@@ -84,14 +84,17 @@ public actor VoiceConversionManager: VoiceConversionManaging {
         case .healthy(let info):
             startedAt = nil
             await releaseFlightTicket(healthy: true)   // clearing rule (a)
+            let mitigation = await probeMitigation()
             return VoiceConversionStatus(
                 state: .healthy,
-                message: "RVC voice-conversion sidecar is running and healthy.",
+                message: Self.healthyMessage(mitigationActive: mitigation.active),
                 version: info.version,
                 engine: info.engine,
                 baseModelPresent: info.baseModelPresent,
                 voiceCount: info.voiceCount,
-                pid: readPidfile()
+                pid: readPidfile(),
+                mitigationActive: mitigation.active,
+                mitigationDetail: mitigation.detail
             )
         case .malformed:
             return VoiceConversionStatus(
@@ -223,6 +226,37 @@ public actor VoiceConversionManager: VoiceConversionManaging {
         process.executableURL = plan.executableURL
         process.arguments = plan.arguments
         process.currentDirectoryURL = plan.workingDirectory
+        // m23-di-2a: redirect the facade's voice store OUT of the read-only
+        // scripts/rvc/ checkout. `server.py:66` resolves `VOICES_DIR` from
+        // `RVC_VOICES_DIR` (falling back to its own in-checkout
+        // `runtime/voices/`), and `run.sh` never sets that var itself (only
+        // `RVC_RUNTIME_DIR`/`RVC_API_PORT`) — checked before this landed,
+        // nothing else in `Sources/` set it either. MERGE onto the inherited
+        // environment (a nil `process.environment` would otherwise inherit
+        // it implicitly; setting the dictionary explicitly requires copying
+        // the rest across too, or every other env var this process depends
+        // on — PATH, HOME, API keys read elsewhere — silently vanishes for
+        // the child). `VoiceModelImport.voicesDirectory` is the SAME path an
+        // import lands in, so a voice imported before or after this boot is
+        // found by the facade's own `_scan_voices()` either way.
+        //
+        // m23-fo-2: the same merge now also PREPENDS `PYTHONPATH` so the
+        // facade picks up our `sitecustomize.py` and wraps `RVC_MLX.infer`
+        // with `mx.clear_cache()`. `run.sh` is left completely unchanged (it
+        // still owns its pidfile and double-start guard, and
+        // `SidecarStop.Identity.rvc` still matches the process it execs) —
+        // one environment variable is the entire seam. Built as a pure
+        // function so prepend-not-clobber is tested without spawning.
+        //
+        // m23-fp: the same merge now ALSO sets `RVC_OUT_DIR`. `server.py:67`
+        // resolves `OUT_DIR` from it and nothing in `Sources/` set it before,
+        // so every shipped conversion wrote its wav into
+        // `scripts/rvc/runtime/out/` — inside the read-only fence. This
+        // redirects those writes to app-owned storage; it creates nothing
+        // under `scripts/rvc/`. Which paths get armed is `spawnEnvironment`'s
+        // job (one expression, testable without spawning) precisely so this
+        // call site cannot arm the wrong ones.
+        process.environment = config.spawnEnvironment(base: ProcessInfo.processInfo.environment)
         // No log-handle assignment — see this type's own doc comment,
         // deviation 2: `run.sh` redirects its own stdout/stderr to
         // `config.logFileURL` internally (`exec >> ... 2>&1`) before it execs
@@ -491,6 +525,127 @@ public actor VoiceConversionManager: VoiceConversionManaging {
         )
     }
 
+    // MARK: - m23-fo mitigation probe
+
+    /// PURE — no I/O. Maps one `GET /v1/_dawpro/mitigation` outcome onto the
+    /// tri-state. Split out of the probe for the same reason
+    /// `classifyFallbackBoot` is: the mapping is the part with the subtle
+    /// rule, and it should be testable without a socket.
+    ///
+    /// `statusCode == nil` means the request never completed (transport error
+    /// or timeout).
+    ///
+    /// ⚠️ **`200` IS NOT AUTOMATICALLY `true`.** The hook is deliberately
+    /// fail-safe: it never fails the facade's boot, so it can be loaded and
+    /// serving this very route while its engine patch failed (e.g. a future
+    /// MLX without `clear_cache` — `gate_m23fo_mechanism.py` phase G
+    /// exercises exactly that, and it answers 200 with
+    /// `enginePatched: false`). Reporting `true` there would tell a user they
+    /// are protected when they are not, which is the one failure this field
+    /// exists to prevent. So `true` requires `enginePatched == true`, and
+    /// BOTH ways of being unprotected — no route at all, or a route reporting
+    /// a failed patch — map to `false` with distinguishing detail.
+    ///
+    /// Deliberately `internal` (the tests reach it via `@testable import`), for
+    /// the same reason as `healthyMessage` above: it is `status()`'s private
+    /// classifier, not a seam any other module calls.
+    static func classifyMitigation(
+        statusCode: Int?, body: Data?
+    ) -> (active: Bool?, detail: String?) {
+        guard let statusCode else {
+            return (nil, "the mitigation probe did not complete (timeout or transport error).")
+        }
+        if statusCode == 404 {
+            return (
+                false,
+                "this facade has no m23-fo mitigation hook (GET /v1/_dawpro/mitigation "
+                + "answered 404) — it was almost certainly started outside the app."
+            )
+        }
+        guard (200..<300).contains(statusCode) else {
+            return (nil, "the mitigation probe answered HTTP \(statusCode).")
+        }
+        guard let body,
+              let parsed = try? JSONSerialization.jsonObject(with: body),
+              let top = parsed as? [String: Any],
+              let data = top["data"] as? [String: Any] else {
+            return (nil, "the mitigation route answered, but not in the expected envelope.")
+        }
+        let patched = (data["enginePatched"] as? NSNumber)?.boolValue
+            ?? (data["enginePatched"] as? Bool)
+        // ⚠️ ABSENT is not FALSE. An envelope without `enginePatched` is not
+        // our route reporting a failed patch — it is something else answering
+        // this path, and we do not know. Only an EXPLICIT `false` is a
+        // positive report that the user is unprotected; guessing `false` from
+        // a missing field would put an accusatory warning in `message` on the
+        // strength of an assumption.
+        guard let patched else {
+            return (nil, "the mitigation route answered without an enginePatched field.")
+        }
+        if patched {
+            let calls = (data["clearCacheCalls"] as? NSNumber)?.intValue
+                ?? (data["clearCacheCalls"] as? Int)
+            return (
+                true,
+                "mx.clear_cache() runs before every conversion"
+                + (calls.map { " (\($0) so far)" } ?? "") + "."
+            )
+        }
+        let reason = (data["error"] as? String) ?? "no reason reported"
+        return (
+            false,
+            "the m23-fo hook is loaded but its engine patch did NOT apply: \(reason)"
+        )
+    }
+
+    /// One extra loopback round-trip, on the `.healthy` path only, bounded by
+    /// the SAME timeout as the health probe so a hanging route can never make
+    /// `status()` cost more than a `/health` timeout already does. Failing
+    /// fast into `nil` is the designed behaviour, not a fallback.
+    private func probeMitigation() async -> (active: Bool?, detail: String?) {
+        var request = URLRequest(
+            url: config.baseURL.appendingPathComponent("v1/_dawpro/mitigation"))
+        request.httpMethod = "GET"
+        request.timeoutInterval = config.healthProbeTimeoutSeconds
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            return Self.classifyMitigation(
+                statusCode: (response as? HTTPURLResponse)?.statusCode, body: data)
+        } catch {
+            return Self.classifyMitigation(statusCode: nil, body: nil)
+        }
+    }
+
+    /// The healthy-state sentence. ⭐ When we KNOW the facade is unprotected
+    /// the message has to say so and name the item — this is the only signal
+    /// a user gets in the one real hole: `start()` returns early at `:190-191`
+    /// when the sidecar is already healthy, so an app attaching to a
+    /// hand-started `run.sh` never sets `PYTHONPATH` and nothing else would
+    /// ever mention it. `nil` deliberately says nothing: we did not find out,
+    /// and inventing a warning from ignorance is its own dishonesty.
+    ///
+    /// ⚠️ **REACH, MEASURED — THIS SENTENCE IS AGENT-VISIBLE ONLY.** It travels
+    /// `vc.sidecarStatus` → MCP fine, but `VoicePanelModel.banner` returns
+    /// `nil` for `.healthy` (the panel is ready, so it shows no banner at all),
+    /// which means the healthy `message` — warning and all — is never rendered
+    /// to a human. Surfacing it in the panel is a UI behaviour change nobody
+    /// has approved, so it is deliberately NOT done here; it is filed rather
+    /// than silently assumed. Do not cite this string as the user's signal
+    /// without changing `VoicePanelModel` first.
+    ///
+    /// Internal, not `public`, unlike `Configuration.childEnvironment`: this is
+    /// copy-shaping consumed only by `status()` and the tests, whereas
+    /// `childEnvironment` is a seam the app's spawn path calls across.
+    static func healthyMessage(mitigationActive: Bool?) -> String {
+        guard mitigationActive == false else {
+            return "RVC voice-conversion sidecar is running and healthy."
+        }
+        return "RVC voice-conversion sidecar is running, but it is NOT protected against "
+            + "m23-fo: repeated conversions will degrade to saturated output after a few "
+            + "runs. Stop it and start it again from the app (vc.sidecarStop, then "
+            + "vc.sidecarStart) so the mitigation is applied."
+    }
+
     private func isInstalled() -> Bool {
         guard let marker = config.installMarkerURL else { return false }
         return FileManager.default.fileExists(atPath: marker.path)
@@ -601,9 +756,204 @@ extension VoiceConversionManager {
         public var logFileURL: URL? {
             rvcDir?.appendingPathComponent("runtime/logs/rvc-facade.log")
         }
+        /// m23-fo-2 — the directory holding our `sitecustomize.py` mitigation
+        /// hook, put on the child's `PYTHONPATH` so the facade wraps
+        /// `RVC_MLX.infer` with `mx.clear_cache()` (m23-fo: repeated
+        /// conversion otherwise degrades to saturation by about the 4th call).
+        ///
+        /// `DAWPRO_RVC_MITIGATION_DIR` wins if set; otherwise it is the
+        /// SIBLING of `rvcDir` — deliberately derived rather than an
+        /// independent default, so the two cannot be misconfigured apart from
+        /// each other. `rvcDir` nil ⇒ nil, exactly like `logFileURL`.
+        ///
+        /// ⚠️ This is a directory WE own. It is not, and must never become, a
+        /// path under `scripts/rvc/` — that tree is read-only.
+        /// Set by `resolved(environment:)` from `DAWPRO_RVC_MITIGATION_DIR`,
+        /// exactly as `baseURL` is set from `RVC_API_URL` — the environment is
+        /// read in ONE place (that factory) rather than stored on this struct.
+        public var mitigationDirOverride: URL?
+
+        public var mitigationDirURL: URL? {
+            Self.resolveOwnedDir(
+                name: "rvc-mitigation", override: mitigationDirOverride, rvcDir: rvcDir)
+        }
+        /// The hook file itself. ⚠️ `scripts/rvc-mitigation/` holds EXACTLY
+        /// ONE file by design — it goes on `sys.path` ahead of site-packages,
+        /// so a second module there would shadow a same-named module for the
+        /// whole interpreter.
+        public var mitigationModuleURL: URL? {
+            mitigationDirURL?.appendingPathComponent("sitecustomize.py")
+        }
+
+        /// m10-p-6 — `scripts/rvc-patches/`, holding the two corrected engine
+        /// modules the hook binds before the engine loads (MLX's broken
+        /// `conv_transpose1d` on long outputs, and the fork's flow
+        /// `noise_scale` shipped at 0.0). Without them a conversion does not
+        /// produce a voice at all.
+        ///
+        /// `DAWPRO_RVC_PATCHES_DIR` wins if set; otherwise the SIBLING of
+        /// `rvcDir`, exactly like `mitigationDirURL` — derived, so the three
+        /// directories cannot be misconfigured apart from each other.
+        ///
+        /// ⚠️ Unlike `rvc-mitigation/`, this directory is NOT on `sys.path`:
+        /// the hook loads `shadow.py` by path. It therefore has no one-file
+        /// rule, which is exactly why the patch modules live here — their
+        /// names (`generators`, `synthesizers`) are far too generic to expose
+        /// to the whole interpreter.
+        public var patchesDirOverride: URL?
+
+        public var patchesDirURL: URL? {
+            Self.resolveOwnedDir(
+                name: "rvc-patches", override: patchesDirOverride, rvcDir: rvcDir)
+        }
+
+        /// Ordered resolution for a small directory WE own that has to survive
+        /// distribution. PURE given its three injected inputs, so the order is
+        /// testable without a bundle or a filesystem.
+        ///
+        /// 1. explicit override (`DAWPRO_RVC_*_DIR`)
+        /// 2. the sibling of `rvcDir` **if it exists** — the repo checkout, and
+        ///    any install that keeps the three directories co-located
+        /// 3. the app bundle's resources — a distributed `.app`, where the
+        ///    1.7 GB vendored runtime CANNOT ship inside the bundle and so
+        ///    `rvcDir` points somewhere else entirely (an installed runtime
+        ///    under Application Support). ⚠️ This is exactly why (2) cannot be
+        ///    trusted unconditionally: deriving these from `rvcDir` is right in
+        ///    a checkout and wrong in a bundle.
+        /// 4. the sibling again, existing or not — so a missing directory still
+        ///    produces the SAME "restore it / set the env var" error naming the
+        ///    SAME path it always named, rather than a confusing bundle path.
+        static func resolveOwnedDir(
+            name: String,
+            override: URL?,
+            rvcDir: URL?,
+            bundleCandidates: [URL]? = nil,
+            exists: ((URL) -> Bool)? = nil
+        ) -> URL? {
+            if let override { return override }
+            let doesExist = exists ?? { FileManager.default.fileExists(atPath: $0.path) }
+            let sibling = rvcDir?.deletingLastPathComponent()
+                .appendingPathComponent(name)
+            if let sibling, doesExist(sibling) { return sibling }
+            let bundles = bundleCandidates ?? [
+                Bundle.main.resourceURL,
+                Bundle.main.bundleURL.appendingPathComponent("Contents/Resources"),
+            ].compactMap { $0 }
+            for base in bundles {
+                let candidate = base.appendingPathComponent(name)
+                if doesExist(candidate) { return candidate }
+            }
+            return sibling
+        }
+
+        /// PURE — no process, no I/O. The child environment for the facade,
+        /// split out of the spawn site so the one rule that is easy to get
+        /// wrong is unit-testable without spawning anything. Mirrors how
+        /// `classifyFallbackBoot` and `SidecarStop.resolvePlan` are already
+        /// split out of their call sites.
+        ///
+        /// ⚠️⚠️ **PREPEND, NEVER CLOBBER.** `PYTHONPATH` is not ours: the
+        /// inherited value can carry anything the user's shell put there, and
+        /// overwriting it would break the child in a way that looks like our
+        /// hook misbehaving. Ours goes FIRST (so `sitecustomize` resolves to
+        /// our file rather than a same-named module further down the path),
+        /// the inherited value follows.
+        ///
+        /// A nil `mitigationDir` leaves `PYTHONPATH` EXACTLY as inherited —
+        /// including the "present but empty string" case, which is a distinct
+        /// dictionary state from "absent" and a real shell environment.
+        /// Refusing to launch is `resolveLaunchPlan()`'s job and ONLY its job;
+        /// one refusal point, not two.
+        /// m23-fp adds `outDir` -> `RVC_OUT_DIR`. REQUIRED, no default: a
+        /// defaulted parameter is exactly how the m23-fo-2 hook nearly shipped
+        /// un-armed ("until this item nothing in the app set the one
+        /// environment variable that arms it, so no user reached it"), and the
+        /// point of this variable is that the facade stops writing its output
+        /// into the read-only `scripts/rvc/` checkout.
+        ///
+        /// An EMPTY `outDir` leaves `RVC_OUT_DIR` unset rather than setting it
+        /// to `""`. That matters: `server.py:67` does `Path(os.environ.get(
+        /// "RVC_OUT_DIR", ...))`, and `Path("")` is `.` — the facade's cwd,
+        /// which it `chdir`s to `SRC_DIR` INSIDE the fence. Unset means the
+        /// facade's own in-checkout default, which is merely the pre-m23-fp
+        /// behaviour. Unreachable in practice (the real value comes from
+        /// `AppDirectories`), pinned by a test so it stays that way.
+        public static func childEnvironment(
+            base: [String: String],
+            voicesDir: String,
+            mitigationDir: String?,
+            patchesDir: String?,
+            outDir: String
+        ) -> [String: String] {
+            var environment = base
+            environment["RVC_VOICES_DIR"] = voicesDir
+            if !outDir.isEmpty { environment["RVC_OUT_DIR"] = outDir }
+
+            // m10-p-6 — where the audio-correctness patch modules live. The hook
+            // derives this from its own location when unset, but a BUNDLED build
+            // has no such sibling relationship to rely on, so the app states it.
+            if let patchesDir, !patchesDir.isEmpty {
+                environment["DAWPRO_RVC_PATCHES_DIR"] = patchesDir
+            }
+
+            // ⚠️ Set UNCONDITIONALLY, not only when the hook is armed.
+            //
+            // Importing `sitecustomize` makes CPython write
+            // `<mitigationDir>/__pycache__/`. Two consequences, both real:
+            //  1. `gate_m23fo_mechanism.py` asserts no `__pycache__` beside the
+            //     hook (the one-file invariant), so any real app run turned that
+            //     gate RED until now — a latent defect this item reproduced.
+            //  2. In a distributed .app the hook ships inside a code-signed,
+            //     read-only Resources directory. Writing there is at best a
+            //     no-op and at worst a signature problem.
+            // Bytecode caching buys nothing for one small module on a process
+            // that already takes seconds to boot.
+            environment["PYTHONDONTWRITEBYTECODE"] = "1"
+
+            guard let mitigationDir, !mitigationDir.isEmpty else { return environment }
+            let inherited = base["PYTHONPATH"] ?? ""
+            environment["PYTHONPATH"] =
+                [mitigationDir, inherited].filter { !$0.isEmpty }.joined(separator: ":")
+            return environment
+        }
+
+        /// The environment the spawner actually hands the facade — ONE
+        /// expression, so the spawn site has nothing left to get wrong.
+        ///
+        /// m23-fp built this seam deliberately. Testing `childEnvironment`
+        /// alone proves the merge RULE and says nothing about whether the app
+        /// arms it with the right values; every one of those assertions can be
+        /// green while `spawnAndPoll` passes a path that never leaves the
+        /// fence. This closes that gap while staying spawn-free and
+        /// write-free (it resolves directory URLs; it creates nothing — the
+        /// facade `mkdir`s `RVC_OUT_DIR` itself at `server.py:325`, and
+        /// `VoiceConversionOutput.capture` creates the capture home).
+        public func spawnEnvironment(base: [String: String]) -> [String: String] {
+            Self.childEnvironment(
+                base: base,
+                voicesDir: VoiceModelImport.voicesDirectory.path,
+                mitigationDir: mitigationDirURL?.path,
+                patchesDir: patchesDirURL?.path,
+                outDir: VoiceConversionOutput.sidecarOutputDirectory.path)
+        }
 
         /// Pure path resolution — no process spawned. Throws `.notInstalled`
-        /// (never crashes) when the directory or its `run.sh` can't be found.
+        /// (never crashes) when the directory, its `run.sh`, or (m23-fo-2) our
+        /// mitigation hook can't be found.
+        ///
+        /// ⚠️ **`SidecarError.notInstalled` is a SEMANTIC STRETCH for the hook
+        /// limb and that reuse is deliberate**: the sidecar IS installed; it is
+        /// OUR module that is missing. A dedicated case would cost an audit of
+        /// every exhaustive `switch` over this public enum, for a condition a
+        /// user resolves the same way they resolve the others — by fixing the
+        /// checkout. The teaching message names the actual path and the item,
+        /// so the message (which is what a human reads) is never wrong even
+        /// though the case name is imprecise.
+        ///
+        /// ⚠️ Called at `start()`'s `:193` — BEFORE the `dryRun` branch — so a
+        /// DRY RUN THROWS TOO. That is correct, not an oversight: a dry run
+        /// that answers "would launch X" when the real thing would refuse is a
+        /// lie, and the whole point of a dry run is to be believed.
         public func resolveLaunchPlan() throws -> SidecarLaunchPlan {
             guard let dir = rvcDir else {
                 throw SidecarError.notInstalled(
@@ -616,6 +966,26 @@ extension VoiceConversionManager {
                 throw SidecarError.notInstalled(
                     "run.sh not found at \(runScript.path) — run scripts/rvc/install.sh first "
                         + "(see scripts/rvc/README.md).")
+            }
+            // m23-fo-2 — REFUSE TO SPAWN AT ALL without the hook. Booting
+            // without it produces a facade that silently saturates from about
+            // the 4th conversion (m23-fo), which is far worse for a user than
+            // an honest refusal naming the missing file.
+            guard let hook = mitigationModuleURL else {
+                throw SidecarError.notInstalled(
+                    "the m23-fo mitigation hook directory could not be resolved — set "
+                    + "DAWPRO_RVC_MITIGATION_DIR, or run the app from inside the daw-pro "
+                    + "repo checkout (expects scripts/rvc-mitigation/sitecustomize.py "
+                    + "beside scripts/rvc/).")
+            }
+            guard FileManager.default.fileExists(atPath: hook.path) else {
+                throw SidecarError.notInstalled(
+                    "the m23-fo mitigation hook is missing at \(hook.path) — without it "
+                    + "repeated voice conversion degrades to saturated output by about the "
+                    + "4th conversion, so the sidecar is not started. Restore "
+                    + "scripts/rvc-mitigation/sitecustomize.py (it is the only file that "
+                    + "directory may contain), or set DAWPRO_RVC_MITIGATION_DIR to where "
+                    + "it lives.")
             }
             return SidecarLaunchPlan(
                 executableURL: URL(fileURLWithPath: "/bin/bash"),
@@ -638,6 +1008,16 @@ extension VoiceConversionManager {
             if let override = environment["RVC_API_URL"], let url = URL(string: override) {
                 config.baseURL = url
             }
+            // m23-fo-2 — same shape as RVC_API_URL above.
+            if let override = environment["DAWPRO_RVC_MITIGATION_DIR"], !override.isEmpty {
+                config.mitigationDirOverride =
+                    URL(fileURLWithPath: override).standardizedFileURL
+            }
+            // m10-p-6 — same shape again.
+            if let override = environment["DAWPRO_RVC_PATCHES_DIR"], !override.isEmpty {
+                config.patchesDirOverride =
+                    URL(fileURLWithPath: override).standardizedFileURL
+            }
             return config
         }
 
@@ -656,7 +1036,30 @@ extension VoiceConversionManager {
                     return found
                 }
             }
+            // A DISTRIBUTED build has no `Package.swift` to walk up to, so every
+            // anchor above fails and the sidecar was previously unreachable
+            // outside a repo checkout. The vendored runtime is ~1.7 GB (venv +
+            // fork + weights) and cannot live inside a code-signed bundle, so
+            // the shipped location is an INSTALLED one under Application
+            // Support. Returned only when it is actually there, so a checkout
+            // that simply has not run install.sh still reports the same
+            // not-installed error against the same path it always named.
+            if let installed = installedRuntimeDir(),
+               FileManager.default.fileExists(atPath: installed.path) {
+                return installed
+            }
             return nil
+        }
+
+        /// `<Application Support>/DAWPro/rvc` — the per-machine home for the
+        /// vendored runtime in a distributed build. Deliberately NOT under the
+        /// bundle: it is large, it is written during install, and a bundle is
+        /// read-only and signed.
+        static func installedRuntimeDir() -> URL? {
+            guard let base = try? FileManager.default.url(
+                for: .applicationSupportDirectory, in: .userDomainMask,
+                appropriateFor: nil, create: false) else { return nil }
+            return base.appendingPathComponent("DAWPro/rvc")
         }
 
         private static func walkUpForScriptsDir(from start: URL) -> URL? {

@@ -1,0 +1,103 @@
+--- vendored/generators.py
++++ patched/generators.py
+@@ -6,6 +6,64 @@
+ from rvc_mlx.lib.mlx.residuals import ResBlock, LRELU_SLOPE
+ 
+ 
++# ---------------------------------------------------------------------------
++# m10-p-6: MLX GPU ConvTranspose1d correctness workaround.
++#
++# mlx 0.30.1's Metal conv_transpose1d silently leaves a large, run-varying part
++# of its output at the bias value when the output is long.  Measured against
++# PyTorch on this model's four dec.ups geometries for a 46 s clip:
++#     512->256 K16 S10  L_out=  46100   29 % of samples wrong, corr 0.843
++#     256->128 K16 S10  L_out= 461000   50 % wrong,            corr 0.708
++#     128-> 64 K4  S2   L_out= 922000   50 % wrong,            corr 0.709
++#      64-> 32 K4  S2   L_out=1844000   50 % wrong,            corr 0.412
++# The wrong region carries only the layer bias (rms 0.0099 where the correct
++# value is 0.4295) and its values drift run to run on identical input, so it is
++# a grid-coverage/race defect in the kernel, not a precision issue.  The CPU
++# stream (mx.stream(mx.cpu)) is exact but 100-500x slower (4.4-18.0 s/layer).
++#
++# The boundary is exactly 2**15 output samples: for 64->32 K4 S2 P1,
++# L_out=32768 is exact (max diff 8e-4) and L_out=32770 is wrong (6e-1).
++# It is NOT a monotone threshold - L_out=800000 is exact again, so MLX must
++# pick a different (correct) kernel for very large outputs.  A "only chunk
++# above N" guard is therefore unsafe; always chunk below 2**15.
++#
++# Splitting the call so each dispatch emits a short output is exact
++# (corr 1.000000, max abs diff <= 2.3e-3 == fp32 rounding) and costs 36-94 ms.
++# Plain Conv1d is unaffected at the same sizes (verified to L=1_844_000).
++# ---------------------------------------------------------------------------
++_CONVT_MAX_OUT = 16384
++
++
++def conv_transpose1d_chunked(layer, x, stride, kernel, padding,
++                             max_out: int = _CONVT_MAX_OUT):
++    """Exact-equivalent replacement for ``layer(x)`` on an nn.ConvTranspose1d.
++
++    x is (B, L, C_in).  Splits along time so every GPU dispatch emits at most
++    ``max_out`` samples.  A transposed conv run on the sub-array x[lo:hi] maps
++    its local output index p onto global output index lo*stride + p, so the
++    pieces butt together exactly once each chunk is given ``overlap`` extra
++    input frames of context on both sides.
++    """
++    L = x.shape[1]
++    step = max(1, max_out // max(1, stride))
++    if L <= step:
++        return layer(x)
++    total_out = (L - 1) * stride - 2 * padding + kernel
++    overlap = max(1, -(-(kernel - 1) // stride))  # ceil((kernel-1)/stride)
++    pieces = []
++    i = 0
++    while i < L:
++        lo = max(0, i - overlap)
++        hi = min(L, i + step + overlap)
++        seg = layer(x[:, lo:hi, :])
++        s0 = (i - lo) * stride
++        s1 = min(total_out, min(i + step, L) * stride) - lo * stride
++        s1 = min(s1, seg.shape[1])
++        pieces.append(seg[:, s0:s1, :])
++        i += step
++    return mx.concatenate(pieces, axis=1)
++
++
+ class SineGenerator(nn.Module):
+     def __init__(
+         self,
+@@ -161,6 +219,9 @@
+         self.ups = []
+         self.noise_convs = []
+         self.output_paddings = []  # Store output_padding for manual application
++        # m10-p-6: geometry needed by conv_transpose1d_chunked
++        self.upsample_kernel_sizes = upsample_kernel_sizes
++        self.up_paddings = []
+         
+         channels = []
+         # Replicate channel calculation logic
+@@ -187,6 +248,7 @@
+             
+             # Store output_padding to apply manually (MLX doesn't support it natively)
+             self.output_paddings.append(u % 2)
++            self.up_paddings.append(p)
+             
+             # Use native ConvTranspose1d (output_padding applied in forward)
+             self.ups.append(nn.ConvTranspose1d(
+@@ -234,8 +296,15 @@
+             noise_conv = getattr(self, f"noise_conv_{i}")
+             
+             x = nn.leaky_relu(x, self.lrelu_slope)
+-            x = up(x)
+-            
++            # m10-p-6: was `x = up(x)` — mlx 0.30.1's GPU ConvTranspose1d
++            # returns bias-only garbage over most of a long output.
++            x = conv_transpose1d_chunked(
++                up, x,
++                stride=self.upsample_rates[i],
++                kernel=self.upsample_kernel_sizes[i],
++                padding=self.up_paddings[i],
++            )
++
+             # Apply output_padding manually (MLX doesn't support it in ConvTranspose1d)
+             # output_padding adds to one side of the output to match PyTorch behavior
+             out_pad = self.output_paddings[i]

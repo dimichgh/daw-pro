@@ -39,7 +39,7 @@
 // `buildOrAbort` makes it structurally impossible here now.
 import { mkdirSync, writeFileSync } from "node:fs";
 import {
-  sleep, buildOrAbort, startStaging, stopStaging, connect,
+  sleep, buildOrAbort, startStaging, stopStaging, connect, verdict,
 } from "./_staging.mjs";
 
 const GATE = "m23o1";               // also names the pidfile + out dir
@@ -372,4 +372,4 @@ try {
 
 console.log(`\nM23O1_GATE pass=${pass} fail=${fail}`);
 if (failures.length) console.log("FAILED LEGS:\n  " + failures.join("\n  "));
-process.exit(fail ? 1 : 0);
+verdict({ ran: pass + fail, failed: fail });

@@ -116,6 +116,53 @@ struct ContentView: View {
                     onClose: { withAnimation(.easeOut(duration: 0.15)) { model.closeQuantizePanel() } }
                 )
             }
+            // Humanize panel (m25-c): the Quantize idiom exactly — a centered
+            // dark-glass modal over a scrim, rendered INSIDE the window rather
+            // than as a popover (which `debug.captureUI` could never see).
+            // ⚠️ Snapshot-ABLE, not snapshotted: no debug seam OPENS this panel
+            // yet, so `humanizePanelVisible` reads false in every headless flow
+            // — see HumanizePanel's note. Opened by the piano-roll HUMANIZE
+            // chip and the arrange clip context menu. UI-only: Apply
+            // routes through `ProjectStore.humanizeClipNotes`, the SAME method
+            // `clip.humanize` uses — a face for a capability that already had a
+            // wire command and an MCP tool, not a new capability.
+            //
+            // ⚠️ FOLDED INTO THE QUANTIZE OVERLAY ON PURPOSE, not given its own
+            // `.overlay`. The root body chain sits AT the type-checker's limit
+            // (the `pickerOverlays` comment says so, and adding one more link
+            // here failed the build with "unable to type-check this expression
+            // in reasonable time"). Two panels, one chain link. They are
+            // mutually exclusive in practice — each opener closes nothing but
+            // itself, and both are listed in `isModalPresented`.
+            if model.humanizePanelClipID != nil {
+                HumanizePanel(
+                    model: model.humanizeModel,
+                    onApply: { withAnimation(.easeOut(duration: 0.15)) { model.applyHumanize() } },
+                    onClose: { withAnimation(.easeOut(duration: 0.15)) { model.closeHumanizePanel() } }
+                )
+            }
+            // Breath pad (m28-p7): the same centered dark-glass modal, folded
+            // into this SAME overlay for the type-checker reason above — three
+            // panels, one chain link, all mutually exclusive in practice and all
+            // listed in `isModalPresented`.
+            //
+            // Unlike Humanize this one IS snapshotted: `debug.breathPad` opens
+            // it AND sets the dot, which is what lets a probe capture the
+            // geometry in more than one state. UI-only — the drag streams
+            // through `ProjectStore.previewEffort` and the release commits
+            // through `ProjectStore.applyEffortShape`, the SAME methods
+            // `pad.previewEffort` and `clip.applyEffortShape` use.
+            if model.breathPadClipID != nil {
+                BreathPadView(
+                    model: model.breathPad,
+                    // m28-knob-ui: the hardware-mapping section's model. It
+                    // holds closures, never the store — so this panel appearing
+                    // cannot bring the CoreMIDI client up. Only the LEARN button
+                    // can.
+                    hardware: model.breathPadHardware,
+                    onClose: { withAnimation(.easeOut(duration: 0.15)) { model.closeBreathPad() } }
+                )
+            }
         }
         // "Convert to Voice…" sheet (m10-p-5): a centered dark-glass modal over a
         // scrim (the Quantize idiom) — rendered INSIDE the window so
@@ -337,6 +384,7 @@ struct ContentView: View {
                 onImport: { model.importSoundBankViaPanel() },
                 onImportSampleLibrary: { model.importSampleLibraryViaPanel() },
                 onTunePolySynth: { withAnimation(.easeOut(duration: 0.15)) { model.openPolySynthEditorFromPicker() } },
+                onTuneSampler: { withAnimation(.easeOut(duration: 0.15)) { model.openSamplerEditorFromPicker() } },
                 onClose: { withAnimation(.easeOut(duration: 0.15)) { model.closeInstrumentPicker() } }
             )
         }
@@ -351,6 +399,22 @@ struct ContentView: View {
             PolySynthEditorOverlay(
                 model: model.polySynthEditor,
                 onClose: { withAnimation(.easeOut(duration: 0.15)) { model.closePolySynthEditor() } }
+            )
+        }
+        // Sampler editor (m26-i's UI half): the poly synth card's twin for the
+        // OTHER built-in instrument with no plugin window — opened by the
+        // instrument picker's TUNE affordance on the Sampler row (replacing the
+        // picker; one centered card at a time) and `debug.samplerEditor`. The
+        // same kind gate drops the card honestly if the instrument is swapped
+        // while open.
+        //
+        // ⛔ Its knobs commit ONCE ON RELEASE, not per drag frame — a sampler
+        // apply re-validates (and re-opens) every sample file in the library
+        // and can force an engine rebuild. See `DeferredKnob`.
+        if model.samplerEditorTrackID != nil, model.samplerEditor.targetIsSampler {
+            SamplerEditorOverlay(
+                model: model.samplerEditor,
+                onClose: { withAnimation(.easeOut(duration: 0.15)) { model.closeSamplerEditor() } }
             )
         }
         // AU-effect picker (m13-g, audit F6): opened by a Pro channel/bus strip's
@@ -577,7 +641,42 @@ struct ContentView: View {
                     .transition(.move(edge: .trailing).combined(with: .opacity))
             }
         }
+        // m25-b-1: while the editor is MAXIMIZED this row is PINNED to the sliver
+        // (`nil` height = the shipped `maxHeight: .infinity` behaviour otherwise),
+        // so `chrome + sliver + editor == windowHeight` holds by construction. It
+        // is pinned rather than left to shrink because this is the VStack's only
+        // flexible child: if the pane's fixed height over-commits the window,
+        // SwiftUI does not reliably compress a flexible child to exactly the
+        // leftover — it lays out past the frame, and an overflow is invisible to
+        // every headless gate here. The row stays MOUNTED (never `if`-ed away) so
+        // the arrange's scroll offset, reported viewport width, follow runtime and
+        // key-focus scope all survive the mode round trip untouched.
+        //
+        // TWO modifiers, not one call: `frame(height:)` and `frame(maxHeight:)` are
+        // different overloads and cannot be mixed. The flexible frame stays INNER
+        // (unchanged), the hard pin wraps it — and `frame(height: nil)` is a
+        // pass-through, so the un-maximized layout is exactly what it was.
+        //
+        // ⚠️⚠️ **THE SKETCHPAD / CLIP-FIX / VOICE PANELS ARE INSIDE THIS ROW, so a
+        // hard pin proposes 86 pt to them too. That is SAFE, and only because of
+        // m17-f F4** — read `SketchpadView.swift:29-36`: those panels were rebuilt
+        // to pin their header and put everything else in a `ScrollView`
+        // specifically so the workspace row can be far shorter than their natural
+        // height without driving the window layout past its bounds (the exact bug,
+        // "header + transport pushed off-window", that this pin would otherwise
+        // reintroduce). So a user who maximizes with a side panel open gets that
+        // panel COMPRESSED to its pinned header + a short scroll — squashed, and
+        // deliberately so: they asked for the editor to be big, the panel's
+        // identity and its close button stay reachable, and Escape undoes it. The
+        // amount of space available to the panel is the same whether this pin is
+        // hard or flexible (the pane's height is what consumed the window), so the
+        // pin is not what squashes it — it only makes the row's height certain.
+        // ⚠️ IF THOSE PANELS EVER STOP COMPRESSING, THIS PIN OVERFLOWS. That
+        // coupling is why it is written down here and not only there.
         .frame(maxHeight: .infinity)
+        .frame(height: EditorMaximize.arrangeHeight(
+                   maximized: model.panelLayout.editorMaximized && selectedMIDIClip != nil,
+                   arrangeSliver: Self.maximizedArrangeSliver))
         // Keep the fix panel's composer pointed at the live audio selection. The
         // panel is thin over the model, so the view (not the model) reads the
         // selection and seeds the composer target; deselecting an audio clip
@@ -590,6 +689,11 @@ struct ContentView: View {
             // Drag UP grows the piano roll; the store clamps the fraction to 0.30–0.55
             // (0.55 keeps the app chrome visible at the height the app runs at; a
             // smaller window can still overflow at the max → m10-j).
+            //
+            // m25-b-1: the MAXIMIZED mode suspends that clamp at RENDER time only —
+            // see `editorPaneFraction` and `EditorMaximize`. Dragging the splitter
+            // leaves the mode (a manual resize is a request for a manual height),
+            // which is a third way out on top of the toggle and Escape.
             editorSplitter(geoHeight: geo.size.height)
             PianoRollView(
                 clip: clip,
@@ -603,6 +707,15 @@ struct ContentView: View {
                 // m23-c2: follow keeps the playhead in frame during PLAYBACK only.
                 isPlaying: store.transport.isPlaying,
                 densityStore: model.panelDensity,
+                // m25-ab — THE APP-LEVEL SNAP, so the note editor and the arrange
+                // stop being two surfaces with the same label and different
+                // answers. `effectiveClipSnap` (not the raw `clipSnap`) is the
+                // value IN FORCE: the toolbar chip renders only when the arrange
+                // is Pro, so feeding the raw picker would let an invisible `.off`
+                // silently unsnap this editor. The roll keeps its own DIVISION;
+                // only OFF crosses, and `SnapResolution.effective` is what
+                // combines them.
+                appSnap: model.effectiveClipSnap,
                 // m21-c: the shared layout store carries the persisted
                 // piano-roll zoom slot (`pianoRollPPB`) the editor scales by, and
                 // (m23-c2) the ONE `followPlayhead` flag both surfaces read.
@@ -610,7 +723,24 @@ struct ContentView: View {
                 // m23-c2: the roll's follow runtime, held by the app so it survives
                 // a clip switch and `debug.followPlayhead` can echo it.
                 follow: model.pianoRollFollow,
-                onCommit: { notes in _ = try? store.setClipNotes(clipID: clip.id, notes: notes) },
+                // m25-a — `cover` names the notes the gesture just placed. When
+                // one lands past the clip end the store grows the clip to cover
+                // it IN THE SAME undo step (`ClipAutoExtend` decides how far);
+                // empty means the pre-m25-a behaviour, unchanged.
+                //
+                // m25-a-2 — and it hands the AUTO-EXTEND REFUSAL back, so the
+                // roll can say why nothing moved. Auto-extend refuses rather
+                // than partially growing (ratified), and until now it did so in
+                // total silence: the note was written, stayed latent, and
+                // nothing visible happened. `lastAutoExtendRefusal` is nil for
+                // the ordinary "the notes already fit" case AND for a successful
+                // grow — the store distinguishes those from the three real
+                // refusals so this call site never has to.
+                onCommit: { notes, cover in
+                    _ = try? store.setClipNotes(clipID: clip.id, notes: notes,
+                                                extendToCover: cover)
+                    return store.lastAutoExtendRefusal
+                },
                 // Scrub seeks through the app's store seek (the existing transport.seek
                 // path), NOT the WebSocket. Refused mid-record → try? swallows it.
                 onSeek: { beats in _ = try? store.seek(toBeats: beats) },
@@ -623,13 +753,67 @@ struct ContentView: View {
                     try? store.insertTimeRange(clipID: clip.id, atBeat: at, lengthBeats: len)
                 },
                 onOpenQuantize: { model.openQuantizePanel(clipID: clip.id) },
+                // Humanize (m25-c): the QUANTIZE chip's sibling in the roll header.
+                onOpenHumanize: { model.openHumanizePanel(clipID: clip.id) },
+                // Breath pad (m28-p7): the third chip in the roll header — the
+                // only thing a human can click to reach `applyEffortShape`.
+                onOpenBreathPad: { model.openBreathPad(clipID: clip.id) },
                 // Controller strip (m16-b4) commits through the same store call the
                 // clip.setControllerLane wire verb uses; returns the updated clip so
                 // the strip reseeds its edit model.
                 onCommitControllerLane: { type, points in
                     try? store.setControllerLane(clipID: clip.id, type: type, points: points)
                 },
+                // m23-ek-3 — the clipboard. COPY has no domain effect at all,
+                // which is exactly why it is not a wire verb.
+                onCopyNotes: { notes in
+                    model.clipboard.put(.notes(ClipboardNotes(notes: notes,
+                                                              sourceClipID: clip.id)))
+                },
+                // ⚠️ CUT WRITES THE CLIPBOARD ONLY AFTER THE STORE ACCEPTS THE
+                // REMOVAL. `setClipNotes` can refuse (a take-comp member), and a
+                // clipboard left loaded while nothing was removed is a lie about
+                // what happened. The refusal surfaces VERBATIM as the amber
+                // bubble, the m17-c/m23-e convention.
+                onCutNotes: { copied, remaining in
+                    do { _ = try store.setClipNotes(clipID: clip.id, notes: remaining) }
+                    catch {
+                        model.presentArrangeSplitRefusal(error, clipID: clip.id)
+                        return false
+                    }
+                    return model.clipboard.put(.notes(ClipboardNotes(notes: copied,
+                                                                     sourceClipID: clip.id)))
+                },
+                // ⚠️⚠️ `pasteNotes`, NOT `setClipNotes` — the UNCOALESCED entry
+                // point. `setClipNotes` journals under `clip.notes:<id>` and the
+                // undo journal folds same-key edits inside 800 ms, so a paste
+                // routed through `onCommit` within 800 ms of a note drag would
+                // fold into it and ONE ⌘Z would undo BOTH.
+                //
+                // m25-f-2 — `extendToCover:` carries the ids the paste PLACED,
+                // so a paste landing past the clip's end grows the clip inside
+                // the SAME undo step. It is a parameter on `pasteNotes` rather
+                // than a switch to `setClipNotes(extendToCover:)` precisely
+                // because of the coalescing note above: the grow rule is shared
+                // (`ClipAutoExtend`), the journal key is not.
+                //
+                // m25-a-2 — the paste path reports its refusal too, through the
+                // SAME store channel and the same words. Wiring only `onCommit`
+                // would have left the paste silent, which is the half of the
+                // defect that is easiest to miss.
+                onPasteNotes: { notes, extendToCover in
+                    _ = try? store.pasteNotes(clipID: clip.id, notes: notes,
+                                              extendToCover: extendToCover)
+                    return store.lastAutoExtendRefusal
+                },
+                // The live clipboard's notes, so the roll's own context-menu
+                // Paste is titled and enabled from what is ACTUALLY on the
+                // clipboard rather than from a staged request.
+                clipboardNotes: model.clipboardNotes,
                 onClose: { selectedClipID = nil },
+                // m25-b-1: ESCAPE's primary mount. The decision is the app's, and
+                // the arrange workspace's backstop mount calls the same one.
+                onEscape: { model.handleEditorEscape() },
                 // m23-d: hear the pitch you drag, and the key you press in the
                 // gutter. The defeat switch is checked HERE rather than in the
                 // view, so the view keeps zero audition policy — and the
@@ -651,6 +835,19 @@ struct ContentView: View {
                 // the one closure behind its eight gesture funnels. THIS is what
                 // ⌘+/⌘−/⌘0 route on, via `EditorSurfaceRouter`.
                 onEngage: { model.editorEngagement.engage(.pianoRoll) },
+                // ⭐ m23-cf (second pass): the roll's DELETE key asks the APP who
+                // owns the keystroke — the SAME `handleDeleteKey` the arrange
+                // mount below and the expanded automation lanes call. Three
+                // focus-gated claimants, one decision, so SwiftUI's
+                // (measurably non-deterministic) focus arbitration stops changing
+                // what DELETE does.
+                onDeleteKey: { model.handleDeleteKey() },
+                // m23-cq-1: the step sequencer's session state + staging seam.
+                // App-held so the chosen editor survives a clip switch (the
+                // drum workflow is several clips in a row) and so
+                // `debug.stepSequencer` drives the SAME path the chips do.
+                stepSequencer: model.stepSequencer,
+                isDrumKit: isDrumKitTrack(ofClip: clip.id),
                 // m23-x: the roll publishes whether it holds a NOTE selection,
                 // which is what the arrange's arrow-key nudge refuses on (with
                 // focus). Same object carries the debug seam's staged selection
@@ -666,9 +863,35 @@ struct ContentView: View {
                 }
             )
             .id(clip.id)
-            .frame(height: geo.size.height * model.panelLayout.editorFraction)
+            .frame(height: geo.size.height * editorPaneFraction(geoHeight: geo.size.height))
         }
     }
+
+    /// The fraction of the window the editor pane is laid out at (m25-b-1) — ONE
+    /// expression for both modes, so the normal path is byte-identical to the
+    /// pre-m25-b-1 one whenever `editorMaximized` is false.
+    ///
+    /// The maximized value is COMPUTED from the live window height rather than
+    /// being a constant fraction, and `EditorMaximize` carries the argument for
+    /// why (short version: `WindowFloor.minHeight` is DERIVED from the 0.55
+    /// ceiling, so a constant fraction pushes the header and transport off-window
+    /// at the floor — the exact m10-j overflow the item asks about). The arrange
+    /// sliver is passed in from the real geometry, never re-derived inside
+    /// DAWAppKit, which cannot see these two constants.
+    private func editorPaneFraction(geoHeight: CGFloat) -> CGFloat {
+        EditorMaximize.effectiveFraction(
+            windowHeight: geoHeight,
+            editorFraction: model.panelLayout.editorFraction,
+            maximized: model.panelLayout.editorMaximized,
+            arrangeSliver: Self.maximizedArrangeSliver)
+    }
+
+    /// The arrange height kept while the editor is maximized: the PINNED RULER
+    /// BLOCK plus the gap below it. Composed from the two real constants (rather
+    /// than `EditorMaximize.defaultArrangeSliverHeight`) so a change to either one
+    /// moves the reserve with it and the block can never be starved into
+    /// overflowing onto the editor.
+    static let maximizedArrangeSliver = TimelineLanesView.rulerHeight + arrangeBlockGap
 
     /// Builds one arrange-timeline instance in the given render mode (m13-g). The
     /// SAME big param set drives both the pinned `.ruler` block and the scrolling
@@ -696,6 +919,9 @@ struct ContentView: View {
             // selection into it, so ← / → with a point selected edits the point
             // rather than sliding the whole clip underneath the open lane.
             automationPointSelection: model.automationPointSelection,
+            // m23-cf (second pass): the same routing decision the piano roll and
+            // `ArrangeDeleteKey` ask, handed to the expanded automation lanes.
+            onDeleteKey: { model.handleDeleteKey() },
             snap: model.clipSnap,
             // m12-d: route the waveform seconds-per-beat through the tempo-map API.
             // Base-tempo scalar (segment 0); clips crossing a non-trivial boundary
@@ -709,6 +935,11 @@ struct ContentView: View {
             // Arrange zoom (m17-b): the SAME store value drives the pinned ruler
             // and the lanes, so both columns rescale in one update.
             pixelsPerBeat: model.panelLayout.arrangePPB,
+            // m25-e: waveform amplitude scaling — the SAME store values the WAVE
+            // cluster drives, so the toolbar readout and the drawn pixels are the
+            // one value (the rowHeight discipline).
+            waveformNormalize: model.panelLayout.waveformNormalize,
+            waveformVerticalZoom: model.panelLayout.waveformVerticalZoom,
             availableWidth: model.arrangeViewportWidth,
             // Pinch zoom, anchored at the pointer — the model owns the math.
             onPinchZoomChanged: { x, m in
@@ -723,11 +954,28 @@ struct ContentView: View {
             // single-clip undo entry reading exactly as it did before).
             // `trackID` is unused: the move is id-addressed and same-track by
             // construction (there is no cross-track drag — see `moveClips`).
-            onMoveClip: { _, clip, anchorOriginalStart, rawDragDeltaBeats in
-                model.dragArrangeClips(anchorClipID: clip.id,
-                                       anchorOriginalStart: anchorOriginalStart,
-                                       rawDragDeltaBeats: rawDragDeltaBeats).anchorStart
+            // m25-k: the per-frame call PREVIEWS; the release COMMITS. The store
+            // sees one move per drag, resolved against the position the user
+            // actually dropped on — not against every position they passed over.
+            // m25-l-2: `requestedTrackDelta` is the VERTICAL half, already
+            // resolved from the ABSOLUTE row under the pointer by the lanes (the
+            // only layer that knows the non-uniform ladder). It rides the SAME
+            // preview/commit split — a cross-lane drag must not resolve overlap
+            // on every lane it passes over.
+            onPreviewMoveClip: { _, clip, anchorOriginalStart, rawDragDeltaBeats, requestedTrackDelta in
+                model.previewArrangeDrag(anchorClipID: clip.id,
+                                         anchorOriginalStart: anchorOriginalStart,
+                                         rawDragDeltaBeats: rawDragDeltaBeats,
+                                         requestedTrackDelta: requestedTrackDelta)
             },
+            onCommitMoveClip: { model.commitArrangeDrag() },
+            onCancelMoveClip: { model.cancelArrangeDrag() },
+            dragPreview: model.liveArrangeDragPreview,
+            // m25-m: a plain click on empty timeline space deselects. The note
+            // editor closes as a CONSEQUENCE — `openEditorClip` derives from
+            // `selectedClipID`, which mirrors the selection's focus — so there
+            // is deliberately nothing here about editor visibility.
+            onDeselectAll: { model.clearArrangeSelection() },
             onTrimClip: { trackID, clip, newStart, newLength in
                 _ = try? store.trimClip(trackId: trackID, clipId: clip.id,
                                         newStartBeat: newStart, newLengthBeats: newLength)
@@ -743,6 +991,13 @@ struct ContentView: View {
             // title by `DeleteMenuPolicy.clipContextCommand`, and travels here in
             // the command so the action cannot act on a different set.
             onDeleteClip: { clip, command in model.deleteClipFromContextMenu(clip, command: command) },
+            // m23-ek-3: the clip context menu's Cut / Copy. Same shape as Delete
+            // above — the blast radius was decided and SHOWN in the title by
+            // `ClipboardMenuPolicy.clipContextCommand` and travels here in the
+            // command, so the action cannot act on a different set.
+            onClipboardClipMenu: { clip, verb, command in
+                model.clipboardClipFromContextMenu(clip, verb: verb, command: command)
+            },
             onSplitClip: { trackID, clip, atBeat in
                 // m17-c: refusals (comp member, outside-span) surface VERBATIM
                 // as an amber bubble on the clip — the same message the wire's
@@ -769,6 +1024,14 @@ struct ContentView: View {
             // Quantize & groove (m11-a): the arrange clip context menu (Pro, sp-c)
             // opens the SAME panel the piano roll does.
             onOpenQuantize: { clip in model.openQuantizePanel(clipID: clip.id) },
+            // Humanize (m25-c): the arrange clip context menu opens the SAME
+            // panel the piano roll does. MIDI clips only — the menu hides the
+            // entry on audio rather than offering a throw (the sibling
+            // "Quantize…" / "Convert to Voice…" rule).
+            onOpenHumanize: { clip in model.openHumanizePanel(clipID: clip.id) },
+            // Breath pad (m28-p7, Pro clip menu, MIDI only): the same centered
+            // panel the piano-roll BREATH chip opens.
+            onOpenBreathPad: { clip in model.openBreathPad(clipID: clip.id) },
             onExtractGroove: { clip in
                 model.openQuantizePanel(clipID: clip.id, startExtract: true)
             },
@@ -853,6 +1116,19 @@ struct ContentView: View {
                 } catch {
                     model.presentArrangeLaneRefusal(error, trackID: trackID, beat: beat)
                 }
+            },
+            // m25-f-4: right-click ▸ Paste on EMPTY LANE SPACE. The clipboard
+            // flows in by value (both are `@Observable`, so a Copy un-greys the
+            // item on the next pass — the `pasteMenuItem` staleness rule), and
+            // the gesture calls the ONE HOME with the lane it was opened on and
+            // the beat it was opened at. `intoTrack` is what makes the
+            // destination `.explicit` (m25-l-3) and therefore honoured; `atBeat`
+            // overrides the playhead for this paste only. Neither moves the
+            // stored cursor or the transport.
+            clipboardKind: model.clipboard.kind,
+            clipboardClipCount: model.clipboard.clipCount,
+            onPasteIntoLane: { trackID, beat in
+                model.pasteClipsFromClipboardDetailed(intoTrack: trackID, atBeat: beat)
             },
             // m23-v: the VISIBLE half of m23-e. The lanes compose the hint set
             // once, draw it, and report THAT value up — never a re-derivation
@@ -946,7 +1222,19 @@ struct ContentView: View {
     /// pointer. The store clamps the fraction.
     private func editorSplitter(geoHeight: CGFloat) -> some View {
         PanelSplitter(axis: .horizontal) { translation in
-            if editorDragOrigin == nil { editorDragOrigin = model.panelLayout.editorFraction }
+            if editorDragOrigin == nil {
+                // m25-b-1: a drag on the splitter is a request for a MANUAL height,
+                // so it leaves the maximized mode — a third exit beside the toggle
+                // and Escape, and the one a user reaches for by reflex. The origin
+                // is seeded from the EFFECTIVE (maximized) fraction, not from the
+                // stored one, so the drag starts where the splitter actually IS;
+                // the store then clamps it back inside 0.30–0.55 on the first
+                // delta, which is the shipped resize behaviour resuming.
+                editorDragOrigin = editorPaneFraction(geoHeight: geoHeight)
+                if model.panelLayout.editorMaximized {
+                    model.panelLayout.setEditorMaximized(false)
+                }
+            }
             let origin = editorDragOrigin ?? PanelLayoutStore.defaultEditorFraction
             let deltaFraction = -translation.height / max(1, geoHeight)
             model.panelLayout.setEditorFraction(origin + deltaFraction)
@@ -998,6 +1286,19 @@ struct ContentView: View {
             // BOTH densities (zoom is view navigation, not Pro edit chrome).
             zoomCluster
                 .explainable(.arrangeZoom)
+            // Waveform height (m25-e) — the zoom cluster's VERTICAL sibling,
+            // seated immediately beside it because they are the same idea on the
+            // two axes, and shown in BOTH densities for the zoom cluster's own
+            // reason (seeing your audio is not Pro edit chrome).
+            //
+            // Rendered ONLY when the project actually contains audio (the m22-g
+            // reference-row precedent: zero chrome, zero cost, for a project the
+            // control could do nothing for). A pure-MIDI session's toolbar stays
+            // as simple as it is today.
+            if projectHasAudioClips {
+                waveformZoomControl
+                    .explainable(.arrangeWaveformZoom)
+            }
             if arrangeIsPro {
                 snapPicker
                     .explainable(.arrangeSnap)
@@ -1234,6 +1535,30 @@ struct ContentView: View {
 
     /// Themed grid-snap menu: Off / Bar / Beat / 1/2 / 1/4 / 1/8 / 1/16 (beat
     /// fractions). Bar follows the meter.
+    /// True when any track carries an audio clip — the WAVE cluster's visibility
+    /// gate (m25-e). Cheap: a short-circuiting scan over the clips already in
+    /// memory, the same shape as the sibling `selectedAudioClip` lookup.
+    private var projectHasAudioClips: Bool {
+        store.tracks.contains { $0.clips.contains { !$0.isMIDI } }
+    }
+
+    /// The arrange toolbar's waveform-height cluster (m25-e). Every action routes
+    /// through an AppModel entry point that mutates the ONE persisted
+    /// `PanelLayoutStore` slot pair — the SAME entry points the View menu's ⌥⌘
+    /// items and `debug.panelLayout` use, so toolbar, menu and wire can never
+    /// drift into three different answers.
+    private var waveformZoomControl: some View {
+        WaveformZoomControl(
+            normalize: model.panelLayout.waveformNormalize,
+            verticalZoom: model.panelLayout.waveformVerticalZoom,
+            onSetNormalize: { model.setWaveformNormalize($0) },
+            onZoomOut: { model.waveformZoomOut() },
+            onZoomIn: { model.waveformZoomIn() },
+            onSetZoom: { model.setWaveformVerticalZoom($0) },
+            onReset: { model.waveformZoomReset() }
+        )
+    }
+
     private var snapPicker: some View {
         Menu {
             ForEach(ClipSnap.allCases, id: \.self) { resolution in
@@ -1278,6 +1603,19 @@ struct ContentView: View {
     /// iteration, returning the OWNER rather than the clip.
     private func trackID(ofClip clipID: UUID) -> UUID? {
         store.tracks.first { $0.clips.contains { $0.id == clipID } }?.id
+    }
+
+    /// Does the track owning this clip address a GM drum kit (m23-cq-1)?
+    ///
+    /// Asks `SMFProjectExporter.isDrumKit`, the app's ONE home for the question
+    /// (made `public` for this call rather than re-expressed here — a second
+    /// predicate would agree today and drift tomorrow). Resolved HERE because
+    /// `PianoRollView` is deliberately store-free: it takes plain value inputs so
+    /// a preview can mount it without a project.
+    private func isDrumKitTrack(ofClip clipID: UUID) -> Bool {
+        guard let track = store.tracks.first(where: { $0.clips.contains { $0.id == clipID } })
+        else { return false }
+        return SMFProjectExporter.isDrumKit(track)
     }
 
     /// The selected clip when it's a plain AUDIO clip, paired with its track id —
@@ -1660,7 +1998,67 @@ private struct ArrangeDeleteKey: ViewModifier {
             // No focus ring on the workspace root — the selected clips ARE the
             // cue (docs/DESIGN-LANGUAGE.md: one accent per meaning).
             .focusEffectDisabled()
-            .onKeyPress(.delete) { model.handleArrangeDeleteKey() ? .handled : .ignored }
+            // ⭐ m23-cf (second pass): `handleDeleteKey`, NOT `handleArrangeDeleteKey`.
+            // This mount is one of THREE focus-gated claimants for DELETE (the
+            // piano roll and each expanded automation lane own the other two),
+            // and which one is eligible flips on every clip selection — measured,
+            // 6 true / 6 false over 12 consecutive selections. Asking the app's
+            // one routing decision here is what makes the outcome identical
+            // whichever claimant SwiftUI happened to focus. The arrange branch of
+            // that decision still lands in `handleArrangeDeleteKey`, guards and
+            // all, so nothing this file's banner promises has been given up.
+            // ⚠️ m23-fi: THIS MOUNT'S EXACT SPELLING IS PINNED by
+            // `DeleteKeySiteTests.arrangeRoutes`, so it cannot carry a probe
+            // counter the way the arrow mounts below do. The substitute
+            // discriminator is `deleteKeyFunnelSeq` measured under a ⇧ CHORD:
+            // the m23-cf-3 monitor refuses `.chord` and RETURNS the event, so
+            // with a modifier held the funnel can only move if this SwiftUI
+            // mount fired. See `KeyPressProbe`.
+            //
+            // ⭐⭐ m23-fk — `KeyEquivalent("\u{7F}")` IS THE WHOLE FIX, AND IT IS
+            // A MEASUREMENT RATHER THAN A PREFERENCE. `KeyEquivalent.delete` is
+            // **0x08** (BACKSPACE — read out of SwiftUI itself, see
+            // `KeyPressProbe.echo`'s `keyEquivalentScalars`), while
+            // `NSEvent.characters` for `kVK_Delete` (51) is **0x7F** (DELETE),
+            // and `.onKeyPress` matches on the event's CHARACTERS. So the old
+            // `.onKeyPress(.delete)` spelling could not fire for the ⌫ key under
+            // any amount of focus repair. MEASURED ON THIS MOUNT, before the
+            // change: an event carrying 0x7F entered nothing, and the SAME event
+            // carrying 0x08 entered it and deleted the clip — same view, same
+            // focus, one character apart. That is also why focus was never the
+            // bug (the ←/→ mount below was reached throughout).
+            //   • `.delete` is KEPT: it costs nothing and covers a future SwiftUI
+            //     that normalises ⌫ to the backspace character.
+            //   • `.deleteForward` (0xF728) is ADDED: ⌦ genuinely sends it —
+            //     measured through the system's own HID→NSEvent translation —
+            //     and no mount in this app spelled it before.
+            //
+            // ⚠️ RE-ARMING THIS MOUNT CANNOT DOUBLE-FIRE, and that is measured,
+            // not argued: `handleKeyDownEvent` asks `handleDeleteKey()` FIRST and
+            // returns nil (swallows) when some surface owned the key, so a press
+            // that deletes anything never reaches SwiftUI at all. In the states
+            // where the monitor passes the event on — nobody owned it, or a chord
+            // — this closure asks the SAME one decision and gets the same answer.
+            // ⚠️⚠️ `phases: [.down]` IS LOAD-BEARING AND IS NOT THE DEFAULT IN
+            // PRACTICE — MEASURED, and it is the difference between this change
+            // and a clip-destroying one. Written without it, this mount receives
+            // `KeyPress.phase == .repeat` presses (read out of SwiftUI at this
+            // very closure), and the m23-cf-3 monitor REFUSES an auto-repeat and
+            // RETURNS the event — so a held ⌫ arrived here. Measured sequence
+            // before the argument was added, roll open with 3 notes selected:
+            //   1. key-down       → monitor owned it, notes 3 → 0, swallowed
+            //   2. auto-repeat    → monitor refused `.key-repeat`, passed it on,
+            //                       THIS mount fired, selection was now empty so
+            //                       the routing said `.arrangeClips` — CLIP GONE
+            // i.e. exactly the loss `DeleteKeyMonitorRouting`'s `keyRepeat` doc
+            // calls "the ONE guard with teeth". With `[.down]`: funnel +0, notes
+            // 3 → 0 → 0, clip alive. The mount CANNOT re-derive repeat-ness for
+            // itself — the monitor swallowed the initial key-down, so SwiftUI's
+            // own key-state tracking never saw it.
+            .onKeyPress(keys: [KeyEquivalent("\u{7F}"), .delete, .deleteForward],
+                        phases: [.down]) { _ in
+                model.handleDeleteKey() ? .handled : .ignored
+            }
             // ←/→ NUDGE the arrange selection (m23-x). Three things here are
             // decisions, not defaults:
             //
@@ -1683,6 +2081,7 @@ private struct ArrangeDeleteKey: ViewModifier {
             //     the chord EXPLICITLY, because a synthesized press carries none
             //     — exercises the SAME rule the real key does.
             .onKeyPress(keys: [.leftArrow, .rightArrow], phases: [.down, .repeat]) { press in
+                KeyPressProbe.arrangeHorizontalArrow += 1   // m23-fi probe, first statement
                 let character = press.key.character
                 let direction: ArrangeNudgeDirection
                 if character == KeyEquivalent.leftArrow.character {
@@ -1712,6 +2111,7 @@ private struct ArrangeDeleteKey: ViewModifier {
             //     guards — see `AppModel.ArrangeNudgeOutcome`. That is the one
             //     place the two axes deliberately differ.
             .onKeyPress(keys: [.upArrow, .downArrow], phases: [.down, .repeat]) { press in
+                KeyPressProbe.arrangeVerticalArrow += 1     // m23-fi probe, first statement
                 let character = press.key.character
                 let direction: ArrangeVerticalNudgeDirection
                 if character == KeyEquivalent.upArrow.character {
@@ -1726,6 +2126,35 @@ private struct ArrangeDeleteKey: ViewModifier {
                     modifiers: AppModel.keyPressModifiers(press.modifiers))
                 return outcome.handled ? .handled : .ignored
             }
+            // ESCAPE leaves the MAXIMIZED note editor (m25-b-1) — the BACKSTOP
+            // mount. The roll claims Escape too; this one covers focus sitting
+            // anywhere else in the arrange workspace (a track row, the ruler, a
+            // lane), which is reachable while maximized because the arrange is
+            // still mounted at its ruler sliver.
+            //
+            // ⚠️ THIS MOUNT IS SCOPED, AND THE SCOPE IS THE SAFETY ARGUMENT — the
+            // same one that put `ArrangeDeleteKey` here rather than on the root.
+            // The modals live in `ContentView`'s `.overlay` chain, OUTSIDE this
+            // subtree, so an Escape aimed at a scrimmed panel never propagates
+            // through here. The retained-focus path is closed too, by
+            // `handleEditorEscape`'s own `isModalPresented` guard.
+            //
+            // ⚠️ `.ignored` WHENEVER THE MODE IS OFF, so Escape keeps reaching the
+            // rename fields below this mount exactly as it does today — the one
+            // decision is `AppModel.handleEditorEscape`, and outside the mode it
+            // consumes nothing. No `phases:` argument: unlike ⌫ and the arrows,
+            // there is no auto-repeat hazard here (the second press finds the mode
+            // already off and is a no-op), and Escape is not held down.
+            .onKeyPress(.escape) {
+                model.handleEditorEscape() ? .handled : .ignored
+            }
             .onChange(of: model.arrangeKeyFocusNonce) { _, _ in focused = true }
+            // ⭐ m23-fi PROBE — the `@FocusState` VALUE, not the assertion above.
+            // Whether `focused = true` STICKS is the whole question, and it is
+            // invisible from outside this view. `initial: true` so a mount that
+            // was never focused reports `false` rather than never reporting.
+            .onChange(of: focused, initial: true) { _, isFocused in
+                KeyPressProbe.arrangeWorkspaceFocused = isFocused
+            }
     }
 }

@@ -24,10 +24,29 @@ import Testing
 //    compared literally — the `.relocation` head build consumes one fewer
 //    noteID, so every subsequent ID shifts. The ID-independent assertion is the
 //    per-pitch note-ON COUNT, which a leak moves from 1 to 1-per-cycle.
-//  · G-L3 (offline unmoved) is the EXISTING offline SHA suites re-run
+//  · G-L3 (offline unmoved) WAS the existing offline SHA suites re-run
 //    (`StemNullTests`, `DeliveryFormatRenderTests`, GaplessLoopMIDITests' C8
-//    render) — `OfflineRenderer` takes the `.relocation` default, so no new
-//    test belongs here, only a required green.
+//    render), on the grounds that `OfflineRenderer` took the `.relocation`
+//    default so no new test belonged here. ⚠️ THAT GROUND IS GONE: m23-bv's
+//    2026-08-17 ruling moved `OfflineRenderer` to `.offlineRender`, which
+//    CHASES. "Offline unmoved" is no longer true unconditionally — it is true
+//    exactly at `fromBeat: 0`, and G-L4 below is what turns that from an
+//    argument into a measurement.
+//  · G-L4 (m23-bv CONTAINMENT). Chase can only ever ADD notes whose onset
+//    precedes `fromBeat`. `buildEvents`' guard is a STRICT `onBeat < fromBeat`,
+//    so at `fromBeat: 0` no note can qualify (onsets are ≥ 0) and a note
+//    onsetting EXACTLY at the anchor is not chased — it cannot double-fire a
+//    chase prefix alongside its natural note-on. Therefore every render from
+//    beat 0 is byte-identical to the pre-ruling tree, and the blast radius of
+//    the ruling is confined to renders from a NON-ZERO `fromBeat` with material
+//    straddling it. Both legs carry an ANTI-VACUITY arm: a byte-identity
+//    assertion that cannot detect a difference proves nothing, so each shows
+//    the same comparison going RED at a non-zero anchor.
+//    ⚠️ PRECONDITION, stated because it is not universal: this holds for
+//    projects whose note onsets are ≥ 0 (`clip.startBeat + note.startBeat`).
+//    The AUDIO path is different by design — `scheduleAll`'s `offsetSec =
+//    max(0, -clipStartSec)` enters a clip mid-file — but audio is unaffected by
+//    chase either way, which is the asymmetry m23-bv measured.
 //
 // 48 kHz, 120 BPM ⇒ 1 beat = 24 000 frames.
 
@@ -201,5 +220,138 @@ struct NoteChaseGraphTests {
         // Event-count delta is exactly the chased pair (on + off), so no cycle
         // block gained anything either.
         #expect(continuation.total == relocation.total + 2)
+    }
+
+    // MARK: - G-L4: m23-bv containment — chase is a NO-OP at fromBeat 0
+
+    /// A corpus wide enough that a chase side effect would have somewhere to
+    /// hide: notes at the anchor, before it, straddling it, back-to-back
+    /// same-pitch, a clip offset in time, and controller lanes (whose chase
+    /// PREFIX is independent of `chaseHeldNotes` and must stay so).
+    private func containmentClips() -> [Clip] {
+        [
+            Clip(name: "at-zero", startBeat: 0, lengthBeats: 8, notes: [
+                MIDINote(pitch: 60, velocity: 100, startBeat: 0, lengthBeats: 8),  // onset == 0
+                MIDINote(pitch: 64, velocity: 90, startBeat: 0, lengthBeats: 1),   // adjacency…
+                MIDINote(pitch: 64, velocity: 80, startBeat: 1, lengthBeats: 1),   // …tie
+                MIDINote(pitch: 67, velocity: 70, startBeat: 2.5, lengthBeats: 4),
+            ]),
+            Clip(name: "offset", startBeat: 3, lengthBeats: 8, notes: [
+                MIDINote(pitch: 72, velocity: 110, startBeat: 0, lengthBeats: 6),
+                MIDINote(pitch: 55, velocity: 60, startBeat: 1.25, lengthBeats: 0.5),
+            ]),
+        ]
+    }
+
+    /// THE MECHANISM, at the build layer. `chaseHeldNotes` is the ONLY thing
+    /// `.offlineRender` changes versus `.relocation` (it is the single read of
+    /// `chasesHeldNotes` in the tree — `NoteChaseSiteTests` pins that), so if
+    /// the flag is a provable no-op at `fromBeat: 0`, so is the ruling.
+    ///
+    /// Compared on EVERY field including noteIDs and `nextNoteID`: an ID shift
+    /// is exactly how a silently-admitted extra note would leak into a render
+    /// without changing the event COUNT at any single pitch.
+    @Test("G-L4a: at fromBeat 0 the chase flag changes NOTHING — same events, same noteIDs")
+    func chaseIsANoOpAtBeatZero() {
+        let map = TempoMap(constantBPM: 120)
+        let clips = containmentClips()
+
+        let noChase = MIDIEventSchedule.buildEvents(
+            clips: clips, fromBeat: 0, tempoMap: map, sampleRate: ncgRate,
+            chaseHeldNotes: false)
+        let chase = MIDIEventSchedule.buildEvents(
+            clips: clips, fromBeat: 0, tempoMap: map, sampleRate: ncgRate,
+            chaseHeldNotes: true)
+        print("[measured] G-L4a fromBeat 0: no-chase \(noChase.events.count) events "
+              + "(nextNoteID \(noChase.nextNoteID)); chase \(chase.events.count) events "
+              + "(nextNoteID \(chase.nextNoteID))")
+
+        let why = "m23-bv CONTAINMENT BROKEN. The ruling moved offline renders to "
+            + "`.offlineRender`, which chases; the whole blast-radius argument is "
+            + "that chase can only ADD notes onsetting BEFORE `fromBeat`, so at "
+            + "beat 0 it can add nothing and every render from the top is "
+            + "byte-identical. If this fails, renders from beat 0 have MOVED and "
+            + "every offline SHA gate in the tree is in scope — re-scope before "
+            + "re-baselining anything."
+        #expect(chase.events == noChase.events, "\(why)")
+        #expect(chase.nextNoteID == noChase.nextNoteID, "\(why)")
+
+        // ANTI-VACUITY: the very same comparison DOES separate the two arms one
+        // beat later. Without this, an always-equal `buildEvents` would pass
+        // the leg above and prove nothing at all.
+        let noChaseAt4 = MIDIEventSchedule.buildEvents(
+            clips: clips, fromBeat: 4, tempoMap: map, sampleRate: ncgRate,
+            chaseHeldNotes: false)
+        let chaseAt4 = MIDIEventSchedule.buildEvents(
+            clips: clips, fromBeat: 4, tempoMap: map, sampleRate: ncgRate,
+            chaseHeldNotes: true)
+        print("[measured] G-L4a anti-vacuity @ fromBeat 4: no-chase "
+              + "\(noChaseAt4.events.count) events; chase \(chaseAt4.events.count)")
+        let vacuous = "the containment comparison above is VACUOUS — the chase flag "
+            + "changes nothing at beat 4 either, so its equality at beat 0 is not evidence"
+        #expect(chaseAt4.events != noChaseAt4.events, "\(vacuous)")
+    }
+
+    /// THE SAME PROPERTY IN SAMPLES, through the real `PlaybackGraph` and a
+    /// real render — the layer a user actually hears. Bit-pattern equality, not
+    /// Float `==`: `-0.0 == 0.0` is true and `NaN == NaN` is false, so `==`
+    /// is both too weak and too strong for a byte-identity claim.
+    ///
+    /// This is the containment proof for `OfflineRenderer` by composition:
+    /// `NoteChaseSiteTests` pins that the renderer passes `.offlineRender`, and
+    /// this pins that `.offlineRender` and `.relocation` are indistinguishable
+    /// at beat 0. Together: every bounce from the top is unmoved.
+    @Test("G-L4b: a fromBeat-0 render is BIT-identical under .offlineRender and .relocation")
+    func beatZeroRenderIsBitIdentical() throws {
+        let renderFrames = 24_000   // 0.5 s
+        let map = TempoMap(constantBPM: 120)
+        let track = Track(name: "Pad", kind: .instrument, clips: containmentClips())
+
+        func render(cause: RescheduleCause, fromBeat: Double) throws -> [[Float]] {
+            var out: [[Float]] = [[], []]
+            let rig = try NoteChaseRig(tracks: [track], tempoMap: map,
+                                       fromBeat: fromBeat, cause: cause)
+            try rig.render(frames: renderFrames, into: &out)
+            rig.engine.stop()
+            return out
+        }
+
+        func bits(_ channelData: [[Float]]) -> [[UInt32]] {
+            channelData.map { $0.map(\.bitPattern) }
+        }
+
+        let offline = try render(cause: .offlineRender, fromBeat: 0)
+        let relocation = try render(cause: .relocation, fromBeat: 0)
+        let differing = zip(bits(offline), bits(relocation))
+            .reduce(0) { $0 + zip($1.0, $1.1).lazy.filter(!=).count }
+        print("[measured] G-L4b fromBeat 0: \(differing) differing samples of "
+              + "\(renderFrames * 2); RMS offline \(ncgRMS(offline, 480..<renderFrames)) "
+              + "vs relocation \(ncgRMS(relocation, 480..<renderFrames))")
+
+        let moved = "m23-bv CONTAINMENT BROKEN IN SAMPLES: a render from beat 0 moved "
+            + "when the offline cause started chasing. Every offline SHA/byte gate in "
+            + "the tree renders from beat 0 and is now in scope."
+        #expect(differing == 0, "\(moved)")
+        #expect(ncgNaNCount(offline) == 0)
+        #expect(ncgNaNCount(relocation) == 0)
+
+        // ANTI-VACUITY, in samples: the identical comparison at a NON-ZERO
+        // anchor must separate the arms — that is the very change the ruling
+        // bought, and it proves this rig can see a difference at all.
+        let offlineAt4 = try render(cause: .offlineRender, fromBeat: 4)
+        let relocationAt4 = try render(cause: .relocation, fromBeat: 4)
+        let differingAt4 = zip(bits(offlineAt4), bits(relocationAt4))
+            .reduce(0) { $0 + zip($1.0, $1.1).lazy.filter(!=).count }
+        print("[measured] G-L4b anti-vacuity @ fromBeat 4: \(differingAt4) differing "
+              + "samples; RMS offline \(ncgRMS(offlineAt4, 480..<renderFrames)) "
+              + "vs relocation \(ncgRMS(relocationAt4, 480..<renderFrames))")
+        let sampleVacuity = "the beat-0 bit-identity above is VACUOUS — this rig renders "
+            + "the same samples for both causes even at beat 4, where the held notes "
+            + "MUST diverge"
+        #expect(differingAt4 > 0, "\(sampleVacuity)")
+        // …and the divergence is in the direction the ruling asked for: the
+        // chasing arm is LOUDER, because it is the one still sounding the pad.
+        #expect(ncgRMS(offlineAt4, 480..<renderFrames)
+                > ncgRMS(relocationAt4, 480..<renderFrames))
     }
 }

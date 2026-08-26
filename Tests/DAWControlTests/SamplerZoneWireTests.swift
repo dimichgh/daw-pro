@@ -20,6 +20,70 @@ struct SamplerZoneWireTests {
         return (CommandRouter(store: store), store)
     }
 
+    /// FIELD REPORT 2026-08-17, finding 12. An agent imported a 309-zone
+    /// upright bass, then tried to lengthen its release. `track.setInstrument`
+    /// documents itself as a PARTIAL update, but the sampler object was a
+    /// carve-out: an omitted `zones` key parsed as an EMPTY array and the store
+    /// swaps the sampler wholesale, so a one-knob tweak DELETED the whole
+    /// library — silently, with a successful response, and audible only as an
+    /// instrument that had stopped making sound. The documented workaround was
+    /// to resend all 309 zones, readable only from a ~1 MB project.snapshot.
+    @Test("a partial sampler edit keeps the zones AND the untouched globals")
+    func partialSamplerEditKeepsZones() async throws {
+        let (router, store) = makeRouter()
+        let instID = store.addTrack(kind: .instrument).id.uuidString
+
+        let imported = await router.handle(ControlRequest(
+            id: "1", command: "track.setInstrument",
+            params: [
+                "trackId": .string(instID),
+                "kind": .string("sampler"),
+                "sampler": .object([
+                    "zones": .array([
+                        .object(["path": .string(Self.pingPath), "minPitch": .number(36),
+                                 "maxPitch": .number(59)]),
+                        .object(["path": .string(Self.pingPath), "minPitch": .number(60),
+                                 "maxPitch": .number(83)]),
+                    ]),
+                    "oneShot": .bool(true),
+                    "gain": .number(0.42),
+                ]),
+            ]))
+        #expect(imported.ok)
+        let zoneIDs = store.tracks[0].instrument?.sampler?.zones.map(\.id) ?? []
+        #expect(zoneIDs.count == 2)
+
+        // The reported call: ONE global, nothing else.
+        let tweak = await router.handle(ControlRequest(
+            id: "2", command: "track.setInstrument",
+            params: ["trackId": .string(instID),
+                     "sampler": .object(["release": .number(0.4)])]))
+        #expect(tweak.ok)
+
+        let sampler = try #require(store.tracks[0].instrument?.sampler)
+        // THE POINT: the library is still there, same zones, same ids.
+        #expect(sampler.zones.count == 2)
+        #expect(sampler.zones.map(\.id) == zoneIDs)
+        #expect(sampler.zones[0].minPitch == 36)
+        #expect(sampler.zones[1].maxPitch == 83)
+        // The edit landed…
+        #expect(sampler.release == 0.4)
+        // …and the globals the caller never mentioned did NOT snap back to
+        // model defaults (oneShot false / gain 0.8), which is the same class of
+        // silent loss one level down.
+        #expect(sampler.oneShot == true)
+        #expect(sampler.gain == 0.42)
+
+        // An EXPLICIT empty array still clears — "partial" must not mean
+        // "unclearable", and this is the only way to say it deliberately.
+        let cleared = await router.handle(ControlRequest(
+            id: "3", command: "track.setInstrument",
+            params: ["trackId": .string(instID),
+                     "sampler": .object(["zones": .array([])])]))
+        #expect(cleared.ok)
+        #expect(store.tracks[0].instrument?.sampler?.zones.isEmpty == true)
+    }
+
     @Test("the ten m19-b zone keys round-trip through set → echo → snapshot")
     func playbackScalarsRoundTrip() async throws {
         let (router, store) = makeRouter()
@@ -259,5 +323,120 @@ struct SamplerZoneWireTests {
         #expect(zone["endFrame"]?.doubleValue == 11)
         #expect(zone["decay"]?.doubleValue == 0)
         #expect(store.tracks[0].instrument?.sampler?.zones.first?.endFrame == 11)
+    }
+
+    // MARK: - m30-a: mounting the BUNDLED sample by name
+
+    /// ⛔ THE m30-a GATE ON THE WIRE. The app ships no sample audio, so an
+    /// agent with no library of its own could not make the Sampler produce a
+    /// sound at all — and a sampler feature exercised with no content is
+    /// indistinguishable from a broken one. A zone `path` now accepts a
+    /// well-known name as well as a filesystem path, the `SoundBankSource`
+    /// `"gm"` sentinel idiom, so the caller needs to know nothing about where
+    /// this repo (or the .app) lives.
+    ///
+    /// NO NEW VERB: this rides `track.setInstrument`, which already carries one
+    /// string per zone. Additive by construction — no real path has ever begun
+    /// with `builtin:`.
+    @Test("a zone path of builtin:<name> mounts the bundled sample by name")
+    func builtinZonePathResolvesToTheShippedFile() async throws {
+        let (router, store) = makeRouter()
+        let instID = store.addTrack(kind: .instrument).id.uuidString
+        let entry = try #require(BundledSamples.catalog.first)
+
+        let response = await router.handle(ControlRequest(
+            id: "1", command: "track.setInstrument",
+            params: [
+                "trackId": .string(instID),
+                "kind": .string("sampler"),
+                "sampler": .object([
+                    "zones": .array([
+                        .object(["path": .string(entry.wireName),
+                                 "rootPitch": .number(Double(entry.rootPitch))]),
+                    ]),
+                ]),
+            ]))
+        #expect(response.ok, "\(response.error ?? "")")
+        let stored = try #require(store.tracks[0].instrument?.sampler?.zones.first)
+        // Resolved at the wire boundary, so the MODEL holds a real file — which
+        // is what makes the zone loadable by the engine and copyable into a
+        // saved project bundle (ProjectBundle.planMedia copies zone media).
+        #expect(stored.audioFileURL.path.hasPrefix("/"))
+        #expect(FileManager.default.fileExists(atPath: stored.audioFileURL.path), """
+            the wire accepted \(entry.wireName) but stored \(stored.audioFileURL.path), \
+            which is not on disk
+            """)
+        #expect(stored.audioFileURL.lastPathComponent == entry.fileName)
+        #expect(stored.rootPitch == entry.rootPitch)
+        // The response echoes the RESOLVED path, so a caller can see what it got.
+        let echoed = try #require(response.result?["sampler"]?["zones"]?.arrayValue?.first)
+        #expect(echoed["path"]?.stringValue == stored.audioFileURL.path)
+    }
+
+    /// The SECOND call site: `zonePatches` merges by id and parses its path
+    /// through the same helper, so a patch can re-point an existing zone at the
+    /// bundled sample. One helper, two branches — the two must not drift on
+    /// what a path means.
+    @Test("a zonePatches path of builtin:<name> resolves the same way")
+    func builtinZonePathResolvesOnThePatchBranchToo() async throws {
+        let (router, store) = makeRouter()
+        let instID = store.addTrack(kind: .instrument).id.uuidString
+        let entry = try #require(BundledSamples.catalog.first)
+
+        let created = await router.handle(ControlRequest(
+            id: "1", command: "track.setInstrument",
+            params: [
+                "trackId": .string(instID),
+                "kind": .string("sampler"),
+                "sampler": .object([
+                    "zones": .array([.object(["path": .string(Self.pingPath)])]),
+                ]),
+            ]))
+        #expect(created.ok)
+        let zoneID = try #require(store.tracks[0].instrument?.sampler?.zones.first?.id)
+
+        let patched = await router.handle(ControlRequest(
+            id: "2", command: "track.setInstrument",
+            params: [
+                "trackId": .string(instID),
+                "sampler": .object([
+                    "zonePatches": .array([
+                        .object(["id": .string(zoneID.uuidString),
+                                 "path": .string(entry.wireName)]),
+                    ]),
+                ]),
+            ]))
+        #expect(patched.ok, "\(patched.error ?? "")")
+        let stored = try #require(store.tracks[0].instrument?.sampler?.zones.first)
+        #expect(stored.id == zoneID)
+        #expect(stored.audioFileURL.lastPathComponent == entry.fileName)
+        #expect(FileManager.default.fileExists(atPath: stored.audioFileURL.path))
+    }
+
+    /// ⛔ A NAME NOBODY SHIPPED MUST FAIL LOUD, naming what it could have said.
+    /// Falling through to `URL(fileURLWithPath: "builtin:nope")` would answer
+    /// SUCCESS and leave a silent track — this tree's characteristic failure
+    /// mode, and exactly the confusion m30-a exists to end.
+    @Test("an unknown builtin: name is refused, and the refusal lists the known names")
+    func unknownBuiltinNameIsRefused() async throws {
+        let (router, store) = makeRouter()
+        let instID = store.addTrack(kind: .instrument).id.uuidString
+
+        let response = await router.handle(ControlRequest(
+            id: "1", command: "track.setInstrument",
+            params: [
+                "trackId": .string(instID),
+                "kind": .string("sampler"),
+                "sampler": .object([
+                    "zones": .array([.object(["path": .string("builtin:no-such-sample")])]),
+                ]),
+            ]))
+        #expect(!response.ok)
+        let message = try #require(response.error)
+        #expect(message.contains("no-such-sample"))
+        #expect(message.contains("sampler.zones[0].path"))
+        // Teaches the way out, rather than only refusing.
+        #expect(message.contains(BundledSamples.knownNames[0]))
+        #expect(store.tracks[0].instrument == nil, "nothing may land on a refused call")
     }
 }

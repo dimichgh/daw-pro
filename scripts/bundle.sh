@@ -109,18 +109,103 @@ printf 'APPL????' > "$APP/Contents/PkgInfo"
 # iconutil; CFBundleIconFile=AppIcon in the plist template points at it.
 cp "Sources/DAWApp/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 
-# SwiftPM resource bundle (glass-d): the DAWApp target declares runtime-loaded
-# resources (the onboarding hero PNGs), which SwiftPM emits as a .bundle beside
-# the binary. Ship it in Contents/Resources — the standard app location, where
-# OnboardingHeroArt.load looks first (NOT the bundle root: a stray top-level
-# item there would break the codesign seal).
-RESOURCE_BUNDLE="$BIN_DIR/daw-pro_DAWApp.bundle"
-if [[ -d "$RESOURCE_BUNDLE" ]]; then
-    cp -R "$RESOURCE_BUNDLE" "$APP/Contents/Resources/"
-else
-    echo "error: SwiftPM resource bundle not found at $RESOURCE_BUNDLE" >&2
+# SwiftPM resource bundles (glass-d; generalised at m23-ap-2a-1, 2026-08-13).
+#
+# Every target that declares runtime-loaded resources gets its own .bundle beside
+# the binary. They all ship in Contents/Resources — the standard app location,
+# where the loaders look first (NOT the bundle root: a stray top-level item there
+# would break the codesign seal).
+#
+# ⚠️⚠️ THIS USED TO COPY EXACTLY ONE, HARDCODED (`daw-pro_DAWApp.bundle`), AND
+# THAT WAS A LATENT SHIPPING BUG THE MOMENT A SECOND TARGET GAINED RESOURCES.
+# m23-ap-2a vendored the SwiftF0 weights into DAWEngine; they landed in
+# `daw-pro_DAWEngine.bundle`, which this script then silently did not copy — so a
+# packaged app could never find the pitch model. It failed as a clean
+# `weightsMissing` rather than a crash only because `PitchTracker` deliberately
+# avoids `Bundle.module` (whose generated accessor ends in `fatalError`). The
+# whole test suite stayed green throughout, because tests resolve via the
+# `.xctest`-sibling path and never exercise the packaged layout.
+#
+# USER RULING 2026-08-13, asked as "the pitch model won't reach the built app":
+# *"Copy every resource bundle — fixes this and any future one."*
+#
+# ⚠️ "EVERY" IS FILTERED IN EXACTLY ONE WAY, AND IT IS NOT PEDANTRY: TEST BUNDLES
+# MUST NEVER SHIP. A test build leaves `daw-pro_*Tests.bundle` beside the product
+# ones (measured: `daw-pro_DAWCoreTests.bundle`, 92 KB), and a literal "copy
+# every .bundle" would seal test fixtures into a signed, distributed app.
+# `--show-bin-path -c release` does not normally surface them, which is exactly
+# what makes this the kind of leak nobody notices until it has shipped.
+shopt -s nullglob
+copied_bundles=()
+for rb in "$BIN_DIR"/*.bundle; do
+    case "$(basename "$rb")" in
+        *Tests.bundle|*Tests*.bundle)
+            echo "  skipping test bundle: $(basename "$rb")"
+            continue
+            ;;
+    esac
+    cp -R "$rb" "$APP/Contents/Resources/"
+    copied_bundles+=("$(basename "$rb")")
+done
+shopt -u nullglob
+
+echo "  resource bundles copied: ${#copied_bundles[@]} — ${copied_bundles[*]:-none}"
+
+# Three are REQUIRED, and each fails loudly here rather than quietly at runtime.
+# DAWApp carries the onboarding hero art; DAWEngine carries the SwiftF0 weights;
+# DAWCore carries the bundled sampler one-shot (m30-a), which is the only sound
+# the Sampler can make on a machine with no sample library of its own.
+# A missing one is a packaging failure, not a runtime condition.
+#
+# The copy loop above takes EVERY non-test bundle, so this list is not what puts
+# them in the app — it is what stops a silent miss. DAWCore was added on
+# 2026-08-23 the moment it started carrying shipping content; a resource bundle
+# only exists at all once its target declares a resource, so an accidental
+# removal from Package.swift would otherwise reach users as a refusal at runtime.
+for required in daw-pro_DAWApp.bundle daw-pro_DAWEngine.bundle daw-pro_DAWCore.bundle; do
+    if [[ ! -d "$APP/Contents/Resources/$required" ]]; then
+        echo "error: required resource bundle '$required' did not reach the app" >&2
+        echo "       (looked in $BIN_DIR — was the release build run?)" >&2
+        exit 1
+    fi
+done
+
+# Voice-conversion correctness patches + the facade hook (m10-p-6, 2026-08-13).
+#
+# These are OURS and tiny (~55 KB together). They are NOT optional: without them
+# the RVC sidecar produces wrong audio (MLX's broken conv_transpose1d on long
+# outputs, and the fork's flow noise_scale shipped at 0.0). The ~1.7 GB vendored
+# runtime they patch canNOT ship in a signed bundle and installs separately into
+# Application Support — which is exactly why these must be bundled: with the
+# runtime living elsewhere, `rvcDir`'s sibling is NOT where our files are, so
+# Configuration.resolveOwnedDir falls through to Contents/Resources for them.
+#
+# Like the weights above, this MUST run before `codesign`.
+for owned in rvc-patches rvc-mitigation; do
+    src="scripts/$owned"
+    if [[ ! -d "$src" ]]; then
+        echo "error: $src not found — the sidecar would produce WRONG AUDIO" >&2
+        exit 1
+    fi
+    dest="$APP/Contents/Resources/$owned"
+    mkdir -p "$dest"
+    # No __pycache__: it would break the mitigation dir's one-file invariant and
+    # is dead weight inside a read-only, signed bundle anyway.
+    find "$src" -type f -name '*.py' -not -path '*__pycache__*' -exec cp {} "$dest/" \;
+    find "$src" -type f \( -name '*.md' -o -name '*.patch' \) -exec cp {} "$dest/" \;
+done
+
+# ⚠️ scripts/rvc-mitigation/ goes on sys.path AHEAD of site-packages, so a second
+# module there would shadow a same-named module for the whole interpreter. The
+# invariant is asserted by gate_m23fo_mechanism.py at the source; assert it again
+# on what actually LANDED, because a bundling bug is exactly how a copy diverges
+# from its source.
+hook_files=$(find "$APP/Contents/Resources/rvc-mitigation" -type f -name '*.py' | wc -l | tr -d ' ')
+if [[ "$hook_files" != "1" ]]; then
+    echo "error: rvc-mitigation must bundle EXACTLY ONE .py, found $hook_files" >&2
     exit 1
 fi
+echo "==> bundled voice-conversion patches + hook (one-file invariant holds)"
 
 # Speech-model weights (m23-n1, 2026-07-27) — OPT-IN, off by default.
 #
@@ -148,6 +233,30 @@ fi
 
 echo "==> plutil -lint"
 plutil -lint "$APP/Contents/Info.plist"
+
+# --- Strip (m23-dp) ----------------------------------------------------------
+# The linked binary carries ~20.6 MB of symbols — more than half the shipped
+# bundle. `-S` drops the debug symbol table, `-x` drops local symbols; neither
+# touches the external/dynamic symbols Swift reflection and SwiftUI need, which
+# is why the aggressive forms (`-r`, `-u`, bare `strip`) are deliberately NOT
+# used here.
+#
+# ⚠️ ORDERING IS LOAD-BEARING: this MUST run BEFORE `codesign` below. Stripping
+# rewrites the Mach-O, so doing it after signing silently invalidates the seal
+# and the app fails Gatekeeper with no error at bundle time.
+#
+# Set DAWPRO_NO_STRIP=1 to keep symbols when you need readable crash reports
+# with function names instead of raw addresses.
+if [[ "${DAWPRO_NO_STRIP:-0}" == "1" ]]; then
+    echo "==> strip SKIPPED (DAWPRO_NO_STRIP=1) — symbols kept for crash reports"
+else
+    STRIP_TARGET="$APP/Contents/MacOS/$EXECUTABLE"
+    BEFORE_BYTES=$(stat -f %z "$STRIP_TARGET")
+    strip -S -x "$STRIP_TARGET"
+    AFTER_BYTES=$(stat -f %z "$STRIP_TARGET")
+    echo "==> strip -S -x: $((BEFORE_BYTES / 1048576)) MB -> $((AFTER_BYTES / 1048576)) MB" \
+         "(saved $(( (BEFORE_BYTES - AFTER_BYTES) / 1048576 )) MB)"
+fi
 
 # --- Sign --------------------------------------------------------------------
 # Ad-hoc (identity "-"): runs on this machine and any machine after a

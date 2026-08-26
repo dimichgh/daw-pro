@@ -55,12 +55,15 @@ public enum ReferenceAnalyzer {
     /// (the m22-c convergence-gate edge).
     static let truePeakTailFrames = 31
 
-    /// Analyzes the whole file at `url`. Blocking — call from a detached
-    /// task only. `chunkFrames` is a test seam (chunk-size invariance pin);
-    /// production uses the 64 k default.
-    public static func analyze(
-        fileAt url: URL, chunkFrames: AVAudioFrameCount = defaultChunkFrames
-    ) throws -> ReferenceAnalysis {
+    /// Opens `url` for reading and validates it carries at least one
+    /// channel, one sample, and a positive sample rate. THE shared
+    /// file-open prelude for every offline whole-file/windowed analyzer in
+    /// this package (m25-z: `FileProfiler` reuses this rather than
+    /// re-deriving its own "is this a readable, non-empty audio file"
+    /// check — two file readers could disagree about what a file
+    /// contains, the `interpolatorPhases`/m23-ch anti-fork reasoning
+    /// applied to file I/O instead of DSP coefficients).
+    static func openValidatedFile(_ url: URL) throws -> AVAudioFile {
         let reader: AVAudioFile
         do {
             reader = try AVAudioFile(forReading: url)
@@ -68,12 +71,23 @@ public enum ReferenceAnalyzer {
             throw AudioContentAnalyzerError.unreadable(
                 "\(url.path): \(error.localizedDescription)")
         }
+        let format = reader.processingFormat
+        guard reader.length > 0, format.channelCount > 0, format.sampleRate > 0 else {
+            throw AudioContentAnalyzerError.unreadable("empty source \(url.path)")
+        }
+        return reader
+    }
+
+    /// Analyzes the whole file at `url`. Blocking — call from a detached
+    /// task only. `chunkFrames` is a test seam (chunk-size invariance pin);
+    /// production uses the 64 k default.
+    public static func analyze(
+        fileAt url: URL, chunkFrames: AVAudioFrameCount = defaultChunkFrames
+    ) throws -> ReferenceAnalysis {
+        let reader = try openValidatedFile(url)
         let format = reader.processingFormat  // deinterleaved float32
         let channelCount = Int(format.channelCount)
         let rate = format.sampleRate
-        guard reader.length > 0, channelCount > 0, rate > 0 else {
-            throw AudioContentAnalyzerError.unreadable("empty source \(url.path)")
-        }
         guard let chunk = AVAudioPCMBuffer(
             pcmFormat: format, frameCapacity: max(1, chunkFrames)) else {
             throw AudioContentAnalyzerError.unreadable("buffer allocation failed")

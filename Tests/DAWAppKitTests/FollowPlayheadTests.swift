@@ -175,6 +175,73 @@ struct FollowPlayheadTests {
         #expect(model.expectedOffset == 2400)
     }
 
+    @Test("m25-b-3: a ZOOM's anchor scroll does not stand follow down…")
+    func zoomAnchorScrollDoesNotSuspend() {
+        // THE PRECEDENCE DECISION FOR THE PIANO ROLL'S ANCHOR-PRESERVING ZOOM,
+        // pinned on the model rather than asserted in prose. The roll delivers the
+        // compensating offset through `scrollExternally` — the same seam a minimap
+        // jump and an edge drag take, both of which DO suspend follow — so the
+        // question "does zooming pause follow?" has to be answered here.
+        //
+        // It answers itself: the roll's grid is `beats · ppb` wide, so the report
+        // that carries a zoom's offset ALSO carries a changed content width, and
+        // the detector re-baselines on a geometry change instead of blaming the
+        // user. That is not a coincidence being exploited — this model's own doc
+        // names *zoom* in that list.
+        let model = FollowPlayheadModel()
+        _ = model.target(isEnabled: true, isPlaying: true, playheadX: 970,
+                         viewportWidth: viewport, contentWidth: content, currentOffset: 0)
+        model.reportOffset(850, isEnabled: true, isPlaying: true,
+                           contentWidth: content, viewportWidth: viewport)
+        #expect(model.isSuspended == false)
+
+        // The user zooms in 2×: the roll writes the new scale, the funnel issues an
+        // anchor-preserving offset, and the single report that follows carries both.
+        model.scrollExternally(to: 1700)
+        model.reportOffset(1700, isEnabled: true, isPlaying: true,
+                           contentWidth: content * 2, viewportWidth: viewport)
+        #expect(model.isSuspended == false, "a zoom must not read as a manual scroll")
+        #expect(model.expectedOffset == 1700)
+        // And follow is still live afterwards — the whole point of not suspending.
+        #expect(model.target(isEnabled: true, isPlaying: true, playheadX: 3400,
+                             viewportWidth: viewport, contentWidth: content * 2,
+                             currentOffset: 1700) != nil)
+    }
+
+    @Test("…but a SECOND, same-geometry landing after it does — the stated residual")
+    func zoomTwoPhaseLandingSuspends() {
+        // ⚠️ THE HONEST OTHER HALF, RECORDED RATHER THAN ENGINEERED AROUND. If the
+        // scroller clamps itself on the rescale BEFORE the anchor scroll lands, the
+        // detector sees TWO reports: the first absorbed by the geometry change, the
+        // second (same geometry, different offset, nothing in flight) read as the
+        // user. Follow suspends, the chip shows its PAUSED face, and one click
+        // resumes — it costs a click, never data.
+        //
+        // This is pinned so the behaviour is KNOWN, not so it is endorsed: curing it
+        // means teaching `reportOffset` to hold an in-flight expectation across a
+        // geometry change, which changes shipped behaviour on the arrange too (which
+        // carries the identical exposure through `applyArrangeHScroll`). If someone
+        // later makes that change, THIS test is the one that should fail and be
+        // rewritten — deliberately, with the arrange re-checked.
+        let model = FollowPlayheadModel()
+        _ = model.target(isEnabled: true, isPlaying: true, playheadX: 970,
+                         viewportWidth: viewport, contentWidth: content, currentOffset: 0)
+        model.reportOffset(850, isEnabled: true, isPlaying: true,
+                           contentWidth: content, viewportWidth: viewport)
+        model.scrollExternally(to: 1700)
+        // Phase 1 — the scroller's own clamp on the new content width.
+        model.reportOffset(1200, isEnabled: true, isPlaying: true,
+                           contentWidth: content * 2, viewportWidth: viewport)
+        #expect(model.isSuspended == false)
+        // Phase 2 — the anchor scroll lands, geometry unchanged.
+        model.reportOffset(1700, isEnabled: true, isPlaying: true,
+                           contentWidth: content * 2, viewportWidth: viewport)
+        #expect(model.isSuspended, "recorded, not endorsed — see the note above")
+        // Recoverable by exactly the affordance that already exists.
+        model.rearm()
+        #expect(model.isSuspended == false)
+    }
+
     @Test("scrolling while STOPPED never suspends — the detector is playback-armed")
     func stoppedScrollNeverSuspends() {
         let model = FollowPlayheadModel()

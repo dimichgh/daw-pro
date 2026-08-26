@@ -169,6 +169,25 @@ final class MIDIInputManager {
     /// `AudioEngine.startTake`, fed by the ~30 Hz capture drain.
     var captureSession: MIDICaptureSession?
 
+    /// MAIN-ACTOR sink for hardware CONTROLLER changes (m28-knob), installed
+    /// through `AudioEngineControlling.setControlChangeObserver`.
+    ///
+    /// Fed from `drainCaptureRing` — the SAME ~30 Hz main-actor pop of the SAME
+    /// capture ring the take accumulator uses, so no second seam crosses off the
+    /// receive thread and the render path is untouched. It runs whether or not a
+    /// take is open (`captureSession` is nil between takes and the ring is
+    /// drained regardless), which is what lets a mapped knob work with the
+    /// transport STOPPED — the property the whole feature rests on.
+    ///
+    /// ⭐ Called ONCE PER DRAIN with the controller changes seen this pass,
+    /// **including when there were none.** The empty call is the idle tick a
+    /// knob gesture needs to notice the hand stopped; see the protocol doc.
+    var controlChangeObserver: (@MainActor ([MIDIControlChangeEvent]) -> Void)?
+
+    /// Reused across drains so a 30 Hz pump does not allocate a fresh array
+    /// every pass. Main-actor only.
+    private var controlScratch: [MIDIControlChangeEvent] = []
+
     /// Renderers currently receiving thru (for AudioEngine's flush diff).
     var fanoutRenderers: [InstrumentRenderer] { currentFanout?.renderers ?? [] }
 
@@ -280,14 +299,31 @@ final class MIDIInputManager {
     /// session (events between takes are discarded — the ring must never
     /// back up while idle). Also runs synchronously from `stopRecording` so
     /// tail events land before `finish`.
+    /// Also the m28-knob controller feed: every `controlChange` popped this pass
+    /// is forwarded to `controlChangeObserver` in ONE call at the end, empty
+    /// batch included. Ordering is load-bearing — the capture session ingests
+    /// first, so a mapped CC is still recorded into the take exactly as it was
+    /// before this observer existed (the map does NOT swallow the CC; see
+    /// `MIDIControlMap`).
     func drainCaptureRing() {
         let ring = rtContext.captureRing
         if daw_atomic_u32_exchange(ring.droppedFlag, 0) == 1 {
             captureSession?.markDropped()
         }
+        controlScratch.removeAll(keepingCapacity: true)
+        let observing = controlChangeObserver != nil
         while let event = ring.pop() {
             captureSession?.ingest(event)
+            if observing, event.kind == ScheduledMIDIEvent.controlChange {
+                controlScratch.append(
+                    MIDIControlChangeEvent(sourceID: event.source,
+                                           channel: Int(event.channel),
+                                           controller: Int(event.pitch),
+                                           value: Int(event.velocity),
+                                           hostTime: event.hostTime))
+            }
         }
+        controlChangeObserver?(controlScratch)
     }
 
     /// ~30 Hz main-actor capture drain, alive as long as the client is.
@@ -308,6 +344,10 @@ final class MIDIInputManager {
         drainTask?.cancel()
         drainTask = nil
         captureSession = nil
+        // The controller feed dies with the client: a disposed manager must not
+        // keep an external gesture believing the hand is still on the knob.
+        controlChangeObserver = nil
+        controlScratch.removeAll(keepingCapacity: false)
         publishFanout(renderers: [])
         if client != 0 {
             MIDIClientDispose(client)

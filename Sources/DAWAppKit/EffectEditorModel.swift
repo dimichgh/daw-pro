@@ -176,11 +176,16 @@ public final class EffectEditorModel {
             ]
         case .compressor:
             // Pro-C3's own grouping: trigger/shape, then time smoothing,
-            // makeup last.
+            // makeup last. m23-ck: the parallel dry/wet blend joins OUTPUT
+            // APPENDED after makeup, mirroring the schema append — it acts on
+            // the makeup-inclusive wet signal, so it reads last in signal
+            // order. (The saturator puts `mix` FIRST in its OUTPUT group; if
+            // that ordering should win here instead, it is a design call, not
+            // a correctness one.)
             return [
                 ("TRIGGER", [("thresholdDb", nil), ("ratio", nil), ("kneeDb", nil)]),
                 ("TIME", [("attackMs", nil), ("releaseMs", nil)]),
-                ("OUTPUT", [("makeupDb", nil)]),
+                ("OUTPUT", [("makeupDb", nil), ("mix", nil)]),
             ]
         case .limiter:
             // Release before Ceiling — input→output even on a 2-knob card.
@@ -598,6 +603,7 @@ public final class EffectEditorModel {
             case "releaseMs": return p.releaseMs
             case "kneeDb": return p.kneeDb
             case "makeupDb": return p.makeupDb
+            case "mix": return p.mix
             default: return nil
             }
         case .limiter:

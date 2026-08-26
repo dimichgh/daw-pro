@@ -9,6 +9,15 @@
 // the thing to check in each is the BOTTOM-MOST control of each strip kind
 // (Arm on a channel, Solo on a bus), not merely "the fader is visible".
 //
+// A NOTE ON THE "h640" IN CAPTURE NAMES (m23-dw): `h640` names the REQUESTED
+// `debug.windowFrame` height, not the window's actual resting height. Since
+// m23-dw split the window floor into two units, a 640 request clamps straight
+// up to the real content-rect floor, `WindowFloor.minWindowContentHeight` = 672
+// (640 was only ever the SwiftUI LAYOUT floor, `WindowFloor.minHeight`, which
+// sits BELOW the titlebar). The captures below are named for what was asked,
+// not what the window is holding when they're taken — do not rename them, they
+// may be referenced elsewhere; just read "h640" as "requested 640, landed 672".
+//
 // Staging: this gate BUILDS AND LAUNCHES its own app on 17695 — just run
 // `node scripts/gates/m23a-mixer-strip-layout.mjs`. 17600 is the user's LIVE app
 // and the harness refuses it outright.
@@ -28,7 +37,7 @@
 //   so pass an absolute path. Omitted, it defaults to the staging out dir.
 // Promoted from the session scratchpad 2026-07-26 (m23-a).
 import fs from "fs";
-import { buildOrAbort, startStaging, stopStaging, connect } from "./_staging.mjs";
+import { buildOrAbort, startStaging, stopStaging, connect, panelDensityGuard, verdict } from "./_staging.mjs";
 
 const GATE = "m23a";                                  // names the pidfile + out dir
 const OUT = process.argv[2] || `/tmp/daw-gate-out/${GATE}`;
@@ -60,10 +69,20 @@ startStaging({ gate: GATE });
 // The harness also retries 40x1 s instead of failing after a single 5 s attempt,
 // which is the right budget against a cold boot we now own.
 const ws = await connect();
+// m23-ej-2: raw cmd(ws,…), never `must` — `must` process.exit(1)s on any
+// failing command, and a guard built on it would die mid-restore-loop.
+const guard = panelDensityGuard((command, params) => cmd(ws, command, params));
 async function must(command, params) {
   log(`> ${command}`);
   const r = await cmd(ws, command, params);
-  if (!r.ok) { log(`FAIL ${command}: ${JSON.stringify(r.error)}`); process.exit(1); }
+  if (!r.ok) {
+    log(`FAIL ${command}: ${JSON.stringify(r.error)}`);
+    // m23-ej-2: this is the gate's ONLY failure exit (straight-line, no
+    // try/catch) — restore BEFORE process.exit, which gives no `exit` handler
+    // a chance to await.
+    await guard.restore("must-failure");
+    process.exit(1);
+  }
   return r.result;
 }
 async function cap(name) {
@@ -109,7 +128,7 @@ const heights = [
   { name: "h640", w: 1440, h: 640 },   // the measured window-height FLOOR
 ];
 for (const mode of ["pro", "simple"]) {
-  await must("debug.panelDensity", { panel: "mixer", mode });
+  await guard.set("mixer", mode);
   for (const s of heights) {
     const f = await must("debug.windowFrame", { width: s.w, height: s.h });
     await sleep(400);
@@ -118,7 +137,7 @@ for (const mode of ["pro", "simple"]) {
 }
 
 // ---- the COLLAPSE disclosure, at both window heights ----
-await must("debug.panelDensity", { panel: "mixer", mode: "pro" });
+await guard.set("mixer", "pro");
 for (const s of [{ name: "h900", h: 900 }, { name: "h640", h: 640 }]) {
   await must("debug.windowFrame", { width: 1440, height: s.h });
   const r = await must("debug.panelLayout", { mixerInsertsCollapsed: true });
@@ -130,7 +149,7 @@ for (const s of [{ name: "h900", h: 900 }, { name: "h640", h: 640 }]) {
 }
 
 // ---- insert count as an independent variable, at the SHORT window ----
-await must("debug.panelDensity", { panel: "mixer", mode: "pro" });
+await guard.set("mixer", "pro");
 await must("debug.windowFrame", { width: 1440, height: 640 });
 for (const n of [4, 2, 0]) {
   while (fxIds.length > n) {
@@ -152,7 +171,7 @@ for (const kind of ["compressor", "limiter"]) {
   await must("fx.add", { trackId: "master", kind });
 }
 await must("ui.showMixer", { show: true });
-await must("debug.panelDensity", { panel: "mixer", mode: "pro" });
+await guard.set("mixer", "pro");
 
 // --- GR mini-bar liveness inside the bounded region (m22-e law) ---
 await must("debug.windowFrame", { width: 1440, height: 900 });
@@ -181,15 +200,22 @@ await must("debug.referenceSeed", {
 });
 await must("debug.windowFrame", { width: 1440, height: 640 });
 for (const mode of ["pro", "simple"]) {
-  await must("debug.panelDensity", { panel: "mixer", mode });
+  await guard.set("mixer", mode);
   await sleep(450);
   await cap(`master-tallest-${mode}-h640`);
 }
 await must("debug.windowFrame", { width: 1440, height: 900 });
-await must("debug.panelDensity", { panel: "mixer", mode: "pro" });
+await guard.set("mixer", "pro");
 await sleep(450);
 await cap("master-tallest-pro-h900");
+await guard.restore("normal exit");
 stopStaging(GATE);   // SIGTERMs by exact pid AND releases our session.lock
 ws.close();
 log("done");
-process.exit(0);
+// m23-fl: this gate ASSERTS NOTHING and always has — its header says so in prose, but nothing
+// MACHINE-READABLE did, so a corpus run counted it as a passing gate indistinguishable from one
+// that actually checked something. `verdict({ran: 0, ...}, {allowEmpty})` states it in a form the
+// census can read: it still exits 0 (correct — this is a capture tool), but it is now counted as
+// EXEMPTED, never as MIGRATED, and the reason is enforced non-empty at RUNTIME rather than by
+// convention. Assertions were deliberately NOT invented for it: the real check is a human eye.
+verdict({ ran: 0, failed: 0 }, { allowEmpty: "capture-only by design: mixer-strip frames for pixel review, where the thing to check is the BOTTOM-MOST control of each strip kind (Arm on a channel, Solo on a bus) — a judgement no assertion in this file makes. See this file's own header." });

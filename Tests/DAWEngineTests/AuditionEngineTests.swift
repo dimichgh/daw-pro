@@ -144,6 +144,127 @@ struct AuditionEngineTests {
         #expect(engine.auditionPitchesForTesting.isEmpty)
     }
 
+    // MARK: - Breath pad P6: the ANTI-VACUITY gate for `previewController`
+    //
+    // ⚠️ `AudioEngineControlling.previewController` carries a `.unsupported`
+    // default so fakes and headless engines compile unchanged. That default is
+    // exactly the `availableOutputDevices` vacuity risk the protocol warns about
+    // — and WORSE here, because the symptom is SILENCE rather than an empty
+    // list. A real `AudioEngine` that forgot to override it would preview
+    // nothing, forever, and every model-layer test would still pass, because
+    // `PadPreviewController` is deliberately written to keep working against an
+    // engine that cannot preview.
+    //
+    // This is `OutputDeviceTests`' shape applied to that method: assert the REAL
+    // engine answers something other than `.unsupported` for a track that has an
+    // instrument node. ⛔ THE PLANT: delete `AudioEngine.previewController` (the
+    // protocol default then takes over and the code still compiles) and this
+    // goes red while nothing else in the tree does.
+
+    @Test("P6 the REAL engine implements previewController — it does not inherit .unsupported")
+    func theRealEngineImplementsTheControllerPreview() throws {
+        let engine = AudioEngine()
+        let track = Track(name: "Sax", kind: .instrument)
+        engine.tracksDidChange([track])
+        let renderer = try #require(engine.graph.instrumentRenderer(forTrack: track.id))
+
+        let outcome = engine.previewController(trackID: track.id, controller: 11, value: 90)
+
+        #expect(outcome != .unsupported,
+                "the real engine must OVERRIDE the protocol's .unsupported default")
+        #expect(outcome != .noRenderer)
+        // …and it must have actually pushed, not merely reported well. The
+        // outcome alone is not proof: a setter's return is not proof it took.
+        let events = queuedAuditionEvents(renderer)
+        #expect(events.count == 1)
+        // `.first?` rather than a subscript: when the engine override is
+        // deleted (the vacuity plant) this must FAIL, not trap.
+        #expect(events.first?.kind == ScheduledMIDIEvent.controlChange)
+        #expect(events.first?.pitch == 11)
+        #expect(events.first?.velocity == 90)
+        // Nothing went near the hardware-thru ring, and no voice was opened.
+        #expect(renderer.thruRing.count == 0)
+        #expect(engine.auditionPitchesForTesting.isEmpty)
+    }
+
+    @Test("P6 the preview is NOT a heartbeat, and files no entry in the voice ledger")
+    func previewIsNeitherHeartbeatNorVoice() throws {
+        let engine = AudioEngine()
+        let track = Track(name: "Sax", kind: .instrument)
+        engine.tracksDidChange([track])
+        let renderer = try #require(engine.graph.instrumentRenderer(forTrack: track.id))
+        let beatBefore = heartbeat(renderer)
+
+        engine.previewController(trackID: track.id, controller: 11, value: 64)
+
+        // Bumping the counter would keep a genuinely stuck piano-roll audition
+        // note alive past the render side's 3 s watchdog.
+        #expect(heartbeat(renderer) == beatBefore)
+        // And `auditionVoices` is keyed by PITCH: an entry for CC 11 would come
+        // back out of `stopAllAudition`/`allNotesOff` as a note-off on pitch 11.
+        #expect(engine.auditionPitchesForTesting[track.id] == nil)
+    }
+
+    @Test("P6 an unchanged value pushes nothing; a changed one pushes again")
+    func previewFiltersUnchangedValues() throws {
+        let engine = AudioEngine()
+        let track = Track(name: "Sax", kind: .instrument)
+        engine.tracksDidChange([track])
+        let renderer = try #require(engine.graph.instrumentRenderer(forTrack: track.id))
+
+        engine.previewController(trackID: track.id, controller: 11, value: 64)
+        #expect(queuedAuditionEvents(renderer).count == 1)
+
+        // A dot held still costs zero ring traffic — but the OUTCOME is still
+        // reported honestly, because the strip really is at that value.
+        let repeatOutcome = engine.previewController(trackID: track.id, controller: 11, value: 64)
+        #expect(repeatOutcome != .unsupported && repeatOutcome != .noRenderer)
+        #expect(queuedAuditionEvents(renderer).isEmpty)
+
+        engine.previewController(trackID: track.id, controller: 11, value: 65)
+        #expect(queuedAuditionEvents(renderer).count == 1)
+        // A different CC is a different lane, never de-duplicated against 11.
+        engine.previewController(trackID: track.id, controller: 74, value: 65)
+        #expect(queuedAuditionEvents(renderer).count == 1)
+    }
+
+    @Test("P6 a reset invalidates the remembered value, so the next identical push lands")
+    func previewLedgerIsClearedByAResetPath() throws {
+        let engine = AudioEngine()
+        let track = Track(name: "Sax", kind: .instrument)
+        engine.tracksDidChange([track])
+        let renderer = try #require(engine.graph.instrumentRenderer(forTrack: track.id))
+
+        engine.previewController(trackID: track.id, controller: 11, value: 30)
+        _ = queuedAuditionEvents(renderer)
+        #expect(engine.controllerPreviewForTesting[track.id]?.value == 30)
+
+        // Panic resets every instrument, which restores its OWN controller
+        // defaults — so a remembered 30 would be a lie that suppressed the next
+        // push of 30 and left the strip at full expression.
+        _ = engine.allNotesOff()
+        #expect(engine.controllerPreviewForTesting.isEmpty)
+
+        engine.previewController(trackID: track.id, controller: 11, value: 30)
+        #expect(queuedAuditionEvents(renderer).count == 1)
+    }
+
+    @Test("P6 audio, bus and unknown tracks report noRenderer and deliver no controller")
+    func previewOnNonInstrumentTracksReportsNoRenderer() {
+        let engine = AudioEngine()
+        let audio = Track(name: "Vox", kind: .audio)
+        let bus = Track(name: "Verb", kind: .bus)
+        engine.tracksDidChange([audio, bus])
+
+        #expect(engine.previewController(trackID: audio.id, controller: 11, value: 64)
+                == .noRenderer)
+        #expect(engine.previewController(trackID: bus.id, controller: 11, value: 64)
+                == .noRenderer)
+        #expect(engine.previewController(trackID: UUID(), controller: 11, value: 64)
+                == .noRenderer)
+        #expect(engine.controllerPreviewForTesting.isEmpty)
+    }
+
     @Test("a muted track still RECEIVES the events and reports inaudibleMuted")
     func mutedReportsWithoutSuppressing() throws {
         let engine = AudioEngine()

@@ -47,7 +47,7 @@
 import fs from "fs";
 import path from "path";
 import { execFileSync } from "child_process";
-import { buildOrAbort, startStaging, stopStaging } from "./_staging.mjs";
+import { buildOrAbort, startStaging, stopStaging, panelDensityGuard, verdict } from "./_staging.mjs";
 
 const GATE = "m23g1";
 const PORT = process.env.DAW_CONTROL_PORT || "17695";
@@ -67,7 +67,12 @@ if (probeStale) {
   console.log(`compiling pixel probe -> ${PROBE}`);
   execFileSync("swiftc", ["-O", "-o", PROBE, PROBE_SRC], { stdio: "inherit" });
 }
-const killer = setTimeout(() => { console.error("TIMEOUT"); process.exit(2); }, 600_000);
+let guard = null;   // m23-ej-2: `let` — assigned after connect, read by the killer below
+const killer = setTimeout(async () => {
+  console.error("TIMEOUT");
+  await guard?.restore("timeout");
+  process.exit(2);
+}, 600_000);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ── the numbers the fixture is built from (everything else is derived) ──────
@@ -126,6 +131,7 @@ console.log(`staging pid ${stagingPid} on :${PORT}`);
 await sleep(4500);
 
 const { ws, req } = await connect();
+guard = panelDensityGuard(req);   // req already unwraps to .result ?? whole msg
 const checks = [];
 const check = (name, ok, detail) => {
   checks.push({ name, ok, detail });
@@ -203,7 +209,7 @@ try {
   await req("debug.arrangeZoom", { reset: true });
   const zoom = await req("debug.arrangeZoom", { ppb: PPB });
   await req("debug.arrangeZoom", { rowStep: "large" });
-  await req("debug.panelDensity", { panel: "arrange", mode: "pro" });
+  await guard.set("arrange", "pro");
   const layout = await req("debug.panelLayout", {});
   // Echo-and-CHECK, never assume a parameter landed (a debug command silently
   // ignores keys it does not own — the m23-c2 corollary).
@@ -577,6 +583,7 @@ try {
 } catch (err) {
   check("FATAL", false, String(err && err.stack ? err.stack : err));
 } finally {
+  await guard.restore("finally");
   try { ws.close(); } catch {}
   stopStaging(GATE, PIDFILE);   // m23-ac-2a: same pidfile-exact kill, one home
   clearTimeout(killer);
@@ -588,5 +595,5 @@ try {
     console.log("FAILED:");
     for (const b of bad) console.log(`  - ${b.name}: ${b.detail}`);
   }
-  process.exit(bad.length ? 1 : 0);
+  verdict({ ran: checks.length, failed: bad.length });
 }

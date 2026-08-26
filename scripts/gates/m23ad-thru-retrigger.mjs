@@ -28,7 +28,7 @@ import { spawn } from "child_process";
 import { spawnSync } from "child_process";
 import fs from "fs";
 import {
-  ROOT, STAGING_PORT, sleep, launchStaging, stopStaging,
+  ROOT, STAGING_PORT, sleep, launchStaging, stopStaging, verdict,
 } from "./_staging.mjs";
 
 const GATE = "m23ad";
@@ -213,10 +213,16 @@ try {
 } catch (e) {
   console.log(`FAIL: gate threw — ${e && e.message}`);
   failed++;
+  // m23-fa-2: this bare `failed++` had no matching `results.push` — an ORPHAN
+  // counter bump the census's AST reader cannot see. Deriving `ran`/`failed`
+  // from `results` alone (the honest single-collection shape) would have
+  // silently dropped this failure and turned a red gate green. Recording it
+  // here keeps the counter and the collection in agreement.
+  results.push({ name: "EXCEPTION: gate threw", ok: false });
 }
 
 console.log(`\n${results.filter((r) => r.ok).length}/${results.length} checks passed`);
 clearTimeout(killer);
 stopStaging(GATE);
 try { ws.close(); } catch { /* ignore */ }
-process.exit(failed === 0 ? 0 : 1);
+verdict({ ran: results.length, failed: results.filter((r) => !r.ok).length });

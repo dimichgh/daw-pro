@@ -83,6 +83,22 @@ struct StandardMIDIFileMapperTests {
             tempoChanges: tempo, timeSignatures: meter, warnings: [])
     }
 
+    /// One named part on one channel, with an optional program change (m23-k5).
+    /// A shape the reader really produces: format 1 gives one `SMFTrack` per
+    /// chunk, and format 0's `splitByChannel` gives one per channel with the
+    /// chunk's name repeated — pass the same `index` twice for the latter.
+    static func namedPart(_ name: String?, index: Int, channel: Int, pitch: Int,
+                          program: Int?) -> SMFTrack {
+        SMFTrack(
+            name: name, sourceTrackIndex: index, channels: [channel],
+            notes: [SMFNote(tick: 0, lengthTicks: 480, note: pitch, velocity: 100,
+                            releaseVelocity: 64, channel: channel)],
+            controllers: [], endTick: 960,
+            programChanges: program.map {
+                [SMFProgramChangeEvent(tick: 0, channel: channel, program: $0)]
+            } ?? [])
+    }
+
     // MARK: - Fixture integrity
 
     /// The pin for the ONE new byte fixture. Same job as k1's own pin test: it
@@ -760,8 +776,14 @@ struct StandardMIDIFileMapperTests {
     }
 
     /// D3 — program change is CAPTURED and REPORTED whatever `instruments` says;
-    /// only the descriptor assignment is gated. The GM default is `none` in k3
-    /// because bulk sound-bank assignment is an unmeasured main-actor cost.
+    /// only the descriptor assignment is gated.
+    ///
+    /// THE DEFAULT MOVED at m23-k5: `none` → `gm`, on a measurement (13 GM banks
+    /// ready 161 ms after a cold import of the user's own file, with no
+    /// main-actor cost above the `none` control). k3's `none` meant every human
+    /// import silently landed on the default poly synth. Both legs are asserted
+    /// EXPLICITLY below rather than one of them leaning on the default, so this
+    /// test says what the default IS instead of merely inheriting it.
     @Test("G10 program-change — reported under 'none', applied under 'gm', channel 10 is the kit")
     func programChangesAreReportedAndOptionallyApplied() throws {
         let notes = [
@@ -776,14 +798,15 @@ struct StandardMIDIFileMapperTests {
             SMFProgramChangeEvent(tick: 0, channel: 9, program: 0),
         ])
 
-        let reported = try Self.mapFile(file)
+        let reported = try Self.mapFile(file, options: MIDIImportOptions(instruments: .none))
         #expect(reported.report.parts[1].programChange == 56)
         #expect(reported.report.parts[1].programName == "Trumpet")
         #expect(reported.report.parts[2].programName == GMProgramCatalog.standardDrumKit.name)
         // The second program change on channel 0 is a drop: a DAW Pro track
         // holds one instrument for its whole length.
         #expect(reported.report.droppedProgramChanges == 1)
-        // Default is `none` — nothing was assigned.
+        // `none` is the explicit OPT-OUT — nothing was assigned, and the program
+        // was reported anyway.
         #expect(reported.tracks[0].track.instrument == nil)
         #expect(reported.report.instrumentsAssigned == "none")
 
@@ -972,5 +995,191 @@ struct StandardMIDIFileMapperTests {
                 == MIDIImportReport.maxReportedEntries + 1)
         #expect(plan.report.droppedMeterChanges.last?.hasPrefix("… and ") == true)
         #expect(plan.report.droppedMeterChanges.last?.contains("168") == true)
+    }
+
+    // MARK: - m23-k5 — track naming and the instruments default
+
+    /// THE USER'S BUG, in bytes. A format-0 file carries ONE chunk name for the
+    /// whole file, and `StandardMIDIFileReader.splitByChannel` gives every carved
+    /// part that same name with `channels: [oneChannel]` — so
+    /// `enumerateParts`' `source.channels.count > 1` suffix is structurally
+    /// unreachable here, and 13 channels imported as the song title, 13 times.
+    ///
+    /// This is a PARSING claim as much as a mapping one (that the reader really
+    /// does hand the mapper five same-named single-channel parts), which is why
+    /// it is gated on bytes rather than a hand-built IR — the fixture README's
+    /// own rule for when reachability is itself the claim.
+    @Test("m23-k5 — the new format-0 fixture loads from the bundle with its pinned SHA-256")
+    func namedProgramsFixtureBytesAreUnmodified() throws {
+        let data = try Self.fixtureData("hazard-type0-named-programs")
+        let actual = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        #expect(actual == "5589742142facf8015770d3bc65d2521fbbb8581a79130ab4819aaf7406b8229",
+                "hazard-type0-named-programs.mid has changed on disk — Apple's confirmation of its reading no longer applies until it is re-validated")
+    }
+
+    /// The structural precondition, asserted BEFORE the naming one so a failure
+    /// says which half broke: the reader hands over one part per channel, each
+    /// carrying the SAME chunk name and exactly one channel.
+    @Test("m23-k5 — a format-0 chunk splits into same-named single-channel parts")
+    func formatZeroPartsShareOneName() throws {
+        let file = try Self.decodeFixture("hazard-type0-named-programs")
+        #expect(file.format == .singleTrack)
+        #expect(file.tracks.count == 5)
+        #expect(file.tracks.map(\.name) == Array(repeating: "Fixture Song", count: 5))
+        #expect(file.tracks.map(\.channels) == [[0], [1], [2], [4], [9]])
+        // …so the pre-m23-k5 suffix condition is FALSE for every one of them.
+        // Without this leg the naming test below could pass on a build that
+        // simply re-enabled `split`.
+        #expect(file.tracks.allSatisfy { $0.channels.count == 1 })
+    }
+
+    /// The naming rule, end to end on those bytes. Every branch is exercised:
+    /// unique program name, colliding program name, drum channel, and a channel
+    /// that names no program at all.
+    @Test("m23-k5 — a format-0 file's parts are named by program, colliding ones by channel")
+    func formatZeroPartsAreNamedByProgram() throws {
+        let file = try Self.decodeFixture("hazard-type0-named-programs")
+        let plan = try Self.mapFile(file)
+
+        #expect(plan.tracks.map(\.track.name) == [
+            "Violin",                       // ch 0, program 40 — unique
+            "Distortion Guitar (ch 2)",     // ch 1, program 30 — collides…
+            "Distortion Guitar (ch 3)",     // ch 2, program 30 — …with this one
+            "Fixture Song (ch 5)",          // ch 4, NO program change at all
+            "Standard Drum Kit",            // ch 9 — GM percussion by convention
+        ])
+        // The CLIP is named with it too, not just the track: a clip called
+        // "Bohemian Rhapsody" on a track called "Timpani" is the same defect
+        // one layer down.
+        #expect(plan.tracks.map(\.clip.name) == plan.tracks.map(\.track.name))
+
+        // The report keeps BOTH: `name` literal, `trackName` resolved.
+        #expect(plan.report.parts.map(\.name)
+                == Array(repeating: "Fixture Song", count: 5))
+        #expect(plan.report.parts.map(\.trackName) == plan.tracks.map(\.track.name))
+        // 1-based display, 0-based storage — the GMProgramCatalog R1 law. The
+        // suffix says "ch 2" for the part whose stored channel is 1.
+        #expect(plan.report.parts.map(\.channel) == [0, 1, 2, 4, 9])
+    }
+
+    /// The half that must NOT change: a well-authored file naming its chunks
+    /// keeps those names. They are better than any GM program name we could
+    /// substitute, and overwriting them would be a second bug in the other
+    /// direction — the reason the rule is "does the name DISTINGUISH", not "does
+    /// the part have a program".
+    @Test("m23-k5 — distinct file-given names survive, program names never overwrite them")
+    func distinctFileNamesAreKept() throws {
+        let file = StandardMIDIFile(
+            format: .simultaneousTracks, division: .ticksPerQuarterNote(480),
+            tracks: [
+                Self.namedPart("Lead Vox", index: 0, channel: 0, pitch: 60, program: 52),
+                Self.namedPart("Bass", index: 1, channel: 1, pitch: 40, program: 33),
+            ],
+            tempoChanges: [], timeSignatures: [], warnings: [])
+        let plan = try Self.mapFile(file)
+
+        #expect(plan.tracks.map(\.track.name) == ["Lead Vox", "Bass"])
+        #expect(plan.report.parts.map(\.trackName) == ["Lead Vox", "Bass"])
+        // The programs are still REPORTED and still ASSIGNED — only the NAME
+        // came from the file. A test that asserted names alone could pass on a
+        // build that stopped assigning instruments entirely.
+        #expect(plan.report.parts.map(\.programName) == ["Choir Aahs", "Electric Bass (finger)"])
+        #expect(plan.tracks.map { $0.track.instrument?.soundBank?.program } == [52, 33])
+    }
+
+    /// The mixed case the "identical across ALL parts" reading gets wrong: ONE
+    /// duplicated name among otherwise-distinct ones. The duplicates fall back;
+    /// the unique name is left alone.
+    @Test("m23-k5 — only the parts whose name collides fall back to the program name")
+    func fallbackIsPerPartNotAllOrNothing() throws {
+        let file = StandardMIDIFile(
+            format: .simultaneousTracks, division: .ticksPerQuarterNote(480),
+            tracks: [
+                Self.namedPart("Bass", index: 0, channel: 0, pitch: 40, program: 33),
+                Self.namedPart("Track", index: 1, channel: 1, pitch: 60, program: 0),
+                Self.namedPart("Track", index: 2, channel: 2, pitch: 64, program: 48),
+            ],
+            tempoChanges: [], timeSignatures: [], warnings: [])
+        let plan = try Self.mapFile(file)
+
+        #expect(plan.tracks.map(\.track.name)
+                == ["Bass", "Acoustic Grand Piano", "String Ensemble 1"])
+    }
+
+    /// The rule is about the parts that are ACTUALLY IMPORTED, so a `parts`
+    /// selection changes the answer — and the pre-pass must agree with the build
+    /// loop about which parts those are (both read `isImportable`). Selecting one
+    /// of two same-named parts makes that name unique again, so it is KEPT.
+    @Test("m23-k5 — the naming set is the IMPORTED set, so a parts selection changes it")
+    func namingFollowsTheSelection() throws {
+        let file = StandardMIDIFile(
+            format: .simultaneousTracks, division: .ticksPerQuarterNote(480),
+            tracks: [
+                Self.namedPart("Track", index: 0, channel: 0, pitch: 60, program: 0),
+                Self.namedPart("Track", index: 1, channel: 1, pitch: 64, program: 48),
+            ],
+            tempoChanges: [], timeSignatures: [], warnings: [])
+
+        let both = try Self.mapFile(file)
+        #expect(both.tracks.map(\.track.name) == ["Acoustic Grand Piano", "String Ensemble 1"])
+
+        let one = try Self.mapFile(file, options: MIDIImportOptions(parts: [1]))
+        #expect(one.tracks.map(\.track.name) == ["Track"])
+        // The part that was not imported is named NOTHING — no track was made
+        // for it, so claiming a track name would be a lie in the report.
+        #expect(one.report.parts.map(\.trackName) == [nil, "Track"])
+        #expect(one.report.parts.map(\.name) == ["Track", "Track"])
+    }
+
+    /// A conductor part carries no channel, so there is no suffix to add. It is
+    /// never imported anyway (no content), which is exactly why `trackName` is
+    /// nil: the field means "what the track was called", and there is no track.
+    @Test("m23-k5 — skipped parts carry no trackName")
+    func skippedPartsHaveNoTrackName() throws {
+        let plan = try Self.mapFile(try Self.decodeFixture("apple-type1"))
+        let conductor = try #require(plan.report.parts.first { !$0.imported })
+        #expect(conductor.trackName == nil)
+        #expect(conductor.channel == nil)
+        #expect(plan.report.parts.filter(\.imported).allSatisfy { $0.trackName != nil })
+    }
+
+    /// A blank `FF 03` payload distinguishes nothing, so it must not win step 1
+    /// and must not become a track name — "" is not a name a user can find in
+    /// the track list. The last-resort shape is the pre-existing "MIDI Track N"
+    /// one plus the channel.
+    @Test("m23-k5 — a blank chunk name never becomes a track name")
+    func blankNamesFallBack() throws {
+        let file = StandardMIDIFile(
+            format: .singleTrack, division: .ticksPerQuarterNote(480),
+            tracks: [
+                Self.namedPart("   ", index: 0, channel: 0, pitch: 60, program: nil),
+                Self.namedPart("   ", index: 0, channel: 3, pitch: 64, program: nil),
+            ],
+            tempoChanges: [], timeSignatures: [], warnings: [])
+        let plan = try Self.mapFile(file)
+        #expect(plan.tracks.map(\.track.name) == ["MIDI Track 1 (ch 1)", "MIDI Track 1 (ch 4)"])
+    }
+
+    /// THE DEFAULT ITSELF (m23-k5). Asserted through `MIDIImportOptions()` —
+    /// the value every caller that names no policy gets — because the whole
+    /// defect was that nobody passed one.
+    @Test("m23-k5 — the instruments default is gm, so a caller that says nothing gets the file's")
+    func instrumentsDefaultIsGM() throws {
+        #expect(MIDIImportOptions().instruments == .gm)
+
+        let plan = try Self.mapFile(try Self.decodeFixture("hazard-type0-named-programs"))
+        #expect(plan.report.instrumentsAssigned == "gm")
+        #expect(plan.tracks.allSatisfy { $0.track.instrument?.kind == .soundBank })
+        #expect(plan.tracks.map { $0.track.instrument?.soundBank?.program } == [40, 30, 30, 0, 0])
+        // Channel 10 is the percussion bank whatever program it names — the one
+        // assignment that is not a straight program copy.
+        #expect(plan.tracks.map { $0.track.instrument?.soundBank?.bankMSB }
+                == [GMProgramCatalog.melodicBankMSB, GMProgramCatalog.melodicBankMSB,
+                    GMProgramCatalog.melodicBankMSB, GMProgramCatalog.melodicBankMSB,
+                    GMProgramCatalog.percussionBankMSB])
+        // The channel with NO program change still gets an instrument: program 0.
+        // (`gmInstrument`'s `program ?? 0` — asserted so the fallback is pinned
+        // rather than incidental.)
+        #expect(plan.tracks[3].track.instrument?.soundBank?.displayName == "Acoustic Grand Piano")
     }
 }

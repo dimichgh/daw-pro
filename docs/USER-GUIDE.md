@@ -328,7 +328,7 @@ The MCP server bridges agents to the control protocol. Set it up:
 
 3. **Start the app first**, then connect your agent.
 
-The server exposes 111 tools — one for every control-protocol command. The agent sees the entire DAW state and can compose, arrange, mix, and master like a human operator.
+The server exposes 176 tools: one for each of the 173 control-protocol commands, plus three that call a generation provider directly (lyrics, song, image). The agent sees the entire DAW state and can compose, arrange, mix, and master like a human operator.
 
 ## Troubleshooting
 

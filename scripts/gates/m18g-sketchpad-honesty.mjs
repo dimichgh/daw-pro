@@ -39,6 +39,7 @@
 //   outdir defaults to /tmp/daw-gate-out/m18g-sketchpad-honesty
 import fs from "fs";
 import { buildOrAbort, startStaging, stopStaging, connect } from "./_staging.mjs";
+import { verdict } from "./_verdict.mjs";
 const GATE = "m18g-sketchpad-honesty";
 const OUT = process.argv[2] || "/tmp/daw-gate-out/m18g-sketchpad-honesty";
 fs.mkdirSync(OUT, { recursive: true });
@@ -52,11 +53,30 @@ const ws = await connect();
 // staging rather than leak it for the next gate to silently drive. `stopStaging`
 // is idempotent, so this and the explicit call at the bottom (success path)
 // cannot double-fire badly. Mirrors current house style (m23am-refusal-anchor.mjs).
+// m23-fa-4b-3: DECLARED BEFORE the crash handler below, which now reads them.
+// They used to live after it — harmless while the handler only called
+// `process.exit(2)`, but a handler that touches `pass`/`fail` must not be
+// registered above their `let` or a crash in that window would throw a
+// ReferenceError from inside the error handler itself.
+let n = 0, pass = 0, fail = 0;
 const teardown = () => { try { stopStaging(GATE); } catch {} };
 for (const ev of ["uncaughtException", "unhandledRejection"]) {
-  process.on(ev, (e) => { console.error(`${ev}:`, e && e.message); teardown(); process.exit(2); });
+  // m23-fa-4b-3: this used to `process.exit(2)`. Once the final verdict routes
+  // through `_verdict.mjs`, 2 means "asserted nothing" — so a CRASH exiting 2
+  // would be indistinguishable from a run that never checked anything, which is
+  // the exact overload found in m16a at m23-fa-5. A crash is a FAILURE and is
+  // now recorded as one (m23-fa-4a's precedent: "record the crash as a failed
+  // test like any other"), so this lands on exit 1 via the shared primitive.
+  // `fail++` before the call keeps `failed <= ran` even when the crash happens
+  // before any check has run.
+  process.on(ev, (e) => {
+    console.error(`${ev}:`, e && e.message);
+    console.log(`FAIL gate crashed mid-run (${ev}) :: ${e && e.message}`);
+    fail++;
+    teardown();
+    verdict({ ran: pass + fail, failed: fail });
+  });
 }
-let n = 0, pass = 0, fail = 0;
 function cmd(command, params = {}, timeoutMs = 30000) {
   return new Promise((res, rej) => {
     const i = `g_${++n}`;
@@ -204,4 +224,6 @@ check("card empty at end", r.ok && r.result.jobs.length === 0, JSON.stringify(r.
 console.log(`M18G_GATE pass=${pass} fail=${fail}`);
 stopStaging(GATE);   // SIGTERMs by exact pid AND releases our session.lock
 ws.close();
-process.exit(fail === 0 ? 0 : 1);
+// m23-fa-4b-3: was `process.exit(fail === 0 ? 0 : 1)` — green whenever nothing
+// failed, including when nothing ran at all.
+verdict({ ran: pass + fail, failed: fail });

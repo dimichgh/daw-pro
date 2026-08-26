@@ -1,5 +1,2389 @@
 # Changelog
 
+## 2026-08-23 — Arrow keys step over a track they cannot land on
+
+Dragging a clip to another track worked with the mouse and got stuck with the keyboard. With an
+audio track sitting between two instrument tracks, pressing the down arrow on a MIDI clip did
+nothing at all — the clip could not get past the lane it was not allowed to land on.
+
+The mouse never hit this because a drag lands where you point: it asks to move two lanes and
+never asks about the one in between. An arrow key can only say "down", so it asked for one lane,
+was told that lane was the wrong kind, and stopped.
+
+Arrow keys now step **over** a lane they cannot use and land on the next one that will take the
+clip. Nothing else changed: the audio lane is still not a legal destination, a mouse drag still
+lands exactly where you point and still refuses an impossible lane, and a press with no reachable
+lane in that direction refuses exactly as it did before. When several clips move together they
+still move as a rigid group — the step chosen is the first one where every clip lands somewhere
+it fits.
+
+This behaviour had been written down as a deliberate trade-off, with the advice to reorder your
+tracks instead. It was reported as a bug by someone using it, and that ruling has been reversed.
+
+## 2026-08-23 — Right-click an empty part of a track to paste there
+
+Copying a clip and pasting it put it back where the playhead was, on a track chosen for you.
+There was no way to say "put it here" with the mouse.
+
+Right-clicking empty space in a track now offers Paste, and the clip lands on that track at that
+point. If there is nothing to paste, or what you copied is notes rather than clips, the item is
+still shown but greyed, so it is clear the option exists and what it needs. Pasting a MIDI clip
+onto an audio track still refuses, and now says which clip and why.
+
+Right-clicking a clip is unchanged and still offers no Paste — pasting "onto" a clip has never
+had a well-defined meaning, and that argument still stands.
+
+## 2026-08-23 — The Sampler makes a sound on a machine with no samples
+
+Until now the Sampler could not be tried at all without a sample library of your own. A fresh
+project ships no audio, so anyone reaching for it — or for the bend range and voice mode added
+today — got silence, and would reasonably conclude the thing was broken.
+
+The app now ships a single generated one-shot: a third of a second of A4, at 440 Hz exactly,
+rooted at MIDI 69. Anywhere a sampler zone takes a file path it will also take the name
+`builtin:test-tone-a4`, so the Sampler can be played, and its bend range and voice mode heard,
+with nothing else on the machine.
+
+A `builtin:` name that does not exist is refused, and the message lists the ones that do. That
+matters more than it sounds: a name that quietly fell through to being treated as a filename
+would have reported success and played nothing, which is the exact experience this change
+exists to remove.
+
+## 2026-08-23 — Writing notes no longer sends them all back to you
+
+Adding notes to a clip returned the whole clip, every note in it, each with a freshly minted
+identifier. For anything driving the app in bulk that is a large reply to a request whose
+useful answer is a single clip id — and a clip may hold four thousand notes.
+
+There is now a way to ask for the notes to be left out. The default is unchanged: ask for
+nothing and you get exactly what you got before.
+
+When the notes are omitted the reply says so explicitly and gives their count, so a suppressed
+reply can never be mistaken for a clip that genuinely has no notes in it. The notes remain
+readable at any time.
+
+## 2026-08-23 — A misspelled setting is refused rather than quietly ignored
+
+Settings passed inside a nested group — the notes on a clip, a tempo map segment, an automation
+target, a sampler zone — were checked less strictly than settings passed at the top level. A
+misspelled name in one of those was discarded on the way through, and the request came back
+successful having done nothing.
+
+Two such gaps were already known and recorded. Rather than fix the two, we went looking: there
+were **seventeen**, including the one used by every single call that writes notes to a clip.
+
+All seventeen now refuse an unrecognised name instead of dropping it. Nothing that previously
+worked is affected — a name that was being thrown away was, by definition, already doing
+nothing.
+
+## 2026-08-23 — A nonsense value for a sampler knob is refused again
+
+Setting a sampler knob to a word instead of a number — a gain of `"loud"` — was accepted by the
+tool layer and passed through to the app, where it had previously been turned away immediately with
+a clear explanation.
+
+This was our own regression, hours old, and it came from a feature in this same release. The
+new voice mode below takes the words `"poly"` and `"mono"`, so the setting tool had to start
+accepting text. It did — for every setting, not just that one. Widening a door for one visitor
+opened it for everybody.
+
+The check is now made per setting rather than per shape: only voice mode takes words, and only
+words. Everything else is refused at the boundary again, with a message naming what it got. Nothing
+that worked before has been narrowed.
+
+## 2026-08-23 — The Sampler bends further than a tone, and can play one note at a time
+
+The Sampler's pitch-bend range was fixed at one whole tone, shared by every instrument in the
+project and adjustable by nobody. A wind or string part that bends a fourth had no way to ask for
+it.
+
+Each sampler instrument now carries its own bend range, from nothing up to four octaves, defaulting
+to the familiar whole tone so existing projects sound exactly as they did.
+
+Alongside it, a voice mode. In the new **mono** setting a new note takes over from the one before
+it instead of sounding on top of it — the way a single-reed or brass player physically has to play.
+Measured on a real render: a D5 arriving over a held A4 leaves the A4 six hundred times quieter,
+which is to say gone rather than merely covered. That distinction matters, because the older trick
+of overlapping notes only ever *hid* a re-attack under a decaying tail.
+
+**poly** remains the default and is unchanged.
+
+## 2026-08-23 — When a sampler setting is dead, the app says so and names a fix that works
+
+A sampler whose individual zones each carry their own release makes the instrument-wide release
+knob inert — the zones win. The app already said so. What it said to do about it did not work: the
+suggested remedy named a path that exists deep in the control protocol but is absent from the tool
+it named, so following the advice exactly produced a cheerful success and no change whatsoever.
+
+The note now names the verb that actually does the job, and keeps the older form as a parenthetical
+for anyone driving the app directly.
+
+A second, quieter version of the same problem sat underneath it. A misspelled setting name inside a
+sampler description was being silently discarded rather than refused — the request came back
+successful and did nothing. That was our own inconsistency, not a limitation: some of these
+descriptions were checked strictly and some were not. The sampler, its zones, and its crossfades are
+now all checked. Two others, for hosted Audio Units and sound banks, still have the gap; they are
+recorded rather than quietly left.
+
+Finally, the description of a sampler no longer guesses at where its settings came from. It names an
+SFZ opcode only when the instrument actually came from an SFZ file, and it now reports the stored
+value and the value in force side by side instead of trying to collapse them into one number that
+could not be defined once zones disagree with each other.
+
+## 2026-08-23 — The tool reference no longer describes a product we changed this morning
+
+Three pieces of guidance that AI agents read before touching this app had aged into being wrong.
+
+One told every agent that no instrument here can slur between notes — written before the voice mode
+above shipped, and stale within hours of it. One described a new MIDI clip as silent until an
+instrument is configured, which stopped being true a long time ago; a new track sounds immediately.
+One asserted a precise tool count, presented as freshly measured, that was out of date.
+
+All three are corrected, and the count is now marked as needing re-measurement rather than restated
+as a number that will rot again.
+
+## 2026-08-20 — A clip plays at its own pitch, not the bend left behind
+
+When a clip had no pitch-bend lane of its own, it would inherit the pitch bend left behind by an
+earlier clip on the same track. A clip meant to be in tune played a full semitone sharp — that is
+exactly how wrong it was. A preceding clip holding bend 12288 made the next clip play +100 cents
+sharp.
+
+The cause was in how the engine chases controller state when playback starts or seeks. That chase
+ran once per audio block rather than once per clip, so a new clip beginning mid-block picked up
+whatever bend the last clip had set, instead of starting clean.
+
+Now a clip with no bend lane begins at centre pitch, explicitly, at its first beat. Seeking into
+such a clip also chases centre rather than the earlier bend. The fixed rendering measures A440, not
+a semitone sharp.
+
+Here is an important distinction: mod wheel, breath (CC 11), and other continuous controllers are
+not reset at a clip boundary, and this is correct, not an oversight. Resetting them would be actively
+wrong — CC 11's neutral value is full, so resetting breath at every clip start would jump it to
+maximum. A test pins this.
+
+The reset touches bend-using tracks only and emits exactly one event carrying one value. Tracks with
+no bend are untouched. One thing remains open: the same leak still exists when exporting a MIDI file,
+which uses a different code path and has not yet been fixed.
+
+## 2026-08-20 — Bounces now tell a hosted plugin it is rendering offline
+
+When you bounced a track through a hosted Audio Unit instrument, the first clip often disappeared
+from the bounce. The only way to get it back was to place a dummy note in front of it. A real bounce
+would silently lose an instrument's opening.
+
+The cause: Apple's Audio Unit API has a flag that tells a plugin it is rendering offline rather than
+live. DAW Pro never set this flag. A plugin that loads its sounds lazily had no way to know it must
+load before the render starts, rather than streaming in as playback happens.
+
+The fix sets that flag on every hosted Audio Unit before that unit allocates its render resources,
+which is the only moment at which the flag has any effect — set it later and the plugin has already
+decided how to behave. Live playback is unchanged: only the offline renderer sets it, the live engine
+never does, and a test holds that boundary in place.
+
+Here is what we measured: bouncing through a built-in Apple effect and a General MIDI sound bank
+produces byte-identical audio. That proves the change is harmless where nothing was broken; it does
+not prove it cures the reported case, because those components were never dropping anything in the
+first place. The fix rests on Apple's documented behaviour for the offline flag, and has not yet been
+confirmed against the reporter's own project.
+
+## 2026-08-20 — The Sampler stops reporting a Release you cannot hear
+
+Load a sample library and the Sampler's own **Release** knob often does nothing. That is correct, and
+it is not new: most `.sfz` libraries set a release time on every zone they contain, and a zone's own
+setting wins over the instrument-wide knob — the same way it works in every other SFZ player. The
+knob is the fallback for zones that stay silent about it, and a library that speaks for all of them
+leaves nothing for it to do.
+
+What was wrong is that nothing said so. Asking the Sampler to describe itself answered "release:
+3.4465 seconds" for an instrument that audibly stopped in half a second, and there was no way to
+tell that number was dead. An answer that looks exactly like a real answer and is not one is worse
+than no answer, and it is worse still for an AI agent, which has no ears to catch it with.
+
+Now the description says which of **Release**, **Attack** and **One-shot** the zones have taken over,
+and what the instrument will actually do — including the mixed case, where some zones override and
+the rest still follow the knob. If a knob is doing nothing, it now says so in that many words, and
+points at the per-zone setting that will work instead.
+
+Nothing about how your projects sound has changed; this is the report catching up with the engine.
+
+## 2026-08-20 — Turn a real knob, move the breath pad
+
+The breath pad has a dot you drag around a circle to say how a player is blowing. You can now drive
+that dot from a knob on a MIDI controller instead of the mouse.
+
+Pick what the knob should move — *travel around the ring* or *depth* — arm it, and turn the knob you
+want. The first controller move wins, which is how MIDI learn works everywhere; if nothing happens,
+the app tells you which controller it last heard, so "your knob is not mapped" and "your knob is not
+plugged in" stop looking the same. One knob on *travel* is the whole gesture: it walks the dot from
+one effort shape into the next at whatever depth it is sitting at. A second knob on *depth* covers
+the rest of the pad.
+
+Two things worth knowing. The mapping is not saved into your song — it describes the hardware on
+this desk, so opening someone else's project will not re-point your knobs, and it does not survive a
+relaunch yet. And a mapped controller is **not** swallowed: it still reaches an armed track and still
+records into the take, so if you are playing through a hosted plugin, pick a controller number that
+plugin does not use.
+
+Something that already worked and had never been written down anywhere: a hardware knob sending CC 11
+already rides an armed track's expression today, with no mapping and no setup — plug it in, arm the
+track, turn it. That works with the transport stopped. On the built-in instruments only CC 1, 2, 11
+and 64 do anything; hosted plugins get everything.
+
+**This round is controller-and-agent only — there is no button in the pad panel yet to arm learn.**
+Mapping a knob currently goes through the control surface or an AI agent, not the on-screen panel.
+
+## 2026-08-20 — Your bounce now sounds like what you heard
+
+If you put a vibrato or a tremolo on a track that plays through a **sound bank** or a **hosted Audio
+Unit plugin**, the export used to disagree with the monitor. It played back correctly and bounced
+wrong, which is the worst way for a bug to behave, because everything sounds fine right up until you
+send the file to someone.
+
+**Check which of your tracks this applies to before re-bouncing**, because it is not all of them. The
+project snapshot reports each track's instrument `kind`:
+
+| `kind` | What it is | Affected? |
+|---|---|---|
+| `soundBank` | An SF2/DLS bank program — the GM instruments | **Yes** |
+| `audioUnit` | A hosted AU plugin instrument | **Yes** |
+| `sampler` | Our own sample player | No — never was |
+| `polySynth` | The built-in poly synth | No — never was |
+
+The last two never went through the coarse path, so a sax on our own sampler was always bouncing its
+vibrato correctly. This distinction was missing from the first version of this entry, and a tester
+had to measure their own project to discover it — which is precisely the work good documentation is
+supposed to save.
+
+The cause was ours, not the instrument's. A bounce fed those instruments their controller moves in
+blocks eight times coarser than live playback does, and a wobble sampled that coarsely comes back as
+a *different* wobble. A 5.5 Hz vibrato exported as two vibratos beating against each other. An 8 Hz
+one exported at 3.7 Hz. At 11.7 Hz it stopped being a vibrato at all and became a static, slightly
+flat note.
+
+Bounces now use the same block size as live playback, so the two agree by construction. Measured on
+rendered audio: vibrato depth arrives at 95–100% of what you wrote, at the rate you wrote it. The
+false copies are not deleted — they move eight times higher and shrink to a few cents, well out of
+the range you hear as a wobble. The cost is 0.14 seconds on a two-minute eight-track bounce — still
+two hundred times faster than real time.
+
+This was measured on Apple's built-in sampler with the stock sound bank, which is what those tracks
+use. It says nothing about third-party plugins: one that smooths its own controller input never had
+this problem in the first place.
+
+One feature comes back because of this. The breath pad's micro-tremor — the small 4–8 Hz waver inside
+a sustained note that makes a wind part sound played rather than typed — had to be refused on those
+instruments, because at the old block rate it produced an artefact louder than itself. It now lands
+there like everywhere else. The refusal still exists for genuinely fast modulation (above 18.75 Hz),
+and it still tells you when it applies rather than quietly retuning what you asked for.
+
+Automation on those tracks is eight times finer in an export as a side effect, so a bounce of a
+project with controller automation will produce different bytes than it did yesterday. That is the
+fix working, not a regression.
+
+## 2026-08-20 — The breath pad has a face: a circle, a dot, and a gauge that says why it went quiet
+
+Eight ways a wind player shapes a note now sit around a circle, and a dot moves between them. Where
+the dot points chooses which two blend; how far out it sits chooses how strongly. You hear it while
+you drag, and the shape is written into the part when you let go — once, on release, never on every
+frame of the drag.
+
+The middle of the circle is worth one sentence, because it is the opposite of what a knob usually
+means: the centre is **"exactly as written"**, which is the LOUDEST reading, not the quietest.
+Dragging outwards shapes the part more strongly. Nothing in the panel calls that axis a volume, and
+the readout is labelled DEPTH for the same reason.
+
+Under the circle is the air gauge, and it exists because a feature that can quietly turn your phrase
+down owes you an explanation. It draws one band per phrase whose height is the breath the simulated
+player has left, a mark where he got a breath (and a different mark where the gap was too short to be
+one), and a plain sentence: *"Air enforcement pulled 2 of 8 notes down, by up to 11.0 dB."* The
+switch that turns enforcement on sits on the face of the card, not behind a disclosure, and it starts
+OFF — a model that overrides what you wrote is something you turn on once, deliberately.
+
+With the switch off you still get the reading, and the sentence changes tense rather than disappearing:
+*"AIR IS OFF. Enforcing it WOULD pull 2 of 8 notes down."* Applying without enforcement is therefore
+how you find out what enforcement would do, before you let it do it.
+
+Reachable from the piano-roll BREATH chip and from an instrument clip's context menu. It adds no new
+commands and no new AI tools — the engine behind it already had both; this is the half a human can
+click.
+
+One fix in here was found by making the window small. On a laptop-sized window the card ran past the
+bottom of the screen and took the **Write the shape** button with it — the panel drew perfectly and
+could not be used. The card now shrinks its circle first, then its warnings list, and finally scrolls
+its middle while the title bar and the button stay put, so the two things you always need — close it,
+or commit it — are never the things that fall off the edge.
+
+## 2026-08-19 — The pad you can hear while you drag it, and the value it refuses to leave behind
+
+The breath pad could already write a shape. Now you can hear one while your finger is still moving.
+Drag the dot and the instrument responds immediately — the same path a piano-roll key press already
+uses, so nothing new runs on the audio thread and nothing new can stall it.
+
+The part worth explaining is what happens when you let go. The pad does **not** leave the last value
+you dragged to sitting on the instrument. A MIDI controller is sticky: nothing takes it back. Park a
+low expression value and every later playback of that song would be quieter than a bounce of the
+same project — the preview would have quietly become part of the record. So releasing the pad
+restores the controller to exactly the value the sequencer itself uses when no automation says
+otherwise.
+
+One caveat, stated plainly because we measured it rather than assumed it. That restore is the
+sequencer's *default* value, which is not the same thing as your track's own automation. If the track
+already has an expression lane and you preview in the middle of playback, letting go sets the
+controller to full and it stays there until the lane's next point — so that stretch plays back louder
+than a bounce would. It corrects itself at the next point, and it cannot happen at all on a track you
+have not yet written a shape to, which is the case the pad exists for. (The direction depends on the
+controller: expression's default is full, so the error is toward louder there, but a preview aimed at
+a different controller errs toward whatever that one's default is — modulation's, for instance, is
+off.) Restoring the lane's own value needs machinery that lives inside the schedule builder today, and
+we would rather ship the limitation written down than a second copy of that machinery that disagrees
+with the first. It is on the roadmap as its own item.
+
+For the same reason the pad only streams **while a gesture is in progress**. That rule is enforced
+on the wire, not just in the window: an agent that sends a move without first sending a begin is
+refused with a sentence telling it why. And a gesture that is never ended releases itself.
+
+One measurement came out of this that corrects a number we had been assuming: live playback hands
+the engine 512-frame blocks — 93.75 times a second, eight times finer than an offline bounce. The
+controller-resolution ceiling we had documented is a property of bouncing, not of listening.
+
+A saxophone held a long note and it sat there, flat, the way a real one never does. The report that
+came back named the mechanism precisely: seven CC11 expression lanes had been written into the
+song, they were stored, they were drawn in the editor, and not one of them reached the audio. The
+built-in sampler honoured CC64 and nothing else. The lanes were decoration.
+
+They sound now. CC11 drives amplitude continuously, a per-voice lowpass turns a controller into
+brightness on the built-in sampler, SFZ crossfade parses in both its velocity and controller forms,
+and `clip.applyBreathContour` writes a shaped breath curve over a sustained note. A warning path
+now says, at the moment you author a lane, whether the track's current instrument will actually
+honour it — because the failure this round exists to fix was never an error message. It was silence
+that looked like success.
+
+Then we asked the sampler three questions nobody had asked it, and two answers changed the plan.
+
+**CC 11 does not open a filter on a sound-bank track.** It is exactly a gain, following the MIDI
+square law, with any non-gain difference bounded at −104 dB. That is not "we looked and found
+nothing" — the same measurement fires on the built-in sampler's real filter and refuses there by
+95 dB. So on a hosted AUSampler the breath control shapes loudness and pitch, and no text may
+promise it shapes timbre. **The pitch-bend range is ±2.0155 semitones**, which vindicates an
+assumption that had been sitting unverified in the contour generator. And **the stock sax has its
+own vibrato on CC 1**, linear in depth, fixed at 5.400 Hz, generated inside the plugin.
+
+That last one matters more than it looks, because of what else turned up: **pitch-bend lanes are
+sample-and-held at the render block rate in a bounce.** Offline render uses 4096-frame blocks — an
+11.719 Hz sampler against a 5.86 Hz Nyquist — so a 5.5 Hz vibrato exports as two vibratos beating
+against each other, and an 11.72 Hz one exports as a static detune. Both of our own layers are
+already sample-accurate, which means we cannot fix it by scheduling better; the block size is the
+only lever. It is filed with the experiment that settles it. Until then, sax vibrato belongs on
+CC 1, where it never touches our bend lane at all.
+
+On top of that sits the first phase of the breath pad: eight named effort shapes — messa di voce,
+the two hairpins, terraced, sforzando-piano, sub-tone entry — applied per note or per phrase through
+`clip.applyEffortShape`. The phrase-and-breath detector that humanize had been carrying inline is
+now one definition used by both. The gates assert on rendered samples rather than stored lane
+points: a hairpin crescendo measured at +3.72 dB strictly rising, with a diminuendo control that
+falls.
+
+**One contract change to a shipped verb, deliberate and worth stating plainly.**
+`clip.applyBreathContour`'s `notesWithVibrato` count now requires `vibratoDepthCents > 0` as well as
+sufficient note length. It previously reported vibrato on notes that had none, and its companion
+warning fired about notes being "too short" when vibrato had simply been switched off. Callers
+reading that field were being told something untrue.
+
+## 2026-08-18 — Nine genres, and a bass that is allowed to bloom
+
+A blues session had to ask for rock. It got rock's 140 BPM, rock's two guitars and, worst of the
+three, rock's `bass-tight` — a 4:1 compressor at a 5 ms attack, which catches a blues bass note
+before it has finished swelling and flattens exactly the part a blues bass is for. Nothing in that
+chain was broken. The template simply wasn't shaped for the job, and there was no other template to
+ask for.
+
+There are fourteen genres now: the original five plus **blues** (84), **jazz** (132), **country**
+(100), **r-and-b** (88), **funk** (108), **metal** (170), **folk** (96), **reggae** (76) and
+**lo-fi** (78). The bar each had to clear was distinctness in *form* as well as roster, because a
+genre that differs only in its track names is a roster override wearing a costume. Blues is
+genuinely twelve-bar — its body sections are 12 bars, not the 8 a pop layout hands back. Jazz is
+32-bar head/solos/head and carries no audio strip at all, since a combo is played rather than
+tracked. Lo-fi is Loop A / Loop B rather than verse/chorus. Metal has the hard-panned double rhythm
+guitar. A test enforces the bar: no two genres may share a tempo *and* a roster.
+
+Two genres were deliberately not added. There is no `latin`, because salsa, reggaetón, bachata and
+cumbia share almost no roster or tempo, and shipping them as one entry would recreate precisely the
+rock-serving-blues failure this work exists to fix. There is no catch-all `edm` for the same reason.
+Both are reachable through the roster override that landed last pass, with no release.
+
+Six presets joined them, each referenced by at least one roster rather than invented speculatively:
+`guitar-crunch`, `acoustic-sparkle`, `horn-section`, `drum-room`, `lofi-tape`, and **`bass-round`**.
+That last one is the actual fix, and it is a *pair* with `bass-tight` rather than a correction of it
+— the tight preset is right when a bass must sit rock-steady under a dense mix, and nothing about it
+changed. What is new is the sibling: the same threshold, so the two differ in how they compress
+rather than in how much signal they see, but 2.5:1 at a 20 ms attack with a low-shelf *lift* against
+tight's 4:1 at 5 ms with a low-shelf *cut*. The note blooms before the compressor catches it. A test
+pins the direction of both differences, so the pair cannot later be tidied into twelve names and
+eleven sounds.
+
+Nothing was renamed, retuned or removed, and no verb or tool was added — the catalogs grew in place
+and the additions are appended, so the wire-visible order is unchanged.
+
+Two things surfaced while doing it that are worth more than the feature. A negative test fixture went
+stale in the same commit that would have inverted it: both unknown-genre tests used `"jazz"` as their
+not-found string, so adding the genre would have left them asserting that something which exists
+does not. A negative fixture has to be a value the catalog will never plausibly adopt, not merely one
+it happens to lack today. And the preset catalog carried a false sentence: it documented the negative
+low-shelf as a workaround for the built-in EQ having no high-pass, which stopped being true when the
+EQ gained one. The shelf is kept — every existing preset uses it and retuning them would change how
+existing projects sound — but it is now documented as the house style it actually is. A wrong doc
+produces a report indistinguishable from a wrong implementation, which is the lesson the previous
+entry was already about.
+
+## 2026-08-17 — Four answers, and one of them cost no code at all
+
+The open questions from the field report came back answered. Two have landed.
+
+**A bounce now sounds notes that started before it.** The entry below says this one was left where it
+was, because whether a region bounce should chase held notes is a product decision and not ours to
+make. It has been made: chase, the way the play button already does. A pad held from bar one is
+audible when you play *through* bar five, and it should not vanish because you bounced *from* bar
+five — which is what it did, at RMS exactly zero, while a straddling *audio* clip in the identical
+position sounded fine. That asymmetry is now closed.
+
+It is a fourth reschedule cause rather than a reuse or a flip. Calling it a transport start would
+have made that case mean "the user pressed play" when nobody did, and flipping the relocation case
+would have changed three live behaviours — seeking while rolling, starting a record, wrapping a loop
+— to fix one offline one. The cost is stated rather than implied: a note already mid-decay at the
+window edge re-attacks at full velocity, so a bounce synthesises an attack the song does not have
+there. You can see it in the measurement — the bounce reads slightly *louder* than the play-through,
+0.0662 against 0.0639, where it used to read 0.0.
+
+The part worth trusting is the containment. Chasing can only ever add notes that begin before the
+window, so a render from beat zero cannot change — nothing precedes zero. That is now checked in bit
+patterns rather than argued: zero differing samples out of forty-eight thousand at beat zero, and
+47,998 differing at beat four, so the test can demonstrably see a difference when there is one.
+Nothing was re-baselined, because nothing moved.
+
+**The pitch-accuracy target was corrected rather than enforced.** The detector spike set a bar of ±10
+cents and attached a consequence — miss it and we throw out the detector and vendor a different
+library. The detector missed it. But the bar is impossible by arithmetic: the model reports pitch by
+picking one of 256 bins across 6,577 cents, so a bin is 25.8 cents wide and the worst-case rounding
+error is ±12.9 cents before the model is consulted at all. No tuning reaches ±10, and neither does
+swapping in another library that reports through the same 256 bins — so the consequence would have
+discarded a working detector over a specification error.
+
+What it actually does on voice-like material is 4.74 cents median in the sung range and zero octave
+errors, which is the failure that actually ruins a tuned vocal. The synthetic tier of the target is
+now written in those units. The real-vocal tier is untouched and still binding — and still unmet, in
+the honest sense that no real vocal has been through this path yet.
+
+The odd part: the code needed no change, and neither did the tests. The Swift battery had been
+measuring median, p95 and octave rate all along, with margin over the measured numbers and a
+deliberately-wrong tracker asserted to fail it. The *document* was the only thing still stating a
+target nothing could hit.
+
+**The Sampler is reachable now, over MCP.** It was the only instrument surface in the app with
+neither a read nor a per-parameter write — effects have describe-and-set, hosted plugins have
+describe-and-set, the sound banks report where they came from, and the built-in Sampler had none of
+it. After an import, a nineteen-parameters-per-zone instrument was frozen at whatever its `.sfz`
+author chose.
+
+Three tools and a new read command. The read is the one worth describing: it reports pitch and
+velocity coverage as the *union* of the zone ranges — the outer envelope plus the interior gaps —
+rather than a minimum and a maximum. A min/max would report "0 to 127" for a keymap with a hole in
+the middle, and a hole in the middle is exactly what cost the last session an afternoon: a bass that
+was silent below MIDI 35 and a library silent above 45. It also pages, because the only previous way
+to see any of this was a project snapshot that measures 296,809 bytes on a real song.
+
+Underneath, two things that had to be fixed first. Zone ids were published in every snapshot and
+then thrown away on every write — the parser minted fresh ones per element — so reading a keymap and
+writing it back silently renumbered all of it, and nothing could address a zone to edit it. And a
+sampler track recorded nothing about where its library came from, so "which bass is this?" was
+answerable only by dumping a megabyte and eyeballing a file path. Both now hold.
+
+One compatibility note, because it changes nothing you'd notice but is the kind of thing that bites
+later. Copying one track's zones onto another track still works. Honouring ids is what made that
+dangerous — zone ids have to be unique across the whole project, since the project file keys each
+zone's sample reference by id — so ids that don't belong to the destination get fresh ones, exactly
+as they always did, and the reply now tells you which ones were replaced instead of doing it
+silently.
+
+**And agents can paste.** Paste was reachable only through a debug verb, so the one operation you
+perform constantly by hand had no honest route for anything else. `edit.pasteClips` fires the app's
+own ⌘V — the same clipboard, the same target resolution, the same undo step — and its reply
+distinguishes the four things that used to collapse into a bare false: clips landed, the clipboard
+was empty, the clipboard holds notes rather than clips, or the destination refused the payload. An
+agent that got `false` had no way to tell those apart.
+
+Worth being plain about one limit: the clipboard is *yours*. Nothing can put clips into it over the
+wire, so this pastes whatever you last copied.
+
+## 2026-08-17 — What the agents were told, versus what the app can actually do
+
+Someone installed the Music Team plugin, asked it for a song, and then asked it what got in the
+way. Eleven findings came back. Six of them turned out not to be about the app at all — they were
+about what the agents had been *told*, and in two cases what they had been told was simply wrong.
+
+The sidechain is the clearest example. An agent reported it unusable in an all-MIDI project,
+because the tool's own description said the key source has to be an audio track. It doesn't. The
+code has only ever rejected a *bus* as a key source — an instrument track is a perfectly valid one,
+and ducking a pad off a MIDI kick never needed an audio bounce. What the tool actually requires is
+that the *keyed compressor* live on an audio or bus track, which in an all-MIDI project means
+adding a bus. The mix engineer couldn't do that either, but for an unrelated reason: nobody had
+given it `track_add`. Two sentences and one tool grant, and a capability that had been reported as
+missing turned out to have been there the whole time.
+
+The same shape, four more times. `clip_humanize` compounds when you run it twice — the store's own
+comment says so, the tool description never did. `render_measure_loudness` re-renders the session
+rather than reading the file you just wrote, which is fine, but nothing said so and nothing pointed
+at the tools that *do* read a file. The master fader stops at +6 dB, and the answer to a mix that
+needs more is a gain insert, not a fight with the fader. And a windowed loudness measurement
+silently drops every MIDI note that started before the window — which produced a convincing false
+alarm about a silent outro, and cost several probes to disprove.
+
+Two real gaps got closed rather than documented. `note_audition` now returns the instrument's load
+status alongside `audible`, because `audible: true` on a patch that is still loading had been read
+as "this patch sounds good" — it never meant that, and now it can't be mistaken for it. And
+`macro_song_skeleton` now drops a real marker at every section start, so the song's beat map exists
+the moment the scaffold lands instead of being retyped by hand into every downstream instruction.
+
+The plugin itself got the rest. Its coordinator agent had been told to delegate through a tool it
+was never granted — an exhaustive tool allowlist revokes the built-ins, so its documented job was
+literally unexecutable. It now plans, scaffolds, and hands back a delegation plan, with the tools
+to reconcile a genre template against an actual brief. The finisher can inspect the file it just
+wrote. The composer can read one clip's notes instead of the entire project. And the reference
+every agent preloads now carries the traps above, each with the measurement that proved it.
+
+One finding was left exactly where it was. Whether a bounce should chase notes held across its
+start is a product decision with a test suite already pinning today's answer, and it belongs to the
+person who owns the product.
+
+A later pass through the same report turned up something worse than friction. `track_set_instrument`
+describes itself as a partial update — omit a field and it keeps its value — with the sampler as
+the stated exception. What that exception meant in practice: send `{sampler: {release: 0.4}}` to
+lengthen the release on a 309-zone imported bass, and the omitted `zones` key parsed as an empty
+array, which the store then swapped in wholesale. The library was deleted. The call returned
+success. The only symptom was an instrument that had stopped making sound, and the documented way
+to avoid it was to read all 309 zones back out of a snapshot approaching a megabyte and resend them
+with your one change.
+
+The sampler is now partial too, at both levels: omit `zones` and the track's zones stand, omit a
+global and it keeps its value instead of snapping back to a default. A `zones` array you actually
+send still replaces the map — a wire zone carries no id the parser honours, so there is nothing to
+merge by yet — which makes `zones: []` the deliberate way to clear a sampler and nothing else.
+
+`clip.getNotes` / `clip_get_notes` — new, strictly read-only control command and MCP tool. Give it
+a clip id and it hands back that clip's notes, with their real ids, optionally narrowed to a beat
+range or a pitch range. It exists because there was no honest way to read a MIDI clip's notes back
+without either asking for the entire project or mutating the clip to get an echo of it.
+
+`clip.setNotes` has always replaced a clip's whole note array — by design, there's no
+add-one-note verb. That's fine for writing, but it means editing requires reading first: you need
+the current array, ids included, before you can change three notes and resubmit six. The only
+tool that returned notes at all was `project.snapshot`, and on a modest six-track project that's
+about 290 KB of JSON — comfortably past what an agent can afford to read on every turn just to
+find one clip's content. The only other option was calling `clip.humanize` with zero jitter and
+throwing away the jitter, using a mutating command as a magnifying glass.
+
+That trick turns out to be worse than it looks. Zero jitter does draw nothing and does leave the
+notes byte-identical — but the edit still runs through the same code path as a real edit, which
+marks the project dirty and pings the engine, whether or not anything actually changed. Undo is
+the one thing it happens to spare, because the store already skips writing a history entry for an
+edit that produced no change — but "the app now thinks you have unsaved work" is exactly the kind
+of side effect a read should never have. `clip.getNotes` never enters that path at all.
+
+Two things about the response are worth knowing before wiring it into anything. The beat window is
+half-open — a note starting exactly at the end of your range doesn't come back, so two adjacent
+windows never both claim the same note. And the response always reports the clip's *total* note
+count alongside however many survived your filter, specifically so that filtering, editing, and
+then calling `clip.setNotes` with only what you saw can't quietly delete the notes you never asked
+for.
+
+## 2026-08-16 — Zooming the note editor no longer slides the music away
+
+Pinch or press ⌘+ in the note editor and the music used to drift sideways under your
+cursor — you'd zoom in on a bar and land somewhere else. The arrange has always held
+its place. The editor simply never adopted the rule.
+
+It does now, and it anchors on the right thing for each way of zooming. A pinch has a
+pointer, so it holds the beat under your fingers. The ± buttons and ⌘± don't — your
+hand is at the header, nowhere near the beat you're reading — so those hold the
+playhead, or the centre when the playhead isn't in this clip.
+
+The arithmetic wasn't rewritten. It's the same function the arrange has always used,
+called from one more place; the editor adds only its own answer to *which point should
+stay still*. Worth doing that way because "the centre of the view" now has exactly one
+definition, and the day it changes, both surfaces change together.
+
+One bug nearly shipped inside this. The new scale was being written before the anchor
+was measured, so the code would have read the playhead's position at the *new* zoom
+level — a perfectly plausible number describing the wrong place, and the picture would
+have slid by exactly one zoom step. Caught, fixed, and pinned by a test that fails if
+anyone reintroduces it.
+
+## 2026-08-16 — The test suite stops forgetting its own history
+
+Internal tooling, invisible in the app, but it was quietly destroying evidence.
+
+This project has 94 "gates" — standalone checks that guard behaviours ordinary tests
+can't see. Each run recorded its result into a single file that the next run overwrote.
+That file isn't in version control, so the previous result wasn't recoverable from
+anywhere. Running a gate destroyed the only record of how it did last time — which makes
+*"did this used to pass?"*, the first question anyone asks when something breaks,
+permanently unanswerable.
+
+There's now an append-only history alongside it: one line per write, never rewritten.
+
+The interesting part was finding all the places that write. Three different pieces of
+code do, and they deliberately record different things — one knows how many checks ran,
+another knows how long it took, and only one knows the actual pass/fail verdict, because
+only it can tell a genuine failure from one that's expected and pinned. Hook the history
+into the obvious two and you'd get a complete record of hashes and timestamps that never
+once says whether anything passed. All three now go through a single shared writer, which
+also fixed one of them writing non-atomically — it could leave a half-written file behind
+if interrupted, a hazard the other two had already been hardened against.
+
+Verified by breaking it on purpose: unhooking each writer in turn fails exactly its own
+check and leaves the other two green.
+
+## 2026-08-16 — Hold at the edge and it keeps scrolling
+
+Dragging notes to the edge of the note editor scrolls the view. Holding them there used to do
+nothing: the scroll advanced only when a pointer event arrived, and a pointer held still emits no
+events. Push to the edge of a long clip and you'd stop, mid-drag, with nowhere left to go.
+
+The reason it had never been built was a real objection written into the code: a clock firing
+between pointer events has no event to read, so it would have to *invent* how far the pointer
+moved — and an invented number would slide the notes out from under your cursor. That objection
+turns out to be answerable. A held pointer only changes position within the content because the
+content moved underneath it, and the editor already knows exactly how far it scrolled. So each tick
+recomputes the position from that, rather than accumulating guesses. Nothing drifts, because nothing
+is being added up; and the value it arrives at is the one the system itself would have reported, so
+the next real movement agrees with it instead of jumping.
+
+Two hazards showed up during the build and both would have shipped as bugs. The first gate tried
+"no event since the last tick" as the test for *held* — but a 16 ms clock and 16.7 ms pointer events
+drift past each other, so roughly every other tick would have fired mid-motion and quietly made
+normal dragging faster. It now waits for 200 ms of genuine stillness, which can't beat against
+anything. Second, a press with no movement counts as a drag, so simply clicking near the edge would
+have launched a runaway scroll. It now arms only once you've actually moved.
+
+The arithmetic is machine-checked: the dragged note's position on screen is pinned across a
+four-thousand-point run, and deliberately corrupting the calculation makes that check fail. Whether
+the *ramp* feels right is not something any test here can judge — that needs a hand on a trackpad.
+
+## 2026-08-16 — Every key is named, and so is every note
+
+The piano roll's keyboard used to label C and nothing else, which left you counting rows to find
+out where you were. Every key now carries its name, and note blocks carry theirs too when there's
+room.
+
+A note too narrow for its name shows no name at all rather than a shortened one. This is not
+fussiness: "C#4" trimmed to "C#" is a *valid, different pitch*, so trimming here would invent a
+plausible wrong answer instead of admitting it ran out of space. Zoom in and the names appear.
+
+Legibility was measured rather than eyeballed — the actual view rendered offscreen and its pixels
+read back. Every one of the 128 rows clears the contrast floor. That measurement changed the
+design twice: a single dark ink turned out to fail on quiet violet notes, which are exactly the
+ones marking AI-generated material, so each note now picks its ink from its own colour and
+loudness. And the text metrics we assumed were slightly wrong in a way that had been costing every
+eighth note its name at normal zoom.
+
+Accidentals are set one tone quieter than naturals so 128 names read as a scale rather than a wall
+— though whether that lands is a matter of taste, and nobody has looked at it in a running app yet.
+
+## 2026-08-16 — Ask a clip what notes are in it
+
+`clip.detectPitch` — new control command and MCP tool. Point it at an audio clip and it returns the
+pitch, 62.5 readings a second, with a confidence and a level for each one. This is what the
+voice-to-song workflow was waiting on: an agent can now find the notes in a spoken or sung phrase
+instead of being told them.
+
+Verified end to end against a tone built for the purpose — 220 Hz for two seconds, then silence.
+It read **220.06 Hz, a median error of half a cent**, and no octave errors. Where the silence
+begins, every frame says so: the pitch field is simply absent, with a reason attached — *below
+level*, meaning too quiet to tell, as distinct from *below confidence*, meaning present but
+unclear. A zero there would have become a real note the moment anything read it.
+
+Frames are never dropped, only emptied. A gap in a vocal is information — the difference between
+two notes and one long one — so the grid stays even and the holes stay visible.
+
+One shape worth knowing: asking about a whole three-minute song returns about 11,000 frames. That
+ceiling is deliberate. Thinning them out would have been easy and would have quietly destroyed the
+evenness the previous paragraph depends on.
+
+## 2026-08-16 — The app can hear pitch
+
+Pitch detection runs in-process now: a protocol seam with a SwiftF0 backend behind it, reading
+frequency from audio 62.5 times a second. This is the foundation vocal tuning and the voice-to-song
+workflow have both been waiting on. It isn't reachable from the app yet — the command that exposes
+it is the next piece.
+
+Two things found while measuring it are worth writing down, because both nearly caused the wrong
+decision.
+
+**Every bad accuracy number previously on record was a property of the test tone, not the model.**
+A 220 Hz pure sine came back 88.8% wrong by an octave. The same pitch played with harmonics — a
+sound resembling a voice or an instrument — reads 0.48 cents off, with no octave errors at all. A
+model trained on spectrograms of real audio has never seen a pure sine. The fixture was the defect,
+and it very nearly condemned a working detector.
+
+**Confidence does not mean "there is sound here."** A tone at −140 dBFS, which is silence by any
+practical definition, comes back with 99.99% confidence. Left unguarded, that turns room tone into
+a confident melody. Detection now requires both confidence and an actual signal level, and those
+two catch different things: confidence rejects noise, level rejects near-silence.
+
+Where a frame has no pitch, it says so and says why — too quiet, too uncertain, or out of range —
+rather than reporting zero. A zero would become a real note the moment anything read it.
+
+Accuracy on voice-like material: 4.74 cents median in the sung range, 10.60 in the low range, zero
+octave errors in either.
+
+## 2026-08-16 — Humanize and Quantize no longer pretend to work on a comp'd take
+
+If a clip was part of a take comp, the Humanize and Quantize panels would open, let you set
+amounts, accept the Apply, close — and change nothing. The store had always refused that edit;
+the refusal just never reached the screen.
+
+Both panels now ask before offering. Apply is disabled and the panel says why, naming the comp
+and the way out (flatten it, or edit through the comp). The panel also stays open, so the
+sentence is still there to read.
+
+The distinction underneath is worth stating, because it decides how every future refusal in a
+panel should look: **kind hides, state explains.** Whether a clip is audio or MIDI is what it
+*is* — the panel makes no sense, so the entry never appears. Whether it belongs to a comp is
+something you can change — so the door stays open and the app tells you what to do first.
+
+Fixed in both panels deliberately. Quantize shipped first and had the identical fault; fixing
+only the one you'd noticed would have left the same silence one menu away.
+
+Not yet confirmed by eye: the reason is verified to be computed and wired, but nobody has seen
+it drawn in the panel.
+
+## 2026-08-16 — When a clip can't grow to fit your note, it now says so
+
+Placing a note past the end of a clip usually just works: the clip grows to make room. But it
+can't always. Another clip may be sitting right behind it, or the note may be further out than
+the app is willing to stretch in one go. Until now those two cases looked identical to the
+ordinary one — the note landed, stayed silent, and nothing on screen changed.
+
+An amber note now appears and names the actual obstacle, because the obstacles have different
+fixes: a clip in the way is something you move, a note too far out is something you place nearer.
+Telling you the wrong one would be worse than the silence.
+
+The hard part was not the message. "The clip didn't grow" and "the clip couldn't grow" were the
+same answer internally — the same empty result covers a note that already fits, which is what
+happens on essentially every edit inside a clip. The naive version of this feature would have
+warned you every time you moved a note, and every time you pressed Delete. The rule now returns
+a named reason instead of a bare blank, so the ordinary case is something the compiler forces
+anyone to handle rather than something a reader has to notice.
+
+Not yet confirmed by eye: the message is verified to fire on the right cases and carry the right
+text, but nobody has seen it drawn over the grid.
+
+## 2026-08-16 — You can now ask the app what a rendered file actually contains
+
+Verifying a bounce used to mean leaving the app. Checking whether a render was truncated, or
+what the level was in one particular second of it, needed external tools every time.
+
+`audio.profileFile` answers that directly: give it a path and a window size and it returns
+peak and RMS for each window, plus the file's own header — duration, sample rate, channels,
+bit depth. It reads the file where it lies: nothing is copied, nothing is imported, and the
+project's reference slot is left alone, so it works as a throwaway probe rather than an
+operation you have to undo.
+
+Two deliberate limits. A digitally silent window reports no level at all rather than zero,
+because silence has no decibel value and pretending otherwise is how a truncated render gets
+mistaken for a quiet one. And this is not a loudness meter — the existing external loudness
+cross-check stays external, since a meter cannot be used to check itself.
+
+## 2026-08-16 — A check that was failing on the wrong view's colour
+
+One of the header checks verifies that the "no clips to select" chip stays visually neutral —
+plain secondary ink, no accent colour, no glow. It had been failing, and the tempting reading
+was that the chip's colours had drifted.
+
+They hadn't. The check grabbed the chip's source by taking everything up to the next view
+declaration in the file, which is not the same thing as taking the chip. It overshot by 3413
+characters into the neighbouring declaration — the cyan active-track rail — and reported that
+rail's cyan as the chip's. The chip itself was, and is, correct.
+
+It now extracts the declaration by matching its own braces, and refuses to run at all if that
+extraction looks wrong in either direction: too short to contain the chip's own text, or long
+enough to have swallowed the neighbour. What it asserts about the colours is unchanged, which
+was the point — the easy repair was to stop looking for cyan, and that would have left a check
+that could never fail again.
+
+## 2026-08-16 — A test that guarded nothing now guards something
+
+One of the note-editor tests claimed to check that changing only a clip's length forces the
+editor to reload. It never checked that. It built its two note sets by calling the same
+fixture twice, and notes get a fresh identity each time they are made — so the two sets
+always differed by identity, and the reload it observed was triggered by the notes looking
+different, not by the length changing at all. Deleting the length check outright left the
+test green.
+
+It is three lines shorter now and actually fails when the code it names is removed.
+
+The method matters more than the fix: the only reliable way to tell a real test from a
+decorative one is to delete the thing it claims to protect and confirm it goes red. Every
+test in that file was put through it, and the other eleven earned their keep — including one
+with the identical suspicious shape that turns out to be fine, because controller points
+carry no identity to diverge on.
+
+## 2026-08-16 — Turning snap off now turns it off in the note editor too
+
+Reported from a real session: with snap off, clicking or dragging the playhead in the note
+editor still dropped it on a grid line, while doing the same thing in the arrange worked
+fine.
+
+It was not a playhead bug. There were two separate snap settings. The toolbar control drove
+the arrange; the note editor kept its own, defaulting to whole beats, and never read the
+toolbar's. Both rendered as an identical "SNAP:" label, so there was no way to tell from
+looking that you were adjusting only half the app.
+
+There is now one policy deciding what snap applies, and turning snap off wins everywhere.
+The note editor keeps its own resolution — sixteenths for notes while clips move in bars is
+genuinely useful — but off means off. The editor's own chip now shows the grid actually in
+force rather than the resolution you picked, since a chip reading "1/16" while nothing snaps
+is the same broken promise in a quieter voice.
+
+One thing deliberately left: the note editor's own resolution still resets when you reopen a
+clip. That is a separate piece of plumbing, and your off setting is unaffected by it.
+
+## 2026-08-16 — The loudness tool now admits what it returns
+
+`render_measure_loudness` has always returned a loudness-range figure (EBU Tech 3342 LRA)
+and never mentioned it in its own description, so an agent reading the docs would reach for
+an external meter to get a number the tool was already handing it. It is documented now,
+along with what LRA actually means and the fact that it is the same figure
+`reference_analyze` reports — so a mix and a reference track are directly comparable on it.
+
+A second error in the same paragraph turned out to be worse than the omission: the text said
+a missing measurement meant the audio was silent. That is only sometimes true. The windowed
+figures also go missing when the excerpt is shorter than their window — 400 ms for max
+momentary, 3 seconds for max short-term and loudness range — so measuring a two-second
+snippet drops three fields while the integrated and true-peak numbers stay perfectly
+healthy. Read literally, the old text told you to diagnose that as silence.
+
+Documentation only; no behaviour changed and nothing was added to the control surface.
+
+## 2026-08-14 — Meme songs: a skill for turning a phrase into a track
+
+You can now hand an agent a recording of somebody talking and ask for a song built out of
+that voice — the vocal pitched into a melody and played rhythmically, rather than sung over
+a backing. `.claude/skills/meme-song/SKILL.md` teaches the whole sequence, and
+`scripts/meme/melody-offsets.mjs` turns a tune into the exact pitch-shift calls that play it.
+
+The interesting part is what turned out *not* to be needed. This workflow was filed as blocked
+on automatic pitch detection, which hasn't shipped. It isn't: a melody is a set of relative
+intervals, so shifting one syllable by 0, +3, +5, +7, +10, +12 semitones plays a minor
+pentatonic run no matter what pitch the syllable started at. Detection is needed for exactly
+one thing — making the backing agree with the voice's key — and there are three ways to do
+that today, the cheapest being to transpose the whole vocal set by a constant, which leaves
+the melody untouched.
+
+One ordering rule is now written down because it is easy to get wrong and fails late:
+tightening the rhythm must happen before any pitching. `clip_quantize_audio` refuses a
+pitch-shifted clip, not just a time-stretched one, so a melody built first is a melody that
+can no longer be quantized.
+
+Also fixed a scheduling trap. The pitch detector, the wire command that makes it usable, and
+this skill were split across two milestones, and the work-order banner routed cycles to only
+one of them — so the detector would have been built with nothing able to call it. All three
+now sit together.
+
+## 2026-08-13 — The built app is current again, and now carries the pitch model
+
+Two things. The packaging script only ever copied one resource bundle, hardcoded by name — so
+when the pitch model arrived it landed in a different bundle and silently never reached the built
+app. It now copies every one, with a single exclusion: test bundles, which must never ship.
+
+And `dist/DAWPro.app` was fifteen hours out of date — built this morning, before everything from
+today. If you had been testing against it, none of the recent work would have been there. It is
+rebuilt: 40 MB, signature verified, pitch model present and byte-identical to source.
+
+## 2026-08-13 — The note editor no longer offers you something it won't do
+
+Holding ⌘ near a note selection used to light up the stretch handle — while actually clicking
+placed the playhead instead. The handle now retracts under ⌘ and ⇧, so what the editor shows you
+and what it does are the same thing.
+
+## 2026-08-13 — Grab the playhead and drag it, and snapping finally agrees with itself
+
+The playhead line in the note editor can now be grabbed and dragged anywhere in the grid, not just
+in the thin strip at the top. Notes always win: if one is under the pointer you grab the note, so
+the playhead can never make notes unreachable by sitting on top of them.
+
+**Snapping in the note editor now follows the same rule as the arrange**, which is what you asked
+for. Previously the editor's scrub deliberately ignored your snap setting entirely — it called
+itself "the pro default". With snap on, the playhead lands on the grid; with it off, anywhere you
+like. Holding ⌥ gives you free positioning without changing the setting, exactly as in the arrange.
+All three ways of moving the playhead — ⌘-click, dragging the line, and the strip at the top — now
+go through one piece of code, so they cannot drift apart again.
+
+## 2026-08-13 — Three tests that failed depending on your headphones
+
+Internal only, but worth recording. Three audio-analysis tests read the sample rate from whatever
+output device happened to be default, while generating their test tone at a fixed 48 kHz. Your
+AirPods drop to 24 kHz whenever the microphone engages — so the tests failed whenever you were on
+a call, and passed when you weren't. They now pin the rate they analyse at, and pass either way.
+
+## 2026-08-13 — Put the playhead where you're looking
+
+Hold ⌘ in the note editor and the cursor becomes a vertical bar; click on empty grid and the
+playhead moves there. It respects your snap setting, and lands anywhere you like when snap is off.
+The playhead in the track area moves with it — there's only one playhead, so nothing has to be
+kept in sync.
+
+Everything ⌘ already did still works: ⌘ on a note still adds or removes it from the selection,
+⌘-dragging still draws an additive selection box, and a plain click on empty space still deselects.
+Those three are the ones a change like this quietly breaks, so each has a test that fails if it
+stops working.
+
+## 2026-08-13 — Stretch and squeeze a group of notes
+
+Select several notes, hover near either end of the selection, and a handle appears. Drag it and the
+whole group scales in time — compress a phrase to fit, or stretch it out. The far end stays put, so
+the handle you're holding is the only thing that moves, and the clip grows if you stretch past its
+end.
+
+Swing and triplets survive it. That sounds obvious and isn't: scaling notes individually would snap
+each one to the nearest grid line and quietly straighten a swung figure into a stiff one. The whole
+group is transformed as one gesture instead, and there's a test that fails the moment anyone changes
+that.
+
+Two things to know. A selection that starts at the very first beat gets a right-hand handle only —
+there's no room to its left. And the handles only appear in Pro density, matching how single-note
+resizing already works.
+
+## 2026-08-13 — ⌘A selects every note in the editor
+
+You asked for it: in the note editor, ⌘A now selects all the notes. It stays out of the way
+everywhere else — inside a rename field ⌘A still selects text, because macOS hands the key to the
+text field before it ever reaches us, and that was measured rather than assumed.
+
+**One rough edge worth trying and telling me about.** Opening a clip shows the editor but doesn't
+yet treat it as the surface you're working in, so the very first ⌘A after opening a clip does
+nothing until you click somewhere inside the editor. After that it works every time. Making it
+work immediately is a one-line change — the reason it isn't already is that a different keystroke
+(Delete) uses the same "which panel are you in" rule, and having the two disagree seemed worse to
+decide without asking you.
+
+## 2026-08-13 — Pasting notes into a short clip now grows the clip
+
+You reported this: paste a run of notes into a clip that ends before they do, and the notes went in
+but the clip stayed short, so the tail never played. The clip now stretches to cover what you
+pasted, in the same single undo step — one ⌘Z puts everything back.
+
+It stops at 16 bars of growth, the same ceiling that already applied when a note is dragged past
+the end, and it will never grow over a clip that follows it on the same track. If a paste lands
+further out than that ceiling allows, the notes are still placed but the clip does not grow — that
+case is currently silent, and telling you about it is a separate piece of work.
+
+## 2026-08-13 — Clicking a track no longer grabs everything on it
+
+Clicking a track header used to select every clip on that track. It now just makes the track
+active — a cursor, not a grab. Nothing gets selected, so the next Delete can't take the whole
+track with it.
+
+That mattered more after yesterday's paste change: clicking a header became the way to choose
+where a paste lands, which meant the most ordinary navigation gesture was quietly arming a
+destructive one.
+
+**Selecting a whole track is still there, behind ⇧ or ⌘ on the header** — and "just this track,
+nothing else" is now two clicks: plain, then ⇧. One knock-on worth knowing: a plain header click
+now closes an open piano roll, where before it left the roll on its clip. Hold ⇧ to keep it open.
+
+## 2026-08-13 — You can see which track is active now
+
+The cyan rail marking the active track had been written but never actually placed on screen — the
+code that draws it existed and nothing ever called it. That is why the track you picked looked
+identical to every other one. It runs down the left edge of the track card now.
+
+This matters more than it did yesterday: paste now goes to the track you select, so being unable
+to see which track that is made the feature guesswork.
+
+## 2026-08-13 — Paste goes where you pointed
+
+**Click a track's header, hit ⌘V, and the clip lands on that track.** Before, it went back to the
+track you copied it from, whatever you had selected — which is what you reported. Selecting a track
+is now treated as saying where you want things to go.
+
+Plain copy-and-paste with no track selected is unchanged: it still lands in place, and a copy
+spanning several tracks still keeps those tracks' relative positions when it moves. The distinction
+the app now makes is between a track you *deliberately clicked* and one it merely inferred from
+whatever clip you last touched — only the first one redirects a paste.
+
+**One consequence worth knowing:** copy a MIDI clip, click an *audio* track's header, then paste,
+and nothing lands — you get an amber note saying that track can't hold it. Previously the clip
+would quietly go home to the MIDI track. Saying "that won't fit there" seems more honest than
+putting it somewhere you didn't point, but tell me if you'd rather have the old behaviour back.
+
+## 2026-08-13 — The note editor's ruler, and it turns out you already had a feature nobody could see
+
+**The strip along the top of the note editor is now a real ruler** — bar numbers, tick marks, a
+ground you can see, and a handle showing where the playhead sits. It was always there and always
+worked: an 18-point transparent band you could drag to move the playhead. Being invisible, it may
+as well not have existed. Nothing about how it behaves has changed; it is exactly 18 points tall
+as before. You can just see it now.
+
+Bar numbers appear at any zoom; beat numbers join them once there is room. One thing worth your
+eye: the numbers count bars **within the clip** you are editing, starting at 1 — so a clip that
+begins at bar 19 of the song shows "1" where the transport reads 19. That is consistent with the
+grid underneath, and it is the call most likely to be wrong. Say so if it reads oddly.
+
+## 2026-08-13 — Groundwork: the pitch engine has a runtime
+
+Under the hood, and nothing you can click yet. Pitch correction needs a neural pitch tracker, and
+that needs a machine-learning runtime inside the app. ONNX Runtime is now a pinned dependency and
+runs real inference in this codebase — a test feeds it a 220 Hz tone and it answers 220.83 Hz.
+
+**The cost, since it is worth being straight about:** the app binary goes from 17.75 MB to
+37.63 MB. That is a little over double, and it is the honest post-compression number rather than
+the alarming one we had been quoting — stripping debug symbols gives back about 10.8 MB of it.
+
+Two things we learned that will shape the feature itself. The tracker can be extremely confident
+and still be wrong: on a clean 440 Hz tone it reports 437.55 Hz — about a tenth of a semitone flat
+— while claiming 98.5 % confidence. And how loud a sound is changes whether it lands on the right
+octave at all. Both mean the eventual "fix my pitch" button needs to be more careful than
+"trust the model when it says it is sure", and both were found before any of it was built.
+
+## 2026-08-13 — Five things you asked for, and one that was quietly eating your work
+
+**Dragging a clip past another one was destroying it.** Not dropping it there — just moving
+across. The overlap rule itself was right (drop a clip on another and it overwrites, same as Logic
+and Live), but it was being applied on every frame of the drag rather than at the drop, so
+anything you passed over on the way got consumed about sixty times a second. Undo always brought
+it back, which is why this hid for so long: the edit history looked perfectly clean. Now the move
+is previewed while you drag and committed once when you release. The type that runs the drag holds
+no reference to the project at all, so the per-frame version cannot come back by accident.
+
+**⌘X / ⌘C / ⌘V now work** for clips and for notes, pasting at the playhead with the group's
+internal timing preserved. They are wired through macOS's own Edit menu rather than as our own
+shortcut — which matters, because a menu shortcut is checked before the text field you are typing
+in, and ⌘C in a rename box would have copied the clip instead of the text.
+
+**Clicking empty space deselects**, in both the arrange and the note editor, and the note editor
+closes when the clip driving it is deselected. Holding ⇧ or ⌘ still adds to a selection, a
+right-click still keeps the selection it was invoked on, and dragging from empty space still draws
+a marquee.
+
+**Audio waveforms now fill their clip.** They were drawn at raw amplitude, so anything mastered
+below full scale sat as a thin ribbon down the middle — material at −12 dBFS used about 22% of the
+available height. It now fills about 88% of it. Quiet passages still read as quieter, the boost is
+capped so near-silence does not blow up into noise, and there is a **TRUE LEVEL** mode if you want
+honest amplitude back. There is also a vertical zoom, 1× to 8×, for reading detail.
+
+**Playback stops at the end of your material** instead of running on forever into empty bars. It
+is a preference, looping still wins while a loop is active, and recording is deliberately exempt —
+recording past the end of what exists is the entire point of recording.
+
+**Also:** the Delete key fix is confirmed working. Six places in the code were still holding other
+work back on the assumption that it was broken; all corrected.
+
+**The note editor has a minimap.** A small overview in the corner of the piano roll showing every
+note in the clip, where you are in it, and where the playhead is — click or drag it to jump. It is
+on by default and collapses to a chip if you want it out of the way. **This one has not had a human
+look at it yet:** it passes its tests, but whether it reads well on a dense clip is a question only
+your eyes can answer, so tell me if it looks wrong.
+
+**Humanize is now something you can click.** It nudges note timing and velocity off the grid by
+small random amounts, for a less mechanical feel — the opposite of Quantize. It has been in the app
+for a while, but only agents could reach it; there was no button anywhere. Now it is in the note
+editor header and the clip's right-click menu, next to Quantize. Apply is one decisive action that
+closes the panel, and the amounts stay where you set them — so undo and reopen is how you re-roll.
+**Also not looked at by a human yet.**
+
+**You can already move clips between tracks with ↑ and ↓.** Not a new feature — it has been there,
+and I only found it while auditing. Select the clips and press the arrow keys, no modifier. That is
+not the drag-and-drop you asked for, which is still missing, but it may unblock you today.
+
+**Tracks now have a "you are here."** Click a track header and it becomes the active track, marked
+with a cyan rail down its leading edge. It is a cursor, not a selection — it does not change what is
+selected, and it does not open the note editor. Clicking a clip hands the cursor back to that clip's
+track, so it follows you rather than getting stuck. **Not looked at by a human yet** — the rail's
+appearance rests on code review, not on anyone seeing it.
+
+**But it does not yet fix pasting to another track, and I want to be straight about why.** Paste has
+a deliberate rule: if the tracks you copied from still exist, it pastes *in place* — back where it
+came from — no matter what else is selected. That is good behaviour for the common case and it was a
+settled decision, so I did not quietly override it. It does mean the active track has no effect on
+an ordinary copy/paste. **There is a decision waiting for you** on whether deliberately clicking a
+track header should override that, or whether cross-track paste should be its own command.
+
+**You can drag clips between tracks now.** Pick a clip up and move it to another lane; a ghost shows
+where it will land, and the move commits once when you let go — not sixty times a second on the way,
+which is the bug that was eating your clips. A multi-clip selection keeps its shape rather than
+collapsing onto one lane, matching what ↑/↓ already did. If a lane can't hold what you're dragging
+(a MIDI clip over an audio track), the ghost simply won't cross — it doesn't refuse the whole move,
+so you keep the horizontal part.
+
+Two things I chose that you may want changed: the readout still shows only the beat, not the
+destination track name; and a lane that won't accept the clip says nothing — the ghost just stops.
+**No human has done this with a mouse yet.** Every automated check around it passes, but none of
+them can execute a drag, so this one genuinely needs your hand.
+
+**Not done yet:** copy/paste into a different track. I said
+previously that both needed "a concept the app does not have — a selected track for actions to
+target." **That was overstated.** What I measured since: paste already resolves a target track, but
+it derives it from whichever *clip* is focused — so with nothing selected there is no track, and it
+falls back to the first one that fits. That is exactly the behaviour you ran into. How much has to
+be built on top of that is still being checked.
+
+## 2026-08-13 — Voice conversion actually works now, and the fix travels with the app
+
+Voice conversion has been producing noise instead of a voice. Two separate bugs, neither of them
+in our code:
+
+**One is in Apple's MLX itself.** Its `conv_transpose1d` silently leaves a large chunk of its
+output blank when the output is long — about half the samples wrong on a 46-second clip. Short
+clips are fine, which is why the library we build on advertises "perceptually identical" results
+in good faith: they tested on 13.5 seconds, below where it breaks. We work around it by splitting
+each call into shorter pieces.
+
+**The other is in that library.** It multiplies a random-noise term by zero where the reference
+implementation uses 0.66666. That noise is what gives a converted voice its breath and texture;
+without it you get the conditional average of a voice, which sounds metallic and rings. The
+comment directly above the line says "expanding with noise" — someone almost certainly zeroed it
+to get repeatable numbers while debugging and never put it back.
+
+With both fixed, conversion runs in **1.7 seconds for 46 seconds of audio** — about 26× realtime,
+and 10× faster than the PyTorch path we were going to fall back to.
+
+Until today those fixes only worked from the command line: the app's own voice sidecar still ran
+the broken code on every machine. It now applies them at startup and reports whether they took, so
+a silently-unpatched sidecar can't masquerade as a healthy one. The fixes also ship inside the app
+bundle, so they travel to another laptop or a packaged build rather than only existing in a
+developer's checkout.
+
+Not fixed: the Mac App Store. The voice engine is a 1.7 GB Python process, which the App Store
+sandbox does not permit. Direct distribution works.
+
+## 2026-08-11 — A test that can now say "I don't know" instead of quietly saying "fine"
+
+Our automated checks had a blind spot. Some of them are *preconditions* — they confirm the world is
+in the state a later check assumes. One test restarts the app and then confirms your "follow the
+playhead" preference survived. Before it can claim that, it has to know the old copy of the app
+really shut down. If it hadn't, the test could reconnect to the *old* app and read the setting out
+of the process that never restarted — and report a pass.
+
+Until now, a failed precondition just got recorded and the test carried on, reporting the later
+checks as passes. Anyone reading the results would see one failure and have no way to know it made
+four other passes meaningless.
+
+Checks can now declare what they depend on. If a precondition fails, everything resting on it is
+reported as **UNKNOWN** rather than passed or failed — with a note saying which precondition
+invalidated it. A check that depends on two things names both. Genuine failures are still reported
+as failures; this only affects results we can no longer vouch for.
+
+While doing this we also found that a separate long-standing complaint — that this same test had
+been failing for an unknown number of cycles — has been fixed by earlier work, and confirmed it now
+passes completely.
+
+
+## 2026-08-11 — Adding a track while the song plays got about 50 ms faster, and we can prove it
+
+Adding a new track in the middle of playback is one of the more expensive things the app does: it
+has to rebuild the audio graph and hand every currently-playing clip back to the sound engine. We
+have measured that cost for a while, and a note in one of our timing checks suggested it had
+quietly improved. That was a single measurement, so it was written down as a suspicion rather than
+a fact.
+
+It is now a fact. Across eight fresh runs, the cost of that mid-playback track add has dropped by
+roughly 50 ms compared with every measurement taken in mid-July — and the old and new sets of
+numbers do not overlap at all, with a clear gap between them. The per-track part of the cost is
+unchanged; it is the fixed overhead that got cheaper. The runs were also taken on a *busier*
+machine than the original ones, so if anything the improvement is understated.
+
+We did not change any behaviour here and we did not loosen any of the limits the check enforces —
+this was a measurement, and the only edits were to the explanatory notes. One of those notes had
+been quietly comparing two different things: a number this check can calculate, and a different
+number measured a different way. They were never the same quantity and never should have been
+compared. That is now spelled out, so the next person to read it is not misled.
+
+## 2026-08-11 — A test that now re-checks its own assumptions instead of trusting a note
+
+One of our visual checks watches the piano roll scroll to follow the playhead. To do that it looks
+at the pixels and decides "there is a note here" by whether the ink is dark enough — a sensitivity
+setting. Two different parts of that check share one sensitivity number, but they look at strips of
+very different heights, so they have very different amounts of room to spare before a real note
+stops registering.
+
+That mattered for a practical reason. If a note ever *did* slip below the sensitivity threshold, the
+check would fail with a message about a completely different mechanism — one that filters out the
+playhead line — and send whoever read it to the wrong setting entirely.
+
+The check now measures its own margin on every run and prints the result, and fails with a message
+that names the sensitivity setting directly if the margin ever disappears. While adding that, the
+measurement turned up a small correction: an older note in the code said notes stop registering
+past a certain sensitivity, and they don't — they survive noticeably further, and the falloff is
+gradual rather than a clean edge. The margin is about two and a half times the shipped setting
+rather than one and a half. We corrected the note where it was written rather than only where it
+had been quoted, and because the numbers are now re-derived on every run, that particular figure
+can't quietly go stale again.
+
+No behaviour changed: the sensitivity setting itself is untouched, and nothing about how the app
+plays or draws is different.
+
+## 2026-08-11 — The doubled note we were hunting cannot happen on the sound the test uses
+
+Yesterday's entry ended by saying our loudness meter was blind to the thing we were trying to
+detect — two copies of one note playing at once — and that we'd need to add new machinery deep in
+the audio engine to see it. We went to build that machinery. It turned out not to be needed, and
+the reason is more interesting than the fix would have been.
+
+Two things were true at once, and together they looked like a single mystery.
+
+First: the sound the test plays is a General MIDI instrument, which is handled by Apple's built-in
+sampler rather than by our own synthesizer. When a MIDI instrument is told to play a note it is
+already playing, the standard behaviour is to *restart* that note, not to stack a second copy on
+top of it. So on the exact sound our test uses, the doubling we were hunting cannot occur at all.
+We measured this directly: two copies on two separate tracks light up every meter we have, and two
+copies on one track are indistinguishable from a single note.
+
+Second: on our own built-in synthesizer, two copies of one note genuinely *do* play together — and
+the loudness meter still often can't see them. Two identical notes reinforce or cancel depending on
+how their waveforms line up, and at one particular alignment they sum to exactly the original
+loudness. That's why the earlier measurement kept reading "no change" even in setups where a second
+note was definitely sounding. Loudness was simply the wrong thing to look at. The *brightness*
+reading we already publish sees it immediately — it nearly doubles.
+
+One detail decides whether the first point actually applies to the engine rebuild, so we checked it
+rather than assuming: a note only retriggers instead of stacking if both instructions reach the
+*same* sampler. They do. The component that owns loaded instruments is deliberately kept outside
+the audio engine's lifetime — it survives a rebuild by design, and a rebuild changes nothing that
+would cause an instrument to be reloaded — so the rebuilt engine is handed back the very same
+sampler, with its sound and its plugin state intact.
+
+The practical upshot for anyone using DAW Pro: the failure that would actually hurt you is a held
+note going silent when the engine rebuilds, and that has always been plainly visible to the checks
+we run. The doubled-note scenario turns out to be unreachable on the standard sounds. No engine
+changes were made, and none are needed.
+
+## 2026-08-11 — Ten measurements that turned out to be measuring nothing
+
+There's a known race deep in the audio engine: when the engine is torn down and rebuilt while
+music is playing, the "stop all notes" signal sent to the old engine may not be consumed before
+that engine is thrown away. If it loses that race, a note that was sounding survives into the new
+engine. On the current build we believed this was harmless, and we wanted to check one specific
+way it could bite: if the old note survives *and* the rebuild re-starts the same note, you'd have
+two copies of one note playing at once, which would be about 3–6 dB louder.
+
+The plan was ten runs of the existing test, comparing the loudness before and after. Ten runs, all
+clean, all reading exactly the same level — no doubling. Which looked like an answer, and wasn't.
+
+Every one of the ten runs produced byte-identical numbers. A measurement that never moves is
+indistinguishable from an instrument that can't move, so before trusting it we checked the
+loudness meter could actually see a doubled note. It can: two notes of the same pitch on two
+separate tracks read 6.0 dB louder, right where the theory says they should.
+
+But the same two notes on *one* track read 0.0 dB louder — no change at all, across sixteen
+thousand samples. And one track is exactly the situation this race creates. So the flat reading we
+got ten times over carries no information: "the signal was flushed correctly" and "the signal was
+missed and the extra note vanished into the mix" produce the identical number. The test we ran
+could never have told them apart.
+
+We don't yet know what makes the second note disappear — the obvious explanation, the sampler
+running out of voices and reusing one, is ruled out by the code, which has 64 voices and only
+needed 2. That's now filed as its own piece of work, along with what it would actually take to
+answer the original question: a way to count the notes the engine is really playing, rather than
+inferring it from how loud things are.
+
+## 2026-08-11 — Checking that the view scrolls the right way, and the note our own test was wrong about
+
+When you press play with "follow the playhead" on, the arrangement and the piano roll scroll along to
+keep the playhead in view. Our tests checked that the view moved, and that the playhead stayed on
+screen. They did not check which *direction* it moved. The test counted how many different scroll
+positions it saw — and a set of positions has no order, so a view that scrolled *backwards* through
+the song while the music played forwards would have passed every single check.
+
+Two new checks read the scroll positions in the order they were captured and assert they never go
+backwards. On their own those would be almost worthless: a view that never moved at all also never
+goes backwards. So each one sits directly under the existing "it actually moved" check and says in
+writing that it is meaningless without it — if someone ever weakens that neighbour, they take this
+one down with it, and now they'll know.
+
+Which raised the harder question: if the scroll position *couldn't* report going backwards, the new
+checks would pass on a broken build forever. So two more checks rewind the song to the start while
+it's still playing and assert both views page back — which is what the code is documented to do, and
+what nothing had ever actually driven end to end. That doubles as proof the new checks can fail.
+
+One correction worth recording: the note that opened this work claimed *nothing anywhere* checked
+scroll direction. It was written after searching for the words "monotonic", "increasing", "forward" —
+and there was a direction check sitting there all along, written as a bare `>` comparison, which no
+word search can see. The check was real but narrow (one surface, two points, buried in an unrelated
+test), so the work still needed doing — but the claim that justified it was false.
+
+## 2026-08-11 — A check that would have passed on an empty screenshot, and then passed by one pixel
+
+One of the visual checks watches the piano keyboard strip down the left of the editor and asserts it
+stays byte-for-byte identical while the view scrolls — that strip shouldn't move when the music
+scrolls horizontally. Correct as far as it goes, but it was the wrong shape: a screenshot window
+aimed at blank background is *also* identical every time. It would have passed more reliably on
+nothing than on the real thing, and nothing anywhere checked the window was pointed at the keyboard
+at all.
+
+It now also asserts that the strip contains something — specifically the small cyan keyboard icon in
+the editor header — and, in the same breath, that a deliberately blank slice of the same screenshot
+contains nothing. Both halves are one check on purpose: a separate "the blank bit is blank" check
+would have been another thing that passes on nothing, which is the problem we were fixing.
+
+Then the interesting part. That new check passed, and it passed by one pixel. Sweeping the
+measurement window down the image shows the icon registers from 110 pixels to 152, and the window
+had been placed at exactly 110 — one pixel higher and it reads as empty. It would have gone green
+today and started failing on any small change in how the header is laid out, for no reason connected
+to the thing it is meant to catch. It has been moved to 131, the middle of that range, where it
+reads nearly three times the detection threshold with about twenty pixels of room in each direction.
+
+The general lesson is one we keep re-learning in a new costume: knowing a check passes tells you
+nothing about how close it came to failing, and only a sweep tells you that. A margin is part of a
+measurement, not a detail of it.
+
+One of the visual checks looks at the piano roll and asks whether the little markers in the
+controller lane line up with where the notes actually start. It reads both straight off the screen
+by finding coloured stripes, which is a good way to catch the two halves of the display drifting
+apart.
+
+The trouble is that the playhead — the line showing where you are in the song — is drawn in the same
+colour as the notes, and it crosses the row the check reads. So the list of "note starts" quietly
+included one thing that wasn't a note start. Nothing failed because of it, but the check had become
+easier to pass than intended: a marker that happened to line up with the playhead would have counted
+as correct.
+
+The fix is to tell them apart by width. A note is about 177 pixels wide on screen; the playhead is
+two. That gap is wide enough that a cutoff of eight sits comfortably clear of both.
+
+Two other ways of solving it were considered and rejected on measurement rather than taste. Ignoring
+anything touching the edge of the screenshot sounds safer, but it would have thrown away a real note
+that was half off-screen — and a real marker depends on that note, so the check would have started
+failing for a reason that had nothing to do with the app. Working out where notes *ought* to be from
+the scroll position also fails, because the scroll position lands somewhere different every run; the
+playhead was the only thing standing still.
+
+The check now also refuses to pass if the filter ever removes so much that there is nothing left to
+verify, and it prints the unfiltered stripes next to the filtered ones — so if it ever does fail,
+it's immediately obvious whether the filter was too greedy or the stripe was never detected at all.
+
+That safety net needed a second attempt, and the reason is worth recording. The first version asked
+"are there still at least as many note starts as there are markers to explain?" — which sounds like
+it would catch the filter eating something. It doesn't. The note at the very start of the visible
+area is half off-screen, and so is its marker, so losing that note removes one from each side of the
+comparison and the totals still match. A deliberately over-greedy filter was run to test this, and
+that check stayed green while printing the very note it had just eaten. It now also asserts that one
+specific note is present by name, rather than relying on counting alone.
+
+## 2026-08-11 — Held notes: the last untested path, and a bug we nearly deleted by mistake
+
+Some time ago a note that was already sounding could go silent for good if the app rebuilt its audio
+setup underneath it — hit a certain kind of change while the music was playing and a held pad would
+just stop. That was fixed a while back. What has been happening since is slower and less glamorous:
+proving the fix actually holds at every place in the code that can trigger such a rebuild, one at a
+time, with a test that fails if you break it.
+
+Four of those places are now covered by tests that play real audio and listen to the result. The
+fifth is covered only by a check on the source code, and that is deliberate — the code path in
+question looks unreachable, and a test that pretends to exercise an unreachable path is worse than
+no test, because it reads like coverage. The test says so on its own label rather than in a comment
+someone has to go find.
+
+Two things came out of the work that were not what we went looking for.
+
+The first is a genuine loose end in how the app tears down and rebuilds its audio engine. When the
+engine is replaced, it sends a "stop all notes" message to the old one — but it can then throw that
+old engine away before the message has been acted on. A note that was sounding can survive into the
+new engine. Today nothing bad comes of it, because the same rebuild also re-starts the note properly
+including its ending. It is written down rather than fixed, because changing teardown ordering in
+real-time audio code is not something to do casually or as a side errand.
+
+The second is a correction worth being blunt about. The original report behind all this said a pad
+went silent "when I switched audio devices" — and it turned out that sentence was never something a
+person said. It was our own summary of a measurement, written in quotation marks, and then quoted
+back as though it were a user's words for the next nine days. Finding that out, we came close to
+throwing the whole device-switch question away on the grounds that nobody could reproduce it. That
+was the wrong conclusion: knowing who said something tells you nothing about whether it is true. The
+measurement was real, it was never explained, and switching between two different audio devices
+remains the one version of this that has never actually been tested. It is now its own open item.
+
+Testing it properly turns out to need a second silent audio device to switch to, and this machine
+only has one that is safe to touch — everything else would play sound out loud, and some of it
+belongs to other apps. So that one is waiting on a decision rather than on work.
+
+## 2026-08-11 — A test that was measuring the machine, not the app
+
+The same follow-the-playhead check had a rule reading "the view must have scrolled to at least three
+different positions during the test." That sounds like a statement about the app. It isn't. Three
+positions means two page-turns, and the second page-turn only happens once the music has played for
+about twelve seconds — inside a test window of fifteen. Roughly two seconds of margin. Every run we
+measured landed on exactly three. A slightly busier machine would have failed the test without
+anything being wrong with the software.
+
+It now asks for two positions instead of three, which needs one page-turn at around six and a half
+seconds — four times the margin, and no longer tied to how far ahead the view likes to scroll.
+
+Worth being honest about two things. The looser rule is not free of assumptions either; it still
+depends on the window size, just far less tightly, and the comment in the file now says so rather
+than overclaiming. And the reason we had written down for making this change turned out to be wrong:
+we thought this was the only rule left proving the view moves at all, but another rule added in the
+very same round already proves that. The rule earns its place for a different reason — it is the only
+one proving the view moved during the stretch the screenshots were taken from — and that reason is
+now written where the next person will find it.
+
+## 2026-08-11 — A test that had been watching the wrong pixels
+
+Our automated check for "does the view follow the playhead while music plays" had been failing four
+of its checks for weeks, on the piano roll side only. The cause turned out to be more interesting
+than a stale number: **notes are drawn in exactly the same cyan as the playhead.** The check finds
+the playhead by looking for that cyan in a strip of the grid that is supposed to contain no notes —
+and that strip had ended up sitting directly on the row where every note in the test song lives. So
+it was measuring a note and reporting it as the playhead.
+
+Nothing about the app was broken. The instrument was.
+
+That strip is no longer a fixed number. Every run, the check now asks the app where the grid
+actually is, scans it to find which row the notes occupy, and picks a clear one — then proves it
+aimed correctly before trusting anything it sees: the playhead has to move in every single frame,
+and its mark has to be a two-pixel line rather than a wide block. A note sits still between page
+turns and is nearly two hundred pixels wide, so either check alone catches the old mistake.
+
+The whole thing now passes for the first time.
+
+## 2026-08-11 — A playback test that was two seconds from failing for the wrong reason
+
+One of our automated checks watches the view scroll to keep up with the playhead during playback, and
+it insisted the view scrolled *at least twice*. That number was never the thing worth checking — it
+just falls out of the window width, the zoom and how far ahead of the playhead we like to sit. Improve
+any of those for good reasons and the check goes red while the app is working perfectly.
+
+Measuring showed how close that already was. In the piano roll the view scrolled exactly twice, and
+the second scroll needed about twelve seconds of playback inside a fifteen-second measurement window
+that also has to absorb app launch. Roughly two seconds of margin — a slower machine would have failed
+a working app.
+
+The check now asserts only what it was really guarding: that we turn the page a handful of times
+during playback rather than jerking the view on every tick. The thing the old floor was quietly
+standing in for — that the playhead never slides off screen — is checked directly, and always was. A
+neighbouring check already answers "did it scroll at all", and we found it has the same fragility, so
+that one is written down as its own job rather than quietly patched here.
+
+## 2026-08-11 — Triage notes for the audit tool, and a claim of ours withdrawn
+
+The audit tool flags a handful of tests it cannot prove sound. Those flags are not all the same thing,
+and the tool now says so: some are real weaknesses, and some are tests that genuinely cannot misfire
+where the proof simply lives in a different function than the one being read. Treating the second kind
+as the first leads to "fixes" that make a test worse, so the distinction is now written down beside the
+tool with both known examples named.
+
+We had recorded one of those tests as a third, separate kind — a case where a test passing on an empty
+list was the right answer rather than an oversight. Checking that before acting on it showed it was
+wrong: every place that test is called supplies a non-empty list, so the situation never arises. The
+note is withdrawn and the test is filed with the others. What survived the check was more useful than
+the claim: the test's guard compares two lengths to each other rather than to zero, which looks like a
+safeguard and is not one on its own. That shape is now documented so nobody mistakes it for one.
+
+## 2026-08-11 — A research note stopped quoting numbers, and its own instructions turned out not to work
+
+One of our research notes described an audit tool and then reproduced that tool's output: totals, and a
+table of every flagged spot with its line number. Those line numbers went out of date, and one stale pair
+was copied into the tool's own source, where it sat until last cycle's work went to check those lines and
+found unrelated code. So the table was not merely at risk of going stale — it had already exported a wrong
+fact into working code. The note now carries the method and the reasoning and no numbers at all; the tool
+prints its own, on demand, and cannot go stale.
+
+Checking the note's instructions rather than just reading them turned up a second problem: the command it
+told you to run did not work, and had not worked for either author who wrote it. The setting it used takes
+a path interpreted relative to the script's own folder rather than the folder you are standing in, so the
+obvious value silently pointed one level too deep. The plain command, with no setting at all, works fine —
+and now that is what the note says, along with a warning for anyone who does need the setting.
+
+## 2026-08-11 — A decision not to build something, and a correction to yesterday's note
+
+Two of the tests the audit tool still flags are sound; it simply cannot prove it, because the proof lives
+inside a helper function it deliberately does not read. We decided not to teach it to. Writing that down
+took longer than writing the code would have, because the reason we had recorded for the decision — that
+only one test would benefit — turned out to be wrong when checked. Three would. The decision holds anyway,
+for a better reason: those three tests need two different kinds of cross-function reasoning, not one, and
+each kind is a new way for the tool to wrongly declare a test sound. The tool's value is that when it
+clears something, you can believe it.
+
+This note also corrects the previous one. It claimed that running a single test directly left our
+"which tests have actually been run" ledger un-updated, so a freshly fixed test was recorded as both
+never-run and out-of-date. That was false — the ledger updates on a direct run, and says so in a comment
+we did not read. The ledger is accurate and the staleness figure never moved. The original complaint that
+prompted the note, about single-test runs overwriting a full run's summary, is a different file and still
+stands.
+
+## 2026-08-11 — A test that checked "nothing was trimmed" now also checks there was something to trim
+
+The audit tool described in the last three notes found one genuinely weak test, as opposed to tests it
+merely misunderstood. A check on arrow-key nudging asserted that nothing was trimmed or removed, and that
+every clip kept its length — but the first two parts were about a different object, so the third would
+have been satisfied by having no clips at all.
+
+It was never actually broken: an earlier check in the same test reads the clips by position and would
+have crashed first. But that protection lives in a separate statement, and a known open issue means a
+failed earlier check does not stop later ones from running. The check now states its own precondition —
+three clips — and its failure message reports the count and each clip's length, where before it printed
+nothing about the clips at all.
+
+Worth noting for what it is: with the test fixture as written, the new condition cannot fail today. Its
+value is that the check now stands on its own, and that it will catch a future change to how the fixture
+builds its clips.
+
+The test was run before and after the change — 55 of 55 passing both times, with the leg in question a
+genuine pass rather than a skip in each.
+
+## 2026-08-11 — The audit tool now understands a test that proves itself by crashing
+
+The last two notes described a checking tool that was excusing tests too easily. Tightening it left four
+tests flagged as unexplained that were in fact perfectly sound — so this change teaches the tool the
+reason they were sound, and they are quietly excused again.
+
+The pattern is worth describing, because it is not the obvious one. Those tests never state that the list
+they are checking is non-empty. Instead they reach into it — "the gap between the second and third item
+is four beats" — so if the list were empty the test would crash rather than pass. Failing loudly is a
+perfectly good proof of non-emptiness; it just does not look like one.
+
+Two shapes are now recognised: reaching in by position directly, and reaching in from inside a loop over
+a fixed list of expected values. The second needed care — a loop over an *empty* fixed list proves
+nothing at all, so the tool checks that the list actually has entries.
+
+Four tests are excused again. Two remain flagged and they are different from each other: one is sound for
+a reason that lives inside another function, which this tool deliberately does not follow, and stays
+flagged on purpose; the other is the genuinely thin check found last time, still waiting on its own fix.
+Both are now written into the tool's own notes so nobody has to rediscover which is which.
+
+Because this change makes the tool excuse *more* rather than less, the checking was inverted: rather than
+proving nothing new was excused, we proved that exactly the four intended tests changed, that nothing
+moved the other way, and that no other test's verdict shifted in any respect. Two of the newly handled
+shapes appear nowhere in the current test suite and are covered only by purpose-built examples.
+
+## 2026-08-11 — The audit tool no longer counts a test as its own proof
+
+Yesterday's note described a checking tool that was excusing tests too easily, and a worse version of the
+same flaw in its most-used code path. That one is now fixed.
+
+It had been reading the surrounding source as plain text inside a fixed window. The window was wide
+enough to reach into the test's own body, so a test could be counted as the evidence that it was worth
+running. It also accepted any property whose name merely started with "length" — and "lengthBeats", how
+long a clip is, appears throughout these tests. Between them, a test could excuse itself using nothing
+more than a mention of a clip's length.
+
+It now looks at the code's actual structure instead of its text: it skips the part of the expression the
+test itself occupies, requires a real length check rather than a name that starts with one, and — as with
+yesterday's fix — requires the check to be about the same list the test iterates.
+
+Six tests were being excused on reasoning that didn't hold. Five are sound anyway, and now show up as
+unexplained until we teach the tool the pattern they actually use; that follow-up is written down. The
+sixth is the genuinely thin one, and it is now correctly flagged. Nothing else moved: the other
+forty-three excused tests are excused for exactly the same reasons as before, and nothing in the current
+test suite became *more* excused — across today's tests, the tool only got stricter.
+
+## 2026-08-11 — An audit tool stopped accepting the wrong evidence, and we found it doing something worse
+
+One of our automated checks looks for tests that would pass even if the thing being tested were empty —
+"every item in the list is correct" is trivially true of a list with nothing in it. To avoid crying wolf,
+the tool excuses such a test when a nearby line proves the list isn't empty.
+
+It was matching that nearby line too loosely. If a test checked "every landing is on the right track",
+the tool would accept a nearby line about a completely different list — the *clips*, say — as proof the
+*landings* weren't empty. Both lines mention the same result object, so they looked related; they aren't.
+No test in the current suite was written that way, so nothing was being wrongly excused today. The point
+of fixing it is that the next test written that way would have been waved through silently.
+
+While confirming that fix, we found the same flaw in a second, much more widely used part of the same
+tool — and that one is active. It reads the surrounding source as text within a fixed window, and the
+window is wide enough to reach inside the test's own body. So a test could end up counted as its own
+proof. It also treated any property whose name merely *starts with* "length" as a length check, and
+"lengthBeats" — how long a clip is — appears all over these tests.
+
+Six checks in the current suite are being excused for a reason that doesn't hold. We read all six. Five
+are sound anyway, for a reason worth noting: they don't state that the list is non-empty, they reach
+into it by position — so on an empty list they fail loudly rather than passing quietly. The sixth is
+genuinely weak, and only an earlier line in the same test keeps it honest.
+
+So no test in the suite is silently passing when it shouldn't. But the tool's reasoning was wrong in all
+six cases, and one test is thinner than it appears. Both are now written down and scheduled rather than
+left as a footnote.
+
+## 2026-08-11 — Converted vocals no longer overwrite each other, and land somewhere stable
+
+Voice conversion is handled by a small local service that writes its result to a file and hands back
+the path. It names that file using the current time to the nearest second, plus two other values that
+never change while it is running. So two conversions finishing in the same second produced the same
+filename, and the second silently replaced the first. Measured: twenty-four conversions produced only
+seven distinct files.
+
+A single vocal take takes far longer than a second to convert, so this was unlikely to bite one clip
+at a time. It mattered for converting in batches, and for anything driving conversions in a loop —
+including us: an earlier performance measurement looked reassuringly flat only because later runs were
+re-reading a file that had been overwritten.
+
+The app now copies each result to its own storage the moment it arrives, before it can issue another
+conversion, under a name that cannot collide. Converted audio also now lands in the app's own folder
+rather than inside the service's directory. If a copy ever fails, the conversion reports an error
+rather than handing back a path that might be overwritten.
+
+One visible consequence: the file path reported for a conversion now points at the app's copy rather
+than the service's. That is the point of the change — the reported path and the audio that was
+imported are now guaranteed to be the same file.
+
+## 2026-08-11 — An audit tool was excusing a check that tests nothing
+
+We have a tool that hunts for a specific weak spot in our automated checks: asserting "every item in
+this list is correct" without first establishing the list has anything in it. An empty list passes
+that test trivially, so such a check can look green while testing nothing at all.
+
+The tool excuses a check when it finds a nearby assertion establishing the list's size. It was
+matching those by name only. In one of our checks, two separate lists in unrelated blocks happened to
+share a name, and the tool credited the second with the first one's size assertion — an assertion
+describing a value that list never held. So a check that genuinely tests nothing was being marked
+fine.
+
+The tool now works out which declaration a name actually refers to, and only accepts a size assertion
+that refers to the same one. Where it can't work that out, it now says so and flags the check rather
+than excusing it.
+
+Exactly one check changed status across all 135 the tool examines, and that is the one this was
+about. Verified by keeping a record of all 135 beforehand and comparing every row — and by
+constructing three deliberate examples: the tool now catches the two it should while still excusing
+the legitimate pattern it exists to allow.
+
+## 2026-08-11 — Finished reserving the alarm phrase, and added a guard so it stays reserved
+
+An earlier fix stopped our shared check-reporting code from printing a deliberately alarming phrase
+when the thing reporting wasn't actually a check. Two more places still printed it in their own
+wording: the auditing tool that surveys all our checks, in both its "I couldn't read anything" and
+"I found nothing to look at" messages.
+
+Both are real warnings worth keeping loud, and both keep their wording, their exit codes and their
+advice — only the reserved phrase is gone, so searching for it once again means one thing. The
+judgement behind that: the phrase means "a check tested nothing and still looked fine," whereas the
+auditing tool means "I scanned no files." A different claim wearing the same words is precisely what
+costs somebody an investigation.
+
+The more useful part is a guard against this recurring. The previous round of this fix checked one
+message in a file and missed another a hundred and forty lines further down, which is how these two
+survived. So the guard now runs the tools, drives each into its failure state, and inspects what they
+actually print — plus a rule that the phrase may appear in the auditing tool only in comments, never
+in something it prints. That second rule covers a message we can't easily trigger on demand. Proven
+by planting the phrase into exactly that untriggerable message and confirming the guard caught it
+while every other check stayed green.
+
+## 2026-08-11 — The test harness could leave a launched app running behind it
+
+The harness that launches the app for automated checks tracks each launch by a small file holding
+the process id, and shuts everything down when the check finishes. That shutdown step remembered
+only the *first* launch of a given check. A check that launched the app a second time under its own
+id file would, on finishing, shut down the first one and quietly leave the second running — along
+with a stale id file pointing at it.
+
+Shutdown now covers every launch a check made, not just the first. The obvious alternative, keeping
+only the most recent launch, was rejected: it moves the problem rather than fixing it, since the
+first launch is never cleaned up either, so it would strand the first app instead of the second.
+
+Fixing this also closed a related hazard. Each launch keeps its own private settings folder, and the
+shutdown step looked that folder up by check name — a lookup the first shutdown erases. The second
+shutdown would then have fallen back to the real application's own lock file rather than the
+sandboxed one. Each launch now carries its own path explicitly, so shutdown can never reach outside
+its sandbox.
+
+No check in the current suite launches twice under its own id file, so nothing was actually
+stranding processes in practice. It was fixed because the harness's whole safety guarantee is that
+it only ever shuts down processes it can name exactly.
+
+## 2026-08-11 — Fixed a slow leak in the test harness that launches the app
+
+Our automated checks launch the app in a sandboxed copy and capture everything it prints. The code
+that arranged to save that output registered a new shutdown handler every single time it launched
+the app, and never removed any of them. A check that launches once or twice never noticed. Anything
+that launched a dozen times in one go accumulated handlers until Node itself warned about a memory
+leak — and that warning lands in the same output the checks read as evidence.
+
+There's now a single shutdown handler that saves every launch's output from a list, instead of one
+handler per launch. Verified by counting handlers across twelve launches rather than by watching for
+the warning, since the warning only appears past ten and a short test would look fine either way.
+
+Worth recording why the obvious shortcut was rejected: simply refusing to register the handler more
+than once keeps the count flat and looks correct, but each handler was holding its own launch's
+output, so only the first launch's log would ever be saved. That version passes a handler count and
+quietly throws away eleven logs out of twelve — a worse bug than the one being fixed.
+
+## 2026-08-11 — A warning that meant "something is broken" stopped crying wolf
+
+Our automated checks share a small piece of common code that prints the final verdict. When a check
+finishes without having actually tested anything, that code prints a deliberately alarming warning —
+the point being that a check which quietly tests nothing is far more dangerous than one that fails,
+because it still reports success.
+
+The trouble was that this same piece of code is also used by a couple of tools that aren't checks at
+all — a report on which checks have gone stale, and the runner that executes them. When one of those
+legitimately had nothing to report, it printed the alarm word for word. It appeared in a log, someone
+went looking for a broken check, and there wasn't one.
+
+Those tools now print a differently worded message that says the same thing honestly without using
+the alarm phrase, so searching for the phrase means what it's supposed to mean again. The wording is
+chosen by the shared code rather than supplied by each caller, so no tool can reintroduce the alarm
+by accident. The checks themselves print exactly what they printed before, character for character.
+
+We have a suite of roughly seventy-five automated checks that exercise the app end to end. Running
+all of them takes about half an hour, which in practice means they get run rarely.
+
+Two of those checks are unusual: instead of driving the app, they run our entire unit-test suite —
+one of them five times over. Timed directly, those two alone account for just under twelve minutes.
+Two checks out of seventy-five, and they dominate the clock.
+
+There's now a quick mode that leaves those two out and runs the other seventy-three. It works out
+which ones to skip by reading the checks themselves and spotting the ones that launch the full test
+suite, so it stays correct on its own as checks are added or changed — nothing is hardcoded.
+
+It also refuses to be quietly wrong. It names every check it skipped and why, it prints the real
+total so a partial run can never be mistaken for a complete one, it rejects an unrecognised mode
+name rather than silently running everything, and if it ever finds nothing to skip it says so
+loudly — because a filter that has quietly stopped working looks exactly like one with nothing to
+do.
+
+## 2026-08-11 — A checking tool that couldn't run now says so, instead of looking like a failed check
+
+One of our internal audit tools needs a code-parsing library that isn't shipped with the project. If
+that library wasn't installed, the tool crashed with a wall of technical error text and stopped with
+the same failure signal it uses to report a genuine problem with the code.
+
+That combination is worse than it sounds. Someone running the audit on a fresh copy of the project
+would see a failure and have no way to tell whether the code was bad or the tool had simply never
+managed to start. A broken instrument was reporting itself as a finding.
+
+It now stops with its own distinct signal and says plainly that it could not look — that this is a
+failed measurement, not a result — followed by the exact command to fix it. It also prints which
+copy of the parsing library it used, and that library's version, on every single run. The tool's
+conclusions depend on how that library reads code, so a result that can't be traced back to a
+specific version isn't really a measurement at all.
+
+Nothing about the app changed, and no new dependency was added to the project.
+
+## 2026-08-11 — Every screenshot the app takes now records whether it was the frontmost window
+
+A long-running puzzle got closed today, though not by being solved.
+
+For months a particular screenshot our checks take had come back very slightly different from run to
+run — about 94 bytes apart, out of roughly 380,000, at identical dimensions. Small, erratic, and
+unexplained. Four possible causes had been named over time. All four are now ruled out, and they are
+ruled out by *size*: three of them change that screenshot by thousands of bytes, which is far too
+much to be the culprit. The last one, whether the app happened to be the frontmost window, turns out
+to change the picture by exactly nothing — measured across eight screenshots in both states, while a
+deliberate control change moved the same picture by 19,000 bytes.
+
+So the honest summary is that the difference no longer happens and we cannot say why it once did.
+The original runs came from a version of the app we can no longer reconstruct. Absence is not an
+explanation, and the entry says so rather than claiming a fix.
+
+What did ship is the instrument. Every screenshot the app takes now reports whether the app was
+frontmost when it was taken. If the difference ever returns, that fact will already be recorded
+beside it instead of having to be guessed at afterwards.
+
+That instrument justified itself within the hour. The experiment meant to settle the question tried
+twice to hold the app's focus steady and failed both times — nothing hands focus back to an app that
+never asks for it. Both halves of the comparison had quietly become the same half. Because every
+screenshot now records its own focus state, a broken controlled experiment could be salvaged as a
+sound observational one, instead of returning a confident and meaningless "no difference".
+
+## 2026-08-10 — Re-ran the window-size experiments now that they can actually vary something
+
+With the window size finally sticking, we went back and ran the experiment it exists for.
+
+Six of our visual checks had never been confirmed safe to run at a fixed window size. All six have
+now been run twice, at two different sizes, and none of them behaves differently — so all six are
+safe to pin. Three of those six had been declared safe once before; that earlier verdict came from
+the broken method, so it was worth nothing until re-measured. It holds up. The other three, which
+drive the song-generation model and are slow and memory-hungry, had never been measured at all.
+
+The part worth stating plainly is the limit of what this proves. Every run passed, at both sizes. So
+what we compared was two clean results against each other, and two clean results look identical
+whether or not size matters. This says these six checks are safe to pin at the two sizes we tried.
+It does not say window size never matters to them.
+
+Each run now records the window size it actually started with, and we compare those recorded sizes
+before trusting any comparison of the results — which is precisely the step whose absence let the
+earlier round quietly measure nothing.
+
+## 2026-08-10 — Our window-size experiments had been comparing a thing to itself
+
+Nothing in the app changed here either. This is the second repair of the day to the checks that
+guard it, and it came out of noticing that an experiment we had already trusted could not have
+worked.
+
+Some of our checks are sensitive to how big the app window is. To find out which, we run a check
+twice at two different window sizes and compare. Setting the size worked — we set it, we read it
+back, it was what we asked for. But every check still ran at the same default size regardless,
+because starting the app deliberately wipes its saved settings so each run begins from a clean
+slate. That wipe is correct and worth keeping; it just also erased the size we had set moments
+earlier. So both halves of the experiment ran at the identical size, and comparing them told us
+nothing at all. The results looked perfectly normal, which is the whole problem.
+
+The size is now applied after the wipe rather than before it, so there is nothing left to undo it.
+Asking for a size the app already has now says so plainly instead of quietly looking like a success,
+a typo in the size stops everything before the app is even launched, and a size that fails to take
+hold is treated as a wrong measurement rather than a small cosmetic miss.
+
+Worth recording how close this came to going wrong twice. The first version of the fix worked, and
+covered only 31 of our 75 checks — the other 44 open their connection to the app a different way and
+silently got no size at all. It surfaced because one of those checks passed 38 out of 38 under a
+setting that had never been applied to it: the passing result was identical either way, and the only
+clue was a line missing from the log. Passing while a feature sits inert is not evidence the feature
+works.
+
+## 2026-08-10 — Closed a hole that let an automated check pass without checking anything
+
+Nothing in the app itself changed today. This is about the checks that guard it.
+
+Every one of our automated checks ended by asking a question shaped like "did anything fail?" and
+reporting success when the answer was no. That sounds right, and it is wrong in one specific way: if
+a check had quietly stopped running its tests altogether, nothing had failed — so it reported
+success. A check that tested nothing and a check that tested everything and found no problems
+produced the same green result. There was no way to tell them apart from the outside.
+
+Sixty checks across fifty-nine files now report through a single shared piece of code that asks two
+questions instead of one: how many tests ran, and how many failed. Zero tests run is no longer a
+pass. It is now its own distinct outcome that says so in plain words — "this check asserted nothing"
+— because staying silent about having done no work is exactly the failure we were trying to catch.
+
+To be sure this changed nothing else, we ran all sixty-eight checks start to finish before the
+change and again after, and compared them one by one rather than just comparing the totals: every
+single check produced the identical result both times. Two of them are known to be failing for
+reasons already being tracked, and since a failing check looks the same before and after, those two
+were confirmed a second way — by checking that the individual tests inside them still came out
+exactly as before.
+
+Along the way we found three checks with a subtler version of the same problem. Each had a path
+where, if the check itself crashed partway through, the crash was counted in a way the final tally
+couldn't see. Depending on which way we had resolved it, that would either have made the check
+report an impossible result, or — worse — swallowed the crash and turned a failing check green. All
+three now record the crash as a failed test like any other.
+
+The last check still standing outside this system was the one that hunts a specific old crash by
+launching the app and hammering it ten times in a row. It had been left alone deliberately, with a
+note explaining that it already used its own numbering for results and that folding it in would blur
+two of them together. Reading that note against the check itself, the reasoning turned out to be
+backwards. The blurring it warned about was already there, and worse than predicted: the same result
+number meant both "the app never started, so this proved nothing" and "the app died halfway through"
+— which is the check succeeding at the exact job it exists to do. The best possible news and the
+absence of any news at all were arriving under the same label. Folding it in pulled them apart. We
+confirmed it by deliberately breaking the app mid-run and watching the check report a real failure,
+where before it would have reported something indistinguishable from never having started.
+
+Four checks remained outside the system, set aside together on the grounds that bringing them in
+would mean running them, and running them would mean loading the very large AI models they exercise.
+Pricing that out one check at a time rather than as a group, the reason held for two of them, half
+held for a third, and did not apply at all to the fourth — which never loads a model, never contacts
+the real services, and stands up a small stand-in of its own instead. It had been set aside for a
+cost it does not have. It is now folded in, and the remaining three are tracked separately with their
+real costs written down rather than assumed. The best evidence that this was worth doing: with all
+its tests disabled, that check used to report success, and now reports that it tested nothing.
+
+A second of those checks turned out to be cheaper than its label too. It tests what the app shows you
+when you ask for a song while the AI service is switched off, which means it has to actually kick the
+service into starting — the expensive part. Except it doesn't wait for it: it shuts the service down
+the instant it can identify it, so the model never finishes loading. Across five runs, the service
+never once got as far as accepting connections, and nothing was left running afterwards. Measuring
+that before committing to it turned a job budgeted at several sittings into one.
+
+That check also had a specific way of lying. It can legitimately skip part of its work when
+conditions aren't right, and it correctly refuses to count a skip as a success — but it decided its
+overall result by asking only whether anything had failed. Skip everything, and nothing has failed,
+so it passed. It now reports how much it actually checked, and a run that checks nothing says so.
+
+A third check carried a warning that it could only ever be run once, because the AI service it needs
+in a freshly-stopped state cannot be stopped again through the app once it has started. That is true
+of the app's own stop button, but not of the service itself, which can simply be shut down directly —
+which is what we are required to do after these runs anyway. So the check ran twice in one sitting,
+before and after the change, and both runs exercised the part that only exists during a cold start.
+The warning had made a limitation of one button sound like a law of the machine.
+
+Bringing that one in surfaced a subtler problem worth describing, because it is the same mistake in a
+new place. These checks now use a shared result code meaning "this checked nothing". That check
+already used the same number to mean "the check itself crashed". Left alone, a crash would have
+become indistinguishable from a run that tested nothing — the precise confusion we spent this whole
+effort removing, reintroduced by the act of removing it. A crash is now recorded as a failure, like
+any other. We confirmed it by deliberately crashing the check and watching the two versions disagree.
+
+The last one is the check that proves repeated voice conversion doesn't degrade into noise. It was
+brought in on its full run — two rounds of twelve real conversions plus the app-integration round —
+rather than the cheap stand-in round, which was the whole reason we wrote that requirement down a
+cycle earlier: taking the shortcut would have declared the check covered while the expensive parts of
+it had never actually run once. Results were identical before and after, and the read-only vendored
+directory it borrows from was verified untouched afterwards by two independent means.
+
+That completes the effort. Every check the app has now reports how much it checked, and none of them
+can report success after checking nothing. Two honest caveats, both of which we would rather write
+down than let someone rediscover. First, this fixes checking *nothing*; it does not fix checking
+*less than intended* — and we demonstrated that on a real check, which can be reduced from
+fifty-three tests to thirteen by one mis-set environment variable and still reports success. It now
+at least prints how many it ran, so the shortfall is visible to a reader, but nothing objects
+automatically. Second, a separate family of abrupt exits scattered through these checks is untouched
+and tracked on its own.
+
+One pattern is worth recording because it outlived every individual fix. Six checks had been set
+aside as too expensive or too constrained to bring in. Examined one at a time, every single one was
+cheaper or less restricted than its own note claimed: one never loads a model at all, one only ever
+starts a load and immediately aborts it, one was described as runnable only once when in fact only a
+button was, and one was said to be already protected when it was protected on only half its paths.
+Each of those notes had been read and believed for cycles. A note explaining why something was
+deferred is an unverified measurement, and it gets more trusted the longer it sits there.
+
+Nothing shipped from the next piece of work, and the reason is worth writing down. Two of these
+checks take pictures of the app, so they need testing at more than one window size before anyone
+relies on them. The established way to do that is to set the size in a throwaway session, then run
+the check and compare. We ran both sizes. Both checks reported identical results — which looked like
+the answer we wanted, and was worthless: each check also prints the window size it actually started
+with, and all four runs had started at the same size. The size we set never reached them. A change
+made earlier for good reasons — wiping saved settings between runs so each starts clean — also wipes
+the saved window size, so the size-setting step had been quietly doing nothing.
+
+Two right decisions that are incompatible with each other, which is the honest description of the
+problem and now its own tracked item. What is worth keeping from it: had those checks not printed
+the size they started at, two identical runs would have been recorded as evidence that window size
+does not matter. The experiment caught itself; the small test we wrote to validate the approach
+beforehand did not, because it reproduced the mechanism in miniature and the miniature differed in
+exactly the way that mattered.
+
+
+
+The app has 73 automated checks that drive a real copy of it and inspect what happens. Each one
+normally runs only when someone touches the area it covers, which means a check can quietly stop
+working and nobody notices. One of them records having gone through exactly that before, and says it
+plainly in its own notes: a check nobody runs is indistinguishable from one that passes. How long
+each of the three had been failing this time, we can't say — nothing was watching, which is the
+whole point.
+
+So we ran 69 of them back to back, start to finish. 65 passed. Three failed, and each failure was
+re-run on its own afterwards to make sure it was real and not just interference from the checks
+running before it. All three were real.
+
+**The one that looked like it affected you — and turned out not to.** A check about renaming failed:
+when you type in a rename field and press Delete, the app is supposed to notice you are editing text
+and leave your selected clip alone. The check reported that something in the deletion path was still
+running when it shouldn't be, and our first reading was that this might destroy clips.
+
+It doesn't. We went and measured it rather than guessing. The check had a blind spot — at the moment
+it looked, there were no clips left to lose, so its safety test was comparing nothing to nothing. We
+fixed that blind spot first, put a real clip there, selected it, and pressed Delete with the rename
+field focused. **The clip survives.** The app guards this in two independent places, and the second
+one does its job even when the first has already stepped aside.
+
+So the fault was in the test, not the app — the test was watching a counter that only records "a
+keystroke arrived here", and treating it as if it recorded "something was deleted". Those became
+different numbers when a separate keyboard fix landed recently, and nothing re-ran this check
+afterwards to notice. Your clips were never at risk, and no change to the app was needed.
+
+The check has now been corrected, and it gained a new part that records the true behaviour — that the
+keystroke does reach the app and is then turned away — so nobody re-reads the old number as a fault
+again. It also caught a stale note elsewhere in the code still claiming the keyboard never worked this
+way; that is tracked separately. The full suite of 5338 automated tests passes.
+
+**The other two were bookkeeping, not bugs.** One check counts the app's remote-control commands and
+expects 173; there are now 174, because recently added voice-model importing added one. The count is
+right about the last saved version of the code and only disagrees with work that hasn't been saved
+yet, so we deliberately left it alone rather than editing it to match. The other tracks which checks
+adjust panel sizing, and had drifted by one.
+
+Four further checks were deliberately left out of this run: two of them load a 54 GB audio model, and
+they contradict each other — each needs that model switched off when it starts, and each switches it
+on. They cannot both work in a single pass, so they are run by hand. That is now tracked too.
+
+**And then the tool we use to measure all of this declared itself untrustworthy — correctly.** It
+works by reading every check's source code and sorting each one into a category. To prove it can
+still tell those categories apart, it had been pointed at three real checks known to be in a
+particular state, and it refused to report anything at all if it got them wrong. The trouble is that
+this week's work moved all three out of that state on purpose. The tool was checking itself against a
+condition the project had just finished eliminating, so it failed — not because it was broken, but
+because it had succeeded.
+
+It now proves itself against small examples written for that purpose, one per category, which cannot
+go stale when the real checks change. But swapping in self-written examples introduces a subtler
+danger, and guarding against it is the more important half of this fix: a tool that proves itself
+only against its own examples would still pass every one of them while reading none of the real
+checks — reporting a clean result about nothing at all. That is precisely the flaw described at the
+top of this entry, reappearing inside the instrument built to find it. So it now also insists it
+actually read something real before it will report anything, and it says which of the two situations
+it is in rather than failing the same way for both.
+
+**A check can also pass while quietly declining to test part of what it covers.** Some of our checks
+need a person — whether a menu item looks right, whether a real key press travels the way a simulated
+one does. Rather than guess, those parts announce themselves as skipped and the check carries on. That
+is the honest behaviour and we want to keep it. The problem was on the reporting side: a skipped part
+is neither a pass nor a failure, so it left no trace in the result, and a run that skipped work
+reported the same clean line as one that did all of it.
+
+Runs now report skipped work alongside the result — currently 28 skipped parts across 11 checks. The
+count is deliberately reported with its denominator, because the more useful finding was how few
+checks say anything about this at all: 13 of 73. The other 60 are not known to be skip-free; they are
+simply silent, and a number that quietly leaves them out would imply otherwise. Skipped work still
+does not count as failure, and nothing about whether a check passes has changed.
+
+The count is assembled two independent ways — from what each check reports about itself, and from the
+individual announcements — which are then compared. That comparison is the point rather than a
+finishing touch: this exact figure was previously measured as 38, and the error surfaced only because
+one check's own total disagreed with the tally taken from its output.
+
+**Finally, the rule from the top of this entry is now enforced automatically, and enforcing it turned
+up one more check with the original flaw.** Fixing sixty checks by hand fixes them once; nothing
+stopped the next new check from being written the old way, which is how sixty accumulated in the first
+place. A new check now reads every other check and fails if any of them decides its own result without
+going through the shared code.
+
+Writing it surfaced a check that had been missed. It reported its result indirectly — handing the
+outcome to a shared cleanup routine that exited on its behalf — so the earlier survey, which looked
+for the decision being made in place, could not see it. It had the exact flaw described above: had it
+somehow tested nothing, it would have reported success. It has been corrected, and its result now
+comes out the same way every other check's does.
+
+Seven checks are formally excused. Four need a large model loaded to run at all; two are waiting on
+work already scheduled; one already refuses to pass without testing anything, by its own separate
+route. Each exemption names the task that will remove it, and the enforcing check fails if an excused
+check is later fixed without its exemption being deleted — so the list cannot quietly outlive the
+problem it was written for.
+
+
+We also looked at making the whole suite of checks run on a schedule, so nobody has to remember to
+start it. We are not going to do that, and the reason is worth writing down: seventy-three of our
+seventy-four checks work by launching the actual app, and there is no way to run it invisibly. A
+scheduled run would open the app seventy-three times, on its own, on the machine you make music on.
+That is not a setting anyone would want us to pick a good default for, so we did not build it at
+all — not even switched off, because a switched-off feature reads as a finished one.
+
+What we built instead answers the question the schedule was meant to answer, and it answers it
+faster. There is now a check that takes about a second and tells you which checks have never been
+run, and which ones have been edited since they last ran — the second group being the ones whose
+last green result no longer describes the code that is in the file today. It names them, one by one,
+rather than just counting them, because a number is easy to skim past and a list of names is not. It
+runs as part of the normal development routine, which is a thing that already happens, rather than
+waiting on a timer that nobody set.
+
+Each check now records that it ran, at the moment it reports its result, so this stays accurate by
+itself as work goes on. That bookkeeping is deliberately unable to affect anything: we tested it
+against a full disk, a read-only folder and a path that was not writable at all, and in every case
+the check still reported exactly what it would have reported otherwise, down to the byte. A note
+about the bookkeeping failing goes to the error log and nowhere else. It would be a poor trade to
+gain a coverage report and lose the ability to trust a green result, so the recording is wired to
+lose that argument every time.
+
+The record is kept per check rather than per run. That matters because running a single check used
+to overwrite the record of everything else, which had already destroyed one set of results earlier
+this week. Now running one check updates one line and leaves the rest untouched — which is a
+property of how it is stored, not a rule someone has to remember.
+
+One limitation, stated plainly: seven checks still cannot report their own coverage, because they are
+the seven that were formally excused above and never reach the shared reporting code. They will show
+as never-run no matter how often they are run. The two tasks already scheduled to fix those
+exemptions will fix this at the same time; it is not a separate problem, and it is not a new one.
+
+
+Separately: some of our test commands quietly changed a setting nobody asked them to change. Opening
+the effects editor from a test also switched the mixer panel to its detailed view — and left it that
+way. That setting is one you own; the app remembers it between launches. So a test run could change
+how your mixer looked, and nothing in the test said it had.
+
+Both of the safeguards we already had were blind to this by construction. One only remembers panels a
+test explicitly says it is going to change; the other only looks at tests that ask for a density
+change in the first place. A panel changed sideways, through some other command, is invisible to
+both. The fix records every panel setting before a test runs and puts them all back afterwards,
+including removing ones the test invented — so a setting you never had does not survive the test that
+created it.
+
+We proved it the honest way, by running two tests and comparing. The unprotected one changed the
+mixer setting and left it changed. The protected one, doing the same thing twenty-two times over, left
+it exactly as it found it. The protection also refuses to guess: if it cannot read the current
+settings properly, it stops rather than assuming there were none — assuming none would have meant
+erasing all of them, which would be a far worse bug than the one it was written to fix.
+
+Two related things we found and wrote down rather than quietly fixing. The same problem affects two
+more tests we have not protected yet, and we confirmed that by measurement rather than assuming it.
+And more broadly, our tests share their saved settings with the copy of the app you actually use —
+we noticed a test run had moved where the app's window opens. We put it back, and that wider issue is
+now written down as its own piece of work rather than patched setting by setting.
+
+
+Follow-up: two more of our tests had the same problem, and we checked rather than assumed. One we had
+already suspected; the other we had written down as unconfirmed, and it turned out to be leaking too.
+A third we had assumed was fine genuinely is fine — we ran it to be sure instead of taking our own
+earlier word for it. Both leaking tests now restore your panel settings the way the others do, and
+both still pass.
+
+
+The bigger fix behind those two: our tests no longer share their saved settings with the copy of the
+app you use. They used to write into exactly the same place your own preferences live, which is how a
+test run was able to move where your window opens — that one was not even our code doing it, it was
+the system's own window-position memory, so no amount of tidying up individual settings could have
+caught it.
+
+Tests now run under a different name, which gives them their own separate store of settings. Everything
+they save goes there instead, including the things the system saves on their behalf without asking us.
+Your own settings are untouched, and we verified that by comparing the file byte for byte before and
+after — along with a deliberately corrupted copy, to prove the comparison would have noticed if
+anything had changed.
+
+The per-setting protections we added earlier are still in place. They are now redundant, and we are
+leaving them there anyway until the new approach has more time behind it.
+
+
+And a test that checks the tests: it launches the app, makes it save a setting, and then confirms your
+own preferences file is byte-for-byte what it was. It proves it is capable of noticing a change first,
+by planting one deliberately and catching it — a check that has never been seen to fail at anything is
+not worth much. It also checks the specific thing that started all this: that the window position the
+system saves on the app's behalf now lands in the test's own store rather than yours.
+
+To prove it is watching a real target rather than an empty one, it launches a second, throwaway copy
+under a different name and confirms it notices that copy's writes. The tempting alternative — switch
+the protection off and check that something breaks — was rejected: when that test worked, it would do
+so by writing into your real settings, which is the thing being protected.
+
+
+Then we ran the whole suite and compared it against the last full run from before any of this, one test
+at a time rather than just comparing totals. Seventy-one tests, and your own settings file came out of
+it byte-for-byte identical — which is the thing we actually wanted to prove, and which would not have
+been true a day ago.
+
+The comparison earned its keep immediately: it found one test we had broken. Giving the tests their own
+name meant one of them could no longer find the app it was trying to drive, because it had the old name
+written into it. Everything else about that test looked fine, and it would have kept looking fine — it
+only surfaced because we compared the full before and after picture rather than checking that things
+still broadly passed. It is fixed, and the name is now derived in one place instead of written down in
+two.
+
+**And it solved a five-day-old mystery.** One test takes a picture of the editor, undoes an edit, and
+takes another picture to prove the undo repainted the screen exactly as it was. That test worked, but
+it had a note attached recording something nobody could explain: the picture it took came out slightly
+different each time it ran — three different file sizes across eleven runs, with no pattern. The note
+guessed the cause was the window size being remembered somewhere outside the test's control, and
+admitted it was a guess.
+
+The guess was half right, and the half it got wrong is the interesting half. The window size was never
+it — the test pins the window and the dimensions were identical every time. The culprit was the same
+shared settings file, holding things the test does not pin: how tall the editor pane is, how tall the
+rows are, how far you are zoomed in. Another test would leave one of those changed, and the next run of
+this one would inherit it and draw a slightly different picture.
+
+It now runs identically every time. We were careful not to let a clean streak stand in for a proper
+explanation, because running the same test fifteen times in a row with nothing in between is exactly
+the situation where the old setup would also have looked clean. So we checked it the other way round:
+we deliberately planted a leftover value in the settings — the same thing another test would have
+done — confirmed it was really there, and ran. The picture came out identical to every other run,
+because the settings are now wiped and reset before each one. We also confirmed the picture genuinely
+does respond to those settings, so that "identical every time" means something rather than nothing.
+
+We did not pin the exact picture as the expected answer, deliberately. A change already queued will
+alter it on purpose, and an expected answer that goes stale the moment you look away is worse than
+none.
+
+**The tests now run against the app as it ships, not as this machine happens to be set up.** When we
+gave the tests their own settings, we filled those settings with a snapshot of whatever this
+particular Mac was already using. That was deliberate — it let us make the change without altering
+what any test saw. But it left the tests running against one developer's preferences rather than
+against what a new user actually gets.
+
+We have now emptied that snapshot down to a single entry. Everything else falls back to the app's own
+shipped defaults.
+
+Before doing it we worked out, key by key, which settings would actually change. Sixteen entries were
+removed; only six of them differ from what the app ships. The rest — panel widths, zoom levels, row
+heights, three on/off switches, the assistant's model — had been captured at values identical to the
+defaults, so removing them changes nothing. Knowing that in advance turned the whole exercise from
+guesswork into checking predictions, and it meant we could tell a real problem from an expected
+change immediately.
+
+The six that do differ all concern how densely panels are packed. The tests had been running with six
+of seven panels in the denser "pro" layout, while a new user gets the simpler one.
+
+One test genuinely broke, and it is a real flaw worth having found: it measures a strip along the
+bottom of the window, but never specified which layout the transport bar should be in. It had been
+passing because of a setting it never asked for. We have not patched over it — loosening the
+measurement until it passes would gut the very check that gives the test its meaning — so it is
+written up to be fixed properly.
+
+One more failed for an amusing reason: a test that verifies the settings isolation was itself
+checking, as part of its setup, that a particular setting held a particular value — the value that
+had just been removed. It was asserting the contents of the snapshot rather than the behaviour it
+exists to prove. Fixed so it can't go stale against that snapshot again, in either direction.
+
+Two others failed only when the whole suite ran at once and passed cleanly on their own — ordinary
+timing sensitivity under load. We checked that claim rather than assuming it: the same
+run-it-alone method still reproduced the genuine failure above, so it is a real test and not a way of
+making everything look fine.
+
+Your own settings files came through all of it byte-for-byte unchanged, verified with a check we
+first proved capable of detecting a single flipped byte.
+
+**The app can now say which settings file it is writing to.** Until today, the way we confirmed the
+tests were writing somewhere separate from your settings was to ask the operating system what the
+test process was called, and reason from there. That is an inference about the app rather than a
+statement by it. There is now a diagnostic the app answers directly: which name it is running under,
+whether it has a bundle identity, and which preferences domain it therefore persists to.
+
+Two details we were careful about. The answer distinguishes what is *derived* from what is
+*measured* — the domain name is worked out from the app's identity, so it is labelled that way, and
+a separate optional check actually looks a key up through both paths and reports whether they agree.
+That second part refuses to report agreement when the key was never written in the first place,
+which would otherwise be a comparison of nothing against nothing that always looks fine.
+
+The isolation test now asks both the operating system and the app the same question and requires the
+answers to match. Two independent instruments, because a single one cannot notice its own mistake.
+The diagnostic is strictly read-only — a check whose job is proving the app does not write where it
+shouldn't must not itself write anywhere.
+
+**Two more checks moved onto the shared reporting code.** Continuing the work at the top of this
+entry: two checks that were still deciding pass-or-fail their own way now go through the shared
+piece that also asks "how many tests actually ran". One of them turned out to have exactly the
+weakness that piece exists to catch — its self-test would have reported success if its list of
+fixtures were ever emptied, because nothing had failed. It now says it tested nothing instead.
+
+One of the two needed a judgement rather than a mechanical change. It had its own numbering for how
+it reports outcomes, and one of those outcomes — a test run that came back red — was filed under
+"could not score this" rather than "this failed". A red run is a failure, and reporting it as though
+the check had done no work would have been the precise defect this whole effort is meant to remove.
+That one outcome was reclassified; the rest were left exactly as they were.
+
+We checked that reclassification could not confuse anything downstream, and the first reason we came
+up with for why it was safe turned out to be wrong — a search that appeared to prove the check wasn't
+used anywhere was actually a search that found nothing at all. The real reason it is safe is that the
+thing consuming these results only ever distinguishes success from failure, not one kind of failure
+from another.
+
+A latent problem surfaced along the way and is written up rather than quietly patched: one check
+reports the line numbers where it finds issues, and those numbers drift out of alignment whenever the
+file contains a multi-line comment, because of how it strips comments before scanning. It has been
+handing out coordinates that point a few lines off.
+
+**That one is now fixed, and it was worse than it first looked.** The check removes comments before
+scanning, and removing a multi-line comment was also removing the line breaks inside it — so every
+line number it reported after that point was short by however many lines the comment spanned. It had
+been telling us line 529 for something that actually sits at line 536.
+
+The reason to spend real time on this rather than nudge the one number: we checked every file it
+scans instead of only the file where the problem turned up. Seventeen of eighty-nine were affected,
+and the worst was off by three hundred and twenty-seven lines — far enough that a reported location
+would land in an entirely different part of the file. A tool that hands out coordinates and gets them
+wrong generates bad references faster than anyone can chase them down, and misleading line numbers
+have cost us real investigations before.
+
+All eighty-nine now report accurately. We confirmed the fix changed nothing else — the check finds
+exactly the same problems it found before, only now with the right addresses — and confirmed our
+measurement could actually tell a real fix from a no-op before trusting it.
+
+## 2026-08-10 — Voice conversion no longer degrades the more you use it
+
+Converting the same vocal a few times in a row used to get progressively louder and more distorted,
+until by the fourth or fifth conversion the output was pinned against the ceiling and audibly
+crushed. Nothing you did caused it — the audio engine was reusing graphics-card memory it hadn't
+finished writing, so each conversion inherited a little more garbage from the last.
+
+Measured, before and after, on twelve conversions in a row: the level used to climb by a factor of
+twelve and peak at 0.99 (with true peak actually past full scale); it now stays flat, varying by
+0.03%. The engine clears that memory before every conversion. Conversions cost about 0.03 s more
+each, and the engine now takes about half a second longer to start — but it loads faster on the
+first conversion, so in practice you get that back.
+
+**One thing to know.** The fix is applied when the app starts the voice engine. If you started the
+engine yourself from a terminal, the app can't apply it, and conversions will still degrade. The
+app now detects exactly that case — but only an AI assistant asking about engine status currently
+sees the warning; it isn't shown in the Voice panel yet. Stopping and restarting the engine from
+the app applies the fix.
+
+**A separate problem found along the way, not yet fixed.** The voice engine names its output files
+using a timestamp accurate only to the second, so conversions finishing within the same second
+overwrite each other — twenty-four conversions produced seven files in testing. A single vocal take
+takes longer than a second to convert, so ordinary use is unaffected; the risk is batch conversion.
+It's tracked and will be fixed separately. Until then, if you convert several short clips in rapid
+succession, check you got every file.
+
+## 2026-08-10 — Half the voice-conversion model was random noise (found, corrected, not yet shipped)
+
+The voice model has four "normalising flow" layers that shape the converted voice. Two of them —
+the 2nd and the 4th — were never actually loaded from the trained model file. They were filled with
+fresh random numbers every single time the model loaded, which means voice conversion produced a
+slightly different result on every run and none of them used the weights that had been trained.
+
+The cause was a one-line disagreement between two pieces of the vendored engine: the file that
+converts models and the file that loads them number the layers differently, and only the loader
+runs. Layer 0 is the one place the two agree, which is why every smoke test looked fine.
+
+There is now a corrector that fixes a model file's layer names without touching a single byte of
+the actual weights, plus a gate that proves it: the broken model fails 6 checks and produces a
+different fingerprint on every load; the corrected one passes all of them and produces the same
+fingerprint every time, in separate processes.
+
+**This is not in your hands yet, and it is worth being plain about that.** The corrected model has
+to actually reach the app, and the one voice currently available takes a code path that our own
+settings cannot redirect. Which of three routes to take is a decision waiting on you. There is also
+a loudness caveat: the corrected model runs about 10 dB hotter, leaving roughly 1.2 dB of headroom.
+It did not clip in testing, but that was one test signal, not a library — so a listening check comes
+before this ships.
+
+## 2026-08-09 — The Delete key works the same way every time
+
+Pressing Delete used to be a coin flip. Three different parts of the app each claimed the key —
+the piano roll, the arrange area and the automation lane — and which one actually got it depended
+on where the keyboard focus happened to have landed. Focus moved every time you selected a clip,
+so the same keystroke could do different things on consecutive presses: sometimes it deleted the
+notes you had selected, sometimes it appeared to do nothing at all, and in one case it deleted the
+whole clip out from under the notes you were actually pointing at.
+
+All three now ask the same question the Edit menu already asked — what are you pointing at? — and
+act on that answer. Notes when the piano roll is open with a selection, automation points when a
+lane holds one, clips otherwise. Where focus sits no longer changes the outcome, and Delete can no
+longer remove a clip when what you had selected was the notes inside it.
+
+## 2026-08-09 — Copy and paste for clips and notes
+
+There was no way to copy anything. Not a clip, not a note, not a phrase you wanted twice.
+
+Now the Edit menu and the right-click menus carry Cut, Copy and Paste, and they know what you are
+pointing at: notes when the piano roll is open with a selection, clips otherwise. Paste lands at the
+playhead, keeps the internal timing of whatever you copied, and puts clips back on the tracks they
+came from where those still exist. Pasting a phrase that would start before the beginning slides the
+whole group forward together rather than stacking its first notes on top of each other.
+
+Each paste is its own undo step, even one made immediately after an edit.
+
+There are deliberately no keyboard shortcuts yet. A menu shortcut outranks text fields on macOS, and
+this app still has an unexplained keyboard bug open, so the shortcuts wait until that is understood
+rather than shipping on top of it.
+
+## 2026-08-09 — Drag a box around notes in the piano roll
+
+Selecting several notes meant clicking each one with shift held. There was no way to sweep a box
+over a phrase and grab it, the way you already can over clips in the arrange view.
+
+Now you can. Press on empty grid and drag: a band follows the pointer and selects every note it
+touches, additively if you hold shift or command. A plain click still deselects, exactly as before —
+the band only arms once the pointer has actually travelled, so nothing you already do has changed.
+
+Dragging the selection also got fixed, and it needed to. Moving several notes at once used to snap
+each note to the grid independently, so notes sitting slightly off the beat relative to each other
+were quietly welded onto the same line — a groove flattened by moving it. The group now translates
+rigidly: a phrase keeps its internal timing wherever you drop it. This was always broken; it was
+just hard to notice while selections were built one click at a time.
+
+## 2026-08-09 — Imported MIDI files keep their instruments, and drums get a step grid
+
+Load a multi-part MIDI file and every track used to arrive on the same default poly synth, all
+sharing the song's title as their name. A 13-part orchestration imported as thirteen tracks called
+"Bohemian Rhapsody", none of which sounded like what the file said they were.
+
+The file had been read correctly the whole time — the piano, the fingered bass, the string ensemble,
+the drum kit, both distortion guitars were all sitting in the import report. They were just thrown
+away before they reached your tracks. Instrument assignment was switched off by default, from a time
+when nobody had measured what turning it on would cost, and the code that gives two parts distinct
+names could never fire on the single-track file format that needs it most.
+
+Both are fixed. An imported file now arrives with the General MIDI instrument each part asked for,
+and tracks are named for what they play — "Alto Sax", "Timpani", "Standard Drum Kit", and where two
+parts share an instrument, "Distortion Guitar (ch 9)" and "Distortion Guitar (ch 12)". Loading all
+thirteen instruments takes 161 ms. Pass `instruments: "none"` if you want the old behaviour.
+
+Separately, the clip editor has a second mode. Select a clip on a drum track and it opens as a step
+grid instead of a piano roll: one row per drum, named for the drum ("Closed Hi Hat", "Acoustic
+Snare"), one column per step. Click a box to place a hit, click it again to remove it — the same
+gesture for both, so it is also a way to delete notes that does not depend on the keyboard. Any MIDI
+clip can be switched to it by hand. It edits the same notes the piano roll does, through the same
+undo history.
+
 ## 2026-08-05 — A typo in a song-generation request no longer costs you a generation
 
 The three tools that generate things by calling an outside service — lyrics, a full song, an
@@ -1693,6 +4077,29 @@ nothing.
 **Two of the four were already failing before anything was touched.** That is the
 finding, and it is why the probe was worth doing:
 
+- **m23-fl / m23-fj — three tests that always said "pass" now say what they actually do, and a soak test can no longer pass without running.** Three of our checks are really screenshot tools: they capture frames for a human to look at and assert nothing. Their own notes said so, but only in prose, so an automated run counted them as passing tests indistinguishable from ones that checked something. They now declare it in a form the tooling reads — still succeeding, but recorded separately and required to state a reason. **Deliberately, no assertions were invented for them: the real check is someone's eyes.** Separately, a soak test that repeats an operation could be told to repeat it zero times, whereupon it printed PASS — measured directly, not theorised. It now refuses, and a sweep confirmed only two tests in the whole suite have a setting like that, both now handled.
+- **m23-fk — the delete shortcuts now respond to the key you actually press, and fixing it nearly introduced something worse.** Three delete shortcuts were listening for the wrong character and had never fired. The obvious one-line fix turned out to be destructive: with the shortcuts re-armed, *holding* Delete deleted the selected notes and then, on the very next auto-repeat, deleted the clip containing them — because once the notes were gone the same keystroke was interpreted as targeting the clip. The repeat protection that should have caught this had been bypassed. The shipped fix declares explicitly that these shortcuts respond only to a key going down, never to a repeat, which was measured to hold the clip safe. **Also fixed: Delete now works on automation points in the Mix console** — three of the four links are measured, and the last one needs a real click, so it wants a human check. Two behaviour changes are flagged for you rather than decided quietly: Shift/Option/Command+Delete now delete where they previously did nothing, and the protection that stops Delete eating a clip while you're renaming something is now the only thing standing there.
+- **m23-bn — a test that had been failing since the day it was written now passes.** One check sent a parameter by the wrong name, which the app correctly rejected, so that check had never once succeeded. Rather than fix it, previous notes recorded it as a known harmless failure — which is how a documented artifact outlives the bug it describes. Fixed and verified: the gate is now 20 for 20.
+- **m23-fi — the Delete key's real explanation turned out to be a single character, and it wasn't what we'd said.** We had blamed keyboard focus. Measuring it directly showed focus was fine all along: the shortcut constant SwiftUI calls "delete" is actually the *backspace* character, while the Delete key on your keyboard sends a different one. They could never match, so three delete shortcuts had never once fired — no amount of focus work would have helped. The proof is that arrow-key shortcuts sitting on the very same view, with the very same focus, work perfectly. **One genuine bug surfaced that nobody had reported: in the Mix console, pressing Delete on a selected master-volume automation point does nothing** — the only way to remove one is to double-click it. That has never worked, and it's the one case the current Delete fix structurally cannot reach.
+- **m23-fg / m23-fl — a suspected problem in our test suite turned out to be 111 false alarms and one real one.** A count of 116 suspicious exit points had been filed as a second class of tests-that-pass-without-testing. Classifying every one of them: 111 are ordinary failure exits, which fail in the *safe* direction. One is real — a test that prints "PASS" after running zero iterations when a setting is turned down to zero. And three others report success unconditionally: they take screenshots and exit, and nothing anywhere — no comparison step, no stored reference, no script — ever looks at the images.
+- **m23-di-2a — you can now import someone else's voice model.** Point the app at an RVC `.pth` file (and its companion index, if you have one) and it becomes a real voice in your library, named and listed. The sidecar was always built to accept a voice folder dropped in from outside — its own code comment says so — but nothing in the app could put one there. Imports land in your Application Support folder, never inside the read-only engine checkout. **An imported model arrives honestly marked "needs prep": it can't be used for conversion until it's converted to the engine's format, and that step is a separate question waiting on you.** Verified end to end against a running app, including that the files genuinely land on disk rather than the command merely claiming success.
+- **m23-fc — we nearly built a feature that the app is deliberately incapable of hosting.** Live voice conversion while you sing was on the roadmap as a large-but-doable job, and a first look suggested most of it already existed upstream. Measuring it changed the answer twice. The existing code turned out never to have run at all — it produces exactly silence, for a specific and provable reason. And even a perfect implementation would not have helped: converting a block of audio costs about 26 ms **no matter how small the block is**, so a round trip lands near 120–185 ms where singers need under 15, and that floor stays above the target even at an impossible zero processing cost. The decisive point came from our own code: DAW Pro has no path from a live input back to the speakers, and a comment written long ago says that's deliberate. So the feature was never a latency problem. **Recorded rather than attempted, with the measurements, so nobody re-opens it on optimism.**
+- **m23-er / m23-fh — two pieces of our own record corrected.** A survey of which settings each debug command can quietly change had been done by asking which commands *mention* the setting by name; rebuilt around what the code actually calls, it found two more commands than the previous list named. And nine test files carried a claim that a certain kind of keyboard test was impossible in our harness — it never was; the failure they were describing was the real Delete bug. Seven were corrected and **two were left alone, because they had stated it accurately all along.**
+- **m23-fa-1 — we found a test that passes by not testing anything, and it wasn't hypothetical.** An audit had established that most of our automated checks would report success if they somehow ran zero checks, but the expectation on record was that this was a theoretical hole nobody would ever fall into. The first real measurement disproved that: one existing check, entirely unmodified, reports **"PASS: 0/0 cycles audible"** and exits successfully when a documented setting is turned down to zero. It has presumably been doing that whenever anyone used that setting. **The fix is a single shared piece of code that every check will report its result through** — it refuses to call a run successful if nothing was actually checked, and distinguishes "nothing ran" from "something failed" so the two can't be confused. Three checks are migrated onto it as a pilot. **The proof that matters isn't that they still pass — it's that they now go red when their assertions are removed, while the old code stays green under exactly the same conditions.** A survey tool went with it, so migrating the remaining sixty-one is measurable rather than eyeballed. It also found a flaw in our own tally of the problem, and a third way the same failure can happen that nobody had named.
+- **m23-cf — the Delete key does nothing, and the reason turned out to be that nothing was listening.** You reported that selecting a note or a clip and pressing Delete did nothing, while Delete inside a rename field correctly deleted text. That third result was the one that cracked it: the key was arriving at the app perfectly well, so the problem was never delivery. A probe over twelve consecutive selections settled which of the two remaining explanations it was — the delete handler was entered **zero times out of twelve** with the new routing disabled and **twelve out of twelve** with it live. It was never being asked, rather than being asked and declining. The underlying cause is that the arrange surface holds no keyboard focus at all for the modern key-handling path to attach to. **The fix takes the same route the space bar has always used** — a window-level key monitor that doesn't depend on that focus, feeding the existing, unchanged decision about what Delete should remove. An earlier attempt this week made all three delete handlers agree with each other, which was a real fix for a real inconsistency but could not have helped here: agreement between handlers is worth nothing when none of them is ever consulted. **Held-back note: this is verified by synthesized key events against a running app and by 27 checks that were each proven to go red when their guard is removed — but not yet by a human finger on a key.**
+- **m23-ez — we were about to price a piece of work as an engine migration, and it turned out we already run that engine.** A note in the roadmap held some voice-conversion work out of scope on the grounds that the Apple-MLX voice-conversion project we'd want to build on was *a different backend* from the one our voice sidecar runs — a swap, with all the risk that implies. Reading our own installer settled it in three commands: it clones that exact project, at a pinned commit, and the sidecar reports it by name as its own engine. The confusion had a real source — the engine comes from one project and the neural assets it loads come from a different one, so the two names sit side by side in the same file. **Consequence: the live-conversion and voice-blending spikes are work on the stack we already run, not a migration, which is a materially lower cost than recorded.** No code changed; the whole finding was read-only.
+- **m23-ee — the audit of our own test suite is finished, after about ten rounds.** The question it started from: how many of our automated checks can pass without actually checking anything? All 71 gate scripts were swept by a purpose-built tool, all 130 candidate sites were judged individually and in writing, and the tool itself was corrected four times along the way — including once where it had been quietly declaring a check "safe" on the strength of a stale measurement. Real faults found and fixed across the arc: nine, plus one in the auditing tool. **The two lessons are a matched pair and both were expensive:** a checker that can only see one function at a time mostly flags *careful* code, so a noisy report meant the tool was weak rather than the tests sloppy — twelve of fifteen flags in the final round were false alarms. And a checker that recognises only one way of writing a mistake will miss the same mistake written any other way: it found two instances of a problem that turned out to affect 57 of 71 files. Five sites remain flagged and all five are deliberate — three are the tool honestly reporting what it cannot see, which is how it was designed.
+- **m23-ee-2c-3 — went to fix two lines, found that 4 out of 5 of our automated checks can report success without having checked anything.** The two lines were real: a gate that recorded no results exited with a success code, because "every item in an empty list passes" is true. Both are fixed, and the fix provably changes the outcome of exactly one situation — the empty one — so no existing result moves. **Then the same question asked of the whole suite: 57 of 71 gates have the same hole**, written eight different ways (counting failures, comparing a pass count to a total, and so on) — every one of which reads as "success" when nothing ran. That is now its own tracked item, with a note against fixing 57 files by hand. **The uncomfortable part is the detection rate:** the tool built to find this class found 2 of 58, because it only recognised one of the nine ways of writing it — and the 56 it missed are invisible precisely because they are written the idiomatic way.
+- **m23-ck — the compressor gets a Mix knob, so parallel compression stops costing you a duplicate track.** New-York compression — blending the squashed signal back under the untouched one — is a daily move, and until now doing it here meant duplicating the track and balancing a send. There is now a Mix control on the built-in compressor: fully wet by default, so **every existing project renders bit-for-bit identically**, which was tested rather than assumed. At Mix 0 the compressor is a provable bypass. One note for later: the gain-reduction meter still shows movement at Mix 0, because it reports what the detector measured rather than what you hear — that is how other DAWs behave, but say the word and it can follow the blend instead. **(Follow-up, m23-ev: the AI-facing description of the compressor now names the Mix control and explains it, so an agent asked to set up parallel compression can discover it — previously the knob existed but nothing told an agent it was there.)**
+- **m23-di-3 — we compared ourselves to VocalNet before building anything, and it changed the plan.** You asked for a plugin like VocalNet for RVC models. Most of it turned out to already ship here, and the obvious next step looked like adding model import. The comparison says otherwise: **import is real but it is the cheapest of three gaps, not the only one.** VocalNet also does live real-time conversion — the thing its relaunch was built around, and arguably what you actually asked for — and blending several voices together. Neither exists here. The report separates what was confirmed from a primary source, what rests on a single user's report, and what simply could not be checked, and it throws out two claims that turned up only in search-engine summaries with no traceable source.
+- **m23-eu — the test-auditing tool was quietly declaring some checks "safe" on the strength of a measurement taken 130 lines earlier, of a value that had since been overwritten ten times.** Fixed, and the count of unexplained checks correctly went UP rather than down. Two more of the same family are now filed rather than silently carried.
+- **m23-ca — the DAW now keeps a record of what AI agents actually did to your project.** You asked for this after a session where an agent rebalanced your mix and the only account of it was the agent's own written summary — which claimed the master fader had been at 1.0097 before it started, a statement about the past that nothing could confirm or deny. Every tool call an agent makes is now written to an append-only log in `~/Library/Logs/DAWPro/mcp/`: what was called, what was passed, **what came back**, how long it took, and — for anything that changes the project — **a snapshot of the relevant state beforehand**, which is the part that answers the master-fader question. API keys are stripped by two independent rules, and anything large is reduced to a fingerprint rather than dumped in. **Honest about its own limits:** roughly 57% of changing operations capture a genuinely useful before-value; the rest record that they could not, and why, rather than leaving a blank that reads like nothing happened. Logging can never slow down, break, or interfere with a call — if it fails, it gets out of the way.
+- **m23-ee-2c-2b — taught the checker four more patterns it had been misreading, and the useful part is the one it refused to agree with me about.** The tool that has been auditing our tests kept flagging checks that were actually fine, because it could only look at one function at a time. Four of those blind spots are now closed, and the list of unexplained checks drops from ten to six. **The fifth was my mistake, not the tool's:** I had read one flagged check, satisfied myself it was properly defended, and then assumed the tool could be taught to see the same thing. It cannot — the defence lives inside a helper function, and reading across function boundaries is precisely what this tool deliberately does not do. Being able to see that something is fine and being able to prove it mechanically are different problems, and I had quietly treated them as one. **It also found a genuine fault in the tool that predates this work, and left it alone rather than fixing it on the way past:** in one test file the checker credits a check as "defended" by pointing at a measurement taken 130 lines earlier, of a value that has since been overwritten ten times. That is the dangerous direction of error — a false alarm gets investigated and dismissed, while a wrongly-cleared check is one nobody ever looks at again. Filed as its own item, and fixing it will make the number go UP, not down.
+- **m23-ee-2c-2a — the one real one, and it was broken in two places rather than one.** After clearing twelve false alarms, this is the single genuine case in the batch. When you drag a MIDI file onto the arrangement, a check confirms every imported clip landed on the beat you dropped it at. It could report success in two different situations where it had checked nothing: if the import created no tracks at all, and — separately — if it created the tracks but put no clips on them. Either way the check found no beats to compare, and finding no problems in an empty list reads as "no problems". The audit tool only knew about the first of those two; fixing that alone would have looked complete while leaving the second open. Both are now pinned to what a correct import actually produces (two tracks, at least one clip each), cross-checked against a *second*, independent reading of the project rather than against the importer's own report of what it did. Proven both directions: the check now rejects all four broken situations, the old one accepted all four, and — the control that matters — a genuine wrong-beat error is still caught, so the fix hardened the check rather than watering it down. The gate runs 18/18 before and after.
+- **m23-ee-2c-1 — we went to fix seven flagged checks and found nothing wrong with any of them.** The scanner that has been driving this audit reports a list of checks that *could* pass without testing anything. Seven of them were queued for repair. Reading the actual code, all seven turned out to be defended already — five cannot encounter the problem at all (the thing they inspect is built by a loop that always produces the same fixed number of items), and two are guarded by a neighbouring check that goes red first, so the situation could never pass unnoticed. In one case the person who wrote the check had anticipated exactly this and said so in the check's own title: *"asked first… otherwise every check below would be vacuous."* The scanner flagged the very line that sentence defends. Nothing in the gates was changed; the scanner was fixed instead, and it now understands three of the four patterns it was missing. The fourth needs it to read across function boundaries, which it deliberately does not attempt — instead it now says "a human should read this one function" rather than guessing. **Continuing through the rest of the list the same way: 12 of the 15 outstanding items are false alarms, roughly 2–3 are real, and the full reasoning per item is written down in `docs/research/2026-08-09-vacuity-tail-adjudication.md`.** The useful lesson is uncomfortable and worth keeping: a checker that can only see one function at a time will mostly flag *careful* code, because careful code puts its defences in the setup, one line up, or one function over. A noisy report meant the tool was weak, not that the tests were. **Now landed and re-checked against the finished tool: the list of unexplained checks drops from 16 to 10, and the three cases deliberately picked as "must NOT be cleared" are all still flagged.** One detail earned its own warning — the total read the same before and after the final correction to the tool, but it was not the same ten; only comparing the two lists item by item showed that anything had moved.
+- **m23-ee-2b — the last three `?? []` vacuity sites hardened, and one of them had been failing for three weeks over its own fixture name** (`m17b:125→133`, `m23a2:360→359`, `m23k4a:176→181`). The filed plan offered two fixes for `m17b` as alternatives — pin the count, or pin the field's presence — and said to decide by reading the gate. Reading it answered *both*: the gate really does perform undoable edits before that point, and the reply really must carry the list. The separate discovery is the interesting one. That check asks "did zooming add anything to the undo history?" by searching the history for the words *zoom*, *ppb* or *row*. The track it creates for itself was named **`ZoomOrch`**, so the entry `Add Track 'ZoomOrch'` matched its own search and the check failed — every run, for the life of the gate, while the app was behaving correctly the whole time. It had been diagnosed correctly weeks ago and then written into the file's header as an accepted quirk rather than fixed, which cost one word to put right (`OrchA`). The same leg also printed nothing at all when it failed, so there was no way to see any of this without adding a diagnostic first. Both are now fixed: the check is green and a failure would say why. Verified in both directions — all three new conditions reject all four broken-response shapes, all three old ones accepted all four, and live runs give 19/1 (the single remaining failure is a separate known bug), 31/0 and 45/0.
+- **m23-ee-2a — the three `devicesOf` vacuity sites hardened** (`m20d:262`, `m20e:1251`, `m23bp:846`). Each read `r.result?.devices ?? []` off `output.setDevice` and asserted an ABSENCE ("pin released"), so a renamed or missing `devices` field made the leg pass having checked nothing. Pinned on the response (`length >= 1`), not on the hardware. Verified both ways: the old condition passes on all four degenerate response shapes while the new one rejects them, and a live staging round-trip confirms the pin passes on a healthy run (3 devices, none selected, system default unmoved).
+- **m23-ee-1 — the `every()`-vacuity census.** `[].every(f)` is `true`, so an assertion over a runtime-derived collection passes vacuously when that collection is empty. Swept all 71 non-harness staging gates with an acorn AST (`scripts/every-vacuity-census.mjs`) rather than a grep, because the filed scope counted comment prose: **130 code sites, 108 cleared, 21 actionable candidates across 16 gates**, tabulated per-site in `docs/research/2026-08-09-every-vacuity-census.md`. Polarity halves the axis — `some(…)` and `!every(…)` redden on empty and need no guard. The instrument was licensed against four known answers before any new result was believed; three failed first and each taught it a missing rule.
 - One check **could never have reported a failure at all.** It always signalled
   success when it finished, no matter how many of its own tests had failed. It
   has been quietly failing two tests for some time while reporting a clean pass

@@ -6,7 +6,14 @@ import Foundation
 /// Built-in soft-knee downward compressor (M4 iii). Topology (the classic
 /// log-domain feed-forward design):
 ///   stereo-linked peak detector → log-domain gain computer (quadratic soft
-///   knee) → one-pole attack/release smoothing ON THE GAIN SIGNAL → makeup.
+///   knee) → one-pole attack/release smoothing ON THE GAIN SIGNAL → makeup
+///   → parallel dry/wet blend (m23-ck).
+///
+/// The blend is `out = mix·wet + (1−mix)·dry` with the dry term the unit's own
+/// MAIN input at the same sample index — the compressor has no lookahead and
+/// reports `latencySamples == 0`, so no delay compensation is needed and the
+/// blend cannot comb. `mix` defaults to 1 (fully wet), which collapses the
+/// blend back to the original single multiply, bit-for-bit.
 ///
 /// The detector is an instant-attack peak follower with a short FIXED 5 ms
 /// decay (not the raw rectified sample): it bridges the rectifier's
@@ -49,6 +56,11 @@ final class CompressorEffect: KeyableEffectRendering, GainReductionReporting,
     private var slope = 1.0 / 4.0 - 1.0  // (1/ratio − 1) ≤ 0, dB of reduction per dB over
     private var kneeDb = 6.0
     private var makeupDb = 0.0
+    /// Parallel-compression blend (m23-ck), pre-split so the inner loop does
+    /// one multiply-add and no branch: `wet = mix`, `dry = 1 − mix`. Defaults
+    /// are fully wet (1, 0) — the pre-m23-ck compressor exactly.
+    private var mixWet = 1.0
+    private var mixDry = 0.0
     private var attackCoeff = 0.0   // per-sample one-pole feedback coefficient
     private var releaseCoeff = 0.0
     /// Smoothed gain reduction in dB (≤ 0; 0 = no reduction).
@@ -164,6 +176,8 @@ final class CompressorEffect: KeyableEffectRendering, GainReductionReporting,
         slope = 1.0 / p.ratio - 1.0
         kneeDb = p.kneeDb
         makeupDb = p.makeupDb
+        mixWet = p.mix
+        mixDry = 1.0 - p.mix
         // One-pole time constants: coeff = e^(−1/(ms·rate)); the
         // envelope covers 63.2% of a step in exactly attack/release ms.
         attackCoeff = exp(-1.0 / (p.attackMs * 0.001 * sampleRate))
@@ -172,11 +186,13 @@ final class CompressorEffect: KeyableEffectRendering, GainReductionReporting,
 
     /// RENDER-THREAD automation store (M4 vii-c). Slot order =
     /// `EffectParamSpec.specs(for: .compressor)`: 0 thresholdDb, 1 ratio,
-    /// 2 attackMs, 3 releaseMs, 4 kneeDb, 5 makeupDb. Pokes a preallocated
-    /// params copy and re-derives — no allocation, no locks. The envelope
-    /// smoother naturally declicks the quantum steps.
+    /// 2 attackMs, 3 releaseMs, 4 kneeDb, 5 makeupDb, 6 mix. Pokes a
+    /// preallocated params copy and re-derives — no allocation, no locks. The
+    /// envelope smoother naturally declicks the quantum steps. Slot 6 (m23-ck)
+    /// IS accepted: the blend is two multiplies against state that already
+    /// exists, so a lane can ride it without allocating anything.
     func storeAutomatedParam(slot: Int, value: Double) {
-        guard value.isFinite, (0...5).contains(slot) else { return }
+        guard value.isFinite, (0...6).contains(slot) else { return }
         adoptPendingParams()
         overlay.beginStore()
         switch slot {
@@ -185,7 +201,8 @@ final class CompressorEffect: KeyableEffectRendering, GainReductionReporting,
         case 2: overlay.effective.attackMs = value
         case 3: overlay.effective.releaseMs = value
         case 4: overlay.effective.kneeDb = value
-        default: overlay.effective.makeupDb = value
+        case 5: overlay.effective.makeupDb = value
+        default: overlay.effective.mix = value
         }
         deriveRenderParams(overlay.effective)
     }
@@ -282,8 +299,19 @@ final class CompressorEffect: KeyableEffectRendering, GainReductionReporting,
             // detector's doing), −20 dB/s linear-in-dB release. One max +
             // one subtract per sample; publish happens once after the loop.
             grHeld = max(-env, grHeld - grDecay)
-            // Makeup applied last.
-            let gain = Float(pow(10.0, (env + makeupDb) / 20.0))
+            // Makeup applied last, then the m23-ck parallel blend folded into
+            // the SAME per-sample scalar:
+            //     out = mix·(x·wetGain) + (1−mix)·x = x·(mix·wetGain + 1−mix)
+            // so parallel compression costs one multiply-add per sample, no
+            // dry buffer, no branch, no extra state — and the plain and keyed
+            // paths cannot diverge because there is only one application site.
+            // At the default mix (wet 1, dry 0) this is `1·g + 0` on a strictly
+            // positive g, which is `g` bit-for-bit: the pre-m23-ck expression.
+            // NOTE the loop is NOT skipped at mix 0 (the saturator's trick):
+            // this unit is STATEFUL — the detector, the gain smoother and the
+            // GR meter must keep running or an automated mix 0→1 would snap
+            // from stale state.
+            let gain = Float(mixWet * pow(10.0, (env + makeupDb) / 20.0) + mixDry)
             for channel in 0..<channelCount {
                 channelData[channel]![frame] *= gain
             }

@@ -41,12 +41,34 @@ public enum MIDITempoPolicy: String, Sendable, Codable, Equatable, CaseIterable 
 
 /// Whether to assign instruments from the file's program changes (design D3).
 ///
-/// The default is `none` in k3 and that is a deliberate, evidence-based retreat:
-/// nothing in the tree assigns sound-bank instruments in bulk, no per-prepare
-/// cost is recorded anywhere, and AU preparation has historically cost minutes
-/// on the main actor. k3 computes and REPORTS the whole GM mapping (all of the
-/// value, none of the risk); k4 — which owns the UI and can show progress —
-/// measures it and flips the default.
+/// **The default is `gm`, and that is now MEASURED rather than assumed.** k3 shipped
+/// `none` as a deliberate, evidence-based retreat — nothing in the tree assigned
+/// sound-bank instruments in bulk, no per-prepare cost was recorded anywhere, and
+/// AU preparation has historically cost minutes on the main actor — and left the
+/// flip to "k4, which owns the UI and can show progress". k4 shipped as k4a
+/// (export) + k4b (the drop path) and never measured it, so every human import
+/// silently landed on the default poly synth: the user's own report, on a
+/// 13-channel format-0 file that names a program on every channel.
+///
+/// THE MEASUREMENT (m23-k5, a real app on staging, the user's own 49 KB /
+/// 13-part / 5925-note file, COLD — fresh launch, that import first):
+///   * the import command itself: **26.3 ms** with `gm`, **26.0 ms** with `none`.
+///     The mapping is free; `gmInstrument` is a struct literal per part.
+///   * every one of the 13 sound banks reporting `ready` in
+///     `engine.auPrepareStats`: **161 ms** after the call started (140-143 ms
+///     warm). The banks really load — 13 × `ready`, not a `missing`
+///     short-circuit.
+///   * main-actor responsiveness across the prepare window: worst poll
+///     round-trip **82 ms under `gm` vs 93 ms under the `none` control**, i.e.
+///     inside ambient noise and not attributable to the banks at all.
+/// `syncAudioUnitInstruments` spawns ONE ASYNC prepare per hosted track, so the
+/// cost never lands inside the caller's edit; 161 ms is an order of magnitude
+/// under the interactive budget, and the 32-track `maxImportedTracks` ceiling
+/// keeps the worst case in the same range.
+///
+/// `none` stays available as an explicit opt-out for a caller who wants the
+/// tracks left on the default instrument. The program each part asks for is
+/// REPORTED either way — that has always been true and is unchanged.
 public enum MIDIImportInstruments: String, Sendable, Codable, Equatable, CaseIterable {
     case none
     case gm
@@ -77,7 +99,7 @@ public struct MIDIImportOptions: Sendable, Equatable {
     public init(atBeat: Double = 0,
                 contentOffsetBeats: Double = 0,
                 tempoPolicy: MIDITempoPolicy = .auto,
-                instruments: MIDIImportInstruments = .none,
+                instruments: MIDIImportInstruments = .gm,
                 parts: [Int]? = nil,
                 force: Bool = false) {
         self.atBeat = max(0, atBeat)
@@ -428,6 +450,13 @@ public struct MIDIImportReport: Codable, Sendable, Equatable {
     /// the same thing in a dry run and a real one.
     public struct Part: Codable, Sendable, Equatable {
         public var index: Int
+        /// The part's name AS THE FILE SPELLS IT (the chunk's `FF 03`, or the
+        /// synthesized "MIDI Track N" when the chunk carries none). LITERAL, and
+        /// deliberately so: this mapper's posture is a faithful readout of the
+        /// bytes, and an agent comparing the report against the file it just
+        /// wrote must see what the file says. The name the TRACK actually got is
+        /// `trackName` — the two differ whenever the file's own name does not
+        /// distinguish the parts (m23-k5).
         public var name: String
         public var sourceTrackIndex: Int
         /// 0-based MIDI channel (the raw wire value, R1); nil for a part that
@@ -441,6 +470,16 @@ public struct MIDIImportReport: Codable, Sendable, Equatable {
         public var programChange: Int?
         /// The GM name of that program, or the drum kit for channel 10.
         public var programName: String?
+        /// The name the DAW track (and its clip) actually got — `name` when the
+        /// file's own name distinguishes the parts, otherwise the resolved
+        /// fallback (`SMFProjectMapper.resolveTrackNames`). **nil for a part that
+        /// was not imported**, because no track was named for it.
+        ///
+        /// ADDITIVE (m23-k5): `name` keeps its literal meaning, so nothing that
+        /// already reads this report changes under it. An agent that wants to
+        /// find the track it just made should read THIS field — after a format-0
+        /// import, `name` is the song title thirteen times over.
+        public var trackName: String?
         public var imported: Bool
         public var skipReason: String?
         /// nil on a dry run (nothing was created).
@@ -452,7 +491,7 @@ public struct MIDIImportReport: Codable, Sendable, Equatable {
         /// so an agent can feed a reported id straight back into `clip.importMIDI`.
         private enum CodingKeys: String, CodingKey {
             case index, name, sourceTrackIndex, channel, noteCount, controllerLanes
-            case programChange, programName, imported, skipReason
+            case programChange, programName, trackName, imported, skipReason
             case trackID = "trackId"
             case clipID = "clipId"
         }
@@ -460,6 +499,7 @@ public struct MIDIImportReport: Codable, Sendable, Equatable {
         public init(index: Int, name: String, sourceTrackIndex: Int, channel: Int?,
                     noteCount: Int, controllerLanes: [String],
                     programChange: Int? = nil, programName: String? = nil,
+                    trackName: String? = nil,
                     imported: Bool, skipReason: String? = nil,
                     trackID: UUID? = nil, clipID: UUID? = nil) {
             self.index = index
@@ -470,6 +510,7 @@ public struct MIDIImportReport: Codable, Sendable, Equatable {
             self.controllerLanes = controllerLanes
             self.programChange = programChange
             self.programName = programName
+            self.trackName = trackName
             self.imported = imported
             self.skipReason = skipReason
             self.trackID = trackID
@@ -840,6 +881,13 @@ public enum SMFProjectMapper {
         }
         let selection: Set<Int>? = options.parts.map(Set.init)
 
+        // ---- 4b. Resolve the DAW track names (m23-k5), BEFORE the build loop:
+        //          the rule is about the imported SET (does this name
+        //          distinguish?), so it cannot be decided one part at a time.
+        //          The report's `name` is untouched — it stays the file's literal
+        //          spelling — and `trackName` carries the answer.
+        let trackNames = resolveTrackNames(parts, selection: selection)
+
         // ---- 5. Build one track per importable part.
         var planned: [MIDIImportPlan.PlannedTrack] = []
         var reportParts: [MIDIImportReport.Part] = []
@@ -863,7 +911,15 @@ public enum SMFProjectMapper {
             // D4: the discriminator is CONTENT, not `channels.isEmpty`. They
             // coincide today, but a CC-only part IS content and IS imported —
             // `Clip` supports a CC-only MIDI clip as `notes: []` + lanes.
-            guard !part.notes.isEmpty || !part.controllers.isEmpty else {
+            //
+            // ⚠️ BOTH guards below read the SAME two atoms `isImportable` is
+            // built from (`part.hasContent`, `isSelected`), and the name pre-pass
+            // calls `isImportable`. That is deliberate: a second hand-written
+            // copy of this condition in the pre-pass would name parts the loop
+            // then skips (or skip parts it named) the moment either drifts — the
+            // m23-x → m23-al law that a guard must mirror the condition the
+            // shielded surface itself applies.
+            guard part.hasContent else {
                 reportParts.append(MIDIImportReport.Part(
                     index: part.index, name: part.name,
                     sourceTrackIndex: part.sourceTrackIndex, channel: part.channel,
@@ -872,7 +928,7 @@ public enum SMFProjectMapper {
                     imported: false, skipReason: "no notes or controller data"))
                 continue
             }
-            guard selection?.contains(part.index) ?? true else {
+            guard isSelected(part, selection: selection) else {
                 reportParts.append(MIDIImportReport.Part(
                     index: part.index, name: part.name,
                     sourceTrackIndex: part.sourceTrackIndex, channel: part.channel,
@@ -938,9 +994,13 @@ public enum SMFProjectMapper {
                     .flatMap(\.points).filter { $0.beat >= clipLength }.count
             }
 
-            let clip = Clip(name: part.name, startBeat: options.atBeat, lengthBeats: length,
+            // THE ONE NAMING SITE (m23-k5). `enumerateParts` keeps reporting the
+            // file's literal name; what the TRACK is called is decided here,
+            // where the whole imported set is known.
+            let trackName = trackNames[part.index] ?? part.name
+            let clip = Clip(name: trackName, startBeat: options.atBeat, lengthBeats: length,
                             notes: notes, controllerLanes: laneOutcome.lanes)
-            var track = Track(name: part.name, kind: .instrument)
+            var track = Track(name: trackName, kind: .instrument)
             // `kind: .instrument` is mandatory — MIDI clips live only on
             // instrument tracks. NOTE: this copies `importGeneration`'s
             // STRUCTURE but NOT its `isAIGenerated = true`: a MIDI file import
@@ -963,6 +1023,7 @@ public enum SMFProjectMapper {
                 noteCount: notes.count,
                 controllerLanes: laneOutcome.lanes.map(\.type.wireKey),
                 programChange: part.programChange, programName: programName,
+                trackName: trackName,
                 imported: true, trackID: track.id, clipID: clip.id))
         }
 
@@ -1116,6 +1177,25 @@ public enum SMFProjectMapper {
         var programName: String?
         var droppedProgramChangeCount: Int
         var polyAftertouchEventCount: Int
+
+        /// D4's discriminator, spelled ONCE: a part becomes a track iff it has
+        /// content. A CC-only part IS content (`Clip` supports `notes: []` plus
+        /// lanes), which is why this is not `channels.isEmpty`.
+        var hasContent: Bool { !notes.isEmpty || !controllers.isEmpty }
+    }
+
+    /// The `parts` selection test, spelled ONCE (see `hasContent`). nil selects
+    /// everything; an EXPLICIT empty array selects nothing.
+    static func isSelected(_ part: Part, selection: Set<Int>?) -> Bool {
+        selection?.contains(part.index) ?? true
+    }
+
+    /// Whether a part becomes a DAW track — the CONJUNCTION of the two guards
+    /// `map`'s build loop applies, and the definition of "the imported set" that
+    /// `resolveTrackNames` reasons about. One home, so the name pre-pass and the
+    /// loop cannot disagree about which parts they are talking about.
+    static func isImportable(_ part: Part, selection: Set<Int>?) -> Bool {
+        part.hasContent && isSelected(part, selection: selection)
     }
 
     static func enumerateParts(_ file: StandardMIDIFile) -> [Part] {
@@ -1173,6 +1253,92 @@ public enum SMFProjectMapper {
             }
         }
         return parts
+    }
+
+    // MARK: - Track names (m23-k5)
+
+    /// The DAW track name for every IMPORTED part, keyed by part index. Parts
+    /// that are not imported are absent (nothing was named for them).
+    ///
+    /// THE RULE, in the order it is applied per part:
+    ///
+    /// 1. **The file's own name, when it DISTINGUISHES the part** — i.e. no other
+    ///    imported part carries the same literal name. A well-authored format-1
+    ///    file naming its chunks "Lead Vox" / "Bass" keeps those names, because
+    ///    they are better than any GM program name we could substitute.
+    /// 2. **The GM program name** otherwise ("Acoustic Grand Piano", "Standard
+    ///    Drum Kit"), when THAT distinguishes the part among the parts that got
+    ///    this far.
+    /// 3. **The program name plus the 1-based channel** when even that collides —
+    ///    a file with two `Distortion Guitar` parts gets "Distortion Guitar
+    ///    (ch 9)" and "Distortion Guitar (ch 12)".
+    /// 4. **The file's name plus the 1-based channel** when the part names no
+    ///    program at all. For a nameless chunk that is the existing "MIDI Track N
+    ///    (ch M)" shape verbatim; for a named one it keeps the file's name rather
+    ///    than throwing it away, which is the same suffixing `enumerateParts`
+    ///    already does for a multi-channel format-1 chunk.
+    ///
+    /// WHY THIS IS NEEDED AT ALL — and why `enumerateParts`' own `split` suffix
+    /// cannot do it: `StandardMIDIFileReader.splitByChannel` carves a format-0
+    /// chunk into one `SMFTrack` PER CHANNEL, each with `channels: [one]` and the
+    /// SAME `raw.name`. So `source.channels.count > 1` is false for every
+    /// format-0 part — the exact case that needs disambiguation most — and a
+    /// 13-channel file imported as the song title, thirteen times (the user's
+    /// report). The set-level question "does this name distinguish?" is only
+    /// answerable once, over all the parts, which is why the rule lives here and
+    /// not in the per-chunk enumeration.
+    ///
+    /// DETERMINISTIC: dictionaries are used only for COUNTING (no iteration over
+    /// their unordered storage decides anything); every decision is made in
+    /// `parts` order.
+    ///
+    /// One residual collision is accepted rather than papered over: two parts
+    /// that share a name AND a program AND a channel — possible only across two
+    /// format-1 chunks — end up with the same track name. Duplicate track names
+    /// are legal in this model, and an untested fourth tie-break is worse than a
+    /// rare duplicate.
+    static func resolveTrackNames(_ parts: [Part], selection: Set<Int>?) -> [Int: String] {
+        let imported = parts.filter { isImportable($0, selection: selection) }
+
+        // A blank/whitespace-only `FF 03` payload is a name that distinguishes
+        // nothing, so it never wins step 1 and never becomes a track name.
+        func fileGiven(_ part: Part) -> String? {
+            part.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : part.name
+        }
+        // 1-based for display, 0-based in storage — the `GMProgramCatalog` R1 law,
+        // and the same spelling `enumerateParts` uses.
+        func withChannel(_ base: String, _ channel: Int?) -> String {
+            guard let channel else { return base }
+            return "\(base) (ch \(channel + 1))"
+        }
+
+        var literalCounts: [String: Int] = [:]
+        for part in imported {
+            guard let name = fileGiven(part) else { continue }
+            literalCounts[name, default: 0] += 1
+        }
+        // Only the parts that FALL THROUGH step 1 compete for a program name: a
+        // "Bass" part that kept its own name must not push a genuinely unique
+        // "Electric Bass (finger)" into a channel suffix it does not need.
+        var programCounts: [String: Int] = [:]
+        for part in imported where fileGiven(part).map({ literalCounts[$0] != 1 }) ?? true {
+            if let program = part.programName { programCounts[program, default: 0] += 1 }
+        }
+
+        var resolved: [Int: String] = [:]
+        for part in imported {
+            if let name = fileGiven(part), literalCounts[name] == 1 {
+                resolved[part.index] = name
+            } else if let program = part.programName {
+                resolved[part.index] = programCounts[program] == 1
+                    ? program
+                    : withChannel(program, part.channel)
+            } else {
+                resolved[part.index] = withChannel(
+                    fileGiven(part) ?? "MIDI Track \(part.sourceTrackIndex + 1)", part.channel)
+            }
+        }
+        return resolved
     }
 
     // MARK: - Tempo map (§2.3)

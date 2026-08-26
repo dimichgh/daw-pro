@@ -999,7 +999,21 @@ public enum SMFProjectExporter {
     /// on bank 120 IS a percussion bank, and channel 9 is the right channel for
     /// it in any GM player. That is a different question from which program
     /// NUMBER means what, which is what the `source` test below is for.
-    static func isDrumKit(_ track: Track) -> Bool {
+    ///
+    /// ⚠️ `public` SINCE m23-cq-1, AND THAT IS THE POINT OF THE KEYWORD, not a
+    /// widening for its own sake. "Is this a drum track?" now has a SECOND
+    /// consumer — the step sequencer's lane set (`StepSequencerLanes`, DAWAppKit)
+    /// picks named GM percussion lanes for a drum kit and a pitch window
+    /// otherwise. Nothing outside DAWCore could call this while it was internal,
+    /// so the alternative was a second expression of the same predicate in
+    /// another module, free to agree with this one today and drift tomorrow. The
+    /// export mapper stays the ONE home; the sequencer asks IT.
+    ///
+    /// The name's export flavour is honest history, not a mis-file: this is
+    /// where the question was first answered. A caller reading
+    /// `SMFProjectExporter.isDrumKit(track)` from a UI module is reading the one
+    /// home, which is the property worth having.
+    public static func isDrumKit(_ track: Track) -> Bool {
         guard let instrument = track.instrument, instrument.kind == .soundBank,
               let bank = instrument.soundBank else { return false }
         return bank.bankMSB == GMProgramCatalog.percussionBankMSB

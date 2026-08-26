@@ -330,8 +330,9 @@ struct FXCommandTests {
             "highShelfQ", "highShelfEnabled",
             "lowPassFreq", "lowPassSlopeDbPerOct", "lowPassEnabled",
         ])
+        // m23-ck appends mix in slot 6 — the six original params keep 0…5.
         #expect(paramNames("compressor") == [
-            "thresholdDb", "ratio", "attackMs", "releaseMs", "kneeDb", "makeupDb",
+            "thresholdDb", "ratio", "attackMs", "releaseMs", "kneeDb", "makeupDb", "mix",
         ])
         // m23-ch appends truePeak in slot 2 — ceilingDb/releaseMs keep 0/1.
         #expect(paramNames("limiter") == ["ceilingDb", "releaseMs", "truePeak"])

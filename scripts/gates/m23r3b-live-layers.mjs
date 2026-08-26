@@ -67,7 +67,7 @@
 //       and not the behaviour, which is why L0-L3 exist.
 import { mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { spawn } from "node:child_process";
-import { buildOrAbort, startStaging, stopStaging, connect, sleep } from "./_staging.mjs";
+import { buildOrAbort, startStaging, stopStaging, connect, sleep, panelDensityGuard, verdict } from "./_staging.mjs";
 
 const GATE = "m23r3b";                      // also names the pidfile + out dir
 const OUT = `/tmp/daw-gate-out/${GATE}`;    // exactly what startStaging derives
@@ -93,6 +93,7 @@ function cmd(command, params = {}, timeoutMs = 30000) {
     ws.send(JSON.stringify({ id: i, command, params }));
   });
 }
+const guard = panelDensityGuard(cmd);   // raw cmd — envelope shape, normalized inside
 const ck = (name, cond, extra) => {
   if (cond) { pass++; console.log("PASS " + name); }
   else { fail++; console.log("FAIL " + name + (extra !== undefined ? " :: " + extra : "")); }
@@ -170,7 +171,7 @@ let r = await cmd("project.new", { discardChanges: true });
 ck("S1 project.new", r.ok, r.error);
 r = await cmd("ui.showMixer", { show: true });
 ck("S2 mixer visible (the master strip carries the scope + readouts)", r.ok, r.error);
-r = await cmd("debug.panelDensity", { panel: "mixer", mode: "pro" });
+r = await guard.set("mixer", "pro");
 ck("S3 mixer density = pro (the goniometer well is Pro-only)", r.ok, r.error);
 // The transport stays STOPPED for every counting leg: a moving playhead is an
 // observable change, and observable changes re-render a subtree whether or not
@@ -291,7 +292,7 @@ ck("L2e captured the scope", r.ok, r.error);
 // altogether, so the trail's count must go to ZERO — and that zero must be
 // distinguishable from a freeze. It is: the READOUTS render in both densities
 // and keep ticking in the same window, same app, same instant.
-r = await cmd("debug.panelDensity", { panel: "mixer", mode: "simple" });
+r = await guard.set("mixer", "simple");
 ck("L2f mixer density → simple (the well is gone; the verdict row stays)", r.ok, r.error);
 s = await quiet(1.0);
 ck("L2g the trail layer is GONE — no layer, no ticks", s.trail.ticks === 0, s.brief());
@@ -299,7 +300,7 @@ ck("L2h and the app is demonstrably still drawing: the readouts ticked "
   + "through the same window (so L2g is an ABSENT layer, not a frozen app)",
   s.readouts.ticks >= expect("readouts", 1) && unfocused(s), s.brief());
 ck("L2i the probe agrees the well is off screen", s.scopeShown === false, s.brief());
-r = await cmd("debug.panelDensity", { panel: "mixer", mode: "pro" });
+r = await guard.set("mixer", "pro");
 ck("L2j mixer density → pro", r.ok, r.error);
 s = await quiet(1.0);
 ck("L2k the trail returns and ticks again — closing the live → dead → live "
@@ -403,6 +404,7 @@ for (const [label, re] of PATTERNS) {
 
 stopStealing();
 console.log(`M23R3B_GATE pass=${pass} fail=${fail}`);
+await guard.restore("normal exit");
 stopStaging(GATE);   // SIGTERMs by exact pid AND releases our session.lock
 ws.close();
-process.exit(fail ? 1 : 0);
+verdict({ ran: pass + fail, failed: fail });

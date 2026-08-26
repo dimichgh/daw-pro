@@ -44,7 +44,7 @@
 import fs from "fs";
 import zlib from "zlib";
 import { execFileSync } from "child_process";
-import { buildOrAbort, startStaging, stopStaging } from "./_staging.mjs";
+import { buildOrAbort, startStaging, stopStaging, panelDensityGuard, verdict } from "./_staging.mjs";
 
 const GATE = "m23a2";
 const PORT = process.env.DAW_CONTROL_PORT || "17695";
@@ -54,7 +54,15 @@ const BINARY = process.env.M23SR_BINARY || ".build/debug/DAWApp";
 const REPO = process.env.M23SR_REPO || process.cwd();
 fs.mkdirSync(OUT, { recursive: true });
 
-const killer = setTimeout(() => { console.error("TIMEOUT"); process.exit(2); }, 600_000);
+// m23-ej-2: declared `let` and assigned AFTER `cmd`/`must` exist, below — the
+// killer's callback closes over it and only runs long after assignment, but a
+// `const` here would be a TDZ trap the moment this file's shape changed.
+let guard = null;
+const killer = setTimeout(async () => {
+  console.error("TIMEOUT");
+  await guard?.restore("timeout");
+  process.exit(2);
+}, 600_000);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const SETTLE = 420;
 
@@ -100,6 +108,7 @@ async function must(command, params) {
   if (!r.ok) throw new Error(`${command} failed: ${JSON.stringify(r.error)}`);
   return r.result;
 }
+guard = panelDensityGuard(cmd);   // raw cmd — envelope shape, normalized inside
 
 const checks = [];
 const check = (name, ok, detail) => {
@@ -111,6 +120,10 @@ const same = (xs, eps = 0.5) => xs.length > 0 && Math.max(...xs) - Math.min(...x
 
 const teardown = async (code) => {
   clearTimeout(killer);
+  // m23-ej-2: BOTH exits that reach here — the normal end and the catch(e)
+  // handler — go through this one function, so the restore lives here once
+  // rather than at each of the two call sites.
+  await guard?.restore("teardown");
   fs.writeFileSync(`${OUT}/result.json`, JSON.stringify(checks, null, 2));
   try { ws.close(); } catch {}
   // m23-ac-2c: this gate's bespoke session.lock cleanup MOVED into
@@ -128,7 +141,13 @@ const teardown = async (code) => {
   // The 1200 ms sleep that preceded the check is also gone; see `stopStaging`
   // for why both orderings are safe.
   stopStaging(GATE, PIDFILE);
-  process.exit(code);
+  // m23-fa-3: `code === null` means "cleanup only, do not exit" — the normal
+  // end of the try block now calls `verdict()` AFTER this returns, so the ONE
+  // exit for that path has to come from the primitive, not from here. The
+  // catch(e) path still passes a real code (2) and still exits here, because
+  // by then the run is a GATE ERROR, not a normal check-completion the
+  // primitive should adjudicate.
+  if (code !== null) process.exit(code);
 };
 
 /// Every measured frame we care about, keyed by id, each sorted LEFT TO RIGHT by
@@ -167,7 +186,7 @@ try {
   chainLen[A] = 0;
   for (const k of ["eq", "limiter"]) await must("fx.add", { trackId: "master", kind: k });
   await must("ui.showMixer", { show: true });
-  await must("debug.panelDensity", { panel: "mixer", mode: "pro" });
+  await guard.set("mixer", "pro");
   await must("debug.windowFrame", { width: 1440, height: 900 });
   await must("debug.explainMode", { on: true });
   await sleep(800);
@@ -335,7 +354,7 @@ try {
   const floor = await frames();
   const capInfo = await must("debug.captureUI", { path: `${OUT}/h640-full-chain.png` });
   const contentH = capInfo.height / (capInfo.height > 1400 ? 2 : 1);
-  check("G1 at the 640 pt window floor the strips STILL agree, 8-insert chain and all",
+  check("G1 at the window's 672 pt content floor the strips STILL agree, 8-insert chain and all",
         same(ys(floor, "mixerFader").slice(0, 3)) && same(ys(floor, "mixerPan").slice(0, 3)),
         JSON.stringify({ fader: ys(floor, "mixerFader").slice(0, 3),
                          pan: ys(floor, "mixerPan").slice(0, 3) }));
@@ -343,9 +362,15 @@ try {
   check("G2 m23-a HOLDS: the Mute/Solo/Arm row is still inside the window, not clipped",
         muteBottom.length >= 3 && Math.max(...muteBottom) < contentH,
         JSON.stringify({ muteBottom, windowContent: contentH }));
+  // m23-ee-2b: pin the SOURCE, not the slice. `slice(0, 3)` of an absent or short
+  // `mixerFader` yields [], and `[].every(f) === true`, so this leg passed whenever
+  // the floor frame carried no faders at all — i.e. exactly when the layout was most
+  // broken. `>= 3` on the source is the same idiom G2 uses at :357 and A0 at :190;
+  // it is a genuine floor here because A1 already proved five faders are measured.
+  const floorFaders = floor.mixerFader ?? [];
   check("G3 …and the reserved cluster is intact — the fader region kept its floor",
-        (floor.mixerFader ?? []).slice(0, 3).every((r) => r.height >= 100),
-        JSON.stringify(hs(floor, "mixerFader").slice(0, 3)));
+        floorFaders.length >= 3 && floorFaders.slice(0, 3).every((r) => r.height >= 100),
+        JSON.stringify({ faders: floorFaders.length, h: hs(floor, "mixerFader").slice(0, 3) }));
 
   // ── H: the EMPTY state occupies the reserve (capture for pixel review) ────
   await must("debug.windowFrame", { width: 1440, height: 900 });
@@ -461,25 +486,34 @@ try {
                          fader: ys(keyF, "mixerFader").slice(0, 3) }));
 
   // ── I: SIMPLE density is untouched ────────────────────────────────────────
-  await must("debug.panelDensity", { panel: "mixer", mode: "simple" });
+  await guard.set("mixer", "simple");
   await sleep(SETTLE);
   const simple = await frames();
   check("I1 SIMPLE hides the whole signal-flow block — strips agree, no reserve shown",
         (simple.mixerInserts ?? []).length === 0 && same(ys(simple, "mixerFader").slice(0, 3)),
         JSON.stringify({ inserts: (simple.mixerInserts ?? []).length,
                          fader: ys(simple, "mixerFader").slice(0, 3) }));
-  await must("debug.panelDensity", { panel: "mixer", mode: "pro" });
+  await guard.set("mixer", "pro");
   await sleep(SETTLE);
   await cap("h900-pro-final");
 
   const bad = checks.filter((c) => !c.ok);
   console.log(`\nm23-strip-reserve gate: ${checks.length - bad.length} pass / ${bad.length} fail`);
-  await teardown(bad.length ? 1 : 0);
+  await teardown(null);                 // cleanup, DO NOT exit — verdict() below exits instead
 } catch (e) {
   console.error("GATE ERROR", e);
   checks.push({ name: "GATE ERROR", ok: false, detail: String(e) });
   await teardown(2);
 }
+// m23-fa-3: routed through the ONE-home primitive instead of the vacuous
+// `teardown(bad.length ? 1 : 0)` — that ternary exits 0 when `checks` is
+// empty (`bad.length` is 0 too), a green that asserted nothing. Deliberately
+// OUTSIDE the try/catch above: `verdict()` can itself throw (its own
+// `failed > ran` guard), and if that threw INSIDE the try, the catch would
+// call `teardown` a second time — double `guard.restore()`, double
+// `stopStaging`. Unreachable on the catch(e) path, which already exited via
+// `teardown(2)` above.
+verdict({ ran: checks.length, failed: checks.filter((c) => !c.ok).length });
 
 async function cap(name) {
   const r = await must("debug.captureUI", { path: `${OUT}/${name}.png` });

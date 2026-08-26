@@ -191,7 +191,16 @@ before(async () => {
       command: process.execPath,
       args: [join(mcpServerRoot, "dist", "index.js")],
       cwd: mcpServerRoot,
-      env: { DAW_CONTROL_PORT: TEST_PORT },
+      env: {
+        DAW_CONTROL_PORT: TEST_PORT,
+        // This spawn gets a REPLACED env (not merged with process.env), so
+        // without this the spawned server falls back to the real
+        // ~/Library/Logs/DAWPro/mcp/ (m23-ca call logging, src/mcp-log.ts) —
+        // a real file in a developer's home directory on every `npm test`.
+        // Reuse whatever the npm `test` script pointed at (see package.json),
+        // falling back to the same mcp-server/.test-logs/ location if unset.
+        DAWPRO_MCP_LOG_DIR: process.env["DAWPRO_MCP_LOG_DIR"] || join(mcpServerRoot, ".test-logs"),
+      },
     });
     client = new Client({ name: "integration-test-client", version: "0.0.0" });
     await client.connect(transport);
@@ -307,11 +316,74 @@ test("tools/list returns exactly the audit-enforced tool count", { skip: SKIP_RE
   // m23-aj-1's cross-track group move) took it 172 -> 174. m23-dl's
   // ai_model_residency/ai_model_unload (which local models are loaded and what they
   // hold; unload one or all WITH evidence that it stopped) took it 174 -> 176.
+  // m23-di-2a's vc_import_voice_model (third-party RVC voice-model import —
+  // a mutating tool, so it joined the strict-schema wrapper count) took it
+  // 176 -> 177. m25-d's transport_set_stop_at_content_end (stop the transport
+  // at the end of the last clip — a mutating tool, so it joined the strict-schema
+  // wrapper count) took it 177 -> 178. m25-z's audio_profile_file (windowed
+  // peak/RMS profile of a file on disk — read-only, but registered through the
+  // strict-schema wrapper anyway since it takes real params worth typo-catching)
+  // took it 178 -> 179. m23-ap-3's clip_detect_pitch (per-frame pitch
+  // detection over an audio clip — also read-only, also registered through
+  // the strict-schema wrapper for the SAME real-params-worth-typo-catching
+  // reason as audio_profile_file, not clip_detect_transients' single-knob
+  // shape) took it 179 -> 180. clip_get_notes (the read-only counterpart to
+  // clip_set_notes — pull one clip's notes, filtered by beat range and/or
+  // pitch, instead of paying for a whole project_snapshot) took it 180 -> 181;
+  // registered through the strict-schema wrapper for the same real-params-
+  // worth-typo-catching reason as audio_profile_file/clip_detect_pitch.
+  // m26-i's `instrument_describe_sampler` (read-only sibling of
+  // `au_describe_params` for the built-in Sampler — the answer to "which
+  // library is loaded and how is it mapped" without paying for a whole
+  // project_snapshot; registered through the strict-schema wrapper for the
+  // same real-params reason), `instrument_set_sampler_param` (set one
+  // sampler global) and `instrument_set_sampler_zones` (merge zones by id)
+  // took it 181 -> 184. The latter two have no 1:1 backing command of their
+  // own — both wrap `track.setInstrument` under a narrower name, so they
+  // live in `audit-tools.test.ts`'s EXCEPTION_TABLE_C rather than the
+  // mechanical command->tool rule.
+  // m26-k's `edit_paste_clips` (fire the app's own Cmd-V clipboard paste
+  // over the wire — a mutating tool, so it joined the strict-schema wrapper
+  // count; routes through the new TYPED `EditPasteControlling` app-layer
+  // seam, the `plugin.*` precedent, not `appCommandHandler`) took it
+  // 184 -> 185.
+  // m27 leg D's `clip_apply_breath_contour` (generate a realistic breath
+  // contour over a MIDI clip's notes — the expression swell plus delayed
+  // vibrato; a mutating tool, so it joined the strict-schema wrapper count)
+  // took it 185 -> 186.
+  // Breath pad P1's `clip_apply_effort_shape` (apply one NAMED effort gesture —
+  // messa di voce, a phrase-wide hairpin, sforzando-piano — through leg D's own
+  // machinery; a mutating tool, so it joined the strict-schema wrapper count)
+  // took it 186 -> 187.
+  // Breath pad P6's `pad_preview_effort` (stream one effort value live while a
+  // pad gesture is open — a preview, never the record; a mutating tool, so it
+  // joined the strict-schema wrapper count) took it 187 -> 188.
   // ⚠️ The DECOMPOSITION, because the total on its own has rotted before:
-  // 34 `server.registerTool(` (pure reads, deliberately exempt from `.strict()`
-  // — `ai_model_residency` joined them) + 142 `registerTool(` (the strict-schema
-  // wrappers — `ai_model_unload` joined those) = 176.
-  assert.equal(result.tools.length, 176);
+  // 34 `server.registerTool(` (pure reads, deliberately exempt from `.strict()`)
+  // + 154 `registerTool(` (the strict-schema wrappers — `vc_import_voice_model`,
+  // `transport_set_stop_at_content_end`, `audio_profile_file`,
+  // `clip_detect_pitch`, `clip_get_notes`, m26-i's three sampler tools,
+  // m26-k's `edit_paste_clips`, m27 leg D's `clip_apply_breath_contour` and
+  // breath pad P1's `clip_apply_effort_shape` and P6's `pad_preview_effort`
+  // joined those) = 188.
+  //
+  // ⚠️⚠️ THE DECOMPOSITION ITSELF HAD ROTTED and this cycle re-measured it
+  // rather than adding one: at 186 tools it read "34 + 151", which does not
+  // even add up to 186. Measured 2026-08-19 by name-capturing regexes
+  // (`server\.registerTool\(\s*\n?\s*"([a-z0-9_]+)"` for the direct set,
+  // the same without the `server.` prefix and minus that set for the wrapper
+  // set): 34 direct + 154 wrapper = 188, no name in both, no duplicates
+  // (re-measured 2026-08-19 at the breath-pad P6 close by the same regexes,
+  // with a bogus-name negative control that returned nothing).
+  // ⚠️ A naive `grep -o 'server\.registerTool('` returns 36, not 34 — two of
+  // those occurrences are inside the wrapper's own doc comment and body.
+  //
+  // 188 -> 191 at m28-knob (midi_get_control_map read-only/direct,
+  // midi_set_control_map + midi_learn_control mutating/wrapper). RE-MEASURED,
+  // not derived, by the same two regexes: **35 direct + 156 wrapper = 191**,
+  // 0 duplicates, 0 names in both sets, and a bogus-name negative control that
+  // returned nothing.
+  assert.equal(result.tools.length, 191);
 });
 
 // ---------------------------------------------------------------------------

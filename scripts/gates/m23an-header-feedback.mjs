@@ -77,7 +77,7 @@
 import fs from "fs";
 import zlib from "zlib";
 import { execFileSync } from "child_process";
-import { buildOrAbort, startStaging, stopStaging } from "./_staging.mjs";
+import { buildOrAbort, startStaging, stopStaging, verdict } from "./_staging.mjs";
 
 const GATE = "m23an";
 const PORT = process.env.DAW_CONTROL_PORT || "17695";
@@ -342,15 +342,74 @@ try {
   // file — a backwards slice, which is the empty string, which passes an
   // `!includes(accent)` test while failing the `includes(textSecondary)` one for
   // a reason that has nothing to do with colour.
-  const b0 = src.indexOf("private var trackClickAckBubble");
-  const bubbleSrc = b0 < 0 ? "" : src.slice(b0, src.indexOf("var body: some View {", b0));
+  //
+  // ⚠️ m25-y: THE SLICE USED TO END AT THE NEXT `var body: some View {` IN THE
+  // FILE, NOT AT THE DECLARATION'S OWN CLOSING BRACE. `trackClickAckBubble`'s
+  // true body is 1203 B; slicing to the next `var body:` token (a SIBLING
+  // declaration's, not this one's) swallowed 3413 B more — the whole of the
+  // next declaration, `activeTrackRail`, whose `.fill(DAWTheme.playback)` is a
+  // legitimate accent on a DIFFERENT view (the cyan active-track rail). That
+  // widened 4616 B slice made S3 redden on a colour that has nothing to do
+  // with this chip. Extracted by BRACE-MATCHING the declaration's own
+  // `{ … }` instead, which cannot walk past a sibling — and self-validated in
+  // both directions, so a stray `}` inside a future comment truncating the
+  // region early fails LOUDLY instead of silently passing the colour checks
+  // on a mangled slice.
+  function extractOwnDeclaration(text, anchor) {
+    const start = text.indexOf(anchor);
+    if (start < 0) {
+      return { ok: false, why: `anchor ${JSON.stringify(anchor)} not found in source`, region: "" };
+    }
+    const open = text.indexOf("{", start);
+    if (open < 0) {
+      return { ok: false, why: `no "{" found after anchor ${JSON.stringify(anchor)}`, region: "" };
+    }
+    let depth = 0, end = -1;
+    for (let i = open; i < text.length; i++) {
+      if (text[i] === "{") depth++;
+      else if (text[i] === "}") {
+        depth--;
+        if (depth === 0) { end = i; break; }
+      }
+    }
+    if (end < 0) {
+      return { ok: false, why: `brace matching from ${JSON.stringify(anchor)} never closed`, region: "" };
+    }
+    const region = text.slice(start, end + 1);
+    // Self-validating, both directions: the region must contain the chip's own
+    // marker (proof brace-matching reached THIS declaration's real content,
+    // not a truncation) and must NOT contain the next sibling's name (proof it
+    // did not walk past its own close). Trusting the brace count alone is not
+    // enough — a stray `}` inside a comment would close early and could still
+    // pass the textSecondary/no-accent checks on the truncated remainder by
+    // accident.
+    if (!region.includes("Text(Self.noClipsToSelectNotice)")) {
+      return {
+        ok: false,
+        why: "region does not contain the chip's own Text(Self.noClipsToSelectNotice) — brace matching likely truncated early",
+        region,
+      };
+    }
+    if (region.includes("activeTrackRail")) {
+      return {
+        ok: false,
+        why: "region reaches into the next declaration (activeTrackRail) — brace matching did not close where expected",
+        region,
+      };
+    }
+    return { ok: true, why: null, region };
+  }
+  const extracted = extractOwnDeclaration(src, "private var trackClickAckBubble");
+  const bubbleSrc = extracted.region;
   check("S3 the chip's REGISTER is neutral at the source: textSecondary ink, no accent "
         + "token, no .glow — amber is the refusal register and nothing was refused",
-        bubbleSrc.length > 200
+        extracted.ok
+          && bubbleSrc.length > 200
           && bubbleSrc.includes("DAWTheme.textSecondary")
           && !/DAWTheme\.(record|playback|signal|clip|ai)\b/.test(bubbleSrc)
           && !/\.glow\(/.test(bubbleSrc),
-        `slice=${bubbleSrc.length}B textSecondary=${bubbleSrc.includes("DAWTheme.textSecondary")} `
+        `extractOk=${extracted.ok}${extracted.ok ? "" : ` (${extracted.why})`} slice=${bubbleSrc.length}B `
+        + `textSecondary=${bubbleSrc.includes("DAWTheme.textSecondary")} `
         + `accentToken=${/DAWTheme\.(record|playback|signal|clip|ai)\b/.test(bubbleSrc)} `
         + `glow=${/\.glow\(/.test(bubbleSrc)}`);
 
@@ -699,7 +758,7 @@ try {
   clearTimeout(killer);
   ws.close();
   teardown();
-  process.exit(failed.length ? 1 : 0);
+  verdict({ ran: checks.length, failed: failed.length });
 } catch (err) {
   console.error("GATE ERROR:", err);
   clearTimeout(killer);

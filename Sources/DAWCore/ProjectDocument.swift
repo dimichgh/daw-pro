@@ -842,10 +842,23 @@ public struct InstrumentDocument: Codable, Sendable, Equatable {
                     // m20-g: tolerant decode — an unknown loopMode rawValue
                     // resolves to nil (no loop) rather than failing the open.
                     loopMode: zd.loopMode.flatMap(SamplerLoopMode.init(rawValue:)),
-                    loopStart: zd.loopStart, loopEnd: zd.loopEnd)
+                    loopStart: zd.loopStart, loopEnd: zd.loopEnd,
+                    // m27 leg B: absent (every pre-m27 project) -> nil ->
+                    // hard layer switching, exactly as before.
+                    crossfade: zd.crossfade)
             }
             return SamplerParams(zones: zones, oneShot: s.oneShot,
-                                 attack: s.attack, release: s.release, gain: s.gain)
+                                 attack: s.attack, release: s.release, gain: s.gain,
+                                 // m26-h: provenance is a RECORD, so it decodes
+                                 // verbatim — no resolution, no warning, no drop
+                                 // if the .sfz has since moved. Absent (every
+                                 // pre-m26-h project) → nil → today's behaviour.
+                                 sourcePath: s.sourcePath, displayName: s.displayName,
+                                 // m27: absent (every pre-m27 project) → nil →
+                                 // depth 0 → the pre-m27 amplitude law exactly.
+                                 expressionModDepth: s.expressionModDepth,
+                                 expressionFilterDepth: s.expressionFilterDepth,
+                                 expressionFilterCC: s.expressionFilterCC)
         }
         // The AU config round-trips intact even when the component isn't
         // installed on this machine — the engine reports `.missing` and
@@ -867,8 +880,30 @@ public struct SamplerDocument: Codable, Sendable, Equatable {
     public var attack: Double
     public var release: Double
     public var gain: Double
+    // m26-h provenance — nil never encodes (the synthesized encoder uses
+    // encodeIfPresent for optionals), so a sampler that was never imported
+    // from a library keeps a document shape byte-identical to pre-m26-h, and a
+    // pre-m26-h project decodes both keys as nil. `sourcePath` is a plain
+    // absolute path, NOT a `media/` reference: it names the .sfz/.dspreset the
+    // zones came from, which the bundle deliberately does not copy (the SAMPLES
+    // are what get copied, per zone). ReferenceDocument's `media`/`sourcePath`
+    // pair is the sibling precedent for a path that may not resolve on the
+    // machine that opens the project — and, like it, an unresolvable path here
+    // is never an open-time failure: nothing reads it back.
+    public var sourcePath: String?
+    public var displayName: String?
+    /// m27 continuous expression — nil never encodes (the optional
+    /// encodeIfPresent rule above), so a sampler that never opted in keeps a
+    /// document shape byte-identical to pre-m27, and every pre-m27 project
+    /// decodes it as nil = off.
+    public var expressionModDepth: Double?
+    public var expressionFilterDepth: Double?
+    public var expressionFilterCC: Int?
 
-    private enum CodingKeys: String, CodingKey { case zones, oneShot, attack, release, gain }
+    private enum CodingKeys: String, CodingKey {
+        case zones, oneShot, attack, release, gain, sourcePath, displayName
+        case expressionModDepth, expressionFilterDepth, expressionFilterCC
+    }
 
     init(from s: SamplerParams, mediaRefs: [UUID: String?]) {
         zones = s.zones.map { SamplerZoneDocument(from: $0, media: mediaRefs[$0.id] ?? nil) }
@@ -876,6 +911,11 @@ public struct SamplerDocument: Codable, Sendable, Equatable {
         attack = s.attack
         release = s.release
         gain = s.gain
+        sourcePath = s.sourcePath
+        displayName = s.displayName
+        expressionModDepth = s.expressionModDepth
+        expressionFilterDepth = s.expressionFilterDepth
+        expressionFilterCC = s.expressionFilterCC
     }
 
     public init(from decoder: any Decoder) throws {
@@ -886,6 +926,11 @@ public struct SamplerDocument: Codable, Sendable, Equatable {
         attack = try c.decodeIfPresent(Double.self, forKey: .attack) ?? d.attack
         release = try c.decodeIfPresent(Double.self, forKey: .release) ?? d.release
         gain = try c.decodeIfPresent(Double.self, forKey: .gain) ?? d.gain
+        sourcePath = try c.decodeIfPresent(String.self, forKey: .sourcePath)
+        displayName = try c.decodeIfPresent(String.self, forKey: .displayName)
+        expressionModDepth = try c.decodeIfPresent(Double.self, forKey: .expressionModDepth)
+        expressionFilterDepth = try c.decodeIfPresent(Double.self, forKey: .expressionFilterDepth)
+        expressionFilterCC = try c.decodeIfPresent(Int.self, forKey: .expressionFilterCC)
     }
 }
 
@@ -930,6 +975,8 @@ public struct SamplerZoneDocument: Codable, Sendable, Equatable {
     public var loopMode: String?
     public var loopStart: Int?
     public var loopEnd: Int?
+    // m27 leg B dynamic-layer crossfade -- nil never encodes.
+    public var crossfade: SamplerCrossfade?
 
     private enum CodingKeys: String, CodingKey {
         case id, media, rootPitch, minPitch, maxPitch, gain
@@ -937,6 +984,7 @@ public struct SamplerZoneDocument: Codable, Sendable, Equatable {
         case tuneCents, pan, ampVelTrack, oneShot, startFrame, endFrame
         case attack, decay, sustain, release
         case loopMode, loopStart, loopEnd
+        case crossfade
     }
 
     init(from z: SamplerZone, media: String?) {
@@ -966,6 +1014,7 @@ public struct SamplerZoneDocument: Codable, Sendable, Equatable {
         loopMode = z.loopMode?.rawValue
         loopStart = z.loopStart
         loopEnd = z.loopEnd
+        crossfade = z.crossfade
     }
 
     public init(from decoder: any Decoder) throws {
@@ -996,6 +1045,7 @@ public struct SamplerZoneDocument: Codable, Sendable, Equatable {
         loopMode = try c.decodeIfPresent(String.self, forKey: .loopMode)
         loopStart = try c.decodeIfPresent(Int.self, forKey: .loopStart)
         loopEnd = try c.decodeIfPresent(Int.self, forKey: .loopEnd)
+        crossfade = try c.decodeIfPresent(SamplerCrossfade.self, forKey: .crossfade)
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -1028,6 +1078,7 @@ public struct SamplerZoneDocument: Codable, Sendable, Equatable {
         try c.encodeIfPresent(loopMode, forKey: .loopMode)
         try c.encodeIfPresent(loopStart, forKey: .loopStart)
         try c.encodeIfPresent(loopEnd, forKey: .loopEnd)
+        try c.encodeIfPresent(crossfade, forKey: .crossfade)
     }
 }
 

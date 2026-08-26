@@ -55,7 +55,7 @@
 // reports.
 import fs from "fs";
 import { execFileSync, spawnSync } from "child_process";
-import { ROOT, buildOrAbort, startStaging, stopStaging, connect, sleep } from "./_staging.mjs";
+import { ROOT, buildOrAbort, startStaging, stopStaging, connect, sleep, panelDensityGuard, verdict } from "./_staging.mjs";
 
 const GATE = "m23c1";                       // names the pidfile + staging out dir
 const OUT = process.env.M23C1_OUT || "/tmp/m23c1";
@@ -69,7 +69,18 @@ fs.mkdirSync(OUT, { recursive: true });
 // The 600 s self-kill. Since m23-bd the harness tears the staging app down on
 // `exit`, so this path — the one that fires precisely when the gate has HUNG —
 // no longer leaks the app it was driving.
-const killer = setTimeout(() => { console.error("TIMEOUT"); process.exit(2); }, 600_000);
+// m23-ej-2: `let` — assigned right after `ws`/`req` are ready, below. Unlike
+// the panelLayout restore in this file's `finally` (documented above as a
+// deliberately-scoped residual gap on this exact watchdog path), the density
+// guard costs nothing extra to cover here too — it does not touch panelLayout
+// at all, so closing this gap for density does not touch that separate,
+// already-tracked limitation.
+let guard = null;
+const killer = setTimeout(async () => {
+  console.error("TIMEOUT");
+  await guard?.restore("timeout");
+  process.exit(2);
+}, 600_000);
 
 buildOrAbort({ label: "building staging binary (m23c1)…" });
 // Rebuild the cyan-column probe every run, for the same reason the app is built
@@ -177,6 +188,7 @@ console.log(`panelLayout priors (leak check): editorFraction=${priorLayout.edito
 const pinnedLayout = await req(ws, "debug.panelLayout", PANEL_DEFAULTS);
 console.log(`panelLayout pinned:  editorFraction=${pinnedLayout.editorFraction} `
   + `rowHeight=${pinnedLayout.rowHeight} pianoRollPPB=${pinnedLayout.pianoRollPPB}`);
+guard = panelDensityGuard((command, params) => req(ws, command, params));
 
 // Everything from here on can throw (the `cap.width !== 2800` assertion is
 // live) — wrapped so the panel-layout restore below always runs.
@@ -189,13 +201,27 @@ console.log(`panelLayout pinned:  editorFraction=${pinnedLayout.editorFraction} 
 // path `UserDefaultsPanelLayoutBacking` already owns. A HANG (not a throw)
 // in the ~600 s window between the pin and here would still leak the pinned
 // values. Scoped deliberately to the throw path m23-du named; not closed.
-let failed = 1; // pessimistic default; corrected only on a clean run through
+// m23-fa-2: the old `let failed = 1` pessimistic default USED to live here and
+// is deliberately gone. It was write-only once the verdict began deriving from
+// `checks` (assigned in both the success and catch paths, read by nothing), and
+// a comment promising "pessimistic default; corrected only on a clean run" that
+// no longer gates anything is the exact stale-invariant shape that cost this
+// milestone a full cycle twice (m23-ft, m23-fy). The pessimism it provided is
+// now carried by the `EXCEPTION: gate threw` record pushed in `catch` below.
+// m23-fa-2: hoisted out of the try block (was declared at the old line 314,
+// inside `try`, so `catch` could never see it) — without this, a throw could
+// only ever be recorded via the outer `failed` scalar, never in `checks`
+// itself, which is the ORPHAN shape m23-ad already proved: deriving ran/failed
+// from `checks` alone would then silently lose "the gate threw" whenever the
+// exception landed after every check that DID run had already passed.
+const checks = [];
+const check = (name, ok, detail) => { checks.push({ name, ok, detail }); };
 try {
 
 // ── fixture ───────────────────────────────────────────────────────────────
 await req(ws, "project.new", { discardChanges: true });
 await req(ws, "debug.windowFrame", { width: 1400, height: 1000 });
-await req(ws, "debug.panelDensity", { panel: "pianoRoll", mode: "pro" });
+await guard.set("pianoRoll", "pro");
 const tr = await req(ws, "track.add", { name: "Playhead Probe", kind: "instrument" });
 const trackId = tr.id ?? tr.track?.id;
 // Notes deliberately start at clip-local beat 4, so the LEAD window is clear of
@@ -283,7 +309,7 @@ for (const st of STATES) {
 // density, so it is the mode the user's report most likely came from). The
 // grid cue must still be there, and the law's wording is "every band that is
 // present", not "both bands".
-await req(ws, "debug.panelDensity", { panel: "pianoRoll", mode: "simple" });
+await guard.set("pianoRoll", "simple");
 await req(ws, "transport.seek", { beats: 0 });
 await sleep(500);
 const simpleCap = await req(ws, "debug.captureUI", { path: `${OUT}/S8-simple.png`, selectClip: clipId });
@@ -296,11 +322,11 @@ const simple = {
 console.log(`\nS8-simple  beat 0 — Simple density (no velocity lane)`);
 console.log(`   grid LEAD runs=${simple.grid.runs}`);
 console.log(`   ex-velocity slot runs=${simple.velSlot.runs}`);
-await req(ws, "debug.panelDensity", { panel: "pianoRoll", mode: "pro" });
+await guard.set("pianoRoll", "pro");
 
 // ── assertions ────────────────────────────────────────────────────────────
-const checks = [];
-const check = (name, ok, detail) => { checks.push({ name, ok, detail }); };
+// m23-fa-2: `checks`/`check` moved up to just before the outer `try` — see
+// the comment there. Left this section header in place.
 
 // A pill reads as SEVERAL glyph runs spanning ~100px; a bare playhead line reads
 // as ONE run well under 40px wide. That difference is the double-draw detector.
@@ -463,10 +489,13 @@ for (const c of checks) {
 }
 fs.writeFileSync(`${OUT}/gate.json`, JSON.stringify({ results, simple, checks }, null, 2));
 console.log(`\n${checks.length - failedChecks}/${checks.length} checks passed`);
-failed = failedChecks;
 
 } catch (e) {
-  failed = 1;
+  // m23-fa-2: also recorded IN the collection, not just the outer scalar —
+  // this is what lets ran/failed be derived from `checks` alone at the
+  // bottom without losing "the gate threw" when it fires after every check
+  // that DID get to run had already passed.
+  checks.push({ name: "EXCEPTION: gate threw", ok: false, detail: e?.message ?? String(e) });
   console.error(`GATE THREW: ${e?.stack ?? e?.message ?? e}`);
 } finally {
   clearTimeout(killer);
@@ -485,7 +514,8 @@ failed = failedChecks;
   } catch (e) {
     console.error(`panelLayout restore FAILED — LEAKED editorFraction/rowHeight/pianoRollPPB: ${e?.message ?? e}`);
   }
+  await guard?.restore("finally");   // m23-ej-2
   stopStaging(GATE);   // SIGTERMs by exact pid AND releases our session.lock
   ws.close();
 }
-process.exit(failed === 0 ? 0 : 1);
+verdict({ ran: checks.length, failed: checks.filter((c) => !c.ok).length });

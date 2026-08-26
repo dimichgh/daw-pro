@@ -79,7 +79,7 @@
 //   node scripts/gates/m23am-refusal-anchor.mjs
 import fs from "fs";
 import path from "path";
-import { buildOrAbort, startStaging, stopStaging } from "./_staging.mjs";
+import { buildOrAbort, startStaging, stopStaging, verdict } from "./_staging.mjs";
 
 const GATE = "m23am";
 const PORT = process.env.DAW_CONTROL_PORT || "17695";
@@ -250,9 +250,17 @@ try {
   }
 
   // ══ P — the item's PREMISE, measured rather than assumed ═══════════════════
-  console.log("\n── P: a header click selects the track and adopts NO focus ──");
-  const clicked = await req("debug.arrangeSelection", { act: "clickTrack", trackId: tA });
-  check("P1 the header click selects exactly track A's 8 clips",
+  // ⚠️ m25-v: MUST BE ⇧, NOT PLAIN. m25-l-1 defect ② (USER RULING 2026-08-13)
+  // made a PLAIN header click select NOTHING and clear instead of selecting
+  // the track's clips — a plain click here would leave nothing selected for
+  // the DELETE-refusal fixture below to anchor on at all. ⇧/⌘ still selects
+  // "exactly this track's clips", unchanged. MEASURED at m25-v: unedited, this
+  // cascaded into 4 failures (P1, and A1-A3 downstream of an empty selection)
+  // before the one-line fix below.
+  console.log("\n── P: a ⇧ header click selects the track and adopts NO focus ──");
+  const clicked = await req("debug.arrangeSelection",
+    { act: "clickTrack", trackId: tA, shift: true });
+  check("P1 the ⇧ header click selects exactly track A's 8 clips",
         clicked.count === N_A
           && aIDs.every((id) => (clicked.selectedIds ?? []).includes(id)),
         `count=${clicked.count} ids=${(clicked.selectedIds ?? []).length}`);
@@ -324,20 +332,27 @@ try {
   check("V1b …and they really are the clip blocks (width == LEN·ppb for all 9)",
         rects.length > 0 && rects.every((r) => Math.abs(r.width - LEN * ppb) < 0.5),
         `ppb=${ppb} expected width=${LEN * ppb} widths=[${rects.map((r) => r.width).join(",")}]`);
-  // ⚠️ MEASURED LIMIT OF THE SEAM, pinned so no later gate reads rect[i] as
-  // clip[i]. `TimelineLanesView` places blocks with `.offset(x:y:)` and hangs
-  // `.explainable` OUTSIDE that offset, so what `debug.explainFrames` reports is
-  // the LAYOUT frame — identical for every block — not the rendered position.
-  // Widths track `ppb` (V1b) while origins do not move at all. So this seam can
-  // answer HOW MANY blocks are mounted and NOTHING about where any one of them
-  // is drawn; the viewport legs below therefore compute from the app's own
-  // reported `ppb`/`hOffset`/`viewportWidth` and the clip's start beat, never
-  // from a rect. If this assertion ever fails, the offsets became measurable and
-  // V3/V4 can be tightened to name the block.
-  check("V2 SEAM LIMIT: every clipBlock rect shares one origin (offsets are not measured)",
-        new Set(rects.map((r) => `${r.x},${r.y}`)).size === 1,
-        `distinct origins=${new Set(rects.map((r) => `${r.x},${r.y}`)).size} `
+  // ⚠️ WAS A PINNED SEAM LIMIT; m25-j LIFTED IT (2026-08-23). Until then
+  // `TimelineLanesView` placed blocks with `.offset(x:y:)` — a RENDER transform —
+  // while `.explainable` measured with a `GeometryReader`, which sees only
+  // LAYOUT, so every block reported the SAME rect and this leg asserted that
+  // collapse ("if this ever fails, the offsets became measurable"). It did:
+  // `offsetExplainable` now carries the placement into the report, so origins are
+  // DISTINCT and correct. The leg is INVERTED rather than deleted, because the
+  // collapse is exactly the regression to catch. The viewport legs below still
+  // compute from the app's own `ppb`/`hOffset`/`viewportWidth` — they were
+  // written that way and they remain the independent route.
+  check("V2 every clipBlock rect has its OWN origin (m25-j: offsets are measured now)",
+        new Set(rects.map((r) => `${r.x},${r.y}`)).size === rects.length,
+        `distinct origins=${new Set(rects.map((r) => `${r.x},${r.y}`)).size}/${rects.length} `
         + `sample=${JSON.stringify(rects.slice(0, 3))}`);
+  // …and by the RIGHT amount: x must track the store's own start beat times the
+  // app's own ppb. "They differ" alone would pass on any wrong offset.
+  check("V2b …and x == firstOrigin + startBeat·ppb for every block",
+        rects.length === N_A + 1
+          && rects.slice(0, N_A).every((r, i) => Math.abs((r.x - rects[0].x) - i * LEN * ppb) < 0.6),
+        `Δx=[${rects.slice(0, N_A).map((r) => r.x - rects[0].x).join(",")}] `
+        + `expected=[${Array.from({ length: N_A }, (_, i) => i * LEN * ppb).join(",")}]`);
   // Viewport arithmetic from the app's OWN reported numbers plus the store's own
   // start beat — the only route left, and the honest one.
   const anchorStart = OFFENDER_I * LEN;
@@ -372,6 +387,14 @@ try {
   // ══ Recorded as SKIP, never as a pass ══════════════════════════════════════
   skip("that a REAL DELETE key (rather than the seam) reaches this handler",
        "m23-g1 MEASURED that an unbundled staging binary does not route real key "
+       // ⚠️ CORRECTED 2026-08-10 (m23-fh, at the m23-cf close). THE CLAIM BELOW IS WRONG.
+       // `keyDelete -> delivered:false` was NEVER a staging/tooling limitation. It was the
+       // app HONESTLY REPORTING THAT NOTHING HANDLED THE KEY: `firstResponder` read `none`
+       // with a clip selected, so no SwiftUI focus existed for `.onKeyPress` to attach to.
+       // A REAL APP DEFECT wearing the costume of a harness limit — m23-cf fixed it with a
+       // window-level NSEvent monitor and its gate now passes 27/27 with redden legs, so
+       // key-event gating on staging is DEMONSTRABLY POSSIBLE. Do not quote the text below
+       // as a reason not to write one. Root cause still open as m23-fi.
        + "events (`act:\"keyDelete\"` -> delivered:false: the window is not key, so "
        + "nothing reaches SwiftUI's focus arbitration). The seam calls the SAME "
        + "`AppModel.deleteArrangeSelection` the key handler calls — that is the "
@@ -394,7 +417,7 @@ try {
   clearTimeout(killer);
   ws.close();
   teardown();
-  process.exit(failed.length ? 1 : 0);
+  verdict({ ran: checks.length, failed: failed.length });
 } catch (err) {
   console.error("GATE ERROR:", err);
   clearTimeout(killer);

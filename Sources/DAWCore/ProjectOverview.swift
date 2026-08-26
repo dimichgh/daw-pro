@@ -78,11 +78,27 @@ public struct ProjectOverview: Codable, Sendable, Equatable {
     }
 
     public struct Effect: Codable, Sendable, Equatable {
+        /// The addressable id — the same one `fx.setParam` / `fx.setBypass` /
+        /// `fx.reorder` / `fx.remove` take. Carried because WITHOUT it the only
+        /// route to an inherited chain's ids was calling `fx.add`, whose reply
+        /// echoes the whole chain: reading state required WRITING state. Two
+        /// agents hit that independently in the 2026-08-17 field report, and
+        /// `Clip` below has always carried its id — effects were simply missed.
+        public var id: UUID
         public var name: String
         public var bypassed: Bool
     }
 
     public struct AutomationLane: Codable, Sendable, Equatable {
+        /// The addressable id — the same one `automation.setPoints` /
+        /// `automation.setLaneEnabled` / `automation.removeLane` take. Carried
+        /// for exactly the reason `Effect.id` above is: WITHOUT it the only
+        /// route to an existing lane's id was calling `automation.addLane`
+        /// (whose no-op-on-duplicate reply echoes the existing lane), so
+        /// reading a lane required WRITING to the project. Same defect as the
+        /// effects one, one layer up — and `Clip` below has always carried
+        /// its id.
+        public var id: UUID
         public var target: String
         public var enabled: Bool
         public var pointCount: Int
@@ -243,11 +259,13 @@ extension ProjectStore {
                 )
             },
             fx: track.effects.map {
-                ProjectOverview.Effect(name: $0.kind.rawValue, bypassed: $0.isBypassed)
+                ProjectOverview.Effect(
+                    id: $0.id, name: $0.kind.rawValue, bypassed: $0.isBypassed)
             },
             clips: track.clips.map { overviewClip($0, takeGroups: track.takeGroups) },
             automation: track.automation.map {
                 ProjectOverview.AutomationLane(
+                    id: $0.id,
                     target: overviewTargetName($0.target),
                     enabled: $0.isEnabled,
                     pointCount: $0.points.count

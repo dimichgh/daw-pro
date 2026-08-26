@@ -39,7 +39,7 @@
 //
 // Staging: DAW_CONTROL_PORT=17695 (17600 is the user's LIVE app and is never a
 // target — enforced in _staging.mjs).
-import { sleep, buildOrAbort, startStaging, stopStaging, connect } from "./_staging.mjs";
+import { sleep, buildOrAbort, startStaging, stopStaging, connect, verdict } from "./_staging.mjs";
 
 const GATE = "m23ba1-marker-rename-modes";
 buildOrAbort({ label: "building staging binary (m23ba1)…" });
@@ -257,4 +257,4 @@ ck("V15 normalized", r.ok, r.error);
 console.log(`M23BA1_MARKER_RENAME_GATE pass=${pass} fail=${fail}`);
 ws.close();
 stopStaging(GATE);
-process.exit(fail ? 1 : 0);
+verdict({ ran: pass + fail, failed: fail });

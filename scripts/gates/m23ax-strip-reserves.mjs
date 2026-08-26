@@ -30,7 +30,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 
 // Build → launch 17695 → pidfile-exact kill, in ONE place (m23-ac-1).
-import { launchStaging, stopStaging, sleep, STAGING_PORT } from "./_staging.mjs";
+import { launchStaging, stopStaging, sleep, STAGING_PORT, panelDensityGuard, verdict } from "./_staging.mjs";
 
 const GATE = "m23ax";
 const OUT = "/tmp/daw-gate-out/m23ax";
@@ -66,6 +66,7 @@ async function must(command, params = {}) {
   if (r.error) throw new Error(`${command} -> ${JSON.stringify(r.error)}`);
   return r.result ?? r;
 }
+const guard = panelDensityGuard(cmd);   // raw cmd — envelope shape, normalized inside
 
 let pass = 0, fail = 0;
 const ck = (name, cond, extra) => {
@@ -94,7 +95,7 @@ try {
   const chan = (await must("track.add", { name: "CH" })).id;
   const bus = (await must("track.add", { name: "BUS", kind: "bus" })).id;
   await must("ui.showMixer", { show: true });
-  await must("debug.panelDensity", { panel: "mixer", mode: "pro" });
+  await guard.set("mixer", "pro");
   await must("debug.windowFrame", { width: 1440, height: 900 });
   await must("debug.explainMode", { on: true });
   await sleep(1200);
@@ -177,7 +178,10 @@ try {
   await must("debug.captureUI", { path: `${OUT}/reserves-8-900.png` });
 
   // ── LEG F — the VALVE, and the class that has none ───────────────────────
-  // At the 640 pt window floor five rows cannot be seated, so the bus SHEDS. The
+  // The window's real content-rect floor is 672 pt (WindowFloor.
+  // minWindowContentHeight, m23-dw); the request below is the pre-m23-dw 640
+  // reading, which now clamps straight to 672 instead of silently drifting
+  // there. At that floor five rows cannot be seated, so the bus SHEDS. The
   // master has no valve at all — it rides its own scroller, so it cannot clip and
   // keeps all five. Both facts in one leg because the contrast IS the design.
   //
@@ -185,7 +189,7 @@ try {
   // `MixerStripLayout.stripHeightAtWindowFloor` is **430**, documented as
   // "conservatively rounded DOWN from ~440". Feed 430 through the budget and you
   // predict 126 pt of room → 106 pt of allowance → three slots, because four need
-  // 108. The REAL strip at a 640 pt window is those ~10 pt taller, so the app
+  // 108. The REAL strip at the window's 672 pt content floor is those ~10 pt taller, so the app
   // seats four (128 = header 16 + gap 4 + rows(4) 108). Nothing is broken: the
   // conservative constant is doing its job, and it is conservative in the SAFE
   // direction. But it means the headless
@@ -196,7 +200,7 @@ try {
   await sleep(1100);
   const ff = await frames();
   record.floor640 = { master: ff.master[0]?.h, chan: ff.strips[0]?.h, bus: ff.strips[1]?.h };
-  ck(`F1 at the 640 pt window floor the BUS sheds to FOUR slots (${section(4)} pt) — MEASURED`,
+  ck(`F1 at the window's 672 pt content floor the BUS sheds to FOUR slots (${section(4)} pt) — MEASURED`,
      Math.abs((ff.strips[1]?.h ?? -1) - section(4)) < EPS, JSON.stringify(ff.strips));
   ck("F1b …i.e. it really did shed — fewer than five, and a WHOLE number of rows",
      (ff.strips[1]?.h ?? -1) < WIDE_SECTION - EPS
@@ -230,9 +234,10 @@ try {
   fail++;
   console.log("GATE ERROR: " + (e?.stack || e));
 } finally {
+  await guard.restore("finally");
   try { ws?.close(); } catch {}
   stopStaging(GATE);
 }
 
 console.log(`\nm23ax: ${pass} passed, ${fail} failed`);
-process.exit(fail === 0 ? 0 : 1);
+verdict({ ran: pass + fail, failed: fail });

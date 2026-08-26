@@ -37,7 +37,7 @@
 // is not a build step, and the original m23-ac filing read exactly this comment
 // as evidence the gate built first. `buildOrAbort()` below does the real thing.
 import fs from "fs";
-import { buildOrAbort, startStaging, stopStaging } from "./_staging.mjs";
+import { buildOrAbort, startStaging, stopStaging, panelDensityGuard, verdict } from "./_staging.mjs";
 
 const GATE = "m23g2";
 const PORT = process.env.DAW_CONTROL_PORT || "17695";
@@ -47,7 +47,12 @@ const BINARY = process.env.M23G2_BINARY || ".build/debug/DAWApp";
 const REPO = process.env.M23G2_REPO || process.cwd();
 fs.mkdirSync(OUT, { recursive: true });
 
-const killer = setTimeout(() => { console.error("TIMEOUT"); process.exit(2); }, 600_000);
+let guard = null;   // m23-ej-2: `let` — assigned after connect, read by the killer below
+const killer = setTimeout(async () => {
+  console.error("TIMEOUT");
+  await guard?.restore("timeout");
+  process.exit(2);
+}, 600_000);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const GRID = 4;            // bar grid in 4/4
@@ -101,6 +106,7 @@ console.log(`staging pid ${stagingPid} on :${PORT}`);
 await sleep(4500);
 
 const { ws, req } = await connect();
+guard = panelDensityGuard(req);   // req already unwraps to .result ?? whole msg
 const checks = [];
 const check = (name, ok, detail) => {
   checks.push({ name, ok, detail });
@@ -128,7 +134,7 @@ try {
   // ══ FIXTURE ══════════════════════════════════════════════════════════════
   await req("project.new", { discardChanges: true });
   await req("debug.windowFrame", { width: 1400, height: 1000 });
-  await req("debug.panelDensity", { panel: "arrange", mode: "pro" });
+  await guard.set("arrange", "pro");
   const trackIDs = [];
   for (const n of ["G2a", "G2b", "G2c", "G2d"]) {
     trackIDs.push((await req("track.add", { kind: "instrument", name: n })).id);
@@ -335,12 +341,12 @@ try {
         `depth=${(await history()).undo.length} expected ${depthBefore}`);
 
   // ══ P6  SNAP HONESTY (the m23-c2 echo-and-CHECK corollary) ═══════════════
-  await req("debug.panelDensity", { panel: "arrange", mode: "simple" });
+  await guard.set("arrange", "simple");
   let se = await drag({ snap: "sixteenth" });
   check("P6a Simple LOCKS the effective grid to Bar even though the picker says sixteenth",
         se.snap === "sixteenth" && se.effectiveSnap === "bar",
         `snap=${se.snap} effectiveSnap=${se.effectiveSnap}`);
-  await req("debug.panelDensity", { panel: "arrange", mode: "pro" });
+  await guard.set("arrange", "pro");
   se = await drag({});
   check("P6b CONTROL: Pro honours the picker, so P6a is the lock and not a stuck echo",
         se.snap === "sixteenth" && se.effectiveSnap === "sixteenth",
@@ -505,14 +511,19 @@ try {
   fs.writeFileSync(`${OUT}/result.json`,
     JSON.stringify({ checks, notes, skips }, null, 2));
   clearTimeout(killer);
-  ws.close();
   // ⚠️ m23-ac-2a: this gate LEAKED — detached + unref, then exit with no
   // teardown. BOTH exit paths need it.
+  // ⚠️ m23-ej-2: guard.restore() round-trips over `req`/`ws` — it MUST run
+  // before ws.close(), never after (measured live on m23k4b's identical bug:
+  // closing first strands the restore write until the guard's own timeout).
+  await guard.restore("normal exit");
+  ws.close();
   stopStaging(GATE, PIDFILE);
-  process.exit(failed.length ? 1 : 0);
+  verdict({ ran: checks.length, failed: failed.length });
 } catch (err) {
   console.error("GATE ERROR:", err);
   clearTimeout(killer);
+  await guard.restore("catch");
   try { ws.close(); } catch {}
   stopStaging(GATE, PIDFILE);
   process.exit(2);

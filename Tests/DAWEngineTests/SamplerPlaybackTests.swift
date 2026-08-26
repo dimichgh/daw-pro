@@ -560,4 +560,127 @@ struct SamplerPlaybackTests {
         #expect(decoded.sustain == 0.6)
         #expect(decoded.release == 0.2)
     }
+
+    // MARK: - Global-vs-zone release precedence (2026-08-20 field report)
+
+    /// THE RULING GATE for the 2026-08-20 report ("Sampler global release is
+    /// inert when zones carry their own; two renders came back byte-identical").
+    ///
+    /// The reporter's two byte-identical renders are consistent with TWO
+    /// stories: the engine ignoring the global correctly, or the engine
+    /// ignoring it by accident. A test that only re-renders the overriding case
+    /// cannot tell them apart — it passes just as happily against a sampler
+    /// that never reads the global at all, or (worse) against a harness that
+    /// renders silence. So this test asserts the PAIR:
+    ///
+    ///   • zone SETS release → the global is inert (byte-identical renders);
+    ///   • zone LEAVES release nil → the global is LIVE (renders differ, and
+    ///     differ in the specific, audible direction a longer release means).
+    ///
+    /// Together those two say the thing that is actually true, and neither
+    /// half is provable without the other. The second is the positive control:
+    /// if the harness were broken, or the note never triggered, the "renders
+    /// differ" assertion is the one that goes red.
+    ///
+    /// The globals are the report's OWN numbers — 3.4465 s reported against an
+    /// instrument behaving at 0.5 s.
+    @Test("release precedence: a zone's own release makes the global inert; a nil zone release leaves it LIVE")
+    func zoneReleaseWinsAndGlobalStaysLiveForNilZones() throws {
+        let fixtures = try fixtures()
+        let shortGlobal = 0.5           // what the instrument audibly did
+        let longGlobal = 3.4465         // what describeSampler reported
+        let noteOff: Int64 = 6_000      // 0.125 s in at 48 kHz
+        let frames = 24_000             // 0.5 s of render
+        // The short release (0.5 s = 24 000 frames) has NOT finished by the end
+        // of the window, so "louder late" is a real, measurable difference
+        // rather than a comparison against a freed voice. The window past
+        // 18 000 is where a 0.5 s ramp is nearly spent and a 3.4465 s ramp is
+        // barely started — the widest honest separation available.
+        let lateWindow = 18_000..<24_000
+
+        func render(zoneRelease: Double?, globalRelease: Double) throws -> [Float] {
+            let zone = SamplerZone(audioFileURL: fixtures.sine440Mono, rootPitch: 69,
+                                   release: zoneRelease)
+            let params = SamplerParams(zones: [zone], oneShot: false,
+                                       attack: 0.001, release: globalRelease, gain: 0.8)
+            return try renderDirect(makeSampler(params),
+                                    events: note(on: 0, off: noteOff, pitch: 69, id: 0),
+                                    frames: frames).left
+        }
+
+        // — A. The zone carries its own release: the global must not reach it —
+        let zoneShortGlobalShort = try render(zoneRelease: shortGlobal, globalRelease: shortGlobal)
+        let zoneShortGlobalLong = try render(zoneRelease: shortGlobal, globalRelease: longGlobal)
+
+        // — B. POSITIVE CONTROL. The zone is silent about release, so the same
+        //   two globals MUST produce different audio. Without this, A passes
+        //   against an engine that reads neither value. —
+        let nilZoneGlobalShort = try render(zoneRelease: nil, globalRelease: shortGlobal)
+        let nilZoneGlobalLong = try render(zoneRelease: nil, globalRelease: longGlobal)
+
+        let overriddenLate = TestSignals.rms(zoneShortGlobalLong, in: lateWindow)
+        let inheritedShortLate = TestSignals.rms(nilZoneGlobalShort, in: lateWindow)
+        let inheritedLongLate = TestSignals.rms(nilZoneGlobalLong, in: lateWindow)
+        print("[measured] release precedence — override byte-identical: "
+              + "\(zoneShortGlobalShort == zoneShortGlobalLong); "
+              + "inherited late RMS short/long: \(inheritedShortLate)/\(inheritedLongLate); "
+              + "overridden late RMS: \(overriddenLate)")
+
+        // A: the global is INERT for an overriding zone — sample for sample.
+        #expect(zoneShortGlobalShort == zoneShortGlobalLong)
+        // …and that null means something: the render is not silence.
+        #expect(TestSignals.peak(zoneShortGlobalLong, in: 0..<Int(noteOff)) > 0.2)
+        #expect(overriddenLate > 0)
+
+        // B: the global is LIVE for an inheriting zone — the SAME two globals
+        // that changed nothing above now change the audio.
+        #expect(nilZoneGlobalShort != nilZoneGlobalLong)
+        // …by the amount the release LAW predicts, not merely "by something".
+        // The engine's release is linear: level(f) = 1 − (f − noteOff)/(R·sr).
+        // Over 18 000..<24 000 that ramp runs 0.5 → 0.25 for R = 0.5 s and
+        // 0.92746 → 0.89119 for R = 3.4465 s. The RMS of a linear ramp a→b is
+        // sqrt((a² + ab + b²)/3), so the expected RATIO is
+        //   sqrt((0.89119² + 0.89119·0.92746 + 0.92746²)/3)
+        //   ÷ sqrt((0.25² + 0.25·0.5 + 0.5²)/3)  =  0.90939 / 0.38188  =  2.3813
+        // — everything else (fixture amplitude, velocity law, output gain)
+        // cancels in the ratio. A 2 % band around a derived constant discriminates
+        // where a bare `>` does not: it fails for a release that is live but
+        // WRONG, which is a defect a loose inequality waves through.
+        let expectedRatio: Float = 2.3813
+        let measuredRatio = inheritedLongLate / inheritedShortLate
+        print("[measured] inherited long/short RMS ratio: \(measuredRatio) "
+              + "(release law predicts \(expectedRatio))")
+        #expect(abs(measuredRatio - expectedRatio) < 0.02 * expectedRatio)
+
+        // The joint claim, as a NULL test: a zone whose own release is 0.5 s
+        // renders EXACTLY what a nil zone renders under a 0.5 s global. The
+        // zone's number is used, and it is used by the same code path — so the
+        // 3.4465 s global handed to the first render reached nothing at all.
+        #expect(zoneShortGlobalLong == nilZoneGlobalShort)
+        #expect(overriddenLate < 0.5 * inheritedLongLate)
+
+        // — And the REPORT, against the same params that produced the audio —
+        //
+        // `instrument.describeSampler`'s `effectiveGlobals` is computed from
+        // `SamplerGlobalUse`, and the whole point of the 2026-08-20 fix is that
+        // its number is the number you HEAR. Asserting that here, in the file
+        // that just rendered the audio, is what keeps the two from drifting:
+        // a DAWControl test can only check that the verb echoes the model, and
+        // would stay green if the ENGINE's precedence flipped tomorrow.
+        let overridingParams = SamplerParams(
+            zones: [SamplerZone(audioFileURL: fixtures.sine440Mono, rootPitch: 69,
+                                release: shortGlobal)],
+            attack: 0.001, release: longGlobal, gain: 0.8)
+        let use = SamplerGlobalUse.release(of: overridingParams)
+        #expect(use.globalIsInert)                       // …as the render showed
+        #expect(use.effectiveValues == [shortGlobal])    // …the number heard
+        #expect(use.global == longGlobal)                // …not the one stored
+
+        let inheritingParams = SamplerParams(
+            zones: [SamplerZone(audioFileURL: fixtures.sine440Mono, rootPitch: 69)],
+            attack: 0.001, release: longGlobal, gain: 0.8)
+        let inheritingUse = SamplerGlobalUse.release(of: inheritingParams)
+        #expect(!inheritingUse.globalIsInert)            // the control, again
+        #expect(inheritingUse.effectiveValues == [longGlobal])
+    }
 }

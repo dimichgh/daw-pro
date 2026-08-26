@@ -7,7 +7,7 @@
 // whatever instance happened to be listening on 17695, at an unknown commit,
 // prepared by hand. It now builds the tree and launches its own instance, so a
 // green here means something about the code as it stands.
-import { sleep, buildOrAbort, startStaging, stopStaging, connect } from "./_staging.mjs";
+import { sleep, buildOrAbort, startStaging, stopStaging, connect, verdict } from "./_staging.mjs";
 
 const GATE = "m17c-pointer-zones";
 buildOrAbort({ label: "building staging binary (m17c)…" });
@@ -74,4 +74,8 @@ ck("normalized", r.ok, r.error);
 console.log(`ORCH_ZONES pass=${pass} fail=${fail}`);
 ws.close();
 stopStaging(GATE);
-process.exit(fail ? 1 : 0);
+// m23-fa-1: was `process.exit(fail ? 1 : 0)` — vacuous if the script threw or
+// returned before the first ck() ran (fail stays 0, exits 0). verdict() takes
+// the total-recorded count explicitly, so a run that asserted nothing reports
+// that honestly instead of reporting green.
+verdict({ ran: pass + fail, failed: fail });

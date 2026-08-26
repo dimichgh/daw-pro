@@ -100,6 +100,22 @@ public struct SampleLibraryIR: Sendable, Equatable {
         /// shared inclusive→exclusive law (`end` → endFrame + 1).
         public var loopEndFrame: Int?
 
+        // m27 leg B — dynamic-layer crossfade bounds, raw MIDI 0...127. The
+        // CC domain carries its controller number in the OPCODE NAME
+        // (`xfin_locc11`), so the parser records which CC it saw; a region
+        // that names two different CCs keeps the FIRST (SFZ has no notion of
+        // two simultaneous CC crossfades on one region, and picking the first
+        // is the deterministic reading).
+        public var xfCC: Int?
+        public var xfCcInLo: Int?
+        public var xfCcInHi: Int?
+        public var xfCcOutLo: Int?
+        public var xfCcOutHi: Int?
+        public var xfVelInLo: Int?
+        public var xfVelInHi: Int?
+        public var xfVelOutLo: Int?
+        public var xfVelOutHi: Int?
+
         // Degradation-policy inputs (§2.3).
         /// Raw `trigger=` value; nil reads as "attack".
         public var trigger: String?
@@ -130,9 +146,23 @@ public struct SampleLibraryIR: Sendable, Equatable {
                     sustainPercent: Double? = nil, releaseSeconds: Double? = nil,
                     loopMode: String? = nil,
                     loopStartFrame: Int? = nil, loopEndFrame: Int? = nil,
+                    xfCC: Int? = nil,
+                    xfCcInLo: Int? = nil, xfCcInHi: Int? = nil,
+                    xfCcOutLo: Int? = nil, xfCcOutHi: Int? = nil,
+                    xfVelInLo: Int? = nil, xfVelInHi: Int? = nil,
+                    xfVelOutLo: Int? = nil, xfVelOutHi: Int? = nil,
                     trigger: String? = nil,
                     swLast: Int? = nil, swDefault: Int? = nil,
                     ccTriggered: Bool = false, ignored: [String] = []) {
+            self.xfCC = xfCC
+            self.xfCcInLo = xfCcInLo
+            self.xfCcInHi = xfCcInHi
+            self.xfCcOutLo = xfCcOutLo
+            self.xfCcOutHi = xfCcOutHi
+            self.xfVelInLo = xfVelInLo
+            self.xfVelInHi = xfVelInHi
+            self.xfVelOutLo = xfVelOutLo
+            self.xfVelOutHi = xfVelOutHi
             self.samplePath = samplePath
             self.defaultPath = defaultPath
             self.groupIndex = groupIndex

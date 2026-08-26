@@ -3,9 +3,21 @@ import DAWCore
 import DAWAppKit
 
 /// Vertical piano-keyboard gutter down the left of the piano roll: one row per
-/// MIDI pitch, ivory/black keys, octave C's labeled (C-1..C9). Shares the
+/// MIDI pitch, ivory/black keys, **every key named** (C-1…G9, m25-i — see
+/// `keyLabel` for the density decision and what it rejected). Shares the
 /// model's pitch↔y mapping so it lines up row-for-row with the grid. Canvas —
 /// no per-frame allocation beyond Paths (docs/DESIGN-LANGUAGE.md "Meters").
+///
+/// ⚠️ **UNVERIFIED, AND WORTH THE NEXT PERSON'S ATTENTION (m25-i): this view's
+/// redraw cadence is not established.** `PianoRollGrid` next door was extracted
+/// specifically so a transport tick leaves its inputs equal and SwiftUI skips
+/// its renderer (see its doc comment); this view takes an `onAudition` closure
+/// that `PianoRollView` constructs INLINE at the call site, giving it a fresh
+/// closure identity on every parent body evaluation — and that body re-evaluates
+/// ~29×/s while the transport runs (measured for the bar-ops readout,
+/// DESIGN-LANGUAGE §"Piano roll"). If the renderer does re-run at that cadence
+/// it now lays out 128 texts per pass instead of 11. Nothing here can measure
+/// that; a signpost on the draw closure under a running transport can.
 ///
 /// DUAL INK (m23-b): this is the app's one light surface, so it is also the one
 /// place the house light-on-dark chrome tokens invert. Every line and glyph
@@ -56,8 +68,71 @@ struct KeyboardSidebar: View {
         [1, 3, 6, 8, 10].contains(((pitch % 12) + 12) % 12)
     }
 
-    /// "C4"-style label for a C pitch (middle C = 60 = C4).
-    private nonisolated static func octaveLabel(_ pitch: Int) -> String { "C\(pitch / 12 - 1)" }
+    /// EVERY key is named (m25-i), not just the C's — `Fundamental.noteName`,
+    /// the repo's ONE scientific-pitch name (`DAWCore`, which itself defers to
+    /// `KeyEstimate.pitchClassesSharp`, the sole pitch-class table). The C-only
+    /// `octaveLabel(_:)` that used to live here is gone rather than generalised:
+    /// a private `"C\(pitch / 12 - 1)"` could not emit any other name, and a
+    /// twelve-string table here would have been the third home for the same
+    /// strings — the gutter would then be free to disagree with the step
+    /// sequencer's lane labels and the instrument frequency reference about what
+    /// MIDI 61 is called. `noteName` is a static on a plain `public enum` with no
+    /// actor isolation, so it is callable from the `@Sendable` Canvas renderer
+    /// below (the same reason `isBlackKey` is `nonisolated`); the step sequencer
+    /// already calls it from a `nonisolated static func`.
+    ///
+    /// ── LABEL DENSITY: EVERY KEY. What that decision rests on ──
+    /// * **It is what was asked for**, and nothing measured argues against it.
+    ///   The two objections that would have — collision and narrow black keys —
+    ///   are both false HERE, and were checked rather than assumed. The row is
+    ///   14 pt (`PianoRollModel.defaultRowHeight`) against a ~9.5 pt line box at
+    ///   8 pt, so consecutive labels cannot touch; and this gutter draws every
+    ///   pitch as a FULL-WIDTH row (see the `rect` below) — it is a striped
+    ///   column, not a physical keyboard with short black keys, so an accidental
+    ///   has exactly as much room for its name as a natural.
+    /// * **White-keys-only was rejected**: it reads cleaner, but it answers a
+    ///   different request with no evidence behind the substitution, and it
+    ///   would leave the five pitches a beginner is least sure of as the five
+    ///   with no name.
+    /// * **Hover-to-reveal was rejected** on this codebase's own precedent
+    ///   (m23-v, the empty-lane hint): "a hint you must already be pointing at
+    ///   is only marginally more discoverable than the invisible thing it
+    ///   advertises, and it is invisible to exactly the user who filed it."
+    ///   Reading which key is which is a LOOKING task, not a pointing one.
+    /// * **A row-height-scaled density ladder is STILL not here — but the
+    ///   reason changed, and this bullet is SUPERSEDED IN PLACE by m25-b-4
+    ///   (2026-08-23) rather than left to rot.** It used to read: *"rejected as
+    ///   unreachable code: `rowHeight` has exactly one value in the shipped app
+    ///   and no vertical-zoom driver anywhere (unlike `pixelsPerBeat`, which has
+    ///   three), so every branch of such a ladder but one would be dead and
+    ///   untestable. When a vertical zoom lands, it owns that ladder — and the
+    ///   note-block labels next door already show the shape it should take
+    ///   (`PianoRollNoteLabel.fits`, a fit test rather than a threshold table)."*
+    ///   **The vertical zoom has landed, so the first half is now false**:
+    ///   `rowHeight` is driven by the persisted `PanelLayoutStore.pianoRollRowHeight`
+    ///   slot and has many reachable values. The ladder is still not needed, and
+    ///   that is a MEASUREMENT rather than a deferral: the zoom's FLOOR was set
+    ///   AT the fit bound. This face lays out in a **10.0 pt line box** (measured
+    ///   for m25-b-4 — `NSLayoutManager.defaultLineHeight` and
+    ///   `NSAttributedString.size().height` both give 10.0 at 8 pt for the medium
+    ///   AND bold weights used here; the "~9.5 pt" this comment quoted below is
+    ///   the INK height, ascender − descender, not the line box), each name is
+    ///   drawn centred in its row, so adjacent names first touch at exactly
+    ///   10 pt — and `PianoRollZoom.rowHeightRange` starts at 10. Every reachable
+    ///   row height therefore names every key, and there is no density to ladder.
+    ///   ⚠️ **THAT INVARIANT IS THE FLOOR'S, NOT THIS FILE'S**: lower the floor
+    ///   below 10 and this gutter needs the fit test the same day
+    ///   (`PianoRollNoteLabel.fits`'s shape — suppress, never truncate, never
+    ///   scale the type down).
+    ///
+    /// The hierarchy that keeps 128 names from reading as a wall: naturals take
+    /// the ivory surface's own measured ink at medium weight, accidentals take
+    /// the caption tier on their black rows (quieter, still ≥ 4.5:1), and middle
+    /// C keeps bold + its anchor bar. The octave marker line at every C is
+    /// unchanged, so the landmark grammar survives the extra text.
+    private nonisolated static func keyLabel(_ pitch: Int) -> String {
+        Fundamental.noteName(midiNote: pitch)
+    }
 
     var body: some View {
         // CANVAS CONTRACT (m16-a): renderer closures are @Sendable — value captures
@@ -89,20 +164,19 @@ struct KeyboardSidebar: View {
                     Path(CGRect(x: size.width - 0.5, y: y, width: 0.5, height: rowHeight)),
                     with: .color(edge)
                 )
-                // Octave marker + label at every C. C is always a WHITE key, so
-                // both are ivory-side ink by construction. Middle C is marked
-                // NEUTRALLY — a bold label over a left-edge anchor bar, the
-                // arrange marker-lane idiom — never with an accent: cyan is
-                // earned active-transport state (in this very view, the
-                // playhead), and on ivory it measures 1.07:1, so it could not
-                // have been seen here in any case.
+                // Octave marker at every C. C is always a WHITE key, so it is
+                // ivory-side ink by construction. Middle C is marked NEUTRALLY —
+                // a bold label over a left-edge anchor bar, the arrange
+                // marker-lane idiom — never with an accent: cyan is earned
+                // active-transport state (in this very view, the playhead), and
+                // on ivory it measures 1.07:1, so it could not have been seen
+                // here in any case.
                 if pitch % 12 == 0 {
-                    let isMiddleC = pitch == 60
                     context.fill(
                         Path(CGRect(x: 0, y: y, width: size.width, height: 1)),
                         with: .color(DAWTheme.keyOctaveOnWhite)
                     )
-                    if isMiddleC {
+                    if pitch == 60 {
                         // Inset top and bottom so it reads as a deliberate mark
                         // on the key, not as the key's own edge.
                         context.fill(
@@ -110,16 +184,35 @@ struct KeyboardSidebar: View {
                             with: .color(DAWTheme.keyLabelOnWhite)
                         )
                     }
-                    let label = Text(Self.octaveLabel(pitch))
-                        .font(.system(size: 8, weight: isMiddleC ? .bold : .medium,
-                                      design: .monospaced))
-                        .foregroundColor(DAWTheme.keyLabelOnWhite)
-                    context.draw(
-                        label,
-                        at: CGPoint(x: size.width - 4, y: y + rowHeight / 2),
-                        anchor: .trailing
-                    )
                 }
+                // The name, on EVERY key (m25-i — see `keyLabel`). DUAL INK: the
+                // polarity comes from the key this glyph sits on, so a natural
+                // takes the ivory surface's own ink (`keyLabelOnWhite`, 10.1:1)
+                // and an accidental takes a DARK-surface token on its near-black
+                // row. Reaching for `keyLabelOnWhite` on a black key — or
+                // `textDim` on an ivory one, which measures 2.19:1 — is the
+                // silent-disappearance defect m23-b closed.
+                //
+                // Accidentals draw one tier quieter than naturals — `textDim`,
+                // the muted-micro-label tier, MEASURED at 5.97:1 on `keyBlack`
+                // against the naturals' 10.07:1 on ivory (both off a real render
+                // of this view; every one of the 128 rows clears Rule 5) — for
+                // two reasons: it keeps
+                // the ivory/black alternation reading as an OBJECT rather than
+                // as 128 rows of type, and the natural names are the ones a
+                // reader navigates by — an accidental is found from its
+                // neighbour. `textSecondary` was the alternative and is brighter
+                // than the naturals' own ink would be relative to its surface,
+                // which would invert that hierarchy.
+                let label = Text(Self.keyLabel(pitch))
+                    .font(.system(size: 8, weight: pitch == 60 ? .bold : .medium,
+                                  design: .monospaced))
+                    .foregroundColor(black ? DAWTheme.textDim : DAWTheme.keyLabelOnWhite)
+                context.draw(
+                    label,
+                    at: CGPoint(x: size.width - 4, y: y + rowHeight / 2),
+                    anchor: .trailing
+                )
             }
         }
         .frame(width: width, height: model.contentHeight)

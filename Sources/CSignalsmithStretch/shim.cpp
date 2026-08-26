@@ -59,6 +59,14 @@ int css_output_latency(const css_stretch *s) {
     return s->stretch.outputLatency();
 }
 
+int css_interval_samples(const css_stretch *s) {
+    // Reads the STFT's own hop (signalsmith-stretch.h `intervalSamples()` ->
+    // `stft.defaultInterval()`), which is what the per-output-sample block
+    // loop compares `samplesSinceLast` against. Not recomputed from the
+    // preset formula on purpose — see the header.
+    return s->stretch.intervalSamples();
+}
+
 void css_output_seek(css_stretch *s, const float *const *inputs,
                      int inputFrames) {
     s->stretch.outputSeek(inputs, inputFrames);

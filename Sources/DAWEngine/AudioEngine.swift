@@ -279,6 +279,9 @@ public final class AudioEngine: AudioEngineControlling {
     /// True after a failed CoreMIDI client creation (sandboxed CI) — don't
     /// retry on every snapshot.
     private var midiInputUnavailable = false
+    /// The remembered m28-knob controller sink, re-applied to every MIDI client
+    /// this engine creates. See `setControlChangeObserver`.
+    private var controlChangeObserver: (@MainActor ([MIDIControlChangeEvent]) -> Void)?
 
     /// Host-tick → seconds factor for the MIDI capture session's beat math
     /// (same conversion the renderers precompute).
@@ -471,6 +474,33 @@ public final class AudioEngine: AudioEngineControlling {
     /// Per-track note-audition state (m23-d) — see `setAuditionPitches`.
     private var auditionVoices: [UUID: AuditionVoices] = [:]
 
+    /// Per-track LIVE CONTROLLER PREVIEW state (breath pad P6) — what
+    /// `previewController` last actually pushed, and to which renderer object.
+    ///
+    /// ⛔ DELIBERATELY A SEPARATE LEDGER FROM `auditionVoices`, NOT AN EXTRA
+    /// FIELD ON IT. That one is keyed by PITCH and `stopAllAudition()` /
+    /// `allNotesOff()` walk it emitting a note-off per entry; a CC number filed
+    /// there would come back out as a bogus note-off on the pitch of the same
+    /// number (CC 11 → note-off on B0). A controller pairs with no voice, so it
+    /// belongs in no voice ledger.
+    ///
+    /// The renderer reference is STRONG for the `AuditionVoices` reason (it pins
+    /// the ring's memory across a node teardown), and the identity is what makes
+    /// the change filter below CORRECT rather than merely cheap: a rebuilt node
+    /// is a different object holding a freshly reset instrument, so a remembered
+    /// value from the old one says nothing about the new one.
+    private struct ControllerPreview {
+        var renderer: InstrumentRenderer
+        var controller: UInt8
+        var value: UInt8
+    }
+
+    /// See `ControllerPreview`. Entries are dropped wherever the instrument is
+    /// reset (`stopAllAudition`, `allNotesOff`), because a reset restores the
+    /// instrument's own controller defaults and the remembered value is then a
+    /// lie that would suppress the next identical push.
+    private var controllerPreviews: [UUID: ControllerPreview] = [:]
+
     /// The tempo tempo-synced delays derive their effective time from
     /// (m22-f): adopted from EVERY transport-carrying intent via
     /// `cacheTransportFlags` — `setTempo` is the store's tempo-change push,
@@ -575,6 +605,26 @@ public final class AudioEngine: AudioEngineControlling {
     /// site is control-side schedule/reconcile code — zero render-thread
     /// surface). The store installs this and owns the coalescing ring.
     public var engineNoticeHandler: ((EngineNoticeEvent) -> Void)?
+
+    /// END-OF-CONTENT STOP (m25-d): the linear beat past which the project has
+    /// no more clips, or nil for "run forever" (today's behaviour).
+    ///
+    /// A PRE-COMPUTED SCALAR handed over by `ProjectStore.setEndStop(beat:)` —
+    /// the playhead tick does one optional unwrap and one `>=` against it and
+    /// never calls back into the store, walks a track list, allocates, locks,
+    /// or hops actors. The store re-pushes on every transition that can change
+    /// the answer, and pushes nil at record start and at stop.
+    private var endStopBeat: Double?
+
+    /// Fired once when the playhead reaches `endStopBeat`. The engine does NOT
+    /// tear its own transport down — the store owns transport state and calls
+    /// its ordinary `stop()`, which comes straight back here as
+    /// `stopPlayback()`.
+    private var endStopHandler: (() -> Void)?
+
+    public func setEndStop(beat: Double?) { endStopBeat = beat }
+
+    public func setEndStopHandler(_ handler: (() -> Void)?) { endStopHandler = handler }
 
     /// THE session processing rate of every LIVE graph (m20-d, m19-k design
     /// §7 Phase 2). A constant, deliberately: the graph no longer follows the
@@ -962,6 +1012,11 @@ public final class AudioEngine: AudioEngineControlling {
             let beats = derivedBeats()  // modular under a loop — BEFORE the context clears
             loopContext = nil
             metronomeElapsedOffset = 0
+            // m25-d: a bound belongs to the RUN that armed it. Clearing here
+            // means no stop bound can survive into the next start (or the next
+            // TAKE) even if a caller forgets to re-push — the store clears it
+            // too, deliberately redundantly.
+            endStopBeat = nil
             lastKnownBeats = beats
             playheadTask?.cancel()
             playheadTask = nil
@@ -1403,6 +1458,9 @@ public final class AudioEngine: AudioEngineControlling {
             midiInputUnavailable = true
             return nil
         }
+        // Re-apply the remembered controller sink (m28-knob): the observer may
+        // have been installed before this client existed, or across a dispose.
+        manager.controlChangeObserver = controlChangeObserver
         midiInput = manager
         return manager
     }
@@ -1416,6 +1474,34 @@ public final class AudioEngine: AudioEngineControlling {
     public func midiEventCount() -> Int {
         midiInput?.eventCount ?? 0
     }
+
+    /// `AudioEngineControlling.setControlChangeObserver` (m28-knob).
+    ///
+    /// Held HERE as well as on the manager, because the manager is created
+    /// LAZILY (first armed instrument track, or the first `availableMIDIInputs`
+    /// call) and may be disposed and recreated underneath us. Installing an
+    /// observer before the client exists must not silently lose it — that is the
+    /// exact "returns success, does nothing" shape this feature is most exposed
+    /// to, so the observer is remembered and re-applied by `ensureMIDIInput`.
+    ///
+    /// Installing a non-nil observer brings the MIDI client UP, for the same
+    /// reason: an armed learn against a client that was never created sees no
+    /// events, and "turn the knob, nothing happens" is indistinguishable from a
+    /// broken mapping.
+    public func setControlChangeObserver(
+        _ observer: (@MainActor ([MIDIControlChangeEvent]) -> Void)?) {
+        controlChangeObserver = observer
+        if observer == nil {
+            midiInput?.controlChangeObserver = nil
+        } else {
+            ensureMIDIInput()?.controlChangeObserver = observer
+        }
+    }
+
+    /// Whether a controller observer is installed on THIS engine — the
+    /// discriminator `AudioEngineControlObserverTests` uses to prove the real
+    /// engine overrides the protocol's silent default. Testing only.
+    var hasControlChangeObserverForTesting: Bool { controlChangeObserver != nil }
 
     // MARK: - Note audition (m23-d)
 
@@ -1510,6 +1596,108 @@ public final class AudioEngine: AudioEngineControlling {
         return auditionAudibility(trackID: trackID)
     }
 
+    /// Sends ONE controller value to `trackID`'s instrument right now (breath
+    /// pad P6 — the live drag preview). Rides the SAME per-renderer audition
+    /// ring `setAuditionPitches` uses, which is the whole reason this leg is
+    /// cheap: no new ring, no new render-thread bound arithmetic
+    /// (design-breath-pad §1.5), and the SPSC argument is unchanged because the
+    /// producer is still the main actor and only the main actor.
+    ///
+    /// WHAT THIS METHOD DOES NOT DO, ON PURPOSE:
+    ///
+    /// * **No time-based throttle here.** The ring-protection cap that matters
+    ///   is the 30 Hz one, and it lives in `PadPreviewController` (DAWCore) with
+    ///   the gesture phase, because those two facts are only safe TOGETHER: an
+    ///   engine-side timer cannot tell an intermediate drag frame from the last
+    ///   value of a gesture, so it would silently strand the strip at a stale
+    ///   controller value — the m25-k shape (a correct policy at the wrong
+    ///   cadence looks exactly like a correct policy). What lives here is a
+    ///   STATE filter, below, which cannot strand anything by construction.
+    /// * **No heartbeat.** `beatAuditionHeartbeat()` is deliberately not called:
+    ///   a controller holds no voice, and bumping the counter would keep a
+    ///   genuinely stuck piano-roll audition note alive past the render side's
+    ///   3 s watchdog.
+    /// * **No `auditionVoices` entry.** See `ControllerPreview`.
+    ///
+    /// The state filter: an identical (controller, value) already sent to the
+    /// SAME renderer object pushes nothing — a dot held still costs zero ring
+    /// traffic — but still reports the audibility outcome honestly, because the
+    /// strip really is at that value. A different renderer always pushes: a
+    /// rebuilt node holds a freshly reset instrument.
+    @discardableResult
+    public func previewController(trackID: UUID, controller: UInt8,
+                                  value: UInt8) -> AuditionOutcome {
+        let cc = controller & 0x7F
+        let data = value & 0x7F
+        let held = controllerPreviews[trackID]
+
+        // ONLY A **FIRST TOUCH** MAY START THE HARDWARE.
+        //
+        // The cold-app half is the `setAuditionPitches` idiom: the pad must be
+        // audible with the transport stopped, so a graph with no running
+        // hardware is started here. `prepare()` has already posted its own
+        // notice on failure.
+        //
+        // Holding a ledger entry for this track means the engine WAS running when
+        // that entry was made, so this push is a refresh or a RELEASE of live
+        // state — the `setAuditionPitches` case that puts its `wanted.isEmpty`
+        // release branch ABOVE its own `prepare()`.
+        //
+        // ⚠️⚠️ **THIS IS DEFENCE IN DEPTH, NOT THE MECHANISM — DO NOT READ IT AS
+        // THE THING THAT PREVENTS THE BUG, AND DO NOT DELETE IT ON THAT BASIS.**
+        // The bug it guards is real and was live: `ProjectStore.stopAllAudition()`
+        // (project boundary, app RESIGN-ACTIVE) routes a release through here, and
+        // an unconditional `prepare()` booted CoreAudio to send a controller to
+        // silence as the app went away. What actually closes it is TWO DAWCore
+        // guards, and they are the ones under test: `PadPreviewController.release-
+        // ToNeutral` pushes nothing when `lastDeliveredValue == nil` (pinned by
+        // `aReleaseWithNothingParkedPushesNothing`), and `ProjectStore.stopAll-
+        // Audition()` releases the pad BEFORE clearing this ledger (pinned by
+        // `projectBoundaryReleasesThePadFirst`, a SEQUENCE assertion). Together
+        // those make the branch below unreachable from the release path today —
+        // which is why deleting `held == nil` reddens nothing, and why the fact is
+        // written here instead of being discovered by someone who deletes it. It
+        // stays for the callers that do not exist yet (P7's `BreathPadModel`,
+        // m28-knob's MIDI-learn), which will reach this method by other routes.
+        //
+        // ⚠️ Skipping the start does NOT drop the release: `prepare()` starts the
+        // existing graph, it does not rebuild it (see `prepare()` — it returns
+        // early when running and otherwise only starts the AVAudioEngine), so
+        // `instrumentRenderer(forTrack:)` is a plain dictionary lookup that
+        // answers the SAME renderer object whether or not hardware is running.
+        // The neutral lands in that renderer's audition ring and is drained on
+        // the next quantum the engine renders — which is why the release must be
+        // PUSHED here rather than skipped: the instrument's own CC state
+        // survives a stop/start, so a value parked before a stop would otherwise
+        // come back with the hardware.
+        if !isRunning, held == nil {
+            do { try prepare() } catch { }
+        }
+
+        guard let renderer = graph.instrumentRenderer(forTrack: trackID) else {
+            // Unknown/audio/bus track, or a mid-rebuild gap. Drop the remembered
+            // value: whatever renderer comes back must be pushed to afresh.
+            controllerPreviews[trackID] = nil
+            return .noRenderer
+        }
+
+        let alreadyThere = held.map {
+            $0.renderer === renderer && $0.controller == cc && $0.value == data
+        } ?? false
+        if !alreadyThere {
+            renderer.pushAuditionController(controller: cc, value: data)
+            controllerPreviews[trackID] = ControllerPreview(
+                renderer: renderer, controller: cc, value: data)
+        }
+        return auditionAudibility(trackID: trackID)
+    }
+
+    /// Test seam: the controller value this engine believes is parked on a
+    /// track, or nil when it has pushed none.
+    var controllerPreviewForTesting: [UUID: (controller: UInt8, value: UInt8)] {
+        controllerPreviews.mapValues { (controller: $0.controller, value: $0.value) }
+    }
+
     /// Releases every audition voice on every track (m23-d). Also requests a
     /// flush on each renderer that held one: this runs on the paths where the
     /// main actor is about to stop being able to send note-offs, and there is
@@ -1524,6 +1712,18 @@ public final class AudioEngine: AudioEngineControlling {
             held.renderer.requestFlush()
         }
         auditionVoices.removeAll()
+        // Breath pad P6. ⚠️ THE OBVIOUS JUSTIFICATION FOR THIS LINE IS FALSE and
+        // is written down wrong-first so nobody re-derives it: the flush above
+        // does NOT cover these tracks. `requestFlush()` runs only for renderers
+        // that held an audition VOICE, and a track can hold a controller preview
+        // with no voice at all — so its instrument keeps whatever CC it was
+        // given. The ledger is dropped anyway because it is a CACHE for the
+        // change filter, and a stale-but-dropped cache can only cost a redundant
+        // push, never suppress a needed one. The value that actually restores
+        // the strip is the neutral `PadPreviewController.stop(engine:)` sends,
+        // which `ProjectStore.stopAllAudition()` deliberately sends BEFORE
+        // calling in here.
+        controllerPreviews.removeAll()
     }
 
     /// PANIC (m23-af) — all-notes-off on every instrument renderer, regardless of
@@ -1545,6 +1745,9 @@ public final class AudioEngine: AudioEngineControlling {
     @discardableResult
     public func allNotesOff() -> Int {
         stopAllAudition()
+        // `flushAllInstruments` resets renderers `stopAllAudition` never held,
+        // so clear the preview ledger against the WIDER set too (breath pad P6).
+        controllerPreviews.removeAll()
         return graph.flushAllInstruments()
     }
 
@@ -1830,6 +2033,35 @@ public final class AudioEngine: AudioEngineControlling {
     public func analyzeReferenceFile(at url: URL) async throws -> ReferenceAnalysis {
         try await Task.detached(priority: .userInitiated) {
             try ReferenceAnalyzer.analyze(fileAt: url)
+        }.value
+    }
+
+    /// Offline windowed peak/RMS file profile (m25-z): `FileProfiler`,
+    /// streamed in bounded chunks on a detached task — zero render-thread
+    /// involvement, zero live-graph involvement. Read-only; no cache (a
+    /// profile is a throwaway diagnostic read, not persisted state like the
+    /// reference slot).
+    public func profileFile(at url: URL, windowSeconds: Double, fromSeconds: Double,
+                            durationSeconds: Double?) async throws -> FileProfile {
+        try await Task.detached(priority: .userInitiated) {
+            try FileProfiler.profile(
+                fileAt: url, windowSeconds: windowSeconds,
+                fromSeconds: fromSeconds, durationSeconds: durationSeconds)
+        }.value
+    }
+
+    /// Offline per-frame pitch detection (m23-ap-3): `ClipPitchAnalyzer`,
+    /// which owns the `PitchTracker` construction + conversion, on a
+    /// detached task — zero render-thread involvement, zero live-graph
+    /// involvement (§7.6 in `PitchTracker.swift`). Read-only; no cache (see
+    /// `ClipPitchAnalyzer`'s header for why).
+    public func detectPitch(inFileAt url: URL, fromSeconds: Double, durationSeconds: Double,
+                            confidenceThreshold: Double,
+                            silenceFloorDbfs: Double) async throws -> PitchDetectionResult {
+        try await Task.detached(priority: .userInitiated) {
+            try ClipPitchAnalyzer.detect(
+                fileAt: url, fromSeconds: fromSeconds, durationSeconds: durationSeconds,
+                confidenceThreshold: confidenceThreshold, silenceFloorDbfs: silenceFloorDbfs)
         }.value
     }
 
@@ -3837,6 +4069,41 @@ public final class AudioEngine: AudioEngineControlling {
                     // linear click run is active — loop runs unroll whole
                     // cycles inside `serviceLoop` instead, m14-c L-3).
                     self.metronome.topUp(currentBeat: beats)
+                    // END OF CONTENT (m25-d) — the load-bearing check: with an
+                    // engine attached, the store's headless ticker never runs,
+                    // so this is the only place a real playback run learns it
+                    // has passed the last clip.
+                    //
+                    // Placed in the LINEAR branch on purpose: LOOPING TAKES
+                    // PRECEDENCE. A `loopContext != nil` run (the gapless
+                    // cycling case) never reaches here at all, and the
+                    // `loopEnabled && loopEndBeat > loopStartBeat` re-check
+                    // below covers the linear-schedule-with-a-loop-cached case
+                    // that the wrap above owns — the identical condition, so
+                    // the two can never disagree about which one acts.
+                    //
+                    // ⚠️ `activeTake == nil` is the STRUCTURAL recording guard:
+                    // even handed a stale bound, a rolling take cannot be
+                    // stopped here. The store carries two more (an explicit nil
+                    // push in `record()`, and `TransportEndStop.bound` refusing
+                    // while `isRecording`).
+                    //
+                    // Cost per tick: one optional unwrap, three bool reads, two
+                    // comparisons. No allocation, no lock, no ObjC dispatch, no
+                    // actor hop — and this task is `@MainActor` on a
+                    // `@MainActor` engine, so it is not the render thread to
+                    // begin with.
+                    if let bound = self.endStopBeat, self.activeTake == nil,
+                       !(self.loopEnabled && self.loopEndBeat > self.loopStartBeat),
+                       beats >= bound {
+                        // Park EXACTLY on the content end rather than wherever
+                        // this ~33 ms tick overshot to, push it, then hand the
+                        // stop to the store (which owns transport state).
+                        self.lastKnownBeats = bound
+                        self.playheadHandler?(bound)
+                        self.endStopHandler?()
+                        return
+                    }
                 }
                 self.lastKnownBeats = beats
                 self.playheadHandler?(beats)

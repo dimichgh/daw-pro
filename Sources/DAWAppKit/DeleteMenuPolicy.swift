@@ -1,7 +1,13 @@
 import Foundation
 
-/// The ONE home for the question "what does a DELETE **menu item** act on, what
-/// does it say, and is it live?" (m23-cf).
+/// The ONE home for the question "what does a DELETE act on, what does it say,
+/// and is it live?" (m23-cf).
+///
+/// ⭐ TWO ROUTES, ONE DECISION, AND THE SECOND ROUTE IS WHY THE FIRST SENTENCE
+/// NO LONGER SAYS "menu item". `editMenuItem` answers for Edit ▸ Delete and the
+/// context menus; `keyPress` answers for the bare DELETE KEY and is
+/// `editMenuItem` plus ONE guard. They are not two policies that agree — the key
+/// route literally calls the menu route, so they cannot disagree.
 ///
 /// WHY THIS EXISTS. Until m23-cf the only way to remove a clip or a note was the
 /// bare DELETE key — `grep 'Button("Delete\|Button("Remove'` over `Sources/DAWApp`
@@ -25,6 +31,16 @@ import Foundation
 /// (`ArrangeScrollQuery`, `GenerationCardDebugKeys`, `ArrangeTrackSelection`).
 /// Everything that DECIDES lives here; `DAWApp` keeps only composition — reading
 /// live state, calling the store, mounting the `Button`s.
+///
+/// ⭐ SEE ALSO `ClipboardMenuPolicy` (m23-ek-3), the SIBLING that answers the
+/// same-shaped question for Copy / Cut / Paste. It is a sibling and not an
+/// extension of this type deliberately — this file's first sentence claims ONE
+/// question, and a file that owns two questions is how a home stops being one.
+/// Copy and Cut reuse the guard stack below VERBATIM (same order, same terms,
+/// same reasons); Paste does not, because its enablement depends on the
+/// clipboard rather than on a selection. The one thing the two genuinely share
+/// is the plural rule, which was hoisted out of `countedTitle` into
+/// `EditMenuTitles` so that neither of them owns it.
 public enum DeleteMenuPolicy {
 
     /// What Edit ▸ Delete says when it is greyed.
@@ -90,9 +106,13 @@ public enum DeleteMenuPolicy {
     /// Both bridges were built for that purpose and their doc comments record
     /// the measurements that rejected focus as a term.
     ///
-    /// ⚠️ `isArrangeTextEditingFocused` IS THE ONE GUARD DELIBERATELY NOT
-    /// MIRRORED, and this is a reasoned divergence rather than an oversight.
-    /// Two independent reasons:
+    /// ⚠️ `isArrangeTextEditingFocused` IS THE ONE GUARD THIS **MENU** ROUTE
+    /// DELIBERATELY DOES NOT MIRROR, and this is a reasoned divergence rather
+    /// than an oversight. ⭐ SCOPE THIS SENTENCE TO THE MENU — since m23-cf's
+    /// second pass the KEY route (`keyPress`, below) DOES apply the guard, as
+    /// its first term. That is not the two routes disagreeing; it is the two
+    /// routes having different hazards, which is exactly what the two reasons
+    /// below say. Two independent reasons:
     ///
     ///   • WHAT IT GUARDS CANNOT HAPPEN HERE. That guard exists because a
     ///     Backspace typed into a rename field must not reach the clips — an
@@ -112,6 +132,10 @@ public enum DeleteMenuPolicy {
     /// while a rename field is open, and will delete the arrange selection. It is
     /// labelled, deliberate and journaled (undo restores it) — which is the
     /// opposite of the silent destruction the key-path guard prevents.
+    ///
+    /// ⚠️ SO DO NOT CALL THIS FROM A KEY HANDLER. `keyPress` exists precisely
+    /// because a keystroke DOES carry the ambiguity this route does not, and it
+    /// re-adds the term without forking the precedence.
     ///
     /// - Parameters:
     ///   - arrangeWorkspace: `workspaceMode == .arrange`.
@@ -151,6 +175,109 @@ public enum DeleteMenuPolicy {
         guard arrangeClipCount > 0 else { return DeleteMenuItem(refusedBy: .emptySelection) }
         return DeleteMenuItem(title: countedTitle(arrangeClipCount, "Clip", "Clips"),
                               surface: .arrangeClips)
+    }
+
+    // MARK: - The DELETE KEY
+
+    /// Resolves a bare DELETE **key press**: which surface owns it, and — when
+    /// nothing does — which guard refused.
+    ///
+    /// ═══ WHY THIS EXISTS (m23-cf, second pass) — THE COIN FLIP ═══
+    ///
+    /// The user's report was "selecting a note and pressing delete does not
+    /// work", and separately that a freshly double-clicked clip could be dragged
+    /// but not deleted. Both are the same defect, and it is not that a handler is
+    /// missing. DELETE is CLAIMED BY THREE HANDLERS, each gated behind its own
+    /// `@FocusState`, and only one view can hold focus:
+    ///
+    ///   • `PianoRollView.onKeyPress(.delete)`, focused from `.onAppear`.
+    ///   • `AutomationLaneEditor.onKeyPress(.delete)`, one per expanded track.
+    ///   • `ArrangeDeleteKey.onKeyPress(.delete)` (`ContentView`), re-focused on
+    ///     every selection via `AppModel.arrangeKeyFocusNonce`.
+    ///
+    /// WHICH ONE IS EVEN ELIGIBLE FLIPS ON EVERY CLIP SELECTION. That is
+    /// MEASURED, not inferred: `pianoRollEditorFocused` alternates deterministically
+    /// — 6 true / 6 false over 12 consecutive clip selections, strictly
+    /// alternating, editor open throughout (`PianoRollNoteSelectionBridge`, and
+    /// `EditorSurfaceRouter`'s C1–C3 for why no consumer of that flag can be
+    /// deterministic). The three handlers then did DIFFERENT things, so DELETE
+    /// did different things on alternate presses.
+    ///
+    /// ⭐⭐ THE FIX IS NOT TO MAKE FOCUS ARBITRATION RELIABLE — IT IS TO MAKE
+    /// EVERY OUTCOME IDENTICAL. Whoever wins the coin flip calls this one
+    /// function and dispatches to the surface it names, so the arbitration stops
+    /// being observable to the user. `EditorSurfaceRouter`'s banner states the
+    /// general form of this rule: *"any design whose correctness argument
+    /// requires knowing [SwiftUI's arbitration order] is the wrong design."*
+    /// Here the argument does not require knowing it.
+    ///
+    /// ═══ IT IS `editMenuItem` PLUS ONE GUARD, BY CONSTRUCTION ═══
+    ///
+    /// The body below DELEGATES rather than restating the precedence, and that is
+    /// the whole point of the shape. m23-x → m23-al is this tree's own record of
+    /// what a second computation of one rule costs: a guard that mirrors a
+    /// surface's condition APPROXIMATELY looks correct in review and is wrong
+    /// exactly where it matters. The menu route already shipped WORKING for this
+    /// exact question (commit `81a678c`); the key route is not allowed a second
+    /// opinion about it.
+    ///
+    /// ⚠️ THE ONE ADDED TERM IS `isTextEditingFocused`, AND IT IS FIRST. The menu
+    /// route omits it for two reasons that are both about the MENU (no key
+    /// equivalent, so no delivery ambiguity; and an unobservable responder read
+    /// would make the item's enabled state go stale) — read `editMenuItem`'s
+    /// banner. Neither reason survives the trip to a KEY: a Backspace typed into
+    /// a track/marker rename field is exactly the delivery ambiguity that guard
+    /// exists for, and nothing here is a `Commands` body that could go stale.
+    /// This is `AppModel.handleArrangeDeleteKey`'s third guard, kept.
+    ///
+    /// ⭐ FIRST RATHER THAN THIRD, AND THAT IS AN IMPROVEMENT RATHER THAN A
+    /// COMPROMISE. `AppModel.ArrangeNudgeRefusal`'s doc states the property that
+    /// makes a reported refusal worth reporting: *"a leg that meant to test the
+    /// text-editing guard would pass identically if the selection had quietly
+    /// emptied, which is how a dead handler slips through a refusal-only test."*
+    /// Ordered first, `.textEditing` is returned whatever the rest of the state
+    /// is, so a gate aiming at that guard cannot be answered by an accident of
+    /// selection, workspace or modal. The user-visible outcome is identical
+    /// either way — all four are refusals.
+    ///
+    /// ⚠️ RETURNS `DeleteMenuItem`, TITLE AND ALL, AND THE TITLE IS NOT A LIE ON
+    /// THIS ROUTE. It names the same blast radius the menu would have named for
+    /// the same state, which is what makes it worth echoing on the debug seam. A
+    /// second result type would be a second thing to keep in step for no gain;
+    /// `isEnabled`'s derivation ("there is a surface to act on") reads correctly
+    /// as "a surface owns this keystroke".
+    ///
+    /// ⚠️⚠️ WHAT THE CALLER MUST ANSWER `.handled` FROM — READ THIS BEFORE WIRING
+    /// A HANDLER. `.handled` iff `surface != nil`, NEVER "iff something was
+    /// actually deleted". They are different questions (`ArrangeNudgeOutcome`
+    /// makes the same distinction, and a fully-clamped nudge at the beat-0 wall
+    /// reports `handled: true` for it). A handler that answered `.ignored`
+    /// because `deleteArrangeSelection()` was REFUSED by the store — a take-comp
+    /// member — would let the key bubble from the roll to its ancestor
+    /// `ArrangeDeleteKey`, which would resolve the same surface and refuse again:
+    /// TWO amber bubbles and two auto-dismiss tasks for one keystroke.
+    /// (`AppModel.presentArrangeDragRefusal` exists because
+    /// `presentArrangeSplitRefusal` does not dedupe.)
+    ///
+    /// - Parameters:
+    ///   - isTextEditingFocused: a text-input surface owns keyboard focus
+    ///     (`AppModel.isArrangeTextEditingFocused`, the m17-d responder
+    ///     classifier). Every other parameter is `editMenuItem`'s, unchanged.
+    public static func keyPress(
+        arrangeWorkspace: Bool,
+        isModalPresented: Bool,
+        isTextEditingFocused: Bool,
+        pianoRollHasNoteSelection: Bool,
+        automationPointCount: Int,
+        arrangeClipCount: Int
+    ) -> DeleteMenuItem {
+        guard !isTextEditingFocused else { return DeleteMenuItem(refusedBy: .textEditing) }
+        return editMenuItem(
+            arrangeWorkspace: arrangeWorkspace,
+            isModalPresented: isModalPresented,
+            pianoRollHasNoteSelection: pianoRollHasNoteSelection,
+            automationPointCount: automationPointCount,
+            arrangeClipCount: arrangeClipCount)
     }
 
     // MARK: - The arrange clip context menu
@@ -214,8 +341,18 @@ public enum DeleteMenuPolicy {
 
     /// "Delete Clip" for one, "Delete 3 Clips" for many — ONE producer, so no
     /// surface can invent its own plural.
+    ///
+    /// ⭐ A FORWARDER SINCE m23-ek-3, and the rule it forwards to is the same
+    /// rule. The body used to live here and hardcoded the verb `"Delete"`, so
+    /// the clipboard's Copy/Cut/Paste titles could not reuse it — and copying
+    /// it would have created exactly the second plural producer the sentence
+    /// above forbids. The rule moved up to `EditMenuTitles.counted`, one level
+    /// where both policies can reach it, and this stayed as the Delete-verb
+    /// spelling so no caller had to change. The output is unchanged character
+    /// for character: `DeleteMenuPolicyTests` passes across the refactor
+    /// UNEDITED, which is the acceptance criterion for it.
     static func countedTitle(_ count: Int, _ singular: String, _ plural: String) -> String {
-        count == 1 ? "Delete \(singular)" : "Delete \(count) \(plural)"
+        EditMenuTitles.counted(verb: "Delete", count: count, singular: singular, plural: plural)
     }
 }
 
@@ -237,6 +374,18 @@ public enum DeleteSurface: String, Sendable, CaseIterable, Equatable {
 public enum DeleteMenuRefusal: String, Sendable, Equatable {
     case workspace
     case modal
+    /// A text-input surface owns keyboard focus — the m17-d guard.
+    ///
+    /// ⚠️ REACHABLE ON THE **KEY** ROUTE ONLY (`DeleteMenuPolicy.keyPress`), and
+    /// that asymmetry is deliberate, not an unfinished edge. `editMenuItem` is
+    /// never handed the term at all, so an Edit ▸ Delete item can never carry
+    /// this reason — see that method's banner for the two reasons the MENU must
+    /// not apply it (an item with no key equivalent has no delivery ambiguity;
+    /// and a responder read is unobservable, so it would make the item's enabled
+    /// state stale). Spelled as a shared case rather than a second refusal
+    /// vocabulary because the other three ARE shared, and two enums that agree
+    /// about three cases out of four are two things to keep in step.
+    case textEditing = "text-editing"
     case emptySelection = "empty-selection"
 }
 

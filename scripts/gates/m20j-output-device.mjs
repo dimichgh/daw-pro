@@ -17,7 +17,7 @@
 //
 // Staging: DAW_CONTROL_PORT=17695. The user's live app on 17600 is never a
 // target — `startStaging` asserts this.
-import { sleep, buildOrAbort, startStaging, stopStaging, connect } from "./_staging.mjs";
+import { sleep, buildOrAbort, startStaging, stopStaging, connect, verdict } from "./_staging.mjs";
 
 const GATE = "m20j-output-device";
 buildOrAbort({ label: "building staging binary (m20j)…" });
@@ -68,7 +68,7 @@ const candidates = initial.filter(d => !d.isDefault);
 if (candidates.length === 0) {
   console.log("SKIP L2..L5 — single-output machine, no non-default device to pin");
   console.log(`ORCH_M20J pass=${pass} fail=${fail} (partial: one output device)`);
-  ws.close(); stopStaging(GATE); process.exit(fail ? 1 : 0);
+  ws.close(); stopStaging(GATE); verdict({ ran: pass + fail, failed: fail });
 }
 const target = candidates.find(d => d.uid === "BlackHole2ch_UID") ?? candidates[0];
 
@@ -121,4 +121,4 @@ ck("L5 SYSTEM DEFAULT unmoved across the whole suite",
 console.log(`ORCH_M20J pass=${pass} fail=${fail}`);
 ws.close();
 stopStaging(GATE);
-process.exit(fail ? 1 : 0);
+verdict({ ran: pass + fail, failed: fail });

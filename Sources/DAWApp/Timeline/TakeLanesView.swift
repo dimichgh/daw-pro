@@ -24,6 +24,11 @@ struct TakeLanesView: View {
     var meterMap: MeterMap
     var secondsPerBeat: Double
     var waveformStore: WaveformStore
+    /// Waveform auto-fit + vertical zoom (m25-e) — the SAME `PanelLayoutStore`
+    /// values the clip lane above reads, so a take lane and the clip comped out
+    /// of it never disagree about how loud the material looks.
+    var waveformNormalize: Bool = WaveformScale.defaultNormalize
+    var waveformVerticalZoom: CGFloat = WaveformScale.defaultVerticalZoom
     /// Replaces a group's comp wholesale (wired to `setCompSegments`).
     var onSetComp: (_ groupID: UUID, _ segments: [CompSegment]) -> Void
     /// Whole-lane swap (wired to `selectTake`).
@@ -60,6 +65,8 @@ struct TakeLanesView: View {
                     meterMap: meterMap,
                     secondsPerBeat: secondsPerBeat,
                     waveformPeaks: lane.clip.audioFileURL.flatMap { waveformStore.peaks(for: $0) },
+                    waveformNormalize: waveformNormalize,
+                    waveformVerticalZoom: waveformVerticalZoom,
                     onSetComp: { onSetComp(group.id, $0) },
                     onSelectLane: { onSelectLane(group.id, lane.id) },
                     onRemoveLane: { onRemoveLane(group.id, lane.id) },
@@ -118,6 +125,8 @@ private struct TakeLaneRow: View {
     var meterMap: MeterMap
     var secondsPerBeat: Double
     var waveformPeaks: WaveformPeaks?
+    var waveformNormalize: Bool = WaveformScale.defaultNormalize
+    var waveformVerticalZoom: CGFloat = WaveformScale.defaultVerticalZoom
     var onSetComp: (_ segments: [CompSegment]) -> Void
     var onSelectLane: () -> Void
     var onRemoveLane: () -> Void
@@ -182,7 +191,8 @@ private struct TakeLaneRow: View {
                 .allowsHitTesting(false)
         } else if let peaks = waveformPeaks {
             ClipWaveform(peaks: peaks, startOffsetSeconds: lane.clip.startOffsetSeconds,
-                         secondsPerBeat: secondsPerBeat, pixelsPerBeat: geometry.pixelsPerBeat, tint: tint)
+                         secondsPerBeat: secondsPerBeat, pixelsPerBeat: geometry.pixelsPerBeat, tint: tint,
+                         normalize: waveformNormalize, verticalZoom: waveformVerticalZoom)
                 .frame(width: laneClipW, height: rowHeight)
                 .offset(x: laneClipX)
                 .opacity(0.45)

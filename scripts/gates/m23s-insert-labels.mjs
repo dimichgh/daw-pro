@@ -30,7 +30,7 @@ import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node
 
 // The build/launch/pidfile-kill lifecycle lives in ONE place (m23-ac-1) —
 // `_staging.mjs`. It used to be copy-pasted into every gate that had it at all.
-import { launchStaging, stopStaging, sleep, ROOT, STAGING_PORT } from "./_staging.mjs";
+import { launchStaging, stopStaging, sleep, ROOT, STAGING_PORT, panelDensityGuard, verdict, STAGING_DEFAULTS_DOMAIN } from "./_staging.mjs";
 
 const GATE = "m23s";
 const OUT = "/tmp/daw-gate-out/m23s";
@@ -74,6 +74,60 @@ async function must(command, params = {}) {
   if (r.error) throw new Error(`${command} -> ${JSON.stringify(r.error)}`);
   return r.result ?? r;
 }
+const guard = panelDensityGuard(cmd);   // raw cmd — envelope shape, normalized inside
+
+// ── m23-dv-2b: pin the ONE ambient pref this gate is sensitive to ──────────
+// An 8-way single-key bisect off an app-defaults baseline (m23-dv-2) found this
+// gate's verdict depends on exactly one of the eight `panelLayout.*` keys:
+// `mixerInsertsCollapsed = true` (collapsed) reproduces the SAME 7-pass/27-fail
+// set this gate showed from a dirty profile; all seven other keys at non-default
+// values left it 34/34 every time. Mechanism: with the console's INSERTS
+// disclosure collapsed there are no insert rows to measure at all, so the
+// presence legs (A0/B0, "reported a drawn label") fail before layout is even in
+// question. Pin ONLY this key — the other seven are measured innocent, and
+// pinning a gate against a value it was never sensitive to is the m23-bg risk
+// for zero benefit.
+//
+// `must("debug.panelLayout", {})` — a bare params object with NO write keys —
+// returns the current values with nothing changed (the `debug.panelDensity
+// {panel}`-read precedent). `must` already unwraps `r.result ?? r`, and
+// `setPanelLayout` returns its object directly (not nested under a `stored` /
+// `.result` sub-key the way `debug.panelDensity` is), so the echo's
+// `mixerInsertsCollapsed` field IS the prior — verified against
+// `Sources/DAWApp/DAWProApp.swift`'s `setPanelLayout` before writing this.
+//
+// Deliberately NOT `{reset:true}`: reset also moves `arrangePPB`, which
+// `setPanelLayout`'s echo never reports back (filed m23-eq) — a reset would
+// silently change a value this gate can never confirm it restored.
+let layoutPrior;            // undefined until read; a real read is always a boolean
+let layoutRestored = false; // idempotence flag, set at ENTRY (not completion) —
+                             // a second call (e.g. the catch path AND `finally`
+                             // both running) must be a safe no-op.
+async function pinMixerInsertsExpanded() {
+  const before = await must("debug.panelLayout", {});
+  layoutPrior = before.mixerInsertsCollapsed;
+  console.log(`m23-dv-2b: prior panelLayout.mixerInsertsCollapsed=${layoutPrior}`);
+  const pinned = await must("debug.panelLayout", { mixerInsertsCollapsed: false });
+  // Printed, not asserted (requirement: visible drift in the other seven keys
+  // without this gate ever pinning against them).
+  console.log("m23-dv-2b: panelLayout after pin: " + JSON.stringify(pinned));
+}
+async function restoreMixerInserts(reason) {
+  if (layoutRestored) return;
+  layoutRestored = true;
+  if (typeof layoutPrior !== "boolean") {
+    console.log(`m23-dv-2b: restore(${reason}) — never pinned (read never completed), nothing to do`);
+    return;
+  }
+  try {
+    const echo = await must("debug.panelLayout", { mixerInsertsCollapsed: layoutPrior });
+    console.log(`m23-dv-2b: restore(${reason}) -> mixerInsertsCollapsed=${echo.mixerInsertsCollapsed} (prior)`);
+  } catch (e) {
+    console.error(`m23-dv-2b: RESTORE FAILED (${reason}): ${e.message} — hand fix: `
+      // m23-gf-b: staging writes into DAWProStaging, not the user's real DAWApp.
+      + `defaults write ${STAGING_DEFAULTS_DOMAIN} panelLayout.mixerInsertsCollapsed -float ${layoutPrior ? 1 : 0}`);
+  }
+}
 
 let pass = 0, fail = 0;
 const ck = (name, cond, extra) => {
@@ -106,6 +160,7 @@ function byKind(list, kind, chain) {
 try {
   const staging = await launchStaging({ gate: GATE });
   ws = staging.ws;
+  await pinMixerInsertsExpanded();   // m23-dv-2b — read prior, then pin, BEFORE anything lays out
 
   // ──────────────────────────────────────────────────────────────────────
   // LEG E — the row is still 24 pt tall, MEASURED, not asserted from the
@@ -118,7 +173,7 @@ try {
   await must("project.new", { discardChanges: true });
   const soloTrack = (await must("track.add", { name: "H" })).id;
   await must("ui.showMixer", { show: true });
-  await must("debug.panelDensity", { panel: "mixer", mode: "pro" });
+  await guard.set("mixer", "pro");
   await must("debug.windowFrame", { width: 1440, height: 900 });
   await must("debug.explainMode", { on: true });
   await sleep(900);
@@ -230,7 +285,7 @@ try {
 
   await must("debug.grSeed", { db: 6 });
   await must("ui.showMixer", { show: true });
-  await must("debug.panelDensity", { panel: "mixer", mode: "pro" });
+  await guard.set("mixer", "pro");
   await must("debug.windowFrame", { width: 1440, height: 900 });
   await sleep(1800);
 
@@ -417,15 +472,16 @@ try {
     await sleep(1200);
     await must("debug.captureUI", { path: `${OUT}/mixer-${tag}.png` });
   }
-  // At the 640 pt floor the reserve degrades in WHOLE rows, so the labels must
-  // still be whole there too — this is the same read, at the window that used to
-  // clip.
+  // At the window's real 672 pt content floor (WindowFloor.minWindowContentHeight,
+  // m23-dw — the 640 request below now clamps straight to it) the reserve
+  // degrades in WHOLE rows, so the labels must still be whole there too — this is
+  // the same read, at the window that used to clip.
   // No reset here on purpose (see above): the ids are unchanged, so the floor
   // read is the SAME rows re-measured at the smaller window.
   await sleep(1400);
   const floor = await rows();
   const floorBuiltIns = floor.rows.filter((x) => x.chain === "track" && x.kind !== "audioUnit");
-  ck("F1 at the 1440×640 floor no built-in label truncates either",
+  ck("F1 at the window's 1440×672 content floor no built-in label truncates either",
      floorBuiltIns.length === 10 && floorBuiltIns.every((x) => !x.truncated && !x.overflows),
      `${floorBuiltIns.length} rows`);
   console.log(`\ncaptures in ${OUT}`);
@@ -434,8 +490,10 @@ try {
   fail++;
 } finally {
   stopStealing();
+  await restoreMixerInserts("finally");   // m23-dv-2b — MUST run before stopStaging
+  await guard.restore("finally");
   stopStaging(GATE);
 }
 
 console.log(`\nm23-s gate: ${pass} passed, ${fail} failed`);
-process.exit(fail === 0 ? 0 : 1);
+verdict({ ran: pass + fail, failed: fail });

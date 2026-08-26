@@ -56,19 +56,33 @@ import Testing
 // back to a chosen beat, and its post-state must equal "seek to loop start and
 // play" because every later gapless cycle reproduces exactly that state.
 //
-// Site 11 (`OfflineRenderer`) is not in the sequence above because it is not in
-// this file. Until m23-bv it NAMED NO CAUSE AT ALL: it took `scheduleAll`'s
-// `.relocation` default, and the only record that anyone had chosen that lived
-// in this very header — prose, 95 lines from the code, invisible to every pin
-// in the tree. m23-bv made it explicit and pinned it below, so the discipline
-// is now machine-checked across all THREE files it spans (`AudioEngine.swift`
-// for the ten live sites, `OfflineRenderer.swift` for site 11,
-// `PlaybackGraph.swift` for the default and the production-caller SET).
-// ⚠️ The behaviour is unchanged and deliberately so — but "it keeps the offline
-// SHA gates byte-identical" argues against CHANGING it, never that it is right.
-// m23-bv measured what it costs (a note held across `fromBeat` is absent from a
-// bounce; an audio clip in the identical position is not) and left the product
-// call to the user. See `OfflineChaseDivergenceTests`.
+// 11. offline render  bounce / stems / loudness / caller's fromBeat      .offlineRender
+//                     the windowed clip vocal-fix
+//                     bounce — m23-bv, RULED 2026-08-17
+//
+// Site 11 (`OfflineRenderer`) is not in the ORDERED SCAN above because that
+// scan reads `AudioEngine.swift` only and this site lives one file over; it has
+// its own pin below. Its history is the reason this header exists. Until m23-bv
+// it NAMED NO CAUSE AT ALL: it took `scheduleAll`'s `.relocation` default, and
+// the only record that anyone had chosen that lived in this very header —
+// prose, 95 lines from the code, invisible to every pin in the tree. m23-bv
+// made it explicit, so the discipline is machine-checked across all THREE files
+// it spans (`AudioEngine.swift` for the ten live sites, `OfflineRenderer.swift`
+// for site 11, `PlaybackGraph.swift` for the default and the caller SET).
+//
+// ⚠️ THE BEHAVIOUR IS NO LONGER UNCHANGED. The recorded justification for
+// `.relocation` here was "it keeps the offline SHA gates byte-identical" —
+// which argues against CHANGING it, never that it was right, since the gates
+// encode exactly what the code already did. m23-bv measured what it cost (a
+// MIDI note held across `fromBeat` absent from the bounce; an AUDIO clip at
+// identical geometry present) and put the product call to the user, who ruled
+// on 2026-08-17: **make the bounce chase held notes, like the play button
+// already does.** Site 11 is now `.offlineRender`, a FOURTH case — not
+// `.transportStart` (a bounce is not the user pressing play) and not a flipped
+// `.relocation` (still no-chase for seek/record/loop-wrap). Chase can only ADD
+// notes onsetting before `fromBeat`, so renders from beat 0 stay byte-identical;
+// `NoteChaseGraphTests` machine-checks that containment. See
+// `OfflineChaseDivergenceTests` for the samples.
 //
 // NOT COVERED HERE (the named gap): layer 3(b), the LIVE per-site legs that
 // start real playback, trigger each site and read the published schedule. Those
@@ -156,8 +170,15 @@ struct NoteChaseSiteTests {
             // A case missing here reads as "no site", not as a failure: the site
             // silently LEAVES the sequence and the expected array can be edited
             // to match, which is the m23-bp "prose far from the code" failure in
-            // a new costume. m23-cd added `transportStart`.
-            for token in ["relocation", "continuation", "transportStart"]
+            // a new costume. m23-cd added `transportStart`; m23-bv added
+            // `offlineRender`.
+            // ⚠️ `offlineRender` is scanned here but is NOT in `expected`, and
+            // that is correct rather than an oversight: this scan reads
+            // `AudioEngine.swift` ONLY, and site 11 lives in
+            // `OfflineRenderer.swift`. The token must still be listed — if
+            // `.offlineRender` ever appears in THIS file it is an eleventh live
+            // site and must fail here loudly, not vanish from `found`.
+            for token in ["relocation", "continuation", "transportStart", "offlineRender"]
             where line.text.contains("cause: .\(token)") {
                 found.append((line.number, token))
             }
@@ -234,6 +255,8 @@ struct NoteChaseSiteTests {
                     cause = ".continuation"
                 } else if line.text.contains("cause: .relocation") {
                     cause = ".relocation"
+                } else if line.text.contains("cause: .offlineRender") {
+                    cause = ".offlineRender"
                 } else if line.text.contains("cause: cause") {
                     cause = "cause"
                 } else {
@@ -251,12 +274,21 @@ struct NoteChaseSiteTests {
     /// omission.
     ///
     /// REDDENS IF: a third production caller lands (count moves off 2); or
-    /// `OfflineRenderer`'s explicit `cause: .relocation` is deleted so it takes
-    /// the default again (its cause reads nil — the exact regression this pin
-    /// exists for, and one that changes NO behaviour, which is why no render
-    /// test can catch it); or `AudioEngine`'s forward is changed to a literal
-    /// (its cause stops reading "cause", meaning ten sites just got overridden
-    /// at one line).
+    /// `OfflineRenderer`'s explicit `cause: .offlineRender` is deleted so it
+    /// takes the default again, or is reverted to `.relocation` (m23-bv's
+    /// ruling silently undone); or `AudioEngine`'s forward is changed to a
+    /// literal (its cause stops reading "cause", meaning ten sites just got
+    /// overridden at one line).
+    ///
+    /// ⚠️ THIS PIN'S STANDING CHANGED AT THE 2026-08-17 RULING, and the old
+    /// note here is now inverted. It used to say a lapse at `OfflineRenderer`
+    /// "changes NO behaviour, which is why no render test can catch it" — that
+    /// was true while the explicit value equalled the default. It is FALSE
+    /// now: `.offlineRender` chases and `.relocation` does not, so a regression
+    /// here silences held notes in every bounce and `OfflineChaseDivergenceTests`
+    /// catches it in samples. This pin is no longer the only witness — it is
+    /// the FAST one, and it names the cause where the render test names only
+    /// the symptom.
     @Test("m23-bv: production has exactly two scheduleAll callers, and both STATE a cause")
     func productionCallersStateTheirCause() {
         let calls = Self.productionScheduleAllCalls()
@@ -274,14 +306,18 @@ struct NoteChaseSiteTests {
         #expect(calls.allSatisfy { $0.cause != nil }, "\(why)")
 
         let offline = calls.first { $0.file == "OfflineRenderer.swift" }
-        #expect(offline?.cause == ".relocation", "\(why)")
+        // m23-bv, THE RULING in one line: a bounce chases held notes.
+        #expect(offline?.cause == ".offlineRender", "\(why)")
         let live = calls.first { $0.file == "AudioEngine.swift" }
         #expect(live?.cause == "cause", "\(why)")
     }
 
     /// THE DEFAULT ITSELF. `.relocation` = the v0 no-chase rule, which is what
-    /// makes every fixture call and (by the pin above) the offline bounce
-    /// byte-identical to the pre-m23-bp tree.
+    /// keeps every FIXTURE call byte-identical to the pre-m23-bp tree.
+    ///
+    /// ⚠️ It no longer covers the offline bounce: m23-bv's ruling moved that
+    /// caller to `.offlineRender` (see the pin above). The default's job is now
+    /// exactly one thing — the ~30 fixture call sites that have no opinion.
     ///
     /// REDDENS IF: the default flips to `.continuation` — a one-token edit that
     /// would silently start chasing held notes in ~30 fixtures and would be
@@ -336,12 +372,24 @@ struct NoteChaseSiteTests {
 
     // MARK: - The mapping itself
 
-    @Test("the RescheduleCause mapping: continuation and transportStart chase, relocation does not")
+    @Test("the RescheduleCause mapping: only `.relocation` declines to chase")
     func mappingIsTheDesignRule() {
         #expect(RescheduleCause.continuation.chasesHeldNotes)
         #expect(!RescheduleCause.relocation.chasesHeldNotes)
         // m23-cd — THE RULING, in one line: the play button chases.
         #expect(RescheduleCause.transportStart.chasesHeldNotes)
+        // m23-bv — THE RULING, in one line: the bounce chases too.
+        #expect(RescheduleCause.offlineRender.chasesHeldNotes)
+
+        // …and EXACTLY ONE case declines. Written over `allCases` rather than
+        // as a fourth literal: a fifth case gets a chase answer from whoever
+        // adds it, and this leg makes them state it here rather than inherit
+        // the majority silently.
+        let chasing = RescheduleCause.allCases.filter(\.chasesHeldNotes)
+        let notChasing = RescheduleCause.allCases.filter { !$0.chasesHeldNotes }
+        print("[measured] chase mapping: chase \(chasing.map { "\($0)" }), "
+              + "no-chase \(notChasing.map { "\($0)" })")
+        #expect(notChasing.map { "\($0)" } == ["relocation"])
     }
 
     /// The sequence scan above matches a HARD-CODED token list. A case absent
@@ -353,7 +401,8 @@ struct NoteChaseSiteTests {
     /// token list in `causeSequenceMatchesDesignTable`.
     @Test("m23-cd: the cause-sequence scan covers EVERY RescheduleCause case")
     func scanTokenListIsExhaustive() {
-        let scanned: Set<String> = ["relocation", "continuation", "transportStart"]
+        let scanned: Set<String> = ["relocation", "continuation", "transportStart",
+                                    "offlineRender"]
         let all = Set(RescheduleCause.allCases.map { String(describing: $0) })
         print("[measured] RescheduleCause cases: \(all.sorted()); scanned: \(scanned.sorted())")
         let why = "a RescheduleCause case is missing from the sequence scan's token list — its "

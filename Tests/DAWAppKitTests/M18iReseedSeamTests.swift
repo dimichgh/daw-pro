@@ -34,8 +34,14 @@ struct M18iReseedSeamTests {
 
     @Test("grid: length-only change (trim-extend) is stale — the boundary must move")
     func gridLengthOnlyChangeReseeds() {
-        let m = PianoRollModel(notes: notesABC(), clipLengthBeats: 8)
-        #expect(m.needsReseed(notes: notesABC(), clipLengthBeats: 13))
+        // Bound ONCE and reused: the notes must be genuinely content-equal (same
+        // ids) so only the length differs, otherwise the fresh-UUID-per-call
+        // `MIDINote.init` would make the note comparison in `needsReseed` the
+        // thing that fires, and this test would no longer pin the length check
+        // at all (m25-w).
+        let notes = notesABC()
+        let m = PianoRollModel(notes: notes, clipLengthBeats: 8)
+        #expect(m.needsReseed(notes: notes, clipLengthBeats: 13))
     }
 
     @Test("grid: dropped note (trim-shorter) is stale even at equal length")
@@ -117,6 +123,69 @@ struct M18iReseedSeamTests {
         m.reseed(lanes: replaced, clipLengthBeats: 8)
         #expect(m.selectedType == .cc(controller: 1))
         #expect(m.draft == replaced[0].points)
+    }
+
+    // MARK: - m25-f-2 — the seam is what makes a GROWN PASTE visible
+
+    /// ⭐ **THE PROPAGATION LEG OF m25-f-2, AND IT IS NOT OBVIOUS.**
+    ///
+    /// `ProjectStore.pasteNotes(…, extendToCover:)` grows the clip, but the view
+    /// discards the returned `Clip` (`_ = try? store.pasteNotes(…)`) and the roll
+    /// keeps its OWN `clipLengthBeats` — the value `playableEndBeat`,
+    /// `contentWidth` and `moveIDsStartingAudible` all read. So a store-side
+    /// grow that never reached the model would leave the user looking at the
+    /// exact defect they reported: notes pasted past a boundary that did not
+    /// move. THIS seam is the only thing that carries it across, and it carries
+    /// it through the length comparison rather than the note comparison —
+    /// `needsReseed`'s FIRST line, before notes are looked at.
+    ///
+    /// Pinned here rather than in `PasteAutoExtendTests` because it is a
+    /// property of the editor model, not of the store, and nothing else covers
+    /// it: `m23ek-clipboard.mjs` N2e measured selection survival on a 16-beat
+    /// clip where no growth occurs, and the source-site pins cannot execute.
+    @Test("m25-f-2: a grown paste reseeds the roll AND keeps the pasted selection")
+    func grownPasteReseedsAndKeepsSelection() {
+        // The roll as it stands just before the paste: a 4-beat clip, one note.
+        let existing = MIDINote(pitch: 60, velocity: 100, startBeat: 0, lengthBeats: 1)
+        let m = PianoRollModel(notes: [existing], clipLengthBeats: 4)
+
+        // The paste, as the view applies it locally: two notes past the end,
+        // and they become the selection ("arrives ready to drag").
+        let pasted = [MIDINote(pitch: 64, velocity: 100, startBeat: 3, lengthBeats: 1),
+                      MIDINote(pitch: 67, velocity: 100, startBeat: 4.5, lengthBeats: 2)]
+        m.draft = MIDINote.canonicallyOrdered([existing] + pasted)
+        m.selection = Set(pasted.map(\.id))
+
+        // The store's echo: same notes, but the clip GREW to 8 (bar-snapped past
+        // the covered end 6.5). Notes alone are content-equal, so the length
+        // comparison is the ONLY thing that can call this stale.
+        let echoed = MIDINote.canonicallyOrdered([existing] + pasted)
+        #expect(m.needsReseed(notes: echoed, clipLengthBeats: 8))
+
+        m.reseed(notes: echoed, clipLengthBeats: 8)
+
+        // The boundary moved — which is the whole user-visible point.
+        #expect(m.clipLengthBeats == 8)
+        // …and the pasted notes are now inside it, so they draw and sound as
+        // placed rather than as latent (strict `<`, engine truth).
+        #expect(pasted.allSatisfy { $0.startBeat < m.clipLengthBeats })
+        // ⚠️ AND THE SELECTION SURVIVED. `reseed` keeps the ids still present,
+        // and the pasted ids are — so the group is still drag-ready. A reseed
+        // that cleared it would silently undo m23-ek-3's promise for exactly
+        // the pastes m25-f-2 added, and every other test would stay green.
+        #expect(m.selection == Set(pasted.map(\.id)))
+    }
+
+    /// ANTI-VACUITY for the test above: `reseed` really does DROP ids that are
+    /// gone, so "the selection survived" is a result and not a tautology about a
+    /// method that never filters anything.
+    @Test("m25-f-2 control: reseed still drops selected ids the echo no longer has")
+    func reseedStillDropsVanishedSelection() {
+        let notes = notesABC()
+        let m = PianoRollModel(notes: notes, clipLengthBeats: 8)
+        m.selection = Set(notes.map(\.id))
+        m.reseed(notes: [notes[0]], clipLengthBeats: 8)
+        #expect(m.selection == [notes[0].id])
     }
 
     @Test("strip: readout truth — the reseeded draft no longer contains a deleted point's value")

@@ -59,6 +59,24 @@ const EXCEPTION_TABLE_B: ReadonlySet<string> = new Set([
   "generate_song_suno",
 ]);
 
+/**
+ * Table C — MCP tools that DO bridge to the app, but to an EXISTING
+ * control-protocol command under a narrower, friendlier, non-mechanical
+ * name/parameter surface rather than that command's own 1:1 mechanical tool
+ * (which continues to exist separately). Unlike Table B these are not
+ * "no backing command" — they are "backed by a command the mechanical rule
+ * would never have named this". Added m26-i: `instrument_set_sampler_param`
+ * (one global) and `instrument_set_sampler_zones` (merge zones by id) both
+ * wrap `track.setInstrument` — a caller doesn't need to know that a partial
+ * sampler update is safe, or how to shape a `zonePatches` merge by hand,
+ * because `track_set_instrument` (the mechanical 1:1 tool for
+ * `track.setInstrument`) still exists unchanged alongside them.
+ */
+const EXCEPTION_TABLE_C: ReadonlySet<string> = new Set([
+  "instrument_set_sampler_param",
+  "instrument_set_sampler_zones",
+]);
+
 /** Format-drift guard: if the Commands.swift parser yields fewer than this
  * many commands, the regex has almost certainly stopped matching the file
  * (e.g. the array literal moved or the source format changed) — fail loudly
@@ -297,23 +315,34 @@ test("every control command maps to exactly one listed MCP tool", () => {
   );
 });
 
-test("every listed MCP tool maps back to a command, or is in exception table B", () => {
+test("every listed MCP tool maps back to a command, or is in exception table B or C", () => {
   const expectedFromCommands = new Set(commands.map(commandToToolName));
   const strays: string[] = [];
   for (const tool of tools) {
-    if (!expectedFromCommands.has(tool.name) && !EXCEPTION_TABLE_B.has(tool.name)) {
+    if (
+      !expectedFromCommands.has(tool.name) &&
+      !EXCEPTION_TABLE_B.has(tool.name) &&
+      !EXCEPTION_TABLE_C.has(tool.name)
+    ) {
       strays.push(tool.name);
     }
   }
-  assert.deepEqual(strays, [], `tools with no backing command and not in exception table B:\n${strays.join("\n")}`);
+  assert.deepEqual(
+    strays,
+    [],
+    `tools with no backing command and not in exception table B or C:\n${strays.join("\n")}`
+  );
 });
 
-test("tool count is a bijection: commands + |exception table B|, no strays", () => {
+test("tool count is a bijection: commands + |exception table B| + |exception table C|, no strays", () => {
+  const expected = commands.length + EXCEPTION_TABLE_B.size + EXCEPTION_TABLE_C.size;
   assert.equal(
     tools.length,
-    commands.length + EXCEPTION_TABLE_B.size,
-    `expected ${commands.length} commands + ${EXCEPTION_TABLE_B.size} exception-B tools = ` +
-      `${commands.length + EXCEPTION_TABLE_B.size} tools, found ${tools.length}`
+    expected,
+    `expected ${commands.length} commands + ${EXCEPTION_TABLE_B.size} exception-B tools + ` +
+      `${EXCEPTION_TABLE_C.size} exception-C tools = ${expected} tools, found ${tools.length}. ` +
+      "If this reddened after adding a wrapper tool that bridges to an EXISTING command " +
+      "under a new name, it needs an entry in EXCEPTION_TABLE_C, not a new command."
   );
 });
 

@@ -44,6 +44,27 @@ struct MIDIFileImportCommandTests {
         return try write(Data(bytes), name: "wire-simple.mid")
     }
 
+    /// Format 0, 480 tpqn, ONE chunk named "Song" carrying two channels with
+    /// different programs (40 = Violin on ch 0, 48 = String Ensemble 1 on ch 1).
+    /// The shape of the user's m23-k5 report in miniature: the file's own name
+    /// is the same for every part, so `name` and `trackName` must differ.
+    private static func formatZeroFile() throws -> URL {
+        let bytes: [UInt8] = [
+            0x4D, 0x54, 0x68, 0x64, 0x00, 0x00, 0x00, 0x06,
+            0x00, 0x00, 0x00, 0x01, 0x01, 0xE0,               // format 0, 1 chunk, 480 tpqn
+            0x4D, 0x54, 0x72, 0x6B, 0x00, 0x00, 0x00, 0x23,   // MTrk, 35 bytes
+            0x00, 0xFF, 0x03, 0x04, 0x53, 0x6F, 0x6E, 0x67,   // track name "Song"
+            0x00, 0xC0, 0x28,                                 // ch 0 program 40
+            0x00, 0xC1, 0x30,                                 // ch 1 program 48
+            0x00, 0x90, 0x3C, 0x64,                           // ch 0 note 60 on
+            0x00, 0x91, 0x40, 0x64,                           // ch 1 note 64 on
+            0x83, 0x60, 0x80, 0x3C, 0x40,                     // +480: ch 0 note off
+            0x00, 0x81, 0x40, 0x40,                           // ch 1 note off
+            0x00, 0xFF, 0x2F, 0x00,
+        ]
+        return try write(Data(bytes), name: "wire-format0.mid")
+    }
+
     private static func write(_ data: Data, name: String) throws -> URL {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("m23k3-wire-\(UUID().uuidString)")
@@ -68,9 +89,13 @@ struct MIDIFileImportCommandTests {
         // `clip.moveManyByTracks`/`clip.moveManyToTrack` AFTER this pair —
         // the additive-at-end law working, not a regression: the k3 verbs did
         // not move, they are simply no longer last.
-        #expect(CommandRouter.allCommands.count == 173)   // 159 -> 161 at m23-n3b -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w -> 166 at m23-af -> 168 at m20-j -> 169 at m23-br-1 -> 171 at m23-aj-2 -> 173 at m23-dl
-        // …and m23-dl appended `ai.modelResidency`/`ai.modelUnload` after THAT.
-        #expect(Array(CommandRouter.allCommands.suffix(16).prefix(2))
+        #expect(CommandRouter.allCommands.count == 186)   // 159 -> 161 at m23-n3b -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w -> 166 at m23-af -> 168 at m20-j -> 169 at m23-br-1 -> 171 at m23-aj-2 -> 173 at m23-dl -> 174 at m23-di-2a -> 175 at m25-d -> 176 at m25-z -> 177 at m23-ap-3 -> 178 (clip.getNotes) -> 179 (m26-i instrument.describeSampler) -> 180 (edit.pasteClips) -> 181 (m27 leg D clip.applyBreathContour, placed next to its controller-lane siblings, NOT at the tail) -> 182 (breath pad P1 clip.applyEffortShape, placed next to clip.applyBreathContour, NOT at the tail) -> 183 (breath pad P6 pad.previewEffort, placed next to note.audition — the other 'sounds now, outside the timeline, not an edit' verb — NOT at the tail) -> 186 (m28-knob midi.getControlMap/setControlMap/learnControl, placed next to midi.listInputs — their only sibling on this surface — and BEFORE transport.record, NOT at the tail)
+        // …and m23-dl appended `ai.modelResidency`/`ai.modelUnload` after
+        // THAT, then m23-di-2a appended `vc.importVoiceModel`, m25-d appended
+        // `transport.setStopAtContentEnd`, m25-z appended `audio.profileFile`,
+        // m23-ap-3 appended `clip.detectPitch`, and m26-k appended
+        // `edit.pasteClips`, each after the last.
+        #expect(Array(CommandRouter.allCommands.suffix(21).prefix(2))
                 == ["project.importMIDI", "clip.importMIDI"])
     }
 
@@ -144,6 +169,53 @@ struct MIDIFileImportCommandTests {
         #expect(some.ok)
         #expect(store.tracks.count == 1)
         #expect(store.tracks[0].instrument?.kind == .soundBank)
+    }
+
+    /// m23-k5 — the WIRE default. `parseMIDIImportInstruments` returns a value
+    /// for an ABSENT key, so the default is spelled in the control plane as well
+    /// as in the store, and this is the leg that pins them together. An agent
+    /// (and the MCP tool, which omits undefined params) that names no policy
+    /// must get the instruments the file names.
+    @Test("m23-k5 — an absent 'instruments' key defaults to gm on the wire")
+    func instrumentsDefaultsToGMOnTheWire() async throws {
+        let (router, store) = makeRouter()
+        let url = try Self.formatZeroFile()
+
+        let response = await router.handle(ControlRequest(
+            id: "1", command: "project.importMIDI", params: ["path": .string(url.path)]))
+        #expect(response.ok)
+
+        let report = try #require(response.result?["report"]?.objectValue)
+        #expect(report["instrumentsAssigned"]?.stringValue == "gm")
+        #expect(store.tracks.count == 2)
+        #expect(store.tracks.allSatisfy { $0.instrument?.kind == .soundBank })
+        #expect(store.tracks.map { $0.instrument?.soundBank?.program } == [40, 48])
+
+        // The additive report field, read OFF THE WIRE rather than off the model:
+        // `name` stays the file's literal chunk name for both parts, `trackName`
+        // carries what the tracks were actually called.
+        let parts = try #require(report["parts"]?.arrayValue)
+        #expect(parts.compactMap { $0.objectValue?["name"]?.stringValue } == ["Song", "Song"])
+        #expect(parts.compactMap { $0.objectValue?["trackName"]?.stringValue }
+                == ["Violin", "String Ensemble 1"])
+        #expect(store.tracks.map(\.name) == ["Violin", "String Ensemble 1"])
+    }
+
+    /// …and the opt-out still reaches the store through the same key.
+    @Test("m23-k5 — instruments: \"none\" still opts out on the wire")
+    func explicitNoneOptsOutOnTheWire() async throws {
+        let (router, store) = makeRouter()
+        let url = try Self.formatZeroFile()
+
+        let response = await router.handle(ControlRequest(
+            id: "1", command: "project.importMIDI",
+            params: ["path": .string(url.path), "instruments": .string("none")]))
+        #expect(response.ok)
+        #expect(try #require(response.result?["report"]?.objectValue)["instrumentsAssigned"]?
+                .stringValue == "none")
+        #expect(store.tracks.allSatisfy { $0.instrument == nil })
+        // Naming is independent of the instrument policy.
+        #expect(store.tracks.map(\.name) == ["Violin", "String Ensemble 1"])
     }
 
     // MARK: - The error surface (§4.3)

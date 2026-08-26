@@ -21,8 +21,17 @@ struct CursorModelTests {
             #expect(CursorKind(rawValue: kind.rawValue) == kind)
         }
         // The vocabulary the app actually needs (guards a silent shrink).
+        //
+        // 5 → 6 in m25-o: `verticalBar` — the "place / move the transport
+        // position" family, shown while ⌘ is held over the piano-roll grid where
+        // a click seeks the playhead. It is the app's ONE custom-drawn cursor
+        // (`NSCursor.playheadPlace`), because AppKit has no honest stock shape for
+        // it: `iBeam` is the right silhouette and the wrong meaning —
+        // docs/DESIGN-LANGUAGE.md reserves the I-beam for text and says "never
+        // override it" — and `crosshair`, the place/paint family, is not the
+        // vertical sign the user asked for.
         #expect(Set(CursorKind.allCases) == [
-            .resizeLeftRight, .resizeUpDown, .grab, .grabbing, .crosshair,
+            .resizeLeftRight, .resizeUpDown, .grab, .grabbing, .crosshair, .verticalBar,
         ])
     }
 
@@ -38,8 +47,13 @@ struct CursorModelTests {
         }
         // 12 → 13 in m17-c: the arrange playhead grab strip joined the movable
         // bodies (drag scrub-seeks the transport). 13 → 14 in m23-h: the arrange
-        // TRACK HEADER joined them too (drag reorders the track list).
-        #expect(CursorAffordance.allCases.count == 14)
+        // TRACK HEADER joined them too (drag reorders the track list). 14 → 15
+        // in m23-cq-1: the step-sequencer CELL joined the place/paint family
+        // (click authors a hit by position; nothing there can be picked up).
+        // 15 → 16 in m25-b-2: the piano roll's viewport MINIMAP joined the movable
+        // bodies — the thing under the pointer is the viewport rectangle, an
+        // existing object being carried, and nothing is authored on that surface.
+        #expect(CursorAffordance.allCases.count == 16)
     }
 
     @Test("value adjusters keep their resize cursor for the whole drag")

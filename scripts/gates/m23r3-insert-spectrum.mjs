@@ -69,7 +69,7 @@
 //
 // Promoted from the session scratchpad at the m23-r3 close (2026-07-28).
 import { mkdirSync } from "node:fs";
-import { buildOrAbort, startStaging, stopStaging, connect, sleep } from "./_staging.mjs";
+import { buildOrAbort, startStaging, stopStaging, connect, sleep, panelDensityGuard, panelDensityDomainGuard, verdict } from "./_staging.mjs";
 
 const GATE = "m23r3";                       // also names the pidfile + out dir
 const OUT = `/tmp/daw-gate-out/${GATE}`;    // exactly what startStaging derives
@@ -95,6 +95,16 @@ function cmd(command, params = {}, timeoutMs = 30000) {
     ws.send(JSON.stringify({ id: i, command, params }));
   });
 }
+const guard = panelDensityGuard(cmd);   // raw cmd — envelope shape, normalized inside
+// m23-en: `debug.effectEditor { add }` / `{ open }` writes panelDensity.mixer
+// unconditionally (DAWProApp.swift, effectEditorDebug) — a side effect the
+// per-panel guard above never sees because it only ever `set()`s the
+// "effectEditor" panel. Snapshot the WHOLE domain now, before the first
+// debug.effectEditor call below, so restore() at the end can put back
+// anything else that verb (or a future one) writes on the side, panel by
+// panel, whether or not this gate ever named it.
+const domainGuard = panelDensityDomainGuard(cmd);
+await domainGuard.snapshot();
 const ck = (name, cond, extra) => {
   if (cond) { pass++; console.log("PASS " + name); }
   else { fail++; console.log("FAIL " + name + (extra !== undefined ? " :: " + extra : "")); }
@@ -196,7 +206,7 @@ ck("S3 two instrument tracks each with an EQ insert", !!A.tid && !!A.eq && !!B.t
 r = await cmd("fx.add", { trackId: "master", kind: "eq" });
 const eqM = r.result?.effectId ?? r.result?.effect?.id;
 ck("S4 master EQ insert", r.ok && !!eqM, r.error);
-r = await cmd("debug.panelDensity", { panel: "effectEditor", mode: "simple" });
+r = await guard.set("effectEditor", "simple");
 ck("S5 effect editor density = simple (the curve surface)", r.ok, r.error);
 r = await cmd("transport.play");
 ck("S6 transport rolling", r.ok, r.error);
@@ -273,7 +283,7 @@ ck("L3b PRECONDITION — with the layer present this seed genuinely DRAWS "
   + "(without this the zero below is unearned)",
   s.shown === true && s.source === "insertSeed"
   && s.argmax === SEED_PEAK_BAND && s.max > 0.5, s.brief() + ` argmax=${s.argmax}`);
-r = await cmd("debug.panelDensity", { panel: "effectEditor", mode: "pro" });
+r = await guard.set("effectEditor", "pro");
 ck("L3c density → pro", r.ok, r.error);
 // Re-open so the curve model (and its smoothed heights) is FRESH — otherwise
 // "flat" could just be a leftover from a previous card.
@@ -290,7 +300,7 @@ ck("L3g no plot ⇒ no caption at all (the field mirrors the view's existence)",
   s.help === null || s.help === undefined, JSON.stringify(s.help));
 r = await cmd("debug.captureUI", { path: `${OUT}/L3-track-eq-pro-no-layer.png` });
 ck("L3h captured the absent-layer card", r.ok, r.error);
-r = await cmd("debug.panelDensity", { panel: "effectEditor", mode: "simple" });
+r = await guard.set("effectEditor", "simple");
 ck("L3i density → simple", r.ok, r.error);
 await sleep(1200);
 s = await spectrum();
@@ -516,6 +526,14 @@ ck("L8c and the last one is genuinely measuring, not just nominally armed",
 await cmd("transport.stop");
 await cmd("debug.effectEditor", { close: true });
 console.log(`M23R3_GATE pass=${pass} fail=${fail}`);
+await guard.restore("normal exit");
+// m23-en: domain restore runs SECOND, deliberately. The domain snapshot was
+// taken before ANY panelDensity write, so "effectEditor" sits in it at
+// whatever value panelDensityGuard ALSO captured on its own first touch —
+// running the domain restore after guard.restore() makes their handling of
+// that one shared panel a consistent no-op (or an identical redundant
+// write), never a clobber. Reorder these two lines and that stops holding.
+await domainGuard.restore("normal exit");
 stopStaging(GATE);   // SIGTERMs by exact pid AND releases our session.lock
 ws.close();
-process.exit(fail ? 1 : 0);
+verdict({ ran: pass + fail, failed: fail });

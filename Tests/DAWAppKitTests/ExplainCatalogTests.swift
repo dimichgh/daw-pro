@@ -39,9 +39,15 @@ struct ExplainCatalogTests {
         // .referenceSpectrum), taking the surface to 88; m23-a added the channel
         // strip's round volume knob (.mixerVolumeKnob) → 89; m23-c2 added the
         // arrange toolbar's FOLLOW chip (.arrangeFollow) → 90; m23-m3 added the
-        // export dialog (.exportDialog) → 91.
-        #expect(ExplainID.allCases.count >= 91,
-                "explain coverage shrank below the m23-m3 floor: \(ExplainID.allCases.count)")
+        // export dialog (.exportDialog) → 91; m23-cq-1 added the step sequencer's
+        // three (.stepSequencerMode / .stepSequencerGrid / .stepSequencerStep)
+        // → 94; m25-e added the arrange toolbar's WAVE cluster
+        // (.arrangeWaveformZoom) → 95; m25-b-1 added the piano roll's MAXIMIZE
+        // toggle (.pianoRollMaximize) → 96; m25-b-2 added the piano roll's viewport
+        // MINIMAP (.pianoRollMinimap) → 97; m26-i's UI half added the built-in
+        // SAMPLER editor card (.samplerEditor) → 98.
+        #expect(ExplainID.allCases.count >= 98,
+                "explain coverage shrank below the m26-i floor: \(ExplainID.allCases.count)")
     }
 
     @Test("ExplainID round-trips its raw value; unknown raw is nil (debug.explainMode focus)")

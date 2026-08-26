@@ -322,6 +322,30 @@ public struct CompressorParams: Codable, Sendable, Equatable {
     public var releaseMs: Double
     public var kneeDb: Double
     public var makeupDb: Double
+    /// PARALLEL ("New York") COMPRESSION blend (m23-ck) — how much of the
+    /// compressed signal reaches the output, against the untouched input:
+    ///
+    ///     out = mix · (compressed, makeup included) + (1 − mix) · dry
+    ///
+    /// `1` (the DEFAULT) is fully wet — bit-for-bit the pre-m23-ck compressor,
+    /// so every existing project renders identically. `0` is a bit-exact
+    /// bypass: makeup gain belongs to the WET path and never touches the dry
+    /// one. Between them you get the move that previously cost a duplicate
+    /// track plus a send blend — crush the copy (low threshold, high ratio)
+    /// and dial it under the original for density without losing transients.
+    ///
+    /// The dry term is the effect's own MAIN input, at the SAME sample index:
+    /// the compressor has no lookahead and reports `latencySamples == 0`, so
+    /// no delay compensation is needed and the blend cannot comb. When a
+    /// sidechain key is attached the key still drives the DETECTOR only —
+    /// the dry signal is always the main input, never the key.
+    ///
+    /// The gain-reduction meter keeps reporting what the DETECTOR computed,
+    /// unscaled by `mix` — the same convention that already excludes makeup
+    /// gain (both are static output-stage arithmetic, not the detector's
+    /// doing). At `mix: 0` the effect is silent-passing while the meter still
+    /// shows reduction; that is deliberate.
+    public var mix: Double
 
     public static let thresholdRange: ClosedRange<Double> = -60...0
     public static let ratioRange: ClosedRange<Double> = 1...20
@@ -329,6 +353,7 @@ public struct CompressorParams: Codable, Sendable, Equatable {
     public static let releaseRange: ClosedRange<Double> = 5...2_000
     public static let kneeRange: ClosedRange<Double> = 0...24
     public static let makeupRange: ClosedRange<Double> = 0...24
+    public static let mixRange: ClosedRange<Double> = 0...1
 
     public init(
         thresholdDb: Double = -18,
@@ -336,7 +361,8 @@ public struct CompressorParams: Codable, Sendable, Equatable {
         attackMs: Double = 10,
         releaseMs: Double = 100,
         kneeDb: Double = 6,
-        makeupDb: Double = 0
+        makeupDb: Double = 0,
+        mix: Double = 1
     ) {
         self.thresholdDb = thresholdDb.clamped(to: Self.thresholdRange)
         self.ratio = ratio.clamped(to: Self.ratioRange)
@@ -344,13 +370,16 @@ public struct CompressorParams: Codable, Sendable, Equatable {
         self.releaseMs = releaseMs.clamped(to: Self.releaseRange)
         self.kneeDb = kneeDb.clamped(to: Self.kneeRange)
         self.makeupDb = makeupDb.clamped(to: Self.makeupRange)
+        self.mix = mix.clamped(to: Self.mixRange)
     }
 
     private enum CodingKeys: String, CodingKey {
-        case thresholdDb, ratio, attackMs, releaseMs, kneeDb, makeupDb
+        case thresholdDb, ratio, attackMs, releaseMs, kneeDb, makeupDb, mix
     }
 
-    /// Decoding routes through the clamping init.
+    /// Decoding routes through the clamping init. `mix` defaults to 1 (fully
+    /// wet) when the key is ABSENT — every project saved before m23-ck omits
+    /// it, and must decode to exactly today's behaviour.
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         self.init(
@@ -359,7 +388,8 @@ public struct CompressorParams: Codable, Sendable, Equatable {
             attackMs: try c.decodeIfPresent(Double.self, forKey: .attackMs) ?? 10,
             releaseMs: try c.decodeIfPresent(Double.self, forKey: .releaseMs) ?? 100,
             kneeDb: try c.decodeIfPresent(Double.self, forKey: .kneeDb) ?? 6,
-            makeupDb: try c.decodeIfPresent(Double.self, forKey: .makeupDb) ?? 0)
+            makeupDb: try c.decodeIfPresent(Double.self, forKey: .makeupDb) ?? 0,
+            mix: try c.decodeIfPresent(Double.self, forKey: .mix) ?? 1)
     }
 }
 
@@ -855,6 +885,20 @@ public struct EffectParamSpec: Sendable, Equatable {
                                 defaultValue: 6, unit: "dB"),
                 EffectParamSpec(name: "makeupDb", range: CompressorParams.makeupRange,
                                 defaultValue: 0, unit: "dB"),
+                // m23-ck parallel compression — APPENDED so the automation slot
+                // indices of the six original params (0…5) never move.
+                EffectParamSpec(name: "mix", range: CompressorParams.mixRange,
+                                defaultValue: 1, unit: "linear",
+                                note: "Parallel ('New York') compression blend: 1 (the default) "
+                                    + "is fully compressed — exactly the classic behaviour — and "
+                                    + "0 is a bit-exact bypass of the whole unit, makeup gain "
+                                    + "included. Values between blend the compressed signal over "
+                                    + "the untouched input, which is what a duplicate track plus "
+                                    + "a send used to be for: crush hard (low threshold, high "
+                                    + "ratio, high makeup) then dial mix to ~0.3-0.5 for density "
+                                    + "that keeps the original transients. With a sidechain key "
+                                    + "attached the key still only drives the DETECTOR — the dry "
+                                    + "half of the blend is always this effect's own input."),
             ]
         case .limiter:
             return [

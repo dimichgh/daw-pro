@@ -82,14 +82,21 @@
 //   node scripts/gates/m23do-menubar.mjs
 import fs from "fs";
 import { execFileSync } from "node:child_process";
-import { launchStaging, stopStaging } from "./_staging.mjs";
+import { launchStaging, stopStaging, verdict, STAGING_PROCESS_NAME } from "./_staging.mjs";
 
 const GATE = "m23do";
 const PORT = process.env.DAW_CONTROL_PORT || "17695";
 const OUT = process.env.M23DO_OUT || "/tmp/m23do";
 const PIDFILE = process.env.M23DO_PIDFILE || "/tmp/m23do-staging.pid";
 const BINARY = process.env.M23DO_BINARY || ".build/debug/DAWApp";
-const PROCESS_NAME = "DAWApp"; // the executable name, NOT "DAWPro" — measured at m23-bx-1
+// ⚠️ IMPORTED, NEVER SPELLED. This used to be the literal `"DAWApp"` ("the
+// executable name, NOT 'DAWPro' — measured at m23-bx-1"), which was TRUE when it
+// was written and became FALSE at m23-gf-b: staging now launches through a symlink
+// named `DAWProStaging`, so System Events answers `Can't get process "DAWApp"
+// (-1728)` and AX0 — this gate's own positive control — fails. The m23-gf-c-2
+// corpus comparison is what caught it. Deriving the name means the next rename
+// cannot silently break the accessibility query again.
+const PROCESS_NAME = STAGING_PROCESS_NAME;
 
 fs.mkdirSync(OUT, { recursive: true });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -315,4 +322,4 @@ try {
 fs.writeFileSync(`${OUT}/results.json`, JSON.stringify(checks, null, 2));
 const pass = checks.filter((c) => c.ok).length;
 console.log(`\nM23DO ${pass}/${checks.length}`);
-process.exit(pass === checks.length ? 0 : 1);
+verdict({ ran: checks.length, failed: checks.length - pass });

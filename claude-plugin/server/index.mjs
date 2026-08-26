@@ -2244,8 +2244,8 @@ var require_resolve = __commonJS({
       }
       return count;
     }
-    function getFullPath(resolver, id = "", normalize) {
-      if (normalize !== false)
+    function getFullPath(resolver, id = "", normalize2) {
+      if (normalize2 !== false)
         id = normalizeId(id);
       const p = resolver.parse(id);
       return _getFullPath(resolver, p);
@@ -3641,7 +3641,7 @@ var require_fast_uri = __commonJS({
     "use strict";
     var { normalizeIPv6, removeDotSegments, recomposeAuthority, normalizePercentEncoding, normalizePathEncoding, escapePreservingEscapes, reescapeHostDelimiters, isIPv4, nonSimpleDomain } = require_utils();
     var { SCHEMES, getSchemeHandler } = require_schemes();
-    function normalize(uri, options) {
+    function normalize2(uri, options) {
       if (typeof uri === "string") {
         uri = /** @type {T} */
         normalizeString(uri, options);
@@ -3908,7 +3908,7 @@ var require_fast_uri = __commonJS({
     }
     var fastUri = {
       SCHEMES,
-      normalize,
+      normalize: normalize2,
       resolve: resolve5,
       resolveComponent,
       equal,
@@ -11083,17 +11083,17 @@ var require_sha256 = __commonJS({
       exports2.HMAC = HMAC;
       function hash(data) {
         var h = new Hash().update(data);
-        var digest = h.digest();
+        var digest2 = h.digest();
         h.clean();
-        return digest;
+        return digest2;
       }
       exports2.hash = hash;
       exports2["default"] = hash;
       function hmac(key, data) {
         var h = new HMAC(key).update(data);
-        var digest = h.digest();
+        var digest2 = h.digest();
         h.clean();
-        return digest;
+        return digest2;
       }
       exports2.hmac = hmac;
       function fillBuffer(buffer, hmac2, info, counter) {
@@ -12481,10 +12481,10 @@ async function setupSkills(ctx) {
     try {
       const versionId = await resolveSkillVersion(client, skill.skill_id, skill.version);
       const version2 = await client.beta.skills.versions.retrieve(versionId, { skill_id: skill.skill_id });
-      let dirname5 = path3.basename(version2.name.trim());
-      if (dirname5 === "" || dirname5 === "." || dirname5 === "..")
-        dirname5 = skill.skill_id;
-      const dest = path3.resolve(skillsRoot, dirname5);
+      let dirname6 = path3.basename(version2.name.trim());
+      if (dirname6 === "" || dirname6 === "." || dirname6 === "..")
+        dirname6 = skill.skill_id;
+      const dest = path3.resolve(skillsRoot, dirname6);
       if (dest !== skillsRoot && !dest.startsWith(skillsRoot + path3.sep)) {
         log.warn("skill name escapes the skills dir; skipping", {
           component: "agent-tool-context",
@@ -33250,6 +33250,8 @@ var VOICE_CONVERT_TIMEOUT_MS = 33e4;
 var VOICE_CONVERT_COMMANDS = /* @__PURE__ */ new Set(["vc.convertVocals"]);
 var CLIP_TRANSCRIBE_TIMEOUT_MS = 3e5;
 var CLIP_TRANSCRIBE_COMMANDS = /* @__PURE__ */ new Set(["clip.transcribe"]);
+var CLIP_DETECT_PITCH_TIMEOUT_MS = 6e4;
+var CLIP_DETECT_PITCH_COMMANDS = /* @__PURE__ */ new Set(["clip.detectPitch"]);
 function isControlResponse(value) {
   if (typeof value !== "object" || value === null) return false;
   const record2 = value;
@@ -33276,7 +33278,7 @@ var DawBridge = class {
   async send(command, params = {}) {
     const socket = await this.ensureConnected();
     const id = `mcp-${this.nextId++}-${Date.now()}`;
-    const timeoutMs = VOICE_CONVERT_COMMANDS.has(command) ? VOICE_CONVERT_TIMEOUT_MS : CLIP_TRANSCRIBE_COMMANDS.has(command) ? CLIP_TRANSCRIBE_TIMEOUT_MS : LONG_RUNNING_COMMANDS.has(command) ? LONG_RUNNING_TIMEOUT_MS : REQUEST_TIMEOUT_MS;
+    const timeoutMs = VOICE_CONVERT_COMMANDS.has(command) ? VOICE_CONVERT_TIMEOUT_MS : CLIP_TRANSCRIBE_COMMANDS.has(command) ? CLIP_TRANSCRIBE_TIMEOUT_MS : CLIP_DETECT_PITCH_COMMANDS.has(command) ? CLIP_DETECT_PITCH_TIMEOUT_MS : LONG_RUNNING_COMMANDS.has(command) ? LONG_RUNNING_TIMEOUT_MS : REQUEST_TIMEOUT_MS;
     return new Promise((resolve5, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
@@ -33295,6 +33297,19 @@ var DawBridge = class {
         reject(this.describeConnectionError(err));
       }
     });
+  }
+  /**
+   * True if a WebSocket connection to the DAW app is currently OPEN.
+   *
+   * A pure state read — NEVER initiates a connection. Used by call logging
+   * (m23-ca, src/mcp-log.ts) to decide whether an opportunistic before-state
+   * read (`project.overview`) is safe to attempt without paying — or, worse,
+   * forcing every caller to pay — a fresh connection's cost just to produce a
+   * log line. When this is false, logging records an honest
+   * `beforeCaptured: false` instead of connecting on the log's behalf.
+   */
+  isConnected() {
+    return this.socket !== void 0 && this.socket.readyState === WebSocket.OPEN;
   }
   /** Close the socket, if any. Pending requests are rejected. */
   close() {
@@ -43886,14 +43901,781 @@ async function generateImage(input) {
   return { filePath };
 }
 
+// src/mcp-log.ts
+import { appendFileSync, mkdirSync as mkdirSync2 } from "node:fs";
+import { createHash } from "node:crypto";
+import { homedir } from "node:os";
+import { dirname as dirname5, join as join5 } from "node:path";
+
+// src/result-spill.ts
+import { AsyncLocalStorage } from "node:async_hooks";
+import { randomBytes } from "node:crypto";
+import { mkdirSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join as join4 } from "node:path";
+var DEFAULT_MAX_RESULT_CHARS = 24e3;
+function maxResultChars() {
+  const raw = process.env["DAWPRO_MCP_MAX_RESULT_CHARS"];
+  if (raw !== void 0 && raw !== "") {
+    const n = Number(raw);
+    if (Number.isFinite(n) && n > 0) return Math.floor(n);
+  }
+  return DEFAULT_MAX_RESULT_CHARS;
+}
+function spillDir() {
+  const raw = process.env["DAWPRO_MCP_SPILL_DIR"];
+  if (raw !== void 0 && raw !== "") return raw;
+  return join4(tmpdir(), "dawpro-mcp-results");
+}
+var SPILL_TTL_MS = 24 * 60 * 60 * 1e3;
+var SPILL_FILE_PREFIX = "dawpro-mcp-";
+var SPILL_FILE_RE = /^dawpro-mcp-[A-Za-z0-9_.-]+\.(json|txt)$/;
+var PASSES = [
+  { inlineMax: 4096, maxRecurseElements: 64, headSamples: 3, strideSamples: 4, outlineBudget: 1200 },
+  { inlineMax: 2048, maxRecurseElements: 32, headSamples: 3, strideSamples: 4, outlineBudget: 1e3 },
+  { inlineMax: 1024, maxRecurseElements: 16, headSamples: 2, strideSamples: 3, outlineBudget: 700 },
+  { inlineMax: 512, maxRecurseElements: 8, headSamples: 2, strideSamples: 2, outlineBudget: 400 },
+  { inlineMax: 256, maxRecurseElements: 4, headSamples: 1, strideSamples: 1, outlineBudget: 200 },
+  { inlineMax: 128, maxRecurseElements: 0, headSamples: 1, strideSamples: 0, outlineBudget: 0 }
+];
+var MAX_RECURSE_KEYS = 128;
+var MAX_SAMPLE_ELEMENT_CHARS = 300;
+var MAX_SAMPLE_CHARS = 1200;
+var MAX_INDEX_ENTRIES = 50;
+var MAX_DEPTH = 200;
+var STRING_PREVIEW_CHARS = 160;
+var ROOT_STRING_PREVIEW_CHARS = 600;
+var toolNameStore = new AsyncLocalStorage();
+function runWithToolName(name, fn) {
+  return toolNameStore.run(name, fn);
+}
+function currentToolName() {
+  return toolNameStore.getStore();
+}
+function isDict(v) {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+function normalize(node) {
+  if (node !== null && typeof node === "object") {
+    const maybe = node.toJSON;
+    if (typeof maybe === "function") {
+      try {
+        return maybe.call(node, "");
+      } catch {
+        return node;
+      }
+    }
+  }
+  return node;
+}
+function emittedKeys(obj) {
+  const out = [];
+  for (const k of Object.keys(obj)) {
+    const v = obj[k];
+    if (v === void 0 || typeof v === "function" || typeof v === "symbol") continue;
+    out.push(k);
+  }
+  return out;
+}
+function arrayElement(v) {
+  if (v === void 0 || typeof v === "function" || typeof v === "symbol") return null;
+  return v;
+}
+var Sizer = class {
+  memo = /* @__PURE__ */ new WeakMap();
+  size(node, depth = 0) {
+    const v = normalize(node);
+    if (v === null || v === void 0) return 4;
+    switch (typeof v) {
+      case "string":
+        return JSON.stringify(v).length;
+      case "number":
+        return Number.isFinite(v) ? String(v).length : 4;
+      case "boolean":
+        return v ? 4 : 5;
+      case "bigint":
+      case "function":
+      case "symbol":
+        return 4;
+    }
+    if (depth > MAX_DEPTH) return 4;
+    const obj = v;
+    const hit = this.memo.get(obj);
+    if (hit !== void 0) return hit;
+    let n;
+    if (Array.isArray(v)) {
+      n = 2 + Math.max(0, v.length - 1);
+      for (const el of v) n += this.size(arrayElement(el), depth + 1);
+    } else {
+      const keys = emittedKeys(v);
+      n = 2 + Math.max(0, keys.length - 1);
+      for (const k of keys) n += JSON.stringify(k).length + 1 + this.size(v[k], depth + 1);
+    }
+    this.memo.set(obj, n);
+    return n;
+  }
+};
+var LineCounter = class {
+  memo = /* @__PURE__ */ new WeakMap();
+  overflowed = false;
+  lines(node, depth = 0) {
+    const v = normalize(node);
+    if (v === null || typeof v !== "object") return 1;
+    if (depth > MAX_DEPTH) {
+      this.overflowed = true;
+      return 1;
+    }
+    const obj = v;
+    const hit = this.memo.get(obj);
+    if (hit !== void 0) return hit;
+    let n;
+    if (Array.isArray(v)) {
+      if (v.length === 0) n = 1;
+      else {
+        n = 2;
+        for (const el of v) n += this.lines(arrayElement(el), depth + 1);
+      }
+    } else {
+      const keys = emittedKeys(v);
+      if (keys.length === 0) n = 1;
+      else {
+        n = 2;
+        for (const k of keys) n += this.lines(v[k], depth + 1);
+      }
+    }
+    this.memo.set(obj, n);
+    return n;
+  }
+};
+function verifiedRange(ctx, start, end, node, key) {
+  if (!ctx.enabled) return null;
+  if (start < 1 || end < start || end > ctx.lines.length) {
+    ctx.failures += 1;
+    return null;
+  }
+  const first = ctx.lines[start - 1];
+  const last = ctx.lines[end - 1];
+  if (first === void 0 || last === void 0) {
+    ctx.failures += 1;
+    return null;
+  }
+  if (key !== void 0 && !first.includes(`${JSON.stringify(key)}:`)) {
+    ctx.failures += 1;
+    return null;
+  }
+  const v = normalize(node);
+  const isArr = Array.isArray(v);
+  const isObj2 = isDict(v);
+  if (isArr || isObj2) {
+    const open3 = isArr ? "[" : "{";
+    const close = isArr ? "]" : "}";
+    const emptyToken = isArr ? "[]" : "{}";
+    const firstTrimmed = first.trimEnd();
+    const lastTrimmed = last.trim();
+    if (start === end) {
+      if (!firstTrimmed.endsWith(emptyToken) && !firstTrimmed.endsWith(`${emptyToken},`)) {
+        ctx.failures += 1;
+        return null;
+      }
+    } else {
+      if (!firstTrimmed.endsWith(open3)) {
+        ctx.failures += 1;
+        return null;
+      }
+      if (lastTrimmed !== close && lastTrimmed !== `${close},`) {
+        ctx.failures += 1;
+        return null;
+      }
+    }
+  } else if (start !== end) {
+    ctx.failures += 1;
+    return null;
+  }
+  return [start, end];
+}
+function childStartLines(ctx, start, children) {
+  const out = [];
+  let cursor = start + 1;
+  for (const c of children) {
+    out.push(cursor);
+    cursor += ctx.liner.lines(c);
+  }
+  return out;
+}
+function sampleArray(ctx, arr) {
+  const out = {};
+  let budget = MAX_SAMPLE_CHARS;
+  const take = (i) => {
+    const el = arrayElement(arr[i]);
+    const sz = ctx.sizer.size(el);
+    if (sz > MAX_SAMPLE_ELEMENT_CHARS || sz > budget) return void 0;
+    budget -= sz;
+    return el;
+  };
+  const head = [];
+  for (let i = 0; i < Math.min(ctx.pass.headSamples, arr.length); i += 1) {
+    const el = take(i);
+    if (el === void 0) break;
+    head.push(el);
+  }
+  if (head.length > 0) out["head"] = head;
+  const strideCount = ctx.pass.strideSamples;
+  if (strideCount > 0 && arr.length > head.length + 1) {
+    const stride = Math.max(1, Math.floor(arr.length / (strideCount + 1)));
+    const items = [];
+    for (let n = 1; n <= strideCount; n += 1) {
+      const idx = Math.min(arr.length - 1, n * stride);
+      if (idx < head.length) continue;
+      const el = take(idx);
+      if (el === void 0) break;
+      items.push({ index: idx, value: el });
+    }
+    if (items.length > 0) out["sampled"] = { stride, items };
+  }
+  if (head.length === 0 && out["sampled"] === void 0) {
+    const outline = outlineElements(ctx, arr);
+    if (outline !== null) out["outline"] = outline;
+    else {
+      const first = arrayElement(arr[0]);
+      if (isDict(first)) out["elementKeys"] = Object.keys(first).slice(0, 40);
+      else out["elementType"] = first === null ? "null" : typeof first;
+    }
+  }
+  return out;
+}
+function outlineOf(ctx, el) {
+  const v = normalize(el);
+  if (!isDict(v)) return void 0;
+  const out = {};
+  for (const k of emittedKeys(v)) {
+    const child = normalize(v[k]);
+    if (child === null || typeof child !== "object") {
+      if (typeof child === "string" && child.length > 64) out[k] = `${child.slice(0, 64)}\u2026`;
+      else out[k] = child;
+    } else if (Array.isArray(child)) {
+      out[k] = `<array of ${child.length}, omitted>`;
+    } else {
+      out[k] = `<object, ${emittedKeys(child).length} keys, omitted>`;
+    }
+  }
+  return Object.keys(out).length > 0 ? out : void 0;
+}
+function outlineElements(ctx, arr) {
+  let budget = ctx.pass.outlineBudget;
+  if (budget <= 0 || arr.length === 0) return null;
+  const items = [];
+  for (let i = 0; i < arr.length; i += 1) {
+    const o = outlineOf(ctx, arrayElement(arr[i]));
+    if (o === void 0) break;
+    const sz = ctx.sizer.size(o);
+    if (sz > budget) break;
+    budget -= sz;
+    items.push(o);
+  }
+  if (items.length === 0) return null;
+  return {
+    note: "PARTIAL \u2014 each element reduced to its scalar fields; every array/object field inside it was dropped and is marked as such. " + (ctx.fileAvailable ? "Read the file for full elements." : "The full elements were NOT saved anywhere \u2014 see the warning above."),
+    covered: items.length === arr.length ? `all ${arr.length}` : `first ${items.length} of ${arr.length}`,
+    items
+  };
+}
+function elideArray(ctx, arr, path6, range) {
+  const approxChars = ctx.sizer.size(arr);
+  ctx.elided.push({ path: path6, kind: "array", elementCount: arr.length, fileLineRange: range });
+  let linesPerElement = null;
+  if (arr.length > 0) {
+    const firstLines = ctx.liner.lines(arrayElement(arr[0]));
+    linesPerElement = firstLines;
+    for (let i = 1; i < arr.length; i += 1) {
+      if (ctx.liner.lines(arrayElement(arr[i])) !== firstLines) {
+        linesPerElement = null;
+        break;
+      }
+    }
+  }
+  const out = {
+    _elided: "array",
+    elementCount: arr.length,
+    approxChars,
+    path: path6,
+    fileLineRange: range
+  };
+  if (range !== null && linesPerElement !== null) {
+    out["linesPerElement"] = linesPerElement;
+    out["readElements"] = `To read elements N..M from the spill file: read lines ${range[0] + 1} + N*${linesPerElement} through ${range[0]} + (M+1)*${linesPerElement} (1-based, inclusive). Element 0 starts at line ${range[0] + 1}.`;
+  }
+  Object.assign(out, sampleArray(ctx, arr));
+  return out;
+}
+function elideObject(ctx, obj, path6, range) {
+  const keys = emittedKeys(obj);
+  ctx.elided.push({ path: path6, kind: "object", keyCount: keys.length, fileLineRange: range });
+  return {
+    _elided: "object",
+    keyCount: keys.length,
+    keys: keys.slice(0, 40),
+    approxChars: ctx.sizer.size(obj),
+    path: path6,
+    fileLineRange: range
+  };
+}
+function elideString(ctx, s, path6, range) {
+  ctx.elided.push({ path: path6, kind: "string", chars: s.length, fileLineRange: range });
+  return {
+    _elided: "string",
+    chars: s.length,
+    preview: `${s.slice(0, STRING_PREVIEW_CHARS)}${s.length > STRING_PREVIEW_CHARS ? "\u2026" : ""}`,
+    path: path6,
+    fileLineRange: range
+  };
+}
+function digest(ctx, node, path6, start, key, depth) {
+  const v = normalize(node);
+  if (ctx.sizer.size(v) <= ctx.pass.inlineMax) return node;
+  if (depth > MAX_DEPTH) return node;
+  const range = ctx.fileAvailable ? verifiedRange(ctx.ranges, start, start + ctx.liner.lines(v) - 1, v, key) : null;
+  const shrinkOrKeep = (make) => {
+    const before = ctx.elided.length;
+    const placeholder = make();
+    if (ctx.sizer.size(placeholder) < ctx.sizer.size(v)) return placeholder;
+    ctx.elided.length = before;
+    return node;
+  };
+  if (typeof v === "string") return shrinkOrKeep(() => elideString(ctx, v, path6, range));
+  if (Array.isArray(v)) {
+    if (v.length > 0 && v.length <= ctx.pass.maxRecurseElements) {
+      const elements = v.map(arrayElement);
+      const starts = childStartLines(ctx, start, elements);
+      return elements.map(
+        (el, i) => digest(ctx, el, `${path6}[${i}]`, starts[i] ?? start, void 0, depth + 1)
+      );
+    }
+    return shrinkOrKeep(() => elideArray(ctx, v, path6, range));
+  }
+  if (isDict(v)) {
+    const keys = emittedKeys(v);
+    if (keys.length > 0 && keys.length <= MAX_RECURSE_KEYS) {
+      const values = keys.map((k) => v[k]);
+      const starts = childStartLines(ctx, start, values);
+      const out = {};
+      keys.forEach((k, i) => {
+        out[k] = digest(ctx, v[k], `${path6}.${k}`, starts[i] ?? start, k, depth + 1);
+      });
+      return out;
+    }
+    return shrinkOrKeep(() => elideObject(ctx, v, path6, range));
+  }
+  return node;
+}
+function sanitizeToolName(name) {
+  if (!name) return "tool";
+  const cleaned = name.replace(/[^A-Za-z0-9_-]/g, "-").slice(0, 60);
+  return cleaned.length > 0 ? cleaned : "tool";
+}
+function spillFileName(extension) {
+  const stamp = (/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-");
+  const salt = randomBytes(3).toString("hex");
+  return `${SPILL_FILE_PREFIX}${sanitizeToolName(currentToolName())}-${stamp}-${salt}.${extension}`;
+}
+function pruneStaleSpills(dir) {
+  try {
+    const now = Date.now();
+    for (const name of readdirSync(dir)) {
+      if (!SPILL_FILE_RE.test(name)) continue;
+      const full = join4(dir, name);
+      try {
+        const st = statSync(full);
+        if (st.isFile() && now - st.mtimeMs > SPILL_TTL_MS) unlinkSync(full);
+      } catch {
+      }
+    }
+  } catch {
+  }
+}
+function writeSpill(body, extension) {
+  const dir = spillDir();
+  try {
+    mkdirSync(dir, { recursive: true });
+    pruneStaleSpills(dir);
+    const path6 = join4(dir, spillFileName(extension));
+    writeFileSync(path6, body, "utf8");
+    return { path: path6, bytes: Buffer.byteLength(body, "utf8"), error: null };
+  } catch (err) {
+    return { path: null, bytes: null, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+var DO_NOT_RERUN = "DO NOT re-run this tool call to recover the omitted content: the call ALREADY SUCCEEDED, and re-running a mutating tool (edit_undo, clip_apply_effort_shape, \u2026) repeats the edit.";
+function buildNotice(args) {
+  const { fullChars, fullLines, limit: limit3, spill, elided, lineRangesVerified, kind } = args;
+  const notice = {
+    status: spill.path ? "ELIDED_TO_FILE" : "ELIDED_NO_FILE",
+    reason: `This reply was ${fullChars} characters (${fullLines} lines) \u2014 over the ${limit3}-character inline limit. THIS IS NOT THE COMPLETE REPLY. ` + (kind === "json" ? 'Every scalar and short field is inline below, unchanged; only oversized nodes were replaced, each by a placeholder object carrying "_elided", its element/key count, and where to read it.' : "The reply was a single large text value."),
+    fullChars,
+    fullLines,
+    inlineLimit: limit3
+  };
+  if (spill.path) {
+    notice["file"] = spill.path;
+    notice["fileBytes"] = spill.bytes;
+    notice["howToRead"] = `The COMPLETE reply was written to the file above. Read it with your file-reading tool (Read, cat, \u2026) \u2014 it is ${kind === "json" ? "pretty-printed JSON" : "plain text"}, ${fullLines} lines. Read only the line range you need (see fileLineRange on each placeholder) rather than the whole file. ${DO_NOT_RERUN}`;
+  } else {
+    notice["file"] = null;
+    notice["writeError"] = spill.error;
+    notice["warning"] = `THE OMITTED CONTENT IS NOT RETRIEVABLE. The spill file could not be written (${spill.error ?? "unknown error"}), so the elided nodes below exist nowhere else. Work from the inline fields, or re-read the state with a READ-ONLY tool (project_snapshot, clip_get_notes, controller_lane_get). ${DO_NOT_RERUN}`;
+  }
+  if (kind === "json") {
+    if (spill.path) notice["lineRangesVerified"] = lineRangesVerified;
+    if (spill.path && !lineRangesVerified) {
+      notice["lineRangeNote"] = "Computed line ranges did not verify against the emitted file, so all fileLineRange values are null. The file content itself is complete and correct; only the line-offset shortcut is unavailable \u2014 search the file for the path instead.";
+    }
+    notice["elidedCount"] = elided.length;
+    notice["elided"] = elided.slice(0, MAX_INDEX_ENTRIES);
+    if (elided.length > MAX_INDEX_ENTRIES) {
+      notice["elidedIndexTruncated"] = elided.length - MAX_INDEX_ENTRIES;
+    }
+  }
+  return notice;
+}
+function envelope(notice, body) {
+  if (isDict(body) && !("_elided" in body)) return { _elided: notice, ...body };
+  return { _elided: notice, result: body };
+}
+function formatToolText(value) {
+  if (value === void 0) return "ok";
+  const limit3 = maxResultChars();
+  if (typeof value === "string") {
+    if (value.length <= limit3) return value;
+    const spill2 = writeSpill(value, "txt");
+    const notice2 = buildNotice({
+      fullChars: value.length,
+      fullLines: value.split("\n").length,
+      limit: limit3,
+      spill: spill2,
+      elided: [],
+      lineRangesVerified: false,
+      kind: "string"
+    });
+    notice2["preview"] = `${value.slice(0, ROOT_STRING_PREVIEW_CHARS)}\u2026`;
+    return JSON.stringify({ _elided: notice2 }, null, 2);
+  }
+  const full = JSON.stringify(value, null, 2);
+  if (full === void 0) return "ok";
+  if (full.length <= limit3) return full;
+  const lines = full.split("\n");
+  const sizer = new Sizer();
+  const liner = new LineCounter();
+  const computedTotal = liner.lines(value);
+  const lineIndexOk = !liner.overflowed && computedTotal === lines.length;
+  const ranges = { lines, enabled: lineIndexOk, failures: 0 };
+  const spill = writeSpill(full, "json");
+  let rendered = null;
+  let notice = null;
+  for (const pass of PASSES) {
+    ranges.failures = 0;
+    const ctx = {
+      pass,
+      sizer,
+      liner,
+      ranges,
+      elided: [],
+      fileAvailable: spill.path !== null
+    };
+    const body = digest(ctx, value, "$", 1, void 0, 0);
+    const candidateNotice = buildNotice({
+      fullChars: full.length,
+      fullLines: lines.length,
+      limit: limit3,
+      spill,
+      elided: ctx.elided,
+      lineRangesVerified: lineIndexOk && ranges.failures === 0,
+      kind: "json"
+    });
+    const text = JSON.stringify(envelope(candidateNotice, body), null, 2);
+    if (text.length <= limit3) {
+      rendered = text;
+      notice = candidateNotice;
+      break;
+    }
+    rendered = text;
+    notice = candidateNotice;
+  }
+  if (rendered !== null && rendered.length <= limit3) return rendered;
+  const fallbackNotice = notice ?? {};
+  fallbackNotice["status"] = spill.path ? "ELIDED_TO_FILE_SUMMARY_ONLY" : "ELIDED_NO_FILE";
+  fallbackNotice["summaryOnly"] = "Even the field-by-field summary exceeded the inline limit, so only this notice is returned. Read the file for anything you need.";
+  fallbackNotice["elided"] = [];
+  const topLevelKeys = isDict(value) ? emittedKeys(value).slice(0, 100) : Array.isArray(value) ? [`<array of ${value.length}>`] : [];
+  return JSON.stringify({ _elided: fallbackNotice, topLevelKeys }, null, 2);
+}
+
+// src/mcp-log.ts
+var currentRegistrationIsMutating = false;
+function withMutatingRegistration(fn) {
+  currentRegistrationIsMutating = true;
+  try {
+    return fn();
+  } finally {
+    currentRegistrationIsMutating = false;
+  }
+}
+var NO_WIRE_COMMAND_TOOLS = /* @__PURE__ */ new Set([
+  "generate_lyrics",
+  "generate_song_suno",
+  "generate_image"
+]);
+var GLOBAL_SCOPE_TOOLS = /* @__PURE__ */ new Set([
+  "transport_play",
+  "transport_stop",
+  "transport_panic",
+  "transport_seek",
+  "transport_record",
+  "transport_set_tempo",
+  "tempo_set_map",
+  "transport_set_loop",
+  "transport_set_punch",
+  "transport_set_metronome",
+  "mixer_set_master_volume"
+]);
+var SECRET_KEY_PATTERN = /key|token|secret|password|credential|authorization/i;
+var SECRET_VALUE_PATTERNS = [
+  /sk-ant-[A-Za-z0-9_-]{8,}/g,
+  /sk-proj-[A-Za-z0-9_-]{8,}/g,
+  /sk-[A-Za-z0-9]{16,}/g,
+  /Bearer\s+[A-Za-z0-9._-]{8,}/gi
+];
+var LARGE_BLOB_THRESHOLD_CHARS = 2e3;
+var OVERALL_VALUE_CAP_CHARS = 2e4;
+function sha256Hex(input) {
+  return createHash("sha256").update(input, "utf8").digest("hex");
+}
+function redactSecretPatterns(value) {
+  let out = value;
+  for (const pattern of SECRET_VALUE_PATTERNS) {
+    out = out.replace(pattern, "[REDACTED]");
+  }
+  return out;
+}
+function redactValue(key, value) {
+  if (SECRET_KEY_PATTERN.test(key)) {
+    return "[REDACTED]";
+  }
+  if (value === null || value === void 0 || typeof value === "number" || typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "string") {
+    if (value.length > LARGE_BLOB_THRESHOLD_CHARS) {
+      return { __truncated: true, sha256: sha256Hex(value), length: value.length };
+    }
+    return redactSecretPatterns(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map((v) => redactValue("", v));
+  }
+  if (typeof value === "object") {
+    const out = {};
+    for (const [k, v] of Object.entries(value)) {
+      out[k] = redactValue(k, v);
+    }
+    return out;
+  }
+  return String(value);
+}
+function capOverallSize(value, label) {
+  let str2;
+  try {
+    str2 = JSON.stringify(value) ?? "";
+  } catch {
+    return value;
+  }
+  if (str2.length > OVERALL_VALUE_CAP_CHARS) {
+    return { __truncated: true, sha256: sha256Hex(str2), length: str2.length, reason: `${label} exceeded ${OVERALL_VALUE_CAP_CHARS} chars` };
+  }
+  return value;
+}
+function redactAndCap(label, value) {
+  if (value === void 0) return void 0;
+  return capOverallSize(redactValue(label, value), label);
+}
+var resolvedLogPath;
+var logDirEnsured = false;
+var loggingDegraded = false;
+function defaultLogDir() {
+  return join5(homedir(), "Library", "Logs", "DAWPro", "mcp");
+}
+function mcpLogFilePath() {
+  if (resolvedLogPath) return resolvedLogPath;
+  const dir = process.env["DAWPRO_MCP_LOG_DIR"] || defaultLogDir();
+  const stamp = (/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-");
+  resolvedLogPath = join5(dir, `mcp-session-${stamp}-${process.pid}.jsonl`);
+  return resolvedLogPath;
+}
+function writeLogLineSafely(entry) {
+  let line;
+  try {
+    line = JSON.stringify(entry) + "\n";
+  } catch (err) {
+    if (!loggingDegraded) {
+      loggingDegraded = true;
+      console.error(
+        `[daw-pro-mcp] call logging degraded: could not serialize a log entry (${err instanceof Error ? err.message : String(err)}). Continuing without call logs.`
+      );
+    }
+    return;
+  }
+  try {
+    const filePath = mcpLogFilePath();
+    if (!logDirEnsured) {
+      mkdirSync2(dirname5(filePath), { recursive: true });
+      logDirEnsured = true;
+    }
+    appendFileSync(filePath, line, "utf8");
+  } catch (err) {
+    if (!loggingDegraded) {
+      loggingDegraded = true;
+      console.error(
+        `[daw-pro-mcp] call logging degraded: could not write to "${mcpLogFilePath()}" (${err instanceof Error ? err.message : String(err)}). Continuing without call logs.`
+      );
+    }
+  }
+}
+function beforeCaptureEnabled() {
+  return process.env["DAWPRO_MCP_LOG_BEFORE"] !== "0";
+}
+function extractNarrow(name, params, overview) {
+  const p = params && typeof params === "object" ? params : {};
+  const ov = overview && typeof overview === "object" ? overview : {};
+  const trackId = p["trackId"];
+  if (typeof trackId === "string") {
+    if (trackId === "master") {
+      return { scope: "master", value: ov["master"] };
+    }
+    const tracks = Array.isArray(ov["tracks"]) ? ov["tracks"] : [];
+    const track = tracks.find((t) => t && t["id"] === trackId);
+    return track ? { scope: "track", value: track } : { scope: "track-not-found", value: void 0 };
+  }
+  const clipId = p["clipId"];
+  if (typeof clipId === "string") {
+    const tracks = Array.isArray(ov["tracks"]) ? ov["tracks"] : [];
+    for (const t of tracks) {
+      const clips = Array.isArray(t["clips"]) ? t["clips"] : [];
+      const clip = clips.find((c) => c && c["id"] === clipId);
+      if (clip) return { scope: "clip", value: clip };
+    }
+    return { scope: "clip-not-found", value: void 0 };
+  }
+  if (GLOBAL_SCOPE_TOOLS.has(name)) {
+    return { scope: "transport+master", value: { transport: ov["transport"], master: ov["master"] } };
+  }
+  return void 0;
+}
+async function captureBefore(name, isMutating, params, bridge2) {
+  if (!isMutating) return { captured: false, reason: "read-only tool" };
+  if (NO_WIRE_COMMAND_TOOLS.has(name)) {
+    return { captured: false, reason: "no backing wire command (direct AI-provider call)" };
+  }
+  if (!beforeCaptureEnabled()) return { captured: false, reason: "disabled via DAWPRO_MCP_LOG_BEFORE=0" };
+  if (!bridge2.isConnected()) return { captured: false, reason: "bridge not connected" };
+  const startedAt = performance.now();
+  try {
+    const overview = await bridge2.send("project.overview");
+    const overviewStr = JSON.stringify(overview) ?? "null";
+    const narrow = extractNarrow(name, params, overview);
+    return {
+      captured: true,
+      source: "project.overview",
+      fullHash: sha256Hex(overviewStr),
+      fullBytes: Buffer.byteLength(overviewStr, "utf8"),
+      narrowScope: narrow ? narrow.scope : "none",
+      narrow: narrow ? redactAndCap("before.narrow", narrow.value) : null,
+      captureMs: Math.round((performance.now() - startedAt) * 1e3) / 1e3
+    };
+  } catch (err) {
+    return {
+      captured: false,
+      reason: `project.overview read failed: ${err instanceof Error ? err.message : String(err)}`
+    };
+  }
+}
+function extractResultForLog(result) {
+  if (result && typeof result === "object" && "content" in result) {
+    const r = result;
+    const first = Array.isArray(r.content) ? r.content[0] : void 0;
+    const text = first && first.type === "text" ? first.text : void 0;
+    let body = text;
+    if (typeof text === "string") {
+      try {
+        body = JSON.parse(text);
+      } catch {
+        body = text;
+      }
+    }
+    return { ok: !r.isError, body };
+  }
+  return { ok: true, body: result };
+}
+function round(ms) {
+  return Math.round(ms * 1e3) / 1e3;
+}
+function wrapHandler(name, hasInputSchema, isMutating, original, bridge2) {
+  return async (...callArgs) => {
+    const startedAt = performance.now();
+    const params = hasInputSchema ? callArgs[0] : void 0;
+    const before = await captureBefore(name, isMutating, params, bridge2);
+    let threw = false;
+    let rawError;
+    let rawResult;
+    try {
+      rawResult = await runWithToolName(name, () => original(...callArgs));
+    } catch (err) {
+      threw = true;
+      rawError = err;
+    }
+    const durationMs = round(performance.now() - startedAt);
+    const { ok, body } = threw ? { ok: false, body: rawError instanceof Error ? rawError.message : String(rawError) } : extractResultForLog(rawResult);
+    writeLogLineSafely({
+      ts: (/* @__PURE__ */ new Date()).toISOString(),
+      tool: name,
+      mutating: isMutating,
+      params: redactAndCap("params", params),
+      before,
+      ok,
+      ...ok ? { result: redactAndCap("result", body) } : { error: typeof body === "string" ? redactSecretPatterns(body) : redactAndCap("error", body) },
+      durationMs
+    });
+    if (threw) throw rawError;
+    return rawResult;
+  };
+}
+var instrumentedNames = [];
+var instrumentedMeta = [];
+var installed = false;
+function installMcpLogging(server2, bridge2) {
+  if (installed) {
+    console.error("[daw-pro-mcp] call logging: installMcpLogging called twice \u2014 ignoring the second call.");
+    return;
+  }
+  installed = true;
+  console.error(
+    `[daw-pro-mcp] call logging: writing to "${mcpLogFilePath()}"; before-snapshot capture is ${beforeCaptureEnabled() ? "ON (set DAWPRO_MCP_LOG_BEFORE=0 to disable)" : "OFF (DAWPRO_MCP_LOG_BEFORE=0)"}.`
+  );
+  const target = server2;
+  const original = target.registerTool.bind(target);
+  target.registerTool = (name, config2, cb) => {
+    const isMutating = currentRegistrationIsMutating;
+    const hasInputSchema = Boolean(config2 && config2.inputSchema);
+    instrumentedNames.push(name);
+    instrumentedMeta.push({ name, mutating: isMutating });
+    return original(name, config2, wrapHandler(name, hasInputSchema, isMutating, cb, bridge2));
+  };
+}
+
 // src/server.ts
 function textResult(value) {
-  const text = value === void 0 ? "ok" : typeof value === "string" ? value : JSON.stringify(value, null, 2);
-  return { content: [{ type: "text", text }] };
+  return { content: [{ type: "text", text: formatToolText(value) }] };
 }
 function errorResult(err) {
   const message = err instanceof Error ? err.message : String(err);
-  return { content: [{ type: "text", text: message }], isError: true };
+  return { content: [{ type: "text", text: formatToolText(message) }], isError: true };
 }
 async function toToolResult(fn) {
   try {
@@ -43907,9 +44689,12 @@ var server = new McpServer({
   name: "daw-pro",
   version: "0.1.0"
 });
+installMcpLogging(server, bridge);
 function registerTool(name, config2, handler) {
   const strictConfig = config2.inputSchema ? { ...config2, inputSchema: external_exports.object(config2.inputSchema).strict() } : config2;
-  server.registerTool(name, strictConfig, handler);
+  withMutatingRegistration(() => {
+    server.registerTool(name, strictConfig, handler);
+  });
 }
 registerTool(
   "transport_play",
@@ -44040,14 +44825,14 @@ registerTool(
         external_exports.object({
           startBeat: external_exports.number().min(0).describe("Beat where this tempo begins. Segment 0 must be 0; later segments strictly increasing."),
           bpm: external_exports.number().min(20).max(400).describe("Tempo in BPM for this segment. Range 20-400.")
-        })
+        }).strict()
       ).min(1).describe("Ordered tempo segments; segment 0 at beat 0 sets the base tempo."),
       meterChanges: external_exports.array(
         external_exports.object({
           startBeat: external_exports.number().min(0).describe("Beat where this time signature begins. Change 0 must be 0."),
           beatsPerBar: external_exports.number().int().min(1).describe("Beats per bar \u2014 the top number (e.g. 3 for 3/4)."),
           beatUnit: external_exports.number().int().min(1).describe("Beat unit \u2014 the bottom number (e.g. 4 for 3/4).")
-        })
+        }).strict()
       ).min(1).optional().describe(
         "Optional time-signature changes; omit to leave the meter unchanged. Change 0 must be at beat 0; each later change must fall on a barline."
       )
@@ -44115,6 +44900,19 @@ registerTool(
   async ({ enabled, countInBars }) => toToolResult(() => bridge.send("transport.setMetronome", { enabled, countInBars }))
 );
 registerTool(
+  "transport_set_stop_at_content_end",
+  {
+    title: "Stop playback at the end of the song",
+    description: "Control whether playback stops automatically when the playhead reaches the end of the last clip (the end of the song). ON by default. Turn it OFF to let the transport keep running into empty space past the last clip, which is what Logic and Live do by default. A recording take NEVER stops at the content end regardless of this setting \u2014 recording past the end of existing material is the point of recording \u2014 and an active loop takes precedence, cycling forever rather than stopping. This is a session preference, not project data: it is not saved with the project, edit_undo does not affect it, and it resets to on when the app restarts. Returns `{stopAtContentEnd, contentEndBeat}`, where `contentEndBeat` is the measured end of the last clip across all tracks (0 when the project has no clips). On project_snapshot the setting appears under the INVERTED name `runsPastContentEnd`, and only when it has been turned off: absent means playback stops at the content end (the default), `true` means it free-runs past the last clip. It is never `false`. Read the snapshot key by its own name and it is never misleading \u2014 do not look for `stopAtContentEnd` there.",
+    inputSchema: {
+      enabled: external_exports.boolean().describe(
+        "True to stop playback at the end of the last clip, false to keep running past it."
+      )
+    }
+  },
+  async ({ enabled }) => toToolResult(() => bridge.send("transport.setStopAtContentEnd", { enabled }))
+);
+registerTool(
   "track_add",
   {
     title: "Add a track",
@@ -44167,7 +44965,7 @@ registerTool(
   "track_set_volume",
   {
     title: "Set track volume",
-    description: "Set a track's fader volume as a linear gain multiplier, where 1.0 is unity gain (0 dB, no change). Range 0-2: 0 is silence, 0.5 is roughly -6 dB, 2.0 is roughly +6 dB. This is linear gain, not decibels.",
+    description: 'Set a track\'s fader volume as a linear gain multiplier, where 1.0 is unity gain (0 dB, no change). Range 0-2: 0 is silence, 0.5 is roughly -6 dB, 2.0 is roughly +6 dB. This is linear gain, not decibels. \u26A0\uFE0F CHECK THE REPLY: it normally reads "ok", but comes back as `{automationControlled: true, automationPointCount}` when an active VOLUME AUTOMATION LANE \u2014 not the value you just passed \u2014 governs what is heard and what renders, so this call will NOT change the audible level. (The keys are absent when nothing is overriding you.) The write still lands: it is stored, undoable, moves the fader, and takes effect the moment the lane is disabled (automation_set_lane_enabled), emptied, or removed. To change an automated level, edit the lane with automation_set_points instead.',
     inputSchema: {
       trackId: external_exports.string().min(1).describe("Id of the track, from project_snapshot."),
       volume: external_exports.number().min(0).max(2).describe("Linear gain, 0-2, where 1 = unity gain (0 dB).")
@@ -44223,9 +45021,40 @@ registerTool(
   },
   async ({ trackId, armed }) => toToolResult(() => bridge.send("track.setArm", { trackId, armed }))
 );
+var samplerCrossfadeSchema = external_exports.object({
+  controller: external_exports.number().int().min(0).max(127).optional().describe(
+    "CC number driving the CONTINUOUS crossfade domain (SFZ `xfin_locc<N>`/`xfin_hicc<N>`/`xfout_locc<N>`/`xfout_hicc<N>`) \u2014 re-evaluated while a note SOUNDS, so a held note really does change layer as this controller moves. Omitted = the CC domain is off; the velocity-domain bounds below (if any) still apply."
+  ),
+  ccInLo: external_exports.number().int().min(0).max(127).optional().describe(
+    "CC value (raw MIDI 0-127, SFZ `xfin_locc`) where this zone starts fading IN. Only meaningful with `controller` set. Together with `ccInHi` this zone's gain ramps 0\u21921 (equal-power curve) as the controller rises through [ccInLo, ccInHi]."
+  ),
+  ccInHi: external_exports.number().int().min(0).max(127).optional().describe(
+    "CC value (raw MIDI 0-127, SFZ `xfin_hicc`) where this zone finishes fading in. See `ccInLo`."
+  ),
+  ccOutLo: external_exports.number().int().min(0).max(127).optional().describe(
+    "CC value (raw MIDI 0-127, SFZ `xfout_locc`) where this zone starts fading OUT. Together with `ccOutHi` this zone's gain ramps 1\u21920 as the controller rises through [ccOutLo, ccOutHi]."
+  ),
+  ccOutHi: external_exports.number().int().min(0).max(127).optional().describe(
+    "CC value (raw MIDI 0-127, SFZ `xfout_hicc`) where this zone finishes fading out. See `ccOutLo`."
+  ),
+  velInLo: external_exports.number().int().min(0).max(127).optional().describe(
+    "Note-on velocity (raw MIDI 0-127, SFZ `xfin_lovel`) where this zone starts fading IN. FIXED AT NOTE-ON, unlike the CC domain above \u2014 this smooths layer choice ACROSS successive notes and cannot change anything within one held note. Together with `velInHi` this zone's gain ramps 0\u21921 as note-on velocity rises through [velInLo, velInHi]."
+  ),
+  velInHi: external_exports.number().int().min(0).max(127).optional().describe(
+    "Note-on velocity (raw MIDI 0-127, SFZ `xfin_hivel`) where this zone finishes fading in. See `velInLo`."
+  ),
+  velOutLo: external_exports.number().int().min(0).max(127).optional().describe(
+    "Note-on velocity (raw MIDI 0-127, SFZ `xfout_lovel`) where this zone starts fading OUT. Together with `velOutHi` this zone's gain ramps 1\u21920 as note-on velocity rises through [velOutLo, velOutHi]."
+  ),
+  velOutHi: external_exports.number().int().min(0).max(127).optional().describe(
+    "Note-on velocity (raw MIDI 0-127, SFZ `xfout_hivel`) where this zone finishes fading out. See `velOutLo`."
+  )
+}).strict().optional().describe(
+  "Dynamic-layer crossfade for THIS zone \u2014 the SFZ pp/mf/ff-layer technique: fade this zone's gain in/out against a CC stream and/or note-on velocity instead of a hard keyzone/velocity-range switch, so a library with separately-recorded dynamic layers blends between them rather than clicking from one to the next. Two INDEPENDENT domains, and a zone may use either or both (their gains multiply): the CC domain (`controller` + `ccInLo`/`ccInHi`/`ccOutLo`/`ccOutHi`) re-evaluates continuously while a note holds; the velocity domain (`velInLo`/`velInHi`/`velOutLo`/`velOutHi`) is fixed at note-on. Any bound you omit means \"no fade in that direction\" and resolves to a gain of exactly 1.0 \u2014 so a zone with every field omitted (the default) is bit-identical to having no crossfade at all. Curve is SFZ's documented default, power (equal-power / constant loudness through the fade); there is no way to select a different curve. Typical use: give the LOUD/BRIGHT layer's zone `ccInLo`/`ccInHi` (or `velInLo`/`velInHi`) to fade it IN as the controller/velocity rises, and give the SOFT/DARK layer's zone the matching `ccOutLo`/`ccOutHi` (or `velOutLo`/`velOutHi`) to fade it OUT over the same span."
+);
 var samplerZoneSchema = external_exports.object({
   path: external_exports.string().min(1).describe(
-    "REQUIRED. Absolute file path to this zone's sample audio file (wav/aiff/etc.). The file is copied into the project bundle on project_save, so the project stays portable \u2014 always pass the original source path here, not a bundle-relative one."
+    "REQUIRED. Absolute file path to this zone's sample audio file (wav/aiff/etc.), or the name of a sample the app ships, written `builtin:<name>`. The file is copied into the project bundle on project_save, so the project stays portable \u2014 always pass the original source path here, not a bundle-relative one. The only bundled sample today is `builtin:test-tone-a4` (m30-a): a 0.35 s A4 one-shot whose root pitch is MIDI 69, there so the sampler can be played and smoke-tested on a machine with no sample library of its own \u2014 e.g. to exercise `bendRangeSemitones` or `voiceMode`. A `builtin:` name that does not exist is REFUSED, and the error lists the ones that do; it is never silently accepted."
   ),
   rootPitch: external_exports.number().int().min(0).max(127).optional().describe(
     "MIDI pitch, 0-127 (60 = middle C), at which this sample plays back at its original recorded speed/pitch. Notes above or below are pitch-shifted relative to this root. Defaults to 60."
@@ -44289,11 +45118,21 @@ var samplerZoneSchema = external_exports.object({
   ),
   release: external_exports.number().min(1e-3).max(8).optional().describe(
     "Per-zone amplitude envelope RELEASE in seconds, 0.001-8: fade-out time after note-off. Overrides the sampler's global `release` for this zone only \u2014 give a piano-like zone a longer tail than the kit around it. Omitted = use the global release."
-  )
-});
+  ),
+  loopMode: external_exports.enum(["sustain", "continuous"]).optional().describe(
+    "Loop this zone's playback across `loopStart`/`loopEnd` instead of playing the sample once start-to-end. \"sustain\": loops while the note continues (held, or held-by-sustain-pedal/CC64), then plays out past `loopEnd` to the sample's real end on release \u2014 the classic library idiom for a stable middle plus a natural tail. \"continuous\": loops straight through release as well, with no tail. LOOPING WINS OVER ONE-SHOT: a zone with `loopMode` set is NEVER treated as one-shot, even when the sampler's global `oneShot` or this zone's own `oneShot` says otherwise \u2014 a loop needs a note-off (or held-through-release) boundary to mean anything, so one-shot is simply not consulted once a loop is set. Omitted = no loop (the pre-existing behavior): the zone plays its span once per trigger."
+  ),
+  loopStart: external_exports.number().int().min(0).optional().describe(
+    "First SOURCE-FILE frame (inclusive) of the loop, in the sample file's own frames \u2014 same convention as `startFrame`. Only takes effect when `loopMode` is also set. Omitted = 0 (loop from the file's start, or from `startFrame` if that's set \u2014 the engine further clamps into the zone's real playable span)."
+  ),
+  loopEnd: external_exports.number().int().min(1).optional().describe(
+    "Last SOURCE-FILE frame of the loop, EXCLUSIVE \u2014 matching `endFrame`'s convention. Only takes effect when `loopMode` is also set. Must exceed `loopStart`: a value at or below it is RAISED to loopStart+1 (never swapped, matching `endFrame`'s own rule), and both clamp to the zone's real playable span. Omitted = the zone's resolved end (its `endFrame`, or the sample's own end)."
+  ),
+  crossfade: samplerCrossfadeSchema
+}).strict();
 var samplerSchema = external_exports.object({
-  zones: external_exports.array(samplerZoneSchema).describe(
-    "The sampler's keyzone map. For a played note, each GROUP of zones fires at most one voice: within a group, the first zone (array order) whose pitch AND velocity ranges contain the note and whose round-robin/random gates pass is the one that plays; zones in different `group`s layer simultaneously. Zones without the optional selection fields all share group 0 with full ranges and no gates, so the classic behavior holds: the FIRST zone containing the pitch plays, exactly one voice per note. Use one zone for a single mapped sample; non-overlapping pitch ranges to split samples across the keyboard; velocity ranges for soft/loud layers; `seqLength`/`seqPosition` or `randMin`/`randMax` within a group for round-robin/random alternation; different `group`s to stack sounds."
+  zones: external_exports.array(samplerZoneSchema).optional().describe(
+    "OPTIONAL. Omit it to leave the track's CURRENT zones exactly as they are \u2014 that is how you change a global (say `release`) on an imported 309-zone library without reading back and resending every zone. When PRESENT this array REPLACES the whole keyzone map, so `zones: []` is the deliberate way to clear a sampler, and a partial list silently drops the zones you left out. A zone's `id` (from a prior instrument_describe_sampler/project_snapshot) IS honoured when it already names a zone on THIS track; an id that doesn't (including one copied from a different track) is re-minted and the substitution is reported in the response's `remintedZoneIDs` \u2014 but this array can still only REPLACE, never MERGE. To edit a handful of zones by id and leave the rest of a large library completely untouched, use instrument_set_sampler_zones instead. The sampler's keyzone map. For a played note, each GROUP of zones fires at most one voice: within a group, the first zone (array order) whose pitch AND velocity ranges contain the note and whose round-robin/random gates pass is the one that plays; zones in different `group`s layer simultaneously. Zones without the optional selection fields all share group 0 with full ranges and no gates, so the classic behavior holds: the FIRST zone containing the pitch plays, exactly one voice per note. Use one zone for a single mapped sample; non-overlapping pitch ranges to split samples across the keyboard; velocity ranges for soft/loud layers; `seqLength`/`seqPosition` or `randMin`/`randMax` within a group for round-robin/random alternation; different `group`s to stack sounds."
   ),
   oneShot: external_exports.boolean().optional().describe(
     "If true, a triggered sample always plays to completion regardless of note-off \u2014 use this for drum hits and other percussive one-shots. If false (default), the sample stops following note-off, fading out over `release` seconds, like a sustained instrument."
@@ -44306,9 +45145,24 @@ var samplerSchema = external_exports.object({
   ),
   gain: external_exports.number().min(0).max(1).optional().describe(
     "The sampler's overall output level, 0-1, separate from each zone's own `gain` and from the track fader set by track_set_volume. Defaults to 0.8."
+  ),
+  expressionModDepth: external_exports.number().min(0).max(1).optional().describe(
+    "How far CC 1 (mod wheel) and CC 2 (breath) attenuate loudness, 0-1. NIL/0 IS OFF, not neutral-at-full: at 0 the CC1/CC2 attenuator is skipped and CC 11 (expression) alone drives continuous loudness on the built-in Sampler \u2014 clip_set_controller_lane's own description explains why (CC1/CC2's rest value is 0, so attenuating unconditionally would silence a clip until the lane's first point). At 1, an untouched CC1/CC2 (or one driven fully open) has no effect and a fully-closed one silences the voice. Set this above 0 before a CC1/CC2 controller lane will audibly do anything on this track's Sampler. Has no effect on `testTone`/`polySynth`."
+  ),
+  expressionFilterDepth: external_exports.number().min(0).max(1).optional().describe(
+    "How far the expression controller (CC 11 by default, or `expressionFilterCC`) sweeps a per-voice low-pass filter, 0-1 \u2014 the BRIGHTNESS complement to CC 11's own LOUDNESS control, for making a held sax/string note read as a player leaning into it rather than a flat sustain. NIL/0 MEANS THE FILTER IS SKIPPED ENTIRELY, not run at unity/neutral \u2014 this is a real distinction: a project that never sets this is byte-identical to the pre-existing engine path, not merely 'filter wide open'. At depth 1 cutoff sweeps logarithmically from a dark ~400 Hz at controller 0 up to ~20 kHz (effectively unfiltered) at controller 127; intermediate depths compress that sweep toward the open end. Has no effect on `testTone`/`polySynth`."
+  ),
+  expressionFilterCC: external_exports.number().int().min(0).max(127).optional().describe(
+    "Which CC drives the `expressionFilterDepth` brightness sweep. Omitted = 11 (expression) \u2014 the same controller that drives loudness, so a played expression pedal/lane makes a note both louder AND brighter together. Set to 1 or 2 to drive brightness from mod wheel/breath instead (that does NOT require `expressionModDepth` to be set \u2014 the neutral-0 silencing hazard that gates the loudness path does not apply here, because a filter sitting at its low cutoff is dark, not silent). Only takes effect once `expressionFilterDepth` is above 0."
+  ),
+  bendRangeSemitones: external_exports.number().min(0).max(48).optional().describe(
+    "How many semitones a FULL pitch-bend deflection (raw 0 or 16383 on a pitch-bend controller lane; 8192 is centre) moves the note on the built-in Sampler. OMITTED = 2, the General MIDI default \u2014 and it stays 2 on purpose: every bend lane already written in every existing project was authored against \xB12, so a wider default would multiply all of them silently on load. Set it per instrument instead. For a WIND library, measurement on 36 sax phrases (131 note boundaries) says \xB12 leaves 28 boundaries audibly rough, \xB14 leaves 6, and \xB16 leaves 0 \u2014 the curve SATURATES at 6, so 6 is the value to reach for; 12 buys full-range portamento but no further smoothness. 0 makes bend inert. \u26A0\uFE0F If you also generate vibrato with clip_apply_breath_contour or clip_apply_effort_shape, pass the SAME figure to that tool's own `bendRangeSemitones` \u2014 it converts cents to bend units and will scale every vibrato by the ratio if the two disagree (you get a warning when they do)."
+  ),
+  voiceMode: external_exports.enum(["poly", "mono"]).optional().describe(
+    "How many notes the Sampler lets sound at once. Omitted = `poly` (the existing behaviour, 64 voices). `mono` is LAST-NOTE PRIORITY: a new note always takes over from the one sounding, because a wind line is one airstream and the newest note is the one being played. Use it for sax/flute/trumpet/solo-lead parts. Under the slight note OVERLAPS that legato writing needs, mono retriggers to the newest pitch \u2014 the overlap becomes the slur. A note-off for a note that has already been superseded is discarded: releasing an older still-held key does NOT fall back to it, because on a wind instrument that note ended when the player moved."
   )
-}).describe(
-  "Sampler configuration, used only when `kind` is (or already is) `sampler`. Providing this object REPLACES the sampler's entire configuration at once \u2014 `zones` is not merged with any zones already on the track, so to add/remove/edit one zone you must resend the complete `zones` array. Omit `sampler` entirely to leave the track's current sampler configuration untouched (e.g. when this call only changes `kind` or is switching a different track's instrument). Has no effect on `testTone`/`polySynth`."
+}).strict().describe(
+  "Sampler configuration, used only when `kind` is (or already is) `sampler`. Every field here is independently a PARTIAL update \u2014 omit a field and it keeps its current value \u2014 with ONE exception: a PRESENT `zones` array replaces the whole keyzone map at once (see `zones`'s own description for what 'replaces' means for zone ids). Omit `sampler` entirely to leave the track's current sampler configuration untouched (e.g. when this call only changes `kind` or is switching a different track's instrument). Has no effect on `testTone`/`polySynth`. For narrower, harder-to-misuse edits, prefer instrument_set_sampler_param (one global) or instrument_set_sampler_zones (merge zones by id) over building this object by hand."
 );
 var audioUnitSchema = external_exports.object({
   type: external_exports.string().length(4).optional().describe(
@@ -44320,7 +45174,7 @@ var audioUnitSchema = external_exports.object({
   manufacturer: external_exports.string().length(4).describe(
     'REQUIRED. Audio Unit component manufacturer, a 4-character FourCC string EXACTLY as returned by instrument_list_audio_units (e.g. "appl" for Apple).'
   )
-}).describe(
+}).strict().describe(
   "Identifies one installed Audio Unit instrument by its component triple (type/subType/manufacturer), used only when `kind` is (or is being set to) `audioUnit`. Call instrument_list_audio_units first to discover installed AUs and copy their exact FourCC strings verbatim, including significant trailing spaces. Selecting an `audioUnit` implies `kind` `audioUnit` even if `kind` is omitted from this call. An unknown/uninstalled component triple is rejected with a readable error pointing you back to instrument_list_audio_units. The AU's own preset/parameter state persists in the project automatically on project_save. If a project referencing an AU is opened on a machine where that AU isn't installed, the track loads silently with an instrument `status` of \"missing\" in project_snapshot rather than failing to open. Omit `audioUnit` to leave the track's current instrument untouched."
 );
 var soundBankSchema = external_exports.object({
@@ -44336,14 +45190,14 @@ var soundBankSchema = external_exports.object({
   bankLSB: external_exports.number().int().min(0).max(127).optional().describe(
     "Bank select LSB, 0-127. Defaults to 0. Most banks (General MIDI included) never use a nonzero LSB; instrument_list_sound_bank_programs reports it when a bank does."
   )
-}).describe(
+}).strict().describe(
   'Addresses a SoundFont2 (.sf2) or DLS (.dls) bank program \u2014 General MIDI or any other discovered/imported bank \u2014 used only when `kind` is (or is being set to) `soundBank`. ZERO-SETUP flow: call instrument_list_sound_banks (General MIDI is always listed first, no downloads required) to see available banks, instrument_list_sound_bank_programs to see that bank\'s exact program numbers/names, then pass the chosen `source`/`program`/`bankMSB`/`bankLSB` here \u2014 e.g. `{source: "gm", program: 56}` selects General MIDI\'s Trumpet. Providing `soundBank` implies `kind` `soundBank` even if `kind` is omitted, and is MUTUALLY EXCLUSIVE with `audioUnit` in the same call \u2014 providing both is rejected with "provide either audioUnit or soundBank, not both" and nothing lands. The resolved selection echoes back (and rides project_snapshot) as `soundBank: {source, path, program, bankMSB, bankLSB, name, status}`: `name` is a server-derived display name (e.g. "Trumpet \u2014 General MIDI"); `status` starts "pending" and becomes "ready" once the bank finishes loading into the sampler, "missing" if the bank file can\'t be found on this machine, or `failed: <reason>` (may include a low-level OSStatus code) if loading it otherwise fails. Omit `soundBank` to leave the track\'s current instrument untouched.'
 );
 registerTool(
   "track_set_instrument",
   {
     title: "Select or edit an instrument track's instrument",
-    description: "Select and/or tweak the instrument on an INSTRUMENT track \u2014 this is what actually makes its MIDI clips (from clip_add_midi) audible. `kind` picks the instrument: `testTone` (a simple fixed tone, mainly for signal-chain testing), `polySynth` (a polyphonic subtractive synth with an oscillator, ADSR envelope, and resonant low-pass filter \u2014 the default instrument, good for pads, leads, and basic chords), `sampler` (plays back your own audio files/samples across a keyboard range \u2014 configured via the `sampler` param, good for drum kits, real-instrument recordings, and one-shots), `soundBank` (plays SoundFont2/DLS bank programs \u2014 General MIDI ships with macOS with zero setup, or use an imported/discovered .sf2/.dls library \u2014 selected via the `soundBank` param; call instrument_list_sound_banks then instrument_list_sound_bank_programs to pick one), or `audioUnit` (hosts an installed Audio Unit instrument plugin \u2014 third-party or Apple synths/samplers registered with the system \u2014 selected via the `audioUnit` param; call instrument_list_audio_units first to discover what's installed). This is a PARTIAL update: any field you omit keeps its current value, so you can change just one knob (e.g. only `cutoffHz`) without resending the rest \u2014 EXCEPT `sampler`, which replaces the whole sampler configuration at once when provided (see its own description). The synth params only apply to `polySynth`: `waveform` is the oscillator shape (`saw`, `square`, `triangle`, `sine` \u2014 saw is brightest/buzziest, sine is purest/softest); `attack`/`decay`/`sustain`/`release` are the amplitude envelope in seconds (attack: time to reach full volume after a note starts, 0.0005-5s; decay: time to fall from peak to the sustain level, 0.001-5s; sustain: the held level while a note is down, 0-1, NOT a time; release: time to fade to silence after note-off, 0.001-8s); `cutoffHz` is the low-pass filter cutoff frequency, 40-18000 Hz (lower = darker/muffled, higher = brighter/more open); `resonance` is filter emphasis right at the cutoff, 0-1 (higher adds a resonant peak/whine, 0 is a plain filter); `gain` is the instrument's own output level, 0-1 (separate from the track fader set by track_set_volume). All numeric params are clamped to their safe range if you pass a value outside it. `audioUnit` (see its own description) selects a specific installed AU by component triple, is only meaningful for `kind` `audioUnit`, and implies that kind even if `kind` is omitted. `soundBank` (see its own description) addresses a SoundFont2/DLS bank program by source/program/bankMSB/bankLSB, is only meaningful for `kind` `soundBank`, implies that kind even if `kind` is omitted, and is MUTUALLY EXCLUSIVE with `audioUnit` in the same call (providing both errors, nothing lands). Default instrument (a fresh instrument track) is polySynth with a saw wave. Audio and bus tracks reject this \u2014 use track_add or project_snapshot to find/create an instrument track first.",
+    description: "Select and/or tweak the instrument on an INSTRUMENT track \u2014 this is what actually makes its MIDI clips (from clip_add_midi) audible. `kind` picks the instrument: `testTone` (a simple fixed tone, mainly for signal-chain testing), `polySynth` (a polyphonic subtractive synth with an oscillator, ADSR envelope, and resonant low-pass filter \u2014 the default instrument, good for pads, leads, and basic chords), `sampler` (plays back your own audio files/samples across a keyboard range \u2014 configured via the `sampler` param, good for drum kits, real-instrument recordings, and one-shots), `soundBank` (plays SoundFont2/DLS bank programs \u2014 General MIDI ships with macOS with zero setup, or use an imported/discovered .sf2/.dls library \u2014 selected via the `soundBank` param; call instrument_list_sound_banks then instrument_list_sound_bank_programs to pick one), or `audioUnit` (hosts an installed Audio Unit instrument plugin \u2014 third-party or Apple synths/samplers registered with the system \u2014 selected via the `audioUnit` param; call instrument_list_audio_units first to discover what's installed). This is a PARTIAL update: any field you omit keeps its current value, so you can change just one knob (e.g. only `cutoffHz`) without resending the rest. For a single sampler GLOBAL (oneShot/attack/release/gain), prefer the narrower instrument_set_sampler_param \u2014 it wraps this same partial-update contract so you don't have to know it's safe. `sampler` here is partial too, at BOTH levels: omit `zones` and the track's existing zones stand, so `{sampler: {release: 0.4}}` retunes a 309-zone imported library without resending a single zone, and the globals you don't mention keep their values rather than snapping back to defaults. The one thing that is still wholesale is a PRESENT `zones` array \u2014 it REPLACES the zone list entirely, and an explicit `zones: []` is therefore how you deliberately clear a sampler. Zone ids ARE honoured on this replace path (a zone whose `id` already names a zone on this track keeps that identity; an id that doesn't is re-minted and the substitution is reported in the response's `remintedZoneIDs` \u2014 this is also how a zone map gets copied from one track onto another), but this array can still only REPLACE, never MERGE \u2014 to edit a handful of zones on a large library by id and leave the rest completely untouched, use instrument_set_sampler_zones instead. The synth params only apply to `polySynth`: `waveform` is the oscillator shape (`saw`, `square`, `triangle`, `sine` \u2014 saw is brightest/buzziest, sine is purest/softest); `attack`/`decay`/`sustain`/`release` are the amplitude envelope in seconds (attack: time to reach full volume after a note starts, 0.0005-5s; decay: time to fall from peak to the sustain level, 0.001-5s; sustain: the held level while a note is down, 0-1, NOT a time; release: time to fade to silence after note-off, 0.001-8s); `cutoffHz` is the low-pass filter cutoff frequency, 40-18000 Hz (lower = darker/muffled, higher = brighter/more open); `resonance` is filter emphasis right at the cutoff, 0-1 (higher adds a resonant peak/whine, 0 is a plain filter); `gain` is the instrument's own output level, 0-1 (separate from the track fader set by track_set_volume). All numeric params are clamped to their safe range if you pass a value outside it. `audioUnit` (see its own description) selects a specific installed AU by component triple, is only meaningful for `kind` `audioUnit`, and implies that kind even if `kind` is omitted. `soundBank` (see its own description) addresses a SoundFont2/DLS bank program by source/program/bankMSB/bankLSB, is only meaningful for `kind` `soundBank`, implies that kind even if `kind` is omitted, and is MUTUALLY EXCLUSIVE with `audioUnit` in the same call (providing both errors, nothing lands). Default instrument (a fresh instrument track) is polySynth with a saw wave. Audio and bus tracks reject this \u2014 use track_add or project_snapshot to find/create an instrument track first.",
     inputSchema: {
       trackId: external_exports.string().min(1).describe("Id of the instrument track, from project_snapshot."),
       kind: external_exports.enum(["testTone", "polySynth", "sampler", "audioUnit", "soundBank"]).optional().describe(
@@ -44476,11 +45330,55 @@ server.registerTool(
   },
   async () => toToolResult(() => bridge.send("midi.listInputs"))
 );
+server.registerTool(
+  "midi_get_control_map",
+  {
+    title: "Read the hardware-knob mapping table",
+    description: 'Read which hardware MIDI controls (knobs, faders) are mapped to which DAW parameters, and what CAN be mapped. No params. Returns `bindings` (the mappings that exist), `targets` (the CATALOGUE \u2014 every parameter a control may be bound to, each with a plain-English `summary`, plus the `controller` number currently driving it if any), `learningTarget` (present only while midi_learn_control is armed), `lastControlChange` (the last controller message seen from ANY device, mapped or not) and `subscribed` (whether the DAW is currently listening to the controller feed). \n\nUSE `lastControlChange` TO DIAGNOSE A DEAD KNOB: it separates "your knob is not mapped" from "your knob is not sending anything", which look identical from the outside. \n\nThis call is PASSIVE \u2014 unlike midi_list_inputs it does not open the user\'s MIDI devices. \n\n\u26A0\uFE0F The mapping table is MACHINE SETUP, not part of the song: it is not saved into the project and does not survive an app relaunch yet.'
+  },
+  async () => toToolResult(() => bridge.send("midi.getControlMap"))
+);
+registerTool(
+  "midi_set_control_map",
+  {
+    title: "Map hardware knobs to parameters (whole table)",
+    description: "Set the WHOLE hardware-control mapping table at once. `bindings` replaces everything that was there, and `bindings: []` clears the map. Read the current table with midi_get_control_map first, then write it back with your change \u2014 this call is idempotent. \n\nEach binding is {target, controller, channel?, sourceId?, inverted?}: `target` is one of the ids from midi_get_control_map's `targets` (currently `breathPadAngle` and `breathPadRadius`); `controller` is the MIDI CC number 0-127 that the knob sends; `channel` 0-15 is optional and OMITTING IT IS USUALLY RIGHT (omni \u2014 a controller's global channel can change and a channel-pinned mapping then dies silently); `sourceId` is a device's `uniqueID` from midi_list_inputs, and omitting it accepts any device; `inverted` flips a knob that runs backwards. \n\nONE KNOB IS ENOUGH: bind a single knob to `breathPadAngle` and it walks the breath pad's dot all the way around the ring of playing styles at whatever depth it already has \u2014 that is the whole gesture. Add a second on `breathPadRadius` for depth. \n\nPREFER midi_learn_control when a human is present: turning the knob is faster and more reliable than looking its CC number up. \n\n\u26A0\uFE0F ABSOLUTE controls only (knobs and faders that send a POSITION). An endless/relative encoder sends deltas and will read as a jump to one end. \n\n\u26A0\uFE0F A mapped CC is NOT swallowed: it still reaches armed instrument tracks and is still recorded into a take. On a track hosting an Audio Unit it may also move a plugin parameter \u2014 pick a CC the plugin does not use.",
+    inputSchema: {
+      bindings: external_exports.array(
+        external_exports.object({
+          target: external_exports.string().describe("a target id from midi_get_control_map's `targets`"),
+          controller: external_exports.number().int().min(0).max(127).describe("the MIDI CC number the knob sends"),
+          channel: external_exports.number().int().min(0).max(15).optional().describe("MIDI channel filter; omit for omni (usually right)"),
+          sourceId: external_exports.number().int().optional().describe("a device `uniqueID` from midi_list_inputs; omit for any device"),
+          inverted: external_exports.boolean().optional().describe("flip the sweep for a knob wired backwards")
+        }).strict()
+      ).describe("the WHOLE table \u2014 [] clears every mapping")
+    }
+  },
+  async ({ bindings }) => toToolResult(() => bridge.send("midi.setControlMap", { bindings }))
+);
+registerTool(
+  "midi_learn_control",
+  {
+    title: "MIDI learn \u2014 turn a knob to map it",
+    description: "Arm MIDI learn for `target`, then ask the user to TURN THE KNOB they want: the first controller message that arrives binds to that target and moves it immediately, so the user sees it work at once. Pass `cancel: true` instead to disarm without changing any mapping. \n\nThis is the verb that WAKES THE MIDI SYSTEM UP. The DAW connects to MIDI inputs lazily, so a learn armed any other way can sit listening to a system that was never started. The response carries `inputs` (what the DAW can see right now) and a `hint` sentence \u2014 if the hint says no online input is connected, tell the user that rather than waiting. \n\n`target` is an id from midi_get_control_map's `targets` (currently `breathPadAngle`, which walks the breath pad's dot around its ring of playing styles, and `breathPadRadius`, which is depth). \n\nThe learned binding pins the DEVICE but leaves the MIDI CHANNEL open on purpose, so changing the controller's global channel later does not silently break the mapping. \n\n\u26A0\uFE0F The FIRST controller message wins, whatever it is \u2014 a fader the user brushes will take the binding. Re-arm and try again; midi_get_control_map's `lastControlChange` shows what was heard.",
+    inputSchema: {
+      target: external_exports.string().optional().describe("the target id to arm; omit only when passing cancel"),
+      cancel: external_exports.boolean().optional().describe("true to disarm, changing no mappings")
+    }
+  },
+  async ({ target, cancel }) => toToolResult(() => {
+    const params = {};
+    if (target !== void 0) params.target = target;
+    if (cancel !== void 0) params.cancel = cancel;
+    return bridge.send("midi.learnControl", params);
+  })
+);
 registerTool(
   "note_audition",
   {
     title: "Sound notes now (preview, not an edit)",
-    description: "Sound notes RIGHT NOW on an instrument track so the user can hear a pitch, a chord voicing, or how a patch responds. This is a PREVIEW, not an edit: nothing is written to any clip, nothing is recorded, and the notes release themselves after `durationMs` (default 500). It returns immediately \u2014 it never blocks for the duration. Works with the transport STOPPED and also WHILE PLAYING, and it never disturbs notes already playing back (audition rides its own path into the instrument, separate from the sequencer). Use it to answer 'what does this voicing sound like' before writing it with clip_add_midi, or to confirm an instrument actually makes sound. `audible:false` in the reply is a REAL ANSWER, not an error: `reason` names why nothing will be heard \u2014 `trackMuted` (unmute it, or it is excluded by another track's solo), `instrumentNotReady` (a plugin is still loading \u2014 try again in a moment), `engineStopped`, `engineRebuilding`. It deliberately IGNORES the user's in-app 'audition while editing' preference, because that preference means 'do not sound notes while I drag', not 'never make sound'. Refused while a take is recording.",
+    description: "Sound notes RIGHT NOW on an instrument track so the user can hear a pitch, a chord voicing, or how a patch responds. This is a PREVIEW, not an edit: nothing is written to any clip, nothing is recorded, and the notes release themselves after `durationMs` (default 500). It returns immediately \u2014 it never blocks for the duration. Works with the transport STOPPED and also WHILE PLAYING, and it never disturbs notes already playing back (audition rides its own path into the instrument, separate from the sequencer). Use it to answer 'what does this voicing sound like' before writing it with clip_add_midi, or to confirm an instrument actually makes sound. `audible:false` in the reply is a REAL ANSWER, not an error: `reason` names why nothing will be heard \u2014 `trackMuted` (unmute it, or it is excluded by another track's solo), `instrumentNotReady` (a plugin is still loading \u2014 try again in a moment), `engineStopped`, `engineRebuilding`. It deliberately IGNORES the user's in-app 'audition while editing' preference, because that preference means 'do not sound notes while I drag', not 'never make sound'. Refused while a take is recording. WHAT `audible:true` DOES AND DOES NOT MEAN: it is a signal-PATH check, not a measurement. It says the strip isn't muted or solo-excluded, the engine is running, and \u2014 for `soundBank`/`audioUnit` instruments \u2014 a prepared instrument existed at that instant. It measures no level and no spectrum: NOTHING here confirms a sound was actually produced, and nothing describes its TIMBRE. Do not A/B two candidate patches with this tool and report which sounded better \u2014 you would be inventing the difference. The reply also carries `instrumentStatus` for `soundBank`/ `audioUnit` tracks (\"pending\"/\"ready\"/\"missing\"/\"failed: \u2026\", the same string project_snapshot's instrument object reports): a patch you set moments ago may still be loading, so a `pending` status means retry before you trust what you heard \u2014 `audible:true` alongside `pending` means the path is clear but THIS patch may not have been the thing that sounded.",
     inputSchema: {
       trackId: external_exports.string().describe(
         "Id of the INSTRUMENT track to sound the notes on (from project_snapshot). Audio and bus tracks carry no instrument and are refused."
@@ -44501,6 +45399,35 @@ registerTool(
     durationMs
   }) => toToolResult(
     () => bridge.send("note.audition", { trackId, pitches, velocity, durationMs })
+  )
+);
+registerTool(
+  "pad_preview_effort",
+  {
+    title: "Breath pad: stream an effort value live (preview, not an edit)",
+    description: 'Stream ONE breath-pad effort value (0-1, \'how hard is the player blowing right now\') to an instrument track as a live MIDI controller, so it can be HEARD while a pad gesture is in progress. This is a PREVIEW, not an edit: nothing is written to any clip, nothing is recorded, there is no undo entry, and a bounce will not contain it. The RECORD is the controller lane clip_apply_effort_shape writes \u2014 use that to commit a shape. GESTURE-SCOPED, AND THE SCOPING IS THE POINT: send `gesture:"begin"` once, then `gesture:"move"` as the value changes, then `gesture:"end"` exactly once, naming THE SAME trackId. A `move` or `end` with no `begin` open \u2014 or naming a different track than the open gesture \u2014 is REFUSED. The pad NEVER streams while the transport is merely rolling \u2014 only while a gesture is open \u2014 which is what keeps live playback, replay and an offline bounce agreeing sample-for-sample. `end` DOES NOT LEAVE YOUR LAST VALUE ON THE STRIP: it restores the controller to its neutral default (127 for CC 11, expression), because a MIDI controller is sticky and nothing else would take it back \u2014 a parked low value would quietly attenuate every later playback. If you start a gesture, ALWAYS end it. CAVEAT, MEASURED, DO NOT OVERSTATE THIS TOOL: neutral is not the same as the track\'s committed lane. If the track already HAS a CC 11 lane and you preview mid-playback, ending parks 127 and the strip stays there until that lane\'s next point \u2014 so playback is louder than a bounce over that span. It self-heals at the next point and cannot happen on a track with no lane yet. Prefer previewing with the transport stopped, or on a track you have not committed a shape to. The reply carries `controller` (which CC was moved), `controllerValue` (the raw 0-127 that went out), `streaming` (is a gesture open after this call), `delivered` (false when the 30 Hz rate cap or the unchanged-value filter coalesced this call away \u2014 normal during a fast drag, not an error \u2014 and also false, on any phase including `end`, when the value reached no instrument at all), and `audible` with a `reason` when false (`trackMuted`, `instrumentNotReady`, `engineStopped`, `engineRebuilding`) exactly as note_audition does. WHAT THIS DOES AND DOES NOT MOVE: effort rides CC 11 (expression). On the built-in sampler that moves loudness always, and brightness only when the track\'s sampler `expressionFilterDepth` is above 0. On a hosted Audio Unit or sound bank \u2014 where a GM sax lives \u2014 CC 11 was MEASURED to be exactly a gain and NOT a filter, so do not promise a timbre change there. Refused while a take is recording, and on audio or bus tracks.',
+    inputSchema: {
+      trackId: external_exports.string().describe(
+        "Id of the INSTRUMENT track to preview on (from project_snapshot). Audio and bus tracks carry no instrument and are refused."
+      ),
+      gesture: external_exports.enum(["begin", "move", "end"]).describe(
+        "Where this call sits in the drag. 'begin' opens streaming, 'move' updates the value, 'end' closes it and restores the controller to neutral. A 'move' with no 'begin' open is refused."
+      ),
+      value: external_exports.number().min(0).max(1).optional().describe(
+        "Effort, 0-1: 0 is barely blowing, 1 is full pressure. Required for 'begin' and 'move'; ignored for 'end', which always restores neutral."
+      ),
+      expressionCC: external_exports.number().int().min(0).max(127).optional().describe(
+        "Which CC carries the preview. Defaults to 11 (expression) \u2014 the same default clip_apply_effort_shape writes, so the preview and the commit land on one lane. Set it only if you will also pass the matching expressionCC when you commit."
+      )
+    }
+  },
+  async ({
+    trackId,
+    gesture,
+    value,
+    expressionCC
+  }) => toToolResult(
+    () => bridge.send("pad.previewEffort", { trackId, gesture, value, expressionCC })
   )
 );
 server.registerTool(
@@ -44572,6 +45499,88 @@ registerTool(
     })
   )
 );
+registerTool(
+  "instrument_describe_sampler",
+  {
+    title: "Read a track's Sampler configuration (read-only)",
+    description: "Read the built-in Sampler's configuration on an instrument track \u2014 the ANSWER to 'which library is loaded and how is it mapped' without paying for project_snapshot's whole-project cost (measured 296,809 bytes on a real song). Mirrors au_describe_params: a cheap describe you call BEFORE editing, so instrument_set_sampler_param/instrument_set_sampler_zones don't have to guess a track's current state. Works even when the track's ACTIVE instrument is something else right now \u2014 sampler configuration is carried across kind switches (like soundBank/audioUnit), so you can inspect a previously-built sampler map before switching back to it; the response's own `kind` field tells you whether `sampler` is actually the SOUNDING instrument or just preserved state. Refuses readably for an audio/bus track (only instrument tracks carry an instrument), an unknown trackId, or an instrument track that has never had a sampler configured at all (use instrument_import_sample_library or track_set_instrument {kind:\"sampler\", sampler:{zones:[...]}} first; with no sample library of your own, mount the bundled one-shot \u2014 {path: \"builtin:test-tone-a4\", rootPitch: 69} \u2014 and you have a sound) \u2014 but a sampler that IS configured with zero zones (the deliberate `zones: []` clear) is a legal answer, not a refusal: you get `zoneSummary.count: 0` back. Returns {trackId, kind, oneShot, attack, release, gain, sourcePath?, displayName?, zoneSummary, effectiveGlobals?, warnings?}. \u26A0\uFE0F READ `effectiveGlobals` BEFORE TRUSTING top-level `release`/`attack`/`oneShot`. Those three are the STORED globals, and a zone that sets its own value WINS over them \u2014 so on an imported library they are routinely numbers the engine never reads. ANY per-zone value can do this, whichever way the sampler was built: a hand-authored zone over the wire, a `.dspreset` region (whose `attack`/`release` attributes carry no special prefix), or an SFZ region/group/global (whose native opcode names are `ampeg_attack`/`ampeg_release`) \u2014 SFZ is not the only way in. (Field report 2026-08-20: this verb answered `release: 3.4465` for an instrument that audibly released in 0.5 s, because the imported SFZ authored `ampeg_release` in its `<global>` block and every region inherited it. The engine was right; the answer was not.) `effectiveGlobals` is {release, attack, oneShot}, each {global, zonesOverriding, zonesInheriting, globalIsInert, effectiveValues, effectiveMin?, effectiveMax?, effectiveValuesTruncated?, note?}. `globalIsInert: true` means NO zone inherits that global: writing it with instrument_set_sampler_param will be accepted and change nothing you can hear \u2014 change the per-zone values instead (instrument_set_sampler_zones, patching `release` / `attack` / `oneShot` per zone). `note` (present only when `globalIsInert`) says so in prose and, for `release`/`attack`, names the SFZ opcode (`ampeg_release`/`ampeg_attack`) ONLY when `sourcePath` actually ends in `.sfz` \u2014 never for a hand-built sampler or a `.dspreset` import, which would make the opcode name meaningless. Top-level `warnings` (a string array, present only when at least one global is inert) restates the same fact with BOTH the stored and the actually-applied number inline, so it is impossible to miss even for a caller that only reads the top level and never descends into `effectiveGlobals` at all. `effectiveValues` is the list of values the engine will actually apply across the zones, ascending, and is the number to quote to a user; it is meaningful in the MIXED case too (some zones overriding, some still tracking the global), which no single boolean can describe. It caps at 8 distinct values with `effectiveValuesTruncated: true`, but `effectiveMin`/`effectiveMax` stay exact. `oneShot` additionally reports `zonesWithLoopMode` when any zone loops: a looping voice is never one-shot regardless of the flag, provided its loop bounds are valid for the loaded sample (which only the engine can confirm, so it is reported rather than folded into the counts). `effectiveGlobals` is omitted entirely for a zero-zone sampler \u2014 there is no inheritance to describe, and such a sampler is silent for an unrelated reason. `sourcePath`/`displayName` (provenance from an import; `displayName` is a file STEM and therefore NOT unique \u2014 two different folders can both hold a \"Bass.sfz\", so `sourcePath` is what actually disambiguates them) appear only when set \u2014 a hand-built sampler has neither. `zoneSummary` is {count, pitchCoverage?, velocityCoverage?, groupCount, distinctSampleFiles}: `pitchCoverage`/`velocityCoverage` are each {min, max, gaps?} \u2014 the UNION of every zone's range, not a naive min/max, so a keymap with a hole in the middle is visible as a `gaps` entry INSIDE the envelope instead of silently reading as full 0-127 coverage (this is exactly the bug class the field report hit twice: a bass silent below MIDI 35, a library silent above 45). Both are omitted entirely when the sampler has zero zones. `groupCount` counts distinct layering groups (an unset zone group counts as group 0, the classic first-match default) and `distinctSampleFiles` counts unique sample audio files across all zones. The zone list itself is a SEPARATE, opt-in page: omit both `offset` and `limit` and the response has no `zones` key at all (just the summary); pass either one and you get a paged `zones` array (the exact shape track_set_instrument echoes back, ids included) plus `offset`, `limit`, `returnedZones`, and `truncated` so you know whether to page further.",
+    inputSchema: {
+      trackId: external_exports.string().min(1).describe("Id of the instrument track to describe, from project_snapshot."),
+      offset: external_exports.number().int().min(0).optional().describe(
+        "Zero-based index into the sampler's zone list to start a page from. Providing EITHER `offset` or `limit` turns on paging and puts a `zones` array in the response; omitting both returns the summary only. Default 0 when `limit` is given alone. An offset past the end of the zone list is not an error \u2014 it returns an empty, untruncated page."
+      ),
+      limit: external_exports.number().int().min(1).max(5e3).optional().describe(
+        "Max zones to return in the page. Providing EITHER `offset` or `limit` turns on paging (see `offset`). Default 500 when `offset` is given alone; out-of-range values clamp silently into 1-5000 rather than erroring. Compare the response's `returnedZones` against `zoneSummary.count` (or check `truncated`) to know whether to page further."
+      )
+    }
+  },
+  async ({ trackId, offset, limit: limit3 }) => toToolResult(() => bridge.send("instrument.describeSampler", { trackId, offset, limit: limit3 }))
+);
+var samplerGlobalParamSchema = external_exports.enum([
+  "oneShot",
+  "attack",
+  "release",
+  "gain",
+  "expressionModDepth",
+  "expressionFilterDepth",
+  "expressionFilterCC",
+  "bendRangeSemitones",
+  "voiceMode"
+]).describe(
+  "Which Sampler GLOBAL to set \u2014 exactly one per call, matching one of the nine fields track_set_instrument's own `sampler` object carries at this level (everything else there, i.e. `zones`, is per-zone and out of reach of this narrower tool). `oneShot` (boolean): true = every triggered sample always plays to completion regardless of note-off (drum hits and other percussive one-shots); false = the sample follows note-off, fading out over `release` seconds, like a sustained instrument. `attack` (seconds, number, clamps 0-1): how long a triggered note takes to reach full volume. `release` (seconds, number, clamps 0.001-8): how long the sample fades to silence after note-off \u2014 ignored while `oneShot` is true. `gain` (0-1, number): the sampler's overall output level, separate from each zone's own `gain` and from the track fader (track_set_volume). `expressionModDepth` (0-1, number): how far CC 1 (mod wheel) / CC 2 (breath) attenuate loudness \u2014 NIL/0 IS OFF (the attenuator is skipped, not run at neutral), so a CC1/CC2 controller lane does nothing audible on this track's Sampler until this is set above 0. `expressionFilterDepth` (0-1, number): how far the expression controller sweeps a per-voice brightness (low-pass) filter \u2014 NIL/0 IS OFF, the filter branch is skipped entirely, not run at unity. `expressionFilterCC` (integer 0-127): which CC drives that filter sweep; omitted/nil = 11 (expression, the same controller that already drives loudness) \u2014 set it to 1 or 2 to drive brightness from mod wheel/breath instead. `bendRangeSemitones` (number 0-48): how many semitones a full pitch-bend deflection moves the note; omitted/nil = 2 (the General MIDI default, and what every already-authored bend lane assumes) \u2014 6 is the measured saturation point for expressive wind writing. `voiceMode` (STRING, \"poly\" or \"mono\" \u2014 the one param here that takes a string): `mono` is last-note priority, for sax/flute/solo-lead lines. See track_set_instrument's `sampler` object for the full field-by-field description of each."
+);
+registerTool(
+  "instrument_set_sampler_param",
+  {
+    title: "Set one Sampler global (oneShot/attack/release/gain/expression*/bend range/voice mode)",
+    description: "Set exactly ONE global knob on a track's built-in Sampler \u2014 `oneShot`, `attack`, `release`, `gain`, `expressionModDepth`, `expressionFilterDepth`, `expressionFilterCC`, `bendRangeSemitones` or `voiceMode` \u2014 without touching anything else on the sampler. This is a thin, narrower wrapper around track_set_instrument {sampler: {<param>: value}}: the whole reason it exists is so you don't have to know that a partial sampler update is safe (added m26-g/h) \u2014 this call is GUARANTEED to leave the track's zones, `sourcePath`, and `displayName` exactly as they were, no matter which global you set or what an imported library's zone count is (tuning `release` on a 309-zone library through this tool can never touch a single zone). Has no audible effect unless the track's active instrument kind is `sampler` (see instrument_describe_sampler's `kind` field), though the value is still stored and takes effect the next time it is. Sending a boolean for a numeric param (or vice versa) is a readable error naming the mismatch. Out-of-range numbers clamp silently for the six original numeric params, through the same ranges track_set_instrument uses; `bendRangeSemitones` and `voiceMode` instead REFUSE an out-of-range number / unrecognised mode with a readable error, so a typo cannot land as a silently-different setting (see `param`'s own description for each range). Returns the full resolved instrument object, same shape as track_set_instrument.",
+    inputSchema: {
+      trackId: external_exports.string().min(1).describe("Id of the instrument track, from project_snapshot."),
+      param: samplerGlobalParamSchema,
+      value: external_exports.union([external_exports.number(), external_exports.boolean(), external_exports.string()]).describe(
+        'The new value: a boolean for `param: "oneShot"`, the string "poly" or "mono" for `param: "voiceMode"`, and a number for every other `param` (seconds for `attack`/`release`, a 0-1 level for `gain`/`expressionModDepth`/`expressionFilterDepth`, an integer CC 0-127 for `expressionFilterCC`, semitones 0-48 for `bendRangeSemitones`). See `param`\'s description for which type and range applies.'
+      )
+    }
+  },
+  async ({ trackId, param, value }) => toToolResult(() => {
+    if (typeof value === "string" && param !== "voiceMode") {
+      throw new Error(
+        `sampler param "${param}" does not take a string \u2014 got ${JSON.stringify(value)}. Only "voiceMode" is a string param ("poly" or "mono").`
+      );
+    }
+    if (param === "voiceMode" && typeof value !== "string") {
+      throw new Error(
+        `sampler param "voiceMode" takes the string "poly" or "mono" \u2014 got ${typeof value}.`
+      );
+    }
+    return bridge.send("track.setInstrument", { trackId, sampler: { [param]: value } });
+  })
+);
+var samplerZonePatchSchema = external_exports.object({
+  id: external_exports.string().uuid().describe(
+    "REQUIRED. The zone to edit, by id \u2014 read it from a prior instrument_describe_sampler or project_snapshot call (instrument.sampler.zones[].id). Must already name a zone on THIS track: an id copied from a DIFFERENT track is a readable error naming the id \u2014 this tool never silently inserts a new zone or re-mints the id. To copy a zone map onto a different track, use track_set_instrument's wholesale `zones` array instead, which mints fresh ids automatically and reports the substitution in the response's `remintedZoneIDs`."
+  ),
+  ...samplerZoneSchema.shape,
+  path: samplerZoneSchema.shape.path.optional().describe(
+    "Absolute path to REPLACE this zone's sample audio file with. Omit to keep the zone's CURRENT file \u2014 most patches touch only a mapping/envelope field and leave the audio alone."
+  )
+}).strict();
+registerTool(
+  "instrument_set_sampler_zones",
+  {
+    title: "Edit existing Sampler zones by id, leaving every other zone standing",
+    description: "Edit one or more of a track's EXISTING Sampler zones by id \u2014 a targeted MERGE, the opposite of track_set_instrument's `sampler.zones`, which REPLACES the whole keyzone map wholesale (and whose `zones: []` is the only way to CLEAR a sampler; that replace-vs-merge choice is not available here). This is the tool for touching one zone of a 309-zone imported library without resending the other 308: each entry in `zones` below names an existing zone by `id` and changes only the fields it mentions \u2014 everything else on that zone (and every zone not named at all) is left exactly as it was, INCLUDING fields left nil (e.g. an unset `pan` stays unset, not reset to an explicit 0). A patch can even swap a zone's sample file via `path` while keeping its pitch/velocity mapping. Under the hood this wraps track_set_instrument's `sampler.zonePatches` merge path (m26-g). Ids are per-track and this tool is STRICT about them: an id from a prior instrument_describe_sampler/project_snapshot call on a DIFFERENT track, or one that never existed, or one repeated twice in the same call, is a readable error naming the id, and nothing lands \u2014 never a silent insert. (track_set_instrument's OWN `zones` array behaves differently on an unrecognized id: it mints a fresh one and reports the substitution in `remintedZoneIDs`, because that path is also how a zone map gets copied from one track onto another \u2014 this tool is narrower on purpose.) Returns the full resolved instrument object, same shape as track_set_instrument.",
+    inputSchema: {
+      trackId: external_exports.string().min(1).describe("Id of the instrument track, from project_snapshot."),
+      zones: external_exports.array(samplerZonePatchSchema).describe(
+        "One or more zone edits, each naming the zone it applies to via `id` (required). Every other field is optional and PATCHES that one zone: omit a field to keep the zone's current value for it, unlike track_set_instrument's wholesale `zones` array where an omitted field falls back to a fresh-zone DEFAULT. Zones not named in this array are untouched. Zone ORDER on the track is preserved (a patch replaces its zone in place; it never reorders or appends), which matters because on an overlap the FIRST zone (array order) whose range contains a note wins."
+      )
+    }
+  },
+  async ({ trackId, zones }) => toToolResult(
+    () => bridge.send("track.setInstrument", { trackId, sampler: { zonePatches: zones } })
+  )
+);
 var fxKindSchema = external_exports.enum([
   "gain",
   "eq",
@@ -44585,7 +45594,7 @@ var fxKindSchema = external_exports.enum([
   "bassEnhancer",
   "audioUnit"
 ]).describe(
-  "Effect kind. `gain` is a simple linear gain stage. `eq` is a parametric equalizer (low shelf, two peaking/bell bands, high shelf, plus optional high-pass and low-pass filters at 12 or 24 dB/oct, shelf Q, and per-band bypass) \u2014 call fx_describe to see its exact parameter names and each one's teaching `note`, e.g. `peak1Freq`/`peak1GainDb`/`peak1Q` for the first peaking band (the second peaking band follows the same naming pattern), `highPassFreq`/`highPassSlopeDbPerOct`/`highPassEnabled` for the high-pass (off until you set its frequency or enable it). `compressor` is a soft-knee, stereo-linked dynamics processor: `thresholdDb`, `ratio`, `attackMs`, `releaseMs`, `kneeDb`, `makeupDb`. `limiter` is a lookahead brick-wall limiter: `ceilingDb`, `releaseMs`, `truePeak` \u2014 it adds 5 ms of processing latency, reported per-effect as `latencySamples` in project_snapshot's `effects` array. MIND WHICH PEAK THE CEILING COUNTS (m23-ch): with `truePeak: 0` (the default) `ceilingDb` is a hard dBFS SAMPLE-peak limit, and a true-peak meter \u2014 ffmpeg ebur128, render_measure_loudness's `truePeakDbtp`, any delivery QC \u2014 will read roughly 0.4-1 dB ABOVE it on dense material. That is arithmetic (the meter reconstructs the waveform between samples), not a bug and not run-to-run nondeterminism; do NOT chase it by walking the ceiling down over repeated renders. Set `truePeak: 1` instead and `ceilingDb` becomes a dBTP TRUE-peak limit via 4x oversampled detection, so a -1 dBTP delivery spec is met on the first render. It limits ~0.3-1 dB harder \u2014 that reduction IS the inter-sample overshoot it removes. The dynamics kinds (compressor/limiter/gate) also report a live `gainReductionDb` meter there (positive dB, held-peak, \u221220 dB/s release) \u2014 poll project_snapshot during playback to verify a compressor is actually working. `reverb` is a Freeverb-style room simulation: `roomSize`, `damping`, `mix`, `preDelayMs`, `width`. `delay` is a stereo echo: `timeMs`, `feedback`, `mix`, `pingPong` (0 or 1 \u2014 1 alternates repeats left/right), `highCutHz`, plus tempo sync \u2014 `sync` (0 or 1; 1 derives the effective time from the project tempo, tracking tempo changes, while `timeMs` stays stored as the unsync fallback) and `division` (the synced note length as its duration in BEATS, snapped to the nearest of 1/1\u20261/32 straight/dotted/triplet \u2014 e.g. 1 = 1/4, 0.75 = 1/8 dotted, 0.333 = 1/8 triplet; the snapshot echoes a human `divisionLabel` like \"1/8d\"). `saturator` is a tanh-based drive/color stage: `driveDb`, `mix`, `outputDb`. `gate` is a noise gate: `thresholdDb`, `attackMs`, `holdMs`, `releaseMs`. `chorus` is a 2-voice modulated thickener: `rateHz`, `depthMs`, `mix`. `bassEnhancer` is a psychoacoustic bass enhancer (RBass class): `crossoverHz`, `amount`, `mix`. It low-passes the signal at `crossoverHz`, synthesizes the 2nd/3rd/4th harmonics OF THAT LOW BAND ONLY, high-passes them back at the same corner, and ADDS them to an untouched dry path \u2014 so a speaker that cannot reproduce a 50 Hz fundamental still hears its harmonic series and the ear infers the missing fundamental. Reach for it when a mix has no low end on laptops or phones. It is NOT the `saturator`: the shaper only ever sees the low band and the series stops at the 4th partial. Be honest with users that it ADDS harmonics that were not in the recording. `amount` 0 or `mix` 0 is bit-exact bypass. `audioUnit` hosts an installed Audio Unit EFFECT plugin \u2014 third-party or Apple effects registered with the system \u2014 selected via fx_add's `audioUnit` param (REQUIRED when this kind is used); call fx_list_audio_units first to discover what's installed."
+  "Effect kind. `gain` is a simple linear gain stage. `eq` is a parametric equalizer (low shelf, two peaking/bell bands, high shelf, plus optional high-pass and low-pass filters at 12 or 24 dB/oct, shelf Q, and per-band bypass) \u2014 call fx_describe to see its exact parameter names and each one's teaching `note`, e.g. `peak1Freq`/`peak1GainDb`/`peak1Q` for the first peaking band (the second peaking band follows the same naming pattern), `highPassFreq`/`highPassSlopeDbPerOct`/`highPassEnabled` for the high-pass (off until you set its frequency or enable it). `compressor` is a soft-knee, stereo-linked dynamics processor: `thresholdDb`, `ratio`, `attackMs`, `releaseMs`, `kneeDb`, `makeupDb`, and `mix` \u2014 the parallel (New-York) compression blend, 0 = untouched dry signal, 1 = fully compressed (the default, so an existing project is unchanged). Crush hard and blend a little back with `mix` rather than duplicating the track. `limiter` is a lookahead brick-wall limiter: `ceilingDb`, `releaseMs`, `truePeak` \u2014 it adds 5 ms of processing latency, reported per-effect as `latencySamples` in project_snapshot's `effects` array. MIND WHICH PEAK THE CEILING COUNTS (m23-ch): with `truePeak: 0` (the default) `ceilingDb` is a hard dBFS SAMPLE-peak limit, and a true-peak meter \u2014 ffmpeg ebur128, render_measure_loudness's `truePeakDbtp`, any delivery QC \u2014 will read roughly 0.4-1 dB ABOVE it on dense material. That is arithmetic (the meter reconstructs the waveform between samples), not a bug and not run-to-run nondeterminism; do NOT chase it by walking the ceiling down over repeated renders. Set `truePeak: 1` instead and `ceilingDb` becomes a dBTP TRUE-peak limit via 4x oversampled detection, so a -1 dBTP delivery spec is met on the first render. It limits ~0.3-1 dB harder \u2014 that reduction IS the inter-sample overshoot it removes. The dynamics kinds (compressor/limiter/gate) also report a live `gainReductionDb` meter there (positive dB, held-peak, \u221220 dB/s release) \u2014 poll project_snapshot during playback to verify a compressor is actually working. `reverb` is a Freeverb-style room simulation: `roomSize`, `damping`, `mix`, `preDelayMs`, `width`. `delay` is a stereo echo: `timeMs`, `feedback`, `mix`, `pingPong` (0 or 1 \u2014 1 alternates repeats left/right), `highCutHz`, plus tempo sync \u2014 `sync` (0 or 1; 1 derives the effective time from the project tempo, tracking tempo changes, while `timeMs` stays stored as the unsync fallback) and `division` (the synced note length as its duration in BEATS, snapped to the nearest of 1/1\u20261/32 straight/dotted/triplet \u2014 e.g. 1 = 1/4, 0.75 = 1/8 dotted, 0.333 = 1/8 triplet; the snapshot echoes a human `divisionLabel` like \"1/8d\"). `saturator` is a tanh-based drive/color stage: `driveDb`, `mix`, `outputDb`. `gate` is a noise gate: `thresholdDb`, `attackMs`, `holdMs`, `releaseMs`. `chorus` is a 2-voice modulated thickener: `rateHz`, `depthMs`, `mix`. `bassEnhancer` is a psychoacoustic bass enhancer (RBass class): `crossoverHz`, `amount`, `mix`. It low-passes the signal at `crossoverHz`, synthesizes the 2nd/3rd/4th harmonics OF THAT LOW BAND ONLY, high-passes them back at the same corner, and ADDS them to an untouched dry path \u2014 so a speaker that cannot reproduce a 50 Hz fundamental still hears its harmonic series and the ear infers the missing fundamental. Reach for it when a mix has no low end on laptops or phones. It is NOT the `saturator`: the shaper only ever sees the low band and the series stops at the 4th partial. Be honest with users that it ADDS harmonics that were not in the recording. `amount` 0 or `mix` 0 is bit-exact bypass. `audioUnit` hosts an installed Audio Unit EFFECT plugin \u2014 third-party or Apple effects registered with the system \u2014 selected via fx_add's `audioUnit` param (REQUIRED when this kind is used); call fx_list_audio_units first to discover what's installed."
 );
 var fxAudioUnitSchema = external_exports.object({
   type: external_exports.string().length(4).optional().describe(
@@ -44770,12 +45779,12 @@ registerTool(
   "fx_set_sidechain",
   {
     title: "Key a compressor or gate from another track (sidechain)",
-    description: 'Set (or clear) the SIDECHAIN KEY of a built-in compressor or gate \u2014 make it react to ANOTHER track\'s signal instead of its own. This is how you get classic pumping: add a compressor to the pad/bass track, then key it from the kick so the pad ducks on every kick hit (`fx_set_sidechain {trackId: pad, effectId: comp, sourceTrackId: kick}`). Pass `sourceTrackId: null` (or omit it) to CLEAR the key and return the effect to self-keyed. Only compressor and gate inserts can be keyed (hosted Audio Unit sidechain inputs are a later phase); the keyed effect must live on an audio or bus track (route an instrument to a bus first); the key source is another audio track (bus key sources are a later phase); and a key that would form a feedback loop is rejected with the exact path. The MASTER chain cannot host a sidechain-keyed effect and the master output cannot be a key source: passing "master" as `trackId` or `sourceTrackId` is rejected \u2014 key an effect on a track or bus instead (unlike fx_add/fx_remove/fx_reorder/fx_set_bypass/fx_set_param, this tool takes NO "master" sentinel). Refused while a recording is in progress (a key edge rewires the audio graph, which would truncate the take) \u2014 stop recording first. Returns the track\'s full updated insert chain (`effects` \u2014 the keyed effect carries `sidechainSourceTrackId`) plus `sidechainSkewSamples` (how far the key is delayed by plugin latency, usually 0).',
+    description: 'Set (or clear) the SIDECHAIN KEY of a built-in compressor or gate \u2014 make it react to ANOTHER track\'s signal instead of its own. This is how you get classic pumping: add a compressor to the pad/bass track, then key it from the kick so the pad ducks on every kick hit (`fx_set_sidechain {trackId: pad, effectId: comp, sourceTrackId: kick}`). Pass `sourceTrackId: null` (or omit it) to CLEAR the key and return the effect to self-keyed. Only compressor and gate inserts can be keyed (hosted Audio Unit sidechain inputs are a later phase). WHERE THE PIECES MAY LIVE: the KEYED EFFECT must sit on an AUDIO or BUS track \u2014 an instrument track cannot host one, so in an all-MIDI project add a bus (track_add kind:"bus"), route the instrument into it with track_set_output, and key the compressor ON THE BUS. The KEY SOURCE, by contrast, may be ANY NON-BUS track \u2014 an INSTRUMENT track is a perfectly valid key source, so ducking off a MIDI kick needs no audio bounce (only bus key sources are deferred). A key that would form a feedback loop is rejected with the exact path. The MASTER chain cannot host a sidechain-keyed effect and the master output cannot be a key source: passing "master" as `trackId` or `sourceTrackId` is rejected \u2014 key an effect on a track or bus instead (unlike fx_add/fx_remove/fx_reorder/fx_set_bypass/fx_set_param, this tool takes NO "master" sentinel). Refused while a recording is in progress (a key edge rewires the audio graph, which would truncate the take) \u2014 stop recording first. Returns the track\'s full updated insert chain (`effects` \u2014 the keyed effect carries `sidechainSourceTrackId`) plus `sidechainSkewSamples` (how far the key is delayed by plugin latency, usually 0).',
     inputSchema: {
       trackId: external_exports.string().min(1).describe('Id of the track or bus whose compressor/gate is being keyed, from project_snapshot (not "master" \u2014 the master chain cannot be keyed).'),
       effectId: external_exports.string().min(1).describe("Id of the compressor or gate effect to key, from fx_add's result or project_snapshot."),
       sourceTrackId: external_exports.string().min(1).nullable().optional().describe(
-        "Id of the audio track to key FROM (e.g. the kick). Pass null or omit to CLEAR the key and return the effect to self-keyed."
+        "Id of the track to key FROM (e.g. the kick) \u2014 any NON-BUS track, instrument tracks included; it does NOT have to be an audio track. Pass null or omit to CLEAR the key and return the effect to self-keyed."
       )
     }
   },
@@ -44863,7 +45872,7 @@ var noteSchema = external_exports.object({
   id: external_exports.string().uuid().optional().describe(
     "Note id (uuid). Omit when creating new notes \u2014 the server mints one; include an existing note's id when resubmitting it unchanged via clip_set_notes."
   )
-});
+}).strict();
 registerTool(
   "clip_add_audio",
   {
@@ -44883,7 +45892,7 @@ registerTool(
   "clip_add_midi",
   {
     title: "Create a MIDI clip with notes",
-    description: "Create a MIDI clip on an INSTRUMENT track (see track_add with kind=instrument) and write its notes in one call \u2014 the way to compose a whole melody, riff, or chord progression at once. Each note carries `pitch` (MIDI number, 0-127; 60 = middle C), `velocity` (1-127, defaults to 100), `startBeat` (RELATIVE TO THE CLIP'S START, not the timeline), and `lengthBeats` (defaults to 1 beat). Audio and bus tracks reject MIDI clips. Returns the created clip with server-minted note ids and the notes normalized and sorted by startBeat. NOTE: MIDI clips are silent until an instrument is wired up (M3) \u2014 the data model and editing already work, so compose freely now and expect sound once an instrument lands.",
+    description: "Create a MIDI clip on an INSTRUMENT track (see track_add with kind=instrument) and write its notes in one call \u2014 the way to compose a whole melody, riff, or chord progression at once. Each note carries `pitch` (MIDI number, 0-127; 60 = middle C), `velocity` (1-127, defaults to 100), `startBeat` (RELATIVE TO THE CLIP'S START, not the timeline), and `lengthBeats` (defaults to 1 beat). Audio and bus tracks reject MIDI clips. Returns the created clip with server-minted note ids and the notes normalized and sorted by startBeat. A new instrument track already SOUNDS \u2014 it resolves to the default poly synth even when nothing has been configured on it, so a clip written here is audible immediately. Use track_set_instrument to put it on a sound bank, sampler, or hosted Audio Unit instead. `returnNotes` (default true, UNCHANGED from before this param existed) controls whether the response echoes the notes array back at all: on the hot path of a composing session this echo is often the single biggest cost in the call, since the useful result is almost always just the new clip id, not per-note ids you rarely edit immediately. Pass `returnNotes: false` to get the clip back WITHOUT its `notes` array \u2014 the response instead carries `notesOmitted: true` and `noteCount` (how many notes were actually written), so it can never be mistaken for a genuinely empty clip. Nothing is lost: read the notes back any time with clip_get_notes (read-only, no undo step, takes the returned clip's id). Note this only trims what crosses back to YOU \u2014 the full payload still crosses the app's own control connection either way, so it saves your context budget, not wire bytes.",
     inputSchema: {
       trackId: external_exports.string().min(1).describe("Id of the instrument track to add the clip to, from project_snapshot or track_add."),
       name: external_exports.string().min(1).optional().describe("Display name for the clip. Defaults to a generic name."),
@@ -44895,16 +45904,26 @@ registerTool(
       ),
       notes: external_exports.array(noteSchema).max(4096).optional().describe(
         "Notes to write into the clip, up to 4096. Each note's startBeat is relative to the clip's own start. Omit (or pass an empty array) to create an empty MIDI clip."
+      ),
+      returnNotes: external_exports.boolean().optional().describe(
+        "Whether the response echoes the written notes back, each with its server-minted id. Defaults to true (unchanged prior behavior). Pass false to drop the notes array from the response and get back `notesOmitted: true` plus `noteCount` instead \u2014 the notes are still written and are always readable afterward via clip_get_notes; this only shrinks what comes back to you, not what crosses the app's own control connection."
       )
     }
   },
-  async ({ trackId, name, atBeat, lengthBeats, notes }) => toToolResult(() => bridge.send("clip.addMIDI", { trackId, name, atBeat, lengthBeats, notes }))
+  async ({ trackId, name, atBeat, lengthBeats, notes, returnNotes }) => toToolResult(async () => {
+    const result = await bridge.send("clip.addMIDI", { trackId, name, atBeat, lengthBeats, notes });
+    if (returnNotes === false && result && typeof result === "object" && Array.isArray(result.notes)) {
+      const { notes: writtenNotes, ...rest } = result;
+      return { ...rest, notesOmitted: true, noteCount: writtenNotes.length };
+    }
+    return result;
+  })
 );
 registerTool(
   "clip_set_notes",
   {
     title: "Replace a MIDI clip's notes",
-    description: "Replace a MIDI clip's ENTIRE note array \u2014 the only note-editing primitive. There is no add/remove-single-note tool: read the clip's current `notes` from project_snapshot, modify the array (add, remove, or change notes) in your own code, then resubmit the whole array here. One call = one undo step (edit_undo reverts the entire replacement). `notes` may be empty to clear the clip. Errors readably if `clipId` refers to an audio clip (audio clips have no notes).",
+    description: "Replace a MIDI clip's ENTIRE note array \u2014 the only note-editing primitive. There is no add/remove-single-note tool: read the clip's current notes with clip_get_notes (preferred \u2014 one clip, not the whole project) or from project_snapshot, modify the array (add, remove, or change notes) in your own code, then resubmit the whole array here. One call = one undo step (edit_undo reverts the entire replacement). `notes` may be empty to clear the clip. Errors readably if `clipId` refers to an audio clip (audio clips have no notes). \u2B50 THE CLIP ID SURVIVES: this edits the clip in place and never creates a replacement, so `clipId` \u2014 and the clip's position, length and every other field \u2014 stay valid across a full replace. That makes RE-AUTHORING a clip wholesale a supported fallback when you cannot read it first (e.g. clip_get_notes is unavailable) AND you are the source of its content: rewrite the array you intended, and any ids your later steps depend on still resolve. Reading first remains preferred whenever the clip's notes came from anywhere else, since a whole-array write drops whatever you did not include.",
     inputSchema: {
       clipId: external_exports.string().uuid().describe("Id of the MIDI clip to edit, from project_snapshot."),
       notes: external_exports.array(noteSchema).max(4096).describe(
@@ -44913,6 +45932,27 @@ registerTool(
     }
   },
   async ({ clipId, notes }) => toToolResult(() => bridge.send("clip.setNotes", { clipId, notes }))
+);
+registerTool(
+  "clip_get_notes",
+  {
+    title: "Read a MIDI clip's notes (read-only)",
+    description: "Read a MIDI clip's notes back \u2014 the read half of the clip_set_notes / clip_add_midi pair. Since clip_set_notes replaces the ENTIRE note array, you need the CURRENT array (with its real note ids) before you can edit a subset of notes and resubmit the whole thing; this tool gets you that array. PREFER THIS over project_snapshot for note data: project_snapshot serializes the WHOLE project and measured ~290 KB on a modest 6-track/38-clip/2367-note session (2026-08-17), which can overflow your output budget \u2014 clip_get_notes returns just one clip. `fromBeat`/`toBeat` are CLIP-RELATIVE beats (same frame as a note's startBeat: 0 = the clip's own start, NOT the timeline) and HALF-OPEN \u2014 a note is included when startBeat >= fromBeat AND < toBeat, so adjacent windows never double-count a note sitting exactly on the shared boundary. `pitchMin`/`pitchMax` are INCLUSIVE on both ends. IMPORTANT: `totalNotes` in the response is always the clip's UNFILTERED note count, while `returnedNotes` is how many survived your filters (equal to notes.length) \u2014 if you filtered and then call clip_set_notes with only the filtered array, you will SILENTLY DESTROY every note you never saw, so always check totalNotes === returnedNotes before doing a whole-array replace, or merge your edits back into a full clip_get_notes {} read first. Size math: a note is roughly 90-120 bytes of JSON, so a 900-note drum clip is ~80-110 KB \u2014 for big clips, filter by fromBeat/toBeat rather than pulling the whole clip. This tool is STRICTLY READ-ONLY: no undo entry, nothing dirtied, no engine call \u2014 unlike the old clip_humanize-with-zero-jitter 'peek' trick, which still marks the project dirty and still fires an engine refresh even though the notes come back unchanged. Calling this is free.",
+    inputSchema: {
+      clipId: external_exports.string().uuid().describe("Id of the MIDI clip to read, from project_snapshot or clip_add_midi."),
+      fromBeat: external_exports.number().optional().describe(
+        "Only return notes whose startBeat is >= this (CLIP-RELATIVE beats, not timeline beats). Half-open with toBeat: a note starting exactly at fromBeat IS included. Omit for no lower bound."
+      ),
+      toBeat: external_exports.number().optional().describe(
+        "Only return notes whose startBeat is < this (CLIP-RELATIVE beats, not timeline beats). Half-open: a note starting exactly at toBeat is EXCLUDED (it belongs to the next window). Omit for no upper bound. Must be >= fromBeat when both are given."
+      ),
+      pitchMin: external_exports.number().int().min(0).max(127).optional().describe("Only return notes with pitch >= this, 0-127 INCLUSIVE. Omit for no lower bound."),
+      pitchMax: external_exports.number().int().min(0).max(127).optional().describe(
+        "Only return notes with pitch <= this, 0-127 INCLUSIVE. Omit for no upper bound. Must be >= pitchMin when both are given."
+      )
+    }
+  },
+  async ({ clipId, fromBeat, toBeat, pitchMin, pitchMax }) => toToolResult(() => bridge.send("clip.getNotes", { clipId, fromBeat, toBeat, pitchMin, pitchMax }))
 );
 registerTool(
   "clip_remove",
@@ -45028,7 +46068,7 @@ registerTool(
             "Breakpoint position in beats, RELATIVE TO THE CLIP'S START (not the timeline). Clamped into 0..the clip's length."
           ),
           gainDb: external_exports.number().describe("Gain at this breakpoint in decibels. Clamped to -72..24; 0 = unity.")
-        })
+        }).strict()
       ).optional().describe(
         "Gain breakpoints, sorted by beat ascending with no duplicate beats. Empty or omitted CLEARS the envelope."
       )
@@ -45135,8 +46175,8 @@ registerTool(
 registerTool(
   "clip_humanize",
   {
-    title: "Add human feel to a MIDI clip (seeded timing + velocity jitter)",
-    description: "The inverse-spirited sibling of clip_quantize: instead of snapping a MIDI clip's notes to the grid, nudge them slightly OFF it so they feel played rather than programmed. Each note gets an INDEPENDENT random timing offset (up to \xB1`timingBeats` beats) and an independent random velocity offset (up to \xB1`velocityRange`), applied as ONE undoable step. Onsets are clamped to stay inside the clip and velocities to 1..127; note LENGTHS, ids, and order are preserved. The jitter is DETERMINISTIC and SEEDED: pass a `seed` to get an exact, repeatable result, or omit it to draw a fresh one. Either way the response includes `seedUsed` (the seed actually applied) alongside the updated clip fields \u2014 feed that same value back as `seed` to reproduce this exact take, or omit `seed` again to re-roll a different feel. MIDI CLIPS ONLY: an audio clip is rejected. Returns the updated clip plus `seedUsed`.",
+    title: "Add human feel to a MIDI clip (seeded timing + velocity jitter, optional legato overlap)",
+    description: "The inverse-spirited sibling of clip_quantize: instead of snapping a MIDI clip's notes to the grid, nudge them slightly OFF it so they feel played rather than programmed. Each note gets an INDEPENDENT random timing offset (up to \xB1`timingBeats` beats) and an independent random velocity offset (up to \xB1`velocityRange`), applied as ONE undoable step. Onsets are clamped to stay inside the clip and velocities to 1..127; note ids and array order are ALWAYS preserved, and so are note LENGTHS UNLESS you pass `legatoOverlapBeats` > 0 \u2014 that is the one argument here that rewrites lengths, and it is off by default. LEGATO/GATE PASS (`legatoOverlapBeats` + `maxGapBeats`): every note followed within `maxGapBeats` is lengthened to end `legatoOverlapBeats` PAST the following note's start, so gaps close and joins overlap. A LARGER gap is a rest (for a wind part, a breath) and is left exactly as authored; notes that already overlap are left alone (the pass only ever extends, so running it twice with the same arguments changes nothing the second time); the last note is never extended; nothing is extended past the clip end; a note whose successor repeats its own PITCH abuts that successor exactly instead of overlapping it, because MIDI note-off carries only a pitch and an overlap there would cut the note that just started. \u26A0\uFE0F WHAT OVERLAP ACTUALLY BUYS: this engine has NO legato-hold mode \u2014 every note-on starts a brand-new voice with a fresh attack, on the built-in sampler and on a hosted AUSampler alike. The overlap MASKS each new attack under the previous note's decaying tail; it does NOT eliminate the retrigger and cannot produce true legato. Use ~0.02-0.05 beats for a melodic wind/brass line. `maxGapBeats` on its own does NOTHING: it is a ceiling on a pass that only runs when `legatoOverlapBeats` > 0. The jitter is DETERMINISTIC and SEEDED: pass a `seed` to get an exact, repeatable result, or omit it to draw a fresh one. Either way the response includes `seedUsed` (the seed actually applied) alongside the updated clip fields \u2014 feed that same value back as `seed` to reproduce this exact take, or omit `seed` again to re-roll a different feel. MIDI CLIPS ONLY: an audio clip is rejected. Returns the updated clip plus `seedUsed`. NOT IDEMPOTENT \u2014 the jitter is added to each note's CURRENT position, not to a stored quantized original, so calling this twice COMPOUNDS the feel (and repeated runs pile onsets against the clip boundary, where they clamp). `seed` reproduces a result only from the SAME starting state \u2014 same seed applied twice in a row does NOT give you the same clip as applying it once. Nothing on the clip records that it was humanized, so an agent picking up someone else's clip cannot tell: to re-roll a feel, edit_undo the previous humanize FIRST, then re-apply. Prefer one pass with the right amount over several nudges.",
     inputSchema: {
       clipId: external_exports.string().uuid().describe("Id of the MIDI clip to humanize, from project_snapshot."),
       timingBeats: external_exports.number().min(0).max(0.25).optional().describe(
@@ -45147,10 +46187,25 @@ registerTool(
       ),
       seed: external_exports.number().int().min(0).optional().describe(
         "Optional non-negative integer seed for the deterministic jitter. Pass the same seed (and same params) to reproduce an exact result; omit it to draw a random seed. The seed actually used is always returned as `seedUsed` so you can reproduce or re-roll."
+      ),
+      legatoOverlapBeats: external_exports.number().min(0).max(0.25).optional().describe(
+        "How far each note is stretched PAST the start of the note that follows it, in BEATS, 0..0.25 (default 0 = OFF, note lengths untouched). This is the only argument that changes note LENGTHS. ~0.024-0.048 beats is 20-40 ms at 72 BPM, a good range for a melodic wind/brass line. It masks each note's fresh attack under the previous note's tail \u2014 it does NOT eliminate the retrigger (no legato-hold mode exists in this engine), so bigger is not smoother: past ~0.06 beats it starts to read as two players. Deterministic and RNG-free, so a seeded result is unchanged by it."
+      ),
+      maxGapBeats: external_exports.number().min(0).max(4).optional().describe(
+        "The largest gap the legato pass will close, in BEATS, 0..4 (default 0.125 \u2014 a thirty-second note). A gap WIDER than this is treated as a rest \u2014 a breath in a wind part \u2014 and is preserved exactly, which is what keeps the pass musical rather than destructive. Raise it to close written rests too (1 = a quarter-note rest); lower it at very slow tempos, where 0.125 beat is more milliseconds. Does NOTHING on its own: it only bounds the pass that `legatoOverlapBeats` > 0 turns on."
       )
     }
   },
-  async ({ clipId, timingBeats, velocityRange, seed }) => toToolResult(() => bridge.send("clip.humanize", { clipId, timingBeats, velocityRange, seed }))
+  async ({ clipId, timingBeats, velocityRange, seed, legatoOverlapBeats, maxGapBeats }) => toToolResult(
+    () => bridge.send("clip.humanize", {
+      clipId,
+      timingBeats,
+      velocityRange,
+      seed,
+      legatoOverlapBeats,
+      maxGapBeats
+    })
+  )
 );
 server.registerTool(
   "clip_detect_transients",
@@ -45217,6 +46272,37 @@ registerTool(
   )
 );
 registerTool(
+  "clip_detect_pitch",
+  {
+    title: "Detect the pitch of an audio clip, frame by frame",
+    description: "Analyze an AUDIO clip's current source window for PITCH, frame by frame (~62.5 frames/second) -- fundamental frequency, confidence, level, and (for a silent or unvoiced frame) WHY no pitch was named. This is the wiring for the app's pitch detector (SwiftF0, run on-device via ONNX Runtime) -- the first tool that lets you hear, in numbers, what note someone actually sang. Feeds Kiffness-style workflows (chop a vocal phrase into fragments with clip_detect_transients + clip_split, then learn each fragment's pitch here before pitch-shifting it with clip_set_stretch) and any 'is this take in tune' question. Read-only: nothing is edited, no undo entry, and nothing is cached -- a repeat call re-runs the detector. AUDIO CLIPS ONLY -- a MIDI clip is rejected (its notes already have a definite pitch). Returns `{pitch: {frames, frameCount, voicedFrameCount, voicedFraction, frameRateHz, analysisSampleRateHz, sourceSampleRateHz, windowStartSeconds, windowDurationSeconds, confidenceThreshold, silenceFloorDbfs, minFrequencyHz, maxFrequencyHz}, clipWindowDurationSeconds, stretchRatio, pitchShiftSemitones}`. Each entry in `frames` is `{timeSeconds, frequencyHz?, confidence, levelDbfs?, absence?}` -- `timeSeconds` is a SOURCE-FILE-absolute second (the SAME numbers clip_detect_transients' `sourceSeconds` and clip_analyze_audio's `windowStartSeconds` use, so you can line pitch frames up against transient markers with no arithmetic). HONEST ABSENCE: an unvoiced frame OMITS `frequencyHz` ENTIRELY (never 0, never a fabricated value) and instead carries `absence`, one of `belowConfidence` (the model wasn't sure enough), `belowLevel` (too quiet to trust -- SwiftF0 is confidence-blind to level, so this catches near-silence confidence alone would miss), or `outOfRange` (a real pitch outside `[minFrequencyHz, maxFrequencyHz]`). Frames are never dropped, so the array is a uniform time grid you can read holes out of directly -- 'the singer stopped here' and 'this frame is unreliable' are DIFFERENT reasons and stay distinguishable. `voicedFraction` (0..1) is a quick 'how much of this actually has a pitch' summary before you look at individual frames. `confidenceThreshold` (0..1, default 0.9) and `silenceFloorDbfs` (default -75) are the two tuning knobs that decide voicing -- `silenceFloorDbfs` in particular is UNTUNED against real vocal recordings (only synthetic fixtures so far), so if real-take results look wrong, retune it here rather than assuming the detector is broken. `fromSeconds`/`durationSeconds` narrow the analyzed range (both SOURCE-FILE-absolute, like clip_analyze_audio's window); omit both to analyze the clip's WHOLE current window -- for a multi-minute clip that can be a large response (roughly 60 KB per 10 seconds of audio), so pass an explicit range for a long clip if you only need part of it. `stretchRatio`/`pitchShiftSemitones` echo the clip's current state (results are measured on the SOURCE audio, before either is applied) so you can derive the sounding pitch yourself (`frequencyHz * 2^(pitchShiftSemitones/12)`) if the clip is pitch-shifted.",
+    inputSchema: {
+      clipId: external_exports.string().uuid().describe("Id of the AUDIO clip to analyze, from project_snapshot."),
+      fromSeconds: external_exports.number().min(0).optional().describe(
+        "Where to start, in SOURCE-FILE-absolute seconds (the clip_detect_transients/clip_analyze_audio domain) -- must fall inside the clip's current window. Omit to start at the clip's own window start."
+      ),
+      durationSeconds: external_exports.number().gt(0).optional().describe(
+        "How many seconds to analyze from fromSeconds. Must be > 0 when given. Omit for the rest of the clip's current window; a value that would run past the window end is clamped (never rejected) and the response's `pitch.windowDurationSeconds` reports what was actually analyzed."
+      ),
+      confidenceThreshold: external_exports.number().min(0).max(1).optional().describe(
+        "Voicing confidence gate, 0..1 (default 0.9, SwiftF0's own documented default). A frame under this reads as unvoiced with absence:'belowConfidence'."
+      ),
+      silenceFloorDbfs: external_exports.number().optional().describe(
+        "RMS level gate in dBFS (default -75). A frame quieter than this reads as unvoiced with absence:'belowLevel', regardless of confidence -- needed because the detector can report high confidence on near-silence. UNTUNED against real vocal recordings; adjust this while listening if real-take results look wrong."
+      )
+    }
+  },
+  async ({ clipId, fromSeconds, durationSeconds, confidenceThreshold, silenceFloorDbfs }) => toToolResult(
+    () => bridge.send("clip.detectPitch", {
+      clipId,
+      fromSeconds,
+      durationSeconds,
+      confidenceThreshold,
+      silenceFloorDbfs
+    })
+  )
+);
+registerTool(
   "clip_delete_time_range",
   {
     title: "Delete a time range from a MIDI clip (excise + close the gap)",
@@ -45255,12 +46341,12 @@ var controllerPointSchema = external_exports.object({
   value: external_exports.number().int().min(0).max(16383).describe(
     "Raw MIDI value at this point. 0-16383 for a pitchBend lane (8192 = center, no bend); 0-127 for cc / channelPressure lanes \u2014 a value outside the OWNING lane's domain errors readably, naming the exact range."
   )
-});
+}).strict();
 registerTool(
   "clip_set_controller_lane",
   {
     title: "Write a MIDI clip's controller lane (mod wheel, sustain, pitch bend, ...)",
-    description: "Create or WHOLESALE-REPLACE one controller lane on a MIDI clip \u2014 mod wheel, sustain pedal, pitch bend, expression, channel pressure, or any other numbered MIDI CC \u2014 the performance data that rides ALONGSIDE a clip's notes (clip_set_notes), not instead of them. Points are STEPWISE: a value HOLDS until the next point, so two points make a flat STEP, not a ramp \u2014 draw a smooth ramp as a dense run of points (exactly what a live recording produces). `points` REPLACES the lane's entire point list wholesale \u2014 there is no add/remove-single-point tool: read the clip's current lanes from project_snapshot's `controllerLanes` array (there each lane is `{type: {type, controller?}, points}` \u2014 NOTE the NESTED `type` object on read-back, unlike the FLAT `type`/`controller` params this tool takes as input), modify the array yourself, then resubmit the whole thing here. Values are RAW MIDI: 0-16383 for a `pitchBend` lane (8192 = the center/no-bend position; built-in instruments apply it as +/-2 semitones), 0-127 for `cc`/`channelPressure` lanes (CC 1 = mod wheel, CC 64 = sustain pedal \u2014 a value >= 64 counts as pedal-down). Built-in instruments only honor pitch bend and CC 64 sustain today; every other CC/channelPressure value is forwarded to hosted Audio Unit instruments and otherwise safely ignored by the built-ins. Controller values CHASE at play and at seek: the latest value at or before the playhead stays in effect, so a pedal held or a bend applied earlier in the clip is still sounding after a jump \u2014 you don't need to re-state a value at every seek target. clip_quantize/clip_humanize move only NOTES, never these lanes. Per-note (poly) aftertouch is not supported yet \u2014 only channel-wide values. A clip may hold at most 16 controller lanes (one per type/CC number) and each lane at most 16384 points. MIDI clips only \u2014 an audio clip is rejected readably. Repeated calls to the SAME lane (e.g. while drawing) coalesce into one undo step. Returns the updated clip (the stored lane echoes back in its `controllerLanes`).",
+    description: "Create or WHOLESALE-REPLACE one controller lane on a MIDI clip \u2014 mod wheel, sustain pedal, pitch bend, expression, channel pressure, or any other numbered MIDI CC \u2014 the performance data that rides ALONGSIDE a clip's notes (clip_set_notes), not instead of them. Points are STEPWISE: a value HOLDS until the next point, so two points make a flat STEP, not a ramp \u2014 draw a smooth ramp as a dense run of points (exactly what a live recording produces). `points` REPLACES the lane's entire point list wholesale \u2014 there is no add/remove-single-point tool: read the clip's current lanes from project_snapshot's `controllerLanes` array (there each lane is `{type: {type, controller?}, points}` \u2014 NOTE the NESTED `type` object on read-back, unlike the FLAT `type`/`controller` params this tool takes as input), modify the array yourself, then resubmit the whole thing here. Values are RAW MIDI: 0-16383 for a `pitchBend` lane (8192 = the center/no-bend position; built-in instruments apply it as +/-2 semitones), 0-127 for `cc`/`channelPressure` lanes (CC 1 = mod wheel, CC 64 = sustain pedal \u2014 a value >= 64 counts as pedal-down). WHAT ACTUALLY SOUNDS depends on the track's instrument, and this tool now TELLS you: a lane the instrument cannot consume still succeeds and is still stored, but the response carries a `warnings` array naming the controller and why it will be silent \u2014 read it. The built-in SAMPLER honors pitch bend, CC 64 (sustain) and, for continuous breath/air expression, CC 11 (expression, unconditional), plus CC 1 (mod wheel) and CC 2 (breath) once `sampler.expressionModDepth` is set above 0 on the instrument \u2014 those two are gated because their neutral value is 0, so routing them unconditionally would silence a clip until its lane's first point. The built-in POLY SYNTH honors pitch bend and CC 64 only. Hosted Audio Unit and sound-bank instruments receive every CC as raw MIDI. Note that CC 11 on the sampler scales LOUDNESS; for continuous BRIGHTNESS set `sampler.expressionFilterDepth` (and optionally `expressionFilterCC`), which sweeps a per-voice low-pass \u2014 that is what makes a long held sax or string note read as a player leaning into it rather than a flat sustain. Controller values CHASE at play and at seek: the latest value at or before the playhead stays in effect, so a pedal held or a bend applied earlier in the clip is still sounding after a jump \u2014 you don't need to re-state a value at every seek target. clip_quantize/clip_humanize move only NOTES, never these lanes. Per-note (poly) aftertouch is not supported yet \u2014 only channel-wide values. A clip may hold at most 16 controller lanes (one per type/CC number) and each lane at most 16384 points. MIDI clips only \u2014 an audio clip is rejected readably. Repeated calls to the SAME lane (e.g. while drawing) coalesce into one undo step. Returns the updated clip (the stored lane echoes back in its `controllerLanes`).",
     inputSchema: {
       clipId: external_exports.string().uuid().describe("Id of the MIDI clip to edit, from project_snapshot."),
       type: external_exports.enum(["cc", "pitchBend", "channelPressure"]).describe(
@@ -45294,6 +46380,330 @@ registerTool(
   async ({ clipId, type, controller }) => toToolResult(() => bridge.send("clip.removeControllerLane", { clipId, type, controller }))
 );
 registerTool(
+  "clip_apply_breath_contour",
+  {
+    title: "Make a MIDI clip's held notes breathe (expression swell + delayed vibrato)",
+    description: "Make held notes BREATHE \u2014 the single highest-value fix for a wind, brass, string or sustained-vocal part that sounds like a synthesizer holding a key down. In ONE call it writes the correlated performance contour a real player puts on a sustained note, which is otherwise dozens of hand-placed points per note via clip_set_controller_lane:\n\u2022 an EXPRESSION (CC 11) swell \u2014 a small dip just after the attack as the air column settles, a rise to a peak about two-thirds through the note, then a taper. On the built-in sampler CC 11 moves LOUDNESS always, and BRIGHTNESS too whenever the track's `sampler.expressionFilterDepth` is above 0 \u2014 that pairing is what reads as a player leaning in, and it is why this beats a volume-automation swell, which can only ever sound like a fader move.\n\u2022 DELAYED VIBRATO on the pitch-bend lane \u2014 straight for the first half second, then blooming from nothing to about \xB112 cents at 5.5 Hz, and relaxing back to exact centre before the note ends. Constant vibrato from the attack is the classic MIDI giveaway; the delay is the whole point.\n\u2022 a few cents of MICRO-SHARPENING at the top of the swell, resolving as it falls (blowing harder pushes a wind instrument sharp).\nShapes EVERY note in the clip by default, or only the ones in `noteIds`. It MERGES with whatever is already on those two lanes: points outside the shaped notes' spans survive exactly as authored, so you can run it note by note across a phrase, or after hand-drawing something else, without wiping your earlier work \u2014 unlike clip_set_controller_lane, which replaces a lane wholesale by contract. Notes too short for the straight opening plus one whole vibrato cycle get the expression contour ONLY and no pitch-bend lane at all; that is the intended shape for short notes, not a failure, and the response says how many. \u26A0\uFE0F Pitch bend is CHANNEL-WIDE in MIDI, so the vibrato bends every voice sounding on that track \u2014 correct for the monophonic wind or vocal line this is built for, wrong for a chordal part (pass `vibratoDepthCents: 0` there and keep just the swell). Every parameter is optional and the defaults are a complete, musical result \u2014 reach for them only when the default shape is not what the part needs. One call = one undo step. MIDI clips only. Returns the updated clip (both lanes echo back in `controllerLanes`) plus `notesTouched`, `notesWithVibrato`, `expressionPointCount`, `pitchBendPointCount`, `perNotePointBudget`, and a `warnings` array \u2014 READ THE WARNINGS: they are how a contour that will only be half audible (e.g. brightness off, or no note long enough for vibrato) tells you so.",
+    inputSchema: {
+      clipId: external_exports.string().uuid().describe("Id of the MIDI clip to shape, from project_snapshot."),
+      noteIds: external_exports.array(external_exports.string().uuid().describe("A note id from clip_get_notes.")).optional().describe(
+        "Ids of the notes to shape, from clip_get_notes. OMIT to shape EVERY note in the clip (the usual call). An id that is not in the clip is refused outright and nothing is written \u2014 a partly-applied contour would leave you unable to tell which notes got one."
+      ),
+      depth: external_exports.number().min(0).max(1).optional().describe(
+        "How far the swell falls below its peak, as a fraction of `peakValue`. Default 0.25 \u2014 about 2.5 dB from peak to trough, which is the INVOLUNTARY contour of a note held steady rather than a written crescendo. Raise toward 0.5 for a hairpin. 0 turns the swell off (a flat lane at `peakValue`)."
+      ),
+      peakValue: external_exports.number().int().min(0).max(127).optional().describe(
+        "Raw CC value at the top of the swell, 0-127. Default 127, which is the expression lane's own neutral: the loudest instant of the note comes out exactly as loud as it would with no contour at all, so applying this can never quietly drop the level of a part you already balanced. Lower it to leave headroom above the peak for a later hand edit."
+      ),
+      peakPosition: external_exports.number().min(0.05).max(0.95).optional().describe(
+        "Where the peak of the swell sits, as a fraction of the note's length. Default 0.65 \u2014 past the middle, so the note takes longer arriving than leaving, which is the asymmetry that reads as effort rather than as a tremolo."
+      ),
+      attackSettleSeconds: external_exports.number().min(0).max(1).optional().describe(
+        "Seconds from the attack to the bottom of the settling dip. Default 0.05. Automatically clamped to a quarter of the note, so a staccato note gets a scaled-down version of the same curve instead of being all dip."
+      ),
+      expressionCC: external_exports.number().int().min(0).max(127).optional().describe(
+        "Which CC number carries the swell. Default 11 (expression) \u2014 the one the built-in sampler routes to amplitude with no opt-in, and the default target of its brightness filter, so one lane moves both. Change it only if you have pointed `sampler.expressionFilterCC` somewhere else."
+      ),
+      expressionSpacingSeconds: external_exports.number().min(1e-3).max(1).optional().describe(
+        "Seconds between emitted expression points. Default 0.02. Controller lanes are STEPWISE (a value holds until the next point), so a dense run is what makes a smooth swell instead of a staircase. Note this sets the finest step TIMING, not the point count: redundant points are dropped, so the run is only ever as long as the number of distinct CC values the contour passes through."
+      ),
+      vibratoOnsetSeconds: external_exports.number().min(0).max(10).optional().describe(
+        "Seconds of STRAIGHT playing before vibrato begins. Default 0.5. A note shorter than this plus one whole vibrato cycle gets no pitch-bend lane at all \u2014 lower this to bring vibrato to shorter notes."
+      ),
+      vibratoRateHz: external_exports.number().min(0.2).max(20).optional().describe(
+        "Vibrato rate in Hz. Default 5.5, the middle of the 5-7 Hz band conventionally quoted for instrumental vibrato."
+      ),
+      vibratoDepthCents: external_exports.number().min(0).max(200).optional().describe(
+        "Peak vibrato width in CENTS \u2014 a \xB1 figure, so 12 spans 24 cents. Default 12, deliberately conservative: pitch bend is channel-wide and will bend any overlapping neighbouring note's tail too. 0 turns vibrato off entirely and writes no pitch-bend lane beyond the micro-sharpening."
+      ),
+      vibratoBloomSeconds: external_exports.number().min(0).max(10).optional().describe(
+        "Seconds over which the vibrato widens from nothing to full depth after it starts. Default 0.7 (about four cycles at the default rate)."
+      ),
+      vibratoReleaseSeconds: external_exports.number().min(0).max(10).optional().describe(
+        "Seconds before the note's end over which the vibrato relaxes back to centre. Default 0.08. Players do ease off, and it guarantees the lane lands on exact centre so the NEXT note cannot start detuned by this one's last vibrato phase."
+      ),
+      sharpenCents: external_exports.number().min(-200).max(200).optional().describe(
+        "Peak micro-sharpening in CENTS at the top of the swell, resolving to nothing as the contour falls. Default 4 \u2014 on its own that is below the ear's pitch threshold, but it is CORRELATED with the loudness swell, and that correlation is what is heard as effort. Negative values flatten instead."
+      ),
+      bendSpacingSeconds: external_exports.number().min(1e-3).max(1).optional().describe(
+        "Seconds between emitted pitch-bend points. Default 0.008. Unlike expression, the bend run IS the vibrato waveform (nothing smooths it), so this is its sample rate \u2014 about 23 points per cycle at the default. Coarsening it much past 0.02 stops sounding like vibrato."
+      ),
+      bendRangeSemitones: external_exports.number().min(0.01).max(48).optional().describe(
+        "The instrument's pitch-bend range in semitones for a full \xB18192 deflection, so the cents figures above land correctly. Default 2, which is exactly what the built-in sampler uses. A hosted Audio Unit may differ \u2014 if the vibrato comes out wider or narrower than asked, this is the parameter to correct it with."
+      )
+    }
+  },
+  async ({
+    clipId,
+    noteIds,
+    depth,
+    peakValue,
+    peakPosition,
+    attackSettleSeconds,
+    expressionCC,
+    expressionSpacingSeconds,
+    vibratoOnsetSeconds,
+    vibratoRateHz,
+    vibratoDepthCents,
+    vibratoBloomSeconds,
+    vibratoReleaseSeconds,
+    sharpenCents,
+    bendSpacingSeconds,
+    bendRangeSemitones
+  }) => toToolResult(
+    () => bridge.send("clip.applyBreathContour", {
+      clipId,
+      noteIds,
+      depth,
+      peakValue,
+      peakPosition,
+      attackSettleSeconds,
+      expressionCC,
+      expressionSpacingSeconds,
+      vibratoOnsetSeconds,
+      vibratoRateHz,
+      vibratoDepthCents,
+      vibratoBloomSeconds,
+      vibratoReleaseSeconds,
+      sharpenCents,
+      bendSpacingSeconds,
+      bendRangeSemitones
+    })
+  )
+);
+registerTool(
+  "clip_apply_effort_shape",
+  {
+    title: "Shape how hard the player is blowing, with one named musical gesture",
+    description: "Apply a NAMED effort gesture to a MIDI part \u2014 the composing verb on top of clip_apply_breath_contour. Instead of choosing a dozen numbers, pick the shape a musician would name, and every note gets the right contour for its place in the music:\n\u2022 `messaDiVoce` \u2014 grow to a peak in the MIDDLE of the note, then fade. The anchor gesture for a held wind or vocal note.\n\u2022 `lateBloom` \u2014 steady, then swell in the last third. The difference between singing a note and leaning into it.\n\u2022 `sforzandoPiano` \u2014 hit it hard, drop immediately to soft, then grow back (sfp).\n\u2022 `subToneEntry` \u2014 start almost breath-only and rise into full tone. The tenor-ballad gesture.\n\u2022 `flat` \u2014 no shaping. The identity; use it to hear the part with expression off.\n\u2022 `hairpinCrescendo` / `hairpinDiminuendo` \u2014 the whole PHRASE grows or falls away, note by note.\n\u2022 `terraced` \u2014 step to one level and hold it for the phrase (the baroque contrast to the hairpins).\n\n\nTWO WAYS TO CHOOSE, and you must use exactly one. `pattern` names ONE gesture. `ringAngle` puts a DOT on a circle of all eight and blends the two it sits between \u2014 which is how you get a gesture that has no name, like 'mostly a late bloom but leaning toward a phrase crescendo' (ringAngle 112). The blend is nearest-two and equal-gain: landing on a pattern's own angle gives that pattern exactly, nothing else leaks in, and two identical patterns blend to themselves rather than to something louder. `ringRadius` is how far out the dot is, 0-1, where 0 changes nothing at all. Passing both forms, or neither, or ringRadius/ring without ringAngle, is REFUSED with a sentence \u2014 none of those is silently resolved for you.\n\nTHE PHRASE-SCOPED PATTERNS (the last three) are what clip_apply_breath_contour structurally cannot do: they split the part into phrases at the BREATHS \u2014 rests bigger than `maxGapBeats`, the same rule clip_humanize's legato pass uses \u2014 and place each note at its own point of the arc. A written crescendo is a property of the phrase, not of any one note.\n\nEverything else is the sibling verb's, unchanged: the two lanes are MERGED (points outside the shaped notes survive as authored), the clip-wide point budget applies, and it is ONE undo step.\n\n\u26D4 ON A TRACK HOSTING AN AUDIO UNIT \u2014 which includes EVERY sound-bank instrument, so the GM saxophone, flute, strings and so on \u2014 two limits were MEASURED on 2026-08-19 and are enforced here rather than hoped about:\n1. Bend VIBRATO is SUPPRESSED, not written. Pitch bend there is sampled at the offline render block rate, so an authored 5.5 Hz vibrato bounces as two vibratos beating. `notesWithVibrato` comes back 0 and a warning names the route that DOES work: the instrument's own vibrato on a CC 1 (mod wheel) lane, about 2.4 + 0.30 x CC1 cents at a fixed 5.4 Hz, which you author with clip_set_controller_lane.\n2. The shape moves LOUDNESS ONLY, never brightness. CC 11 on that path is exactly a gain. Brightness shaping is a built-in Sampler capability \u2014 it is not a setting to turn on here.\n\nMAKE THE DOT MOVE \u2014 this is what turns a setting into a performance. `path: \"drift\"` with a `pathSeed` sends the dot wandering from one gesture into the next and back, so note 9 is shaped differently from note 2 the way a player's effort is never twice the same. `path: \"orbit\"` travels the ring steadily instead. The wander is REPRODUCIBLE: it is a pure function of the clip beat and the seed, with nothing accumulating anywhere, so playback, replay, a looped cycle and a bounce that starts in the middle of the song all agree exactly. Same seed, same performance \u2014 change the seed for a different one.\n\u26A0\uFE0F The dot is read ONCE PER NOTE, at the note's start. It chooses each note's gesture and cannot shape inside one.\n\nTHE AIR BUDGET \u2014 a wind player has a finite lungful. `airEnforced: true` makes a phrase that runs past it SAG toward the ground rather than hold, the way a real player does. \u26D4 IT DEFAULTS TO FALSE, deliberately: an air budget OVERRIDES what you wrote, and anything that does that is switched on once, on purpose, rather than assumed. Tune it with `airCapacitySeconds` (how long the player can sustain the part as authored \u2014 6 s), `airConsumptionExponent` (how much faster loud playing burns air), `airRefillSecondsPerSecond` (how much a rest gives back), `airMinBreathSeconds` (a rest shorter than this is an articulation, not a breath) and `airReserveFraction` (when the sag begins). Every one of those is an ESTIMATE, which is exactly why it is a parameter.\n\u2B50 THE RESPONSE ALWAYS CARRIES `air`, whether or not you enforced it, because that is what answers \"why did this get quiet?\". Read `air.applied` first: false means the lane was NOT changed and the rest is a prediction of what enforcing would do \u2014 so you can ask the question without mutating anything. `air.constrainedNoteCount` is how many notes lost something, `air.lowestAir` how close the player came to empty, and when anything was constrained `air.phrases[].constrainedNotes` names each note with `effortRequested` beside `effortAllowed`, the two peak CC values, and the dB between them. `air.neverRecovered` means the rests are too short to keep up and the sag accumulates. \u26D4 A part can also get quiet because YOU asked for it \u2014 a hairpin diminuendo. Only the budget produces effortAllowed < effortRequested, which is why \"air runs out\" is deliberately NOT one of the patterns you can pick: one symptom, one cause.\n\nPHYSIOLOGICAL HUMANISATION \u2014 the involuntary layer. `driftDepth` is a slow 1/f sag in the effort baseline (period `driftScaleBeats`, default 8 beats); `tremorDepth` is a 4-8 Hz micro-tremor INSIDE each note, at `tremorRateHz`, deepening with effort by `tremorEffortExponent`. \u26D4 BOTH DEFAULT TO 0 \u2014 off, and off renders BYTE-IDENTICALLY to never mentioning them, which is what makes each one individually declinable after you hear it. Suggested starting values: driftDepth 0.05, tremorDepth 0.03 (about 0.29 dB). The drift is DOWNWARD ONLY: effort 1 means 'as authored', so it is a ceiling and there is nothing above it to drift into.\n\u2B50 THE TREMOR NOW LANDS ON HOSTED-AU TRACKS TOO (m28-bug, 2026-08-20). It used to be refused on every soundBank instrument including the GM sax, and that refusal was correct at the time: an offline bounce fed hosted AUs MIDI in 4096-frame blocks \u2014 an 11.719 Hz sampler \u2014 so a tremor returned with a sample-and-hold copy at |11.719 - rate| Hz of depth rate/(11.719 - rate), which at 8 Hz was 2.14x LOUDER than the tremor itself and still 52% at 4 Hz. The offline block is now 512 frames, a 93.75 Hz sampler, so that copy sits at |93.75 - rate| Hz \u2014 3% of the tremor at 8 Hz, measured from rendered audio \u2014 and the whole 4-8 Hz band is delivered at about 88% of authored depth. \u26D4 THE LIMIT STILL EXISTS, IT MOVED: rates above 18.75 Hz are still SUPPRESSED rather than quietly retuned, and the response says so when it happens. The DRIFT (three orders of magnitude slower) was never affected and lands everywhere.\n\nREAD THE RESPONSE. `minEffort` and `maxEffort` equal means the shape ran and varied nothing (usually a phrase-scoped pattern on notes that all sit at one point of one phrase). `phraseCount` says how many arcs were drawn. `warnings` says what will and will not be audible. On the ring form there is also `ring`, carrying the resolved `angleDegrees`, `radius`, `patternIds`, per-pattern `weights`, and the `noteWeight` / `phraseWeight` split \u2014 read the weights rather than `patternId`, which names only the NEAREST gesture and not the only one that played. On a moving dot that `ring` block describes the ORIGIN, and a `path` block describes the journey: `moved` says whether the dot travelled at all, `patternIds` lists every gesture it actually reached, and `outrunsNotes` says the motion was faster than the notes could sample it. A wander that reports one entry in `patternIds` ran and did nothing musical. MIDI clips only.",
+    inputSchema: {
+      clipId: external_exports.string().describe("Id of the MIDI clip to shape, from project_snapshot."),
+      pattern: external_exports.enum([
+        "flat",
+        "messaDiVoce",
+        "lateBloom",
+        "hairpinCrescendo",
+        "hairpinDiminuendo",
+        "terraced",
+        "sforzandoPiano",
+        "subToneEntry"
+      ]).optional().describe(
+        "ONE named gesture \u2014 the simple form. An unknown name is REFUSED naming the valid ones; it is never silently defaulted to a shape you did not ask for. Pass EITHER this OR `ringAngle`, never both, and never neither \u2014 the app refuses each of those with a sentence rather than guessing."
+      ),
+      ringAngle: external_exports.number().min(0).max(360).optional().describe(
+        "THE RING \u2014 where the dot sits, in DEGREES, on a circle of the 8 gestures. This is the blending form: instead of one gesture you get the two the dot sits between, mixed by how close it is to each. The default ring is 45\xB0 apart starting at 0: 0=flat, 45=messaDiVoce, 90=lateBloom, 135=hairpinCrescendo, 180=hairpinDiminuendo, 225=terraced, 270=sforzandoPiano, 315=subToneEntry. So 157.5 is halfway between the crescendo and the diminuendo (which cancel to a steady mid-level), and 67.5 is part messa di voce, part late bloom. Landing exactly on a number above gives that gesture EXACTLY \u2014 the blend is nearest-two, so a pattern you are not near contributes nothing at all. Only two things ever mix."
+      ),
+      ringRadius: external_exports.number().min(0).max(1).optional().describe(
+        "How far out the dot sits, 0-1. Default 1 (the full gesture). 0 is a TRUE no-op \u2014 the shape is not applied at all and nothing changes level \u2014 not 'half as loud'. \u26A0\uFE0F Not independent of `amount`: both scale the same thing, so only the PRODUCT survives (radius 0.5 with amount 1 is identical to radius 1 with amount 0.5). Requires `ringAngle`; on its own it is refused rather than defaulted."
+      ),
+      ring: external_exports.array(external_exports.string()).optional().describe(
+        "Your own ring, as pattern ids in ring order \u2014 replaces the default eight. They are spaced evenly, so N ids sit 360/N apart with the first at 0\xB0. Duplicates are allowed (a ring of copies of one pattern is a legitimate way to pin the dot). Max 32. Requires `ringAngle`; on its own it is refused rather than defaulted."
+      ),
+      path: external_exports.enum(["fixed", "orbit", "drift"]).optional().describe(
+        "HOW THE DOT MOVES while the part plays. Default 'fixed' \u2014 it stays where you put it, which is the behaviour every earlier call had.\n\u2022 'orbit' \u2014 a steady revolution round the ring, so the part travels through every gesture in turn. Set `revolutionBeats`.\n\u2022 'drift' \u2014 a seeded wander that flows from one gesture into the next and back. This is the one that sounds like a player rather than a setting. Set `pathSeed`, and optionally `scaleBeats` / `momentum` / `angleSwing`.\nWith a path, `ringAngle` and `ringRadius` stop being where the dot IS and become where you PUT it \u2014 the path is an offset from there, so nudging the origin moves the whole journey instead of cancelling it.\n\u26A0\uFE0F THE DOT IS READ ONCE PER NOTE, at the note's start. It chooses each note's gesture; it cannot shape INSIDE a note (that is what the note-scoped patterns are for). A path that moves faster than the notes arrive comes back with a warning saying so rather than aliasing quietly.\n\u26A0\uFE0F Parameters belonging to another path are REFUSED, not ignored: `revolutionBeats` on a drift is an error with a sentence. Requires `ringAngle`."
+      ),
+      pathSeed: external_exports.number().int().min(0).max(4294967295).optional().describe(
+        "WHICH wander you get, 0-4294967295. Default 0. The same seed always produces the same performance at the same clip beats \u2014 in playback, on replay, and in a bounce alike, including one that starts in the middle of the song. Change it to audition a different take of the same idea. \u26A0\uFE0F Capped at 32 bits deliberately: a JSON number is a double, so a larger seed would not survive the round trip and you would silently get a different wander back. Only means anything with path 'drift'."
+      ),
+      revolutionBeats: external_exports.number().min(0.25).max(4096).optional().describe(
+        "ORBIT ONLY. How many BEATS one full trip round the ring takes. Default 16. On the default 8-pattern ring that is one gesture every 2 beats. Long values are the useful ones: the dot is read once per note, so a revolution shorter than a few notes is heard as an alias rather than as motion, and is warned about."
+      ),
+      pathDirection: external_exports.enum(["clockwise", "counterclockwise"]).optional().describe(
+        "ORBIT ONLY. Which way round. Default 'clockwise', which is the order you listed the patterns in (or the default ring's order: flat \u2192 messaDiVoce \u2192 lateBloom \u2192 \u2026)."
+      ),
+      scaleBeats: external_exports.number().min(0.25).max(1024).optional().describe(
+        "DRIFT ONLY. How many BEATS one unit of the wander spans. Default 8 \u2014 about two bars of 4/4, which reads as phrasing rather than as wobble. Bigger is slower."
+      ),
+      octaves: external_exports.number().int().min(1).max(8).optional().describe(
+        "DRIFT ONLY. How many layers of detail the wander has. Default 4: one slow sway plus three progressively faster and quieter layers on top. 1 is a single pure sway."
+      ),
+      momentum: external_exports.number().min(0).max(1).optional().describe(
+        "DRIFT ONLY. How LAZY the wander is, 0-1. Default 0.5. 1 is one long unhurried sway; 0 is twitchy; 0.5 is the 1/f middle that human drift tends to sit near. \u26A0\uFE0F It is the spectral tilt of the noise, not a stored velocity \u2014 nothing in this feature accumulates, which is why a bounce from bar 33 matches playing through to it."
+      ),
+      angleSwing: external_exports.number().min(0).max(360).optional().describe(
+        "DRIFT ONLY. The furthest the dot ever wanders from `ringAngle`, in DEGREES either side. Default 45 \u2014 one pattern spacing on the default ring, so it reaches each neighbour and no further. This is an exact bound, not a typical value. A swing much smaller than the gap between gestures comes back with a warning that the dot moved and never left the gesture it started on."
+      ),
+      radiusSwing: external_exports.number().min(0).max(1).optional().describe(
+        "DRIFT ONLY. How far the dot also wanders IN AND OUT, 0-1. Default 0 \u2014 the wander changes WHICH gesture is playing, not how strongly it is applied, so one control has one visible outcome. Raise it to let the intensity breathe too."
+      ),
+      noteIds: external_exports.array(external_exports.string()).optional().describe(
+        "Ids of the notes to shape (from clip_get_notes). OMIT to shape every note in the clip. Phrases are still measured over the WHOLE clip, so shaping the middle three notes of a phrase places them where they really sit in it rather than renormalising them into a phrase of their own. An id not in the clip is refused outright \u2014 nothing is written."
+      ),
+      amount: external_exports.number().min(0).max(1).optional().describe(
+        "How strongly the pattern is applied, 0-1. Default 1. 0 is a VALID no-op on the shaping axis \u2014 a flat lane at peakValue \u2014 not an error, and it says so in warnings."
+      ),
+      maxGapBeats: external_exports.number().min(0).max(16).optional().describe(
+        "A gap larger than this counts as a BREATH and splits the phrase, so a hairpin starts over after it. Default 0.125 (a thirty-second note at a quarter-note beat) \u2014 the same threshold, and the same reasoning, as clip_humanize's maxGapBeats. Only the phrase-scoped patterns consult it."
+      ),
+      loudnessDepth: external_exports.number().min(0).max(1).optional().describe(
+        "How far a phrase-scoped shape may pull a quiet note's peak down, 0-1. Default 0.55, which is about 9 dB across a full hairpin. \u26A0\uFE0F Not linear in dB: CC 11 is a square law, so halving it is -12 dB, not -6."
+      ),
+      swellDepth: external_exports.number().min(0).max(1).optional().describe(
+        "How much a quiet note's own internal swell shrinks along with its level, 0-1. Default 0.5, on the reasoning that a player at low pressure has less to shape with. Set 0 to vary only the level and keep every note's internal shape identical."
+      ),
+      airEnforced: external_exports.boolean().optional().describe(
+        "THE AIR BUDGET SWITCH. \u26D4 Default FALSE, and that is a decision, not an oversight: turning it on lets the model OVERRIDE what you wrote, pulling a phrase down when the simulated player runs out of breath, so it is opted into rather than assumed. With it false you still get the full `air` report saying what it WOULD have done \u2014 which is the cheapest way to find out whether a part is over-long before changing anything. A note is never taken to silence and no note's length or existence ever changes; the phrase sags, it does not stop."
+      ),
+      airCapacitySeconds: external_exports.number().min(0.25).max(3600).optional().describe(
+        "How many SECONDS the player can sustain the part AS AUTHORED before the lungful is gone. Default 6. This is an estimate and it is the first knob to reach for when the budget is firing more than you want \u2014 raise it. (There is no separate `referenceEffort`: it would be algebraically the same axis as this number.)"
+      ),
+      airConsumptionExponent: external_exports.number().min(0).max(8).optional().describe(
+        "How much faster loud playing burns air: rate = effort^this. Default 1.5, superlinear because blowing pressure rises steeply into fortissimo. At 1.5 a phrase at half the authored level lasts about 2.8x longer. 0 makes the level irrelevant."
+      ),
+      airRefillSecondsPerSecond: external_exports.number().min(0).max(100).optional().describe(
+        "How much of a lungful one second of rest gives back. Default 0.5, so a 2-second rest refills completely. \u26A0\uFE0F If the part's rests are shorter than this can keep up with, the sag ACCUMULATES across the part instead of resetting at each breath \u2014 the response reports that as `air.neverRecovered` rather than leaving you to hear it."
+      ),
+      airMinBreathSeconds: external_exports.number().min(0).max(60).optional().describe(
+        "A rest shorter than this many SECONDS is an articulation, not a breath, and refills nothing. Default 0.15. \u26A0\uFE0F This is in SECONDS while `maxGapBeats` is in BEATS, so at a fast tempo a gap can split the phrase and still be too quick to breathe in. That is not a contradiction, it is a player whose rest was too short \u2014 the response says so with breath.kind 'tooShort', which is a different answer from 'none' (the first phrase, which has nothing before it)."
+      ),
+      airReserveFraction: external_exports.number().min(0).max(1).optional().describe(
+        "Below this fraction of a lungful the player starts running out, and effort is scaled toward it so the phrase SAGS rather than stopping. Default 0.25. A note starting exactly AT the reserve is left alone; only notes below it lose anything."
+      ),
+      driftDepth: external_exports.number().min(0).max(1).optional().describe(
+        "How far a slow 1/f drift may pull the effort baseline BELOW what you wrote, as a fraction. Default 0 \u2014 off, and off is byte-identical to not mentioning it. 0.05 is the design's suggested starting value. DOWNWARD ONLY: effort 1 means 'as authored'."
+      ),
+      driftScaleBeats: external_exports.number().min(0.01).max(4096).optional().describe(
+        "The drift's period in BEATS. Default 8 (two bars of 4/4). Deliberately far slower than any note rate: effort is sampled once per note, so a fast drift would be aliased by the note grid rather than heard."
+      ),
+      driftOctaves: external_exports.number().int().min(1).max(8).optional().describe(
+        "How many fBm octaves the drift is built from. Default 4, persistence fixed at 0.5, which is the 1/f spectrum. \u26A0\uFE0F '1/f breath pressure' is a MODELLING CHOICE this design made, not a measured finding \u2014 no measurement of 1/f structure in wind-instrument breath pressure was found."
+      ),
+      tremorDepth: external_exports.number().min(0).max(1).optional().describe(
+        "Peak-to-trough depth of the involuntary micro-tremor INSIDE each note, as a fraction of the contour level it rides on. Default 0 \u2014 off, and off is byte-identical. 0.03 is the suggested value and measures about 0.29 dB peak-to-trough; the line is 0.0755 dB per CC of travel, MEASURED on the built-in sampler at \xB11, \xB12, \xB14 and \xB18 CC. \u26D4 SUPPRESSED on hosted-AU tracks \u2014 read the warnings."
+      ),
+      tremorRateHz: external_exports.number().min(0.2).max(20).optional().describe(
+        "Tremor rate in Hz, 0.2-20. Default 4.565 = the vibrato rate x 0.83, so tremor and vibrato are not one oscillator at one rate summing into a single deeper vibrato. At the BOTTOM of the 4-8 Hz physiological band. On a hosted AU an offline bounce re-samples this lane at 93.75 Hz, so anything up to 18.75 Hz is written; above that it is suppressed and the response says so. The band is the vibrato band: below 0.2 Hz a tremor is a drift, which is what driftDepth is for, and a rate outside it is REJECTED rather than clamped so you are never handed a different gesture under the name you asked for."
+      ),
+      tremorEffortExponent: external_exports.number().min(0).max(8).optional().describe(
+        "How the tremor deepens with effort: depth is scaled by effort^this. Default 1 (linear). 0 makes the tremor the same depth however hard the player is blowing."
+      ),
+      peakValue: external_exports.number().int().min(0).max(127).optional().describe(
+        "CC value at FULL effort, 0-127. Default 127 \u2014 the lane's neutral, so the loudest instant is exactly as loud as the note with no contour at all, and applying this can never quietly drop the level of a part you already balanced."
+      ),
+      expressionCC: external_exports.number().int().min(0).max(127).optional().describe(
+        "Which CC carries the shape. Default 11 (expression) \u2014 the one the built-in sampler routes to amplitude with no opt-in."
+      ),
+      attackSettleSeconds: external_exports.number().min(0).max(1).optional().describe(
+        "Seconds from the attack to the settling dip. Default 0.05. A pattern that has its own early dip (sforzandoPiano) overrides this per note so its accent lands where the gesture says."
+      ),
+      expressionSpacingSeconds: external_exports.number().min(1e-3).max(1).optional().describe(
+        "Seconds between expression points. Default 0.02. Controller lanes are STEPWISE, so a dense run is what makes a curve instead of a staircase."
+      ),
+      vibratoOnsetSeconds: external_exports.number().min(0).max(10).optional().describe(
+        "Seconds of STRAIGHT playing before vibrato starts. Default 0.5. A note shorter than this plus one cycle gets no vibrato at all."
+      ),
+      vibratoRateHz: external_exports.number().min(0.2).max(20).optional().describe("Vibrato rate in Hz. Default 5.5."),
+      vibratoDepthCents: external_exports.number().min(0).max(200).optional().describe(
+        "Peak vibrato width in CENTS (a \xB1 figure). Default 12; 0 turns vibrato off. IGNORED on a track hosting an Audio Unit, where vibrato is suppressed for the measured aliasing reason above \u2014 the response reports 0 notes with vibrato rather than pretending."
+      ),
+      vibratoBloomSeconds: external_exports.number().min(0).max(10).optional().describe("Seconds for the vibrato to widen from nothing to full depth. Default 0.7."),
+      vibratoReleaseSeconds: external_exports.number().min(0).max(10).optional().describe(
+        "Seconds before the note's end over which vibrato relaxes back to centre. Default 0.08, which also guarantees the next note cannot start detuned by this one."
+      ),
+      sharpenCents: external_exports.number().min(-200).max(200).optional().describe(
+        "Peak micro-sharpening in CENTS at full effort, resolving as the shape falls. Default 4. It rides the pitch-bend lane on EVERY instrument kind, including hosted Audio Units, because it is a seconds-scale curve far below the block-rate limit that forbids vibrato there."
+      ),
+      bendSpacingSeconds: external_exports.number().min(1e-3).max(1).optional().describe(
+        "Seconds between emitted pitch-bend points. Default 0.008 \u2014 about 23 points per cycle at the default vibrato rate."
+      ),
+      bendRangeSemitones: external_exports.number().min(0.01).max(48).optional().describe(
+        "The instrument's pitch-bend range in semitones for a full \xB18192 deflection, so the cents figures land correctly. Default 2 \u2014 exactly the built-in sampler, and a hosted AUSampler was MEASURED at 2.0155, so the default is right to 0.78% there too."
+      )
+    }
+  },
+  async ({
+    clipId,
+    pattern,
+    ringAngle,
+    ringRadius,
+    ring,
+    path: path6,
+    pathSeed,
+    revolutionBeats,
+    pathDirection,
+    scaleBeats,
+    octaves,
+    momentum,
+    angleSwing,
+    radiusSwing,
+    noteIds,
+    amount,
+    maxGapBeats,
+    airEnforced,
+    driftDepth,
+    driftScaleBeats,
+    driftOctaves,
+    tremorDepth,
+    tremorRateHz,
+    tremorEffortExponent,
+    airCapacitySeconds,
+    airConsumptionExponent,
+    airRefillSecondsPerSecond,
+    airMinBreathSeconds,
+    airReserveFraction,
+    loudnessDepth,
+    swellDepth,
+    peakValue,
+    expressionCC,
+    attackSettleSeconds,
+    expressionSpacingSeconds,
+    vibratoOnsetSeconds,
+    vibratoRateHz,
+    vibratoDepthCents,
+    vibratoBloomSeconds,
+    vibratoReleaseSeconds,
+    sharpenCents,
+    bendSpacingSeconds,
+    bendRangeSemitones
+  }) => toToolResult(
+    () => bridge.send("clip.applyEffortShape", {
+      clipId,
+      pattern,
+      ringAngle,
+      ringRadius,
+      ring,
+      path: path6,
+      pathSeed,
+      revolutionBeats,
+      pathDirection,
+      scaleBeats,
+      octaves,
+      momentum,
+      angleSwing,
+      radiusSwing,
+      noteIds,
+      amount,
+      maxGapBeats,
+      airEnforced,
+      driftDepth,
+      driftScaleBeats,
+      driftOctaves,
+      tremorDepth,
+      tremorRateHz,
+      tremorEffortExponent,
+      airCapacitySeconds,
+      airConsumptionExponent,
+      airRefillSecondsPerSecond,
+      airMinBreathSeconds,
+      airReserveFraction,
+      loudnessDepth,
+      swellDepth,
+      peakValue,
+      expressionCC,
+      attackSettleSeconds,
+      expressionSpacingSeconds,
+      vibratoOnsetSeconds,
+      vibratoRateHz,
+      vibratoDepthCents,
+      vibratoBloomSeconds,
+      vibratoReleaseSeconds,
+      sharpenCents,
+      bendSpacingSeconds,
+      bendRangeSemitones
+    })
+  )
+);
+registerTool(
   "arrange_insert_bars",
   {
     title: "Insert empty bars across the whole project",
@@ -45325,7 +46735,7 @@ var compSegmentSchema = external_exports.object({
   laneId: external_exports.string().uuid().describe("Id of the lane (take) this segment plays, from take_group's result or project_snapshot."),
   startBeat: external_exports.number().describe("Segment start, in ABSOLUTE timeline beats (not lane-relative)."),
   endBeat: external_exports.number().describe("Segment end, in ABSOLUTE timeline beats. Must be greater than startBeat.")
-});
+}).strict();
 registerTool(
   "take_group",
   {
@@ -45481,7 +46891,7 @@ registerTool(
   "mixer_set_master_volume",
   {
     title: "Set master volume",
-    description: "Set the master output gain of the whole mix, as a linear gain multiplier, where 1.0 is unity gain (0 dB, no change). Range 0-2: 0 is silence, 1 is unity, 2 is roughly +6 dB. This is linear gain, not decibels. To set an individual track's gain instead, use track_set_volume.",
+    description: 'Set the master output gain of the whole mix, as a linear gain multiplier, where 1.0 is unity gain (0 dB, no change). Range 0-2: 0 is silence, 1 is unity, 2 is roughly +6 dB. This is linear gain, not decibels. To set an individual track\'s gain instead, use track_set_volume. 2.0 is a HARD CEILING, not a soft one: a value above 2 is REJECTED by this tool\'s schema (it is not silently clamped), and 2.0 itself is the loudest this fader goes. When a mix needs more than +6 dB of makeup to reach a loudness target \u2014 common with quiet General-MIDI-sourced material \u2014 do NOT keep pushing here: add a `gain` insert at the FRONT of the master chain (fx_add with trackId "master", kind "gain", ahead of the eq/limiter) and take the remaining makeup there \u2014 its `gainLinear` param runs 0-4 (\u2248 +12 dB), and inserts stack if you somehow need more. Returns `{masterVolume}` \u2014 and, ONLY when a master volume automation lane is actually governing (enabled and holding at least one point), also `{automationControlled: true, automationPointCount}`. Those two keys are ABSENT in the ordinary case. When they appear, your value was stored (it is undoable and rules again the moment the lane is disabled or emptied) but the LANE, not this fader, decides what is heard and what renders \u2014 edit the lane with automation_set_points (trackId "master"), or disable it with automation_set_lane_enabled, if you meant this level to be audible.',
     inputSchema: {
       volume: external_exports.number().min(0).max(2).describe("Linear master gain, 0-2, where 0 = silence, 1 = unity gain (0 dB), 2 = +6 dB.")
     }
@@ -45494,15 +46904,21 @@ var mixerPresetSchema = external_exports.enum([
   "bass-tight",
   "master-glue",
   "warm-keys",
-  "clean-boost"
+  "clean-boost",
+  "bass-round",
+  "guitar-crunch",
+  "acoustic-sparkle",
+  "horn-section",
+  "drum-room",
+  "lofi-tape"
 ]).describe(
-  "Which curated mixer preset to apply \u2014 each is a small, ready-made insert chain of built-in effects. `drum-bus-glue`: gentle ~4:1 compression plus a touch of low-end weight and upper-mid snap, to glue a drum group into one punchy kit. `vocal-presence`: an EQ that cuts low rumble, lifts presence around 3 kHz and adds air, then ~3:1 compression \u2014 makes a lead vocal sit forward and clear. `bass-tight`: an EQ trimming sub rumble and low-mid mud, then firm ~4:1 fast compression \u2014 keeps a bass part steady and defined. `master-glue`: light ~2:1 compression then a -1 dB brick-wall limiter \u2014 ties a whole mix together and holds the peaks just under clipping (use on the master or a mix bus). `warm-keys`: EQ only \u2014 eases off the top end and adds a little low-end body for a warmer keyboard/synth tone. `clean-boost`: a single gain stage at about +3 dB with no tone change \u2014 a clean level lift."
+  "Which curated mixer preset to apply \u2014 each is a small, ready-made insert chain of built-in effects. `drum-bus-glue`: gentle ~4:1 compression plus a touch of low-end weight and upper-mid snap, to glue a drum group into one punchy kit. `vocal-presence`: an EQ that cuts low rumble, lifts presence around 3 kHz and adds air, then ~3:1 compression \u2014 makes a lead vocal sit forward and clear. `bass-tight`: an EQ trimming sub rumble and low-mid mud, then firm ~4:1 fast compression \u2014 keeps a bass part steady and defined. `master-glue`: light ~2:1 compression then a -1 dB brick-wall limiter \u2014 ties a whole mix together and holds the peaks just under clipping (use on the master or a mix bus). `warm-keys`: EQ only \u2014 eases off the top end and adds a little low-end body for a warmer keyboard/synth tone. `clean-boost`: a single gain stage at about +3 dB with no tone change \u2014 a clean level lift. `bass-round`: the deliberate OPPOSITE of bass-tight \u2014 a low-shelf lift for weight, then a LOW ~2.5:1 ratio with a SLOW 20 ms attack so each note blooms before it is caught; pick it for blues, jazz, soul and anything played with feel, and pick bass-tight when the bass must sit rock-steady under a dense mix. `guitar-crunch`: saturator grit then an EQ scooping low-mid mud and lifting bite \u2014 a driven electric guitar that cuts through a band. `acoustic-sparkle`: EQ only \u2014 takes out the boxy honk and brings back string shimmer and air on an acoustic guitar. `horn-section`: lifts the brassy core, softens the harsh edge, then ~3:1 compression so the loud stabs stop jumping out. `drum-room`: a short, damped reverb at a modest 18% mix \u2014 the kit breathes without the mix going wet. `lofi-tape`: gentle saturation plus a high-shelf cut for the warm, dulled sound of old tape or vinyl."
 );
 registerTool(
   "mixer_apply_preset",
   {
     title: "Apply a curated mixer preset to a track or bus",
-    description: "Apply a named, ready-made mixer preset to one track or bus strip. The preset's insert chain REPLACES the strip's current insert chain wholesale (any effects already there are removed) as ONE undoable step \u2014 a single undo restores the exact previous chain. Presets shape TONE only: the strip's volume, pan, and sends are left untouched. Works on audio, instrument, and bus tracks. Choose `preset` from: drum-bus-glue (glue a drum group), vocal-presence (forward, clear lead vocal), bass-tight (steady, defined bass), master-glue (tie a whole mix together and stop it clipping), warm-keys (warmer, softer synth/keys tone), clean-boost (a clean ~+3 dB level lift). To fine-tune afterwards, nudge individual effects with fx_set_param, or build a chain by hand with fx_add. Returns `{trackId, effects}`: the strip's full new insert chain (same shape as project_snapshot's per-track `effects` array), so you can see exactly what the preset laid down.",
+    description: "Apply a named, ready-made mixer preset to one track or bus strip. The preset's insert chain REPLACES the strip's current insert chain wholesale (any effects already there are removed) as ONE undoable step \u2014 a single undo restores the exact previous chain. Presets shape TONE only: the strip's volume, pan, and sends are left untouched. Works on audio, instrument, and bus tracks. Choose `preset` from: drum-bus-glue (glue a drum group), vocal-presence (forward, clear lead vocal), bass-tight (steady, defined bass), master-glue (tie a whole mix together and stop it clipping), warm-keys (warmer, softer synth/keys tone), clean-boost (a clean ~+3 dB level lift), bass-round (warm, blooming bass \u2014 the opposite of bass-tight), guitar-crunch (driven electric guitar), acoustic-sparkle (open, shimmering acoustic guitar), horn-section (bold, even brass), drum-room (a small live room around the kit), lofi-tape (warm, dulled tape/vinyl character). To fine-tune afterwards, nudge individual effects with fx_set_param, or build a chain by hand with fx_add. Returns `{trackId, effects}`: the strip's full new insert chain (same shape as project_snapshot's per-track `effects` array), so you can see exactly what the preset laid down.",
     inputSchema: {
       trackId: external_exports.string().min(1).describe("Id of the track or bus to apply the preset to, from project_snapshot."),
       preset: mixerPresetSchema
@@ -45620,6 +47036,30 @@ registerTool(
   },
   async () => toToolResult(() => bridge.send("reference.compare"))
 );
+registerTool(
+  "audio_profile_file",
+  {
+    title: "Windowed peak/RMS profile of a file on disk",
+    description: "Read an ARBITRARY audio file on disk (any absolute path -- not a project track, not a clip, not the reference slot) and report SAMPLE peak + RMS per consecutive time window, plus a file-header block (duration, sample rate, channel count, on-disk bit depth/float-ness -- the ffprobe readback). This answers \"what is the peak level between 53s and 54s of this WAV\" -- a WINDOWING question. It is NOT a loudness meter and NOT a substitute for one: `peakDb` is the raw inter-sample maximum, NOT the 4x-oversampled BS.1770 true peak render_measure_loudness/reference_analyze report as `truePeakDbtp` -- a window can read under 0 dBFS sample peak here and still exceed 0 dBTP true peak between samples. Use render_measure_loudness (the rendered SESSION, before quantization) or reference_analyze (a whole file, occupying the project's one reference slot) for LUFS/true-peak questions; use this tool when you need to see what a specific stretch of a file on disk actually contains -- e.g. verifying a bounce/render landed correctly, or checking exactly where a tail decays to silence, without leaving the app. Returns `{durationSeconds, sampleRateHz, channelCount, bitDepth?, isFloat?, windows: [{startSeconds, durationSeconds, peakDb?, rmsDb?}]}`. The header `durationSeconds` is the WHOLE file, independent of any fromSeconds/durationSeconds sub-range requested; `bitDepth`/`isFloat` are omitted for formats with no fixed PCM bit depth (compressed codecs) -- never fabricated. Each window's own `durationSeconds` is usually the requested `windowSeconds`, except the LAST window of the profiled range, which truncates at EOF (or at fromSeconds+durationSeconds) and reads shorter -- read it rather than assuming every window is the same width. `rmsDb` combines all channels using the same rule as `peakDb` (max-abs peak across channels, combined-channel RMS -- deliberately never a mono downmix first, which would under-report anti-phase content, i.e. a loud-but-opposite-polarity L/R pair). A digitally-silent window OMITS `peakDb`/`rmsDb` rather than reporting 0 -- honest absence (JSON has no '-infinity dB'), the same convention render_measure_loudness/reference_analyze use for gated-silent audio; treat a missing field as silence, never as a number. Read-only: never writes anything, never copies the file, and never touches the project's reference slot or the References library -- call this as often as you like without side effects. Errors readably: no file at path (names the path); no audio engine attached (a profile is never fabricated, so this needs the app running).",
+    inputSchema: {
+      path: external_exports.string().describe(
+        "Required. Absolute (or ~-prefixed) path to ANY audio file on disk -- not a project track, clip id, or the reference slot. Read-only: never copied, never modified, never imported anywhere."
+      ),
+      windowSeconds: external_exports.number().gt(0).describe(
+        "Required, > 0. Width of each analysis window in seconds -- e.g. 1.0 for one peak/RMS reading per second of audio. Smaller windows give finer time resolution at the cost of more windows in the response."
+      ),
+      fromSeconds: external_exports.number().min(0).optional().default(0).describe(
+        "Start of the profiled range, in seconds from the start of the FILE itself (not the project timeline). Must be >= 0. Defaults to 0 (the start of the file). Every window's `startSeconds` is an ABSOLUTE file position, so fromSeconds=53 with windowSeconds=1 yields windows starting at 53, 54, 55, ..."
+      ),
+      durationSeconds: external_exports.number().gt(0).optional().describe(
+        "Length of the profiled range in seconds, starting at fromSeconds. Must be > 0 when given. Defaults to the rest of the file (everything from fromSeconds to EOF). The final window truncates at this boundary (or at EOF) and reports its own, shorter `durationSeconds`."
+      )
+    }
+  },
+  async ({ path: path6, windowSeconds, fromSeconds, durationSeconds }) => toToolResult(
+    () => bridge.send("audio.profileFile", { path: path6, windowSeconds, fromSeconds, durationSeconds })
+  )
+);
 server.registerTool(
   "engine_performance_stats",
   {
@@ -45670,44 +47110,76 @@ server.registerTool(
   },
   async () => toToolResult(() => bridge.send("app.connectionInfo"))
 );
-var songSkeletonGenreSchema = external_exports.enum(["pop", "house", "hip-hop", "rock", "ballad"]).describe(
-  "Which genre skeleton to scaffold \u2014 each sets a default tempo and a ready-made track roster. `pop` (120 BPM): Drums, Bass (bass-tight preset), Keys (warm-keys), Lead, Vocals (vocal-presence). `house` (124 BPM): Drums, Bass (bass-tight), Synth, Pads (warm-keys), FX. `hip-hop` (90 BPM): Drums, 808 Bass (bass-tight), Samples, Lead, Vocals (vocal-presence). `rock` (140 BPM): Drums, Bass (bass-tight), Rhythm Guitar, Lead Guitar, Vocals (vocal-presence). `ballad` (72 BPM): Piano (warm-keys), Strings, Bass (bass-tight), Vocals (vocal-presence). Instrument tracks host built-in instruments; audio tracks take recordings or imports. Named mixer presets are applied to the strips shown in parentheses."
+var songSkeletonGenreSchema = external_exports.enum([
+  "pop",
+  "house",
+  "hip-hop",
+  "rock",
+  "ballad",
+  "blues",
+  "jazz",
+  "country",
+  "r-and-b",
+  "funk",
+  "metal",
+  "folk",
+  "reggae",
+  "lo-fi"
+]).describe(
+  "Which genre skeleton to scaffold \u2014 each sets a default tempo and a ready-made track roster. `pop` (120 BPM): Drums, Bass (bass-tight preset), Keys (warm-keys), Lead, Vocals (vocal-presence). `house` (124 BPM): Drums, Bass (bass-tight), Synth, Pads (warm-keys), FX. `hip-hop` (90 BPM): Drums, 808 Bass (bass-tight), Samples, Lead, Vocals (vocal-presence). `rock` (140 BPM): Drums, Bass (bass-tight), Rhythm Guitar, Lead Guitar, Vocals (vocal-presence). `ballad` (72 BPM): Piano (warm-keys), Strings, Bass (bass-tight), Vocals (vocal-presence). `blues` (84 BPM): Drums (drum-room), Bass (bass-round), Rhythm Guitar, Lead Guitar (guitar-crunch), Organ (warm-keys), Vocals (vocal-presence) \u2014 and a genuine TWELVE-BAR form (Intro 4, Head 12, Verse 12, Solo 12, Verse 12, Outro 4). `jazz` (132 BPM): Drums (drum-room), Upright Bass (bass-round), Piano (warm-keys), Horn (horn-section), Guitar \u2014 a combo with no vocal track, in head/solos/head form with 32-bar choruses. `country` (100 BPM): Drums (drum-bus-glue), Bass (bass-round), Acoustic Guitar (acoustic-sparkle), Electric Guitar, Pedal Steel, Vocals (vocal-presence). `r-and-b` (88 BPM): Drums (drum-bus-glue), Bass (bass-round), Keys (warm-keys), Pads, Lead Vocal (vocal-presence), Backing Vocals \u2014 with a Pre-Chorus in the form. `funk` (108 BPM): Drums (drum-bus-glue), Bass (bass-tight \u2014 funk's bass wants the clamp), Rhythm Guitar, Clavinet (warm-keys), Horns (horn-section), Vocals (vocal-presence), with 16-bar verses and a Breakdown. `metal` (170 BPM): Drums (drum-bus-glue), Bass (bass-tight), Rhythm Guitar L and Rhythm Guitar R (both guitar-crunch, for the hard-panned double-track), Lead Guitar (guitar-crunch), Vocals (vocal-presence). `folk` (96 BPM): Acoustic Guitar (acoustic-sparkle), Vocals (vocal-presence), Bass (bass-round), Fiddle, Percussion. `reggae` (76 BPM): Drums (drum-bus-glue), Bass (bass-round), Skank Guitar, Organ (warm-keys), Vocals (vocal-presence), with a Dub Break. `lo-fi` (78 BPM): Drums (lofi-tape), Bass (bass-round), Keys (warm-keys), Samples (lofi-tape), Vinyl FX \u2014 a loop-based form (Intro, Loop A, Loop B, Loop A, Outro) rather than verse/chorus. Instrument tracks host built-in instruments; audio tracks take recordings or imports. Named mixer presets are applied to the strips shown in parentheses. If none of these fits, keep the nearest `genre` and pass your own `tracks` roster and `sections` \u2014 both override the genre's defaults outright."
 );
 var songSkeletonSectionSchema = external_exports.object({
   name: external_exports.string().min(1).max(40).describe(`Section label, e.g. "Verse", "Chorus", "Drop" (1-40 characters). Becomes the guide clip's name.`),
   bars: external_exports.number().int().min(1).max(64).describe("Section length in bars (whole number, 1-64). 4/4 is assumed, so one bar = 4 beats.")
 }).describe("One arrangement section: a named span measured in bars.");
+var songSkeletonTrackSchema = external_exports.object({
+  name: external_exports.string().min(1).max(40).describe('Track name, e.g. "Drums", "Rhodes", "Lead Vocal" (1-40 characters).'),
+  kind: external_exports.enum(["instrument", "audio"]).describe(
+    '"instrument" hosts a built-in instrument and takes MIDI clips (use it for every playable part); "audio" takes recordings and imported files. Skeletons never create buses \u2014 add one afterwards with track_add if you need it.'
+  ),
+  mixerPreset: external_exports.string().optional().describe(
+    'Optional mixer preset applied to this strip as a fresh insert chain, by name (see mixer_apply_preset for the catalog \u2014 e.g. "bass-tight", "vocal-presence", "warm-keys"). Omit for an empty chain. An unknown name is a field-named error listing every valid preset.'
+  )
+}).describe("One roster track: a name, its kind, and an optional mixer preset.");
 registerTool(
   "macro_song_skeleton",
   {
     title: "Scaffold a whole song: tempo, tracks, sections, and loop in one step",
-    description: "Scaffold a working session for a genre in ONE undoable step. Sets the tempo, adds the genre's named tracks (instrument and audio, with curated mixer presets pre-applied where noted), lays the song's sections out as named EMPTY MIDI clips on a dedicated instrument \"Arrangement\" guide track (each clip positioned back-to-back: its start = the running sum of prior section lengths, its length = bars x 4 beats), and enables the loop region over the whole arrangement (start 0 to the total length). This is ADDITIVE \u2014 it never wipes the project: everything is appended to whatever is already there (use project_new first if you want a clean slate). A single edit_undo reverts the ENTIRE scaffold at once. Pass `genre` (required) to use its defaults, or override the tempo with `tempoBPM` (20-400) and/or the layout with `sections`. An unknown genre returns an error listing every valid genre; a bad tempo or section is a field-named error. Returns `{genre, tempoBPM, tracks: [{id, name}], sectionClips: [{name, startBeat, lengthBeats}], loopStart, loopEnd, arrangementTrackId}` with real ids \u2014 `tracks` lists every created track (the roster then the Arrangement track last).",
+    description: 'Scaffold a working session for a genre in ONE undoable step. Sets the tempo, adds the genre\'s named tracks (instrument and audio, with curated mixer presets pre-applied where noted), lays the song\'s sections out as named EMPTY MIDI clips on a dedicated instrument "Arrangement" guide track (each clip positioned back-to-back: its start = the running sum of prior section lengths, its length = bars x 4 beats), DROPS A REAL SESSION MARKER at every section start (so marker_list returns the song\'s beat map immediately \u2014 you do NOT have to lay the section map by hand or re-derive it for a later composer/mix step; each marker is named exactly like its section, repeats included, so disambiguate by beat, and each is addressable by marker_rename / marker_move / marker_remove), and enables the loop region over the whole arrangement (start 0 to the total length). This is ADDITIVE \u2014 it never wipes the project: everything is appended to whatever is already there (use project_new first if you want a clean slate), and markers that already existed survive, merged into beat order. A single edit_undo reverts the ENTIRE scaffold at once. Pass `genre` (required) to use its defaults, or override the tempo with `tempoBPM` (20-400), the layout with `sections`, and/or the track roster with `tracks`. `tracks` replaces THE GENRE ROSTER ONLY: the "Arrangement" guide track is ALWAYS added last, with its section clips and markers, no matter what you pass \u2014 you cannot suppress, reorder, or displace it (and a roster track of your own named "Arrangement" is allowed, it just sits in the roster with the real guide track after it). `genre` stays required even with a full roster override \u2014 it supplies the default tempo. An unknown genre returns an error listing every valid genre; a bad tempo, section, or roster track is a field-named error. Returns `{genre, tempoBPM, tracks: [{id, name}], sectionClips: [{name, startBeat, lengthBeats}], markers: [{id, name, beat}], loopStart, loopEnd, arrangementTrackId}` with real ids \u2014 `tracks` lists every created track (the roster then the Arrangement track last), and `markers` lists just the ones this call created (marker_list returns the whole project\'s).',
     inputSchema: {
       genre: songSkeletonGenreSchema,
       tempoBPM: external_exports.number().min(20).max(400).optional().describe("Optional tempo in BPM (20-400). Omit to use the genre's default tempo."),
       sections: external_exports.array(songSkeletonSectionSchema).min(1).max(16).optional().describe(
         "Optional custom section layout (1-16 sections), replacing the genre's default arrangement. Each section is {name, bars}; sections are laid out contiguously in order. Omit to use the genre's default sections."
+      ),
+      tracks: external_exports.array(songSkeletonTrackSchema).min(1).max(24).optional().describe(
+        `Optional custom track roster (1-24 tracks), replacing the genre's default roster. Tracks are created in the order given, each {name, kind, mixerPreset?}. The "Arrangement" guide track is ALWAYS appended after this roster regardless \u2014 the section clips and beat-map markers are what this macro exists for, so an override can never remove or move them. Omit to use the genre's default roster.`
       )
     }
   },
-  async ({ genre, tempoBPM, sections }) => toToolResult(() => bridge.send("macro.songSkeleton", { genre, tempoBPM, sections }))
+  async ({ genre, tempoBPM, sections, tracks }) => toToolResult(() => bridge.send("macro.songSkeleton", { genre, tempoBPM, sections, tracks }))
 );
 var automationTargetSchema = external_exports.discriminatedUnion("type", [
+  // `.strict()` on each discriminated-union member (m30-c): closes the
+  // same per-element hole for automation_add_lane's `target` — a typo'd
+  // field (e.g. "sendld") would otherwise be silently stripped instead of
+  // rejected. `.strict()` still returns a ZodObject, so discriminatedUnion
+  // accepts it unchanged.
   external_exports.object({
     type: external_exports.literal("volume").describe("Automate the track's fader volume (linear gain multiplier).")
-  }),
+  }).strict(),
   external_exports.object({
     type: external_exports.literal("pan").describe("Automate the track's pan position.")
-  }),
+  }).strict(),
   external_exports.object({
     type: external_exports.literal("sendLevel").describe("Automate one send's level (see `sendId`). Rejected in v0 \u2014 no render path yet."),
     sendId: external_exports.string().min(1).describe("Id of the send to automate, from track_add_send's result or project_snapshot.")
-  }),
+  }).strict(),
   external_exports.object({
     type: external_exports.literal("effectParam").describe("Automate one parameter of a built-in effect (see `effectId`/`param`)."),
     effectId: external_exports.string().min(1).describe("Id of the effect to automate, from fx_add's result or project_snapshot."),
     param: external_exports.string().min(1).describe("Exact parameter name, as listed by fx_describe for the effect's kind.")
-  })
+  }).strict()
 ]).describe(
   "What this lane drives on the track, by discriminator `type`. `volume`: the track fader gain \u2014 while the lane is enabled it REPLACES manual fader control (track_set_volume), the way to draw fades, swells, and rides \u2014 no other fields. `pan`: the track pan, same override behavior as volume \u2014 no other fields. `sendLevel` (needs `sendId`, from track_add_send/project_snapshot): one send's level \u2014 REJECTED in v0 (automation_add_lane errors: send-level automation has no render path yet; the shape is accepted now so projects stay forward-compatible). `effectParam` (needs `effectId` from fx_add/project_snapshot, and `param` \u2014 the EXACT name from fx_describe for that effect's kind): one parameter of a BUILT-IN effect already in the track's insert chain \u2014 use it for filter sweeps, reverb-mix rises, delay-feedback build-ups, etc.; built-in kinds (gain, eq, compressor, limiter, reverb, delay, saturator, gate, chorus, bassEnhancer) work today. `effectParam` is REJECTED in v0 when the effect is a hosted Audio Unit (`kind: \"audioUnit\"` from fx_add), since its generic parameter surface is empty."
 );
@@ -45721,12 +47193,12 @@ var automationPointSchema = external_exports.object({
   curve: external_exports.enum(["linear", "hold"]).optional().describe(
     "Interpolation of the segment LEAVING this point toward the next one. `linear` (the default when omitted) ramps smoothly; `hold` stays flat at this point's value until the next point steps. Has no effect on the lane's last point (nothing follows it)."
   )
-});
+}).strict();
 registerTool(
   "automation_add_lane",
   {
     title: "Add an automation lane to a track",
-    description: 'Create an automation lane on a track for one target (see `target`), so you can then draw a curve into it with automation_set_points \u2014 the primitive behind volume/pan rides, fades, and (for built-in effects already in the track\'s insert chain) parameter sweeps, e.g. a filter cutoff opening across a build or a reverb mix rising into a chorus. A track holds AT MOST ONE lane per target: calling this again for a target that already has a lane is a safe no-op that returns the EXISTING lane unchanged (fine to call defensively before automation_set_points). A new lane starts EMPTY (no points) and enabled; an empty lane is INERT \u2014 it has no audible effect until points are added. `target: {type: "sendLevel", ...}` and `{type: "effectParam", ...}` on a hosted Audio Unit effect are rejected in v0 with a readable error (no render path/parameter surface yet \u2014 see `target`\'s own description). MASTER VOLUME: pass `trackId` as the exact string "master" (m15-c) to automate the whole mix\'s master output volume instead of a track. The master lane accepts the `volume` target ONLY \u2014 a `pan`, `sendLevel`, or `effectParam` target on "master" is rejected with a readable error (those lanes live on tracks \u2014 pass a track UUID). A master volume lane is how you draw a final fade-out/fade-in or a level ride across the whole mix; it applies PRE-limiter (the fade feeds the master insert chain), and \u2014 like every master move \u2014 it is NOT baked into exported stems or a bounce, which stay fade-free by design (the master fade belongs to the mastered deliverable only, so stems hand off clean). The master lane rides project_snapshot\'s top-level `masterAutomation` array (same lane shape), absent when empty. Returns `{lane: {id, target, points, isEnabled}}`.',
+    description: 'Create an automation lane on a track for one target (see `target`), so you can then draw a curve into it with automation_set_points \u2014 the primitive behind volume/pan rides, fades, and (for built-in effects already in the track\'s insert chain) parameter sweeps, e.g. a filter cutoff opening across a build or a reverb mix rising into a chorus. A track holds AT MOST ONE lane per target: calling this again for a target that already has a lane is a safe no-op that returns the EXISTING lane unchanged (fine to call defensively before automation_set_points). A new lane starts EMPTY (no points) and enabled; an empty lane is INERT \u2014 it has no audible effect until points are added. `target: {type: "sendLevel", ...}` and `{type: "effectParam", ...}` on a hosted Audio Unit effect are rejected in v0 with a readable error (no render path/parameter surface yet \u2014 see `target`\'s own description). MASTER VOLUME: pass `trackId` as the exact string "master" (m15-c) to automate the whole mix\'s master output volume instead of a track. The master lane accepts the `volume` target ONLY \u2014 a `pan`, `sendLevel`, or `effectParam` target on "master" is rejected with a readable error (those lanes live on tracks \u2014 pass a track UUID). A master volume lane is how you draw a final fade-out/fade-in or a level ride across the whole mix; it applies PRE-limiter (the fade feeds the master insert chain, so the limiter rides ABOVE the fade \u2014 the professionally-correct order). WHAT RENDERS IT: render_mixdown and render_bounce DO bake the master fade \u2014 it lands in the deliverable, and you do NOT need to rebuild it as per-track lanes. render_stems deliberately EXCLUDES it (a fade is master performance, not material \u2014 baking it into every stem would destroy the re-mixable partition), and that exclusion also covers render_stems{includeMixdown}, whose file is confusingly named "00 Mixdown.wav" but is NOT a render_mixdown \u2014 use render_stems{includeMasteredMixdown} ("00 Mastered Mix.wav"), which DOES carry the fade. MIND THE WINDOW: a render\'s DEFAULT length comes from CLIP extents alone (+ a fixed 2.0 s tail) and never from automation, so points drawn past the last clip need an explicit render `durationSeconds` covering them or they are cut off. The master lane rides project_snapshot\'s top-level `masterAutomation` array (same lane shape), absent when empty. Returns `{lane: {id, target, points, isEnabled}}`.',
     inputSchema: {
       trackId: external_exports.string().min(1).describe(
         'Id of the track to add the lane to, from project_snapshot, OR the exact string "master" for the whole-mix master volume lane (the `volume` target only there).'
@@ -45745,7 +47217,9 @@ registerTool(
       trackId: external_exports.string().min(1).describe(
         'Id of the track that owns the lane, from project_snapshot, OR the exact string "master" for the master volume lane.'
       ),
-      laneId: external_exports.string().min(1).describe("Id of the lane to remove, from automation_add_lane's result or project_snapshot.")
+      laneId: external_exports.string().min(1).describe(
+        "Id of the lane to remove, from project_overview's per-track `automation[].id`, project_snapshot, or automation_add_lane's result."
+      )
     }
   },
   async ({ trackId, laneId }) => toToolResult(() => bridge.send("automation.removeLane", { trackId, laneId }))
@@ -45754,12 +47228,14 @@ registerTool(
   "automation_set_points",
   {
     title: "Draw an automation lane's breakpoints",
-    description: "Replace an automation lane's ENTIRE breakpoint array \u2014 the only point-editing primitive (the clip_set_notes precedent: no add/remove-single-point tool). Read the lane's current `points` from project_snapshot or automation_add_lane's result, modify the array in your own code (add, remove, or move points), then resubmit the whole array here. One call = one undo step. During playback: before the first point the target holds that point's value; after the last point it holds ITS value; between two points a `linear` segment ramps smoothly and a `hold` segment stays flat until the next point steps. Typical uses: a fade (two points \u2014 the start and end value), a volume/pan ride (several points tracing the move), or \u2014 via an `effectParam` lane on a built-in effect \u2014 a filter sweep, reverb-mix rise, or similar parameter move over time. Values clamp to the lane's target range (e.g. 0-2 for volume, -1..1 for pan, an effect parameter's own range from fx_describe); points are automatically reordered by `beat` (equal-beat duplicates keep the later one) and the array is capped at 4096 points (oldest points beyond the cap are dropped). Pass an empty array to clear the lane back to inert. MASTER: pass `trackId` as the exact string \"master\" (m15-c) to draw the whole-mix master VOLUME curve \u2014 a final fade or level ride; values clamp to 0-2 (the master fader range) exactly like a track volume lane. The master fade applies pre-limiter and is NOT baked into exported stems or a bounce (they stay fade-free by design). Returns `{lane: {id, target, points, isEnabled}}` with the lane exactly as stored (reordered/clamped/capped).",
+    description: "Replace an automation lane's ENTIRE breakpoint array \u2014 the only point-editing primitive (the clip_set_notes precedent: no add/remove-single-point tool). Read the lane's current `points` from project_snapshot or automation_add_lane's result, modify the array in your own code (add, remove, or move points), then resubmit the whole array here. One call = one undo step. During playback: before the first point the target holds that point's value; after the last point it holds ITS value; between two points a `linear` segment ramps smoothly and a `hold` segment stays flat until the next point steps. Typical uses: a fade (two points \u2014 the start and end value), a volume/pan ride (several points tracing the move), or \u2014 via an `effectParam` lane on a built-in effect \u2014 a filter sweep, reverb-mix rise, or similar parameter move over time. Values clamp to the lane's target range (e.g. 0-2 for volume, -1..1 for pan, an effect parameter's own range from fx_describe); points are automatically reordered by `beat` (equal-beat duplicates keep the later one) and the array is capped at 4096 points (oldest points beyond the cap are dropped). Pass an empty array to clear the lane back to inert. MASTER: pass `trackId` as the exact string \"master\" (m15-c) to draw the whole-mix master VOLUME curve \u2014 a final fade or level ride; values clamp to 0-2 (the master fader range) exactly like a track volume lane. The master fade applies pre-limiter, and it IS baked into render_mixdown and render_bounce (it lands in the deliverable). Only render_stems excludes it \u2014 including that call's \"00 Mixdown.wav\", which despite the name is a stem-class file; \"00 Mastered Mix.wav\" carries the fade. MIND THE WINDOW: a render's DEFAULT length comes from CLIP extents alone (+ a fixed 2.0 s tail) and never from automation, so points drawn past the last clip need an explicit render `durationSeconds` covering them or they are cut off. Returns `{lane: {id, target, points, isEnabled}}` with the lane exactly as stored (reordered/clamped/capped).",
     inputSchema: {
       trackId: external_exports.string().min(1).describe(
         'Id of the track that owns the lane, from project_snapshot, OR the exact string "master" for the master volume lane.'
       ),
-      laneId: external_exports.string().min(1).describe("Id of the lane to edit, from automation_add_lane's result or project_snapshot."),
+      laneId: external_exports.string().min(1).describe(
+        "Id of the lane to edit, from project_overview's per-track `automation[].id`, project_snapshot, or automation_add_lane's result."
+      ),
       points: external_exports.array(automationPointSchema).max(4096).describe(
         "The lane's complete new breakpoint array (WHOLE-ARRAY replace of all existing points), up to 4096 entries. Pass an empty array to clear the lane."
       )
@@ -45776,7 +47252,9 @@ registerTool(
       trackId: external_exports.string().min(1).describe(
         'Id of the track that owns the lane, from project_snapshot, OR the exact string "master" for the master volume lane.'
       ),
-      laneId: external_exports.string().min(1).describe("Id of the lane to toggle, from automation_add_lane's result or project_snapshot."),
+      laneId: external_exports.string().min(1).describe(
+        "Id of the lane to toggle, from project_overview's per-track `automation[].id`, project_snapshot, or automation_add_lane's result."
+      ),
       enabled: external_exports.boolean().describe(
         "True = read the drawn curve (the default when a lane is created); false = ignore it and follow the target's ordinary manual control instead."
       )
@@ -45788,7 +47266,7 @@ registerTool(
   "render_mixdown",
   {
     title: "Render (bounce) the session to a WAV file",
-    description: "Bounce the current session to a stereo 48 kHz WAV file, rendered offline \u2014 much faster than realtime and without needing audio hardware or realtime playback. Returns `{path, durationSeconds, sampleRate, channels}`; use the returned absolute `path` to reference the bounced audio afterwards (e.g. to import it elsewhere or ship it as a deliverable). Pass `excludeTrackIds` to bounce an INSTRUMENTAL / minus-vocal version \u2014 the full session with those tracks silenced for this render only, leaving the project itself completely untouched. Errors only if the render range holds no clips at all \u2014 of ANY kind, audio or MIDI \u2014 and no explicit `durationSeconds` was given, since there would be nothing to render and no way to infer a render length.",
+    description: 'Bounce the current session to a stereo 48 kHz WAV file, rendered offline \u2014 much faster than realtime and without needing audio hardware or realtime playback. Returns `{path, durationSeconds, sampleRate, channels}`; use the returned absolute `path` to reference the bounced audio afterwards (e.g. to import it elsewhere or ship it as a deliverable). Pass `excludeTrackIds` to bounce an INSTRUMENTAL / minus-vocal version \u2014 the full session with those tracks silenced for this render only, leaving the project itself completely untouched. Errors only if the render range holds no clips at all \u2014 of ANY kind, audio or MIDI \u2014 and no explicit `durationSeconds` was given, since there would be nothing to render and no way to infer a render length. MASTER MOVES ARE INCLUDED: the master fader, the master insert chain, and any MASTER VOLUME AUTOMATION LANE (a fade-out/fade-in or level ride) are all baked into this file, as is every per-track automation lane. You do NOT need to rebuild a master fade as per-track lanes to make it survive. (Only render_stems excludes master moves \u2014 including its "00 Mixdown.wav", which despite the name is a stem-class file and is NOT what this tool produces.) BUT ONLY WITHIN THE RENDER WINDOW, and the DEFAULT window is computed from CLIP extents alone (+ a fixed 2.0 s tail) \u2014 automation extent is never consulted. So anything drawn past the last clip, or ringing longer than 2.0 s after it (a long fade-out, a reverb/delay tail), is CUT OFF unless you pass a `durationSeconds` that covers it.',
     inputSchema: {
       path: external_exports.string().min(1).optional().describe(
         "Absolute path (or a path starting with ~ for the home directory) to write the rendered .wav file to. When omitted, the app picks a temp file location and returns it in the result's `path`."
@@ -45825,13 +47303,13 @@ registerTool(
   "render_measure_loudness",
   {
     title: "Measure the session's loudness without writing anything to disk",
-    description: "Render the session offline and measure its loudness \u2014 BS.1770-4 integrated LUFS, max momentary/short-term LUFS, and 4x-oversampled true peak in dBTP \u2014 WITHOUT writing a file. Use this to see where a mix stands before deciding whether/how hard to normalize with render_bounce. Common reference targets: -14 LUFS integrated is the usual streaming-platform convention (Spotify/YouTube/Apple Music-style loudness normalization), -23 LUFS is EBU R128 broadcast delivery. Any measurement field can come back OMITTED (absent/null) instead of a number \u2014 that means the program sits at or below the -70 LUFS absolute silence gate (JSON has no value for '-infinity dB'); always treat a missing field as gated silence, not zero. Returns `{measurement: {integratedLufs?, truePeakDbtp?, maxMomentaryLufs?, maxShortTermLufs?}, durationSeconds, sampleRate}`. Errors if the project has no clips in the requested window and no explicit `durationSeconds` was given.",
+    description: "Render the session offline and measure its loudness \u2014 BS.1770-4 integrated LUFS, max momentary/short-term LUFS, and 4x-oversampled true peak in dBTP \u2014 WITHOUT writing a file. Use this to see where a mix stands before deciding whether/how hard to normalize with render_bounce. Common reference targets: -14 LUFS integrated is the usual streaming-platform convention (Spotify/YouTube/Apple Music-style loudness normalization), -23 LUFS is EBU R128 broadcast delivery. Any measurement field can come back OMITTED (absent/null) instead of a number \u2014 usually that means the program sits at or below the -70 LUFS absolute silence gate (JSON has no value for '-infinity dB'); treat a missing field as gated silence, not zero. The WINDOWED fields have a second, independent omission reason: a program shorter than the window has no value at all \u2014 400 ms for maxMomentaryLufs, 3 s for maxShortTermLufs and loudnessRangeLu \u2014 so on a short excerpt those can be absent while integratedLufs and truePeakDbtp are perfectly healthy numbers. Returns `{measurement: {integratedLufs?, truePeakDbtp?, maxMomentaryLufs?, maxShortTermLufs?, loudnessRangeLu?}, durationSeconds, sampleRate}`. `loudnessRangeLu` is EBU Tech 3342 loudness range in LU \u2014 the 95th-minus-10th percentile spread of the gated short-term loudness distribution, i.e. how much the loudness MOVES rather than where it sits. It is the same figure reference_analyze reports under the same name, so a mix and a reference track are directly comparable on it. Errors if the project has no clips in the requested window and no explicit `durationSeconds` was given. TWO THINGS THIS TOOL IS NOT. (1) It measures a FRESH RENDER OF THE SESSION, never a file on disk \u2014 it cannot take a `path` (passing one is a hard error), so it verifies the MIX, not the artifact a render_bounce/render_mixdown wrote. To check a file that already exists, use audio_profile_file (windowed sample peak/RMS + real header \u2014 proves a bounce isn't silence-padded and where the tail decays) or, for true BS.1770 LUFS of a file, reference_import (which analyzes on import, but copies the file, occupies the project's single reference slot, and lands as an undoable edit). (2) A WINDOWED measurement is not an excerpt of the full render: a MIDI note whose note-ON falls BEFORE `fromBeat` is dropped entirely from the render (no note-on and no note-off), so measuring a window that starts mid-note reports gated silence for a passage that sounds perfectly fine from the top. A straddling AUDIO clip does NOT behave this way \u2014 it is entered mid-file and sounds. So an unexpectedly silent window over sustained MIDI (pads, held strings, long tails) is far more likely to be this scheduling rule than a real hole in your arrangement: re-measure from beat 0, or from the start of the clip in question, before reporting silence. Note the MIXED UNITS in one call: `fromBeat` is BEATS, `durationSeconds` is SECONDS, and there is no beat-range form.",
     inputSchema: {
       fromBeat: external_exports.number().min(0).optional().default(0).describe(
-        "Timeline position, in beats (quarter notes), to start measuring from. Must be >= 0. Defaults to 0 (the very start of the timeline)."
+        "Timeline position, in BEATS (quarter notes), to start measuring from. Must be >= 0. Defaults to 0 (the very start of the timeline). A non-zero value does NOT give you an excerpt of the whole render: MIDI notes already sounding at this beat (note-on earlier) are omitted from the render entirely, so a window starting mid-note under-reports, sometimes as total silence. Measure from 0 when the number has to be trustworthy."
       ),
       durationSeconds: external_exports.number().gt(0).optional().describe(
-        "How many seconds of audio to measure, starting at fromBeat. Must be > 0. When omitted, defaults to the extent of every track's clips (audio AND instrument \u2014 broader than render_mixdown's audio-only default) at the current tempo, plus a 2.0 s tail for bus reverb/release."
+        "How many SECONDS of audio to measure (not beats \u2014 this tool mixes units deliberately), starting at fromBeat. Must be > 0. When omitted, defaults to the extent of every track's clips (audio AND instrument \u2014 broader than render_mixdown's audio-only default) at the current tempo, plus a 2.0 s tail for bus reverb/release."
       )
     }
   },
@@ -45841,7 +47319,7 @@ registerTool(
   "render_bounce",
   {
     title: "Bounce the session to a loudness-measured, optionally normalized WAV",
-    description: "Render the session offline to a stereo 48 kHz WAV and report its loudness \u2014 the measured/normalizing sibling of render_mixdown (which stays the raw, fast bounce with no loudness report and no gain). Pass `lufsTarget` to normalize toward a delivery target \u2014 -14 LUFS integrated is the usual streaming-platform convention (Spotify/YouTube/Apple Music-style), -23 LUFS is EBU R128 broadcast; OMIT it for a measured but UN-normalized bounce (the loudness report is still included, nothing about the audio changes). Normalization applies ONE static gain toward the target, CLAMPED so the true peak never exceeds `truePeakCeilingDb` (default -1.0 dBTP) \u2014 there is NO limiter in v0, so when the clamp bites, the bounce lands QUIETER than asked and `report.limitedByCeiling` is true; `report.output` is the loudness ACTUALLY achieved (compare it to your target to see the shortfall \u2014 never assume the target was hit without checking this). If you need to close that gap, add the built-in limiter effect to the master bus (or the track/bus feeding it) and call render_bounce again: the limiter does real dynamics control, letting a subsequent gain push closer to the ceiling safely. `report.input` is the pre-gain measurement; `report.output` is RE-MEASURED from the gained audio (never derived from input + gain), so it is ground truth for the file written to disk. Any loudness field \u2014 in either input or output \u2014 can come back OMITTED (null): that means the signal sits at/below the -70 LUFS silence gate. A gated-silent program WITH a requested `lufsTarget` errors (there is nothing to normalize toward); silence without a target still succeeds, with all-null measurements. Pass `excludeTrackIds` to bounce an INSTRUMENTAL / minus-vocal version \u2014 the full session with those tracks silenced for this render only, project untouched; note that normalization then measures the instrumental's OWN loudness, not the full mix's, so a mix and its instrumental normalized to the same target end up at the same LUFS as each other rather than at the same relative level. Returns `{path, durationSeconds, sampleRate, channels, report: {input, output, appliedGainDb, lufsTarget?, truePeakCeilingDbtp, limitedByCeiling}, excludedTracks?}`.",
+    description: "Render the session offline to a stereo 48 kHz WAV and report its loudness \u2014 the measured/normalizing sibling of render_mixdown (which stays the raw, fast bounce with no loudness report and no gain). Like render_mixdown, this BAKES IN every master move: the master fader, the master insert chain, and any MASTER VOLUME AUTOMATION LANE \u2014 a fade-out lands in the bounce and needs no per-track workaround. It lands only WITHIN THE RENDER WINDOW, though, and the DEFAULT window comes from CLIP extents alone (+ a fixed 2.0 s tail), never from automation: a fade or tail extending past the last clip is CUT OFF unless you pass a `durationSeconds` that covers it. Pass `lufsTarget` to normalize toward a delivery target \u2014 -14 LUFS integrated is the usual streaming-platform convention (Spotify/YouTube/Apple Music-style), -23 LUFS is EBU R128 broadcast; OMIT it for a measured but UN-normalized bounce (the loudness report is still included, nothing about the audio changes). Normalization applies ONE static gain toward the target, CLAMPED so the true peak never exceeds `truePeakCeilingDb` (default -1.0 dBTP) \u2014 there is NO limiter in v0, so when the clamp bites, the bounce lands QUIETER than asked and `report.limitedByCeiling` is true; `report.output` is the loudness ACTUALLY achieved (compare it to your target to see the shortfall \u2014 never assume the target was hit without checking this). If you need to close that gap, add the built-in limiter effect to the master bus (or the track/bus feeding it) and call render_bounce again: the limiter does real dynamics control, letting a subsequent gain push closer to the ceiling safely. `report.input` is the pre-gain measurement; `report.output` is RE-MEASURED from the gained audio (never derived from input + gain), so it is ground truth for the file written to disk. Any loudness field \u2014 in either input or output \u2014 can come back OMITTED (null): that means the signal sits at/below the -70 LUFS silence gate. A gated-silent program WITH a requested `lufsTarget` errors (there is nothing to normalize toward); silence without a target still succeeds, with all-null measurements. Pass `excludeTrackIds` to bounce an INSTRUMENTAL / minus-vocal version \u2014 the full session with those tracks silenced for this render only, project untouched; note that normalization then measures the instrumental's OWN loudness, not the full mix's, so a mix and its instrumental normalized to the same target end up at the same LUFS as each other rather than at the same relative level. Returns `{path, durationSeconds, sampleRate, channels, report: {input, output, appliedGainDb, lufsTarget?, truePeakCeilingDbtp, limitedByCeiling}, excludedTracks?}`.",
     inputSchema: {
       path: external_exports.string().min(1).optional().describe(
         "Absolute path (or a path starting with ~ for the home directory) to write the rendered .wav file to. When omitted, the app picks a temp file location and returns it in the result's `path`."
@@ -46085,11 +47563,27 @@ server.registerTool(
   },
   async () => toToolResult(() => bridge.send("edit.history"))
 );
+registerTool(
+  "edit_paste_clips",
+  {
+    title: "Paste the app's clipboard as clips",
+    description: 'Paste whatever CLIPS are currently on the DAW APP\'S OWN clipboard \u2014 the same clipboard Cmd-C/Cmd-V use in the arrange view. This tool cannot PUT anything on that clipboard: there is no wire route to populate it, so a call only fires whatever the human user last copied in the app itself; if nothing has been copied (or the last copy was cleared by a later cut/copy elsewhere), there is nothing to paste. `trackId` is optional and overrides the destination for THIS paste only, without moving the app\'s own paste cursor \u2014 omit it to land on the same resolved active track a bare Cmd-V would use. One call is one undo step, reversible with edit_undo. The response NAMES which of four outcomes happened rather than a bare ok/fail, because \'nothing happened\' has three different causes an agent needs to react to differently: (1) success \u2014 `{pasted:true, landings:[{clipId,trackId,startBeat}], skipped:[{sourceClipId,clipName,reason}], trimmedClipIDs:[string], removedClipIDs:[string]}` (`skipped`/`trimmedClipIDs`/`removedClipIDs` are usually empty \u2014 they only fill in when some pasted clips overlapped and had to be trimmed, removed, or dropped to make room, per the same placement policy Cmd-V uses); (2) `{pasted:false, reason:"empty-clipboard"}` \u2014 nothing has been copied yet; ask the user to copy a clip first, retrying will not help; (3) `{pasted:false, reason:"wrong-payload-kind", clipboardKind:"notes"}` \u2014 the clipboard holds copied MIDI NOTES (from inside the piano roll), not clips; there is no note-paste wire route, so read them with clip_get_notes and write them with clip_set_notes instead; (4) `{pasted:false, reason:<string>, skipped:[...]}` \u2014 the app deliberately refused the paste (e.g. no track can hold the payload, or every copied clip individually mismatched its destination, such as a MIDI clip landing on an audio track); `skipped` names each refused clip and why. Errors (distinct from all four outcomes above) only when this control session has no app UI attached (a headless session) \u2014 start DAWPro.app and retry.',
+    inputSchema: {
+      trackId: external_exports.string().uuid().optional().describe(
+        "Track to paste into, from project_snapshot. Overrides the resolved active track for THIS paste only. Omit to use the same active-track resolution a bare Cmd-V would use."
+      ),
+      atBeat: external_exports.number().optional().describe(
+        "Project beat to anchor the paste on. The EARLIEST copied clip lands here and the rest keep their offsets from it. Overrides the transport playhead for THIS paste only and does NOT move the playhead. Omit to anchor on the playhead, exactly as a bare Cmd-V does. A negative value slides the whole group to beat 0 rather than erroring."
+      )
+    }
+  },
+  async ({ trackId, atBeat }) => toToolResult(() => bridge.send("edit.pasteClips", { trackId, atBeat }))
+);
 server.registerTool(
   "project_snapshot",
   {
     title: "Get the full session state",
-    description: 'Get the full current state of the DAW session: transport (playing/stopped, playhead position in beats), tempo (BPM), master volume, and all tracks with their settings (volume, pan, mute, solo) and clips. Each track also carries its routing: `outputBusId` (the id of the bus track its output feeds, or null for the master mix \u2014 see track_set_output) and `sends` (its post-fader sends into other buses, each `{id, busId, level}` \u2014 see track_add_send/track_set_send/track_remove_send). Each track/bus also carries its `effects` insert chain: a PRE-FADER, ORDERED array (array order = processing order) of `{id, kind, bypassed, params, latencySamples, gainReductionDb?}` (`latencySamples` is the processing delay that effect adds, in samples \u2014 0 for most kinds; `limiter`\'s lookahead adds some). `gainReductionDb` (m22-e) is the LIVE gain-reduction meter of the built-in dynamics kinds \u2014 compressor, limiter, gate \u2014 in POSITIVE dB of reduction (0 = currently untouched; a fully closed gate caps at 80): held-peak with a \u221220 dB/s release, so a poll can\'t miss a brief clamp. Poll this snapshot while audio plays to SEE how hard a compressor is working (e.g. aim ~3-6 dB on a vocal); the key is ABSENT on kinds that don\'t measure gain reduction, on bypassed-and-idle chains running headless, and on hosted AU effects \u2014 never fabricated. The same field rides `masterEffects` entries and every fx_* mutation result. Chains are capped at 16 entries \u2014 see fx_add/fx_remove/fx_reorder/fx_set_bypass/fx_set_param to edit it and fx_describe for each kind\'s parameter names/ranges/units. May also include `masterAutomation` (m15-c): the whole-mix master VOLUME automation lanes as a top-level `[{id, target, points, isEnabled}]` array (same lane shape as a track\'s, driven by automation_add_lane/_set_points/_set_lane_enabled/_remove_lane with `trackId: "master"`) \u2014 ABSENT when there is no master lane; the master fade it draws is pre-limiter and is NOT baked into stems or a bounce. May also include `engineNotices` (m15-e): a top-level array of schedule-time DEGRADATION reports \u2014 cases where playback proceeded on time but not exactly as the project describes (e.g. a fade or gain envelope that couldn\'t be prepared in time so the clip played without it, or a clip still time-stretching that played as silence). Each entry is `{code, message, beat, count, lastAt}`: `code` is a stable machine key naming the degradation family (the current ones are `clip-fades-skipped`, `clip-envelope-skipped`, `clip-stretch-pending`) that events are COALESCED by \u2014 a recurrence increments `count` and refreshes the entry rather than appending; `message` is a human-readable description naming the clip; `beat` is the affected clip\'s start beat (may be null); `count` is how many times this code has occurred; `lastAt` is a monotonic sequence token (bigger = more recent, NOT a wall-clock time) for ordering. The notices are SESSION-TRANSIENT diagnostics: never saved to disk, not touched by undo/redo, and CLEARED on project_new / project_open. The KEY IS ABSENT when there are no notices \u2014 its absence means playback has been healthy, so poll it after transport_play to check whether anything sounded off. MIDI clips (from clip_add_midi) carry a `notes` array (pitch, velocity, startBeat relative to the clip, lengthBeats); audio clips do not. MIDI clips may also carry a `controllerLanes` array (m16-b) \u2014 mod wheel, sustain, pitch bend, and other performance controller data set via clip_set_controller_lane/clip_remove_controller_lane, ridden ALONGSIDE `notes` on the same clip. KEY IS ABSENT when the clip has no controller data. Each entry is `{type: {type: "cc"|"pitchBend"|"channelPressure", controller?}, points: [{beat, value}]}` \u2014 note the NESTED `type` object here, unlike the flat `type`/`controller` params clip_set_controller_lane/clip_remove_controller_lane take as input. Also includes a `meters` object with live peak/RMS levels (linear 0-1) for the master bus (`meters.master`) and each track (`meters.tracks`, keyed by track id \u2014 bus tracks meter here too, like any other track, reflecting their summed input) \u2014 check meters after transport_play to confirm audio is actually rendering. Also includes `lastRecordingError`: null after a successful transport_record take, or a string explaining what went wrong (e.g. microphone permission denied, no armed tracks, empty take) \u2014 check it after transport_stop following a recording. Also includes `undoLabel` and `redoLabel`: a short label describing the edit that edit_undo / edit_redo would apply next (e.g. "Add Track", "Set Tempo"), or null when there is nothing to undo/redo. May also include `midiInputs` (the same list midi_list_inputs returns, for convenience) and `midiEventCount`: a monotonically increasing counter of MIDI events received from any online input source \u2014 poll it across two snapshots and see if it changed to detect live MIDI activity (e.g. confirm a keyboard is actually sending notes) without needing a dedicated streaming channel. Call this first to orient yourself before making other changes.'
+    description: 'Get the full current state of the DAW session: transport (playing/stopped, playhead position in beats), tempo (BPM), master volume, and all tracks with their settings (volume, pan, mute, solo) and clips. Each track also carries its routing: `outputBusId` (the id of the bus track its output feeds, or null for the master mix \u2014 see track_set_output) and `sends` (its post-fader sends into other buses, each `{id, busId, level}` \u2014 see track_add_send/track_set_send/track_remove_send). Each track/bus also carries its `effects` insert chain: a PRE-FADER, ORDERED array (array order = processing order) of `{id, kind, bypassed, params, latencySamples, gainReductionDb?}` (`latencySamples` is the processing delay that effect adds, in samples \u2014 0 for most kinds; `limiter`\'s lookahead adds some). `gainReductionDb` (m22-e) is the LIVE gain-reduction meter of the built-in dynamics kinds \u2014 compressor, limiter, gate \u2014 in POSITIVE dB of reduction (0 = currently untouched; a fully closed gate caps at 80): held-peak with a \u221220 dB/s release, so a poll can\'t miss a brief clamp. Poll this snapshot while audio plays to SEE how hard a compressor is working (e.g. aim ~3-6 dB on a vocal); the key is ABSENT on kinds that don\'t measure gain reduction, on bypassed-and-idle chains running headless, and on hosted AU effects \u2014 never fabricated. The same field rides `masterEffects` entries and every fx_* mutation result. Chains are capped at 16 entries \u2014 see fx_add/fx_remove/fx_reorder/fx_set_bypass/fx_set_param to edit it and fx_describe for each kind\'s parameter names/ranges/units. May also include `masterAutomation` (m15-c): the whole-mix master VOLUME automation lanes as a top-level `[{id, target, points, isEnabled}]` array (same lane shape as a track\'s, driven by automation_add_lane/_set_points/_set_lane_enabled/_remove_lane with `trackId: "master"`) \u2014 ABSENT when there is no master lane; the master fade it draws is pre-limiter, IS baked into render_mixdown and render_bounce, and is excluded only from render_stems (see automation_add_lane). May also include `engineNotices` (m15-e): a top-level array of schedule-time DEGRADATION reports \u2014 cases where playback proceeded on time but not exactly as the project describes (e.g. a fade or gain envelope that couldn\'t be prepared in time so the clip played without it, or a clip still time-stretching that played as silence). Each entry is `{code, message, beat, count, lastAt}`: `code` is a stable machine key naming the degradation family (the current ones are `clip-fades-skipped`, `clip-envelope-skipped`, `clip-stretch-pending`) that events are COALESCED by \u2014 a recurrence increments `count` and refreshes the entry rather than appending; `message` is a human-readable description naming the clip; `beat` is the affected clip\'s start beat (may be null); `count` is how many times this code has occurred; `lastAt` is a monotonic sequence token (bigger = more recent, NOT a wall-clock time) for ordering. The notices are SESSION-TRANSIENT diagnostics: never saved to disk, not touched by undo/redo, and CLEARED on project_new / project_open. The KEY IS ABSENT when there are no notices \u2014 its absence means playback has been healthy, so poll it after transport_play to check whether anything sounded off. MIDI clips (from clip_add_midi) carry a `notes` array (pitch, velocity, startBeat relative to the clip, lengthBeats); audio clips do not. MIDI clips may also carry a `controllerLanes` array (m16-b) \u2014 mod wheel, sustain, pitch bend, and other performance controller data set via clip_set_controller_lane/clip_remove_controller_lane, ridden ALONGSIDE `notes` on the same clip. KEY IS ABSENT when the clip has no controller data. Each entry is `{type: {type: "cc"|"pitchBend"|"channelPressure", controller?}, points: [{beat, value}]}` \u2014 note the NESTED `type` object here, unlike the flat `type`/`controller` params clip_set_controller_lane/clip_remove_controller_lane take as input. Also includes a `meters` object with live peak/RMS levels (linear 0-1) for the master bus (`meters.master`) and each track (`meters.tracks`, keyed by track id \u2014 bus tracks meter here too, like any other track, reflecting their summed input) \u2014 check meters after transport_play to confirm audio is actually rendering. Also includes `lastRecordingError`: null after a successful transport_record take, or a string explaining what went wrong (e.g. microphone permission denied, no armed tracks, empty take) \u2014 check it after transport_stop following a recording. Also includes `undoLabel` and `redoLabel`: a short label describing the edit that edit_undo / edit_redo would apply next (e.g. "Add Track", "Set Tempo"), or null when there is nothing to undo/redo. May also include `midiInputs` (the same list midi_list_inputs returns, for convenience) and `midiEventCount`: a monotonically increasing counter of MIDI events received from any online input source \u2014 poll it across two snapshots and see if it changed to detect live MIDI activity (e.g. confirm a keyboard is actually sending notes) without needing a dedicated streaming channel. Call this first to orient yourself before making other changes.'
   },
   async () => toToolResult(() => bridge.send("project.snapshot"))
 );
@@ -46097,7 +47591,7 @@ server.registerTool(
   "project_overview",
   {
     title: "Get a compact session overview",
-    description: 'Get a compact, aggressively summarized snapshot of the session \u2014 everything you need to orient (what tracks exist, their ids, routing, and roughly what\'s on them) without the token cost of project_snapshot\'s full fidelity. PREFER THIS over project_snapshot when starting a session, re-orienting after a batch of changes, or any time you need ids and session shape rather than note-level detail \u2014 it typically encodes 5x+ smaller than project_snapshot for the same session, staying in the low KBs even on a dense multi-track project. Reach for project_snapshot instead when you actually need MIDI note data, automation breakpoint curves, live meters, resolved per-effect parameter values, or other full-fidelity detail this tool summarizes away. No params. Returns `{transport, master, tracks}` directly (no wrapping envelope). `transport` is `{tempoBPM, isPlaying, isRecording, positionBeats, loop: {enabled, startBeat, endBeat}, metronome: {enabled, countInBars}, punch: {enabled, inBeat, outBeat}}`. `master` is `{volume, peakDb?, rmsDb?}` (`volume` is linear gain, 0-2, 1 = unity; the two level fields are the MASTER BUS\'s, with exactly the same meaning, floor and omit-when-never-heard rule as the per-track ones described below \u2014 read them as the REFERENCE the track levels sit against, which is what turns "the kick is -14 dBFS" into "the kick is 8 dB under the master"). `tracks` is an array of `{id, name, kind, muted, soloed, armed, volume, pan, output?, instrument?, sends, fx, clips, automation, peakDb?, rmsDb?}` \u2014 `id` is the FULL uuid (use it verbatim in follow-up commands like track_set_volume or clip_move; there is no id-shortening machinery on this path). `output` is the destination bus track\'s id, omitted for master. `instrument` is the hosted instrument\'s display name, present only on instrument tracks (it resolves to the default poly synth even when unconfigured), omitted on audio/bus tracks. `sends` is each `{destinationBusID, level, preFader}` (preFader is always false today \u2014 v0 sends are post-fader only). `fx` is each `{name, bypassed}` in chain order (use fx_describe or project_snapshot for actual parameter values). `clips` summarizes every clip as `{id, name, startBeat, lengthBeats, kind: "audio"|"midi", noteCount?, takeLaneCount?, activeLane?, hasStretch?, hasFades?, gainDb?}` \u2014 COUNTS, never the actual MIDI notes, and no file paths (fetch a clip\'s real note data or source file via project_snapshot/clip tools when you need it). `automation` summarizes every lane as `{target, enabled, pointCount}` \u2014 never the breakpoints themselves. `peakDb`/`rmsDb` are LEVELS in dBFS (floor -80, always finite; a POSITIVE peakDb means it clipped), carried BOTH per-track and on `master` \u2014 this is how you compare loudness between tracks, and against the mix as a whole, without paying for project_snapshot. They report the last frame that track (or the master bus) was actually HEARD producing and are RETAINED after the transport stops, so you can read them between actions; play the session (or a section) once and they stay readable afterwards. The keys are OMITTED wherever nothing has produced sound this session \u2014 absent means "no signal observed", which is deliberately different from a measured silence, so do not read a missing peakDb as -80. Note they describe what the ENGINE played, not a rendered file: use render_measure_loudness for gated LUFS/dBTP on a bounce. Every optional field is simply omitted when it doesn\'t apply (never emitted as null), which is what keeps the payload small.'
+    description: 'Get a compact, aggressively summarized snapshot of the session \u2014 everything you need to orient (what tracks exist, their ids, routing, and roughly what\'s on them) without the token cost of project_snapshot\'s full fidelity. PREFER THIS over project_snapshot when starting a session, re-orienting after a batch of changes, or any time you need ids and session shape rather than note-level detail \u2014 it typically encodes 5x+ smaller than project_snapshot for the same session, staying in the low KBs even on a dense multi-track project. Reach for project_snapshot instead when you actually need MIDI note data, automation breakpoint curves, live meters, resolved per-effect parameter values, or other full-fidelity detail this tool summarizes away. No params. Returns `{transport, master, tracks}` directly (no wrapping envelope). `transport` is `{tempoBPM, isPlaying, isRecording, positionBeats, loop: {enabled, startBeat, endBeat}, metronome: {enabled, countInBars}, punch: {enabled, inBeat, outBeat}}`. `master` is `{volume, peakDb?, rmsDb?}` (`volume` is linear gain, 0-2, 1 = unity; the two level fields are the MASTER BUS\'s, with exactly the same meaning, floor and omit-when-never-heard rule as the per-track ones described below \u2014 read them as the REFERENCE the track levels sit against, which is what turns "the kick is -14 dBFS" into "the kick is 8 dB under the master"). `tracks` is an array of `{id, name, kind, muted, soloed, armed, volume, pan, output?, instrument?, sends, fx, clips, automation, peakDb?, rmsDb?}` \u2014 `id` is the FULL uuid (use it verbatim in follow-up commands like track_set_volume or clip_move; there is no id-shortening machinery on this path). `output` is the destination bus track\'s id, omitted for master. `instrument` is the hosted instrument\'s display name, present only on instrument tracks (it resolves to the default poly synth even when unconfigured), omitted on audio/bus tracks. `sends` is each `{destinationBusID, level, preFader}` (preFader is always false today \u2014 v0 sends are post-fader only). `fx` is each `{id, name, bypassed}` in chain order (use fx_describe or project_snapshot for actual parameter values). That `id` is the ADDRESSABLE effect id \u2014 pass it straight to fx_set_param / fx_set_bypass / fx_reorder / fx_remove. It means you can tune a chain you INHERITED (from a mixer preset, a genre skeleton, or another agent) without calling fx_add first purely to make the ids appear in a reply \u2014 reading no longer requires writing. `clips` summarizes every clip as `{id, name, startBeat, lengthBeats, kind: "audio"|"midi", noteCount?, takeLaneCount?, activeLane?, hasStretch?, hasFades?, gainDb?}` \u2014 COUNTS, never the actual MIDI notes, and no file paths (fetch a clip\'s real note data or source file via project_snapshot/clip tools when you need it). `automation` summarizes every lane as `{id, target, enabled, pointCount}` \u2014 never the breakpoints themselves. That `id` is the ADDRESSABLE lane id \u2014 pass it straight to automation_set_points / automation_set_lane_enabled / automation_remove_lane. Exactly like the effect ids above, it means you can drive a lane you INHERITED without calling automation_add_lane first purely to make its id appear in a reply \u2014 reading no longer requires writing. (MASTER volume lanes are not carried here; read their ids from project_snapshot\'s top-level `masterAutomation`, which has always included them.) `peakDb`/`rmsDb` are LEVELS in dBFS (floor -80, always finite; a POSITIVE peakDb means it clipped), carried BOTH per-track and on `master` \u2014 this is how you compare loudness between tracks, and against the mix as a whole, without paying for project_snapshot. They report the last frame that track (or the master bus) was actually HEARD producing and are RETAINED after the transport stops, so you can read them between actions; play the session (or a section) once and they stay readable afterwards. The keys are OMITTED wherever nothing has produced sound this session \u2014 absent means "no signal observed", which is deliberately different from a measured silence, so do not read a missing peakDb as -80. Note they describe what the ENGINE played, not a rendered file: use render_measure_loudness for gated LUFS/dBTP on a bounce. Every optional field is simply omitted when it doesn\'t apply (never emitted as null), which is what keeps the payload small.'
   },
   async () => toToolResult(() => bridge.send("project.overview"))
 );
@@ -46245,6 +47739,31 @@ registerTool(
   },
   async () => toToolResult(() => bridge.send("vc.listVoices"))
 );
+registerTool(
+  "vc_import_voice_model",
+  {
+    title: "Import a third-party RVC voice model",
+    description: "Import a user-supplied third-party RVC voice-conversion model (a `.pth` checkpoint, optionally with its companion `.index`) so it appears in vc_list_voices as a real voice, ready for `voiceId` on vc_convert_vocals. A PURE LOCAL FILE COPY into the app's own voice store \u2014 no sidecar call, so it works even while vc_sidecar_status isn't healthy. `modelPath` (required) is the absolute or `~`-expanded path to the `.pth` file on the user's disk. `indexPath` (optional) is the absolute or `~`-expanded path to a companion FAISS `.index` file, which raises conversion quality when present. `voiceId` (optional) sets the id this voice is listed under; omit to derive one from `name` (or the model file's own name) sanitised to letters/digits/`-`/`_` \u2014 the reserved smoke-test id \"base\" is refused. `name` (optional) is the display name; omit to reuse the same text `voiceId` is derived from. `overwrite` (optional, default false) replaces an existing voice at that id instead of refusing. IMPORTANT \u2014 THIS DOES NOT MAKE THE VOICE IMMEDIATELY USABLE: the RVC engine needs an MLX-converted `.npz`, which this tool does not produce (no conversion step exists yet), so the imported voice lands honestly in `needsConversion` state \u2014 the SAME state vc_list_voices already reports for a voice with a `.pth` but no `.npz`. Calling vc_convert_vocals with this voiceId before that conversion exists will fail; check vc_list_voices' `state` field, and tell the user conversion support is coming rather than implying the voice is ready now. Returns `{voiceId, name, hasIndex, state, directoryPath}`. RIGHTS-RESPONSIBILITY POLICY: third-party voice models are supported; the user is responsible for having the rights to whatever model they import \u2014 this tool implies no ownership or compatibility claim of its own.",
+    inputSchema: {
+      modelPath: external_exports.string().min(1).describe(
+        "Absolute or ~-expanded local path to the third-party RVC .pth checkpoint to import."
+      ),
+      indexPath: external_exports.string().optional().describe(
+        "Absolute or ~-expanded local path to the model's companion FAISS .index file, if the user has one. Omit if there isn't one \u2014 the voice still imports, just without the quality boost an index gives."
+      ),
+      voiceId: external_exports.string().optional().describe(
+        `The store id this voice is listed under (what vc_convert_vocals's voiceId will name). Omit to derive one from name/the model file's own name. The reserved id "base" is refused (it names the built-in smoke-test target).`
+      ),
+      name: external_exports.string().optional().describe("Display name for the voice. Omit to reuse the text voiceId is derived from."),
+      overwrite: external_exports.boolean().optional().describe(
+        "true: replace an existing voice already at this id. Omit or false (default): refuse instead, naming the conflicting id."
+      )
+    }
+  },
+  async ({ modelPath, indexPath, voiceId, name, overwrite }) => toToolResult(
+    () => bridge.send("vc.importVoiceModel", { modelPath, indexPath, voiceId, name, overwrite })
+  )
+);
 server.registerTool(
   "ai_provider_status",
   {
@@ -46382,7 +47901,7 @@ registerTool(
           prompt: external_exports.string().optional().describe(
             `This track's OWN local description, e.g. "round sub bass, laid back, syncopated". Omit for a bare generic instruction.`
           )
-        })
+        }).strict()
       ).min(1).describe("The tracks to generate \u2014 one entry per new track, each with its own local prompt."),
       model: external_exports.string().optional().describe(
         'DiT model name to use, e.g. "acestep-v15-xl-sft". OPTIONAL \u2014 same default-model + auto-load behavior as extract_stems\' `model` note; leave unset for the normal case.'
@@ -46649,7 +48168,7 @@ registerTool(
   "project_import_midi",
   {
     title: "Import a Standard MIDI File as new tracks",
-    description: 'Import a Standard MIDI File (.mid/.midi) as new INSTRUMENT tracks, one MIDI clip per imported part, in ONE journaled "Import MIDI File" edit \u2014 undo removes every created track and reverts any tempo/meter adoption together. RECOMMENDED WORKFLOW: call once with `dryRun: true` first \u2014 it parses the file and returns the full report, including the `parts` array (every part in the file, even ones that would be skipped, so an index means the same thing on the dry run and the real one) and the RESOLVED tempo policy, WITHOUT touching the project or creating an undo entry; inspect it, then call again for real, narrowing `parts` to just what you want \u2014 a call with no `parts` filter imports every part as its own track, which can be dozens for a full arrangement. `atBeat` (default 0) is the TIMELINE beat that file tick 0 lands on; every created clip starts there and notes stay clip-relative regardless. `tempoPolicy` controls the project\'s tempo and time-signature maps: `"auto"` (default) adopts the file\'s tempo/meter maps ONLY when the project has no clips yet, so a first import sets the grid and a later one never silently retimes existing material; `"adopt"` always replaces the project\'s maps with the file\'s (refused when combined with a non-zero `atBeat` \u2014 the maps are absolute, so there\'s no honest offset adoption); `"ignore"` never touches them. Note positions land on the same beats under every policy \u2014 a MIDI file\'s beats come from its ticks, not its tempo. `instruments` is `"none"` (default: new tracks keep the default instrument) or `"gm"` (assigns General MIDI sound-bank programs from the file\'s program changes, channel 10 as the standard drum kit) \u2014 the program each part asks for is reported either way. `force` (default false) overrides the 32-track import-count refusal. The returned report is where every fidelity loss surfaces, never applied silently: clamped out-of-range tempos, dropped or conflicting tempo/meter events, controller lanes dropped or decimated past their cap, dropped release velocities and program changes, plus a plain-English `degradations` list. Response `{report: <MIDIImportReport>, applied}`, where `applied` is true only when `dryRun` was false. Errors readably for a non-.mid/.midi extension, a missing file, any SMF decode problem, a recording in progress, the `"adopt"` + non-zero `atBeat` combination, the 32-track limit (raise it with `force`), and a file whose import would do literally nothing.',
+    description: 'Import a Standard MIDI File (.mid/.midi) as new INSTRUMENT tracks, one MIDI clip per imported part, in ONE journaled "Import MIDI File" edit \u2014 undo removes every created track and reverts any tempo/meter adoption together. RECOMMENDED WORKFLOW: call once with `dryRun: true` first \u2014 it parses the file and returns the full report, including the `parts` array (every part in the file, even ones that would be skipped, so an index means the same thing on the dry run and the real one) and the RESOLVED tempo policy, WITHOUT touching the project or creating an undo entry; inspect it, then call again for real, narrowing `parts` to just what you want \u2014 a call with no `parts` filter imports every part as its own track, which can be dozens for a full arrangement. `atBeat` (default 0) is the TIMELINE beat that file tick 0 lands on; every created clip starts there and notes stay clip-relative regardless. `tempoPolicy` controls the project\'s tempo and time-signature maps: `"auto"` (default) adopts the file\'s tempo/meter maps ONLY when the project has no clips yet, so a first import sets the grid and a later one never silently retimes existing material; `"adopt"` always replaces the project\'s maps with the file\'s (refused when combined with a non-zero `atBeat` \u2014 the maps are absolute, so there\'s no honest offset adoption); `"ignore"` never touches them. Note positions land on the same beats under every policy \u2014 a MIDI file\'s beats come from its ticks, not its tempo. `instruments` is `"gm"` (THE DEFAULT: assigns General MIDI sound-bank programs from the file\'s program changes, channel 10 as the standard drum kit, so the import sounds like the instruments the file names) or `"none"` (the explicit opt-out, leaving new tracks on the default instrument) \u2014 the program each part asks for is reported either way. EACH PART REPORTS TWO NAMES: `name` is the file\'s LITERAL name and `trackName` is what the track was actually called. They differ whenever the file\'s own name does not distinguish the parts \u2014 a format-0 file carries ONE chunk name for every channel, so `name` can be the song title 13 times while `trackName` reads "Acoustic Grand Piano", "Standard Drum Kit", "Distortion Guitar (ch 9)"\u2026 Read `trackName` when you need to find or describe a track you just imported. `force` (default false) overrides the 32-track import-count refusal. The returned report is where every fidelity loss surfaces, never applied silently: clamped out-of-range tempos, dropped or conflicting tempo/meter events, controller lanes dropped or decimated past their cap, dropped release velocities and program changes, plus a plain-English `degradations` list. Response `{report: <MIDIImportReport>, applied}`, where `applied` is true only when `dryRun` was false. Errors readably for a non-.mid/.midi extension, a missing file, any SMF decode problem, a recording in progress, the `"adopt"` + non-zero `atBeat` combination, the 32-track limit (raise it with `force`), and a file whose import would do literally nothing.',
     inputSchema: {
       path: external_exports.string().min(1).describe(
         "Absolute (or ~-prefixed) path to the .mid/.midi Standard MIDI File to import on this Mac. A relative path or wrong extension is rejected."
@@ -46661,7 +48180,7 @@ registerTool(
         `What to do with the file's tempo/time-signature maps. "auto" (default) adopts them only when the project has no clips yet. "adopt" always replaces the project's maps with the file's (refused with a non-zero atBeat). "ignore" never touches them. Note positions are the same under every policy \u2014 only playback speed and the grid are affected.`
       ),
       instruments: external_exports.enum(["none", "gm"]).optional().describe(
-        `"none" (default) leaves new tracks on the default instrument. "gm" assigns General MIDI sound-bank programs from the file's program changes (channel 10 = the standard drum kit). The requested program is reported either way.`
+        `"gm" (DEFAULT) assigns General MIDI sound-bank programs from the file's program changes (channel 10 = the standard drum kit), so the imported tracks sound like the instruments the file names. "none" is the opt-out and leaves new tracks on the default instrument. The requested program is reported either way. Omitting this gets "gm".`
       ),
       parts: external_exports.array(external_exports.number().int()).optional().describe(
         "Which of the file's parts to import, as indices into the report's `parts` array (run with dryRun: true first to see them \u2014 the array lists every part, including ones that would be skipped, so an index means the same thing on a dry run and a real import). Omit to import every part; an explicit empty array imports nothing. An out-of-range index (including negative) is passed through and rejected by the app with a message naming the file's actual part count \u2014 not clamped or pre-validated here."

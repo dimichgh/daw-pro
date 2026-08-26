@@ -413,14 +413,11 @@ final class AutomationSchedule {
     }
 }
 
-extension Array where Element == AutomationLane {
-    /// The single ACTIVE lane driving `target`: enabled AND non-empty (an
-    /// empty lane is inert — the vii-a contract). At most one lane per target
-    /// is store-enforced, so the first match is THE match. This predicate is
-    /// the ONE definition of "automation replaces the manual control" — the
-    /// schedule build and the `applyParameters` override rule both use it, so
-    /// they can never disagree.
-    func activeLane(for target: AutomationTarget) -> AutomationLane? {
-        first { $0.target == target && $0.isEnabled && !$0.points.isEmpty }
-    }
-}
+// `activeLane(for:)` MOVED to DAWCore (`Automation.swift`) at m26-o so the
+// control plane can consult the SAME predicate — `track.setVolume` has to be
+// able to tell a caller that a lane, not its argument, governs the level, and
+// DAWControl imports DAWCore but not DAWEngine. It was moved rather than
+// copied precisely because its own doc calls it "the ONE definition of
+// 'automation replaces the manual control'"; a second copy in DAWControl could
+// drift out of agreement with the render path, which is the failure this
+// annotation exists to prevent.

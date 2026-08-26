@@ -48,7 +48,7 @@
 // Exit codes: 0 = sweep completed; 1 = a wire command failed.
 // Promoted from session scratchpad 2026-07-16 (m17-g); self-seeding 2026-07-30.
 import fs from "fs";
-import { buildOrAbort, startStaging, stopStaging, connect } from "./_staging.mjs";
+import { buildOrAbort, startStaging, stopStaging, connect, panelDensityGuard, verdict } from "./_staging.mjs";
 
 const GATE = "m17f";                       // names the pidfile + staging out dir
 const OUT = process.argv[2] || `/tmp/daw-gate-out/${GATE}`;
@@ -77,10 +77,23 @@ startStaging({ gate: GATE });
 // there is no shared reply pump on this socket to preserve.
 const ws = await connect();
 
+// m23-ej-2: handed the RAW cmd(ws,…), never `must` — `must` itself
+// process.exit(1)s on any failing command, and a guard built on top of that
+// would die mid-restore-loop the first time a restore write happened to fail,
+// silently skipping every panel after it.
+const guard = panelDensityGuard((command, params) => cmd(ws, command, params));
+
 async function must(command, params) {
   const r = await cmd(ws, command, params);
   if (!r.ok) {
     console.error(`FAIL ${command}: ${JSON.stringify(r.error)}`);
+    // m23-ej-2: `must` is this gate's ONLY failure exit — every leg below runs
+    // straight-line with no try/catch, so a failing wire command anywhere
+    // reaches here. Restore BEFORE the exit: `process.exit()` gives an `exit`
+    // handler no chance to await, so it has to happen here, synchronously
+    // ordered before the call. `guard.restore` is a no-op if no panel was
+    // touched yet (e.g. a failure during fixture seeding).
+    await guard.restore("must-failure");
     // Abrupt exit — teardown is structural via armTeardown (m23-bd), so the
     // staging app is still SIGTERMed by exact pid and the session lock released.
     process.exit(1);
@@ -146,19 +159,19 @@ for (const s of sizes) {
   await sleep(350);
   console.log(`# size ${s.name} -> ${f.width}x${f.height}`);
   await must("ui.showMixer", { show: false });
-  await must("debug.panelDensity", { panel: "arrange", mode: "simple" });
-  await must("debug.panelDensity", { panel: "transport", mode: "simple" });
+  await guard.set("arrange", "simple");
+  await guard.set("transport", "simple");
   await sleep(300);
   await cap(`${s.name}-arr-simple`);
-  await must("debug.panelDensity", { panel: "arrange", mode: "pro" });
-  await must("debug.panelDensity", { panel: "transport", mode: "pro" });
+  await guard.set("arrange", "pro");
+  await guard.set("transport", "pro");
   await sleep(300);
   await cap(`${s.name}-arr-pro`);
   await must("ui.showMixer", { show: true });
-  await must("debug.panelDensity", { panel: "mixer", mode: "simple" });
+  await guard.set("mixer", "simple");
   await sleep(300);
   await cap(`${s.name}-mix-simple`);
-  await must("debug.panelDensity", { panel: "mixer", mode: "pro" });
+  await guard.set("mixer", "pro");
   await sleep(300);
   await cap(`${s.name}-mix-pro`);
 }
@@ -166,7 +179,7 @@ for (const s of sizes) {
 // ---- pass 2: piano roll open (CC clip), Pro everywhere ----
 // No longer conditional: the fixture above guarantees the clip and the EQ exist.
 await must("ui.showMixer", { show: false });
-await must("debug.panelDensity", { panel: "pianoRoll", mode: "pro" });
+await guard.set("pianoRoll", "pro");
 for (const s of sizes) {
   const f = await must("debug.windowFrame", { width: s.w, height: s.h });
   await sleep(350);
@@ -189,6 +202,13 @@ for (const s of sizes) {
 fs.rmSync(`${OUT}/tmp-select.png`, { force: true });
 
 console.log("sweep done");
+await guard.restore("normal exit");
 stopStaging(GATE);   // SIGTERMs by exact pid AND releases our session.lock
 ws.close();
-process.exit(0);
+// m23-fl: this gate ASSERTS NOTHING and always has — its header says so in prose, but nothing
+// MACHINE-READABLE did, so a corpus run counted it as a passing gate indistinguishable from one
+// that actually checked something. `verdict({ran: 0, ...}, {allowEmpty})` states it in a form the
+// census can read: it still exits 0 (correct — this is a capture tool), but it is now counted as
+// EXEMPTED, never as MIGRATED, and the reason is enforced non-empty at RUNTIME rather than by
+// convention. Assertions were deliberately NOT invented for it: the real check is a human eye.
+verdict({ ran: 0, failed: 0 }, { allowEmpty: "capture-only by design: a window-size x workspace x density matrix whose output is PNG frames for pixel review. No pass/fail assertion exists here and none is intended — see this file's own header. The frames are the deliverable." });

@@ -249,7 +249,7 @@ struct EditorSurfaceOwnershipSiteTests {
 
     // MARK: - F3/F11: the roll's eight funnels, and the gesture count that guards them
 
-    @Test("all EIGHT piano-roll engagement funnels R1–R8 are still present")
+    @Test("all TEN piano-roll engagement funnels R1–R10 are still present")
     func rollFunnelsArePresent() {
         let roll = Self.text(Self.rollPath)
         #expect(!roll.isEmpty)
@@ -257,7 +257,8 @@ struct EditorSurfaceOwnershipSiteTests {
         // the map; the call count below is the territory. Both, because a marker
         // without a call is a lie and a call without a marker is unmaintainable.
         for tag in ["m23-al R1", "m23-al R2", "m23-al R3", "m23-al R4",
-                    "m23-al R5", "m23-al R6", "m23-al R7", "m23-al R8"] {
+                    "m23-al R5", "m23-al R6", "m23-al R7", "m23-al R8",
+                    "m23-al R9", "m23-al R10"] {
             let note = "the \(tag) engagement funnel is gone from PianoRollView. Each funnel "
                 + "covers a DISTINCT gesture family — R7 in particular is NOT covered by R6, "
                 + "because the controller strip carries its own `onCommit` and never calls "
@@ -266,14 +267,33 @@ struct EditorSurfaceOwnershipSiteTests {
         }
         // MEASURED against this tree (2026-08-03): R1, R2, R3, R4, R5 ×2 (the
         // header's − and +), R6, R7, R8 = 9 calls. R5 is two because the cluster
-        // has two buttons; every other funnel is one site.
+        // has two buttons; every other funnel was one site.
+        //
+        // ⚠️ 9 → 11 AT m23-ek-3, RE-MEASURED: R9, the CLIPBOARD funnel, is TWO
+        // sites — the roll's cut and its paste. Both mutate, so both claim the
+        // zoom keys exactly as the context-menu delete does through R6. ⚠️ COPY
+        // IS THE THIRD CLIPBOARD BRANCH AND IT IS DELIBERATELY NOT A SITE: every
+        // funnel here is a gesture that CHANGES something (R6's safety argument
+        // is precisely that its callers are edits), and a copy mutates nothing —
+        // engaging on a pure read would let it silently re-point ⌘+.
+        //
+        // ⚠️ 11 → 12 AT m25-b-1, and the pin's own standing instruction ("if this
+        // ever reads 12, check whether COPY grew an `onEngage()` before assuming a
+        // new gesture landed") WAS FOLLOWED: copy did not. R10 is the header's new
+        // MAXIMIZE toggle, and it was held to the rule rather than waved through.
+        // Maximizing is not a read — it changes the view, exactly as R5's zoom
+        // cluster does, and it is the strongest statement available that the roll
+        // is the surface the user is working in. Leaving it out would have aimed
+        // ⌘+/⌘−/⌘0 at an arrange collapsed to an 86 pt ruler strip. The
+        // counter-example that stays OUT is CLOSE: it ends the surface rather than
+        // claiming it, so it has no engagement and should never grow one.
         let calls = Self.codeOnly(roll).joined(separator: "\n")
             .components(separatedBy: "onEngage()").count - 1
-        let countNote = "expected 9 `onEngage()` calls in PianoRollView (R1–R8, with R5 counted "
-            + "twice for the header cluster's two buttons), found \(calls). If a gesture was "
-            + "added, add its engagement and update this number; if one was removed, that "
-            + "gesture no longer claims ⌘+."
-        #expect(calls == 9, "\(countNote)")
+        let countNote = "expected 12 `onEngage()` calls in PianoRollView (R1–R10, with R5 and R9 "
+            + "each counted twice — the header cluster's two buttons, and the clipboard's cut "
+            + "and paste), found \(calls). If a gesture was added, add its engagement and "
+            + "update this number; if one was removed, that gesture no longer claims ⌘+."
+        #expect(calls == 12, "\(countNote)")
     }
 
     @Test("R6 `commit()` has no NON-GESTURE caller — the property that makes it safe to engage there")
@@ -284,7 +304,16 @@ struct EditorSurfaceOwnershipSiteTests {
         // lifecycle-driven `commit()` would FALSE-ENGAGE the roll and silently
         // steal ⌘+ from the arrange.
         let roll = Self.codeOnly(Self.text(Self.rollPath)).joined(separator: "\n")
-        let callers = roll.components(separatedBy: "commit()").count - 1
+        // ⚠️ THE NEEDLE IS `commit(`, NOT `commit()` — CHANGED 2026-08-13 (m25-a).
+        // `commit` now takes `extendToCover:` (defaulted), so a caller can spell
+        // itself `commit(extendToCover: […])` and a needle of `commit()` would
+        // MISS IT — the pin would have gone quiet on exactly the kind of new
+        // caller it exists to catch, while still reading a plausible number.
+        // `commit(` catches both spellings. It does NOT collide with the
+        // `onCommit(` closure invocation inside the definition (capital C) or
+        // with `commitControllerLane(` (no paren after `commit`), both verified
+        // against this file's `codeOnly` stripping.
+        let callers = roll.components(separatedBy: "commit(").count - 1
         // MEASURED (2026-08-03): the `.onKeyPress(.delete)` handler, the
         // double-tap add, `endGesture` when the note moved, and the definition
         // itself. The velocity lane passes `commit` BY REFERENCE
@@ -301,13 +330,68 @@ struct EditorSurfaceOwnershipSiteTests {
         //     deliberately no debug seam. A user who deletes notes from the Edit
         //     menu HAS just acted inside the roll, so engaging it there is
         //     correct, not a false engage.
-        let note = "expected 6 occurrences of `commit()` in PianoRollView (5 gesture/menu callers "
+        // RE-MEASURED 2026-08-09 (m23-cq-1), 6 -> 7, and the new caller was held
+        // to the rule above rather than waved through:
+        //   • `applyStepToggle` — the STEP SEQUENCER's cell toggle. Its only two
+        //     callers are the grid's `SpatialTapGesture` (a click) and the
+        //     `stepSequencer.toggleNonce` handler, whose only producer is
+        //     `StepSequencerBridge.stageToggle` — i.e. `debug.stepSequencer`,
+        //     a deliberate staging seam standing in for that same click. No
+        //     timer, no `.onAppear`, no lifecycle path. Clicking a step cell IS
+        //     the user acting inside the editor pane, so engaging there is
+        //     correct.
+        //
+        // ⚠️ RE-MEASURED 2026-08-09 (m23-cf, second pass), 7 -> 6 — A CALLER WAS
+        // REMOVED, AND THIS IS THE ONE DIRECTION THIS PIN MUST NOT BE "FIXED" BY
+        // REFLEX. `.onKeyPress(.delete)` no longer deletes inline: DELETE now
+        // goes through `AppModel.handleDeleteKey`, the ONE routing decision all
+        // three focus-gated claimants consult, and when it names the roll it
+        // bumps `noteSelection.deleteNonce` — which lands in the handler that was
+        // ALREADY counted above (Edit ▸ Delete's, since the first m23-cf pass).
+        // So the key's delete and the menu's delete became the SAME caller
+        // instead of two identical ones. R6 is unaffected in substance: the
+        // routed delete still runs `deleteSelection()` + `commit()`, so a key
+        // press still engages the roll exactly as it did.
+        //   Remaining 5 callers + the definition: the double-tap add, `endGesture`
+        //   when the note moved, the note context menu's Delete, the
+        //   `deleteNonce` handler (key AND menu), `applyStepToggle`.
+        // ⚠️ IF THIS EVER READS 7 AGAIN, CHECK WHETHER A KEY HANDLER WENT BACK TO
+        // DELETING INLINE before assuming a new gesture landed — that is the
+        // m23-cf regression, and it is INTERMITTENT by nature (it only misbehaves
+        // on the presses where SwiftUI focused that particular claimant).
+        // ⚠️ RE-MEASURED 2026-08-13 (m25-a), 6 -> 7. **NO NEW GESTURE LANDED.**
+        // The count moved for two reasons, and neither is a new caller:
+        //   ① The needle changed from `commit()` to `commit(` (see above), which
+        //      is what keeps the DOUBLE-TAP ADD counted now that it spells itself
+        //      `commit(extendToCover: [note.id])` — auto-extending the clip is
+        //      the same gesture it always was, now naming the note that may grow
+        //      the clip. Same for the definition itself.
+        //   ② The VELOCITY LANE became VISIBLE to this pin. It was always a
+        //      caller — the note above says so — but it passed `commit` BY
+        //      REFERENCE and therefore never appeared in the count. m25-a gave
+        //      `commit` a defaulted parameter, and Swift drops default arguments
+        //      when a method is used as a function VALUE, so the reference no
+        //      longer type-checks as `() -> Void` and the site is now spelled
+        //      `onCommit: { commit() }`. The pin got STRICTER, not looser: a
+        //      caller it was previously blind to is now inside the fence.
+        //   Full list at 7: the definition, the double-tap add (m25-a spelling),
+        //   `endGesture` when the note moved, the note context menu's Delete, the
+        //   `deleteNonce` handler (key AND menu), `applyStepToggle`, and the
+        //   velocity lane's closure. Every one is a user gesture or an explicit
+        //   user menu action, so R6 still cannot false-engage.
+        let note = "expected 7 occurrences of `commit(` in PianoRollView (6 gesture/menu callers "
             + "+ the definition), found \(callers). A NEW caller must be checked: if it is not a "
             + "user gesture or an explicit user menu action, R6 now false-engages the roll."
-        #expect(callers == 6, "\(note)")
+        #expect(callers == 7, "\(note)")
+        // ⚠️ THE NEEDLE HERE WAS `onCommit: commit` UNTIL 2026-08-13 (m25-a), AND
+        // IT WAS VACUOUS: `onCommit: commitControllerLane` (the controller strip,
+        // one screen down) contains that string as a PREFIX, so this expectation
+        // passed whether or not the velocity lane was wired to `commit` at all.
+        // The m25-a spelling is unambiguous and cannot be prefix-matched by a
+        // different symbol.
         let lane = "the velocity lane must still commit through `commit` (that is how R6 covers "
             + "it)"
-        #expect(roll.contains("onCommit: commit"), "\(lane)")
+        #expect(roll.contains("onCommit: { commit() }"), "\(lane)")
     }
 
     @Test("the gesture-attachment count under Sources/DAWApp/PianoRoll/ is pinned")
@@ -326,10 +410,10 @@ struct EditorSurfaceOwnershipSiteTests {
         let swift = files.filter { $0.pathExtension == "swift" }.sorted { $0.path < $1.path }
         // ANTI-VACUITY: a walk that found nothing would report a clean 0 and pass
         // any "<= N" assertion. Pin the FILE count too.
-        let fileNote = "expected 4 Swift files under Sources/DAWApp/PianoRoll/ "
-            + "(ControllerLaneStrip, KeyboardSidebar, PianoRollView, VelocityLane), found "
-            + "\(swift.count)"
-        #expect(swift.count == 4, "\(fileNote)")
+        let fileNote = "expected 7 Swift files under Sources/DAWApp/PianoRoll/ "
+            + "(ControllerLaneStrip, KeyboardSidebar, PianoRollMarqueeStaging, PianoRollView, "
+            + "StepSequencerGrid, StepSequencerStaging, VelocityLane), found \(swift.count)"
+        #expect(swift.count == 7, "\(fileNote)")
         var total = 0
         var perFile: [String: Int] = [:]
         for url in swift {
@@ -347,18 +431,51 @@ struct EditorSurfaceOwnershipSiteTests {
         // only PianoRollView's four. The whole directory carries SEVEN:
         //   PianoRollView 4 (gridDrag, gridPinch, the double-tap add, scrubDrag)
         //   KeyboardSidebar 1, VelocityLane 1, ControllerLaneStrip 1
+        //
+        // RE-MEASURED 2026-08-09 (m23-cq-1), 7 -> 8: `StepSequencerGrid` adds
+        // ONE — the step grid's `cellTap`, the whole interaction vocabulary of
+        // that surface. It engages through `PianoRollView.applyStepToggle` →
+        // `commit()` (R6/R9) rather than calling `onEngage` itself, which is
+        // the same route the double-tap add takes.
+        //
+        // ⭐ STILL 8 AFTER m23-ek-1, AND THAT IS THE POINT OF THE ITEM. The roll's
+        // rubber band adds NO gesture: it is a PROMOTION inside the existing
+        // `gridDrag`, entered from `.click(nil)` once the pointer travels
+        // `PianoRollMarquee.dragSlop`. The arrange's `.simultaneousGesture`
+        // shape was rejected precisely because a second gesture would race
+        // `gridDrag`'s own `clearSelection()` at release, at an ordering this
+        // tree cannot observe (m23-bw). If this number ever reaches 9 because
+        // somebody "restored consistency with the arrange", that is the
+        // regression, not the fix.
         let breakdown: String = perFile.sorted { $0.key < $1.key }
             .map { "\($0.key)=\($0.value)" }
             .joined(separator: " ")
-        let note = "gesture attachments under Sources/DAWApp/PianoRoll/ moved from 7 to "
+        let note = "gesture attachments under Sources/DAWApp/PianoRoll/ moved from 8 to "
             + "\(total) (\(breakdown)). A NEW gesture in the piano roll must decide whether it "
             + "ENGAGES the roll (call `onEngage()` and add an `m23-al Rn` marker) — otherwise "
             + "that gesture silently fails to claim ⌘+/⌘−/⌘0. Then update this number."
-        #expect(total == 7, "\(note)")
+        #expect(total == 8, "\(note)")
     }
 
     private func sourcesDirPianoRoll() -> URL {
         Self.sourcesDir().appendingPathComponent("DAWApp/PianoRoll", isDirectory: true)
+    }
+
+    @Test("the grid's `.contentShape(Rectangle())` survives — m23-cf's measured hit region")
+    func gridKeepsItsHitRegion() {
+        // m23-ek-1 F8. The band lives on this surface, and the tempting
+        // restructure (an underlay that owns the marquee, the arrange's
+        // `pointerHoverSurface` analogue) would need this shape shrunk or
+        // removed to let a press through — which would silently delete the
+        // context menu m23-cf added after MEASURING that a `Canvas` contributes
+        // no AppKit hit region of its own. `.gesture` does not care; `.contextMenu`
+        // does. Pinned as a SITE because no headless test can see a right-click.
+        let roll = Self.codeOnly(Self.text(Self.rollPath)).joined(separator: "\n")
+        let note = "the note grid's `.contentShape(Rectangle())` must stay directly above its "
+            + "`.contextMenu` — without it the right-click passes through the Canvas and NO "
+            + "menu appears (measured live on staging, m23-cf)"
+        #expect(roll.contains(".contentShape(Rectangle())\n                        .contextMenu"),
+                "\(note)")
     }
 
     // MARK: - The reader census
@@ -378,12 +495,26 @@ struct EditorSurfaceOwnershipSiteTests {
         //      property read on the same line. A line count says 2 here; an
         //      occurrence count says 4, and this test counts occurrences.
         //   = 9
-        let note = "expected 9 code mentions of `activeEditorSurface` in DAWProApp.swift (1 "
+        // ⭐ 9 → 10 AT m25-s, AND THE ONE ADDED READ IS THE POINT OF THE FEATURE.
+        // `selectAllMenuItem` (Edit ▸ Select All / ⌘A) asks
+        // `activeEditorSurface.surface` which editor the user is working in.
+        //
+        // ⚠️ IT IS A NEW SURFACE-SCOPED DECISION AND WAS CONSIDERED AS ONE, which
+        // is what this pin exists to force. It does NOT go through the sibling
+        // term its two Edit-menu neighbours use: `deleteMenuItem` and
+        // `clipboardItem` route on `pianoRollWouldConsumeKey` ("the roll is open
+        // AND HOLDS A NOTE SELECTION"), and that term cannot express this
+        // question at all — a select-all is pressed precisely when no selection
+        // exists yet, so routing it that way would make the feature reachable
+        // only once it was unnecessary. Engagement is the honest discriminator
+        // here, and this is the home for it. See `SelectAllMenuPolicy`.
+        let note = "expected 10 code mentions of `activeEditorSurface` in DAWProApp.swift (1 "
             + "declaration + 3 routers + 1 debug.viewZoom + 4 from the two echo lines, whose "
-            + "JSON KEYS also contain the token), found \(hits). A new reader is not "
-            + "automatically wrong — but it IS a new surface-scoped decision, and m23-al-3 is "
-            + "where those are supposed to be considered together rather than one at a time."
-        #expect(hits == 9, "\(note)")
+            + "JSON KEYS also contain the token, + 1 for m25-s's `selectAllMenuItem`), found "
+            + "\(hits). A new reader is not automatically wrong — but it IS a new "
+            + "surface-scoped decision, and m23-al-3 is where those are supposed to be "
+            + "considered together rather than one at a time."
+        #expect(hits == 10, "\(note)")
         // No OTHER file may read it: the whole point is that one accessor answers.
         for path in ["DAWApp/ContentView.swift"] {
             let other = Self.codeOnly(Self.text(path)).joined(separator: "\n")
@@ -425,11 +556,42 @@ struct EditorSurfaceOwnershipSiteTests {
         // zoomPianoRollIn() }` is a divergent router that never constructs
         // `ActiveEditorSurface` and so slips past its `fileprivate init`
         // untouched. That is the honest gap the initializer cannot close.
-        let note = "expected 10 code mentions of `openEditorClip` in DAWProApp.swift, found "
+        // ⚠️ 10 → 11 AT m23-ek-3, AND THE ONE ADDED READ IS DELIBERATE. Edit ▸
+        // Paste asks `ClipboardMenuPolicy.pasteMenuItem` for `rollOpen:`, i.e.
+        // "is there a roll ON SCREEN to receive these notes". That is neither a
+        // ZOOM nor a KEY decision, so the note below does not apply to it, and
+        // routing it through `activeEditorSurface` would be WRONG rather than
+        // merely unnecessary: engagement answers "which editor did the user last
+        // ENGAGE", which comes apart from "is a roll mounted" — paste a note
+        // group with the arrange most recently engaged and the roll still open,
+        // and an engagement-routed item would refuse a paste that has a perfectly
+        // good destination on screen. It is also not the m23-x consume test
+        // (`pianoRollWouldConsumeKey`), which additionally requires a NOTE
+        // SELECTION: you can paste into a roll holding no selection at all, and
+        // reusing that property would have greyed Paste in the commonest case
+        // there is. Three distinct questions, three distinct terms; this is the
+        // one that genuinely wants the raw read.
+        // ⚠️ 11 → 12 AT m25-s, AND IT IS NOT A SECOND "IS THE ROLL ON SCREEN".
+        // `selectAllMenuItem` reads `openEditorClip?.notes?.count ?? 0` — a
+        // CONTENT read, asking how many notes there are to select. It never
+        // spells `openEditorClip != nil`, and the surface question it does ask is
+        // routed through `activeEditorSurface`, exactly as the note below
+        // demands. This pin counts raw token mentions, so a content read moves it
+        // even though the failure it guards against (a divergent boolean that
+        // never constructs `ActiveEditorSurface`) has not occurred.
+        //
+        // WHY NOT ROUTE THE COUNT SOMEWHERE ELSE: the roll's live note count
+        // lives on `PianoRollModel.draft`, which is `@State private`, and the
+        // bridge's `surface` echo that mirrors it is `@ObservationIgnored` AND one
+        // body pass behind (measured). Store truth is the only non-stale source a
+        // menu can read; `SelectAllMenuPolicy`'s parameter doc names the single
+        // state where the two differ and why it is unreachable outside a live
+        // gesture.
+        let note = "expected 12 code mentions of `openEditorClip` in DAWProApp.swift, found "
             + "\(hits). If the new one is a ZOOM or KEY decision, it must go through "
             + "`activeEditorSurface` instead — a raw `openEditorClip != nil` is a second "
             + "computation of 'which surface is active' that also silently drops the WORKSPACE "
             + "term (in the Mix console this stays non-nil with no roll mounted)."
-        #expect(hits == 10, "\(note)")
+        #expect(hits == 12, "\(note)")
     }
 }

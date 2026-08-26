@@ -505,10 +505,26 @@ struct TrackRow: View {
     ///
     /// Hence: transient (3 s, model-owned — `AppModel.trackClickAck`), a chip that
     /// floats OVER the row and never a fill or a border ON it, and no persistent
-    /// mark of any kind. `ArrangeTrackSelection`'s standing prohibition — "a track
-    /// as a distinct selectable object ships only on the user's word; do not add it
-    /// on the way past" — is one careless `.background(isSelected …)` away, and
-    /// this chip is the nearest thing in the tree to that mistake.
+    /// mark of any kind.
+    ///
+    /// ⚠️ **UPDATED AT m25-l-1, AND THE UPDATE NARROWS THIS RULE RATHER THAN
+    /// LIFTING IT.** This doc used to close by citing `ArrangeTrackSelection`'s
+    /// standing prohibition — *"a track as a distinct selectable object ships only
+    /// on the user's word; do not add it on the way past"* — as the reason a
+    /// persistent mark on a row was forbidden outright. **The user has since
+    /// given that word** (m25-l), so the row now carries exactly one persistent
+    /// mark: the cyan ACTIVE-TRACK RAIL on its leading edge (`activeTrackRail`).
+    ///
+    /// **The rule that survives is the one that was always the point: THIS CHIP
+    /// must never read as state, and the two marks must never be confused.** They
+    /// are kept apart on every axis on purpose — the chip is transient, neutral
+    /// dark glass, prose, and floats over the row's TRAILING end; the rail is
+    /// persistent, cyan, wordless, and is a 3 pt edge on the LEADING side. And
+    /// they answer different questions: the chip says *"that click landed and
+    /// there was nothing to select"*, the rail says *"this is where the next
+    /// paste goes"*. **What is still forbidden is a track-valued SELECTION** — a
+    /// `.background(isSelected …)` implying DELETE or a nudge would act on the
+    /// track as a member. No verb reads the active track; keep it that way.
     @ViewBuilder
     private var trackClickAckBubble: some View {
         // ONE condition, and it is the model comparison and nothing else: remove
@@ -535,6 +551,64 @@ struct TrackRow: View {
         }
     }
 
+    /// ⭐ **THE ACTIVE-TRACK RAIL (m25-l-1) — "you are here".**
+    ///
+    /// A 3 pt cyan bar on the row card's LEADING edge, for the whole card's
+    /// height. It is the visible half of the active-track concept, and it ships
+    /// WITH it on purpose: an invisible mode is worse than none, and the cursor
+    /// now silently decides where a paste lands.
+    ///
+    /// ═══ IT READS THE RESOLVED VALUE, NOT THE STORED CLICK ═══
+    ///
+    /// `model.activeTrackID` is the id projection of `model.activeTrack`, which
+    /// is `ArrangeActiveTrack.resolve(...)` — the SAME resolution
+    /// `pasteClipsFromClipboard` passes to `PasteAnchorPolicy`. So the
+    /// rail is a live readout of the rule rather than a second opinion about it,
+    /// and the two states where they would otherwise diverge are handled by
+    /// construction: a rail on a track a paste would NOT go to (the explicit id
+    /// names a REMOVED track — resolution falls through to the focused clip's
+    /// owner) and a paste target wearing NO rail (nothing was ever header-clicked
+    /// but a clip is focused — the pre-m25-l-1 behaviour, still the second
+    /// precedence term). Reading `explicitActiveTrackID` here would produce
+    /// exactly the mark-disagrees-with-behaviour defect m23-am was opened for.
+    ///
+    /// ⚠️ **THE RAIL DOES NOT DISTINGUISH `.explicit` FROM `.inferred` (m25-l-3),
+    /// AND THAT IS A REAL, ACCEPTED LIMIT.** Since that ruling only an explicitly
+    /// chosen track redirects an in-place paste, so two visually identical rails
+    /// can now precede different paste outcomes. The rail still answers the
+    /// question it was built to answer — *where am I* — honestly in both cases,
+    /// and a second visual state for "and a paste will move here" is a design
+    /// decision this item did not have the user's word for. The distinction IS
+    /// exposed where it can be measured: `debug.arrangeSelection` and
+    /// `debug.editClipboard` both echo `activeTrackOrigin`.
+    ///
+    /// ═══ CYAN, AND NO GLOW ═══
+    ///
+    /// Cyan is the accent system's *"playback/position/**active state**"* and an
+    /// accent is EARNED by state (Rule 3) — this is the arrange's active state,
+    /// so it is the honest token. **No glow**, because "never glow static chrome"
+    /// and this mark is persistent by design; the drag lift keeps the glowing
+    /// cyan rim as its own earned, momentary treatment, so the two never read the
+    /// same. A RAIL rather than a border or a fill, for the same reason: the card
+    /// stroke is already spoken for (dragging → cyan, AI → violet, else hairline)
+    /// and a `.background(isSelected …)` is the exact careless move
+    /// `trackClickAckBubble`'s doc warns about.
+    ///
+    /// **It spans the whole card**, takes/automation sections included: it marks
+    /// the TRACK, not the header row, and a rail is an edge with no body to
+    /// mis-centre (the geometry failure `trackClickAckBubble` records). Drawn
+    /// before the `clipShape` so its corners are cut by the card, and
+    /// `.allowsHitTesting(false)` so it can never eat a click meant for the row.
+    @ViewBuilder
+    private var activeTrackRail: some View {
+        if model.activeTrackID == track.id {
+            Rectangle()
+                .fill(DAWTheme.playback)
+                .frame(width: 3)
+                .allowsHitTesting(false)
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             // ON THE HEADER ROW ITSELF, never on this VStack: an expanded track
@@ -550,6 +624,19 @@ struct TrackRow: View {
             }
         }
         .background(DAWTheme.panelRaised)
+        // ⚠️⚠️ THE MOUNT. `activeTrackRail` was DEFINED but never mounted when
+        // m25-l-1 shipped — two occurrences repo-wide, both of them prose (a doc
+        // comment and the declaration), zero uses — so the rail could not be
+        // seen and the user reported the active track as invisible. Its own doc
+        // block described exactly where it belongs, which is why this reads as a
+        // dropped line rather than an unfinished design.
+        //
+        // ⭐ BEFORE `.clipShape`, deliberately and per that doc: the rail is a
+        // full-height edge and the card's rounded corners must CUT it, otherwise
+        // a 3 pt bar overhangs the radius at top and bottom.
+        // `.leading` because a rail marks the edge you read first; the trailing
+        // edge is already taken by `trackClickAckBubble`.
+        .overlay(alignment: .leading) { activeTrackRail }
         .clipShape(RoundedRectangle(cornerRadius: 7))
         .overlay(
             RoundedRectangle(cornerRadius: 7).stroke(
@@ -860,11 +947,20 @@ struct TrackRow: View {
             .onSubmit { commitRename() }
             // Escape cancels (drops the draft) BEFORE the focus-loss commit runs —
             // `isEditingName` is cleared first, so the onChange below no-ops.
-            .onKeyPress(.escape) { cancelRename(); return .handled }
+            .onKeyPress(.escape) {
+                KeyPressProbe.trackRenameEscape += 1   // m23-fi probe, first statement
+                cancelRename()
+                return .handled
+            }
             // Focus loss (click elsewhere) commits; guarded so a Return/Escape that
             // already tore down the field can't commit a second time.
             .onChange(of: nameFieldFocused) { _, focused in
                 if !focused && isEditingName { commitRename() }
+            }
+            // m23-fi PROBE — the field's `@FocusState` value, so a probe can tell
+            // "escape was not delivered" from "the field never had focus".
+            .onChange(of: nameFieldFocused, initial: true) { _, focused in
+                KeyPressProbe.trackRenameFieldFocused = focused
             }
     }
 

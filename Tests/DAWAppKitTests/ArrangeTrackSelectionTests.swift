@@ -8,6 +8,25 @@ import Testing
 // The whole rule lives in `ArrangeTrackSelection` precisely so it can be pinned
 // here — `DAWApp` has no test target, so anything decided inside the SwiftUI
 // `body` or the `AppModel` handler would be invisible to `Tests/`.
+//
+// ═══ m25-l-1 DEFECT ② — THE PLAIN CLICK'S MEANING CHANGED (USER RULING) ═══════
+//
+// 2026-08-13, the user hands-on: *"when I click on track with clips, all clips
+// got selected which is not expected."* A PLAIN header click is now a CURSOR
+// MOVE — it names the active track and CLEARS the clip selection; ⇧/⌘ keeps the
+// set behaviour this suite was written for.
+//
+// ⚠️ **THE OLD BEHAVIOUR WAS DELIBERATE, NOT A BUG.** It was documented, argued
+// for, and matches Logic Pro. What changed is the world: m25-l-3 made a header
+// click THE way to choose a paste destination, so a navigational gesture also
+// armed the next ⌫ with every clip on the track. The argument is in
+// `ArrangeTrackSelection`'s banner.
+//
+// ⚠️ **NOTHING THIS SUITE PINNED WAS DELETED.** Tests whose SUBJECT was the set
+// behaviour had their INPUT moved one modifier over (plain → ⇧) and kept their
+// ASSERTIONS verbatim; each carries a note saying so. Tests whose subject WAS the
+// plain click were re-authored and say what they used to claim. If you are here
+// because a test reads oddly: it was decided, not drifted.
 
 @Suite("ArrangeTrackSelection")
 struct ArrangeTrackSelectionTests {
@@ -79,32 +98,98 @@ struct ArrangeTrackSelectionTests {
         #expect(!ids.contains(hidden), "a take LANE clip must never be selectable from the header")
     }
 
-    // MARK: Plain click — replace
+    // MARK: Plain click — THE CURSOR (m25-l-1 defect ②)
 
-    // 4. THE ROADMAP'S FIRST LEG: selecting a track selects its clips.
-    @Test("a plain header click selects exactly that track's clips")
-    func plainClickSelectsTheTrack() {
+    // 4. ⭐ **THE RULING, AND THE ONE TEST THE CHANGE EXISTS FOR.**
+    //
+    //    ⚠️ **RE-AUTHORED 2026-08-13 BY USER RULING — this test used to assert the
+    //    OPPOSITE**, under the name `plainClickSelectsTheTrack` and the title "a
+    //    plain header click selects exactly that track's clips". That was the
+    //    roadmap's first leg for m23-y, it was a deliberate design, and Logic Pro
+    //    behaves the same way. The user reversed it hands-on: *"when I click on
+    //    track with clips, all clips got selected which is not expected"* — after
+    //    m25-l-3 made a header click THE way to choose a paste destination, so the
+    //    gesture that aims a ⌘V also armed the next ⌫ with the whole track.
+    //
+    //    THE OLD ASSERTION IS NOT DELETED. It lives one modifier over, in
+    //    `shiftClickSelectsTheTrack` directly below.
+    //
+    //    ⛔ THE HALF THAT MUST NOT BREAK is asserted here too: a plain click STILL
+    //    names the active track. Paste-to-selected-track (m25-l-3, the user's own
+    //    reported bug) reads exactly this field, so a plain click degraded to a
+    //    pure no-op would silently break the feature this ruling depends on.
+    //    Swept across every chord in `ArrangeActiveTrackTests`.
+    @Test("a plain header click selects NOTHING and names the active track (USER RULING 2026-08-13)")
+    func plainClickSelectsNothingAndNamesTheTrack() {
         let a = UUID(), b = UUID(), other = UUID()
+        let t = track([a, b])
         var s = ArrangeSelection()
         s.selectOnly(other)
 
-        let out = ArrangeTrackSelection.apply(click: track([a, b]), modifiers: .none, to: &s)
-        #expect(s.ids == [a, b])
-        #expect(!s.contains(other), "a plain click REPLACES — a foreign clip must not survive")
+        let out = ArrangeTrackSelection.apply(click: t, modifiers: .none, to: &s)
+        #expect(s.isEmpty, "a plain header click is a CURSOR MOVE — it selects nothing")
+        #expect(!s.contains(a), "not even the clicked track's own clips")
+        #expect(!s.contains(b))
+        #expect(!s.contains(other), "and the previous selection is CLEARED, not left standing")
         #expect(out.intent == .replace)
-        #expect(out.effect == .replace)
-        #expect(out.clipIDs == [a, b])
+        #expect(out.effect == .replace, "the effect case and its wire string are unchanged")
+        #expect(out.clipIDs == [a, b],
+                "clipIDs still reports what is ON the track — it is the feedback predicate's clip-count proxy, not a claim about what the click acted on")
+        #expect(out.activeTrackID == t.id, "⛔ the constraint: a plain click still names the cursor")
+        expectInvariants(s)
+    }
+
+    // 4b. **#4's OLD ASSERTION, ONE MODIFIER OVER.** Selecting a whole track is a
+    //     capability the ruling PRESERVED rather than removed — it now needs ⇧/⌘.
+    //     Both chords swept, because both must reach it.
+    @Test("⇧/⌘ on a header selects exactly that track's clips — the capability the ruling kept")
+    func shiftClickSelectsTheTrack() {
+        for mods in [ArrangeClickModifiers.shift, .command] {
+            let a = UUID(), b = UUID(), c = UUID()
+            var s = ArrangeSelection()
+            let out = ArrangeTrackSelection.apply(click: track([a, b]), modifiers: mods, to: &s)
+            #expect(s.ids == [a, b])
+            #expect(!s.contains(c), "and nothing else in the project")
+            #expect(out.intent == .toggle)
+            #expect(out.effect == .add)
+            #expect(out.clipIDs == [a, b])
+            expectInvariants(s)
+        }
+    }
+
+    // 4c. …and "exactly this track's clips and nothing else" is still reachable
+    //     from a NON-empty selection, in two clicks: plain (clears + activates)
+    //     then ⇧ (adds them all). This is the composition that makes the ruling a
+    //     restriction on ONE gesture rather than the loss of a capability, so it
+    //     is asserted rather than merely claimed in the banner.
+    @Test("plain-then-⇧ on the same header reaches EXACTLY that track's clips in two clicks")
+    func plainThenShiftIsolatesTheTrack() {
+        let a = UUID(), b = UUID(), foreign = UUID()
+        let t = track([a, b])
+        var s = ArrangeSelection()
+        s.selectOnly(foreign)
+
+        ArrangeTrackSelection.apply(click: t, modifiers: .none, to: &s)
+        let out = ArrangeTrackSelection.apply(click: t, modifiers: .shift, to: &s)
+        #expect(s.ids == [a, b])
+        #expect(!s.contains(foreign))
+        #expect(out.effect == .add)
         expectInvariants(s)
     }
 
     // 5. THE FOCUS DECISION, half one: a header click NEVER ADOPTS a focus.
-    //    Plain-clicking the header of a track with one MIDI clip must NOT open
-    //    the piano roll on it. `replace(with:)`'s rule — selecting is not opening.
-    @Test("a plain header click adopts NO focus, even on a single-clip track")
-    func plainClickNeverAdoptsFocus() {
+    //    ⇧-clicking the header of a track with one MIDI clip must NOT open the
+    //    piano roll on it. The set paths' rule — SELECTING IS NOT OPENING.
+    //
+    //    ⚠️ INPUT RESTATED AT m25-l-1 DEFECT ② (USER RULING 2026-08-13): this drove
+    //    a PLAIN click, which no longer selects anything at all. The ASSERTION is
+    //    untouched — the rule is "a SET path adopts no focus", and it is now
+    //    proved on the branch that still builds a set (`formUnion`).
+    @Test("a ⇧ header click adopts NO focus, even on a single-clip track")
+    func shiftClickNeverAdoptsFocus() {
         let only = UUID()
         var s = ArrangeSelection()
-        ArrangeTrackSelection.apply(click: track([only]), modifiers: .none, to: &s)
+        ArrangeTrackSelection.apply(click: track([only]), modifiers: .shift, to: &s)
         #expect(s.ids == [only])
         #expect(s.focusID == nil, "a header has no anchor clip — it must not open the note editor")
         expectInvariants(s)
@@ -112,34 +197,63 @@ struct ArrangeTrackSelectionTests {
 
     // 6. THE FOCUS DECISION, half two: a SURVIVING focus is kept. This is what
     //    leaves the piano roll open when you click the header of the track it is
-    //    already open on, and it is what discriminates `replace(with:)` from a
-    //    loop of `toggle`s (which would adopt, or drop, depending on order).
-    @Test("a plain header click KEEPS a focus that survives into the new set")
-    func plainClickKeepsSurvivingFocus() {
+    //    already open on — the roll-vs-arrange DELETE arbitration documented at
+    //    `AppModel.clickTrack`.
+    //
+    //    ⚠️ INPUT RESTATED AT DEFECT ②, AND THE RESTATEMENT IS THE POINT: the
+    //    arbitration used to be reachable from a PLAIN click (`replace(with:)`
+    //    keeps a member focus). A plain click now empties the selection, so INV2
+    //    drops the focus and the roll CLOSES — see `plainClickClosesAnOpenRoll`.
+    //    The arbitration survives behind ⇧, which is what this pins.
+    @Test("a ⇧ header click KEEPS a focus that survives into the new set")
+    func shiftClickKeepsSurvivingFocus() {
         let a = UUID(), b = UUID()
         var s = ArrangeSelection()
         s.selectOnly(a)                                  // focus = a
-        ArrangeTrackSelection.apply(click: track([a, b]), modifiers: .none, to: &s)
+        ArrangeTrackSelection.apply(click: track([a, b]), modifiers: .shift, to: &s)
         #expect(s.ids == [a, b])
         #expect(s.focusID == a, "the focus is a member of the new set — it survives")
         expectInvariants(s)
     }
 
-    // 7. And a focus that does NOT survive is dropped, not carried as a dangling
-    //    id (INV1).
-    @Test("a plain header click drops a focus the new set does not contain")
-    func plainClickDropsVanishedFocus() {
-        let foreign = UUID(), a = UUID()
+    // 7. The other side of #6, and a USER-VISIBLE consequence of the ruling: a
+    //    PLAIN click closes an open piano roll, wherever its clip lives.
+    //
+    //    ⚠️ RE-AUTHORED AT DEFECT ②. This used to be "a plain header click drops a
+    //    focus the new set does not contain", pinning `replace(with:)`'s INV1
+    //    restoration THROUGH the header path. The header path no longer reaches
+    //    that branch with a non-empty set; the mutator's own rule is still pinned
+    //    directly in `ArrangeSelectionTests` (`replace(with:)`'s surviving- and
+    //    vanished-focus pair), so no coverage was lost — only the route to it.
+    //    What is asserted here now is the fact a user can see.
+    @Test("a plain header click closes an open piano roll — on this track or another")
+    func plainClickClosesAnOpenRoll() {
+        let a = UUID(), foreign = UUID()
+        // (i) the focus is on ANOTHER track…
         var s = ArrangeSelection()
         s.selectOnly(foreign)
         ArrangeTrackSelection.apply(click: track([a]), modifiers: .none, to: &s)
-        #expect(s.ids == [a])
-        #expect(s.focusID == nil)
+        #expect(s.isEmpty)
+        #expect(s.focusID == nil, "the note editor closes (INV2)")
         expectInvariants(s)
+
+        // (ii) …and on the CLICKED track, which is where it used to survive.
+        var s2 = ArrangeSelection()
+        s2.selectOnly(a)
+        ArrangeTrackSelection.apply(click: track([a]), modifiers: .none, to: &s2)
+        #expect(s2.isEmpty)
+        #expect(s2.focusID == nil,
+                "before the ruling `replace(with:)` kept this focus and the roll stayed open")
+        expectInvariants(s2)
     }
 
     // 8. THE ROADMAP'S "zero-clip track selects cleanly" leg, at the unit layer:
     //    a plain click on an empty track CLEARS. It is not guarded, deliberately.
+    //
+    //    ⚠️ UNCHANGED BY DEFECT ②, AND THAT IS EVIDENCE, NOT LUCK: the ruling made
+    //    the plain branch behave at EVERY clip count the way it already behaved at
+    //    zero, so this test passes verbatim. If it ever needs editing, the plain
+    //    branch has stopped being a strict generalisation of what shipped.
     @Test("a plain click on a zero-clip track clears the selection and the focus")
     func plainClickEmptyTrackClears() {
         let a = UUID()
@@ -157,11 +271,14 @@ struct ArrangeTrackSelectionTests {
 
     // 9. THE ROADMAP'S SECOND LEG: shift-clicking a second header ADDS without
     //    dropping the first's clips. Asserted as the exact UNION.
+    //
+    //    ⚠️ SETUP RESTATED AT DEFECT ②: the FIRST click is now ⇧ too, because a
+    //    plain one would build no base. The assertion is untouched.
     @Test("⇧ on a second header adds its clips — the exact union, nothing dropped")
     func shiftClickAddsUnion() {
         let a = UUID(), b = UUID(), c = UUID(), d = UUID()
         var s = ArrangeSelection()
-        ArrangeTrackSelection.apply(click: track([a, b]), modifiers: .none, to: &s)
+        ArrangeTrackSelection.apply(click: track([a, b]), modifiers: .shift, to: &s)
         let out = ArrangeTrackSelection.apply(click: track([c, d]), modifiers: .shift, to: &s)
         #expect(s.ids == [a, b, c, d])
         #expect(out.intent == .toggle)
@@ -171,14 +288,24 @@ struct ArrangeTrackSelectionTests {
 
     // 10. ⌘ is the same chord as ⇧ here, because it is the SAME table
     //     (`ArrangeClickIntent.intent(for:)`) the clip click and the marquee use.
+    //
+    //     ⚠️ ONE `track` INSTANCE FOR BOTH CHORDS (changed at m25-l-1). It used to
+    //     call `track([b])` twice, which built two DISTINCT tracks that happened
+    //     to hold the same clip id — invisible while the outcome carried no track
+    //     identity, and a false failure the moment it carried `activeTrackID`.
+    //     Clicking ONE track with two chords is also what the test's sentence
+    //     actually claims, so the whole-value comparison below gets STRONGER
+    //     rather than weaker: it now also asserts that the chord does not change
+    //     WHICH track the click makes active.
     @Test("⌘ behaves exactly as ⇧ — one shared chord table, not a second one")
     func commandMatchesShift() {
         let a = UUID(), b = UUID()
+        let clicked = track([b])
         var viaShift = ArrangeSelection(), viaCommand = ArrangeSelection()
         viaShift.selectOnly(a)
         viaCommand.selectOnly(a)
-        let s1 = ArrangeTrackSelection.apply(click: track([b]), modifiers: .shift, to: &viaShift)
-        let s2 = ArrangeTrackSelection.apply(click: track([b]), modifiers: .command, to: &viaCommand)
+        let s1 = ArrangeTrackSelection.apply(click: clicked, modifiers: .shift, to: &viaShift)
+        let s2 = ArrangeTrackSelection.apply(click: clicked, modifiers: .command, to: &viaCommand)
         #expect(viaShift == viaCommand)
         #expect(s1 == s2)
         #expect(s1.effect == .add)
@@ -188,12 +315,15 @@ struct ArrangeTrackSelectionTests {
     //     `formUnion`: ⇧ on a FULLY-selected header removes exactly that track's
     //     clips and leaves the other track's standing. Under a `formUnion`
     //     resolution this selection would be unchanged (still 4 ids).
+    //
+    //     ⚠️ SETUP RESTATED AT DEFECT ②: both setup clicks are ⇧ now (a plain one
+    //     would build no base). The assertions are untouched.
     @Test("⇧ on a FULLY-selected header removes exactly that track's clips")
     func shiftClickTogglesOffWhenAllSelected() {
         let a = UUID(), b = UUID(), c = UUID(), d = UUID()
         let t1 = track([a, b]), t2 = track([c, d])
         var s = ArrangeSelection()
-        ArrangeTrackSelection.apply(click: t1, modifiers: .none, to: &s)
+        ArrangeTrackSelection.apply(click: t1, modifiers: .shift, to: &s)
         ArrangeTrackSelection.apply(click: t2, modifiers: .shift, to: &s)
         #expect(s.ids == [a, b, c, d])
 
@@ -302,11 +432,14 @@ struct ArrangeTrackSelectionTests {
     //     remembers a track was involved, so the clip mutators keep working
     //     unchanged over it. This is the property the roadmap's chosen reading
     //     buys, and it is worth pinning rather than assuming.
+    //
+    //     ⚠️ SETUP RESTATED AT DEFECT ②: the header click is ⇧ (a plain one selects
+    //     nothing to compose with). The assertions are untouched.
     @Test("a mixed track+clip selection is an ordinary id set the clip path still owns")
     func mixedSelectionComposes() {
         let a = UUID(), b = UUID(), loose = UUID()
         var s = ArrangeSelection()
-        ArrangeTrackSelection.apply(click: track([a, b]), modifiers: .none, to: &s)
+        ArrangeTrackSelection.apply(click: track([a, b]), modifiers: .shift, to: &s)
         s.toggle(loose)                                   // an ordinary clip click
         #expect(s.ids == [a, b, loose])
         #expect(s.focusID == loose, "the CLIP path still adopts when there is no focus")
@@ -377,9 +510,13 @@ struct ArrangeTrackSelectionTakeCompTests {
         let index = store.tracks[0].clips.firstIndex { $0.id == member.id }!
         store.tracks[0].clips[index].takeGroupID = UUID()
 
-        // Two header clicks: plain on the take track, ⇧ on the ordinary one.
+        // Two header clicks, ⇧ on both. ⚠️ RESTATED AT m25-l-1 DEFECT ②: the first
+        // used to be PLAIN, which built the base set. A plain click now selects
+        // nothing (USER RULING 2026-08-13), so building a two-track union takes
+        // two chords. The union asserted below, and everything after it, is
+        // unchanged.
         var selection = ArrangeSelection()
-        ArrangeTrackSelection.apply(click: store.tracks[0], modifiers: .none, to: &selection)
+        ArrangeTrackSelection.apply(click: store.tracks[0], modifiers: .shift, to: &selection)
         ArrangeTrackSelection.apply(click: store.tracks[1], modifiers: .shift, to: &selection)
         #expect(selection.ids == [free1.id, member.id, free2.id, o1.id, o2.id])
 
@@ -399,6 +536,9 @@ struct ArrangeTrackSelectionTakeCompTests {
 
     // 21. The CONTROL half, without which #20 cannot distinguish "refused
     //     because of the comp member" from "this delete never worked".
+    //
+    //     ⚠️ SETUP RESTATED AT DEFECT ② with #20's, for #20's reason. Assertions
+    //     untouched.
     @Test("CONTROL: the same union without the comp member deletes in ONE step")
     func withoutTheCompMemberItDeletes() throws {
         let store = ProjectStore()
@@ -409,7 +549,7 @@ struct ArrangeTrackSelectionTakeCompTests {
         _ = try store.addMIDIClip(toTrack: ordinary.id, atBeat: 0, lengthBeats: 2)
 
         var selection = ArrangeSelection()
-        ArrangeTrackSelection.apply(click: store.tracks[0], modifiers: .none, to: &selection)
+        ArrangeTrackSelection.apply(click: store.tracks[0], modifiers: .shift, to: &selection)
         ArrangeTrackSelection.apply(click: store.tracks[1], modifiers: .shift, to: &selection)
         #expect(selection.count == 3)
 
@@ -432,6 +572,10 @@ struct ArrangeTrackSelectionTakeCompTests {
     //     before m23-am this fell through to `Set.first` over the whole union and
     //     could name any of the five clips. TWO comp members on purpose: with one,
     //     every implementation names it and the leg proves nothing about order.
+    //
+    //     ⚠️ SETUP RESTATED AT DEFECT ② with #20's, for #20's reason. Assertions
+    //     untouched — including the no-focus premise, which `formUnion` upholds
+    //     exactly as `replace(with:)` did.
     @Test("a refused header-union delete anchors on the FIRST comp member, not an innocent clip")
     func refusalAnchorsOnTheOffender() throws {
         let store = ProjectStore()
@@ -452,7 +596,7 @@ struct ArrangeTrackSelectionTakeCompTests {
         }
 
         var selection = ArrangeSelection()
-        ArrangeTrackSelection.apply(click: store.tracks[0], modifiers: .none, to: &selection)
+        ArrangeTrackSelection.apply(click: store.tracks[0], modifiers: .shift, to: &selection)
         ArrangeTrackSelection.apply(click: store.tracks[1], modifiers: .shift, to: &selection)
         #expect(selection.focusID == nil, "a header click adopts no focus — the item's premise")
 

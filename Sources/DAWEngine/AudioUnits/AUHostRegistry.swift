@@ -262,7 +262,83 @@ public final class AUHostRegistry {
         try await AUAudioUnit.instantiate(with: description, options: options)
     }
 
-    public init() {}
+    // MARK: - Offline rendering (Leg R-1)
+
+    /// ⭐ THE OFFLINE-RENDER FLAG THIS REGISTRY'S INSTANCES ARE PREPARED WITH
+    /// (Leg R-1, docs/research/design-m29-oop-au-hosting.md §15).
+    ///
+    /// THE DEFECT, measured by a tester 2026-08-20: a 296 s bounce of a sax on
+    /// a hosted 46-zone SFZ came back SILENT until 25.25 s — the intro pickup
+    /// and four bars simply absent, with a render that "succeeds" and a
+    /// loudness report that looks plausible. A smaller track lost 24 s cold and
+    /// 8.4 s warm. The dead span scales with how many distinct sample zones the
+    /// part touches.
+    ///
+    /// THE MECHANISM IS APPLE'S, DOCUMENTED, and this host had never used the
+    /// lever it provides. `AUAudioUnit.h:1024-1035`, verbatim: *"A host should
+    /// set this property when using an audio unit in a context where there are
+    /// no realtime deadlines, before asking the unit to allocate render
+    /// resources. An audio unit may respond by … allowing itself to block at
+    /// render time if data being generated on secondary work threads is not
+    /// ready in time. (Normally, in a realtime thread, this data would have to
+    /// be dropped)."* Our offline graph pulls FASTER than realtime while the
+    /// plugin's loader runs in WALL time, and the plugin — correctly, for what
+    /// it believes is a realtime context — drops rather than misses a deadline.
+    ///
+    /// ⛔⛔ WHY THIS IS A `let` AND AN INIT PARAMETER, NOT A `var`. The flag
+    /// invites a plugin to BLOCK AT RENDER TIME. On the live engine's registry
+    /// that would be an invitation to stall the render thread — the exact
+    /// opposite of every real-time law this project holds. Making it immutable
+    /// after construction means "the live registry never sets it" is not a
+    /// convention anyone can forget: `AudioEngine`'s `AUHostRegistry()` takes
+    /// the default and there is no setter to reach. It is safe here ONLY
+    /// because `OfflineRenderer` owns a SEPARATE registry with fresh AU
+    /// instances per render (`OfflineRenderer.swift:79`), so nothing set here
+    /// can ever reach a live playback graph.
+    ///
+    /// ⚠️ APPLE'S WORD IS "MAY", AND A SETTER'S RETURN IS NOT PROOF IT TOOK.
+    /// Measured on this machine 2026-08-20 through the raw v2 API:
+    /// AUSampler and DLSMusicDevice accept `kAudioUnitProperty_OfflineRender`
+    /// (`AudioUnitSetProperty` → 0, read-back 1); **AUDelay REJECTS it with
+    /// -10879 `kAudioUnitErr_InvalidProperty`, and `AUAudioUnitV2Bridge` still
+    /// reports `isRenderingOffline == true` afterwards** — the bridge caches
+    /// the value and swallows the error. So the Objective-C read-back is NOT
+    /// evidence the plugin received it, and a plugin that ignores the flag
+    /// still drops. That residue is what Leg R-2's discardable pre-roll exists
+    /// for; this leg is the cheap half that costs nothing.
+    public let rendersOffline: Bool
+
+    /// `rendersOffline: false` is the LIVE default and every existing call site
+    /// keeps it. `OfflineRenderer` is the only production caller that passes
+    /// `true`.
+    public init(rendersOffline: Bool = false) {
+        self.rendersOffline = rendersOffline
+    }
+
+    /// Applies the offline-render flag to one AU **before** its render
+    /// resources are allocated (Apple's stated ordering — a set AFTER allocate
+    /// is a silent no-op that would pass any naive "is it set?" check).
+    ///
+    /// The barrier is insurance, not observed need: no component measured here
+    /// raises on the setter (the v2 bridge swallows an unsupported property
+    /// silently), but this call sits inside a `DeadlineRace` work closure and
+    /// an NSException unwinding through a MainActor job frame is the proven
+    /// m16-a poisoner. A failure to set is non-fatal — the bounce degrades to
+    /// exactly today's behaviour — so it is reported and stepped over rather
+    /// than turned into a prepare failure, which would silence the track
+    /// completely and be strictly worse than the defect being fixed.
+    static func applyOfflineRenderFlag(to au: AUAudioUnit, rendersOffline: Bool) {
+        guard rendersOffline else { return }
+        do {
+            try withObjCExceptionBarrier("audio unit offline-render flag") {
+                au.isRenderingOffline = true
+            }
+        } catch {
+            let note = "AUHostRegistry: setting renderingOffline raised (\(error)) — "
+                + "continuing; this bounce may drop lazily-loaded content\n"
+            FileHandle.standardError.write(Data(note.utf8))
+        }
+    }
 
     // MARK: - Prepare timeout policy (m23-at)
 
@@ -574,7 +650,7 @@ public final class AUHostRegistry {
         prepareLedger.arm(slot: .effect, id: effectID, component: key.component,
                           deadlineSeconds: AUPrepareLedger.seconds(timeout))
         let stateData = config.stateData
-        let outcome = await DeadlineRace.run(timeout: timeout) { [instantiator] in
+        let outcome = await DeadlineRace.run(timeout: timeout) { [instantiator, rendersOffline] in
             let au: AUAudioUnit
             if isV3 {
                 // v3: in-process first (lower latency), out-of-process retry.
@@ -599,6 +675,28 @@ public final class AUHostRegistry {
             // this the render never pulls its input block and fails with
             // kAudioUnitErr_NoConnection (-10876, measured on AUDelay).
             au.inputBusses[0].isEnabled = true
+
+            // Leg R-1 — the offline-render flag, BEFORE allocate (§15.3).
+            //
+            // ⚠️ EARLIER THAN THE DESIGN DOC'S LITERAL ORDER, deliberately.
+            // §15.3 writes the contract as maxFrames → format → state →
+            // renderingOffline → allocate; this sets it BEFORE the state
+            // restore. Both satisfy Apple's only stated requirement ("before
+            // asking the unit to allocate render resources"), and restoring a
+            // plugin's `fullStateForDocument` is precisely the call that kicks
+            // off the secondary-thread sample loading this flag is about —
+            // telling the unit it is offline first can only widen the window in
+            // which that matters, never narrow it.
+            //
+            // Effects are flagged for the same reason instruments are, but the
+            // response Apple describes differs: an effect "may respond by using
+            // a more expensive signal processing algorithm", which would change
+            // rendered bytes on bounces that were already correct. MEASURED at
+            // Leg R-1 (`OfflineRenderReadinessTests`): every Apple built-in
+            // effect rejects the underlying v2 property outright (-10879), and
+            // an AUDelay bounce is BYTE-IDENTICAL flag-off vs flag-on — the
+            // containment is machine-checked, not argued.
+            Self.applyOfflineRenderFlag(to: au, rendersOffline: rendersOffline)
 
             // Restore order contract: state BEFORE allocateRenderResources
             // (maxFrames → format → state → allocate).
@@ -626,7 +724,8 @@ public final class AUHostRegistry {
                 throw EngineError.renderFailed(
                     "output bus allocated at \(allocatedRate) Hz, wanted \(sampleRate) Hz")
             }
-            return HostedAUEffect(au: au, sampleRate: sampleRate, maxFrames: maxFrames)
+            return HostedAUEffect(au: au, sampleRate: sampleRate, maxFrames: maxFrames,
+                                  rendersOffline: rendersOffline)
         }
 
         switch outcome {
@@ -745,7 +844,7 @@ public final class AUHostRegistry {
         // bank-resolve failure, the no-matching-component return).
         prepareLedger.arm(slot: .instrument, id: id, component: key.component,
                           deadlineSeconds: AUPrepareLedger.seconds(timeout))
-        let outcome = await DeadlineRace.run(timeout: timeout) { [instantiator] in
+        let outcome = await DeadlineRace.run(timeout: timeout) { [instantiator, rendersOffline] in
             let au: AUAudioUnit
             if isV3 {
                 // v3: in-process first (lower latency), out-of-process retry.
@@ -765,6 +864,19 @@ public final class AUHostRegistry {
                 throw EngineError.renderFailed("no standard stereo format at \(sampleRate) Hz")
             }
             try au.outputBusses[0].setFormat(format)
+
+            // Leg R-1 — THE OFFLINE-RENDER FLAG, and the ordering is the whole
+            // point: Apple requires it BEFORE `allocateRenderResources`, and a
+            // set afterwards is a silent no-op that would still read back as
+            // `true`. See `rendersOffline` for the measurement this fixes and
+            // for why only the offline renderer's registry ever carries it;
+            // `applyOfflineRenderFlag` for why the failure is stepped over.
+            //
+            // Placed BEFORE the state restore rather than after it (the design
+            // doc's literal order) because `fullStateForDocument =` is what
+            // starts a plugin's lazy sample loading — see the effect path's
+            // note for the full argument.
+            Self.applyOfflineRenderFlag(to: au, rendersOffline: rendersOffline)
 
             // Restore order contract: state BEFORE allocateRenderResources
             // (maxFrames → format → state → allocate). `key.stateData` is
@@ -829,7 +941,8 @@ public final class AUHostRegistry {
             }
             return try HostedAUInstrument(
                 au: au, sampleRate: sampleRate,
-                serializedBankTeardown: Self.isDLSFamily(key.component))
+                serializedBankTeardown: Self.isDLSFamily(key.component),
+                rendersOffline: rendersOffline)
         }
 
         switch outcome {

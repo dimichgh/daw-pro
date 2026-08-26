@@ -76,6 +76,258 @@ struct SampleLibraryMapperTests {
         return try SampleLibraryMapper.map(ir, force: force)
     }
 
+    // MARK: - m27 leg B: dynamic-layer crossfade opcodes
+
+    // MARK: - Global-vs-zone inheritance reporting (2026-08-20 field report)
+
+    /// The report: "Sampler global release is inert when zones carry their own
+    /// (SFZ imports always do)." The engine is RIGHT to prefer the zone (its
+    /// own §4.4 design, and SFZ's region-over-global precedence); what was
+    /// broken is that nothing said so. These tests pin the computation that
+    /// `instrument.describeSampler` now reports, and they run it over a REAL
+    /// mapped import rather than hand-built zones, because "SFZ imports always
+    /// do" is precisely the claim under test.
+    @Test("ampeg_release in <global> reaches EVERY zone, which makes the sampler's own global release inert")
+    func sfzGlobalReleaseOverridesEveryZone() throws {
+        let dir = tempDir()
+        try writeSample("a.wav", in: dir)
+        try writeSample("b.wav", in: dir)
+        let (params, _) = try map("""
+        <global> ampeg_release=0.5
+        <region> sample=a.wav lokey=0 hikey=59
+        <region> sample=b.wav lokey=60 hikey=127
+        """, in: dir)
+        // The import itself: the <global> opcode landed on both regions.
+        #expect(params.zones.count == 2)
+        #expect(params.zones.allSatisfy { $0.release == 0.5 })
+
+        // The reporter's own numbers: a stored global of 3.4465 s over an
+        // instrument that behaves at 0.5 s.
+        var withReportedGlobal = params
+        withReportedGlobal.release = 3.4465
+        let use = SamplerGlobalUse.release(of: withReportedGlobal)
+        print("[measured] release use — inert: \(use.globalIsInert), "
+              + "overriding/inheriting: \(use.zonesOverriding)/\(use.zonesInheriting), "
+              + "effective: \(use.effectiveValues)")
+        #expect(use.global == 3.4465)            // the number still reported…
+        #expect(use.globalIsInert)               // …and now labelled dead
+        #expect(use.zonesOverriding == 2)
+        #expect(use.zonesInheriting == 0)
+        #expect(use.effectiveValues == [0.5])    // what will ACTUALLY be heard
+        #expect(use.effectiveMin == 0.5)
+        #expect(use.effectiveMax == 0.5)
+        #expect(!use.valuesTruncated)
+    }
+
+    /// The case a bare "is the global inert?" boolean cannot describe, and the
+    /// case that forces the computation to be real: an SFZ authoring
+    /// `ampeg_release` on SOME regions. The global is live for the rest, so
+    /// neither "inert" nor "fine" is the whole answer — only the effective
+    /// value list is.
+    @Test("a MIXED library leaves the global live for the zones that inherit, and says both values")
+    func mixedReleaseOverridesReportBothValues() throws {
+        let dir = tempDir()
+        try writeSample("a.wav", in: dir)
+        try writeSample("b.wav", in: dir)
+        try writeSample("c.wav", in: dir)
+        let (params, _) = try map("""
+        <region> sample=a.wav lokey=0 hikey=41 ampeg_release=0.5
+        <region> sample=b.wav lokey=42 hikey=83 ampeg_release=1.25
+        <region> sample=c.wav lokey=84 hikey=127
+        """, in: dir)
+        var withGlobal = params
+        withGlobal.release = 3.4465
+        let use = SamplerGlobalUse.release(of: withGlobal)
+        print("[measured] mixed release use — inert: \(use.globalIsInert), "
+              + "effective: \(use.effectiveValues)")
+        #expect(!use.globalIsInert)              // one zone still listens
+        #expect(use.zonesOverriding == 2)
+        #expect(use.zonesInheriting == 1)
+        // Ascending, and the inheriting zone contributes the GLOBAL's value —
+        // that is the whole point of "effective".
+        #expect(use.effectiveValues == [0.5, 1.25, 3.4465])
+        #expect(use.effectiveMin == 0.5)
+        #expect(use.effectiveMax == 3.4465)
+    }
+
+    /// The control that keeps `globalIsInert` from being a stuck `true`: a
+    /// library authoring no envelope opcodes at all leaves the global fully
+    /// live, and the reported effective value IS the global.
+    @Test("a library with no ampeg_release leaves the global live for every zone")
+    func noReleaseOpcodeLeavesGlobalLive() throws {
+        let dir = tempDir()
+        try writeSample("a.wav", in: dir)
+        let (params, _) = try map("""
+        <region> sample=a.wav
+        """, in: dir)
+        var withGlobal = params
+        withGlobal.release = 3.4465
+        let use = SamplerGlobalUse.release(of: withGlobal)
+        #expect(!use.globalIsInert)
+        #expect(use.zonesOverriding == 0)
+        #expect(use.zonesInheriting == 1)
+        #expect(use.effectiveValues == [3.4465])
+
+        // ATTACK is release's exact twin at the same engine trigger site, so it
+        // gets the same treatment and the same control.
+        let attackUse = SamplerGlobalUse.attack(of: withGlobal)
+        #expect(!attackUse.globalIsInert)
+        #expect(attackUse.effectiveValues == [withGlobal.attack])
+    }
+
+    /// A zero-zone sampler is deliberately NOT "inert": it is silent for
+    /// reasons that have nothing to do with inheritance, and pointing a caller
+    /// at the global would send them to fix the wrong thing.
+    @Test("a sampler with no zones reports no inert global — silence there is not an inheritance problem")
+    func zeroZoneSamplerIsNotInert() {
+        let use = SamplerGlobalUse.release(of: SamplerParams(zones: [], release: 3.4465))
+        #expect(!use.globalIsInert)
+        #expect(use.zonesOverriding == 0)
+        #expect(use.zonesInheriting == 0)
+        #expect(use.effectiveValues.isEmpty)
+        #expect(use.effectiveMin == nil)
+        #expect(use.effectiveMax == nil)
+    }
+
+    /// More distinct values than the cap: the LIST truncates, the RANGE does
+    /// not. A truncated list that also lost its extremes would be a second
+    /// quietly-wrong number, which is the class of defect this whole change
+    /// exists to remove.
+    @Test("more distinct effective values than the cap truncates the list but keeps min/max exact")
+    func manyDistinctValuesTruncateTheListNotTheRange() throws {
+        let dir = tempDir()
+        try writeSample("a.wav", in: dir)
+        let regions = (0..<12).map { i in
+            "<region> sample=a.wav lokey=\(i * 10) hikey=\(i * 10 + 9)"
+                + " ampeg_release=\(Double(i + 1) / 10)"
+        }.joined(separator: "\n")
+        let (params, _) = try map(regions, in: dir)
+        #expect(params.zones.count == 12)
+        let use = SamplerGlobalUse.release(of: params)
+        print("[measured] truncation — values: \(use.effectiveValues), "
+              + "truncated: \(use.valuesTruncated), "
+              + "range: \(String(describing: use.effectiveMin))…\(String(describing: use.effectiveMax))")
+        #expect(use.valuesTruncated)
+        #expect(use.effectiveValues.count == SamplerGlobalUse.valueCap)
+        #expect(use.effectiveMin == 0.1)
+        #expect(use.effectiveMax == 1.2)
+        #expect(use.globalIsInert)
+    }
+
+    /// One-shot's own caveat: loop mode wins over one-shot in the engine, but
+    /// only for a loop whose bounds survive the load-time check against the
+    /// real audio — which DAWCore cannot evaluate. The count is REPORTED
+    /// beside the inheritance figures instead of being folded into them.
+    @Test("oneShot reports zones with a loop mode separately rather than guessing the engine's loop-validity check")
+    func oneShotReportsLoopModeZonesWithoutFoldingThem() throws {
+        let dir = tempDir()
+        try writeSample("a.wav", in: dir)
+        try writeSample("b.wav", in: dir)
+        let (params, _) = try map("""
+        <region> sample=a.wav lokey=0 hikey=59 loop_mode=one_shot
+        <region> sample=b.wav lokey=60 hikey=127 loop_mode=loop_continuous loop_start=0 loop_end=1
+        """, in: dir)
+        let use = SamplerOneShotUse.oneShot(of: params)
+        print("[measured] oneShot use — overriding/inheriting: "
+              + "\(use.zonesOverriding)/\(use.zonesInheriting), "
+              + "loop-mode zones: \(use.zonesWithLoopMode)")
+        // one_shot sets the override; loop_continuous does not touch it.
+        #expect(use.zonesOverriding == 1)
+        #expect(use.zonesInheriting == 1)
+        #expect(!use.globalIsInert)              // one zone still reads the global
+        #expect(use.zonesWithLoopMode == 1)      // reported, not folded
+    }
+
+    @Test("xfin_locc/xfout_hicc import as a CONTINUOUS crossfade naming their CC")
+    func ccCrossfadeImports() throws {
+        let dir = tempDir()
+        try writeSample("pp.wav", in: dir)
+        try writeSample("ff.wav", in: dir)
+        let (params, report) = try map("""
+        <region> sample=pp.wav xfout_locc11=48 xfout_hicc11=96
+        <region> sample=ff.wav xfin_locc11=48 xfin_hicc11=96
+        """, in: dir)
+        #expect(params.zones.count == 2)
+        let soft = try #require(params.zones[0].crossfade)
+        #expect(soft.controller == 11)
+        #expect(soft.ccOutLo == 48)
+        #expect(soft.ccOutHi == 96)
+        #expect(soft.ccInLo == nil)          // untouched stays untouched
+        let loud = try #require(params.zones[1].crossfade)
+        #expect(loud.controller == 11)
+        #expect(loud.ccInLo == 48)
+        #expect(loud.ccInHi == 96)
+        // The report must distinguish continuous from velocity crossfade.
+        let sentence = try #require(report.degradations.first {
+            $0.contains("dynamic-layer crossfade") })
+        print("[measured] cc crossfade report: \(sentence)")
+        #expect(sentence.contains("CONTINUOUS"))
+        #expect(sentence.contains("equal-power"))
+        #expect(!sentence.contains("VELOCITY"))
+    }
+
+    @Test("xfin_lovel/xfout_hivel import as a VELOCITY crossfade, named as note-on-only")
+    func velocityCrossfadeImports() throws {
+        let dir = tempDir()
+        try writeSample("a.wav", in: dir)
+        let (params, report) = try map("""
+        <region> sample=a.wav xfin_lovel=25 xfin_hivel=60 xfout_lovel=61 xfout_hivel=84
+        """, in: dir)
+        let xf = try #require(params.zones[0].crossfade)
+        #expect(xf.controller == nil)        // velocity domain names no CC
+        #expect(xf.velInLo == 25)
+        #expect(xf.velInHi == 60)
+        #expect(xf.velOutLo == 61)
+        #expect(xf.velOutHi == 84)
+        let sentence = try #require(report.degradations.first {
+            $0.contains("dynamic-layer crossfade") })
+        print("[measured] velocity crossfade report: \(sentence)")
+        #expect(sentence.contains("VELOCITY"))
+        // The honesty this exists for: velocity crossfade CANNOT change a
+        // held note, and the sentence must not let it read as if it could.
+        #expect(sentence.contains("not within one"))
+    }
+
+    @Test("a library with no crossfade opcodes imports crossfade-free — no inert object")
+    func noCrossfadeOpcodesMeansNil() throws {
+        let dir = tempDir()
+        try writeSample("a.wav", in: dir)
+        let (params, report) = try map("""
+        <region> sample=a.wav lovel=0 hivel=89
+        <region> sample=a.wav lovel=90 hivel=127
+        """, in: dir)
+        // This is the shape of the user's OWN tenor sax: a hard velocity
+        // switch at 90 and no xf opcodes anywhere. Leg B must not invent one.
+        #expect(params.zones.allSatisfy { $0.crossfade == nil })
+        #expect(!report.degradations.contains { $0.contains("dynamic-layer crossfade") })
+    }
+
+    @Test("a second CC crossfade on one region is reason-coded, never blended in")
+    func twoControllersOnOneRegionIsReasonCoded() throws {
+        let dir = tempDir()
+        try writeSample("a.wav", in: dir)
+        let (params, report) = try map("""
+        <region> sample=a.wav xfin_locc1=0 xfin_hicc1=64 xfin_locc11=0 xfin_hicc11=64
+        """, in: dir)
+        let xf = try #require(params.zones[0].crossfade)
+        #expect(xf.controller == 1)          // lowest opcode name wins, deterministically
+        // The CC11 pair is DROPPED — and said so.
+        #expect(report.ignoredOpcodes["xfin_locc11"] == 1)
+        #expect(report.ignoredOpcodes["xfin_hicc11"] == 1)
+    }
+
+    @Test("xf_cccurve is reason-coded rather than silently given the engine's curve")
+    func curveOpcodeIsReasonCoded() throws {
+        let dir = tempDir()
+        try writeSample("a.wav", in: dir)
+        let (_, report) = try map("""
+        <region> sample=a.wav xfin_locc11=0 xfin_hicc11=64 xf_cccurve=gain
+        """, in: dir)
+        // We implement SFZ's DEFAULT (power). A file asking for `gain` gets
+        // power — so it must be told, not quietly obliged.
+        #expect(report.ignoredOpcodes["xf_cccurve"] == 1)
+    }
+
     // MARK: - Skip rules (reason-coded)
 
     @Test("trigger=release/first/legato regions are skipped, counted by reason")

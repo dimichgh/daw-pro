@@ -24,7 +24,7 @@
 // Exit: 0 all checks pass, 1 a check failed, 2 could not set up.
 import { spawn, spawnSync } from "child_process";
 import {
-  ROOT, sleep, launchStaging,
+  ROOT, sleep, launchStaging, verdict,
 } from "./_staging.mjs";
 
 const GATE = "m23af";
@@ -270,7 +270,7 @@ try {
   stop();
 
   console.log(`\n${results.filter((r) => r.ok).length}/${results.length} checks passed`);
-  process.exit(failed ? 1 : 0);
+  verdict({ ran: results.length, failed: results.filter((r) => !r.ok).length });
 } catch (err) {
   clearTimeout(killer);
   console.error(`ERROR: ${err?.message ?? err}`);

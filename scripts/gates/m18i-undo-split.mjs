@@ -48,6 +48,109 @@
 // only and never pin an absolute hash: an absolute baseline here is
 // guaranteed to rot, and the drift is confirmed erratic, not a settling
 // transient.
+//
+// ═══ m23-gf-d (2026-08-10): the drift above is EXPLAINED and no longer
+// reproduces. The suspicion recorded in 2026-08-05 was RIGHT ABOUT THE STORE
+// and WRONG ABOUT THE KEY. ═══
+// The store was UserDefaults, but the fix was NOT relocation: `DAWProStaging.
+// plist` lives in `~/Library/Preferences` too. What mattered is that the
+// domain used to be SHARED — across gate runs AND with the user's own app —
+// so whatever the last gate left behind was inherited by the next m18i run.
+// m23-gf-b gave staging its own domain (`DAWProStaging`, via a symlink named
+// alias — the CFPreferences domain follows the EXECUTABLE PATH) and
+// `resetStagingDefaultsDomain()` deletes + reseeds it once per gate process.
+// ⛔ NOT the window frame. The frame DIMENSIONS were pinned and identical
+//    (2800x2000) across all 11 drifting runs, so frame SIZE cannot be it.
+//    (`NSWindow Frame` also encodes origin/screen; those stay unrefuted.)
+//    The sensitive keys are the geometry ones this gate does NOT pin —
+//    `panelLayout.editorFraction` / `rowHeight` / `arrangePPB` /
+//    `sidebarWidth` and the `panelDensity.*` set. Grep confirms this file
+//    pins none of them (0 hits; same pattern finds 16 in the seed file).
+// Measured this cycle, in the order that makes it causal rather than a streak:
+//   1. SENSITIVITY — seed `panelLayout.editorFraction` 0.45 -> 0.60 moved u0
+//      (379147 -> 380496 bytes, different hash); restoring 0.45 returned it to
+//      the byte-exact prior value. So u0 genuinely responds to domain state.
+//   2. THE DISCRIMINATING RUN — planted `editorFraction 0.60` directly into
+//      `DAWProStaging` (read back as 0.6 first, so the test is not vacuous),
+//      then ran: the reset reseeded it to 0.45 and u0 came out byte-identical
+//      to baseline. That is exactly the "last gate left a value in the domain"
+//      case, i.e. the condition that produced the original drift.
+//   3. 14 consecutive runs byte-identical. ⚠️ This is CORROBORATION ONLY, not
+//      the finding: those runs were m18i back-to-back with nothing interleaved,
+//      and the OLD shared-domain setup would also have looked clean under that
+//      condition. Leg 2 is what discriminates. (A clean streak measured under
+//      conditions that differ from the ones that produced the variance cannot
+//      tell a fix apart from the changed conditions.)
+// ⚠️ HONEST RESIDUAL — capability, not occurrence: this proves `editorFraction`
+//    CAN produce variation of exactly this shape. It does NOT prove that key is
+//    what actually drifted in 2026-08-05; those runs are gone and the specific
+//    key stays unidentified.
+// ⚠️ Determinism here has TWO tiers, and only one is pinned. The 17 seeded keys
+//    are held at fixed values. The `NS*` keys (`NSWindow Frame …`, `NSSplitView
+//    …`, `NSToolbar …`) are deliberately NOT seeded — they are cleared and
+//    REGENERATE each run, so their stability rests on the frame pin above plus
+//    an identical action sequence. If u0 ever drifts again with the seed intact,
+//    suspect NS* regeneration first.
+// ⛔⛔ STILL DO NOT PIN AN ABSOLUTE HASH — confirmed necessary, not just
+//    precautionary; see the m23-gf-e addendum immediately below for the
+//    measured before/after.
+//
+// ═══ m23-gf-e (2026-08-10): the seed shrunk from 17 keys to 1
+// (`onboarding.state` only) and u0 MOVED, exactly as the gf-d line predicted.
+// The mechanism is now identified. ═══
+// ⚠️ CORRECTION TO THIS ADDENDUM'S OWN FIRST DRAFT, kept because the mistake
+// is instructive: it opened by "PARTIALLY RETRACTING" the gf-d prediction and
+// said that line had blamed `panelLayout.editorFraction`. IT HAD NOT. The
+// committed gf-d text (ad786a6) reads "six of seven panels `pro` -> `.simple`,
+// which will certainly move u0" — it named the DENSITY flip, correctly, and
+// never mentioned `editorFraction`. The misreading was introduced by the
+// orchestrator's own briefing note this cycle and propagated here in good
+// faith. THE gf-d PREDICTION WAS RIGHT, AND RIGHT FOR THE RIGHT REASON; there
+// is nothing to retract. ⭐ The general trap: a summary of an earlier claim,
+// written from memory rather than from the text, is itself an unverified
+// measurement — re-read the line before you retract it.
+// Separately confirmed and worth keeping: `editorFraction` IS a value no-op —
+// seeded at exactly `PanelLayoutStore.defaultEditorFraction` (0.45) both
+// before and after the shrink (measured by reading the shrunk seed and the
+// shipped default side by side, not assumed). So it is not among the movers,
+// which is why the density mechanism below is the whole story.
+// u0 moved anyway: 379147 bytes / sha `273303db847f53d9…` (the gf-d baseline,
+// 15 runs) -> 339193 bytes / sha `f69ef3c82b671b1b…` under the shrunk seed —
+// a real, reproducible difference (this file's own PIXEL/CONTROL legs still
+// passed 7/7; the U-leg's u0==u1 and the CONTROL's s1!=u0 hold regardless of
+// u0's absolute bytes, which is why the gate stayed green through this).
+// A confirmed CONTRIBUTING mechanism (single-variable A/B, not just source
+// inference): reseeding ONLY `panelDensity.pianoRoll: "pro"` on top of the
+// 1-key shrunk seed and re-running this gate moves u0 to 369275 bytes / sha
+// `1752b9b2309d546c…` — different from BOTH the shrunk-seed value (339193)
+// AND the original 17-key BEFORE value (379147). That inequality is the
+// finding: pianoRoll density IS a real cause (369275 != 339193 — flipping it
+// back changes the pixels), but it is NOT the sole cause (369275 != 379147 —
+// flipping only it back does not reproduce the old total). `PianoRollView.swift`
+// (~lines 460, 906, 913, 922, 947) renders conditionally on that density,
+// which explains its share, but `debug.captureUI` with no `rect` param
+// rasterises the FULL window content view (`DAWProApp.swift` ~10178-10197,
+// "snapshot the real window content"), not a piano-roll crop — so any other
+// panel visible in that 1400x1000 frame (arrange sidebar, transport bar,
+// etc.) whose density also flipped pro -> .simple under the shrunk seed can
+// contribute additional pixels to the same PNG. This gate never pins
+// `pianoRoll` OR any other panel's density (0 hits, confirmed by grep, same
+// as the geometry keys below), so it inherits whatever the seed leaves
+// ambient across the whole visible window, not just the editor.
+// So: the RETRACTION holds for `editorFraction` (confirmed a no-op); the
+// PREDICTION that gf-e would move u0 also holds, via a density mechanism —
+// but "the mechanism is panelDensity.pianoRoll" is too strong a claim from
+// source-reading alone. `pianoRoll` is a MEASURED, PARTIAL contributor; the
+// remainder is attributed to other panelDensity keys sharing the same frame,
+// not measured further here since the gate's own PIXEL/CONTROL legs (which
+// are what it actually asserts) do not depend on u0's absolute byte count.
+// ⚠️ STALE AS OF THIS ADDENDUM — do not read as current: "16 in the seed
+// file" (line above) and "The 17 seeded keys are held at fixed values"
+// (below) both describe the seed as it stood AT THE gf-d MEASUREMENT
+// (17 keys). The current seed (post gf-e) holds exactly 1 key
+// (`onboarding.state`); the six `panelDensity.*` keys and all `panelLayout.*`
+// keys this gate still does not pin are no longer seeded at all. Left
+// unedited above as the historical record of what was true when measured.
 // ⚠️ If PIXEL/CONTROL ever flap, the fix is to CROP to the editor region
 // (the item's original preference) before hashing — not to delete the
 // legs. Full-frame hashing is used now only because within-run identity
@@ -71,7 +174,7 @@
 // longer be pointed at 17600 even by an env var.
 import fs from "fs";
 import crypto from "node:crypto";
-import { buildOrAbort, startStaging, stopStaging, connect } from "./_staging.mjs";
+import { buildOrAbort, startStaging, stopStaging, connect, verdict } from "./_staging.mjs";
 const PORT = process.env.DAW_CONTROL_PORT || "17695";
 const GATE = "m18i-undo-split";   // names the pidfile + out dir = the default OUT below
 const OUT = process.argv[2] || `/tmp/daw-gate-out/${GATE}`;
@@ -119,11 +222,15 @@ function check(name, ok, detail = "") {
 }
 
 // m23-bg: pin the capture window and CONFIRM it stuck before anything else
-// runs. A pin's own echo is not proof it took — `debug.windowFrame
-// {width:1440,height:640}` returns 640 exactly, then the window drifts to
-// 672 within ~100ms and holds there (WindowFloor is applied to the content
-// area below the titlebar while this command sets a contentRect INCLUDING
-// it, +32 exactly) — {1400,1000} holds perfectly instead. So this settles,
+// runs. A pin's own echo is not proof it took — until m23-dw fixed it,
+// `debug.windowFrame {width:1440,height:640}` used to return 640 exactly, then
+// the window silently drifted to 672 within ~100ms and held there (WindowFloor
+// is applied to the content area below the titlebar while this command sets a
+// contentRect INCLUDING it, +32 exactly). m23-dw fixed the drift itself: that
+// same request now lands on 672 immediately and stays (`WindowFloor.
+// minWindowContentHeight`) — but this gate pins {1400,1000} anyway, which
+// held perfectly even before the fix, and keeps the re-read-confirm pattern
+// as a general defense, not one specific to the old bug. So this settles,
 // then re-reads with a BARE (mutation-free — DAWProApp.swift:3617 only
 // mutates when width/height are present) call and asserts the re-read
 // matches the request. Unpinned, this gate would inherit whatever size the
@@ -220,4 +327,4 @@ console.log(`M18I_UNDO_SPLIT pass=${pass} fail=${fail}`);
 clearTimeout(killer);
 ws.close();
 stopStaging(GATE);   // SIGTERMs by exact pid AND releases our session.lock
-process.exit(fail === 0 ? 0 : 1);
+verdict({ ran: pass + fail, failed: fail });

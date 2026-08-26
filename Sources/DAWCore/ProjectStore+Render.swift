@@ -398,6 +398,25 @@ extension ProjectStore {
     /// Internal (not private) so `bounceTrackInPlace` (m11-e) shares the SAME
     /// default window as `render.stems` — a one-track bounce must land the same
     /// length a direct stem render of that track would.
+    ///
+    /// ⚠️ KNOWN LIMITATION, documented rather than fixed (2026-08-18 field
+    /// report, O3): the window is derived from CLIP EXTENTS ONLY, plus a FIXED
+    /// 2.0 s tail. **Automation extent is never consulted.** A master fade — or
+    /// any lane, on any track — whose last breakpoint lies past the end of the
+    /// final clip is therefore TRUNCATED: the curve is faithfully baked in, but
+    /// only for as long as the window lasts, so a fade that was drawn to reach
+    /// silence at beat 40 over a project whose last clip ends at beat 32 lands
+    /// cut off mid-descent. The 2.0 s tail has the same shape as a bound: it is
+    /// a constant, not a measurement, so a reverb/delay release longer than
+    /// 2.0 s is clipped for the same reason. Both are avoidable only by the
+    /// CALLER passing an explicit `durationSeconds` that covers what it drew.
+    ///
+    /// This is deliberately NOT "fixed" by widening the default: the window
+    /// sets the length of EVERY render, so extending it would silently change
+    /// the deliverable length of every existing project. Changing that policy
+    /// is a user-facing decision, not a bug fix. `RenderPolicyTests`'
+    /// `defaultWindowIgnoresAutomationExtent` pins the current behaviour and is
+    /// the test to update if the policy is ever deliberately changed.
     func renderWindowSeconds(fromBeat startBeat: Double,
                              requested: Double?) throws -> Double {
         if let requested { return requested }

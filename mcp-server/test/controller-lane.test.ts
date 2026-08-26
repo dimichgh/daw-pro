@@ -296,3 +296,188 @@ test("clip_remove_controller_lane rejects a non-uuid clipId at the MCP schema la
   assert.equal(calls.length, 0, "a schema-invalid clipId never reaches the bridge");
   assert.ok((result as any).isError, "a non-uuid clipId is a client-side schema rejection");
 });
+
+// ---------------------------------------------------------------------------
+// clip_apply_breath_contour (m27 leg D)
+//
+// ⭐⭐ THE PARAMETER-REACHES-THE-MODEL GATE. The MCP SDK builds a CLOSED
+// `z.object()` from `inputSchema`, so a key the tool DESCRIPTION advertises but
+// the SCHEMA omits is stripped before the handler runs — the call succeeds and
+// silently returns the default result. Three parameters shipped that way
+// earlier in this round. The first test below therefore asserts that EVERY one
+// of the sixteen documented inputs arrives in the bridge frame with the exact
+// value that was sent, and the second asserts the SET of schema keys matches
+// the set the handler forwards, so a future addition cannot land in one place
+// and not the other.
+// ---------------------------------------------------------------------------
+
+/** Every settable input, with a value distinct from that field's default. */
+const BREATH_ALL_PARAMS = {
+  depth: 0.4,
+  peakValue: 110,
+  peakPosition: 0.5,
+  attackSettleSeconds: 0.08,
+  expressionCC: 2,
+  expressionSpacingSeconds: 0.03,
+  vibratoOnsetSeconds: 0.35,
+  vibratoRateHz: 6.2,
+  vibratoDepthCents: 18,
+  vibratoBloomSeconds: 1.1,
+  vibratoReleaseSeconds: 0.12,
+  sharpenCents: 7,
+  bendSpacingSeconds: 0.01,
+  bendRangeSemitones: 12,
+} as const;
+
+test("clip_apply_breath_contour forwards EVERY documented parameter to the app, by value", async () => {
+  const clipId = randomUUID();
+  const noteIds = [randomUUID(), randomUUID()];
+  queuedResult = {
+    id: clipId,
+    name: "Sax",
+    notesTouched: 2,
+    notesWithVibrato: 2,
+    expressionPointCount: 120,
+    pitchBendPointCount: 380,
+    perNotePointBudget: 16384,
+  };
+
+  const args = { clipId, noteIds, ...BREATH_ALL_PARAMS };
+  const result = await client.callTool({ name: "clip_apply_breath_contour", arguments: args });
+
+  assert.equal(calls.length, 1, "exactly one bridge call");
+  assert.equal(calls[0]!.command, "clip.applyBreathContour");
+  // deepEqual, not a spot check: a field dropped between the schema and the
+  // handler's destructuring is invisible to any assertion that only samples.
+  // Copied out first: node's strict `deepEqual` is a TYPE PREDICATE, so
+  // asserting against `args` would narrow `calls[0].params` and make the
+  // string-keyed loop below a compile error.
+  const forwarded: Record<string, unknown> = { ...calls[0]!.params };
+  assert.deepEqual(calls[0]!.params, args);
+
+  // And every value survives the round trip with its own magnitude intact —
+  // a field silently coerced to the default would still pass a key-presence
+  // check but not this one.
+  for (const [key, value] of Object.entries(BREATH_ALL_PARAMS)) {
+    assert.equal(
+      forwarded[key],
+      value,
+      `'${key}' did not reach the app with the value that was sent`
+    );
+  }
+  assert.deepEqual(parseJSON(result as any), queuedResult, "the app's response round-trips verbatim");
+});
+
+test("clip_apply_breath_contour's schema and its handler agree on the parameter set", async () => {
+  // The failure this catches: a parameter added to `inputSchema` but forgotten
+  // in the handler's destructuring is accepted by `.strict()` and then dropped
+  // — the call succeeds and the app never sees it.
+  const tools = await client.listTools();
+  const tool = tools.tools.find((t) => t.name === "clip_apply_breath_contour");
+  assert.ok(tool, "clip_apply_breath_contour is registered");
+  const schemaKeys = Object.keys(
+    (tool!.inputSchema as { properties?: Record<string, unknown> }).properties ?? {}
+  ).sort();
+
+  const clipId = randomUUID();
+  queuedResult = { id: clipId };
+  await client.callTool({
+    name: "clip_apply_breath_contour",
+    arguments: { clipId, noteIds: [randomUUID()], ...BREATH_ALL_PARAMS },
+  });
+  const forwardedKeys = Object.keys(calls[0]!.params).sort();
+
+  assert.deepEqual(
+    forwardedKeys,
+    schemaKeys,
+    "every schema key must be forwarded and every forwarded key must be in the schema"
+  );
+  assert.equal(schemaKeys.length, 16, "clipId + noteIds + 14 contour options");
+});
+
+test("clip_apply_breath_contour omits every unsupplied option from the wire frame", async () => {
+  const clipId = randomUUID();
+  queuedResult = { id: clipId, notesTouched: 3 };
+
+  await client.callTool({ name: "clip_apply_breath_contour", arguments: { clipId } });
+
+  assert.equal(calls.length, 1);
+  // The handler always names every key; the ones that were not supplied hold
+  // `undefined` and vanish at JSON.stringify — the clip_remove_controller_lane
+  // precedent above. What matters is the frame that actually goes on the wire,
+  // because an explicit `null` there would be REJECTED by the app's bounds
+  // checks rather than treated as "use the default".
+  for (const key of Object.keys(BREATH_ALL_PARAMS)) {
+    assert.equal(calls[0]!.params[key], undefined, `unsupplied '${key}' has no value`);
+  }
+  assert.equal(calls[0]!.params["noteIds"], undefined, "unsupplied 'noteIds' has no value");
+  const wire = JSON.stringify(calls[0]!.params);
+  assert.equal(wire, JSON.stringify({ clipId }), "the JSON frame carries clipId alone");
+});
+
+test("clip_apply_breath_contour surfaces the app's half-success warnings, never swallowed", async () => {
+  const clipId = randomUUID();
+  queuedResult = {
+    id: clipId,
+    notesTouched: 4,
+    notesWithVibrato: 0,
+    warnings: [
+      "the swell will change LOUDNESS but not BRIGHTNESS: this track's sampler has expressionFilterDepth off (0)",
+      "no note got vibrato: every one of the 4 selected is shorter than the straight opening plus one vibrato cycle",
+    ],
+  };
+
+  const result = await client.callTool({ name: "clip_apply_breath_contour", arguments: { clipId } });
+  const parsed = parseJSON(result as any);
+  assert.equal(parsed.warnings.length, 2, "both warnings reach the agent");
+  assert.match(parsed.warnings[0] as string, /LOUDNESS but not BRIGHTNESS/);
+  assert.equal(parsed.notesWithVibrato, 0, "and the honest count comes with them");
+});
+
+test("clip_apply_breath_contour passes the app's teaching errors through verbatim", async () => {
+  const clipId = randomUUID();
+  queuedError = new Error(
+    "'vibratoRateHz' must be a number between 0.2 and 20.0 (default 5.5 — vibrato rate in Hz)"
+  );
+
+  const result = await client.callTool({
+    name: "clip_apply_breath_contour",
+    arguments: { clipId, vibratoRateHz: 19 },
+  });
+
+  const r = result as any;
+  assert.ok(r.isError, "an app-side refusal must be a tool error, never a silent success");
+  assert.match(r.content[0].text as string, /between 0\.2 and 20/);
+});
+
+test("clip_apply_breath_contour rejects out-of-range options at the MCP schema layer, no bridge call", async () => {
+  for (const bad of [
+    { vibratoRateHz: 40 },
+    { depth: 2 },
+    { peakValue: 200 },
+    { peakPosition: 0.99 },
+    { bendRangeSemitones: 0 },
+    { peakValue: 100.5 },
+    { noteIds: ["not-a-uuid"] },
+  ]) {
+    calls = [];
+    const result = await client.callTool({
+      name: "clip_apply_breath_contour",
+      arguments: { clipId: randomUUID(), ...bad },
+    });
+    assert.equal(calls.length, 0, `${JSON.stringify(bad)} must never reach the bridge`);
+    assert.ok((result as any).isError, `${JSON.stringify(bad)} is a client-side schema rejection`);
+  }
+});
+
+test("clip_apply_breath_contour is STRICT: a misspelled option is rejected, not silently dropped", async () => {
+  // The exact defect class this round exists to end — `vibratoRate` looks
+  // plausible, and a permissive schema would strip it and return a perfectly
+  // successful default-shaped contour.
+  const result = await client.callTool({
+    name: "clip_apply_breath_contour",
+    arguments: { clipId: randomUUID(), vibratoRate: 5.5 },
+  });
+  assert.equal(calls.length, 0, "an unknown key never reaches the bridge");
+  assert.ok((result as any).isError, "an unknown key is rejected at the MCP boundary");
+});

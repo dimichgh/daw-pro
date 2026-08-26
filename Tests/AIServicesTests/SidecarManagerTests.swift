@@ -44,8 +44,62 @@ final class StubHealthServer: @unchecked Sendable {
         return Data(header.utf8) + bodyData
     }
 
-    init(responseData: Data) {
+    /// m23-fo-2 — optional PATH-AWARE routing. Empty (the default) preserves
+    /// this server's original contract exactly: ignore the request, answer
+    /// every path with `responseData`. When non-empty, the request line's path
+    /// is matched and anything unrouted gets a 404 — which is what makes the
+    /// tri-state `mitigationActive` testable end to end (a facade that serves
+    /// `/health` but 404s `/v1/_dawpro/mitigation` is the real "started by
+    /// hand, never got our PYTHONPATH" case).
+    private let routes: [String: Data]
+
+    /// m23-fo-2 — paths this server ACCEPTS and then never answers. A third
+    /// failure shape, distinct from both a 404 (a positive "no hook here") and
+    /// connection-refused (nothing listening): the socket opens, the request is
+    /// read, and the reply never comes. It is the ONLY branch that can add
+    /// latency to `status()`, and it is the only way to reach the `nil` arm of
+    /// `classifyMitigation` through the request TIMEOUT rather than through a
+    /// transport error — so without it the timeout claim in that doc comment is
+    /// untested. Stalled connections are RETAINED; ARC releasing one would
+    /// close the socket and silently turn a stall into an EOF, i.e. into the
+    /// branch we already cover.
+    private let stallPaths: Set<String>
+    private var stalledConnections: [NWConnection] = []
+
+    init(responseData: Data, routes: [String: Data] = [:],
+         stallPaths: Set<String> = []) {
         self.responseData = responseData
+        self.routes = routes
+        self.stallPaths = stallPaths
+    }
+
+    static func notFoundResponse() -> Data {
+        httpResponse(status: 404, body: #"{"detail":"Not Found"}"#)
+    }
+
+    /// The m23-fo hook's own envelope (`scripts/rvc-mitigation/sitecustomize.py`).
+    static func mitigationResponse(
+        enginePatched: Bool = true, clearCacheCalls: Int = 0, error: String? = nil
+    ) -> Data {
+        let errorJSON = error.map { "\"\($0)\"" } ?? "null"
+        return httpResponse(body: """
+            {"data":{"hookVersion":"1.0.0","active":true,\
+            "enginePatched":\(enginePatched),"clearCacheCalls":\(clearCacheCalls),\
+            "cacheMemoryBytes":0,"mlxVersion":"0.30.1",\
+            "target":"rvc_mlx.infer.infer_mlx.RVC_MLX.infer","defect":"m23-fo",\
+            "error":\(errorJSON)},"code":0,"error":null}
+            """)
+    }
+
+    /// First line of an HTTP request is `METHOD SP PATH SP VERSION`.
+    static func requestPath(from raw: Data) -> String? {
+        guard let text = String(data: raw, encoding: .utf8),
+              let line = text.split(separator: "\r\n", maxSplits: 1,
+                                    omittingEmptySubsequences: false).first
+        else { return nil }
+        let parts = line.split(separator: " ")
+        guard parts.count >= 2 else { return nil }
+        return String(parts[1])
     }
 
     func start() throws {
@@ -74,10 +128,23 @@ final class StubHealthServer: @unchecked Sendable {
     }
 
     private func respond(on connection: NWConnection) {
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] _, _, _, _ in
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) {
+            [weak self] data, _, _, _ in
             guard let self else { return }
+            let path = data.flatMap { Self.requestPath(from: $0) }
+            if let path, self.stallPaths.contains(path) {
+                // Accept, retain, answer never. This closure already runs on
+                // `queue` (it is the queue the connection was started on), so
+                // the append is serialised with `stop()`'s drain.
+                self.stalledConnections.append(connection)
+                return
+            }
+            var payload = self.responseData
+            if !self.routes.isEmpty {
+                payload = path.flatMap { self.routes[$0] } ?? Self.notFoundResponse()
+            }
             connection.send(
-                content: self.responseData,
+                content: payload,
                 completion: .contentProcessed { _ in connection.cancel() })
         }
     }
@@ -85,6 +152,10 @@ final class StubHealthServer: @unchecked Sendable {
     func stop() {
         listener?.cancel()
         listener = nil
+        queue.async { [self] in
+            for connection in stalledConnections { connection.cancel() }
+            stalledConnections.removeAll()
+        }
     }
 
     /// Allocates a loopback port, then frees it immediately — nothing is

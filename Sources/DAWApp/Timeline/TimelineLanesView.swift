@@ -74,6 +74,17 @@ struct TimelineLanesView: View {
     /// must therefore state its answer (`waveformStore` above sets the same
     /// precedent for a dependency that must not be defaulted away).
     var automationPointSelection: AutomationPointSelectionBridge?
+    /// ⭐ m23-cf (second pass): the app's ONE "who owns this DELETE keystroke?"
+    /// decision, handed down to every automation lane editor below — each of
+    /// which owns `.onKeyPress(.delete)` behind its own `@FocusState` and is
+    /// therefore a third claimant beside the piano roll and the arrange mount.
+    /// Returns true when SOME surface owned the key, not "a point was removed"
+    /// (`AppModel.handleDeleteKey`).
+    ///
+    /// Optional and WITHOUT a default, for `automationPointSelection`'s reason:
+    /// a `nil` slipped in by omission would silently return one claimant to
+    /// deciding for itself, which is precisely the divergence this item closed.
+    var onDeleteKey: (() -> Bool)?
 
     // MARK: Clip editing (M5 i-d)
 
@@ -106,6 +117,14 @@ struct TimelineLanesView: View {
     /// beat↔x mapping below derives from THIS value; nothing else may hardcode a
     /// scale. Defaults to the historical 16 for previews / headless callers.
     var pixelsPerBeat: CGFloat = Self.defaultPixelsPerBeat
+    /// Waveform auto-fit (m25-e), threaded from `PanelLayoutStore.waveformNormalize`
+    /// so the clip blocks AND the take-lane rows draw the same file at the same
+    /// scale (the `rowHeight` one-value discipline, vertical-amplitude axis).
+    var waveformNormalize: Bool = WaveformScale.defaultNormalize
+    /// Waveform vertical zoom (m25-e), threaded from
+    /// `PanelLayoutStore.waveformVerticalZoom`. Shares `waveformNormalize`'s
+    /// one-value-both-surfaces discipline.
+    var waveformVerticalZoom: CGFloat = WaveformScale.defaultVerticalZoom
     /// The lanes viewport WIDTH (m17-b), threaded from ContentView's geometry —
     /// used only by the empty-bars padding heuristic so the timeline surface
     /// still fills the viewport when zoomed far out on a short session. 0
@@ -131,9 +150,40 @@ struct TimelineLanesView: View {
     /// the gesture as a whole (the anchor snaps once, the selection translates
     /// rigidly), and a per-clip snapped target is exactly the shape that welds a
     /// group together — see `ArrangeGroupDrag`.
-    var onMoveClip: (_ trackID: UUID, _ clip: Clip,
-                     _ anchorOriginalStart: Double,
-                     _ rawDragDeltaBeats: Double) -> Double = { _, _, s, _ in s }
+    ///
+    /// ⚠️ m25-k: THIS IS THE PREVIEW, AND IT MOVES NOTHING. It reports where the
+    /// drop would land (for the readout and the ghost) and returns; the store
+    /// hears about the drag exactly once, from `onCommitMoveClip` on release. It
+    /// used to be the real move, called on every frame — which ran the drop-time
+    /// overlap policy at every INTERMEDIATE position and destroyed clips the drag
+    /// merely passed over. `ArrangeBodyDrag` documents the whole defect.
+    ///
+    /// ⚠️ m25-l-2: `requestedTrackDelta` carries the VERTICAL half, in whole
+    /// track ROWS, already resolved against the non-uniform lane ladder by
+    /// `verticalTrackDelta(fromRow:pointerContentY:)`. It is the pointer's RAW
+    /// request — the clamp and the compatibility back-off belong to
+    /// `ArrangeVerticalDrag`, downstream, so this view never decides where a clip
+    /// may land. Zero means "no vertical change", which is also what a pointer
+    /// off the lane stack produces.
+    var onPreviewMoveClip: (_ trackID: UUID, _ clip: Clip,
+                            _ anchorOriginalStart: Double,
+                            _ rawDragDeltaBeats: Double,
+                            _ requestedTrackDelta: Int) -> Double = { _, _, s, _, _ in s }
+    /// The release — the ONE real move (m25-k). Takes nothing: the gesture's
+    /// anchor and final translation live in `AppModel.arrangeBodyDrag`, which
+    /// outlives the `ForEach`-built block that started the drag.
+    var onCommitMoveClip: () -> Void = {}
+    /// The gesture died without a release (SwiftUI cancellation, or the block
+    /// being torn down mid-drag). Commits nothing, puts the ghost away.
+    var onCancelMoveClip: () -> Void = {}
+    /// The body-drag ghost (m25-k): clips in `movingClipIDs` are DRAWN at
+    /// `deltaBeats` — and, since m25-l-2, `deltaTracks` — from where the store
+    /// still holds them.
+    var dragPreview: ArrangeDragPreview?
+    /// A plain CLICK on empty timeline space (m25-m) — clears the clip
+    /// selection, which also closes the note editor because `openEditorClip`
+    /// derives from it. Wired to `AppModel.clearArrangeSelection`.
+    var onDeselectAll: () -> Void = {}
     var onTrimClip: (_ trackID: UUID, _ clip: Clip, _ newStart: Double, _ newLength: Double) -> Void = { _, _, _, _ in }
     /// Fits a clip's length to its content (m21-d, Pro clip menu; wired to
     /// `ProjectStore.fitClipToContent` — MIDI: last note end, audio: remaining
@@ -146,6 +196,10 @@ struct TimelineLanesView: View {
     /// `AppModel.deleteClipFromContextMenu`, which routes to the SAME
     /// `ProjectStore.removeClips` the DELETE key uses.
     var onDeleteClip: (_ clip: Clip, _ command: ClipDeleteCommand) -> Void = { _, _ in }
+    /// m23-ek-3 — the clip context menu's Cut / Copy, carrying the blast radius
+    /// the menu's own title already named.
+    var onClipboardClipMenu: (_ clip: Clip, _ verb: ClipboardVerb,
+                              _ command: ClipboardContextCommand) -> Void = { _, _, _ in }
     var onSplitClip: (_ trackID: UUID, _ clip: Clip, _ atBeat: Double) -> Void = { _, _, _ in }
     var onSetClipFades: (_ trackID: UUID, _ clip: Clip, _ fadeIn: Double, _ fadeOut: Double,
                          _ inCurve: FadeCurve, _ outCurve: FadeCurve) -> Void = { _, _, _, _, _, _ in }
@@ -160,6 +214,12 @@ struct TimelineLanesView: View {
     /// Opens the Quantize panel for a clip (m11-a) — MIDI note quantize (arrange
     /// context menu, Pro; sp-c). UI-only, routes to `openQuantizePanel`.
     var onOpenQuantize: (_ clip: Clip) -> Void = { _ in }
+    /// Opens the Humanize panel for a clip (m25-c) — MIDI note humanize (arrange
+    /// context menu, Pro; sp-c). UI-only, routes to `openHumanizePanel`.
+    var onOpenHumanize: (_ clip: Clip) -> Void = { _ in }
+    /// Opens the Breath Pad for a clip (m28-p7) — the arrange clip context menu
+    /// (Pro, MIDI only; sp-c). UI-only, routes to `openBreathPad`.
+    var onOpenBreathPad: (_ clip: Clip) -> Void = { _ in }
     /// Opens the Quantize panel focused on the extract affordance (both kinds).
     var onExtractGroove: (_ clip: Clip) -> Void = { _ in }
     /// Opens the "Convert to Voice…" sheet for an AUDIO clip (m10-p-5, Pro clip
@@ -274,6 +334,25 @@ struct TimelineLanesView: View {
     /// the one `ProjectStore.addMIDIClip` call and opens the editor on the
     /// result — or surfaces the store's refusal verbatim for an audio/bus lane.
     var onCreateMIDIClip: (_ trackID: UUID, _ atBeat: Double, _ lengthBeats: Double) -> Void = { _, _, _ in }
+
+    // MARK: Empty-lane paste (m25-f-4)
+
+    /// What the clipboard holds, threaded in by value from `EditClipboard.kind`
+    /// so the empty-lane Paste item cannot go stale (the `pasteMenuItem`
+    /// observability rule: every input is `@Observable`, so a Copy makes the
+    /// greyed item live on the next pass). nil = nothing copied yet.
+    var clipboardKind: ClipboardKind? = nil
+    /// `EditClipboard.clipCount` — the menu's blast radius, SHOWN in the title
+    /// ("Paste 3 Clips"), the `clipContextCommand` rule.
+    var clipboardClipCount: Int = 0
+    /// A right-click ▸ Paste on empty lane space: THIS lane's track, THIS
+    /// pointer's snapped beat. The parent makes the one
+    /// `pasteClipsFromClipboardDetailed(intoTrack:atBeat:)` call — which feeds
+    /// the track to `ArrangeActiveTrack.resolve`'s `explicit:` input, the ONE
+    /// mechanism that makes a named destination beat the in-place rule
+    /// (m25-l-3). The view never resolves a destination itself, and this
+    /// gesture deliberately does NOT move the stored active-track cursor.
+    var onPasteIntoLane: (_ trackID: UUID, _ atBeat: Double) -> Void = { _, _ in }
 
     // MARK: Empty-lane hint (m23-v)
 
@@ -642,6 +721,32 @@ struct TimelineLanesView: View {
     /// the playhead without moving must not jump it to a snapped beat).
     @State private var playheadScrubbing = false
 
+    /// WHERE A RIGHT-CLICK ON EMPTY LANE SPACE WOULD PASTE (m25-f-4) — the lane's
+    /// track and the snapped beat under the pointer, or nil when the pointer
+    /// names no lane (the gap between rows, a row's expanded extras, the space
+    /// below the last lane) or sits over a clip (the clip's own menu owns that).
+    ///
+    /// ⚠️ **STICKY: NEVER CLEARED ON HOVER EXIT, AND THAT IS LOAD-BEARING.**
+    /// `.contextMenu`'s builder receives no click location — the same constraint
+    /// `markerAddHoverBeat` was built around one strip up — so the target has to
+    /// come from the last hover. Opening the menu ENDS the hover, so a target
+    /// cleared in `endPointerHover` would be nil in exactly the frame the menu
+    /// reads it: a Paste item that pastes nowhere. `markerAddHoverBeat` is
+    /// sticky for this reason and is never cleared either.
+    ///
+    /// Refreshed on EVERY hover, nil included, so hovering onto a clip retires
+    /// the previous lane's target rather than leaving a stale one standing.
+    @State private var laneMenuTarget: LaneMenuTarget?
+
+    /// The lane a right-click named, and the beat it named there.
+    private struct LaneMenuTarget: Equatable {
+        var trackID: UUID
+        /// SNAPPED, through the same `pointerBeat(forX:)` a click seeks with —
+        /// so the paste lands on the grid the user can see, and on the very beat
+        /// a left-click there would have moved the playhead to.
+        var beat: Double
+    }
+
     // MARK: Rubber band state (m23-g3)
 
     /// The marquee in flight (nil at rest). Holds the band ORIGIN and the
@@ -656,6 +761,11 @@ struct TimelineLanesView: View {
     /// the tap SwiftUI may synthesize from the same mouse-up — see
     /// `consumeMarqueeClickSuppression`.
     @State private var marqueeEndedAt: Date?
+    /// When a double-click last CREATED a clip on empty space (m25-m). Consumed
+    /// by the single-tap handler so the tap SwiftUI may deliver from the same
+    /// mouse-up cannot deselect the clip that create just selected — see
+    /// `consumeCreateClickSuppression`.
+    @State private var createdClipAt: Date?
 
     /// A live marquee's immutable inputs.
     private struct MarqueeSession: Equatable {
@@ -1121,12 +1231,21 @@ struct TimelineLanesView: View {
                         startBeat: clip.startBeat, lengthBeats: clip.lengthBeats,
                         isMIDI: clip.isMIDI, tempoMap: tempoMap),
                     waveformPeaks: clip.audioFileURL.flatMap { waveformStore.peaks(for: $0) },
+                    waveformNormalize: waveformNormalize,
+                    waveformVerticalZoom: waveformVerticalZoom,
                     renderVisual: ClipStretch.renderVisual(for: stretchStatus(clip)),
                     onSelect: { mods in onSelectClip(clip, mods) },
-                    onMove: { onMoveClip(track.id, clip, $0, $1) },
+                    onMovePreview: {
+                        onPreviewMoveClip(track.id, clip, $0, $1,
+                                          verticalTrackDelta(fromRow: index,
+                                                             pointerContentY: $2))
+                    },
+                    onMoveCommit: onCommitMoveClip,
+                    onMoveCancel: onCancelMoveClip,
                     onTrim: { onTrimClip(track.id, clip, $0, $1) },
                     onFitToContent: { onFitClipToContent(track.id, clip) },
                     onDelete: { onDeleteClip(clip, $0) },
+                    onClipboardClip: { onClipboardClipMenu(clip, $0, $1) },
                     onSplit: { onSplitClip(track.id, clip, $0) },
                     onSetFades: { onSetClipFades(track.id, clip, $0, $1, $2, $3) },
                     onSetGain: { onSetClipGain(track.id, clip, $0) },
@@ -1143,6 +1262,8 @@ struct TimelineLanesView: View {
                         if let g = takeGroup { onFlattenTakeGroup(track.id, g.id) }
                     },
                     onOpenQuantize: { onOpenQuantize(clip) },
+                    onOpenHumanize: { onOpenHumanize(clip) },
+                    onOpenBreathPad: { onOpenBreathPad(clip) },
                     onExtractGroove: { onExtractGroove(clip) },
                     onConvertToVoice: { onConvertToVoice(clip) },
                     crossfadeNextClipID: isPro ? crossfadeNeighbor(for: clip, in: track) : nil,
@@ -1155,12 +1276,37 @@ struct TimelineLanesView: View {
                         $0.clipID == clip.id ? $0.message : nil
                     }
                 )
-                .offset(x: CGFloat(clip.startBeat) * pixelsPerBeat, y: laneTop(index))
+                // m25-k: the drag GHOST is a pure render offset over the position
+                // the store still holds — the model does not move until the drop.
+                // Zero for every clip that is not in the drag, and zero always
+                // when no drag is in flight.
+                //
+                // m25-l-2: the ghost moves VERTICALLY the same way, by drawing at
+                // the DESTINATION row's lane top. `laneTop` is used rather than a
+                // pixel delta because the ladder is non-uniform — one row down
+                // past an expanded track is a different distance than past a
+                // collapsed one, and a pixel offset would drift from the lane it
+                // claims to be on.
+                //
+                // m25-j: `offsetExplainable` rather than `.offset` + `.explainable`,
+                // because a `GeometryReader` sees LAYOUT and a render offset is not
+                // layout — the plain pair reported the SAME rect for every clip in
+                // the arrangement (measured: three clips on three tracks at beats
+                // 0/8/20 all read `{298,163,64,34}`), so `debug.explainFrames` was a
+                // confident measurement of the wrong lane and the hover card anchored
+                // on beat 0 of track 0. ONE call carries ONE pair of numbers into both
+                // the placement and the report, so they cannot drift apart; the
+                // absolute values are gated in `scripts/gates/m25j-clip-frames.mjs`.
+                //
                 // One card summarizes the clip's edit affordances — the honest scope
                 // for Canvas/gesture chrome (fade grips, trim edges, ⌥-stretch are
                 // gesture-internal, not tag-able views). Per-instance frames anchor it
                 // on whichever clip is hovered (ex-b).
-                .explainable(.clipBlock)
+                .offsetExplainable(
+                    .clipBlock,
+                    x: CGFloat(clip.startBeat + (dragPreview?.offsetBeats(for: clip.id) ?? 0))
+                        * pixelsPerBeat,
+                    y: laneTop(ghostRow(index, of: clip.id)))
             }
         }
     }
@@ -1241,6 +1387,12 @@ struct TimelineLanesView: View {
                     meterMap: meterMap,
                     secondsPerBeat: secondsPerBeat,
                     waveformStore: waveformStore,
+                    // m25-e: the take lanes draw the SAME files at the SAME scale
+                    // as the clip lane above them. A comping surface where the
+                    // dim take material and the comped clip disagreed about
+                    // amplitude would be actively misleading.
+                    waveformNormalize: waveformNormalize,
+                    waveformVerticalZoom: waveformVerticalZoom,
                     onSetComp: { groupID, segments in onSetTakeComp(track.id, groupID, segments) },
                     onSelectLane: { groupID, laneID in onSelectTake(track.id, groupID, laneID) },
                     onFlatten: { groupID in onFlattenTakeGroup(track.id, groupID) },
@@ -1281,7 +1433,14 @@ struct TimelineLanesView: View {
                 // breakpoint selection, don't nudge the clip out from under me".
                 // Keyed by lane id inside the bridge, which is why N of them can
                 // report at once without clobbering each other.
-                pointSelection: automationPointSelection
+                pointSelection: automationPointSelection,
+                // m23-cf (second pass): these editors are the THIRD focus-gated
+                // claimant of DELETE, so they route it through the same
+                // `handleDeleteKey` the roll and the arrange mount use rather
+                // than each deciding for itself. The MIXER's master-lane mount
+                // deliberately passes `nil` here — it lives in the Mix workspace,
+                // which `handleDeleteKey` refuses by design.
+                onDeleteKey: onDeleteKey
             )
             // Re-init the editor's draft when the selected lane (target) changes.
             .id(lane.id)
@@ -1311,13 +1470,58 @@ struct TimelineLanesView: View {
     /// lane plus any expanded take/automation rows, so a drop anywhere in a track's
     /// vertical extent targets that track.
     private func trackIndex(atContentY y: CGFloat) -> Int? {
-        guard y >= rulerInset else { return nil }
-        for i in tracks.indices {
-            let top = laneTop(i)
-            let bottom = top + rowHeight + extraHeight(tracks[i]) + Self.laneSpacing
-            if y >= top && y < bottom { return i }
-        }
-        return nil
+        ArrangeVerticalDrag.row(atContentY: Double(y),
+                                bandTops: laneBandTops,
+                                stackBottom: Double(laneStackBottom))
+    }
+
+    /// The top of every track's band, ascending and CONTIGUOUS (band `i` runs to
+    /// `bandTops[i + 1]`) — the measured ladder `ArrangeVerticalDrag` resolves
+    /// against. A track with expanded takes or an open automation lane is taller
+    /// than its neighbours, which is why this is measured rather than derived
+    /// from a row height.
+    private var laneBandTops: [Double] { tracks.indices.map { Double(laneTop($0)) } }
+
+    /// The bottom of the last band — everything below it is empty space, NOT a
+    /// track. Equal to `laneTop(count)` if that were expressible.
+    private var laneStackBottom: CGFloat {
+        guard let last = tracks.indices.last else { return rulerInset }
+        return laneTop(last) + rowHeight + extraHeight(tracks[last]) + Self.laneSpacing
+    }
+
+    // MARK: - Cross-track body drag (m25-l-2)
+
+    /// The vertical request a body drag anchored on row `row` is making with its
+    /// pointer at content-space `y`, in whole track rows.
+    ///
+    /// ⚠️ RESOLVED FROM THE ABSOLUTE ROW UNDER THE POINTER, never from
+    /// `translation.height`. On a non-uniform ladder the same "one row down"
+    /// intent covers different pixel distances depending on which track is
+    /// expanded, so a pixel-delta reading would put the clip on a lane the
+    /// pointer is not over. This is also the no-skip axis the store's cross-track
+    /// core requires: a bus occupies a row here exactly as the arrange draws one.
+    ///
+    /// ⚠️⚠️ OFF THE LANE STACK MEANS ZERO, NOT ROW 0 — see
+    /// `ArrangeVerticalDrag.row`. The ruler sits immediately above lane 0, so a
+    /// `?? 0` here would fling the drag to the top track whenever the pointer
+    /// drifted up out of the lanes.
+    private func verticalTrackDelta(fromRow row: Int, pointerContentY y: CGFloat) -> Int {
+        ArrangeVerticalDrag.requestedDelta(fromRow: row, pointerContentY: Double(y),
+                                           bandTops: laneBandTops,
+                                           stackBottom: Double(laneStackBottom))
+    }
+
+    /// The row to DRAW clip `id` on: its own, plus the ghost's vertical offset
+    /// while a cross-track drag is in flight.
+    ///
+    /// ⚠️ THE CLAMP IS LOAD-BEARING, NOT DEFENSIVE. `laneTop` subscripts
+    /// `tracks[i]`, and `liveArrangeDragPreview` only checks that the ANCHOR clip
+    /// still exists — a TRACK removed mid-drag (an undo, an agent's
+    /// `track.remove` over the wire) leaves a delta that was clamped against a
+    /// longer array. An out-of-range row here is a trap, not a cosmetic glitch.
+    private func ghostRow(_ index: Int, of id: UUID) -> Int {
+        guard let preview = dragPreview, !tracks.isEmpty else { return index }
+        return min(max(0, index + preview.offsetTracks(for: id)), tracks.count - 1)
     }
 
     /// Resolves a live drop point into its hover preview: the landing beat + the
@@ -1479,7 +1683,7 @@ struct TimelineLanesView: View {
                 // the handler, not inherit a gesture-layer workaround it can
                 // neither cause nor observe.
                 if consumeMarqueeClickSuppression() { return }
-                handleEmptyClick(at: location)
+                handleEmptyClick(at: location, modifiers: .current)
             }
             // The rubber band (m23-g3). SIMULTANEOUS, which is the whole
             // regression story of this item: `pointerHoverSurface` already
@@ -1494,8 +1698,20 @@ struct TimelineLanesView: View {
             // `laneTop` returns content-space y, and `.local` would be silently
             // right in `.lanes` (rulerInset == 0) and wrong in `.full`.
             .simultaneousGesture(marqueeGesture)
-            .offset(y: rulerInset)
-            .explainable(.arrangePlayhead)
+            // m25-f-4: right-click ▸ Paste, on EMPTY LANE SPACE. Mounted on this
+            // surface for the reason the surface exists — everything
+            // interactive hit-tests ABOVE it, so a right-click that reaches
+            // here is on empty space by construction and a right-click on a
+            // clip still gets `ClipBlock`'s own menu. The lane and beat come
+            // from the last hover (`laneMenuTarget`), because `.contextMenu`
+            // hands its builder no location — the `markerAddHoverBeat`
+            // precedent, one strip up.
+            .contextMenu { laneContextMenu }
+            // m25-j: the same trap as the clip blocks — this surface is placed by a
+            // render offset (non-zero only in `.full`, where the ruler sits above the
+            // lanes), so a plain `.explainable` under it would report a rect one ruler
+            // height too high in exactly the mode where it matters.
+            .offsetExplainable(.arrangePlayhead, y: rulerInset)
     }
 
     // MARK: - Rubber band (m23-g3)
@@ -1664,6 +1880,14 @@ struct TimelineLanesView: View {
         let zone = pointerZone(at: p)
         let ghost = zone == .empty ? pointerBeat(forX: p.x) : nil
         if ghostBeat != ghost { ghostBeat = ghost }
+        // m25-f-4: remember where a right-click here would paste. Resolved from
+        // `ArrangePointer.emptyLaneIndex` and DELIBERATELY NOT from `zone`
+        // above — empty space within the playhead grab tolerance classifies
+        // `.playheadGrab`, so a zone guard would lose the target on precisely
+        // the spot the user's last click had just seeked the playhead to (the
+        // m23-e double-click-create lesson, one gesture over).
+        let target = laneMenuTarget(at: p)
+        if laneMenuTarget != target { laneMenuTarget = target }
         onPointerState?(zone, ghost)
     }
 
@@ -1672,13 +1896,135 @@ struct TimelineLanesView: View {
         onPointerState?(.outside, nil)
     }
 
-    /// Click on empty lane space seeks (m17-c #3). The zone guard is
-    /// belt-and-suspenders — a click over a clip/editor never reaches this
-    /// surface — and keeps the STAGED path (which bypasses hit-testing) honest:
-    /// a staged click over a clip is refused the same way a real one is.
-    private func handleEmptyClick(at p: CGPoint) {
+    /// Click on empty lane space seeks (m17-c #3) and DESELECTS (m25-m). The zone
+    /// guard is belt-and-suspenders — a click over a clip/editor never reaches
+    /// this surface — and keeps the STAGED path (which bypasses hit-testing)
+    /// honest: a staged click over a clip is refused the same way a real one is.
+    ///
+    /// ⚠️ THE CHORD IS A PARAMETER, NEVER READ FROM `NSEvent` IN HERE — the
+    /// `PianoRollView.endGesture(at:modifiers:)` precedent. A handler that read
+    /// `.current` itself would leave the ⇧/⌘ case unreachable from the only seam
+    /// that can test it (`applyPointerStage` has coordinates and no event), and a
+    /// gate driving it would silently measure whatever keys the machine happened
+    /// to be holding.
+    ///
+    /// ⚠️ DESELECT IS A **CLICK**, NOT A PRESS, and that is the constraint the
+    /// whole item turns on. A press on empty grid ARMS THE RUBBER BAND
+    /// (`marqueeGesture`, m23-g3); "mouse down on empty ⇒ clear" would destroy
+    /// marquee-from-empty-space, a shipped feature. This runs from
+    /// `.onTapGesture`, which SwiftUI only delivers for a press+release that
+    /// never travelled `ArrangeMarquee.dragSlop` — so a drag reaches it never,
+    /// and a right-click (which `.onTapGesture` does not recognise at all)
+    /// reaches it never, leaving the context menu the selection it was invoked
+    /// on. Shift/⌘ are ADDITIVE (`ArrangeClickIntent`, the app's ONE chord→intent
+    /// mapping), so they are read here rather than given a second meaning.
+    private func handleEmptyClick(at p: CGPoint, modifiers: ArrangeClickModifiers) {
         guard pointerZone(at: p) == .empty else { return }
+        // m25-m: the decision lives in `ArrangeEmptyClick`, headless and pinned.
+        // The suppression is consumed UNCONDITIONALLY (not short-circuited behind
+        // the chord) so the flag always describes the immediately preceding
+        // mouse-up and can never survive into a later click.
+        let followsCreate = consumeCreateClickSuppression()
+        if ArrangeEmptyClick.outcome(modifiers: modifiers,
+                                     followsClipCreate: followsCreate) == .deselect {
+            onDeselectAll()
+        }
         onSeek(pointerBeat(forX: p.x))
+    }
+
+    /// Resolves the empty-lane paste target under a content-space point
+    /// (m25-f-4): the lane's TRACK and the SNAPPED beat, or nil when the point
+    /// names no pasteable destination.
+    ///
+    /// The emptiness question is `ArrangePointer.emptyLaneIndex`'s, in DAWAppKit
+    /// where a test can reach it, composed from the SAME two predicates the
+    /// double-click create uses. This function only pairs its answer with the
+    /// beat — and the beat is `pointerBeat(forX:)`, the one a single click seeks
+    /// with, so the menu's paste and the playhead agree by construction.
+    ///
+    /// ⚠️ The emptiness test uses the RAW beat while the target carries the
+    /// SNAPPED one, deliberately: the user pointed at a pixel, and the snapped
+    /// beat can land inside the neighbouring clip. A paste that snaps onto a
+    /// resident is not silently wrong — `ProjectStore.pasteClips` goes through
+    /// the no-silent-overlap choke point, which trims or removes the loser and
+    /// reports it (`trimmedClipIDs` / `removedClipIDs`), exactly as a ⌘V at that
+    /// beat would. Refusing here instead would make the right-click stricter
+    /// than the keyboard for no reason the user could see.
+    private func laneMenuTarget(at p: CGPoint) -> LaneMenuTarget? {
+        let beatRaw = Double(p.x / max(pixelsPerBeat, 0.0001))
+        guard let laneIndex = ArrangePointer.emptyLaneIndex(
+            atY: p.y, beatRaw: beatRaw, in: pointerLanes) else { return nil }
+        return LaneMenuTarget(trackID: tracks[laneIndex].id, beat: pointerBeat(forX: p.x))
+    }
+
+    /// The EMPTY-LANE context menu (m25-f-4) — Paste, and only Paste.
+    ///
+    /// ═══ WHY THIS MENU EXISTS WHERE THE CLIP MENU'S PASTE DOES NOT ═══
+    ///
+    /// A paste needs a BEAT and a TRACK. A right-click on a clip resolves
+    /// neither honestly (see `ClipBlock.contextMenu`); a right-click on empty
+    /// lane space resolves both — the lane IS the track, the pointer IS the
+    /// beat. That was the item's argument and it was BLOCKED until m25-l-3,
+    /// because an `activeTrack` was consulted only inside the relocate branch:
+    /// an ordinary copy of a still-live clip pasted HOME no matter which lane
+    /// was named. A menu that pastes into a lane other than the one it was
+    /// opened on is worse than no menu, because the menu's POSITION is itself a
+    /// promise. Since m25-l-3 an `.explicit` destination overrides the in-place
+    /// rule, and `AppModel.pasteClipsFromClipboardDetailed(intoTrack:atBeat:)`
+    /// feeds `intoTrack` to `ArrangeActiveTrack.resolve`'s `explicit:` input —
+    /// so the promise is now kept.
+    ///
+    /// ═══ SHOWN AND GREYED, NOT HIDDEN AND NOT SILENT ═══
+    ///
+    /// `ClipboardMenuPolicy.laneContextPasteItem` decides, headlessly, and its
+    /// banner carries the argument: an empty clipboard / a NOTES payload / a
+    /// point that names no lane all show the bare greyed word, so the user
+    /// learns the operation exists and what it wants. What is NOT decided here
+    /// is whether the payload fits THIS lane's kind — that is per-clip, it is
+    /// `Track.canHold`'s in `PasteAnchorPolicy`, and a MIDI clip dropped on an
+    /// audio lane surfaces the amber refusal bubble naming the clip and the
+    /// reason. Deciding it here would be a second home for the kind rule and
+    /// could only ever be partial for a mixed payload.
+    @ViewBuilder
+    private var laneContextMenu: some View {
+        // CAPTURED BY VALUE before the `Button`, so the action cannot read a
+        // target that changed (or a hover that ended) between menu open and
+        // click — the `envPoints`/Canvas value-capture discipline this file
+        // already follows.
+        let target = laneMenuTarget
+        let item = ClipboardMenuPolicy.laneContextPasteItem(
+            clipboardKind: clipboardKind,
+            clipCount: clipboardClipCount,
+            hasTargetTrack: target != nil)
+        Button(item.title) {
+            guard let target else { return }
+            onPasteIntoLane(target.trackID, target.beat)
+        }
+        .disabled(!item.isEnabled)
+    }
+
+    /// True when this tap is the single-tap half of a double-click that just
+    /// CREATED a clip, and must not undo that clip's selection (m25-m).
+    ///
+    /// ⚠️ THIS EXISTS BECAUSE THE TWO TAP COUNTS SHARE ONE SURFACE. The m23-e
+    /// empty-space double-click creates a MIDI clip, selects it and opens the
+    /// editor on it; `pointerHoverSurface`'s own note (see its `.onTapGesture`
+    /// stack) records that the create path is built to be correct "whether or not
+    /// the single tap also fires". That was free while the single tap only
+    /// SEEKED. The moment it also deselects, the order `double → single` would
+    /// create the clip and then immediately close the editor on it — killing the
+    /// beginner's only path from a fresh instrument track to a writable grid. The
+    /// guard makes BOTH orders correct instead of relying on SwiftUI's
+    /// arbitration: `single → double` needs nothing (the clear happens before the
+    /// create), and `double → single` is swallowed here.
+    ///
+    /// CONSUMED on the first tap either way, and time-bounded — the
+    /// `consumeMarqueeClickSuppression` idiom this file already uses, for the
+    /// same reason: a stale flag must never swallow a later deliberate click.
+    private func consumeCreateClickSuppression() -> Bool {
+        guard let createdAt = createdClipAt else { return false }
+        createdClipAt = nil
+        return Date().timeIntervalSince(createdAt) < Self.marqueeClickSuppressWindow
     }
 
     /// Double-click in the lanes. TWO destinations, decided by what is under the
@@ -1729,6 +2075,13 @@ struct TimelineLanesView: View {
             startBeat: beat,
             beatsPerBar: meterMap.beatsPerBar(atBeat: beat),
             spans: spans) else { return }
+        // m25-m: arm the deselect suppression BEFORE the create, so the ordering
+        // `double → single` cannot clear the selection this create is about to
+        // make. Armed on the ATTEMPT rather than on success: a refused create
+        // (audio/bus lane) selected nothing, so swallowing one stray deselect
+        // costs nothing, while branching on the outcome would need the create's
+        // answer to travel back up through a callback that does not return one.
+        createdClipAt = Date()
         onCreateMIDIClip(track.id, beat, length)
     }
 
@@ -1742,7 +2095,7 @@ struct TimelineLanesView: View {
         case .hover: handlePointerHover(at: p)
         case .click:
             handlePointerHover(at: p)
-            handleEmptyClick(at: p)
+            handleEmptyClick(at: p, modifiers: stage.modifiers)
         case .doubleClick:
             handlePointerHover(at: p)
             handleDoubleClick(at: p)
@@ -2373,7 +2726,19 @@ private struct MarkerFlag: View {
             .focused($fieldFocused)
             .onAppear { draft = name; renameResolved = false; fieldFocused = true }
             .onSubmit { commit() }
-            .onKeyPress(.escape) { cancelRename(); return .handled }
+            .onKeyPress(.escape) {
+                KeyPressProbe.markerRenameEscape += 1   // m23-fi probe, first statement
+                cancelRename()
+                return .handled
+            }
+            // m23-fi PROBE — the field's `@FocusState` value. This is the ONE
+            // mount a probe can arm headlessly (`debug.markerRename {markerId}`),
+            // so it is the delivery CONTROL for the whole census: if ESC fires
+            // here, the synthesis and the counters are proven live and the arrow
+            // mounts' zeros are a real negative rather than a dead instrument.
+            .onChange(of: fieldFocused, initial: true) { _, focused in
+                KeyPressProbe.markerRenameFieldFocused = focused
+            }
             // ⚠️ FOCUS LOSS COMMITS — clicking away is NOT escape-equivalent, and
             // m17-d's original "clear focus with a staged click" comment said
             // otherwise. Anything standing in for that gesture must call
@@ -2457,6 +2822,10 @@ private struct ClipBlock: View {
     var crossesTempoBoundary: Bool = false
     /// Nil for MIDI clips, or an audio clip whose peaks are still loading.
     var waveformPeaks: WaveformPeaks?
+    /// Waveform auto-fit + vertical zoom (m25-e) — plain values from
+    /// `PanelLayoutStore`, handed straight to `ClipWaveform`.
+    var waveformNormalize: Bool = WaveformScale.defaultNormalize
+    var waveformVerticalZoom: CGFloat = WaveformScale.defaultVerticalZoom
     /// Coarse offline-stretch render state (M5 ii-e): shimmer while pending, red
     /// accent on failure, nothing otherwise.
     var renderVisual: ClipRenderVisual
@@ -2464,7 +2833,22 @@ private struct ClipBlock: View {
     /// A body drag (m23-g2): reports this clip's start at DRAG BEGIN plus the
     /// RAW, pre-snap pointer translation, and returns the ACHIEVED anchor start
     /// so the readout can show what happened rather than what was asked for.
-    var onMove: (_ anchorOriginalStart: Double, _ rawDragDeltaBeats: Double) -> Double
+    ///
+    /// ⚠️ m25-k: PREVIEW, NOT A MOVE. See `TimelineLanesView.onPreviewMoveClip`.
+    ///
+    /// ⚠️ m25-l-2: the third argument is the pointer's y in the lanes' CONTENT
+    /// space — a RAW COORDINATE, deliberately. The block does not know the lane
+    /// ladder (which track is expanded, where each band starts), so it reports
+    /// where the pointer IS and lets `TimelineLanesView` — the one layer that
+    /// owns that geometry — say which row that is. A block that resolved its own
+    /// destination row would be the second producer of a number the lanes already
+    /// compute for the file-drop path.
+    var onMovePreview: (_ anchorOriginalStart: Double, _ rawDragDeltaBeats: Double,
+                        _ pointerContentY: Double) -> Double
+    /// The release — the ONE real move (m25-k).
+    var onMoveCommit: () -> Void = {}
+    /// The gesture died without a release (m25-k).
+    var onMoveCancel: () -> Void = {}
     var onTrim: (_ newStart: Double, _ newLength: Double) -> Void
     /// Fits the clip's length to its content (m21-d, Pro context menu — MIDI:
     /// last note end, audio: remaining source). One store call, no gesture math.
@@ -2474,6 +2858,9 @@ private struct ClipBlock: View {
     /// user was shown, so the handler cannot act on a different blast radius from
     /// the one the menu named. Defaulted to a no-op so previews stay one-liners.
     var onDelete: (ClipDeleteCommand) -> Void = { _ in }
+    /// m23-ek-3 — the clip context menu's Cut / Copy. One closure for both, so
+    /// the two entries cannot drift into two handlers with two blast radii.
+    var onClipboardClip: (ClipboardVerb, ClipboardContextCommand) -> Void = { _, _ in }
     var onSplit: (_ atBeat: Double) -> Void
     var onSetFades: (_ fadeIn: Double, _ fadeOut: Double, _ inCurve: FadeCurve, _ outCurve: FadeCurve) -> Void
     var onSetGain: (_ gainDb: Double) -> Void
@@ -2503,6 +2890,11 @@ private struct ClipBlock: View {
 
     /// Opens the Quantize panel for this clip (MIDI only — note quantize).
     var onOpenQuantize: () -> Void = {}
+    /// Opens the Humanize panel for this clip (m25-c; MIDI only — note humanize).
+    var onOpenHumanize: () -> Void = {}
+    /// Opens the Breath Pad for this clip (m28-p7; MIDI only — the pad shapes
+    /// notes).
+    var onOpenBreathPad: () -> Void = {}
     /// Opens the Quantize panel focused on the extract affordance (both kinds —
     /// `groove.extract` supports MIDI onsets and audio transients).
     var onExtractGroove: () -> Void = {}
@@ -2545,6 +2937,31 @@ private struct ClipBlock: View {
     }
 
     @State private var drag: ActiveDrag?
+    /// m25-k: a `.body` preview has run in THIS gesture, so the release has a
+    /// move to commit. Local to the block because it is a fact about this
+    /// gesture's zone; the drag's actual PAYLOAD (anchor + final translation)
+    /// lives in `AppModel.arrangeBodyDrag`, which survives a `ForEach` rebuild.
+    @State private var bodyMovePreviewed = false
+    /// The EVENT time of this block's last body-drag release (m25-k).
+    ///
+    /// ⚠️ IT PLUGS A HOLE THE COMMIT-ON-RELEASE CADENCE OPENED. `applyDrag`
+    /// receives its state as `drag ?? beginDrag(at:)` — so a `.onChanged`
+    /// arriving AFTER `.onEnded` (SwiftUI does not promise the release is the
+    /// last delivery) does not no-op: it MANUFACTURES a fresh drag, and
+    /// `beginDrag` reads `clip.startBeat`, which by then is the POST-COMMIT
+    /// position. The trailing frame would therefore preview the whole
+    /// translation a SECOND time, from the new position — committing a double
+    /// move if another release followed, and stranding a ghost at the full drag
+    /// distance with no gesture behind it if none did. Harmless before this item
+    /// (every frame already committed, so a repeat was idempotent); not harmless
+    /// now.
+    ///
+    /// Compared against the EVENT clock rather than a wall-clock window — the
+    /// `marqueeEndedAt` idiom's exact form of the same defence, minus its one
+    /// weakness. A trailing frame carries a time no newer than the release it
+    /// trails; a genuine new press always carries a later one, however fast the
+    /// user is, so this can never swallow the start of a real drag.
+    @State private var dragEndedEventTime: Date?
     @State private var readout: String?
     @State private var hovering = false
     @State private var gainDragOrigin: Double?
@@ -2707,7 +3124,19 @@ private struct ClipBlock: View {
                 // install it in Simple (no monitor when there's nothing to cue).
                 if h && pro { startFlagsMonitor() } else { stopFlagsMonitor() }
             }
-            .onDisappear { stopFlagsMonitor() }
+            .onDisappear {
+                stopFlagsMonitor()
+                // m25-k: the block that owns an in-flight body drag is going
+                // away, so its `.onEnded` will never arrive. SwiftUI does not
+                // guarantee a release for a cancelled gesture either, and the
+                // preview must not outlive the gesture — a ghost drawn at an
+                // offset the store never took is exactly the undismissable
+                // artefact the m23-ek-1 rubber band had to fix. Commit NOTHING:
+                // whatever tore the block down (an undo, an agent's
+                // `clip.remove`) may have changed the very content the drag was
+                // measured against — the `PianoRollView` `.cancelled` contract.
+                if bodyMovePreviewed { onMoveCancel() }
+            }
             .contextMenu { contextMenu }
             .help(helpText)
     }
@@ -2855,7 +3284,9 @@ private struct ClipBlock: View {
                 startOffsetSeconds: clip.startOffsetSeconds,
                 secondsPerBeat: secondsPerBeat,
                 pixelsPerBeat: ppb,
-                tint: tint
+                tint: tint,
+                normalize: waveformNormalize,
+                verticalZoom: waveformVerticalZoom
             )
             .clipShape(RoundedRectangle(cornerRadius: 5))
             // Ghost the waveform under the envelope overlay so it reads as a
@@ -3205,13 +3636,44 @@ private struct ClipBlock: View {
     private var clipDrag: some Gesture {
         DragGesture(minimumDistance: 2, coordinateSpace: .named(TimelineLanesView.contentSpace))
             .onChanged { value in
+                guard !isTrailingFrame(value) else { return }
                 let active = drag ?? beginDrag(at: value.startLocation)
                 // Hold the zone's drag cursor even if the pointer leaves the block
                 // (a body closes the hand; an edge/fade keeps its resize).
                 DragCursor.set(CursorAffordance.forClipZone(active.zone, dragging: true))
-                applyDrag(active, translationBeats: Double(value.translation.width / ppb))
+                applyDrag(active, translationBeats: Double(value.translation.width / ppb),
+                          pointerContentY: Double(value.location.y))
             }
-            .onEnded { _ in drag = nil; readout = nil; DragCursor.clear() }
+            .onEnded { value in endDrag(at: value.time) }
+    }
+
+    /// True when this update belongs to the gesture that ALREADY RELEASED — see
+    /// `dragEndedEventTime`. Inert during a live drag (`drag` is non-nil) and
+    /// inert before the block's first release.
+    private func isTrailingFrame(_ value: DragGesture.Value) -> Bool {
+        guard drag == nil, let ended = dragEndedEventTime else { return false }
+        return value.time <= ended
+    }
+
+    /// The ONE release path for both body-drag gestures (m25-k).
+    ///
+    /// `bodyMovePreviewed` — not the zone — is what decides whether to commit,
+    /// deliberately: `stretchDrag` and `clipDrag` share `drag`, and ⌥ over a
+    /// non-stretch zone falls through to `applyDrag`. Keying the commit on "did a
+    /// body preview actually run" means the two gestures cannot disagree about
+    /// what this release is, and no second copy of `ClipStretch.isStretchDrag`'s
+    /// decision lives here to drift from the first.
+    ///
+    /// `AppModel.commitArrangeDrag` is idempotent (`ArrangeBodyDrag.commit()`
+    /// spends the session), so a release delivered to both gestures still moves
+    /// the clip exactly once.
+    private func endDrag(at eventTime: Date) {
+        if bodyMovePreviewed { onMoveCommit() }
+        bodyMovePreviewed = false
+        drag = nil
+        dragEndedEventTime = eventTime
+        readout = nil
+        DragCursor.clear()
     }
 
     private func beginDrag(at start: CGPoint) -> ActiveDrag {
@@ -3243,6 +3705,7 @@ private struct ClipBlock: View {
         DragGesture(minimumDistance: 2, coordinateSpace: .named(TimelineLanesView.contentSpace))
             .modifiers(.option)
             .onChanged { value in
+                guard !isTrailingFrame(value) else { return }
                 let active = drag ?? beginDrag(at: value.startLocation)
                 let dxBeats = Double(value.translation.width / ppb)
                 if ClipStretch.isStretchDrag(zone: active.zone, optionHeld: true, isAudio: !clip.isMIDI) {
@@ -3257,13 +3720,26 @@ private struct ClipBlock: View {
                     readout = ClipStretch.stretchReadout(length: preview.length, ratio: preview.ratio)
                 } else {
                     DragCursor.set(CursorAffordance.forClipZone(active.zone, dragging: true))
-                    applyDrag(active, translationBeats: dxBeats)
+                    // m25-l-2: ⌥ over a non-stretch zone falls through to the
+                    // ordinary handler, so the vertical axis must be threaded
+                    // from BOTH gestures — feeding it from `clipDrag` alone
+                    // would leave ⌥-drag silently same-track-only.
+                    //
+                    // ⚠️ BE PRECISE ABOUT WHICH ⌥-DRAGS THIS REACHES. Only the
+                    // `.body` zone crosses lanes; `isStretchDrag` is
+                    // `zone == .trimEnd && optionHeld && isAudio`, so ⌥ on a
+                    // MIDI clip's right edge lands in the TRIM branch below, not
+                    // here. The threading is still required — a ⌥-held drag on a
+                    // clip's body is an ordinary move and must behave like one.
+                    applyDrag(active, translationBeats: dxBeats,
+                              pointerContentY: Double(value.location.y))
                 }
             }
-            .onEnded { _ in drag = nil; readout = nil; DragCursor.clear() }
+            .onEnded { value in endDrag(at: value.time) }
     }
 
-    private func applyDrag(_ active: ActiveDrag, translationBeats dxBeats: Double) {
+    private func applyDrag(_ active: ActiveDrag, translationBeats dxBeats: Double,
+                           pointerContentY: Double) {
         switch active.zone {
         case .body:
             // m23-g2: the gesture hands over its RAW translation and its own
@@ -3278,7 +3754,18 @@ private struct ClipBlock: View {
             // the beat-0 clamp case — the exact case this item is about — they
             // differ, and a bubble reading "start 0.0" while the clip sits at
             // 2.0 would be the honesty violation the design language forbids.
-            readout = "start " + fmt(onMove(active.originStart, dxBeats))
+            //
+            // m25-k: "achieved" now means WHERE THE DROP WILL LAND. The preview
+            // runs the same anchor snap and the same whole-group clamp the commit
+            // will, so the number under the cursor is still the truth — it is
+            // simply the truth about a landing that has not happened yet.
+            // m25-l-2: the vertical axis rides the SAME preview call — one
+            // observation of one pointer, previewed together and committed
+            // together. Splitting it into a second callback would let a frame
+            // carry a stale value on one axis while the store applies both as a
+            // single edit.
+            bodyMovePreviewed = true
+            readout = "start " + fmt(onMovePreview(active.originStart, dxBeats, pointerContentY))
         case .trimStart:
             let (s, l) = ClipEdit.trimStart(
                 originalStart: active.originStart, originalLength: active.originLength,
@@ -3361,6 +3848,32 @@ private struct ClipBlock: View {
         // fade/quantize/crossfade items is not discoverable, and in Simple it is
         // the only entry there is.
         Button(deleteCommand.title, role: .destructive) { onDelete(deleteCommand) }
+        // ═══ CUT / COPY (m23-ek-3) — BESIDE DELETE, IN BOTH DENSITIES ═══
+        //
+        // Same argument as Delete's above, and it is not a weaker one: with NO
+        // ⌘C/⌘X in v1 (the user's ruling — see `ClipboardMenuPolicy`), the
+        // context menu is the FAST path, not a convenience. An operation
+        // reachable by only one route is an operation that goes missing, which
+        // is m23-cf's whole lesson.
+        //
+        // The blast radius is decided ONCE by `ClipboardMenuPolicy` and shown in
+        // the title, and the SAME value is handed back to the action so the menu
+        // cannot act on a different set from the one it named.
+        //
+        // PASTE IS DELIBERATELY NOT HERE, AND STILL IS NOT. This menu only
+        // exists because the pointer is over a CLIP, whereas a paste's
+        // destination is a beat and a track — pasting "onto" a clip has no
+        // meaning the user could predict.
+        //
+        // ⚠️ **THE SECOND HALF OF THIS ARGUMENT WAS "and the anchor is the
+        // playhead in EVERY route", AND m25-f-4 MADE THAT FALSE.** Right-click
+        // on EMPTY LANE SPACE now pastes at the pointer's beat on the pointed
+        // lane (`TimelineLanesView.laneContextMenu`), because there both
+        // coordinates are unambiguous. The first half is untouched and is what
+        // keeps Paste out of THIS menu. Edit ▸ Paste / ⌘V remain the
+        // playhead-anchored route.
+        Button(cutCommand.title) { onClipboardClip(.cut, cutCommand) }
+        Button(copyCommand.title) { onClipboardClip(.copy, copyCommand) }
         // The separator is CONDITIONAL because in SIMPLE density on a NON-TAKE
         // clip both blocks below are empty, so an unconditional one would be a
         // trailing rule with nothing under it — in the beginner density, on the
@@ -3448,6 +3961,29 @@ private struct ClipBlock: View {
             Divider()
             if clip.isMIDI {
                 Button("Quantize…") { onOpenQuantize() }
+                // Humanize (m25-c) — quantize's inverse, and MIDI-only for the
+                // same reason: `humanizeClipNotes` throws `notAMIDIClip` on an
+                // audio clip, so the entry simply does not exist there (hidden,
+                // never offered-then-errored — the "Convert to Voice…" rule two
+                // entries down, and the sibling "Quantize…" above).
+                //
+                // ⛔ DO NOT ADD `clip.takeGroupID == nil` HERE (m25-c-2). Both
+                // store methods also refuse a take-comp member, and hiding the
+                // entry looks like the neighbouring guards at :1281 — but this
+                // menu is not the only way in: the piano-roll QUANTIZE/HUMANIZE
+                // chips (PianoRollView `quantizeChip`/`humanizeChip`) are gated on
+                // NOTHING and the roll opens on comp members. A conjunct here
+                // would leave the bug reachable one gesture away AND give the same
+                // refusal two treatments. It is handled once, in the panels: Apply
+                // is disabled and says why (kind hides, state explains).
+                Button("Humanize…") { onOpenHumanize() }
+                // Breath pad (m28-p7) — MIDI-only for the same reason as its two
+                // neighbours (`applyEffortShape` has no notes to shape on an
+                // audio clip), and hidden rather than offered-then-errored. It
+                // sits after Humanize because it is the strongest of the three:
+                // Quantize moves time, Humanize loosens it, the pad rewrites how
+                // the part is BLOWN.
+                Button("Breath Pad…") { onOpenBreathPad() }
             }
             Button("Extract Groove…") { onExtractGroove() }
             // Convert to voice (m10-p-5): AUDIO clips only — a MIDI clip has no
@@ -3467,6 +4003,19 @@ private struct ClipBlock: View {
     private var deleteCommand: ClipDeleteCommand {
         DeleteMenuPolicy.clipContextCommand(clickedClipIsSelected: isSelected,
                                             arrangeSelectionCount: arrangeSelectionCount)
+    }
+
+    /// What this block's Cut / Copy entries say and target (m23-ek-3) — the
+    /// `deleteCommand` twin, resolved by the SAME rule (right-click inside the
+    /// selection acts on all of it; outside, on the one you pointed at).
+    private var cutCommand: ClipboardContextCommand {
+        ClipboardMenuPolicy.clipContextCommand(verb: .cut, clickedClipIsSelected: isSelected,
+                                               arrangeSelectionCount: arrangeSelectionCount)
+    }
+
+    private var copyCommand: ClipboardContextCommand {
+        ClipboardMenuPolicy.clipContextCommand(verb: .copy, clickedClipIsSelected: isSelected,
+                                               arrangeSelectionCount: arrangeSelectionCount)
     }
 
     /// Compact beat readout for the drag bubble (2 decimals, trailing zeros trimmed).

@@ -1,3 +1,5 @@
+import CoreGraphics
+import DAWCore
 import Foundation
 
 /// The ONE home for the question "would the PIANO ROLL have consumed this
@@ -211,4 +213,228 @@ public final class PianoRollNoteSelectionBridge {
                                                    to new: ArrangeSelection) -> Bool {
         old.count <= 1 && new.count > 1
     }
+
+    // MARK: - The RUBBER BAND seam (m23-ek-1)
+
+    /// STAGED FOR THE ROLL by `debug.pianoRollMarquee`: one step of a
+    /// synthesized grid gesture, run through the roll's own press/drag/release
+    /// handlers.
+    ///
+    /// ⚠️ A THIRD NONCE, NOT A THIRD MEANING ON `stageNonce`, and this one is
+    /// not merely stylistic housekeeping: the view's existing
+    /// `.onChange(of: stageNonce)` routes `stagedSelectAll == false` straight to
+    /// `model.clearSelection()`. Reusing it would wipe the selection on every
+    /// single marquee step — the band would report an empty set for a gesture
+    /// that had just selected forty notes.
+    public private(set) var marqueeStageNonce = 0
+    /// The step the staged gesture asks for. `@ObservationIgnored` for
+    /// `stagedSelectAll`'s reason: the nonce is what observers watch, and a
+    /// second observable property would fire a second update per request.
+    @ObservationIgnored public private(set) var marqueeStage: PianoRollMarqueeStage?
+
+    /// REPORTED BY THE ROLL — the band rect the grid is DRAWING, or nil when no
+    /// band is in flight. Ground truth, never the seam's input: it is the very
+    /// `@State` the overlay renders from, handed out after it is stored.
+    ///
+    /// ⚠️ `@ObservationIgnored`, and that is the load-bearing half of this whole
+    /// seam. `DeleteMenuPolicy.swift:136-143` anticipated this feature and warned
+    /// against the obvious implementation: `hasSelection` above publishes a BOOL
+    /// reported on the empty ↔ non-empty TRANSITION only, because it gates a
+    /// keyboard path (`AppModel.pianoRollWouldConsumeKey`). Making any of the
+    /// marquee's per-pointer-tick state observable would invalidate the
+    /// observation graph on every update of a band drag — a correctness
+    /// regression for the keyboard gate, not merely a performance one. Nothing
+    /// below is observed; it is read at SEAM time and nowhere else.
+    @ObservationIgnored public private(set) var marqueeBand: CGRect?
+    /// What the last reported band TOUCHED — distinct from the selection, which
+    /// under an additive chord is `base ∪ hits`.
+    @ObservationIgnored public private(set) var marqueeHits: Set<UUID> = []
+    /// The grid's live scales, content and selection (see `PianoRollSurfaceState`).
+    @ObservationIgnored public private(set) var surface: PianoRollSurfaceState = .empty
+    /// Bumped on every MARQUEE report — the seam's proof that a staged step has
+    /// been THROUGH the view (the m23-e echo-seam law). Deliberately NOT bumped
+    /// by `reportSurface`, so a routine relayout can never satisfy a bounded
+    /// wait that is standing on a staged step.
+    @ObservationIgnored public private(set) var marqueeReportSeq = 0
+
+    /// Whether the roll still has a grid gesture in flight — `activeDrag != .none`,
+    /// reported up rather than inferred.
+    ///
+    /// ⚠️ THIS EXISTS TO MAKE AN UNBALANCED STAGED GESTURE FAIL LOUDLY. A staged
+    /// `begin` arriving while a gesture is already open cannot start a press (the
+    /// mouse cannot either), so the view drops it — and the seam would otherwise
+    /// answer with a perfectly plausible echo while the NEXT `changed` computed
+    /// its band from the PREVIOUS gesture's origin. That is a wrong answer rather
+    /// than an error, the worst shape a diagnostic can take. `pianoRollMarquee`
+    /// reads this and throws instead.
+    @ObservationIgnored public private(set) var marqueeGestureInFlight = false
+
+    /// The roll instance whose surface report is currently standing, or nil when
+    /// no roll is mounted. See `clearSurface(from:)`.
+    @ObservationIgnored private var surfaceReporter: UUID?
+
+    /// Ask the visible roll to run one step of a grid gesture — the only way
+    /// anything outside can drive the roll's pointer handling, since
+    /// `PianoRollModel` is `@State private`. Inert with no roll mounted, like
+    /// every other nonce here.
+    public func stageMarquee(_ stage: PianoRollMarqueeStage) {
+        marqueeStage = stage
+        marqueeStageNonce += 1
+    }
+
+    /// THE GRID DREW THIS — its scales, its content and its selection. Called
+    /// from the roll on first render and whenever any of it changes, so a BARE
+    /// `debug.pianoRollMarquee {}` read can answer the ladder a fixture must be
+    /// computed FROM even though no gesture has ever run.
+    ///
+    /// Does NOT bump `marqueeReportSeq` (see above).
+    ///
+    /// - Parameter token: identifies the reporting roll INSTANCE — see
+    ///   `clearSurface(from:)`.
+    public func reportSurface(token: UUID, _ state: PianoRollSurfaceState) {
+        surfaceReporter = token
+        surface = state
+    }
+
+    /// THE BAND MOVED (or was put away). Carries the surface state ALONGSIDE the
+    /// band rather than leaving it to `reportSurface`'s `.onChange`, and that is
+    /// not redundancy: `awaitPianoRollMarqueeApplied` stops the instant this
+    /// bumps the sequence, which can happen BEFORE SwiftUI runs the body pass
+    /// that would fire the surface report. A seam that answered with a
+    /// pre-gesture selection would not merely fail a gate — a stale echo poisons
+    /// every diagnosis made through it.
+    public func reportMarquee(
+        band: CGRect?, hits: Set<UUID>, surface: PianoRollSurfaceState, gestureInFlight: Bool
+    ) {
+        marqueeBand = band
+        marqueeHits = hits
+        self.surface = surface
+        marqueeGestureInFlight = gestureInFlight
+        marqueeReportSeq &+= 1
+    }
+
+    /// THE ROLL WENT AWAY — drop the surface echo with it, for `clear()`'s
+    /// reason: a latched band or a latched ladder would let the seam answer with
+    /// a grid nothing is drawing.
+    ///
+    /// ⚠️ THE TOKEN IS WHY A CLIP SWITCH DOES NOT BLANK A LIVE ROLL. The editor
+    /// is rebuilt on `.id(clip.id)`, so switching clips tears down one roll and
+    /// stands up another, and SwiftUI does not promise which runs first — this
+    /// file's own header documents that race, MEASURED, one flag over. A
+    /// teardown clears only while the LAST report was its own, so the incoming
+    /// roll's report supersedes the outgoing roll's clear in either order.
+    /// (`clear()` keeps its unguarded shape: its `hasSelection = false` is
+    /// re-established by the incoming roll's `initial: true` report, which is
+    /// exactly what makes the race benign THERE and not here.)
+    public func clearSurface(from token: UUID) {
+        guard surfaceReporter == token else { return }
+        surfaceReporter = nil
+        marqueeBand = nil
+        marqueeHits = []
+        surface = .empty
+        // The roll that owned the gesture is GONE, so nothing can deliver its
+        // release — leaving this latched would lock the seam out of every
+        // subsequent `begin` for the lifetime of the app.
+        marqueeGestureInFlight = false
+        marqueeReportSeq &+= 1
+    }
+
+    // MARK: - The CLIPBOARD seam (m23-ek-3)
+
+    /// ASKED OF THE ROLL by Edit ▸ Copy / Cut / Paste and by the roll's own
+    /// context menu: run this clipboard operation on your notes.
+    ///
+    /// A FOURTH NONCE, and — like `marqueeStageNonce` — not merely stylistic
+    /// housekeeping. `stageNonce` routes `stagedSelectAll == false` straight to
+    /// `model.clearSelection()`, so reusing it would wipe the selection the copy
+    /// was about to read. `deleteNonce` carries a destructive verb with no
+    /// payload. This one carries a VERB and, for paste, a payload of notes, and
+    /// folding three meanings into one number is exactly the confusion
+    /// `dropForWidenedArrangeSelection` was given its own name to avoid.
+    ///
+    /// WHY THE ROLL AND NOT THE MENU DOES THE WORK. `PianoRollModel` is `@State
+    /// private`, so nothing outside can read the selection or the draft — the
+    /// same wall every other nonce here exists to cross. ⚠️ AND THE MENU MUST
+    /// NOT READ `surface.selection` INSTEAD: that echo is published from the
+    /// roll's `.onChange(of: surfaceState)`, i.e. one body pass BEHIND a
+    /// selection change (this file's `marqueeReportSeq` note and
+    /// `awaitPianoRollMarqueeApplied`'s second wait both record the lag,
+    /// measured). Fine for a human clicking a menu; INTERMITTENT for a gate that
+    /// copies immediately after a staged marquee. The roll owns `model.draft`
+    /// and `model.selection` directly, so a copy resolved there has nothing to
+    /// be stale.
+    public private(set) var clipboardNonce = 0
+
+    /// Which operation the staged request is. `@ObservationIgnored` for
+    /// `stagedSelectAll`'s reason: the nonce is what observers watch, and a
+    /// second observable property would fire a second update per request.
+    @ObservationIgnored public private(set) var stagedClipboardVerb: ClipboardVerb = .copy
+
+    /// Ask the roll to COPY its selected notes out.
+    public func requestCopy() { requestClipboard(.copy) }
+
+    /// Ask the roll to CUT its selected notes.
+    ///
+    /// ⚠️ THE ROLL WRITES THE CLIPBOARD ONLY AFTER THE STORE ACCEPTS THE
+    /// REMOVAL — see `PianoRollView`'s handler. A clipboard left loaded while
+    /// nothing was actually cut is a lie about what happened.
+    public func requestCut() { requestClipboard(.cut) }
+
+    /// Ask the roll to PASTE the clipboard's notes at its playhead.
+    ///
+    /// ⚠️ NO PAYLOAD RIDES THIS NONCE, DELIBERATELY. The notes reach the roll as
+    /// an ordinary view property fed from `AppModel.clipboard`, which is
+    /// `@Observable` — so the roll's own context-menu Paste can be titled and
+    /// enabled from the LIVE clipboard at all times. Staging the payload here
+    /// instead would have made that entry readable only AFTER an Edit ▸ Paste had
+    /// already run, i.e. permanently disabled on the route that needs it most.
+    public func requestPaste() { requestClipboard(.paste) }
+
+    private func requestClipboard(_ verb: ClipboardVerb) {
+        stagedClipboardVerb = verb
+        clipboardNonce += 1
+    }
+
+    // MARK: - The SELECT ALL seam (m25-s)
+
+    /// ASKED OF THE ROLL by ⌘A / Edit ▸ Select All: select every note you are
+    /// drawing.
+    ///
+    /// ⚠️⚠️ **A FIFTH NONCE, AND IT IS NOT `stageNonce` — THIS IS THE WHOLE
+    /// DESIGN OF m25-s, NOT HOUSEKEEPING.** `stage(selectAll: true)` above
+    /// already selects every note in the open roll, and routing the user's
+    /// keystroke through it would have been a two-line change. It is refused for
+    /// two independent reasons:
+    ///
+    ///   • `stageNonce` IS A TEST AFFORDANCE. It exists so `debug.arrangeSelection
+    ///     {act:"pianoRollNotes"}` can reach a `@State private PianoRollModel`
+    ///     that nothing outside can otherwise touch. A USER KEYSTROKE MUST NOT
+    ///     DEPEND ON A DEBUG SEAM: the day that seam is gated, renamed or
+    ///     compiled out, ⌘A would go with it, and nothing would say so.
+    ///   • IT ALREADY MEANS THREE THINGS. Its `stagedSelectAll == false` branch
+    ///     routes straight to `model.clearSelection()`, AND it is bumped by the
+    ///     PRODUCTION path `dropForWidenedArrangeSelection()` (m23-ak) meaning
+    ///     "your clip is no longer the whole selection". A fourth meaning on one
+    ///     number is exactly the confusion `deleteNonce`, `marqueeStageNonce` and
+    ///     `clipboardNonce` were each given their own name to avoid — with the
+    ///     added twist that a ⌘A and a gate's staged CLEAR would be
+    ///     indistinguishable at the receiving `.onChange`.
+    ///
+    /// ⭐ **THE VERB IS SHARED, THE MECHANISM IS NOT.** Both this nonce and
+    /// `stageNonce`'s select-all branch land on `PianoRollModel.selectAllNotes()`
+    /// — extracted at m25-s from the inline expression that used to live in the
+    /// view — so the seam and the keystroke can never select different things.
+    /// Sharing the RULE while separating the ROUTE is the m23-cf shape.
+    ///
+    /// CARRIES NO PAYLOAD, like `deleteNonce`: WHAT gets selected is the roll's
+    /// own draft, so the menu cannot name a target the roll disagrees with.
+    ///
+    /// INERT WITH NO ROLL MOUNTED (`.onChange` without `initial: true` — every
+    /// other nonce's behaviour), and that is correct rather than merely
+    /// tolerable: `SelectAllMenuPolicy` refuses unless the roll is the ACTIVE
+    /// surface, which already implies a mounted roll.
+    public private(set) var selectAllNonce = 0
+
+    /// Ask the roll to SELECT ALL of its notes.
+    public func requestSelectAll() { selectAllNonce += 1 }
 }

@@ -34,6 +34,41 @@ private func rvcMalformedResponse() -> Data {
     rvcHTTPResponse(body: #"{"unexpected":"shape"}"#)
 }
 
+/// m23-fo-2 — `resolveLaunchPlan()` now REFUSES to spawn without the
+/// mitigation hook, so every test that reaches a real or dry launch must
+/// provide one.
+///
+/// ⚠️ Written INSIDE the test's own temp dir and pointed at with
+/// `mitigationDirOverride`, NEVER left to the sibling default: for an
+/// `rvcDir` of `/…/T/rvc-test-<uuid>` the sibling would be the SHARED
+/// `/…/T/rvc-mitigation`, so parallel tests would see each other's hook and
+/// one test's cleanup would break another's setup.
+private func makeMitigationDir(in parent: URL) throws -> URL {
+    let dir = parent.appendingPathComponent("rvc-mitigation")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    try Data("# stub hook — presence is all resolveLaunchPlan() checks.\n".utf8)
+        .write(to: dir.appendingPathComponent("sitecustomize.py"))
+    return dir
+}
+
+private func rvcConfig(
+    baseURL: URL,
+    rvcDir: URL?,
+    mitigationDir: URL?,
+    startupTimeoutSeconds: Double = 30,
+    healthPollIntervalSeconds: Double = 0.5,
+    dryRun: Bool = false
+) -> VoiceConversionManager.Configuration {
+    var config = VoiceConversionManager.Configuration(
+        baseURL: baseURL,
+        rvcDir: rvcDir,
+        startupTimeoutSeconds: startupTimeoutSeconds,
+        healthPollIntervalSeconds: healthPollIntervalSeconds,
+        dryRun: dryRun)
+    config.mitigationDirOverride = mitigationDir
+    return config
+}
+
 @Suite("VoiceConversionManager — status mapping (m10-p-3)")
 struct VoiceConversionManagerStatusTests {
     private func baseURL(port: UInt16) -> URL { URL(string: "http://127.0.0.1:\(port)")! }
@@ -158,9 +193,11 @@ struct VoiceConversionManagerStartTests {
         defer { try? FileManager.default.removeItem(at: dir) }
         let runScript = dir.appendingPathComponent("run.sh")
         try Data("#!/bin/bash\necho stub\n".utf8).write(to: runScript)
+        let hookDir = try makeMitigationDir(in: dir)
 
-        let manager = VoiceConversionManager(configuration: .init(
-            baseURL: URL(string: "http://127.0.0.1:1")!, rvcDir: dir, dryRun: true))
+        let manager = VoiceConversionManager(configuration: rvcConfig(
+            baseURL: URL(string: "http://127.0.0.1:1")!, rvcDir: dir,
+            mitigationDir: hookDir, dryRun: true))
         let status = try await manager.start()
 
         #expect(status.state == .starting)
@@ -196,11 +233,13 @@ struct VoiceConversionManagerStartTests {
         // "does the real scripts/rvc/run.sh write one" (proven separately by
         // the live E2E gate).
         try Data("#!/bin/bash\nsleep 1\n".utf8).write(to: dir.appendingPathComponent("run.sh"))
+        let hookDir = try makeMitigationDir(in: dir)
         let unusedPort = try StubHealthServer.unusedLoopbackPort()
 
-        let manager = VoiceConversionManager(configuration: .init(
+        let manager = VoiceConversionManager(configuration: rvcConfig(
             baseURL: URL(string: "http://127.0.0.1:\(unusedPort)")!,
-            rvcDir: dir, startupTimeoutSeconds: 0.3, healthPollIntervalSeconds: 0.1))
+            rvcDir: dir, mitigationDir: hookDir,
+            startupTimeoutSeconds: 0.3, healthPollIntervalSeconds: 0.1))
         let status = try await manager.start()
 
         #expect(status.state == .starting)
@@ -410,11 +449,13 @@ struct VoiceConversionManagerBootProgressTests {
         let dir = try makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
         try writeSleepingRunScript(in: dir)
+        let hookDir = try makeMitigationDir(in: dir)
         let unusedPort = try StubHealthServer.unusedLoopbackPort()
 
-        let manager = VoiceConversionManager(configuration: .init(
+        let manager = VoiceConversionManager(configuration: rvcConfig(
             baseURL: URL(string: "http://127.0.0.1:\(unusedPort)")!,
             rvcDir: dir,
+            mitigationDir: hookDir,
             startupTimeoutSeconds: 0.4,
             healthPollIntervalSeconds: 0.1))
 
@@ -1047,5 +1088,666 @@ struct VoiceConversionManagerStopHonestyTests {
         #expect(status.message.contains("[dry-run]"))
         #expect(!status.message.localizedCaseInsensitiveContains("not running"), "\(status.message)")
         #expect(FileManager.default.fileExists(atPath: pidfile.path), "dry-run removed the pidfile")
+    }
+}
+
+// MARK: - m23-fo-2: the mitigation hook reaches a real user
+
+/// The seam that makes m23-fo's fix actually ship. m23-fo-1 built the hook and
+/// proved it cures the saturation (`scripts/gates/m23fo-conversion-stability.mjs`,
+/// leg 1 RED / leg 2 GREEN); until this item nothing in the app set the one
+/// environment variable that arms it, so no user reached it.
+@Suite("VoiceConversionManager.childEnvironment — PYTHONPATH prepend (m23-fo-2, pure)")
+struct VoiceConversionChildEnvironmentTests {
+    private typealias Config = VoiceConversionManager.Configuration
+
+    @Test("an inherited PYTHONPATH is PREPENDED to, never clobbered")
+    func prependsToInherited() {
+        let env = Config.childEnvironment(
+            base: ["PYTHONPATH": "/user/one:/user/two"],
+            voicesDir: "/voices", mitigationDir: "/hook", patchesDir: "/patches", outDir: "/out")
+        #expect(env["PYTHONPATH"] == "/hook:/user/one:/user/two")
+    }
+
+    @Test("ours goes FIRST — sitecustomize must resolve to our file, not one further down")
+    func oursIsFirst() {
+        let env = Config.childEnvironment(
+            base: ["PYTHONPATH": "/someone/elses/sitecustomize/home"],
+            voicesDir: "/voices", mitigationDir: "/hook", patchesDir: "/patches", outDir: "/out")
+        #expect(env["PYTHONPATH"]?.hasPrefix("/hook:") == true)
+    }
+
+    @Test("no inherited PYTHONPATH -> set to ours alone, with no stray separator")
+    func setsWhenAbsent() {
+        let env = Config.childEnvironment(
+            base: [:], voicesDir: "/voices", mitigationDir: "/hook", patchesDir: "/patches", outDir: "/out")
+        #expect(env["PYTHONPATH"] == "/hook")
+    }
+
+    /// PRESENT BUT EMPTY is a different dictionary state from ABSENT, and a
+    /// real one (`export PYTHONPATH=` in a shell profile). A naive join would
+    /// produce `/hook:` — a trailing empty entry, which Python reads as the
+    /// CURRENT DIRECTORY and would silently put the facade's cwd on sys.path.
+    @Test("inherited PYTHONPATH of \"\" -> ours alone, never a trailing colon")
+    func emptyInheritedProducesNoTrailingColon() {
+        let env = Config.childEnvironment(
+            base: ["PYTHONPATH": ""], voicesDir: "/voices", mitigationDir: "/hook", patchesDir: "/patches", outDir: "/out")
+        #expect(env["PYTHONPATH"] == "/hook")
+        #expect(env["PYTHONPATH"]?.hasSuffix(":") == false)
+    }
+
+    @Test("nil mitigationDir leaves an inherited PYTHONPATH EXACTLY as it was")
+    func nilMitigationDirLeavesInheritedUntouched() {
+        let env = Config.childEnvironment(
+            base: ["PYTHONPATH": "/user/one"], voicesDir: "/voices", mitigationDir: nil, patchesDir: "/patches",
+            outDir: "/out")
+        #expect(env["PYTHONPATH"] == "/user/one")
+    }
+
+    @Test("nil mitigationDir does not INVENT a PYTHONPATH where there was none")
+    func nilMitigationDirDoesNotInvent() {
+        let env = Config.childEnvironment(
+            base: [:], voicesDir: "/voices", mitigationDir: nil, patchesDir: "/patches", outDir: "/out")
+        #expect(env["PYTHONPATH"] == nil)
+    }
+
+    @Test("an empty-string mitigationDir is treated as absent, not joined in")
+    func emptyMitigationDirIsAbsent() {
+        let env = Config.childEnvironment(
+            base: ["PYTHONPATH": "/user/one"], voicesDir: "/voices", mitigationDir: "", patchesDir: "/patches",
+            outDir: "/out")
+        #expect(env["PYTHONPATH"] == "/user/one")
+    }
+
+    @Test("RVC_VOICES_DIR is still set (m23-di-2a must not regress)")
+    func stillSetsVoicesDir() {
+        let env = Config.childEnvironment(
+            base: [:], voicesDir: "/voices/here", mitigationDir: "/hook", patchesDir: "/patches", outDir: "/out")
+        #expect(env["RVC_VOICES_DIR"] == "/voices/here")
+    }
+
+    // MARK: - m23-fp: RVC_OUT_DIR
+
+    @Test("RVC_OUT_DIR is set from outDir (m23-fp — the facade stops writing into the fence)")
+    func setsOutDir() {
+        let env = Config.childEnvironment(
+            base: [:], voicesDir: "/voices", mitigationDir: "/hook", patchesDir: "/patches", outDir: "/app/out")
+        #expect(env["RVC_OUT_DIR"] == "/app/out")
+    }
+
+    /// `Path("")` is `.` in Python, and the facade `chdir`s to `SRC_DIR` INSIDE
+    /// the fence — so setting the variable to an empty string would be strictly
+    /// worse than not setting it. Unreachable in practice; pinned so it stays
+    /// unreachable.
+    @Test("an empty outDir leaves RVC_OUT_DIR ABSENT, never set to \"\"")
+    func emptyOutDirLeavesVariableAbsent() {
+        let env = Config.childEnvironment(
+            base: [:], voicesDir: "/voices", mitigationDir: "/hook", patchesDir: "/patches", outDir: "")
+        #expect(env["RVC_OUT_DIR"] == nil)
+    }
+
+    @Test("an inherited RVC_OUT_DIR is REPLACED — ours is authoritative")
+    func inheritedOutDirIsReplaced() {
+        let env = Config.childEnvironment(
+            base: ["RVC_OUT_DIR": "/somewhere/else"], voicesDir: "/voices",
+            mitigationDir: "/hook", patchesDir: "/patches", outDir: "/app/out")
+        #expect(env["RVC_OUT_DIR"] == "/app/out")
+    }
+
+    // MARK: - m10-p-6 — owned-directory resolution across distribution shapes
+
+    private static func resolve(
+        name: String = "rvc-patches",
+        override: URL? = nil,
+        rvcDir: URL? = URL(fileURLWithPath: "/repo/scripts/rvc"),
+        bundles: [URL] = [URL(fileURLWithPath: "/App.app/Contents/Resources")],
+        present: [String]
+    ) -> URL? {
+        Config.resolveOwnedDir(
+            name: name, override: override, rvcDir: rvcDir,
+            bundleCandidates: bundles,
+            exists: { present.contains($0.path) })
+    }
+
+    @Test("override beats everything, even when both other candidates exist")
+    func overrideWins() {
+        let got = Self.resolve(
+            override: URL(fileURLWithPath: "/custom"),
+            present: ["/repo/scripts/rvc-patches",
+                      "/App.app/Contents/Resources/rvc-patches"])
+        #expect(got?.path == "/custom")
+    }
+
+    /// The dev-mode / repo-checkout shape — unchanged from before this item.
+    @Test("a sibling that EXISTS wins over the bundle")
+    func siblingWinsWhenPresent() {
+        let got = Self.resolve(
+            present: ["/repo/scripts/rvc-patches",
+                      "/App.app/Contents/Resources/rvc-patches"])
+        #expect(got?.path == "/repo/scripts/rvc-patches")
+    }
+
+    /// The distributed shape: the 1.7 GB runtime is installed elsewhere, so the
+    /// sibling of `rvcDir` does NOT hold our files — the bundle does.
+    @Test("a distributed build falls back to the app bundle")
+    func bundleFallback() {
+        let got = Self.resolve(
+            rvcDir: URL(fileURLWithPath: "/Users/x/Library/Application Support/DAWPro/rvc"),
+            present: ["/App.app/Contents/Resources/rvc-patches"])
+        #expect(got?.path == "/App.app/Contents/Resources/rvc-patches")
+    }
+
+    /// ⚠️ When NOTHING exists the answer must still be the sibling, so the
+    /// not-installed error names the path a developer expects to create —
+    /// not a bundle path they cannot write to.
+    @Test("nothing present -> the SIBLING, so the error message stays honest")
+    func fallsBackToSiblingPath() {
+        let got = Self.resolve(present: [])
+        #expect(got?.path == "/repo/scripts/rvc-patches")
+    }
+
+    @Test("a nil rvcDir with nothing in the bundle resolves to nil")
+    func nilWhenNothingKnown() {
+        #expect(Self.resolve(rvcDir: nil, present: []) == nil)
+    }
+
+    @Test("the mitigation dir resolves by the same rules")
+    func mitigationUsesSameResolver() {
+        let got = Self.resolve(
+            name: "rvc-mitigation",
+            rvcDir: URL(fileURLWithPath: "/Users/x/Library/Application Support/DAWPro/rvc"),
+            present: ["/App.app/Contents/Resources/rvc-mitigation"])
+        #expect(got?.path == "/App.app/Contents/Resources/rvc-mitigation")
+    }
+
+    // MARK: - m10-p-6 — the audio-correctness patches
+
+    @Test("patchesDir is published as DAWPRO_RVC_PATCHES_DIR")
+    func patchesDirIsPublished() {
+        let env = Config.childEnvironment(
+            base: [:], voicesDir: "/voices", mitigationDir: "/hook",
+            patchesDir: "/repo/scripts/rvc-patches", outDir: "/out")
+        #expect(env["DAWPRO_RVC_PATCHES_DIR"] == "/repo/scripts/rvc-patches")
+    }
+
+    /// Same rule as `RVC_OUT_DIR`: absent beats `""`. The hook falls back to its
+    /// own sibling when unset, but `Path("")` would point it at the cwd — which
+    /// the facade has `chdir`'d INSIDE the fence.
+    @Test("a nil or empty patchesDir leaves the variable ABSENT, never \"\"")
+    func emptyPatchesDirLeavesVariableAbsent() {
+        for value in [nil, ""] as [String?] {
+            let env = Config.childEnvironment(
+                base: [:], voicesDir: "/voices", mitigationDir: "/hook",
+                patchesDir: value, outDir: "/out")
+            #expect(env["DAWPRO_RVC_PATCHES_DIR"] == nil)
+        }
+    }
+
+    /// ⚠️ The regression that matters: importing `sitecustomize` makes CPython
+    /// write `<mitigationDir>/__pycache__/`, which violates the one-file
+    /// invariant `gate_m23fo_mechanism.py` asserts — so every real app run
+    /// turned that gate red. It also means writing into a code-signed,
+    /// read-only Resources directory in a distributed build.
+    @Test("PYTHONDONTWRITEBYTECODE is always set — no __pycache__ beside the hook")
+    func bytecodeWritingIsDisabled() {
+        let env = Config.childEnvironment(
+            base: [:], voicesDir: "/voices", mitigationDir: "/hook",
+            patchesDir: "/patches", outDir: "/out")
+        #expect(env["PYTHONDONTWRITEBYTECODE"] == "1")
+    }
+
+    /// It is set BEFORE the `guard let mitigationDir` early return, so an
+    /// unarmed hook still cannot litter. Easy to regress by moving the line.
+    @Test("…including when the hook is UNARMED and the function returns early")
+    func bytecodeDisabledEvenWithoutMitigation() {
+        let env = Config.childEnvironment(
+            base: [:], voicesDir: "/voices", mitigationDir: nil,
+            patchesDir: nil, outDir: "/out")
+        #expect(env["PYTHONDONTWRITEBYTECODE"] == "1")
+        #expect(env["PYTHONPATH"] == nil)
+    }
+
+    /// The whole reason this merges onto the inherited environment instead of
+    /// assigning a fresh dictionary: a child with no PATH/HOME is broken in
+    /// ways that look nothing like their cause.
+    @Test("the rest of the inherited environment survives the merge")
+    func preservesTheRestOfTheEnvironment() {
+        let env = Config.childEnvironment(
+            base: ["PATH": "/usr/bin", "HOME": "/Users/tester", "ANTHROPIC_API_KEY": "sk-x"],
+            voicesDir: "/voices", mitigationDir: "/hook", patchesDir: "/patches", outDir: "/out")
+        #expect(env["PATH"] == "/usr/bin")
+        #expect(env["HOME"] == "/Users/tester")
+        #expect(env["ANTHROPIC_API_KEY"] == "sk-x")
+    }
+}
+
+/// m23-fp — the gap `childEnvironment` tests alone CANNOT close: the merge rule
+/// can be perfect while the spawner arms it with the wrong paths. This is the
+/// one expression `spawnAndPoll` now uses, so what these assert is what the
+/// facade is actually launched with.
+@Suite("VoiceConversionManager.spawnEnvironment — what the spawner really arms (m23-fp)")
+struct VoiceConversionSpawnEnvironmentTests {
+    private typealias Config = VoiceConversionManager.Configuration
+
+    @Test("RVC_OUT_DIR is armed with VoiceConversionOutput.sidecarOutputDirectory")
+    func armsOutDirWithTheAppOwnedPath() {
+        let env = Config(rvcDir: URL(fileURLWithPath: "/repo/scripts/rvc"))
+            .spawnEnvironment(base: [:])
+        #expect(env["RVC_OUT_DIR"] == VoiceConversionOutput.sidecarOutputDirectory.path)
+    }
+
+    /// The whole point of the variable. If this ever fails, shipped conversions
+    /// are writing wavs inside the read-only checkout again.
+    @Test("RVC_OUT_DIR points OUTSIDE the read-only scripts/rvc fence")
+    func outDirIsOutsideTheFence() throws {
+        let env = Config(rvcDir: URL(fileURLWithPath: "/repo/scripts/rvc"))
+            .spawnEnvironment(base: [:])
+        let outDir = try #require(env["RVC_OUT_DIR"])
+        #expect(!outDir.contains("scripts/rvc"), "\(outDir)")
+        #expect(outDir.contains("/DAWPro/VoiceConversions/"), "\(outDir)")
+    }
+
+    @Test("RVC_VOICES_DIR and PYTHONPATH are still armed (m23-di-2a / m23-fo-2 must not regress)")
+    func stillArmsTheOlderTwo() {
+        let env = Config(rvcDir: URL(fileURLWithPath: "/repo/scripts/rvc"))
+            .spawnEnvironment(base: ["PYTHONPATH": "/user/one"])
+        #expect(env["RVC_VOICES_DIR"] == VoiceModelImport.voicesDirectory.path)
+        #expect(env["PYTHONPATH"] == "/repo/scripts/rvc-mitigation:/user/one")
+    }
+
+    @Test("the inherited environment still survives (no fresh dictionary)")
+    func preservesInherited() {
+        let env = Config(rvcDir: URL(fileURLWithPath: "/repo/scripts/rvc"))
+            .spawnEnvironment(base: ["PATH": "/usr/bin", "HOME": "/Users/tester"])
+        #expect(env["PATH"] == "/usr/bin")
+        #expect(env["HOME"] == "/Users/tester")
+    }
+
+    /// `spawnEnvironment` resolves directory URLs; it must not CREATE either of
+    /// them (the facade `mkdir`s `RVC_OUT_DIR` itself, and the capture home is
+    /// created on first capture). A spawner that mkdirs as a side effect would
+    /// leave directories behind on every dry run and every refused launch.
+    @Test("computing the environment creates no directories")
+    func createsNothing() {
+        // Stated as "unchanged", not "absent": this machine may legitimately
+        // already have the directory from real use, and an assertion that only
+        // holds on a fresh machine is not an assertion.
+        let target = VoiceConversionOutput.sidecarOutputDirectory.path
+        let existedBefore = FileManager.default.fileExists(atPath: target)
+        _ = Config(rvcDir: URL(fileURLWithPath: "/repo/scripts/rvc")).spawnEnvironment(base: [:])
+        _ = Config(rvcDir: URL(fileURLWithPath: "/repo/scripts/rvc")).spawnEnvironment(base: [:])
+        #expect(FileManager.default.fileExists(atPath: target) == existedBefore)
+    }
+}
+
+@Suite("VoiceConversionManager.Configuration — mitigation paths (m23-fo-2, pure)")
+struct VoiceConversionMitigationPathTests {
+    private typealias Config = VoiceConversionManager.Configuration
+
+    @Test("default is the SIBLING of rvcDir, so the two cannot be misconfigured apart")
+    func siblingByDefault() {
+        let config = Config(rvcDir: URL(fileURLWithPath: "/repo/scripts/rvc"))
+        #expect(config.mitigationDirURL?.path == "/repo/scripts/rvc-mitigation")
+        #expect(config.mitigationModuleURL?.path == "/repo/scripts/rvc-mitigation/sitecustomize.py")
+    }
+
+    @Test("DAWPRO_RVC_MITIGATION_DIR wins over the sibling default")
+    func envOverrideWins() {
+        let config = Config.resolved(environment: [
+            "DAWPRO_RVC_DIR": "/repo/scripts/rvc",
+            "DAWPRO_RVC_MITIGATION_DIR": "/elsewhere/hook",
+        ])
+        #expect(config.mitigationDirURL?.path == "/elsewhere/hook")
+    }
+
+    @Test("an EMPTY DAWPRO_RVC_MITIGATION_DIR is ignored, not honoured as a path")
+    func emptyOverrideIgnored() {
+        let config = Config.resolved(environment: [
+            "DAWPRO_RVC_DIR": "/repo/scripts/rvc",
+            "DAWPRO_RVC_MITIGATION_DIR": "",
+        ])
+        #expect(config.mitigationDirURL?.path == "/repo/scripts/rvc-mitigation")
+    }
+
+    @Test("nil rvcDir and no override -> nil, exactly like logFileURL")
+    func nilWhenUnresolvable() {
+        let config = Config(rvcDir: nil)
+        #expect(config.mitigationDirURL == nil)
+        #expect(config.mitigationModuleURL == nil)
+    }
+
+    @Test("the repo's real hook is where the sibling rule says it is")
+    func realRepoLayoutSatisfiesTheSiblingRule() throws {
+        let rvcDir = try #require(Config.resolveRVCDir(environment: [:]))
+        let config = Config(rvcDir: rvcDir)
+        let hook = try #require(config.mitigationModuleURL)
+        #expect(FileManager.default.fileExists(atPath: hook.path),
+                "expected the shipped hook at \(hook.path)")
+    }
+}
+
+@Suite("VoiceConversionManager — refuses to spawn without the hook (m23-fo-2)")
+struct VoiceConversionHookGuardTests {
+    private func makeTempDir() throws -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rvc-hookguard-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    @Test("run.sh present but the hook file missing -> resolveLaunchPlan() throws, naming it")
+    func missingHookThrows() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try Data("#!/bin/bash\n".utf8).write(to: dir.appendingPathComponent("run.sh"))
+        let emptyHookDir = dir.appendingPathComponent("no-hook-here")
+        try FileManager.default.createDirectory(at: emptyHookDir, withIntermediateDirectories: true)
+
+        var config = VoiceConversionManager.Configuration(rvcDir: dir)
+        config.mitigationDirOverride = emptyHookDir
+
+        #expect(throws: SidecarError.self) { _ = try config.resolveLaunchPlan() }
+        do {
+            _ = try config.resolveLaunchPlan()
+        } catch let error as SidecarError {
+            let text = error.errorDescription ?? ""
+            #expect(text.contains("sitecustomize.py"))
+            #expect(text.localizedCaseInsensitiveContains("m23-fo"))
+            #expect(text.contains(emptyHookDir.path), "the message must name the path it looked at")
+        }
+    }
+
+    @Test("hook present -> resolveLaunchPlan() succeeds and still plans bash run.sh")
+    func hookPresentPlansNormally() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try Data("#!/bin/bash\n".utf8).write(to: dir.appendingPathComponent("run.sh"))
+        let hookDir = try makeMitigationDir(in: dir)
+
+        var config = VoiceConversionManager.Configuration(rvcDir: dir)
+        config.mitigationDirOverride = hookDir
+        let plan = try config.resolveLaunchPlan()
+
+        #expect(plan.executableURL.path == "/bin/bash")
+        #expect(plan.arguments == [dir.appendingPathComponent("run.sh").path])
+    }
+
+    /// ⭐ `resolveLaunchPlan()` is called at `start()`'s `:196`, BEFORE the
+    /// `dryRun` branch — so the DRY RUN THROWS TOO. A dry run that answers
+    /// "would launch X" when the real thing would refuse is a lie, and being
+    /// believed is the only thing a dry run is for.
+    @Test("the DRY-RUN path throws too, rather than describing a launch that would be refused")
+    func dryRunAlsoThrows() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try Data("#!/bin/bash\n".utf8).write(to: dir.appendingPathComponent("run.sh"))
+        let emptyHookDir = dir.appendingPathComponent("no-hook-here")
+        try FileManager.default.createDirectory(at: emptyHookDir, withIntermediateDirectories: true)
+
+        let manager = VoiceConversionManager(configuration: rvcConfig(
+            baseURL: URL(string: "http://127.0.0.1:1")!, rvcDir: dir,
+            mitigationDir: emptyHookDir, dryRun: true))
+        do {
+            _ = try await manager.start()
+            Issue.record("expected the dry run to throw, not to describe a refused launch")
+        } catch let error as SidecarError {
+            #expect(error.errorDescription?.localizedCaseInsensitiveContains("m23-fo") == true)
+        }
+    }
+}
+
+@Suite("VoiceConversionManager.classifyMitigation — the tri-state (m23-fo-2, pure)")
+struct VoiceConversionMitigationClassifierTests {
+    private func body(_ json: String) -> Data { Data(json.utf8) }
+
+    @Test("200 + enginePatched true -> TRUE")
+    func patchedIsTrue() {
+        let result = VoiceConversionManager.classifyMitigation(
+            statusCode: 200,
+            body: body(#"{"data":{"enginePatched":true,"clearCacheCalls":7},"code":0}"#))
+        #expect(result.active == true)
+        #expect(result.detail?.contains("7") == true)
+    }
+
+    /// ⭐ FALSE PATH 1 — the server answered and the route is not there. This
+    /// is the "started by hand, never got our PYTHONPATH" case, and it is a
+    /// POSITIVE answer, not an absence of one.
+    @Test("404 -> FALSE (an unhooked facade), never nil")
+    func notFoundIsFalse() {
+        let result = VoiceConversionManager.classifyMitigation(statusCode: 404, body: Data())
+        #expect(result.active == false)
+        #expect(result.detail?.contains("404") == true)
+    }
+
+    /// ⭐ FALSE PATH 2 — the hook IS loaded but its engine patch failed. The
+    /// hook is deliberately fail-safe (it never fails the facade's boot), so
+    /// this is reachable in production; `gate_m23fo_mechanism.py` phase G
+    /// exercises exactly this shape. Reporting `true` here would tell a user
+    /// they are protected when they are not.
+    @Test("200 + enginePatched FALSE -> FALSE, carrying the hook's own reason")
+    func loadedButUnpatchedIsFalse() {
+        let result = VoiceConversionManager.classifyMitigation(
+            statusCode: 200,
+            body: body("""
+                {"data":{"enginePatched":false,"error":"mlx.core has no clear_cache"},"code":0}
+                """))
+        #expect(result.active == false)
+        #expect(result.detail?.contains("clear_cache") == true)
+    }
+
+    @Test("the two FALSE paths are distinguishable by mitigationDetail")
+    func theTwoFalsePathsDiffer() {
+        let unhooked = VoiceConversionManager.classifyMitigation(statusCode: 404, body: Data())
+        let broken = VoiceConversionManager.classifyMitigation(
+            statusCode: 200,
+            body: body(#"{"data":{"enginePatched":false,"error":"boom"},"code":0}"#))
+        #expect(unhooked.active == false)
+        #expect(broken.active == false)
+        #expect(unhooked.detail != broken.detail)
+    }
+
+    @Test("no response at all (timeout / transport error) -> NIL, never false")
+    func unreachableIsNil() {
+        let result = VoiceConversionManager.classifyMitigation(statusCode: nil, body: nil)
+        #expect(result.active == nil)
+        #expect(result.detail != nil, "nil must still explain itself")
+    }
+
+    @Test("a non-404 error status -> NIL (we did not find out)")
+    func serverErrorIsNil() {
+        let result = VoiceConversionManager.classifyMitigation(statusCode: 500, body: Data())
+        #expect(result.active == nil)
+    }
+
+    @Test("200 with an unparseable body -> NIL")
+    func unparseableIsNil() {
+        let result = VoiceConversionManager.classifyMitigation(
+            statusCode: 200, body: body("not json at all"))
+        #expect(result.active == nil)
+    }
+
+    /// ABSENT is not FALSE. Something else answering this path is not our
+    /// route reporting a failed patch, and guessing `false` would put an
+    /// accusatory warning in `message` on the strength of an assumption.
+    @Test("200 in the right envelope but WITHOUT enginePatched -> NIL, not false")
+    func missingFieldIsNil() {
+        let result = VoiceConversionManager.classifyMitigation(
+            statusCode: 200, body: body(#"{"data":{"service":"something-else"},"code":0}"#))
+        #expect(result.active == nil)
+    }
+
+    @Test("only a KNOWN-unprotected facade gets the warning message, and it names m23-fo")
+    func warningOnlyWhenKnownFalse() {
+        let warned = VoiceConversionManager.healthyMessage(mitigationActive: false)
+        #expect(warned.localizedCaseInsensitiveContains("m23-fo"))
+        #expect(warned.localizedCaseInsensitiveContains("vc.sidecarStart"),
+                "the message must say what to DO, per the design language")
+        #expect(!VoiceConversionManager.healthyMessage(mitigationActive: true)
+            .localizedCaseInsensitiveContains("m23-fo"))
+        // nil says nothing: we did not find out, and a warning invented from
+        // ignorance is its own dishonesty.
+        #expect(!VoiceConversionManager.healthyMessage(mitigationActive: nil)
+            .localizedCaseInsensitiveContains("m23-fo"))
+    }
+}
+
+@Suite("VoiceConversionManager.status() — threads the tri-state onto the wire (m23-fo-2)")
+struct VoiceConversionMitigationStatusTests {
+    private func baseURL(port: UInt16) -> URL { URL(string: "http://127.0.0.1:\(port)")! }
+
+    @Test("a hooked facade -> healthy, mitigationActive true, no warning in the message")
+    func hookedFacadeReportsTrue() async throws {
+        let server = StubHealthServer(responseData: Data(), routes: [
+            "/health": rvcHealthyResponse(),
+            "/v1/_dawpro/mitigation": StubHealthServer.mitigationResponse(clearCacheCalls: 12),
+        ])
+        try server.start()
+        defer { server.stop() }
+
+        let manager = VoiceConversionManager(configuration: .init(
+            baseURL: baseURL(port: server.port), rvcDir: nil))
+        let status = await manager.status()
+
+        #expect(status.state == .healthy)
+        #expect(status.mitigationActive == true)
+        #expect(status.mitigationDetail?.contains("12") == true)
+        #expect(!status.message.localizedCaseInsensitiveContains("m23-fo"))
+    }
+
+    /// ⭐ THE HOLE THIS CLOSES: `start()` returns early when the sidecar is
+    /// already healthy, so an app attaching to a hand-started `run.sh` never
+    /// sets PYTHONPATH — and this message is the user's ONLY signal.
+    @Test("an UNHOOKED facade (404) -> mitigationActive FALSE and the message says so")
+    func unhookedFacadeReportsFalseAndWarns() async throws {
+        let server = StubHealthServer(responseData: Data(), routes: [
+            "/health": rvcHealthyResponse(),
+            // no mitigation route at all -> the stub 404s it
+        ])
+        try server.start()
+        defer { server.stop() }
+
+        let manager = VoiceConversionManager(configuration: .init(
+            baseURL: baseURL(port: server.port), rvcDir: nil))
+        let status = await manager.status()
+
+        #expect(status.state == .healthy, "an unhooked sidecar is still a RUNNING sidecar")
+        #expect(status.mitigationActive == false, "404 is a POSITIVE answer, not nil")
+        #expect(status.message.localizedCaseInsensitiveContains("m23-fo"))
+    }
+
+    @Test("a hook whose engine patch failed -> FALSE and warned, even though it answers 200")
+    func brokenHookReportsFalse() async throws {
+        let server = StubHealthServer(responseData: Data(), routes: [
+            "/health": rvcHealthyResponse(),
+            "/v1/_dawpro/mitigation": StubHealthServer.mitigationResponse(
+                enginePatched: false, error: "mlx.core has no clear_cache in version None"),
+        ])
+        try server.start()
+        defer { server.stop() }
+
+        let manager = VoiceConversionManager(configuration: .init(
+            baseURL: baseURL(port: server.port), rvcDir: nil))
+        let status = await manager.status()
+
+        #expect(status.mitigationActive == false)
+        #expect(status.mitigationDetail?.contains("clear_cache") == true)
+        #expect(status.message.localizedCaseInsensitiveContains("m23-fo"))
+    }
+
+    /// A facade that ACCEPTS the mitigation request and never answers.
+    private func hungMitigationServer() throws -> StubHealthServer {
+        let server = StubHealthServer(
+            responseData: Data(),
+            routes: ["/health": rvcHealthyResponse()],
+            stallPaths: ["/v1/_dawpro/mitigation"])
+        try server.start()
+        return server
+    }
+
+    private func statusCost(port: UInt16, timeout: Double) async
+        -> (status: VoiceConversionStatus, elapsed: Double) {
+        let manager = VoiceConversionManager(configuration: .init(
+            baseURL: baseURL(port: port), rvcDir: nil,
+            healthProbeTimeoutSeconds: timeout))
+        let started = DispatchTime.now()
+        let status = await manager.status()
+        let elapsed = Double(DispatchTime.now().uptimeNanoseconds
+            - started.uptimeNanoseconds) / 1_000_000_000
+        return (status, elapsed)
+    }
+
+    /// ⭐ THE BRANCH THE OTHER TESTS CANNOT REACH. Every `nil` above arrives by
+    /// connection-REFUSED — an instant transport error. This one arrives by
+    /// TIMEOUT, which is the case the `nil` arm's doc comment actually claims
+    /// to handle. Three claims, in descending order of how firmly this test
+    /// can hold them:
+    ///
+    /// 1. HONESTY (deterministic). A hung probe is IGNORANCE: `nil`, no
+    ///    verdict, no warning. A `false` here would accuse a facade that may
+    ///    well be hooked, and the accusation is user-visible text.
+    /// 2. NOT-A-DEMOTION (deterministic). A hung SIDE probe must not turn a
+    ///    healthy sidecar into an unhealthy one. Asserted explicitly, because
+    ///    `mitigationActive == nil` is ALSO what every non-healthy status
+    ///    returns — without the `.healthy` check, claim 1 would pass
+    ///    vacuously on a status that never reached the mitigation probe.
+    /// 3. BOUNDEDNESS (loose, on purpose). `status()` gained a second round
+    ///    trip, so a hang is the one case that can add latency. The ceiling
+    ///    below catches the regression that actually matters — a probe with NO
+    ///    bound, i.e. URLSession's ~60 s default — and nothing finer.
+    ///
+    /// ⚠️ WHY NOTHING FINER: two tighter spellings were written, measured, and
+    /// REMOVED. (a) `elapsed < 2.5 × timeout` passed at 1.05 s in isolation and
+    /// FAILED at 3.35 s in the full suite. (b) A two-budget differential
+    /// (0.5 s vs 3.0 s, expecting ≈2.5 s of separation) passed in isolation
+    /// with delta ≈ 2.5 s and failed in the full suite with delta **−0.44 s** —
+    /// the 0.5 s-budget probe took ~3.5 s while the 3.0 s one took ~3.06 s.
+    /// Under 545 parallel suites, wall clock here measures the scheduler, not
+    /// our code, and the noise does not cancel. The precise claim "the budget
+    /// we configure is the budget the request gets" is therefore verified
+    /// MANUALLY (isolated run: 1.05 s for a 1.0 s budget; hardcoding the
+    /// interval to 5.0 s collapsed the differential to −0.02 s) and is NOT
+    /// asserted here. Do not re-tighten this without re-measuring under load.
+    @Test("a HUNG mitigation route -> still healthy, nil (never a positive false), bounded")
+    func hungMitigationRouteStaysNil() async throws {
+        let server = try hungMitigationServer()
+        defer { server.stop() }
+
+        let (status, elapsed) = await statusCost(port: server.port, timeout: 1.0)
+
+        #expect(status.state == .healthy, "a hung SIDE probe must not demote the sidecar")
+        #expect(status.mitigationActive == nil, "a hang is ignorance, never a positive FALSE")
+        let detail = try #require(status.mitigationDetail)
+        #expect(detail.localizedCaseInsensitiveContains("did not complete"),
+                "the detail must NAME the unknown, not leave it blank: \(detail)")
+        #expect(!detail.contains("404") && !detail.contains("no m23-fo mitigation hook"),
+                "a hang must not borrow the 404 branch's accusation: \(detail)")
+        #expect(!status.message.localizedCaseInsensitiveContains("m23-fo"),
+                "no warning may be invented from a probe that never answered")
+        #expect(elapsed < 30,
+                "a hung mitigation probe ran \(elapsed)s against a 1s budget — unbounded?")
+    }
+
+    @Test("the fields are ADDITIVE — a non-healthy status leaves them nil, no wire change")
+    func nonHealthyLeavesFieldsNil() async throws {
+        let unusedPort = try StubHealthServer.unusedLoopbackPort()
+        let manager = VoiceConversionManager(configuration: .init(
+            baseURL: baseURL(port: unusedPort), rvcDir: nil))
+        let status = await manager.status()
+
+        #expect(status.state != .healthy)
+        #expect(status.mitigationActive == nil)
+        #expect(status.mitigationDetail == nil)
+    }
+
+    @Test("the new fields survive a Codable round trip (they reach MCP verbatim)")
+    func codableRoundTrip() throws {
+        let original = VoiceConversionStatus(
+            state: .healthy, message: "m", mitigationActive: false,
+            mitigationDetail: "unhooked")
+        let decoded = try JSONDecoder().decode(
+            VoiceConversionStatus.self, from: JSONEncoder().encode(original))
+        #expect(decoded.mitigationActive == false)
+        #expect(decoded.mitigationDetail == "unhooked")
+        #expect(decoded == original)
     }
 }

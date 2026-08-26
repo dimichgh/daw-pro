@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 import Testing
 @testable import DAWAppKit
@@ -141,6 +142,126 @@ struct PianoRollNoteSelectionBridgeTests {
         // "provably cleared, not merely suppressed" leg would pass against a roll
         // that still had every note selected.
         #expect(bridge.hasSelection == true)
+    }
+
+    // MARK: - m23-ek-1: the marquee seam rides ALONGSIDE, never through, hasSelection
+
+    @Test("m23-ek-1 F4: a marquee report never touches `hasSelection` — it stays transition-reported")
+    func marqueeReportDoesNotDisturbTheKeyboardGate() {
+        // `DeleteMenuPolicy` anticipated this feature and warned against the
+        // obvious implementation: keying `hasSelection` on a COUNT so the seam
+        // could read it would rewrite a keyboard-gating observable to fire on
+        // every pointer update of a note marquee. `hasSelection` gates
+        // `AppModel.pianoRollWouldConsumeKey`, so that would be a correctness
+        // regression, not a performance one.
+        let bridge = PianoRollNoteSelectionBridge()
+        let a = UUID(), b = UUID(), c = UUID()
+        let surface = { (ids: Set<UUID>) in
+            PianoRollSurfaceState(rowHeight: 14, pixelsPerBeat: 32, clipLengthBeats: 8,
+                                  noteCount: 3, selection: ids)
+        }
+        bridge.report(hasSelection: true)                 // the roll's own transition report
+        bridge.reportMarquee(band: CGRect(x: 0, y: 0, width: 10, height: 10),
+                             hits: [a, b], surface: surface([a, b]), gestureInFlight: true)
+        #expect(bridge.hasSelection == true)
+        // 2 -> 3 notes: the ids and the count move, the gate does not.
+        bridge.reportMarquee(band: CGRect(x: 0, y: 0, width: 20, height: 10),
+                             hits: [a, b, c], surface: surface([a, b, c]), gestureInFlight: true)
+        #expect(bridge.surface.selection.count == 3)
+        #expect(bridge.hasSelection == true)
+        // …and a band that gives everything back does NOT forge a `false`
+        // either: only the roll's own report may move that flag.
+        bridge.reportMarquee(band: nil, hits: [], surface: surface([]), gestureInFlight: false)
+        #expect(bridge.surface.selection.isEmpty)
+        #expect(bridge.hasSelection == true)
+    }
+
+    @Test("m23-ek-1 the marquee sequence advances on band reports ONLY, never on a surface report")
+    func onlyMarqueeReportsAdvanceTheSequence() {
+        // The bounded wait (`awaitPianoRollMarqueeApplied`) stands on this
+        // sequence. If a routine relayout bumped it, the wait would return
+        // before the staged step had run and the echo would answer with the
+        // PREVIOUS step's band — a stale echo poisons every diagnosis made
+        // through it.
+        let bridge = PianoRollNoteSelectionBridge()
+        let token = UUID()
+        let state = PianoRollSurfaceState(rowHeight: 14, pixelsPerBeat: 32, clipLengthBeats: 8,
+                                          noteCount: 0, selection: [])
+        bridge.reportSurface(token: token, state)
+        bridge.reportSurface(token: token, state)
+        #expect(bridge.marqueeReportSeq == 0)
+        #expect(bridge.surface.pixelsPerBeat == 32)      // …but the ladder IS published
+        bridge.reportMarquee(band: nil, hits: [], surface: state, gestureInFlight: false)
+        #expect(bridge.marqueeReportSeq == 1)
+    }
+
+    @Test("m23-ek-1 an in-flight gesture is reported up, and a teardown cannot latch it")
+    func gestureInFlightIsReportedAndUnlatchedByTeardown() {
+        // The seam rejects a `begin` while this is true, so a latched `true`
+        // would lock `debug.pianoRollMarquee` out of every subsequent press —
+        // and the roll that owed the release is gone by then, so nothing could
+        // ever clear it. That is the failure mode this leg exists for.
+        let bridge = PianoRollNoteSelectionBridge()
+        let token = UUID()
+        let state = PianoRollSurfaceState(rowHeight: 14, pixelsPerBeat: 32, clipLengthBeats: 8,
+                                          noteCount: 1, selection: [])
+        #expect(bridge.marqueeGestureInFlight == false)   // nothing has pressed yet
+        bridge.reportSurface(token: token, state)
+        bridge.reportMarquee(band: nil, hits: [], surface: state, gestureInFlight: true)
+        #expect(bridge.marqueeGestureInFlight == true)
+        // A surface report is not a gesture report and must not move it either
+        // way — otherwise a relayout mid-drag would forge a release.
+        bridge.reportSurface(token: token, state)
+        #expect(bridge.marqueeGestureInFlight == true)
+        bridge.clearSurface(from: token)
+        #expect(bridge.marqueeGestureInFlight == false)
+    }
+
+    @Test("m23-ek-1 a teardown clears the surface echo, and the TOKEN protects a clip switch")
+    func surfaceClearIsTokenGuarded() {
+        // The editor is rebuilt on `.id(clip.id)`, so a clip switch tears down
+        // one roll and stands up another, and SwiftUI does not promise which
+        // runs first (measured, m23-x). A stale echo answering with a grid
+        // nothing draws is exactly what this guard prevents.
+        let bridge = PianoRollNoteSelectionBridge()
+        let outgoing = UUID(), incoming = UUID()
+        let state = PianoRollSurfaceState(rowHeight: 14, pixelsPerBeat: 48, clipLengthBeats: 4,
+                                          noteCount: 2, selection: [UUID()])
+        bridge.reportSurface(token: outgoing, state)
+        // The INCOMING roll reports first (the race's other order)…
+        bridge.reportSurface(token: incoming, state)
+        // …and the outgoing one's teardown must then do nothing.
+        bridge.clearSurface(from: outgoing)
+        #expect(bridge.surface.pixelsPerBeat == 48)
+        #expect(bridge.surface.noteCount == 2)
+        // The mounted roll's own teardown DOES clear.
+        bridge.clearSurface(from: incoming)
+        #expect(bridge.surface == .empty)
+        #expect(bridge.marqueeBand == nil)
+        #expect(bridge.marqueeHits.isEmpty)
+    }
+
+    @Test("m23-ek-1 the marquee stage has its OWN nonce — reusing `stageNonce` would clear the selection")
+    func marqueeStageDoesNotRideTheSelectAllNonce() {
+        // `PianoRollView.onChange(of: stageNonce)` routes `stagedSelectAll == false`
+        // straight to `model.clearSelection()`. A marquee step bumping THAT
+        // nonce would wipe the selection on every pointer update — the band
+        // would report an empty set for a gesture that had just selected forty
+        // notes.
+        let bridge = PianoRollNoteSelectionBridge()
+        let before = bridge.stageNonce
+        bridge.stageMarquee(PianoRollMarqueeStage(action: .begin, x: 10, y: 20, nonce: 1))
+        #expect(bridge.stageNonce == before)
+        #expect(bridge.marqueeStageNonce == 1)
+        #expect(bridge.marqueeStage?.action == .begin)
+        // Repeatable: the same step asked for twice must fire twice (a gate has
+        // to be able to drag to the same point again).
+        bridge.stageMarquee(PianoRollMarqueeStage(action: .changed, x: 10, y: 20, nonce: 2))
+        bridge.stageMarquee(PianoRollMarqueeStage(action: .changed, x: 10, y: 20, nonce: 3))
+        #expect(bridge.marqueeStageNonce == 3)
+        // …and staging does not forge the report, the rule every seam here follows.
+        #expect(bridge.marqueeBand == nil)
+        #expect(bridge.marqueeReportSeq == 0)
     }
 }
 

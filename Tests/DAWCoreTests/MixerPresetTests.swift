@@ -7,6 +7,9 @@ import Testing
 /// + param resolvable — proven by APPLYING each preset), replace-semantics,
 /// one-step undo restoring the exact prior chain, the unknown-preset error
 /// listing every valid name, all three track kinds, and volume/pan left alone.
+/// m26-p grew the catalog 6 → 12 and added the `bass-round` vs `bass-tight`
+/// direction pin — the one test here that guards a MUSICAL claim rather than a
+/// mechanical one.
 @MainActor
 @Suite("Mixer presets — ProjectStore")
 struct MixerPresetTests {
@@ -22,11 +25,16 @@ struct MixerPresetTests {
 
     // MARK: Catalog integrity
 
-    @Test("catalog has the six v1 presets with unique kebab-case names")
+    @Test("catalog has the twelve v1 presets with unique kebab-case names")
     func catalogNamesUniqueKebabCase() {
         let names = MixerPresetCatalog.names
+        // ORDER IS WIRE-VISIBLE (the MCP enum mirrors it), so this pins the
+        // ORIGINAL six FIRST and the m26-p six APPENDED — an insertion in the
+        // middle would fail here even though the set would still be right.
         #expect(names == ["drum-bus-glue", "vocal-presence", "bass-tight",
-                          "master-glue", "warm-keys", "clean-boost"])
+                          "master-glue", "warm-keys", "clean-boost",
+                          "bass-round", "guitar-crunch", "acoustic-sparkle",
+                          "horn-section", "drum-room", "lofi-tape"])
         // Unique.
         #expect(Set(names).count == names.count)
         // kebab-case: lowercase letters + digits, hyphen-separated, no edge/double hyphen.
@@ -45,17 +53,35 @@ struct MixerPresetTests {
         }
     }
 
+    /// The rule is "only the BUILT-IN FX pack" — never an `audioUnit`, whose
+    /// availability depends on what is installed on the machine and would make a
+    /// curated preset unresolvable on someone else's system.
     @Test("only built-in FX-pack kinds appear in preset chains")
     func presetsUseOnlyBuiltInFXPack() {
-        let allowed: Set<EffectDescriptor.Kind> = [.eq, .compressor, .limiter, .gain]
+        // The WHOLE built-in pack, not just the kinds in use today — the rule
+        // being tested is "built-in", and narrowing this set to the kinds that
+        // happen to be referenced turns a rule into a snapshot (m26-p added
+        // reverb + saturator and had to widen it by two).
+        let allowed: Set<EffectDescriptor.Kind> = [
+            .eq, .compressor, .limiter, .gain, .reverb, .delay,
+            .saturator, .gate, .chorus, .bassEnhancer,
+        ]
+        var kindsSeen: Set<EffectDescriptor.Kind> = []
         for preset in MixerPresetCatalog.v1 {
             for effect in preset.chain {
+                kindsSeen.insert(effect.kind)
                 #expect(allowed.contains(effect.kind),
                         "\(preset.name) uses non-FX-pack kind \(effect.kind.rawValue)")
                 // audioUnit inserts must carry a component — presets never do.
                 #expect(effect.kind != .audioUnit)
             }
         }
+        // ANTI-VACUITY: an empty catalog, or one whose chains were all emptied,
+        // would satisfy the loop above without testing anything.
+        #expect(MixerPresetCatalog.v1.count >= 12,
+                "expected at least the 12 curated presets; saw \(MixerPresetCatalog.v1.count)")
+        #expect(kindsSeen.count >= 5,
+                "expected several distinct effect kinds across the catalog; saw \(kindsSeen)")
     }
 
     /// Applying EVERY preset proves the catalog→chain fidelity end to end: each
@@ -74,12 +100,22 @@ struct MixerPresetTests {
             #expect(applied.map(\.kind) == preset.chain.map(\.kind))
             // Params identical to the catalog (resolved structs compare equal),
             // but ids are FRESH (minted per apply).
+            // EVERY param surface is compared, not just the ones in use — a
+            // preset using a kind this list omits would round-trip its params
+            // UNVERIFIED while the loop still passed (m26-p's reverb and
+            // saturator presets were exactly that gap).
             for (got, spec) in zip(applied, preset.chain) {
                 #expect(got.id != spec.id, "\(preset.name) reused a template id")
                 #expect(got.resolvedEQ == spec.resolvedEQ)
                 #expect(got.resolvedCompressor == spec.resolvedCompressor)
                 #expect(got.resolvedLimiter == spec.resolvedLimiter)
                 #expect(got.resolvedGain == spec.resolvedGain)
+                #expect(got.resolvedReverb == spec.resolvedReverb)
+                #expect(got.resolvedDelay == spec.resolvedDelay)
+                #expect(got.resolvedSaturator == spec.resolvedSaturator)
+                #expect(got.resolvedGate == spec.resolvedGate)
+                #expect(got.resolvedChorus == spec.resolvedChorus)
+                #expect(got.resolvedBassEnhancer == spec.resolvedBassEnhancer)
                 #expect(got.isBypassed == false)
             }
             // Undo label carries the display name.
@@ -98,6 +134,60 @@ struct MixerPresetTests {
         // +3 dB == 10^(3/20) linear.
         let expected = pow(10.0, 3.0 / 20.0)
         #expect(abs((chain.first?.resolvedGain.gainLinear ?? 0) - expected) < 1e-9)
+    }
+
+    /// ⭐ m26-p / field-report N6. `bass-round` exists ONLY as the audible
+    /// OPPOSITE of `bass-tight`; if the two ever converge, the catalog has
+    /// twelve names and eleven sounds and the whole fix is undone. This pins the
+    /// DIRECTION of the difference rather than the literal numbers, so the
+    /// presets can still be re-voiced — but not "tidied" into the same shape.
+    ///
+    /// ⚠️ SIGN CHECK, because it is the easy thing to get backwards: a SLOWER
+    /// attack is a LARGER `attackMs`. Round's compressor must react LATER (so
+    /// the note blooms) and LESS (so it is guided, not clamped).
+    @Test("bass-round is the audible opposite of bass-tight: lower ratio, slower attack")
+    func bassRoundIsTheOppositeOfBassTight() throws {
+        let tight = try #require(MixerPresetCatalog.preset(named: "bass-tight"))
+        let round = try #require(MixerPresetCatalog.preset(named: "bass-round"))
+
+        let tightComp = try #require(tight.chain.first { $0.kind == .compressor }).resolvedCompressor
+        let roundComp = try #require(round.chain.first { $0.kind == .compressor }).resolvedCompressor
+
+        // THE TWO CLAIMS THE SUMMARY MAKES.
+        #expect(roundComp.ratio < tightComp.ratio,
+                """
+                bass-round must compress at a LOWER ratio than bass-tight \
+                (guide, not clamp)
+                """)
+        #expect(roundComp.attackMs > tightComp.attackMs,
+                """
+                bass-round must have a SLOWER (larger ms) attack than \
+                bass-tight, so the note blooms before it is caught
+                """)
+
+        // The threshold is deliberately IDENTICAL: the pair differs in HOW it
+        // compresses, not in how much signal it sees. That is what makes the
+        // choice legible to a beginner (and to an agent reading the summaries).
+        #expect(roundComp.thresholdDb == tightComp.thresholdDb)
+
+        // And the tonal half of the inversion: tight TRIMS the low shelf,
+        // round LIFTS it.
+        let tightEQ = try #require(tight.chain.first { $0.kind == .eq }).resolvedEQ
+        let roundEQ = try #require(round.chain.first { $0.kind == .eq }).resolvedEQ
+        #expect(tightEQ.lowShelfGainDb < 0, "bass-tight trims the low shelf")
+        #expect(roundEQ.lowShelfGainDb > 0, "bass-round lifts the low shelf")
+
+        // ANTI-CLAMP: values silently clamped to a range edge would make the
+        // comparison above true for the wrong reason. Both sit well inside.
+        #expect(CompressorParams.ratioRange.contains(roundComp.ratio))
+        #expect(CompressorParams.attackRange.contains(roundComp.attackMs))
+        #expect(roundComp.ratio > CompressorParams.ratioRange.lowerBound)
+        #expect(roundComp.attackMs < CompressorParams.attackRange.upperBound)
+
+        // The summaries must tell a beginner WHICH to pick — the catalog is
+        // also the agent's only guidance surface.
+        #expect(round.summary.contains("bass-tight"),
+                "bass-round's summary must name the preset it contrasts with")
     }
 
     // MARK: Replace semantics

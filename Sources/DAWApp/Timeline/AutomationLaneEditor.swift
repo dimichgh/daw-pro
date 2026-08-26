@@ -37,6 +37,29 @@ struct AutomationLaneEditor: View {
     /// has exactly one mount.
     var pointSelection: AutomationPointSelectionBridge?
 
+    /// ⭐ THE DELETE KEY, ROUTED (m23-cf, second pass). Returns true when SOME
+    /// surface owned the keystroke — which is what this view answers `.handled`
+    /// from, and NOT "a breakpoint was removed" (see `AppModel.handleDeleteKey`).
+    ///
+    /// WHY A THIRD CLAIMANT HAD TO BE ROUTED. This editor owns
+    /// `.onKeyPress(.delete)` on its own surface, behind its own `@FocusState`,
+    /// alongside `PianoRollView`'s and `ArrangeDeleteKey`'s — three claimants for
+    /// one key, arbitrated by SwiftUI in a way this tree measured to be a coin
+    /// flip. Leaving this one computing its own rule would have left exactly the
+    /// divergence m23-cf exists to remove: a focused lane holding a breakpoint
+    /// would eat a DELETE the user meant for the notes selected in the roll.
+    ///
+    /// ⚠️ OPTIONAL, AND `nil` AT THE MIXER MOUNT ON PURPOSE — the same asymmetry
+    /// `pointSelection` already has there, for a stronger reason. `MixerStripView`
+    /// mounts the master lane inside the MIX workspace, and `handleDeleteKey`'s
+    /// first guard is `workspaceMode == .arrange`; routing that mount would refuse
+    /// its DELETE outright and take away a working operation. `nil` keeps this
+    /// editor's own `deleteSelection()` as the handler there, which is correct:
+    /// in the Mix console it is the only claimant, so there is no arbitration to
+    /// make identical. No default, for `pointSelection`'s reason — a future third
+    /// mount must be made to decide rather than silently inherit one.
+    var onDeleteKey: (() -> Bool)?
+
     /// Local working copy. Every interaction mutates this; it is submitted on
     /// each change and re-seeded from the canonical lane when a gesture ends.
     @State private var draft: [AutomationPoint]
@@ -48,13 +71,15 @@ struct AutomationLaneEditor: View {
 
     init(lane: AutomationLane, param: AutomationParam, geometry: AutomationGeometry,
          contentWidth: CGFloat, onCommit: @escaping ([AutomationPoint]) -> Void,
-         pointSelection: AutomationPointSelectionBridge?) {
+         pointSelection: AutomationPointSelectionBridge?,
+         onDeleteKey: (() -> Bool)?) {
         self.lane = lane
         self.param = param
         self.geometry = geometry
         self.contentWidth = contentWidth
         self.onCommit = onCommit
         self.pointSelection = pointSelection
+        self.onDeleteKey = onDeleteKey
         _draft = State(initialValue: lane.points)
     }
 
@@ -90,7 +115,56 @@ struct AutomationLaneEditor: View {
             .overlay(alignment: .topLeading) { readoutBubble }
             .focusable()
             .focused($focused)
-            .onKeyPress(.delete, action: deleteSelection)
+            // m23-cf (second pass): where a routing closure is wired (the ARRANGE
+            // mount), DELETE asks the app's ONE ownership decision instead of
+            // deciding here — see `onDeleteKey`. The routed answer still lands in
+            // `deleteSelection()` below, via `pointSelection.deleteNonce`, so this
+            // editor keeps doing its own work through its own `@State private`
+            // draft.
+            //
+            // ⚠️ THE `??` BRANCH IS NOT A FALLBACK FOR "SOMEBODY FORGOT TO WIRE
+            // IT" — it is the MIXER mount's shipped behaviour, kept deliberately.
+            // That mount lives in the Mix workspace, where `handleDeleteKey`'s
+            // workspace guard refuses by design, so routing it would delete the
+            // master lane's DELETE key rather than fix it.
+            // ⭐⭐ m23-fk — THE KEY LIST IS THE FIX, AND THIS MOUNT IS THE ONE THE
+            // USER LOSES SOMETHING BY. `.onKeyPress` matches on the event's
+            // CHARACTERS; `KeyEquivalent.delete` is 0x08 (BACKSPACE) and the ⌫
+            // key sends 0x7F (DELETE), so `.onKeyPress(.delete)` never fired.
+            // Everywhere else the m23-cf-3 `NSEvent` monitor covers for that —
+            // but NOT in the Mix console, where `handleDeleteKey`'s first guard
+            // is `workspaceMode == .arrange` and the monitor therefore refuses
+            // the master lane's DELETE by design (`handleKeyDownEvent` returns
+            // the event when `handleDeleteKey()` answers false). This mount is
+            // the only path there, so until this spelling it had none: ⌫ on a
+            // selected master-volume breakpoint did nothing and double-click was
+            // the only way to remove it. NEVER WORKED — not a regression.
+            //
+            // ⚠️ WHAT IS MEASURED AND WHAT IS NOT, stated because the difference
+            // is a real bound on the claim above. MEASURED: the character (the
+            // system translates `kVK_Delete` to 0x7F), the mount being in the
+            // Mix tree, and that the monitor passes the key on there. NOT
+            // MEASURED HEADLESSLY: this editor's `@FocusState` is written in
+            // exactly one place — `beginDrag`, i.e. the CLICK — and no seam can
+            // click, so a never-clicked staging run reads `focused == false` and
+            // the mount receives nothing. In use the two are the same gesture:
+            // the click that selects the breakpoint is the click that focuses
+            // this editor.
+            // ⚠️⚠️ `phases: [.down]` IS LOAD-BEARING — see
+            // `ContentView.ArrangeDeleteKey` for the measured sequence. Omitting
+            // it admits `.repeat`, and here that would walk a held ⌫ down the
+            // breakpoint list one point per repeat tick.
+            .onKeyPress(keys: [KeyEquivalent("\u{7F}"), .delete, .deleteForward],
+                        phases: [.down]) { _ in
+                // m23-fi probe, first statement. ⭐ THIS MOUNT IS THE ONE
+                // `deleteKeyFunnelSeq` COULD NEVER SEE AT ALL: the `??` branch
+                // below (the MIXER mount, `onDeleteKey == nil`) calls
+                // `deleteSelection()` directly and never enters `handleDeleteKey`,
+                // so m23-cf's funnel instrument was blind to it by construction.
+                KeyPressProbe.automationLaneDelete += 1
+                guard let onDeleteKey else { return deleteSelection() }
+                return onDeleteKey() ? .handled : .ignored
+            }
             // Re-seed from the canonical lane whenever it changes outside a drag
             // (undo, an agent edit, or our own committed gesture landing sorted).
             .onChange(of: lane.points) { _, points in
@@ -117,6 +191,11 @@ struct AutomationLaneEditor: View {
             // rather than waiting for a change.
             .onChange(of: liveSelectionIndex != nil, initial: true) { _, claims in
                 pointSelection?.report(lane: lane.id, hasSelection: claims)
+            }
+            // m23-fi PROBE — this editor's `@FocusState` VALUE, keyed by lane id
+            // so N mounted lanes cannot clobber each other's report.
+            .onChange(of: focused, initial: true) { _, isFocused in
+                KeyPressProbe.reportAutomationLaneFocus(lane: lane.id, focused: isFocused)
             }
             // m23-ai: the debug seam's staged selection — the
             // `follow.externalScrollNonce` pattern (watch the NONCE, so a gate

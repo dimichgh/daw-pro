@@ -43,7 +43,7 @@
 // longer be pointed at 17600 even by an env var.
 import fs from "fs";
 import crypto from "crypto";
-import { buildOrAbort, startStaging, stopStaging, connect } from "./_staging.mjs";
+import { buildOrAbort, startStaging, stopStaging, connect, panelDensityGuard, verdict } from "./_staging.mjs";
 const PORT = process.env.DAW_CONTROL_PORT || "17695";
 const GATE = "m19g-setnotes-ghost";   // names the pidfile + out dir = the default OUT below
 const OUT = process.argv[2] || `/tmp/daw-gate-out/${GATE}`;
@@ -57,7 +57,12 @@ const C0 = `${OUT}/c0-empty.png`, C1 = `${OUT}/c1-presettle.png`, C2 = `${OUT}/c
 // into a loud ENOENT from readFileSync instead of a silent adoption of old bytes.
 for (const p of [C0, C1, C2]) { try { fs.unlinkSync(p); } catch {} }
 const sha = (p) => crypto.createHash("sha256").update(fs.readFileSync(p)).digest("hex");
-const killer = setTimeout(() => { console.error("GATE TIMEOUT"); process.exit(2); }, 120_000);
+let guard = null;   // m23-ej-2: `let` — assigned after connect, read by the killer below
+const killer = setTimeout(async () => {
+  console.error("GATE TIMEOUT");
+  await guard?.restore("timeout");
+  process.exit(2);
+}, 120_000);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 let nextId = 1;
@@ -84,7 +89,9 @@ ws.onmessage = (event) => {
 console.log("connected");
 
 let failures = 0;
+let ran = 0;
 const check = (label, cond, detail) => {
+  ran++;
   console.log(`${cond ? "PASS" : "FAIL"}  ${label}${detail !== undefined ? "  :: " + JSON.stringify(detail) : ""}`);
   if (!cond) failures++;
 };
@@ -107,49 +114,22 @@ await sleep(200);
 // repainted the editor" claim instead of a vague "something moved".
 // m23-du(c) CLOSED: this used to leak `pianoRoll=pro` into the shared `DAWApp`
 // defaults domain on every run, because `debug.panelDensity` had no read form and
-// a gate cannot put back a value it cannot read. m23-du(a) added that read form,
-// so the prior is captured here and restored below.
-//
-// ⚠️ Restore from `stored`, NEVER from `mode`. `mode` is the EFFECTIVE density and
-// reads `simple` both when a panel was explicitly set to simple AND when it was
-// never set at all; writing that back would convert an unset key into an explicit
-// one. `stored` is null in the never-set case, and that case is handled separately
-// below — see the note at the restore.
-const priorRollDensity = (await request(ws, "debug.panelDensity", { panel: "pianoRoll" })).stored ?? null;
-console.log(`prior pianoRoll density: stored=${priorRollDensity ?? "UNSET"}`);
-await request(ws, "debug.panelDensity", { panel: "pianoRoll", mode: "pro" });
+// a gate cannot put back a value it cannot read. m23-du(a) added that read form.
+// m23-ej-2 UPGRADE: routed through the shared `panelDensityGuard` (_staging.mjs)
+// instead of this gate's own hand-rolled restore. The old version's null-prior
+// branch wrote the app default "simple" — a deliberate compromise documented at
+// length here, made necessary only because `debug.panelDensity` had no clear
+// verb (m23-du(a) tracked that as still open). That verb shipped in m23-ej-1;
+// the guard restores a never-set prior with `{clear:true}`, so the compromise
+// and its comment are both gone — restoring genuinely means restoring now.
+guard = panelDensityGuard((command, params) => request(ws, command, params));
+await guard.set("pianoRoll", "pro");
 await sleep(300);
 
-let densityRestored = false;
-async function restoreDensity(reason) {
-  if (densityRestored) return;          // idempotent: normal path AND handlers call it
-  densityRestored = true;
-  try {
-    if (priorRollDensity) {
-      await request(ws, "debug.panelDensity", { panel: "pianoRoll", mode: priorRollDensity });
-      console.log(`   density restored (${reason}): pianoRoll=${priorRollDensity}`);
-    } else {
-      // The prior was UNSET and `debug.panelDensity` has no clear verb yet, so
-      // "unset" is not reachable from here (m23-du(a) documents this half as
-      // still open). The choice is between leaving OUR `pro` behind and writing
-      // the app default explicitly — and `simple` is strictly better: a fresh
-      // machine's EFFECTIVE density is simple, so writing it makes the next gate
-      // behave identically to a fresh machine, differing only by the presence of
-      // a key. Leaving `pro` would change behaviour, which is the actual defect
-      // m23-du is about. Logged, never silent.
-      await request(ws, "debug.panelDensity", { panel: "pianoRoll", mode: "simple" });
-      console.log(`   density prior was UNSET (${reason}): wrote the app default `
-        + `"simple" rather than leaving our "pro" behind — this CREATES an explicit `
-        + `key, which only a clear verb (m23-du(a), still open) could avoid.`);
-    }
-  } catch (e) {
-    console.error(`   ⚠️ DENSITY RESTORE FAILED (${reason}): ${e.message}`);
-  }
-}
 for (const sig of ["unhandledRejection", "uncaughtException"]) {
   process.on(sig, async (err) => {
     console.error(`\n${sig.toUpperCase()} — restoring density before exit:`, err);
-    await restoreDensity(sig);
+    await guard.restore(sig);
     stopStaging(GATE);
     process.exit(3);
   });
@@ -199,7 +179,7 @@ check("pixel CONTROL: the injected notes repainted the editor (c0 != c2)",
 
 await request(ws, "project.new", { discardChanges: true });
 await sleep(300);
-await restoreDensity("normal exit");   // m23-du(c)
+await guard.restore("normal exit");   // m23-du(c) / m23-ej-2
 ws.close();
 clearTimeout(killer);
 stopStaging(GATE);   // SIGTERMs by exact pid AND releases our session.lock
@@ -207,4 +187,4 @@ console.log(failures === 0
   ? `\nORCH SETNOTES GATE: ALL PASS (2 analytic + 2 pixel-premise legs)`
     + `\n  the ghost LAW itself is still a human/agent read of ${C2}`
   : `\nORCH SETNOTES GATE: ${failures} FAILURE(S)`);
-process.exit(failures === 0 ? 0 : 1);
+verdict({ ran, failed: failures });

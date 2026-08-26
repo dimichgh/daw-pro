@@ -475,4 +475,145 @@ struct AuditionRenderTests {
         #expect(harness.fired().count == 2)
         #expect(harness.renderer.openAuditionCount == 0)
     }
+
+    // MARK: - Breath pad P6: the controller payload is a BLESSED audition-ring
+    //         producer, not a producer bug
+    //
+    // These five turn `InstrumentSourceNode.swift`'s 6c `else` branch from
+    // "happens to work" into a pinned contract (design-breath-pad §5.3 step 1,
+    // §13.4). Folded into THIS suite rather than a new one because the
+    // `@MainActor` suite budget is nearly spent, and because this is the same
+    // ring, the same drain and the same harness — a separate file would have
+    // duplicated the fixture to assert on the branch next door.
+    //
+    // ⛔ THE PLANT THAT PROVES THEY DISCRIMINATE: neuter the `pushAudition`
+    // call inside `pushAuditionController` (or narrow the 6c `else` back to
+    // note-offs only) and the first test below goes red on the event count.
+
+    @Test("P6 a controller pushed on the audition ring reaches the instrument INTACT")
+    func padControllerReachesTheInstrument() throws {
+        let harness = Harness()
+        harness.renderer.pushAuditionController(controller: 11, value: 90)
+        harness.pull(sampleTime: 0)
+
+        let fired = harness.fired()
+        #expect(fired.count == 1)
+        // `#require` rather than a subscript: when the plant that unwires the
+        // push is applied this must FAIL, not trap on an empty array.
+        let first = try #require(fired.first)
+        #expect(first.event.kind == ScheduledMIDIEvent.controlChange)
+        // The CC encoding `ScheduledMIDIEvent` documents: pitch = controller
+        // number, velocity = value. If either byte were re-interpreted as a note
+        // the instrument would receive a different message entirely.
+        #expect(first.event.pitch == 11)
+        #expect(first.event.velocity == 90)
+        // Live events sound at offset 0 of the quantum they drain in.
+        #expect(first.firedAtFrame == first.renderStart)
+        #expect(harness.resetCount() == 0)
+    }
+
+    @Test("P6 a controller opens no voice: the audition counters do not move")
+    func padControllerTouchesNoVoiceState() throws {
+        let harness = Harness()
+        #expect(harness.renderer.openAuditionCount == 0)
+
+        for value in [UInt8(0), 40, 127, 12] {
+            harness.renderer.pushAuditionController(controller: 11, value: value)
+        }
+        harness.pull(sampleTime: 0)
+
+        #expect(harness.fired().count == 4)
+        // C11: a controller pairs with no voice, so nothing may be opened…
+        #expect(harness.renderer.openAuditionCount == 0)
+        // …and `pitchToAuditionID` must be untouched. It is private, so probe it
+        // BEHAVIOURALLY, which is stronger than reading the field: a note-on on
+        // the pitch NUMERICALLY EQUAL to the controller (11) would, if the map
+        // had been polluted by the CC, trip the defensive retrigger and emit an
+        // extra note-OFF ahead of the on. Exactly one event means the map slot
+        // for pitch 11 was still zero.
+        harness.pushAudition(kind: ScheduledMIDIEvent.noteOn, pitch: 11)
+        harness.pull(sampleTime: 512)
+        let after = harness.fired()
+        #expect(after.count == 5)
+        #expect(try #require(after.last).event.kind == ScheduledMIDIEvent.noteOn)
+        #expect(harness.renderer.openAuditionCount == 1)
+    }
+
+    @Test("P6 a pad controller interleaved with an open audition note leaves the note pairing")
+    func padControllerDoesNotDisturbAnOpenAuditionNote() throws {
+        let harness = Harness()
+        harness.pushAudition(kind: ScheduledMIDIEvent.noteOn, pitch: 60)
+        harness.pull(sampleTime: 0)
+        let on = try #require(harness.fired().first)
+        #expect(harness.renderer.openAuditionCount == 1)
+
+        // A drag's worth of pad traffic while the note is held.
+        for value in [UInt8(30), 60, 90, 120] {
+            harness.renderer.pushAuditionController(controller: 11, value: value)
+            harness.pull(sampleTime: Double(harness.fired().count * 512))
+        }
+        #expect(harness.renderer.openAuditionCount == 1, "the note must survive the CC traffic")
+
+        harness.pushAudition(kind: ScheduledMIDIEvent.noteOff, pitch: 60)
+        harness.pull(sampleTime: 512 * 9)
+        let fired = harness.fired()
+        let off = fired.last
+        #expect(off?.event.kind == ScheduledMIDIEvent.noteOff)
+        #expect(off?.event.pitch == 60)
+        // THE assertion: the off still pairs with the ON's id. A controller that
+        // had minted itself into the pitch map, or had consumed the counter in a
+        // way that renumbered the voice, would break exactly this.
+        #expect(off?.event.noteID == on.event.noteID)
+        #expect(harness.renderer.openAuditionCount == 0)
+    }
+
+    @Test("P6 pad controllers do NOT extend the audition liveness watchdog")
+    func padControllerIsNotAHeartbeat() {
+        // The inverse of §13.4's third bullet, and the reason
+        // `previewController` deliberately never calls `beatAuditionHeartbeat`:
+        // a pad drag must not keep a genuinely stuck audition note alive. Here
+        // the main actor "wedges" holding a note while the pad keeps streaming —
+        // the note must still be cut on schedule.
+        let harness = Harness()
+        harness.pushAudition(kind: ScheduledMIDIEvent.noteOn, pitch: 60)
+        harness.pull(sampleTime: 0)
+        #expect(harness.renderer.openAuditionCount == 1)
+
+        var quanta = 0
+        var value: UInt8 = 0
+        while harness.renderer.openAuditionCount == 1, quanta < watchdogQuanta + 8 {
+            quanta += 1
+            // Pad traffic every quantum, and it changes value every time so no
+            // de-duplication anywhere could turn it into "no traffic at all".
+            value = value &+ 7
+            harness.renderer.pushAuditionController(controller: 11, value: value & 0x7F)
+            harness.pull(sampleTime: Double(quanta * 512))
+        }
+        #expect(harness.renderer.openAuditionCount == 0, "the stuck note was cut anyway")
+        #expect(quanta <= watchdogQuanta + 1)
+        #expect(quanta >= watchdogQuanta - 2)
+        // The cut is a note-off on 60, not a reset that would also have killed
+        // the pad's own controller state.
+        let offs = harness.fired().filter {
+            $0.event.kind == ScheduledMIDIEvent.noteOff && $0.event.pitch == 60
+        }
+        #expect(offs.count == 1)
+        #expect(harness.resetCount() == 0)
+    }
+
+    @Test("P6 the named entry point masks both bytes to 7 bits rather than trusting them")
+    func padControllerMasksItsBytes() throws {
+        // The render side reads `pitch & 0x7F` as a table index. The mask is
+        // here so an out-of-range value cannot reach it even from a main-actor
+        // caller — and asserting it means the mask cannot be quietly dropped.
+        let harness = Harness()
+        harness.renderer.pushAuditionController(controller: 0xFF, value: 0x80 | 42)
+        harness.pull(sampleTime: 0)
+
+        let fired = harness.fired()
+        #expect(fired.count == 1)
+        let masked = try #require(fired.first)
+        #expect(masked.event.pitch == 0x7F)
+        #expect(masked.event.velocity == 42)
+    }
 }

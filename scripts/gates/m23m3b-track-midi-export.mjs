@@ -23,7 +23,7 @@
 // the harness retries 40x1 s and refuses port 17600 outright.
 import fs from "fs";
 import path from "path";
-import { buildOrAbort, startStaging, stopStaging, connect } from "./_staging.mjs";
+import { buildOrAbort, startStaging, stopStaging, connect, verdict } from "./_staging.mjs";
 const GATE = "m23m3b-track-midi-export";   // names the pidfile + out dir = the default OUT
 const OUT = process.argv[2] || `/tmp/daw-gate-out/${GATE}`;
 const log = (s) => fs.writeSync(1, s + "\n");
@@ -241,7 +241,7 @@ try {
   // stopStaging is idempotent (a missing pidfile is an early return), so having it on
   // both paths is safe and the `finally` still covers a throw.
   stopStaging(GATE);
-  process.exit(failed.length ? 1 : 0);
+  verdict({ ran: legs.length, failed: failed.length });
 } finally {
   ws.close();
   stopStaging(GATE);

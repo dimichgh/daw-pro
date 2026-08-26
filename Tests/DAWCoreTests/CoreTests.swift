@@ -471,6 +471,33 @@ final class FakeEngine: AudioEngineControlling {
         masterEffectsPushes.append(effects)
     }
 
+    /// m25-d end-of-content stop: EVERY bound the store pushed, in order
+    /// (newest last), plus the handler it installed so a test can fire the
+    /// engine's end-stop callback without a real playhead task. Spying on the
+    /// whole sequence, not just the latest value, is what lets a test prove a
+    /// take was disarmed rather than merely never armed.
+    private(set) var endStopPushes: [Double?] = []
+    private(set) var endStopHandler: (() -> Void)?
+
+    /// The most recently pushed bound (nil if none was ever pushed, which is
+    /// distinguishable from a pushed nil via `endStopPushes`).
+    var currentEndStop: Double? { endStopPushes.last ?? nil }
+
+    func setEndStop(beat: Double?) { endStopPushes.append(beat) }
+
+    /// Drops the recorded history so a test can prove a LATER push happened
+    /// (an empty history and "never pushed" are otherwise the same shape).
+    func clearEndStopPushes() { endStopPushes.removeAll() }
+
+    func setEndStopHandler(_ handler: (() -> Void)?) { endStopHandler = handler }
+
+    /// Simulates the engine's playhead tick reaching the bound: park the
+    /// playhead exactly on it (what `AudioEngine` does) and fire the sink.
+    func fireEndStop() {
+        if let bound = currentEndStop { playheadHandler?(bound) }
+        endStopHandler?()
+    }
+
     func renderMixdown(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
                        masterEffects: [EffectDescriptor],
                        masterAutomation: [AutomationLane],

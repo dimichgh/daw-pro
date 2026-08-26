@@ -42,7 +42,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { buildOrAbort, startStaging, stopStaging, connect, sleep } from "./_staging.mjs";
+import { buildOrAbort, startStaging, stopStaging, connect, sleep, verdict } from "./_staging.mjs";
 
 const GATE = "m19f";                        // names the pidfile + staging out dir
 
@@ -83,7 +83,9 @@ function cmd(command, params, timeoutMs = 20000) {
 }
 const median = (a) => { const s = [...a].sort((x, y) => x - y); return s[Math.floor(s.length / 2)]; };
 let failures = 0;
+let ran = 0;
 const check = (label, cond, detail) => {
+  ran++;
   console.log(`${cond ? "PASS" : "FAIL"}  ${label}${detail !== undefined ? "  :: " + JSON.stringify(detail) : ""}`);
   if (!cond) failures++;
 };
@@ -150,4 +152,4 @@ stopStaging(GATE);   // SIGTERMs by exact pid AND releases our session.lock
 ws.close();
 clearTimeout(killer);
 console.log(failures === 0 ? "\nORCH IDLE SCALING GATE: ALL PASS" : `\nORCH IDLE SCALING GATE: ${failures} FAILURE(S)`);
-process.exit(failures === 0 ? 0 : 1);
+verdict({ ran, failed: failures });

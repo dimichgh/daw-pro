@@ -282,6 +282,32 @@ The honest summary: the weights being present is a coincidence of a neighbouring
 - **Bar**: on synthetic material, ≥99% of voiced frames within ±10 cents and **zero octave errors**; on real vocals, ≥95% of voiced frames within ±25 cents of the oracle, gross-error (>50 cents) rate under 2%, and voiced/unvoiced agreement ≥95%.
 - **Kill criterion**: bar missed after one round of tuning ⇒ vendor WORLD Harvest (BSD) behind the same protocol. Budgeted in §11.
 
+#### 5.5.1 AMENDMENT — the SYNTHETIC tier is restated; the kill criterion is VOID (USER RULING, 2026-08-17)
+
+> The bullets above are left exactly as written, per §5.6's rule that §5.1–§5.5 are the record of what was decided on 2026-07-29. **This subsection supersedes the synthetic tier of that "Bar" bullet and voids the "Kill criterion" bullet.** The real-vocal tier is unchanged and still binds.
+
+**What the user ruled**, asked as *"The pitch-accuracy target can't be met by any detector — including a replacement"*: **"Fix the synthetic tier to median / p95 / octave-rate, keep the real-vocal tier as written, keep SwiftF0."**
+
+**Why the ±10-cent synthetic tier was impossible — arithmetic, not quality.** The model reports pitch as an **argmax over 256 log-spaced bins** covering its detectable range of 46.875–2093.75 Hz = 5.481 octaves = **6577.4 cents**, so one bin is **25.79 cents** and worst-case quantisation error is **±12.90 cents before the model is consulted at all**. No amount of tuning reaches ±10 ¢, and neither does vendoring a different library that reports through the same output geometry — which is precisely what the kill criterion would have bought. ⚠️ Our decode does no bin arithmetic to interpolate away: `PitchTracker.swift` consumes the exported graph's own `pitch` output in Hz, the argmax having already happened inside the graph.
+
+⚠️⚠️ **A NUMBER IN OUR OWN SPIKE LOOKS LIKE IT REFUTES THAT FLOOR AND DOES NOT.** `docs/research/2026-08-05-m23ap1-swiftf0-route-spike.md:250-258` reports fp32 at median 0.92 ¢, p95 5.44 ¢, *"0.00 % over 10 ¢"*, concluding *"fp32 clears §5.5's bar"*. **That measures PORT FIDELITY — how far the Core ML re-authoring drifts from the Python reference — not absolute accuracy against ground truth.** The bin quantisation is present on both sides of that comparison and cancels. The spike says so itself (*"Route B spends ~65 % of the entire §5.5 synthetic error budget ON THE PORT ITSELF, before the detector's own error is counted"*). Read naively it would have inverted this ruling. **A number quoted in the units you expected is not thereby a number about what you think.**
+
+**THE RESTATED SYNTHETIC TIER** — in the units the model actually resolves:
+
+- **Median |cents|**, **p95 |cents|**, and **octave-error rate**, per register, plus a **voiced-fraction floor**. No ±10 ¢ clause anywhere.
+- **Octave errors are the class that actually matters** and the bar on them is **zero** — §5.6.1 already named recall/octave errors as the failure that ruins a tuned vocal, and hearing a note an octave off is audible where 15 cents is not.
+- ⚠️ **The voiced-fraction floor for the sung register is 0.90, not 0.95, and that is a FINDING, not a loosened bar** — every declined frame comes from two fixtures (493.88 Hz and 440 Hz), pinned separately by the confidence-trough leg.
+
+**This tier is ALREADY IMPLEMENTED AND ENFORCED IN SWIFT**, and was before this amendment: `Tests/DAWEngineTests/PitchTrackerAccuracyTests.swift`'s `runBattery` measures exactly median/p95/max/octave-count/voiced-fraction per register. ⭐ **It is not a tautology over the measured numbers — the ceilings carry margin (p95 30 ¢ against a measured 15.53 ¢; low-range 35 ¢ against 29.5 ¢) and the battery has a POSITIVE CONTROL that fails it**: `ConstantPitchTracker` (right about one pitch, confident about everything including silence) is asserted to produce failures, naming the `sung-range: p95` and `silence:` legs specifically. **So the doc was the only thing still stating the impossible bar.**
+
+**Measured on the synthetic 12-partial voice-like fixtures:** sung 165–659 Hz — median **4.74 ¢**, p95 **15.53 ¢**, **0 octave errors**, voiced 443/480; low 82–147 Hz — median **10.60 ¢**, p95 **14.76 ¢**, **0 octave errors**, voiced 224/224; silence 0/32 voiced. The p95 sits within **~1.2×** of the ±12.90 ¢ theoretical floor.
+
+⭐⭐ **AND THE FINDING THAT REWRITES THE EARLIER RECORD: every bad number previously on file was a property of PURE SINES, not of SwiftF0.** m23-ap-2a measured 220 Hz at **88.8 % octave errors**; the same pitch with 8 harmonics reads **0.48 ¢, 0 % octave, confidence 0.94–1.00**. A 98 Hz sine read **+94 ¢**; the harmonic equivalent reads **+12.3 ¢ at confidence 1.000**. A spectrogram CNN has never seen a pure sine in training — **the fixture was the defect, and it nearly condemned the model.**
+
+**CONSEQUENCES OF THE RULING:**
+1. **WORLD Harvest is NOT vendored.** The §5.5 kill criterion is void — it was already superseded in shape by §5.6.6's fallback ladder, and §5.6.6's own note stands: Harvest *"has no number in the only benchmark either document found"*, so it was never a known-good escape hatch.
+2. **The real-vocal tier is untouched and still unmet** — ≥95 % within ±25 ¢, gross-error (>50 ¢) under 2 %, voiced/unvoiced agreement ≥95 %. ⚠️ **No real vocal has ever gone through this path**; every number above is synthetic. That tier is comfortably reachable on the evidence (p95 15.53 ¢ against a ±25 ¢ allowance, gross errors measured at zero) but it is **not yet measured**, and this amendment does not claim it is.
+
 ### 5.6 RECONCILIATION — the SwiftF0 decision (m23-ap, 2026-08-03, `daw-architect`)
 
 > **STATUS: RECOMMENDATION AWAITING THE USER'S SIGN-OFF. NOT SETTLED.**

@@ -141,12 +141,21 @@ struct ModelLifecycleCommandTests {
 
     // MARK: - Wire law
 
-    @Test("both verbs are registered at the END of allCommands; count 171 -> 173")
+    @Test("both verbs are registered at the END of allCommands; count 171 -> 173 -> 174")
     func commandsRegisteredAtTheEnd() {
         let all = CommandRouter.allCommands
-        #expect(all.count == 173)
-        #expect(all.dropLast().last == "ai.modelResidency")
-        #expect(all.last == "ai.modelUnload")
+        #expect(all.count == 186)   // 173 at m23-dl -> 174 at m23-di-2a -> 175 at m25-d -> 176 at m25-z -> 177 at m23-ap-3 (vc.importVoiceModel, transport.setStopAtContentEnd, audio.profileFile, clip.detectPitch, appended after) -> 178 (clip.getNotes) -> 179 (m26-i instrument.describeSampler) -> 180 (edit.pasteClips) -> 181 (m27 leg D clip.applyBreathContour, placed next to its controller-lane siblings, NOT at the tail) -> 182 (breath pad P1 clip.applyEffortShape, placed next to clip.applyBreathContour, NOT at the tail) -> 183 (breath pad P6 pad.previewEffort, placed next to note.audition — the other 'sounds now, outside the timeline, not an edit' verb — NOT at the tail) -> 186 (m28-knob midi.getControlMap/setControlMap/learnControl, placed next to midi.listInputs — their only sibling on this surface — and BEFORE transport.record, NOT at the tail)
+        #expect(all.dropLast(6).last == "ai.modelResidency")
+        #expect(all.dropLast(5).last == "ai.modelUnload")
+        #expect(all.dropLast(4).last == "vc.importVoiceModel")
+        // m25-d appended transport.setStopAtContentEnd at the END (same law).
+        #expect(all.dropLast(3).last == "transport.setStopAtContentEnd")
+        // m25-z appended audio.profileFile at the END (same law).
+        #expect(all.dropLast(2).last == "audio.profileFile")
+        // m23-ap-3 appended clip.detectPitch at the END (same law).
+        #expect(all.dropLast().last == "clip.detectPitch")
+        // m26-k appended edit.pasteClips at the END (same law).
+        #expect(all.last == "edit.pasteClips")
         // Additive: every neighbouring lifecycle verb is untouched, in place.
         for name in ["ai.sidecarStatus", "ai.sidecarStart", "ai.sidecarStop",
                      "vc.sidecarStatus", "vc.sidecarStart", "vc.sidecarStop"] {

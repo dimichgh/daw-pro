@@ -67,6 +67,25 @@ const VOICE_CONVERT_COMMANDS: ReadonlySet<string> = new Set(["vc.convertVocals"]
  * that the number is generous enough, not the source of it. */
 const CLIP_TRANSCRIBE_TIMEOUT_MS = 300000;
 const CLIP_TRANSCRIBE_COMMANDS: ReadonlySet<string> = new Set(["clip.transcribe"]);
+/** clip.detectPitch (m23-ap-3) runs on-device SwiftF0 inference (ONNX Runtime,
+ * Sources/DAWEngine/Analysis/PitchTracker.swift). MEASURED 2026-08-16 on this
+ * machine: analyze() over a 3-minute (180s) 48kHz buffer takes 4.27-4.83s
+ * wall time, and SwiftF0PitchTracker construction (~400KB vendored weights,
+ * no CoreML ANE compile unlike WhisperKit) takes ~14ms -- so a worst-case
+ * whole-clip call (the default when fromSeconds/durationSeconds are omitted,
+ * see PitchDetectionResult's payload-arithmetic doc) sits close to the flat
+ * 5s REQUEST_TIMEOUT_MS default already. This budget is the measurement
+ * rounded up with >10x headroom for a slower machine, a longer-than-3-minute
+ * clip (nothing caps clip length), and 48kHz->16kHz resample overhead the
+ * measurement's synthetic buffer paid too (it was already 48kHz) but a
+ * source at an unusual rate might pay differently. Deliberately NOT reusing
+ * CLIP_TRANSCRIBE_TIMEOUT_MS's 300s (WhisperKit's cost model is a ONE-TIME
+ * compile that amortizes to ~1s; SwiftF0 has no comparable compile step, so
+ * borrowing that number would be coincidence, not justification) or
+ * VOICE_CONVERT_TIMEOUT_MS's 330s (RVC's ~37x-real-time model; SwiftF0
+ * measured at roughly 40x FASTER than real time, the opposite shape). */
+const CLIP_DETECT_PITCH_TIMEOUT_MS = 60000;
+const CLIP_DETECT_PITCH_COMMANDS: ReadonlySet<string> = new Set(["clip.detectPitch"]);
 
 interface ControlResponse {
   id: string;
@@ -114,9 +133,11 @@ export class DawBridge {
       ? VOICE_CONVERT_TIMEOUT_MS
       : CLIP_TRANSCRIBE_COMMANDS.has(command)
         ? CLIP_TRANSCRIBE_TIMEOUT_MS
-        : LONG_RUNNING_COMMANDS.has(command)
-          ? LONG_RUNNING_TIMEOUT_MS
-          : REQUEST_TIMEOUT_MS;
+        : CLIP_DETECT_PITCH_COMMANDS.has(command)
+          ? CLIP_DETECT_PITCH_TIMEOUT_MS
+          : LONG_RUNNING_COMMANDS.has(command)
+            ? LONG_RUNNING_TIMEOUT_MS
+            : REQUEST_TIMEOUT_MS;
 
     return new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -139,6 +160,20 @@ export class DawBridge {
         reject(this.describeConnectionError(err));
       }
     });
+  }
+
+  /**
+   * True if a WebSocket connection to the DAW app is currently OPEN.
+   *
+   * A pure state read — NEVER initiates a connection. Used by call logging
+   * (m23-ca, src/mcp-log.ts) to decide whether an opportunistic before-state
+   * read (`project.overview`) is safe to attempt without paying — or, worse,
+   * forcing every caller to pay — a fresh connection's cost just to produce a
+   * log line. When this is false, logging records an honest
+   * `beforeCaptured: false` instead of connecting on the log's behalf.
+   */
+  isConnected(): boolean {
+    return this.socket !== undefined && this.socket.readyState === WebSocket.OPEN;
   }
 
   /** Close the socket, if any. Pending requests are rejected. */

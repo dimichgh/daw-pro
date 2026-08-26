@@ -204,6 +204,9 @@ struct PanelLayoutStoreTests {
 
         store.setMixerInsertsCollapsed(true)
         store.setFollowPlayhead(true)
+        store.setWaveformNormalize(false)
+        store.setWaveformVerticalZoom(4)
+        store.setEditorMaximized(true)
 
         store.reset()
         #expect(store.sidebarWidth == 260)
@@ -220,6 +223,124 @@ struct PanelLayoutStoreTests {
         #expect(backing.storage[PanelLayoutStore.rowHeightKey] == 34)
         #expect(backing.storage[PanelLayoutStore.mixerInsertsCollapsedKey] == 0)
         #expect(backing.storage[PanelLayoutStore.followPlayheadKey] == 0)
+        // m25-e: the waveform's two slots are dimensions too — same half-reset
+        // guard. BOTH halves come back, which is what ⌥⌘0 promises: a reset that
+        // left RAW latched would be one the user could not see the effect of.
+        #expect(store.waveformNormalize == true)
+        #expect(store.waveformVerticalZoom == 1)
+        #expect(backing.storage[PanelLayoutStore.waveformNormalizeKey] == 1)
+        #expect(backing.storage[PanelLayoutStore.waveformVerticalZoomKey] == 1)
+        // m25-b-1: the maximized MODE is a dimension too — same half-reset guard.
+        // A reset that left the editor maximized would hand the user a window with
+        // the arrange collapsed to a ruler strip and no memory of asking for it.
+        #expect(store.editorMaximized == false)
+        #expect(backing.storage[PanelLayoutStore.editorMaximizedKey] == 0)
+    }
+
+    // MARK: - Maximized editor (m25-b-1)
+
+    @Test("the maximized mode defaults OFF, round-trips, persists as 1/0, and is sticky")
+    func editorMaximized() {
+        let backing = SpyBacking()
+        let store = PanelLayoutStore(backing: backing)
+        // Default OFF — the `followPlayhead` rationale: a mode that collapses the
+        // arrange must be asked for, never inherited.
+        #expect(store.editorMaximized == false)
+        #expect(PanelLayoutStore.defaultEditorMaximized == false)
+
+        store.setEditorMaximized(true)
+        #expect(store.editorMaximized == true)
+        // The shared Double backing's 1/0 encoding, like every other Bool slot.
+        #expect(backing.storage[PanelLayoutStore.editorMaximizedKey] == 1)
+
+        store.setEditorMaximized(false)
+        #expect(store.editorMaximized == false)
+        #expect(backing.storage[PanelLayoutStore.editorMaximizedKey] == 0)
+
+        // Sticky: a fresh store over the same backing reads the mode back.
+        store.setEditorMaximized(true)
+        let reopened = PanelLayoutStore(backing: backing)
+        #expect(reopened.editorMaximized == true)
+    }
+
+    /// ⭐⭐ THE RESTORE CONTRACT, PINNED WHERE IT LIVES: maximizing must not
+    /// disturb `editorFraction`, because leaving the mode is nothing more than
+    /// dropping the override — there is no stash to put back. If a future change
+    /// ever "helpfully" writes the maximized fraction into the slot, the value
+    /// would be clamped to 0.55 on the way in and the user's own height would be
+    /// gone. That is the whole reason this item ships no `previousFraction` slot,
+    /// so it is a test and not a comment.
+    @Test("maximizing NEVER writes editorFraction — the restore is the untouched slot")
+    func maximizeLeavesFractionAlone() {
+        let backing = SpyBacking()
+        let store = PanelLayoutStore(backing: backing)
+        store.setEditorFraction(0.38)          // the user's dragged height
+        #expect(store.editorFraction == 0.38)
+
+        store.setEditorMaximized(true)
+        #expect(store.editorFraction == 0.38)  // untouched while maximized
+        #expect(backing.storage[PanelLayoutStore.editorFractionKey] == 0.38)
+
+        store.setEditorMaximized(false)
+        #expect(store.editorFraction == 0.38)  // and the restore lands on it
+
+        // Belt and braces: not one write to the fraction key rode along with the
+        // two mode writes. Equal VALUES could hide a write-then-rewrite; the write
+        // LOG cannot.
+        let fractionWrites = backing.writes.filter { $0.key == PanelLayoutStore.editorFractionKey }
+        #expect(fractionWrites.count == 1, "maximize wrote editorFraction: \(fractionWrites)")
+    }
+
+    // MARK: - Waveform height (m25-e)
+
+    @Test("waveform auto-fit defaults ON, round-trips, persists as 1/0, and is sticky")
+    func waveformNormalize() {
+        let backing = SpyBacking()
+        let store = PanelLayoutStore(backing: backing)
+        // NOT opt-in — the reported defect IS the un-normalised look, so the fix
+        // has to be on by default (the `auditionEnabled` rationale).
+        #expect(store.waveformNormalize == true)
+        #expect(PanelLayoutStore.defaultWaveformNormalize == true)
+
+        store.setWaveformNormalize(false)
+        #expect(store.waveformNormalize == false)
+        #expect(backing.storage[PanelLayoutStore.waveformNormalizeKey] == 0)
+
+        // Sticky across a store rebuild — a user who went back to true amplitude
+        // is still there after relaunch. This is the leg that proves RAW is
+        // REACHABLE AND PERSISTENT, i.e. that relative level is genuinely
+        // recoverable rather than nominally so.
+        #expect(PanelLayoutStore(backing: backing).waveformNormalize == false)
+
+        store.setWaveformNormalize(true)
+        #expect(backing.storage[PanelLayoutStore.waveformNormalizeKey] == 1)
+        #expect(PanelLayoutStore(backing: backing).waveformNormalize == true)
+    }
+
+    @Test("waveform vertical zoom defaults to 1×, clamps to 1–8, and persists")
+    func waveformVerticalZoom() {
+        let backing = SpyBacking()
+        let store = PanelLayoutStore(backing: backing)
+        #expect(store.waveformVerticalZoom == 1)
+        #expect(PanelLayoutStore.defaultWaveformVerticalZoom == 1)
+
+        store.setWaveformVerticalZoom(2.5)
+        #expect(store.waveformVerticalZoom == 2.5)
+        #expect(backing.storage[PanelLayoutStore.waveformVerticalZoomKey] == 2.5)
+
+        // The store CLAMPS, it does not snap: a between-rungs value is legal.
+        store.setWaveformVerticalZoom(99)
+        #expect(store.waveformVerticalZoom == 8)
+        store.setWaveformVerticalZoom(0.01)
+        #expect(store.waveformVerticalZoom == 1)          // never shrinks below 1×
+        store.setWaveformVerticalZoom(-4)
+        #expect(store.waveformVerticalZoom == 1)
+
+        // Sticky, and an out-of-range STORED value is re-clamped on load.
+        store.setWaveformVerticalZoom(3)
+        #expect(PanelLayoutStore(backing: backing).waveformVerticalZoom == 3)
+        backing.storeValue(500, forKey: PanelLayoutStore.waveformVerticalZoomKey)
+        #expect(PanelLayoutStore(backing: backing).waveformVerticalZoom == 8)
     }
 
     // MARK: - Follow the playhead (m23-c2)
@@ -309,5 +430,51 @@ struct PanelLayoutStoreTests {
         #expect(ud.loadValue(forKey: PanelLayoutStore.rowHeightKey) == nil)  // unset
         ud.storeValue(0, forKey: PanelLayoutStore.rowHeightKey)
         #expect(ud.loadValue(forKey: PanelLayoutStore.rowHeightKey) == 0)    // stored 0, not nil
+    }
+
+    // MARK: - Piano-roll VERTICAL zoom (m25-b-4)
+
+    @Test("the roll's pitch-row height defaults to 14 and is NOT the arrange's rowHeight")
+    func pianoRollRowHeightDefaultAndIdentity() {
+        let store = PanelLayoutStore(backing: SpyBacking())
+        // Requirement: an existing session looks exactly as it did.
+        #expect(store.pianoRollRowHeight == 14)
+        #expect(PanelLayoutStore.defaultPianoRollRowHeight == 14)
+        #expect(PianoRollZoom.defaultRowHeight == 14)
+        #expect(PianoRollModel.defaultRowHeight == PianoRollZoom.defaultRowHeight)
+
+        // ⚠️ THE NAME TRAP, PINNED. `rowHeight` is the ARRANGE track-lane height.
+        // The two slots must not share a key, a range, or a value by accident.
+        #expect(PanelLayoutStore.pianoRollRowHeightKey != PanelLayoutStore.rowHeightKey)
+        #expect(PanelLayoutStore.pianoRollRowHeightRange != PanelLayoutStore.rowHeightRange)
+        store.setPianoRollRowHeight(40)
+        #expect(store.pianoRollRowHeight == 40)
+        #expect(store.rowHeight == PanelLayoutStore.defaultRowHeight)   // untouched
+        store.setRowHeight(60)
+        #expect(store.pianoRollRowHeight == 40)                          // still untouched
+    }
+
+    @Test("the pitch-row height clamps to 10...56 and writes through")
+    func pianoRollRowHeightClampsAndPersists() {
+        let spy = SpyBacking()
+        let store = PanelLayoutStore(backing: spy)
+        store.setPianoRollRowHeight(1)
+        #expect(store.pianoRollRowHeight == 10)
+        #expect(spy.storage[PanelLayoutStore.pianoRollRowHeightKey] == 10)
+        store.setPianoRollRowHeight(1000)
+        #expect(store.pianoRollRowHeight == 56)
+        #expect(spy.storage[PanelLayoutStore.pianoRollRowHeightKey] == 56)
+
+        // A relaunch reads the persisted value back through the same key.
+        let reopened = PanelLayoutStore(backing: spy)
+        #expect(reopened.pianoRollRowHeight == 56)
+    }
+
+    @Test("reset() restores the pitch-row height to 14")
+    func pianoRollRowHeightReset() {
+        let store = PanelLayoutStore(backing: SpyBacking())
+        store.setPianoRollRowHeight(56)
+        store.reset()
+        #expect(store.pianoRollRowHeight == 14)
     }
 }

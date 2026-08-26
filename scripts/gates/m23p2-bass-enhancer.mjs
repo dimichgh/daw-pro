@@ -20,7 +20,18 @@ import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, statSync } 
 
 // The build/launch/pidfile-kill lifecycle lives in ONE place (m23-ac-1) —
 // `_staging.mjs`. It used to be copy-pasted into every gate that had it at all.
-import { launchStaging, stopStaging, sleep, STAGING_PORT } from "./_staging.mjs";
+//
+// m23-ge: `debug.effectEditor {add}` (used below for the bass enhancer, the
+// saturator, and the reverb control cards) writes panelDensity.mixer
+// unconditionally (DAWProApp.swift, effectEditorDebug) as a side effect this
+// gate never touches through `debug.panelDensity` itself — measured leaking
+// `panelDensity.mixer` into the user's real prefs domain (filed at the
+// m23-en close). `panelDensityDomainGuard` snapshots the whole domain before
+// the first `debug.effectEditor` call and reconciles it back in `finally`,
+// on both the normal and throw paths — same shape as m23o2-guide-smoke.
+import {
+  launchStaging, stopStaging, sleep, STAGING_PORT, panelDensityDomainGuard, verdict,
+} from "./_staging.mjs";
 
 const GATE = "m23p2";
 const OUT = "/tmp/daw-gate-out/m23p2";
@@ -50,8 +61,11 @@ function ck(label, cond, detail = "") {
 const READOUT = /\d+\s*(Hz|kHz|dB|dBFS|ms|%|x)\b/i;
 
 const staging = await launchStaging({ gate: GATE });
+let domainGuard;
 try {
   ws = staging.ws;
+  domainGuard = panelDensityDomainGuard(cmd);   // raw cmd — envelope shape, normalized inside
+  await domainGuard.snapshot();
 
   // ---- G1: a clean project with one track ----------------------------------
   let r = await cmd("project.new", { discardChanges: true });
@@ -207,13 +221,23 @@ try {
 
   // ---- G21…G24: the card still FITS, measured at the window FLOOR ----------
   // The disclosure is the first thing on this card whose height is a function
-  // of prose, and the card is a modal with no scroll of its own. Assert the
-  // MEASURED height (reported from the card's own GeometryReader) against the
-  // floor the probe also reports — never a hardcoded number, so a change to
-  // `WindowFloor.minHeight` moves the assertion with it.
+  // of prose, and the card is a modal with no scroll of its own. Two DIFFERENT
+  // floor readings appear below, on purpose (m23-dw): G21/G22 read
+  // `debug.windowFrame`'s `minHeight`, the window CONTENT-RECT floor
+  // (`WindowFloor.minWindowContentHeight` = 672); G24 reads
+  // `debug.effectEditor`'s `windowMinHeight`, the SwiftUI LAYOUT floor
+  // (`WindowFloor.minHeight` = 640 — the area below the titlebar, which is
+  // where the card's own GeometryReader actually measures). Never a hardcoded
+  // number either way, so a change to either constant moves its own assertion
+  // with it.
   r = await cmd("debug.windowFrame", { width: 1208, height: 640 });
   ck("G21 window shrunk to the floor", r.ok, JSON.stringify(r.error));
   const floorH = r.result?.height;
+  // Both sides are content-rect height: the 640 REQUEST above now clamps UP to
+  // 672 immediately, and the echoed `minHeight` is that same 672 — a genuine
+  // floor identity. Before m23-dw this also read 640 === 640 and passed, but
+  // only because the echo was read at t0, before the window silently drifted
+  // to 672 ~400 ms later — a false pass for the right-looking reason.
   ck("G22 the window really is at the floor",
      floorH === r.result?.minHeight, JSON.stringify([floorH, r.result?.minHeight]));
   await sleep(500);
@@ -225,6 +249,10 @@ try {
      JSON.stringify(cardH));
   // 32 pt of scrim on each side of a centered modal is the visual minimum that
   // still reads as a card floating over the app rather than a full-screen sheet.
+  // `s.windowMinHeight` here is the LAYOUT floor (640), not the window
+  // content-rect floor used in G21/G22 above — correct on purpose, since the
+  // card is laid out in that same SwiftUI area. Do not "fix" this to 672; that
+  // would silently loosen the assertion by 32 pt.
   ck("G24 the card fits the window floor with room to breathe",
      typeof cardH === "number" && cardH + 64 <= s.windowMinHeight,
      `card ${cardH} + 64 vs floor ${s.windowMinHeight}`);
@@ -322,8 +350,14 @@ try {
   fail++; failures.push(`EXCEPTION ${e.message}`);
   console.log(`FAIL exception :: ${e.stack}`);
 } finally {
+  await domainGuard?.restore("finally");
   stopStaging(GATE);
 }
 
 console.log(`\n${pass}/${pass + fail} checks passed`);
-if (fail) { console.log(`failures: ${failures.join(", ")}`); process.exit(1); }
+if (fail) { console.log(`failures: ${failures.join(", ")}`); }
+// m23-fa-2: was `if (fail) {...; process.exit(1)}` then falling off the end
+// (implicit exit 0) — invisible to the census and vacuous exactly like the
+// ternary spellings: zero checks -> fail falsy -> exit 0. verdict() makes the
+// zero-checks-ran case a distinct exit 2 instead of a silent pass.
+verdict({ ran: pass + fail, failed: fail });

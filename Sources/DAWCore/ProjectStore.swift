@@ -314,12 +314,27 @@ public final class ProjectStore {
             engine?.playheadHandler = { [weak self] beats in
                 self?.transport.positionBeats = beats
             }
+            // End-of-content stop (m25-d): the engine tells us it reached the
+            // pre-computed bound; WE own transport state, so the stop lands on
+            // the ordinary `stop()` path. Always pushed on the main actor from
+            // the engine's playhead task — nothing here runs on the render
+            // thread.
+            engine?.setEndStopHandler { [weak self] in
+                self?.handleContentEndReached()
+            }
             // Schedule-time degradations land in the store's coalescing ring
             // (m15-e) — the one source of truth the wire snapshot and the UI
             // chip both read. Always pushed on the main actor.
             engine?.engineNoticeHandler = { [weak self] event in
                 self?.recordEngineNotice(event)
             }
+            // The m28-knob controller feed (see ProjectStore+MIDIControl). NOT
+            // an unconditional install: subscribing CREATES the CoreMIDI client
+            // and connects to every online source, so it happens only when a
+            // mapping or an armed learn actually needs it. This call re-attaches
+            // an already-wanted subscription across an engine swap — the
+            // `isSubscribed` latch would otherwise leave the new engine silent.
+            midiControl.reattach(engine: engine)
         }
     }
 
@@ -570,15 +585,122 @@ public final class ProjectStore {
 
     // MARK: - Transport
 
+    // MARK: End-of-content stop (m25-d)
+
+    /// Stop the transport when the playhead reaches the end of the last clip.
+    /// **Session preference, ON by default** — the user asked for the stop, so
+    /// on is the right default; running past the last clip (what Logic and
+    /// Live do) stays available by turning it off.
+    ///
+    /// Deliberately NOT on `TransportState`: that struct rides
+    /// `EditState.transport`, so undo would revert a *preference* along with
+    /// the edit it was toggled next to, and a new `CodingKey` there would
+    /// change every project file's and every snapshot's bytes. Deliberately
+    /// not `UserDefaults`-backed either, so **it does not survive relaunch**
+    /// — persisting it is app-layer work (the `PanelDensityStore` shape) and
+    /// is not part of this item.
+    ///
+    /// Never journaled, never written to disk, untouched by undo/redo — the
+    /// `engineNotices` class of session-transient state.
+    public private(set) var stopAtContentEnd: Bool = true
+
+    /// Sets the end-of-content stop preference and re-arms the live transport
+    /// immediately, so a toggle mid-playback takes effect on this run rather
+    /// than the next one. Allowed while recording (the arming predicate
+    /// refuses to produce a bound during a take regardless).
+    public func setStopAtContentEnd(_ enabled: Bool) {
+        stopAtContentEnd = enabled
+        refreshEndStop()
+    }
+
+    /// TRUE end of content in beats — the largest clip end across every track,
+    /// 0 for a project with no clips. THE single source of truth for "where
+    /// does the song end", with no display padding (see
+    /// `TransportEndStop.contentEndBeat`).
+    public var contentEndBeat: Double {
+        TransportEndStop.contentEndBeat(tracks: tracks)
+    }
+
+    /// The bound armed for the CURRENT run, or nil for "do not stop at content
+    /// end". THE one armed value: the engine gets a copy pushed to it, and the
+    /// headless ticker reads this property directly, so the two transports can
+    /// never disagree about where the song ends.
+    ///
+    /// Read O(1) per tick — the O(clips) max is computed only in
+    /// `refreshEndStop()`, at transition/edit rate.
+    private var armedEndStop: Double?
+
+    /// Recomputes the end-of-content bound, stores it, and pushes it to the
+    /// engine as one plain `Double?`. Called from every transition that can
+    /// change the answer: play, seek, loop change, preference toggle, and —
+    /// via both edit funnels — any edit that moves the content end.
+    ///
+    /// O(clips), on the main actor, never per tick and never per rendered
+    /// buffer. Called per EDIT, alongside the two `captureEditState()` deep
+    /// copies + structural compare `performEdit` already performs around every
+    /// edit body — a single max-scan over the same data. NOT benchmarked
+    /// against them; if edit latency ever becomes a measured problem this is a
+    /// candidate to gate on `transport.isPlaying`, at the cost of the armed
+    /// value being stale until the next transport transition.
+    ///
+    /// ⚠️ **BOTH EDIT FUNNELS OR NEITHER.** `performEdit` covers ordinary
+    /// edits; `undo()`/`redo()` bypass it entirely and reach
+    /// `restoreEditState`. Hooking only the first was MEASURED to leave the
+    /// bound stale in both directions mid-playback: adding a clip stopped the
+    /// transport EARLY at the old end, and undoing the last clip let it
+    /// OVERRUN to an end that no longer existed. Both are the exact bug this
+    /// feature exists to fix, so both funnels call this.
+    private func refreshEndStop() {
+        armedEndStop = currentEndStopBound()
+        engine?.setEndStop(beat: armedEndStop)
+    }
+
+    /// Clears the armed bound on BOTH sides. Used where a bound must provably
+    /// not survive — stop, and the start of a take.
+    private func disarmEndStop() {
+        armedEndStop = nil
+        engine?.setEndStop(beat: nil)
+    }
+
+    /// The bound for the transport as it stands right now, via the one shared
+    /// policy function — the store never re-derives it inline.
+    private func currentEndStopBound() -> Double? {
+        TransportEndStop.bound(
+            contentEndBeat: contentEndBeat,
+            positionBeats: transport.positionBeats,
+            isEnabled: stopAtContentEnd,
+            isRecording: transport.isRecording,
+            isLoopActive: TransportEndStop.isLoopActive(transport))
+    }
+
+    /// The engine reached the content-end bound. Stops on the ORDINARY path —
+    /// same state, same meter darkening, no journal entry — and guards against
+    /// a late callback arriving after the transport already stopped or a take
+    /// somehow started (belt-and-braces against the destructive mode: this is
+    /// the third independent place a recording take is protected).
+    private func handleContentEndReached() {
+        guard transport.isPlaying, !transport.isRecording else { return }
+        stop()
+    }
+
     public func play() {
         guard !transport.isPlaying else { return }
         transport.isPlaying = true
         if let engine {
             try? engine.prepare()
             engine.startPlayback(transport)
+            // AFTER startPlayback: the bound must not be readable by a
+            // playhead task that has not started yet, and startPlayback is
+            // what starts it. m25-d.
+            refreshEndStop()
         } else {
             // Headless (tests, no audio hardware injected): free-running
             // display ticker keeps the playhead honest.
+            // m25-d: arm BEFORE starting the ticker. Ordering is not actually
+            // load-bearing here (the tick sleeps first), but the ticker reads
+            // `armedEndStop` and leaving it set by a previous run would be a
+            // stale-bound trap the moment that changes.
+            refreshEndStop()
             startPositionTicker()
         }
     }
@@ -590,6 +712,10 @@ public final class ProjectStore {
         transport.isRecording = false
         playbackTask?.cancel()
         playbackTask = nil
+        // m25-d: disarm BEFORE the engine teardown, so a bound can never
+        // outlive the run that armed it and greet the next start (or the next
+        // TAKE) still live.
+        disarmEndStop()
         if wasRecording {
             // stopRecording halts playback internally AND finalizes the take —
             // calling stopPlayback here would tear the transport down twice.
@@ -612,6 +738,10 @@ public final class ProjectStore {
         }
         transport.positionBeats = max(0, beats)
         engine?.seek(transport)
+        // m25-d: the bound is armed only when playback STARTS before the
+        // content end, so a seek back from past-the-end re-arms it (and a seek
+        // past the end disarms) on this run rather than the next.
+        refreshEndStop()
     }
 
     public func returnToZero() throws {
@@ -896,9 +1026,37 @@ public final class ProjectStore {
         // ring cannot see it, so it would be heard and not recorded, which is
         // exactly the lie the refusal exists to prevent. Placed after every
         // throwing gate above, so a REFUSED record leaves the audition alone.
+        // Same argument for a pad gesture open when record begins (breath pad
+        // P6), plus one more: a parked CC 11 would attenuate the whole take
+        // while being invisible in the project. Releasing to neutral is the
+        // silent start. Ordered BEFORE `audition.stopAll` for the reason spelled
+        // out on `stopAllAudition()` — that call clears the engine's controller-
+        // preview ledger, which is what marks this push as a release. The hazard
+        // it guards (starting the audio hardware) cannot bite HERE, because a
+        // take is starting and the engine is necessarily running; the order is
+        // matched anyway so the two sites cannot teach opposite lessons.
+        padPreview.stop(engine: engine)
         audition.stopAll(engine: engine)
         transport.isRecording = true
         transport.isPlaying = true
+        // ⚠️⚠️ m25-d — RECORDING MUST NEVER STOP AT CONTENT END. Recording past
+        // the end of existing material is the entire point of recording, so an
+        // end-of-content stop here would silently truncate takes: actively
+        // destructive, and the one failure mode of this feature that loses a
+        // user's work.
+        //
+        // This is an EXPLICIT disarm, not a consequence of not arming. `stop()`
+        // already pushes nil, and `record()` refuses unless the transport is
+        // stopped, so a bound "should" be impossible here — but "should" is how
+        // a stale bound from a previous run gets to meet a rolling take. Two
+        // more independent guards back it: `TransportEndStop.bound` returns nil
+        // whenever `isRecording`, and the engine tick requires `activeTake ==
+        // nil`. Deleting any ONE of the three still leaves takes safe.
+        //
+        // Disarms BOTH sides: the headless ticker reads `armedEndStop`, so
+        // clearing only the engine's copy would still let a MIDI-only take on
+        // an engineless store stop itself at the old content end.
+        disarmEndStop()
         do {
             try engine.startTake(transport, audioURL: url,
                                  captureMIDI: !armedInstrumentIDs.isEmpty) { [weak self] result in
@@ -1453,6 +1611,11 @@ public final class ProjectStore {
     /// key press and the `note.audition` wire verb all run through it.
     @ObservationIgnored public let audition = AuditionController()
 
+    /// THE CC→target mapping home (m28-knob) — one table, one engine
+    /// subscription, the `audition` idiom. Engine-free; handed the engine per
+    /// call. See `ProjectStore+MIDIControl.swift`.
+    @ObservationIgnored public let midiControl = MIDIControlController()
+
     /// Sounds exactly `pitches` on `trackID` right now, outside the timeline
     /// (m23-d). SET semantics: `[]` stops. Held until the caller says otherwise
     /// (or the render side's 3 s liveness watchdog cuts it, if this actor stops
@@ -1504,8 +1667,58 @@ public final class ProjectStore {
 
     /// Releases every audition voice everywhere. Called on the project boundary
     /// and by the app on resign-active; idempotent.
+    ///
+    /// ⚠️ **THE ORDER IS LOAD-BEARING, unlike `panic()`'s.** The pad gesture is
+    /// released FIRST because `AudioEngine.stopAllAudition()` clears the engine's
+    /// controller-preview ledger, and that ledger is what tells the engine this
+    /// push is a release of live state rather than a first touch. Clear it first
+    /// and the neutral that follows looks like a cold-app preview — which
+    /// `AudioEngine.previewController` answers by STARTING THE AUDIO HARDWARE, on
+    /// the app-resign-active path, to send a controller to silence.
     public func stopAllAudition() {
+        // A pad gesture left open across a project boundary would park a
+        // controller on a strip nobody is looking at any more (breath pad P6).
+        padPreview.stop(engine: engine)
         audition.stopAll(engine: engine)
+    }
+
+    // MARK: - Breath pad live preview (P6)
+
+    /// THE pad-preview policy home — the pad view's drag, P7's `BreathPadModel`
+    /// and the `pad.previewEffort` wire verb all run through it.
+    @ObservationIgnored public let padPreview = PadPreviewController()
+
+    /// Streams one effort value to `trackID`'s instrument as a live controller,
+    /// for as long as a gesture is open (breath pad P6).
+    ///
+    /// ⛔ **NOT AN EDIT, AND NOT THE RECORD.** Nothing is written to any clip and
+    /// no undo entry is made. What a bounce renders is the committed
+    /// controller lane that `clip.applyEffortShape` writes — this is the
+    /// audible half of a drag, and it ends leaving the controller at its neutral
+    /// default so it leaves nothing behind (see `PadPreviewController`).
+    ///
+    /// REFUSED while recording, for `auditionPitches`' reason exactly: anything
+    /// a user hears during a take is reasonably assumed to be IN the take, and
+    /// both honest alternatives are worse. `.end` is always allowed, so a take
+    /// starting mid-gesture can never strand a parked controller.
+    @discardableResult
+    public func previewEffort(trackID: UUID, value: Double, phase: PadPreviewPhase,
+                              expressionCC: Int = PadPreviewController.defaultExpressionCC) throws
+        -> PadPreviewResult {
+        if phase != .end {
+            guard !transport.isRecording else {
+                throw ProjectError.transportBusy(
+                    "cannot preview the pad while recording — stop the take first")
+            }
+            guard let track = tracks.first(where: { $0.id == trackID }) else {
+                throw ProjectError.trackNotFound(trackID)
+            }
+            guard track.kind == .instrument else {
+                throw ProjectError.instrumentRequiresInstrumentTrack(track.kind)
+            }
+        }
+        return try padPreview.preview(trackID: trackID, effort: value, phase: phase,
+                                      expressionCC: expressionCC, engine: engine)
     }
 
     /// PANIC (m23-af) — the user's and the agent's way out of a stuck note.
@@ -1623,6 +1836,12 @@ public final class ProjectStore {
             transport.loopEndBeat = end
             engine?.loopChanged(transport)
         }
+        // m25-d: LOOPING TAKES PRECEDENCE. Enabling a loop mid-play disarms the
+        // content-end stop (the loop's own wrap owns the bound); disabling one
+        // re-arms it. Outside the `performEdit` on purpose — the bound is
+        // session state, not journaled document state, so undoing this edit
+        // must not restore an old bound.
+        refreshEndStop()
     }
 
     /// Enables/disables the punch recording window and optionally moves its
@@ -1680,7 +1899,16 @@ public final class ProjectStore {
     /// (Swift's `sorted(by:)` is NOT guaranteed stable, so sort on `(beat, index)`
     /// with the current index as the tiebreak). The single funnel every marker
     /// mutation re-applies so `markers` is always the ordered exposure.
-    private static func markersSortedByBeat(_ markers: [Marker]) -> [Marker] {
+    ///
+    /// Module-`internal`, NOT `private`, for exactly one reason: `markers` is the
+    /// ordered exposure for mutations in OTHER FILES of DAWCore too — the
+    /// `applySongSkeleton` extension (`SongSkeleton.swift`) merges its section
+    /// markers through this same funnel inside its single `performEdit`, and
+    /// Swift's `private` is unreachable across files even from an extension of
+    /// the same type. Widening the funnel keeps ONE sort; the alternative was a
+    /// second, drift-prone copy of the tiebreak rule. Still not `public` — the
+    /// ordering is an implementation detail of the store.
+    static func markersSortedByBeat(_ markers: [Marker]) -> [Marker] {
         markers.enumerated()
             .sorted { a, b in
                 a.element.beat != b.element.beat ? a.element.beat < b.element.beat : a.offset < b.offset
@@ -2749,6 +2977,9 @@ public final class ProjectStore {
             case "releaseMs": params.releaseMs = value
             case "kneeDb": params.kneeDb = value
             case "makeupDb": params.makeupDb = value
+            // m23-ck parallel compression: 1 fully wet (the default), 0 a
+            // bit-exact bypass. Already clamped to 0…1 by the spec range.
+            case "mix": params.mix = value
             default: return
             }
             effect.compressor = params
@@ -3323,13 +3554,120 @@ public final class ProjectStore {
         return clip
     }
 
+    // MARK: - Auto-extend reporting (m25-a-2)
+
+    /// What auto-extend did on the MOST RECENT `setClipNotes` / `pasteNotes`.
+    ///
+    /// **A REPORT CHANNEL, NOT STATE ANYTHING RENDERS OFF** — the arrange's
+    /// `arrangePointerZone` echo-seam idiom, one layer down. It exists because
+    /// an auto-extend refusal is the one refusal in this store that is NOT a
+    /// throw: the note write SUCCEEDS, the clip simply does not grow, so there
+    /// is no error for the caller to catch and the whole thing was silent
+    /// (m25-a-2 — the user's report: *"It should warn with signal or something
+    /// and direct user or give a clue"*). The caller reads it synchronously
+    /// after the call; `@ObservationIgnored` because a value that changes on
+    /// every note edit has no business invalidating a view.
+    ///
+    /// ⚠️ Both verbs set this on EVERY invocation, including to `.notNeeded`, so
+    /// a stale value can never be read as a fresh refusal.
+    @ObservationIgnored
+    public internal(set) var lastAutoExtendOutcome: ClipAutoExtend.ExtendOutcome = .notNeeded
+
+    /// The user-facing sentence for `lastAutoExtendOutcome`, or nil when there is
+    /// nothing to say. Derived, never stored — one value, one message.
+    public var lastAutoExtendRefusal: String? {
+        Self.autoExtendRefusalMessage(lastAutoExtendOutcome)
+    }
+
+    /// THE ONE HOME for auto-extend's user-facing words (m25-a-2).
+    ///
+    /// Prose lives HERE and not on `ClipAutoExtend`, whose own banner is *"Pure
+    /// value math, no store, no UI"*; and it lives here rather than in the view
+    /// because `ArrangeRefusalBubble` is contracted to render *"the store's
+    /// refusal message VERBATIM"* — the view renders, it never composes. Both
+    /// verbs (`setClipNotes` and `pasteNotes`, in two different files) call this
+    /// one function, so the two gestures cannot start telling the user different
+    /// stories about the same obstacle.
+    ///
+    /// ⛔ **THE SWITCH IS EXHAUSTIVE AND MUST STAY THAT WAY — NEVER ADD
+    /// `default:`.** `.notNeeded` is the ORDINARY case (the notes already fit),
+    /// and it fires on essentially every note edit inside a clip. A
+    /// `default: warn` would fire an amber bubble on every one of them, which is
+    /// far worse than the silence this exists to fix — and no test would catch
+    /// it, because every fixture anyone writes for this function is a refusal.
+    /// The compiler forcing a human to handle `.notNeeded` IS the safety.
+    ///
+    /// Each message names the ACTUAL obstacle, because the remedies differ and a
+    /// message that names the wrong one sends the user to do something that
+    /// cannot work.
+    /// `nonisolated` because it is a pure value→prose mapping that touches no
+    /// store state — the reason the store OWNS it is where the words belong,
+    /// not what they need to read.
+    nonisolated static func autoExtendRefusalMessage(_ outcome: ClipAutoExtend.ExtendOutcome) -> String? {
+        switch outcome {
+        case .notNeeded, .grew:
+            // Nothing was refused. SAY NOTHING.
+            return nil
+        case .refusedByGrowthCap:
+            return """
+                That note is more than \(ClipAutoExtend.maxGrowthBars) bars past the end of this clip, \
+                so the clip wasn't grown to reach it and the note won't sound. \
+                Place it closer to the clip, or make the clip longer first.
+                """
+        case .refusedByNeighbour:
+            return """
+                There's another clip right after this one, so this clip can't grow to reach that \
+                note and it won't sound. Move the next clip later, or place the note inside this clip.
+                """
+        case .refusedOnsetStillLatent:
+            return """
+                That note starts exactly at the clip's end, so it won't sound wherever the clip ends. \
+                Move it a little earlier.
+                """
+        }
+    }
+
     /// Replaces the entire note list of a MIDI clip (whole-array set — the M3
     /// piano roll edits by re-sending the clip's notes). Throws `clipNotFound`
     /// for an unknown id and `notAMIDIClip` for an audio clip. Notes are
     /// re-clamped and canonically ordered; the edit coalesces per-clip so a
     /// drag of one note is a single undo step. Returns the updated clip.
+    ///
+    /// **`extendToCover` (m25-a) — AUTO-EXTEND, one undo step.** Names the notes
+    /// the CURRENT gesture placed or moved. If one of them lands past the clip's
+    /// end, the clip GROWS to cover it (`ClipAutoExtend` decides how far) inside
+    /// THE SAME `performEdit` as the note write, so a double-click that both
+    /// adds a note and lengthens the clip is ONE undoable action — not two. The
+    /// default `[]` is the pre-m25-a behaviour byte for byte: the wire verb
+    /// `clip.setNotes`, paste, quantize and every other caller keep writing
+    /// past-the-end notes as latent data.
+    ///
+    /// ⚠️ **WHY IDS AND NOT A BOOL.** This verb is handed the roll's WHOLE
+    /// draft, which can already contain latent notes far past the end (m18-f:
+    /// store-legal, engine-windowed). "Extend to fit the notes" would therefore
+    /// mean "adding a note at bar 2 stretches the clip to a forgotten note at
+    /// bar 20". Only the ids named here can move the clip's edge.
+    ///
+    /// ⚠️ **THE GROW NEVER EATS A NEIGHBOUR.** Its ceiling is the distance to
+    /// the next clip on the track (`trailingHeadroom`), because a grow is routed
+    /// through `resolvingOverlaps` like every other edge move — and that choke
+    /// point resolves an overlap by TRIMMING OR DELETING the stationary clip.
+    /// Silently destroying part of a clip the user is not even looking at is a
+    /// far worse surprise than the silent note this item exists to fix, so when
+    /// there is no room the note simply stays latent.
+    ///
+    /// Comp members never reach any of this: `requireNotCompMember` throws
+    /// first, which is exactly right — their geometry is rebuilt from the take
+    /// group's comp on every comp edit, so a length this verb wrote would be
+    /// silently overwritten.
     @discardableResult
-    public func setClipNotes(clipID: UUID, notes: [MIDINote]) throws -> Clip {
+    public func setClipNotes(clipID: UUID, notes: [MIDINote],
+                             extendToCover: Set<UUID> = []) throws -> Clip {
+        // m25-a-2 — CLEARED BEFORE THE GUARDS, not after them. Every throw below
+        // leaves the call with nothing to report, and a caller reading the
+        // channel after a `try?` that threw must not be handed the PREVIOUS
+        // call's refusal.
+        lastAutoExtendOutcome = .notNeeded
         guard let (t, c) = locateClip(clipID) else {
             throw ProjectError.clipNotFound(clipID)
         }
@@ -3343,11 +3681,86 @@ public final class ProjectStore {
             MIDINote(id: $0.id, pitch: $0.pitch, velocity: $0.velocity,
                      startBeat: $0.startBeat, lengthBeats: $0.lengthBeats)
         }
-        performEdit("Edit Notes", key: "clip.notes:\(clipID.uuidString)") {
-            tracks[t].clips[c].notes = MIDINote.canonicallyOrdered(reclamped)
+        let ordered = MIDINote.canonicallyOrdered(reclamped)
+
+        // Decide the grow BEFORE the edit opens — `ClipAutoExtend` is pure, and
+        // the meter is sampled at the clip's start exactly as the piano roll
+        // samples it for its own bar lines (`ContentView`: `beatsPerBar(atBeat:
+        // clip.startBeat)`), so the new end lands on a line the user can see.
+        let clip = tracks[t].clips[c]
+        // ⚠️ m25-a-2 — `.map { … } ?? .notNeeded`, NOT `.flatMap`, AND THE
+        // DIFFERENCE IS THE FEATURE. `coverage` returns nil when `extendToCover`
+        // is empty or names nothing in this submission — which is the ORDINARY
+        // case, not a refusal: the roll's DELETE key and the velocity lane reach
+        // this verb with an empty set on every single press. Folding that into
+        // the same `nil` as the three real refusals is exactly how a warning
+        // ends up firing on every delete keystroke.
+        let outcome = ClipAutoExtend.coverage(of: ordered, ids: extendToCover)
+            .map { span in
+                ClipAutoExtend.outcome(
+                    currentLengthBeats: clip.lengthBeats,
+                    coveringOnsetBeat: span.onsetBeat,
+                    coveringEndBeat: span.endBeat,
+                    beatsPerBar: transport.meterMap.beatsPerBar(atBeat: clip.startBeat),
+                    maxLengthBeats: trailingHeadroom(trackIndex: t, clipIndex: c))
+            } ?? .notNeeded
+        lastAutoExtendOutcome = outcome
+        var grownLength: Double?
+        if case .grew(let length) = outcome { grownLength = length }
+
+        // ONE `performEdit`. `performEdit` is NOT re-entrant (it captures
+        // before-state and journals unconditionally, with no depth counter), so
+        // the length is written by mutating `tracks` in place here rather than
+        // by calling `trimClip`/`fitClipToContent` — the group-verb precedent.
+        //
+        // ⚠️ It also deliberately does NOT route through `applyTrimWindow`, and
+        // that is a CORRECTNESS point, not a style one: that helper re-windows
+        // the note list and DROPS every note whose start is past the new length
+        // (`guard shiftedStart < newLength`). On a grow that is capped — by
+        // `maxGrowthBars` or by a neighbour — the notes beyond the cap are
+        // precisely the legal-but-latent data m18-f promises to keep, and
+        // running them through the trim window would silently delete them. Its
+        // other work is a no-op on a trailing-edge grow anyway: `delta` is 0, so
+        // `startOffsetSeconds` is unchanged, and fades / gain envelope /
+        // controller lanes only ever re-clamp DOWNWARD to a shorter window.
+        let label = grownLength == nil ? "Edit Notes" : "Edit Notes & Extend Clip"
+        performEdit(label, key: "clip.notes:\(clipID.uuidString)") {
+            tracks[t].clips[c].notes = ordered
+            if let grownLength {
+                tracks[t].clips[c].lengthBeats = grownLength
+                // The no-silent-overlap choke point (m13-b) is honoured even
+                // though `trailingHeadroom` has already made this a no-op by
+                // construction. Belt and braces in the safe direction: if the
+                // headroom math is ever wrong, the invariant still holds.
+                tracks[t].clips = Self.resolvingOverlaps(
+                    in: tracks[t].clips, activeIDs: [clipID],
+                    start: clip.startBeat, end: clip.startBeat + grownLength,
+                    tempoMap: transport.tempoMap).clips
+            }
             engine?.tracksDidChange(tracks)
         }
-        return tracks[t].clips[c]
+        // Re-find by id: `resolvingOverlaps` can remove clips and shift indices.
+        return tracks[t].clips.first { $0.id == clipID } ?? tracks[t].clips[c]
+    }
+
+    /// How long `clips[c]` may become before its trailing edge reaches the next
+    /// clip on the same track — the ceiling an auto-extend (m25-a) must respect
+    /// so a grow never trims a neighbour. nil when nothing follows it.
+    ///
+    /// A clip starting at exactly the same beat counts as zero headroom (that is
+    /// an overlap that already exists; an auto-extend is not the place to
+    /// resolve it). Take-group members count as blockers like any other clip:
+    /// `resolvingOverlaps` exempts them from TRIMMING, which means growing over
+    /// one would leave a genuine silent overlap rather than a trimmed neighbour
+    /// — the worse of the two outcomes.
+    func trailingHeadroom(trackIndex t: Int, clipIndex c: Int) -> Double? {
+        let start = tracks[t].clips[c].startBeat
+        var nearest: Double?
+        for (i, other) in tracks[t].clips.enumerated()
+        where i != c && other.startBeat >= start {
+            nearest = Swift.min(nearest ?? .infinity, other.startBeat)
+        }
+        return nearest.map { Swift.max(0, $0 - start) }
     }
 
     // MARK: - MIDI time-range editing (beta m10-h)
@@ -3691,6 +4104,43 @@ public final class ProjectStore {
         let name = tracks[t].takeGroups.first(where: { $0.id == gid })?.name
             ?? tracks[t].clips[c].name
         throw ProjectError.clipInTakeGroup(name, clipID: tracks[t].clips[c].id)
+    }
+
+    /// The ASK form of `requireNotCompMember` (m25-c-2): the refusal an ordinary
+    /// clip edit WOULD throw for this clip, or nil when it would pass.
+    ///
+    /// **FOR SURFACES THAT MUST REFUSE BEFORE THE PRESS, NOT AFTER IT.** The
+    /// Humanize and Quantize panels offered Apply on a comp member, the store
+    /// threw, a `try?` ate it and the panel closed having done nothing — the
+    /// whole of m25-c-2. They now ask this at open time, disable Apply, and print
+    /// `errorDescription` VERBATIM (the `ArrangeRefusalBubble` rule: the view
+    /// renders, it never composes — and the m25-a-2 rule that the words live in
+    /// the store, so one obstacle cannot start telling two stories).
+    ///
+    /// ⛔ **IMPLEMENTED BY CALLING THE GUARD, NEVER BY RE-TESTING `takeGroupID`.**
+    /// A second copy of "is this a comp member?" is exactly what the guard's own
+    /// doc says no caller needs, and a copy is free to drift from the throw it
+    /// exists to predict. Because the question and the answer are the same code,
+    /// ask-then-act cannot disagree with act-and-catch here.
+    ///
+    /// An UNKNOWN clip id answers `nil`, NOT a refusal: this method answers one
+    /// question — "would the comp guard bite?" — and a clip that is not in the
+    /// project is a different question its own caller already handles (the panel
+    /// openers `guard` on finding the clip; the mutation throws `clipNotFound`).
+    ///
+    /// **NO WIRE VERB, DELIBERATELY.** An agent already gets this exact sentence,
+    /// from this exact guard, as the error `clip.humanize` / `clip.quantize`
+    /// return — it was only the human surfaces that had the refusal and did not
+    /// show it. A query verb would be a second way to ask a question the wire
+    /// already answers, so `allCommands` and MCP are untouched by m25-c-2.
+    public func compEditRefusal(clipID: UUID) -> ProjectError? {
+        guard let (t, c) = locateClip(clipID) else { return nil }
+        do {
+            try requireNotCompMember(trackIndex: t, clipIndex: c)
+            return nil
+        } catch {
+            return error as? ProjectError
+        }
     }
 
     /// Clamps a fade pair to a clip length. Each fade is first pinned to
@@ -4069,6 +4519,46 @@ public final class ProjectStore {
         return (effective, effective != requested)
     }
 
+    /// What `moveClips(ids:byBeats:)` WOULD translate by — asked without moving
+    /// anything (m25-k).
+    ///
+    /// EXISTS SO A LIVE DRAG CAN DRAW AN HONEST GHOST. The arrange previews a
+    /// body drag instead of committing it per frame (`ArrangeBodyDrag` — the
+    /// cadence rule), and a preview that ignored the whole-group beat-0 clamp
+    /// would show clips crossing the wall and then snap them back on release.
+    ///
+    /// ⚠️ THIS IS NOT A SECOND CLAMP. It calls `clampedGroupBeatDelta` — the ONE
+    /// home — over the SAME `minStart` `moveClips` computes, so the preview and
+    /// the commit cannot disagree by construction. The m23-f finding (two
+    /// independent computations of one quantity that can agree BY LUCK) is
+    /// exactly what routing through the shared static avoids; a re-derived
+    /// `max(delta, -minStart)` here would have been that bug.
+    ///
+    /// DELIBERATELY NON-THROWING, unlike `moveClips`. This runs once per pointer
+    /// frame while ids can go stale under the gesture (an undo, an agent's
+    /// `clip.remove`), and a throw there would turn a cosmetic staleness into a
+    /// refused drag. Unknown ids are SKIPPED — the `ArrangeSelection.resolved(in:)`
+    /// silent-skip policy, one layer down — and an empty/all-stale set reports a
+    /// zero delta rather than pretending the drag can travel.
+    ///
+    /// It reports the CLAMP ONLY. It does not report what the drop would trim or
+    /// remove, and that omission is deliberate: answering "what will this
+    /// destroy" without destroying it needs the overlap pass run against a
+    /// scratch copy, which would be a second producer of the resolution the
+    /// choke point owns. The visible-preview idea (ROADMAP m25-k route ⓑ) wants
+    /// that answer and should get it by asking `resolvingGroupOverlaps` on a
+    /// copy, not by growing this query.
+    public func plannedGroupBeatDelta(ids: [UUID], byBeats delta: Double)
+        -> (effective: Double, clamped: Bool) {
+        var seen = Set<UUID>()
+        let starts: [Double] = ids.compactMap { id in
+            guard seen.insert(id).inserted, let loc = locateClip(id) else { return nil }
+            return tracks[loc.track].clips[loc.clip].startBeat
+        }
+        guard let minStart = starts.min() else { return (0, false) }
+        return Self.clampedGroupBeatDelta(requested: delta, minStart: minStart)
+    }
+
     /// The ONE home for the GROUP overlap RECIPE (hoisted out of `moveClips` at
     /// m23-aj): `resolvingOverlaps` run ONCE PER MOVER over ONE track's array,
     /// feeding the rebuilt array forward, in a caller-order-independent sort.
@@ -4303,8 +4793,31 @@ public final class ProjectStore {
     /// keeps the no-skip rule true: `byTracks: 5` on a 3-track project clamps to
     /// the last track and the caller then kind-checks THAT landing. It does not
     /// hunt for a landing that works.
-    static func clampedTrackDelta(requested: Int, minTrackIndex: Int, maxTrackIndex: Int,
-                                  trackCount: Int) -> (effective: Int, clamped: Bool) {
+    /// ⚠️ PUBLIC AS OF m25-l-2, AND THE VISIBILITY IS THE POINT — NOT A
+    /// CONVENIENCE. The cross-track DRAG must draw a ghost on the lane the drop
+    /// will actually reach, and `ArrangeDragPreview`'s own contract forbids
+    /// promising a landing the commit then refuses. The preview therefore needs
+    /// THIS clamp, and the only alternatives were a second copy of the formula in
+    /// the app layer (the drift surface this codebase keeps paying for) or a
+    /// preview that lies at the top and bottom of the track list. Exposing the
+    /// ONE home is the cheaper correctness: `ArrangeVerticalDrag.effectiveDelta`
+    /// calls exactly this function, so the ghost and the landing agree by
+    /// construction rather than by two authors agreeing.
+    ///
+    /// Still PURE and still not an operation — it reads nothing and mutates
+    /// nothing. No behaviour changed here; only who may ask.
+    ///
+    /// `nonisolated` for exactly that reason: `ProjectStore` is `@MainActor`, so
+    /// its statics inherit that isolation, but this function reads no stored
+    /// property and touches no reference type — every input arrives as a
+    /// parameter. Opting it out is a statement of that fact, not a concurrency
+    /// escape hatch (contrast `@unchecked Sendable`, which asserts something the
+    /// compiler cannot see; here the compiler can see everything). It lets the
+    /// headless `ArrangeVerticalDrag` — and its tests — call the one home
+    /// without hopping the main actor.
+    nonisolated public static func clampedTrackDelta(
+        requested: Int, minTrackIndex: Int, maxTrackIndex: Int,
+        trackCount: Int) -> (effective: Int, clamped: Bool) {
         guard trackCount > 0 else { return (0, requested != 0) }
         let lower = -minTrackIndex                    // topmost mover lands on track 0
         let upper = (trackCount - 1) - maxTrackIndex  // bottommost lands on the last track
@@ -4357,15 +4870,32 @@ public final class ProjectStore {
     /// private core behind both public shapes; `landing` is the ONLY thing they
     /// disagree about.
     ///
-    /// THE VERTICAL AXIS IS THE RAW `tracks` INDEX, and there is NO SKIP in
-    /// either sense — not "search past a bus", not "move the clips that can and
-    /// leave the rest". A bus occupies a position on the axis like any other
-    /// track because the arrange draws a row for every track including buses, and
-    /// the future cross-track DRAG resolves an ABSOLUTE destination (the row under
-    /// the pointer) which cannot skip. Two vertical axes disagreeing about the
-    /// same visible row is the divergence this rule exists to prevent. The cost is
-    /// stated rather than hidden: in `[audio, BUS, audio]` a ±1 delta cannot reach
-    /// the far audio track, and the answer is `track.reorder`, not a second axis.
+    /// THE VERTICAL AXIS IS THE RAW `tracks` INDEX, and THIS VERB CONTAINS NO
+    /// SKIP in either sense — not "search past a bus", not "move the clips that
+    /// can and leave the rest". A bus occupies a position on the axis like any
+    /// other track because the arrange draws a row for every track including
+    /// buses, and the cross-track DRAG resolves an ABSOLUTE destination (the row
+    /// under the pointer) which cannot skip. Two vertical axes disagreeing about
+    /// the same visible row is the divergence this rule exists to prevent.
+    ///
+    /// ⚠️ **THE COST THIS PARAGRAPH USED TO STATE WAS PAID BY A REAL USER, and
+    /// the ruling has moved one level up (m25-l-1 ④).** It read: *"in
+    /// `[audio, BUS, audio]` a ±1 delta cannot reach the far audio track, and
+    /// the answer is `track.reorder`, not a second axis."* The user hit exactly
+    /// that in `[instrument, AUDIO, instrument]` and reported it as a bug —
+    /// *"works when dragging by mouse … if I use arrow keys, it gets stuck"* —
+    /// because a mouse drag reaches the far lane by requesting ±2 while an arrow
+    /// press could only ever request ±1.
+    ///
+    /// **The verb is UNCHANGED and the rule above still holds here in full: this
+    /// axis is the raw index, this verb never searches, and an ineligible
+    /// landing is still refused, never entered.** What moved is WHO CHOOSES THE
+    /// REQUEST. `ArrangeVerticalNudgeReach.delta` (DAWAppKit) now picks the
+    /// smallest reachable |delta| for the KEYBOARD before calling in, exactly as
+    /// `ArrangeVerticalDrag.effectiveDelta` picks the pointer's — both by
+    /// calling `clampedTrackDelta` and `Track.canHold` rather than re-deriving
+    /// them. That is not a second axis: every caller still names one rigid
+    /// integer on this one index, and this verb still answers legality alone.
     ///
     /// RUNNING OFF THE TOP OR BOTTOM CLAMPS THE WHOLE GROUP (`clampedTrackDelta`),
     /// never per clip and never a throw — the beat-0 precedent. A LANDING THAT
@@ -5644,6 +6174,25 @@ public final class ProjectStore {
         return tracks[t].clips[c]
     }
 
+    /// Whether a controller lane of `type` on this clip's track will actually
+    /// reach the sound, and one sentence naming the controller and the reason
+    /// when it will not (m27). nil = it sounds.
+    ///
+    /// Deliberately SEPARATE from `setControllerLane` rather than folded into
+    /// its return: the accept path must keep returning the updated `Clip` (its
+    /// callers, the wire echo and the piano-roll strip, all depend on that),
+    /// and a warning is not a property of a clip. Callers pair the two — the
+    /// wire injects this into the response's `warnings` array, the same idiom
+    /// media import uses for a successful-but-degraded result.
+    ///
+    /// Read-only and non-throwing: an unknown clip simply has nothing to warn
+    /// about, and this must never be able to fail an edit that succeeded.
+    public func controllerLaneWarning(clipID: UUID, type: MIDIControllerType) -> String? {
+        guard let (t, _) = locateClip(clipID) else { return nil }
+        return MIDIControllerRouting.inertLaneWarning(
+            for: type, instrument: tracks[t].instrument)
+    }
+
     /// Removes the clip's controller lane of `type` (m16-b). MIDI clips only
     /// (`notAMIDIClip` naming `clip.removeControllerLane` otherwise — m16-g
     /// controller-specific copy). If the clip has no lane of that type, throws
@@ -5991,6 +6540,14 @@ public final class ProjectStore {
             lastEditEvent = EditEvent(seq: editEventSeq, label: label, key: key)
         }
         markDirty()
+        // m25-d: an edit can move the content end, and a transport already
+        // running must obey the NEW end — otherwise adding a clip mid-playback
+        // stops early at the old one. Unconditional (not gated on
+        // `isPlaying`) so the armed value is correct before the next start
+        // too; the arming predicate handles recording and looping itself.
+        // The twin call is in `restoreEditState` — undo/redo never come
+        // through here. See `refreshEndStop()`.
+        refreshEndStop()
         return result
     }
 
@@ -6079,6 +6636,13 @@ public final class ProjectStore {
         if metronomeChanged || (meterChanged && !tempoChanged), transport.isPlaying {
             engine?.metronomeChanged(transport)
         }
+        // m25-d: the `performEdit` twin — undo/redo never pass through there,
+        // so without this an undo of "add the last clip" mid-playback leaves
+        // the transport armed at an end that no longer has content behind it
+        // (MEASURED: it overran to beat 24 with content ending at 8). Covers
+        // the loop-window restore above too, since the arming predicate reads
+        // the loop state that `restored` just installed.
+        refreshEndStop()
     }
 
     /// Saves the session to a `.dawproj` bundle.
@@ -7199,7 +7763,9 @@ public final class ProjectStore {
             midiInputs: engine?.availableMIDIInputs(),
             midiEventCount: engine?.midiEventCount(),
             engineNotices: engineNotices,
-            reference: reference
+            reference: reference,
+            stopAtContentEnd: stopAtContentEnd,
+            contentEndBeat: contentEndBeat
         )
     }
 
@@ -7224,6 +7790,12 @@ public final class ProjectStore {
     /// render-derived beats through `playheadHandler`, which is the source of
     /// truth for `transport.positionBeats` during playback.
     private func startPositionTicker() {
+        // m25-d: the tick reads `armedEndStop` — an O(1) stored property — not
+        // a recomputed max, so the 30 Hz loop stays cheap. It is deliberately
+        // NOT captured into a local: an edit that moves the content end
+        // mid-playback must reach the RUNNING transport, and a captured copy
+        // was measured going stale in both directions (early stop after an
+        // add, overrun after an undo). nil means "run linearly forever".
         playbackTask?.cancel()
         playbackTask = Task { [weak self] in
             var last = ContinuousClock.now
@@ -7239,6 +7811,17 @@ public final class ProjectStore {
                 // row 19) — advances correctly across future map boundaries.
                 self.transport.positionBeats = self.transport.tempoMap.beat(
                     from: self.transport.positionBeats, elapsedSeconds: seconds)
+                // End of content (m25-d): park the playhead EXACTLY on the
+                // content end rather than wherever this tick overshot to, then
+                // stop on the ordinary path. `stop()` cancels this very task
+                // (safe — cancelling self from inside is legal) and the break
+                // leaves the loop immediately either way.
+                if let endStop = self.armedEndStop,
+                   self.transport.positionBeats >= endStop {
+                    self.transport.positionBeats = endStop
+                    self.stop()
+                    break
+                }
             }
         }
     }

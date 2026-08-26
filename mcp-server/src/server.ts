@@ -28,6 +28,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { DawBridge } from "./bridge.js";
 import { generateImage, generateLyrics, generateSongSuno } from "./ai.js";
+import { installMcpLogging, withMutatingRegistration } from "./mcp-log.js";
+import { formatToolText } from "./result-spill.js";
 
 interface ToolTextContent {
   type: "text";
@@ -41,18 +43,27 @@ interface ToolResult {
 }
 
 function textResult(value: unknown): ToolResult {
-  // Commands with no result body resolve `undefined`; JSON.stringify(undefined)
-  // returns the JS value `undefined` (not the string "undefined"), which would
-  // produce an invalid MCP content item ({type:"text", text: undefined}) and
-  // fail client-side validation even though the command executed successfully.
-  const text =
-    value === undefined ? "ok" : typeof value === "string" ? value : JSON.stringify(value, null, 2);
-  return { content: [{ type: "text", text }] };
+  // `formatToolText` (src/result-spill.ts) IS the old one-liner below the size
+  // limit — byte-identical `JSON.stringify(value, null, 2)`, and "ok" for the
+  // commands with no result body (JSON.stringify(undefined) returns the JS
+  // value `undefined`, not the string, which would produce an invalid MCP
+  // content item and fail client-side validation even though the command
+  // executed successfully). Above the limit it keeps every scalar/short field
+  // inline and replaces only the oversized nodes with placeholders pointing at
+  // a spill file — see that module's header for the two measured replies
+  // (146,744 and 2,222,508 characters) this exists for. This is the ONE seam
+  // every one of the 191 registrations passes through, via `toToolResult`.
+  return { content: [{ type: "text", text: formatToolText(value) }] };
 }
 
 function errorResult(err: unknown): ToolResult {
   const message = err instanceof Error ? err.message : String(err);
-  return { content: [{ type: "text", text: message }], isError: true };
+  // The same size guard as the success path — an error is the other corner an
+  // oversized payload can escape through (an app-side error that echoes the
+  // payload it choked on would blow the caller's context just as effectively).
+  // Below the limit `formatToolText` returns the message BYTE-IDENTICALLY, so
+  // every actionable error sentence this server is built around is unchanged.
+  return { content: [{ type: "text", text: formatToolText(message) }], isError: true };
 }
 
 /** Run `fn`, wrapping the outcome as MCP tool content either way (never throws). */
@@ -70,6 +81,15 @@ export const server = new McpServer({
   name: "daw-pro",
   version: "0.1.0",
 });
+
+// Append-only call logging (m23-ca, src/mcp-log.ts) — MUST install before the
+// first `registerTool(`/`server.registerTool(` call below, so every one of
+// the 188 registrations (154 local wrapper + 34 direct, re-measured at
+// breath-pad P1 by name-capturing regex — the figure here had been left at the
+// m26-k value of 185 through two later additions)
+// is instrumented. See that file's header for the full design (before-snapshot
+// source/cost, redaction, seam choice).
+installMcpLogging(server, bridge);
 
 /**
  * Registers a MUTATING tool with a STRICT input schema (m16-e, audit F5's
@@ -105,7 +125,13 @@ function registerTool(
   const strictConfig = config.inputSchema
     ? { ...config, inputSchema: z.object(config.inputSchema).strict() }
     : config;
-  server.registerTool(name, strictConfig as any, handler as any);
+  // Marks this registration as MUTATING for mcp-log.ts's before-capture
+  // decision (see that file's header) — the flag it reads is invisible at
+  // the `server.registerTool` seam otherwise, since both this wrapper and
+  // the 34 direct read-only registrations call the same patched method.
+  withMutatingRegistration(() => {
+    server.registerTool(name, strictConfig as any, handler as any);
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -358,6 +384,10 @@ registerTool(
               .max(400)
               .describe("Tempo in BPM for this segment. Range 20-400."),
           })
+            // `.strict()` (m30-c): a typo'd field (e.g. "bmp") inside one
+            // `segments` element would otherwise be silently stripped
+            // instead of rejected.
+            .strict()
         )
         .min(1)
         .describe("Ordered tempo segments; segment 0 at beat 0 sets the base tempo."),
@@ -379,6 +409,8 @@ registerTool(
               .min(1)
               .describe("Beat unit — the bottom number (e.g. 4 for 3/4)."),
           })
+            // `.strict()` (m30-c): same hole, one `meterChanges` element.
+            .strict()
         )
         .min(1)
         .optional()
@@ -554,6 +586,40 @@ registerTool(
     toToolResult(() => bridge.send("transport.setMetronome", { enabled, countInBars }))
 );
 
+registerTool(
+  "transport_set_stop_at_content_end",
+  {
+    title: "Stop playback at the end of the song",
+    description:
+      "Control whether playback stops automatically when the playhead reaches " +
+      "the end of the last clip (the end of the song). ON by default. Turn it " +
+      "OFF to let the transport keep running into empty space past the last " +
+      "clip, which is what Logic and Live do by default. A recording take " +
+      "NEVER stops at the content end regardless of this setting — recording " +
+      "past the end of existing material is the point of recording — and an " +
+      "active loop takes precedence, cycling forever rather than stopping. " +
+      "This is a session preference, not project data: it is not saved with " +
+      "the project, edit_undo does not affect it, and it resets to on when the " +
+      "app restarts. Returns `{stopAtContentEnd, contentEndBeat}`, where " +
+      "`contentEndBeat` is the measured end of the last clip across all tracks " +
+      "(0 when the project has no clips). On project_snapshot the setting " +
+      "appears under the INVERTED name `runsPastContentEnd`, and only when it " +
+      "has been turned off: absent means playback stops at the content end (the " +
+      "default), `true` means it free-runs past the last clip. It is never " +
+      "`false`. Read the snapshot key by its own name and it is never " +
+      "misleading — do not look for `stopAtContentEnd` there.",
+    inputSchema: {
+      enabled: z
+        .boolean()
+        .describe(
+          "True to stop playback at the end of the last clip, false to keep running past it."
+        ),
+    },
+  },
+  async ({ enabled }) =>
+    toToolResult(() => bridge.send("transport.setStopAtContentEnd", { enabled }))
+);
+
 // ---------------------------------------------------------------------------
 // Tracks
 // ---------------------------------------------------------------------------
@@ -652,7 +718,16 @@ registerTool(
     description:
       "Set a track's fader volume as a linear gain multiplier, where 1.0 is " +
       "unity gain (0 dB, no change). Range 0-2: 0 is silence, 0.5 is roughly " +
-      "-6 dB, 2.0 is roughly +6 dB. This is linear gain, not decibels.",
+      "-6 dB, 2.0 is roughly +6 dB. This is linear gain, not decibels. " +
+      "⚠️ CHECK THE REPLY: it normally reads \"ok\", but comes back as " +
+      "`{automationControlled: true, automationPointCount}` when an active " +
+      "VOLUME AUTOMATION LANE — not the value you just passed — governs what " +
+      "is heard and what renders, so this call will NOT change the audible " +
+      "level. (The keys are absent when nothing is overriding you.) " +
+      "The write still lands: it is stored, undoable, moves " +
+      "the fader, and takes effect the moment the lane is disabled " +
+      "(automation_set_lane_enabled), emptied, or removed. To change an " +
+      "automated level, edit the lane with automation_set_points instead.",
     inputSchema: {
       trackId: z.string().min(1).describe("Id of the track, from project_snapshot."),
       volume: z
@@ -731,14 +806,154 @@ registerTool(
   async ({ trackId, armed }) => toToolResult(() => bridge.send("track.setArm", { trackId, armed }))
 );
 
+/** A zone's dynamic-layer crossfade (m27 leg B / SFZ pp/mf/ff-layer technique).
+ * Nested rather than nine flat `sampler.zones[i].xf*` fields because the nine
+ * bounds only mean anything together, and grouping them under one optional
+ * key lets a zone with no crossfade omit all nine at once instead of nine
+ * individual omissions. Mirrors `SamplerCrossfade` (Sources/DAWCore/Model.swift)
+ * field-for-field. */
+const samplerCrossfadeSchema = z
+  .object({
+    controller: z
+      .number()
+      .int()
+      .min(0)
+      .max(127)
+      .optional()
+      .describe(
+        "CC number driving the CONTINUOUS crossfade domain (SFZ `xfin_locc<N>`/" +
+          "`xfin_hicc<N>`/`xfout_locc<N>`/`xfout_hicc<N>`) — re-evaluated while a note " +
+          "SOUNDS, so a held note really does change layer as this controller moves. " +
+          "Omitted = the CC domain is off; the velocity-domain bounds below (if any) " +
+          "still apply."
+      ),
+    ccInLo: z
+      .number()
+      .int()
+      .min(0)
+      .max(127)
+      .optional()
+      .describe(
+        "CC value (raw MIDI 0-127, SFZ `xfin_locc`) where this zone starts fading IN. " +
+          "Only meaningful with `controller` set. Together with `ccInHi` this zone's " +
+          "gain ramps 0→1 (equal-power curve) as the controller rises through " +
+          "[ccInLo, ccInHi]."
+      ),
+    ccInHi: z
+      .number()
+      .int()
+      .min(0)
+      .max(127)
+      .optional()
+      .describe(
+        "CC value (raw MIDI 0-127, SFZ `xfin_hicc`) where this zone finishes fading " +
+          "in. See `ccInLo`."
+      ),
+    ccOutLo: z
+      .number()
+      .int()
+      .min(0)
+      .max(127)
+      .optional()
+      .describe(
+        "CC value (raw MIDI 0-127, SFZ `xfout_locc`) where this zone starts fading " +
+          "OUT. Together with `ccOutHi` this zone's gain ramps 1→0 as the controller " +
+          "rises through [ccOutLo, ccOutHi]."
+      ),
+    ccOutHi: z
+      .number()
+      .int()
+      .min(0)
+      .max(127)
+      .optional()
+      .describe(
+        "CC value (raw MIDI 0-127, SFZ `xfout_hicc`) where this zone finishes fading " +
+          "out. See `ccOutLo`."
+      ),
+    velInLo: z
+      .number()
+      .int()
+      .min(0)
+      .max(127)
+      .optional()
+      .describe(
+        "Note-on velocity (raw MIDI 0-127, SFZ `xfin_lovel`) where this zone starts " +
+          "fading IN. FIXED AT NOTE-ON, unlike the CC domain above — this smooths " +
+          "layer choice ACROSS successive notes and cannot change anything within one " +
+          "held note. Together with `velInHi` this zone's gain ramps 0→1 as note-on " +
+          "velocity rises through [velInLo, velInHi]."
+      ),
+    velInHi: z
+      .number()
+      .int()
+      .min(0)
+      .max(127)
+      .optional()
+      .describe(
+        "Note-on velocity (raw MIDI 0-127, SFZ `xfin_hivel`) where this zone finishes " +
+          "fading in. See `velInLo`."
+      ),
+    velOutLo: z
+      .number()
+      .int()
+      .min(0)
+      .max(127)
+      .optional()
+      .describe(
+        "Note-on velocity (raw MIDI 0-127, SFZ `xfout_lovel`) where this zone starts " +
+          "fading OUT. Together with `velOutHi` this zone's gain ramps 1→0 as note-on " +
+          "velocity rises through [velOutLo, velOutHi]."
+      ),
+    velOutHi: z
+      .number()
+      .int()
+      .min(0)
+      .max(127)
+      .optional()
+      .describe(
+        "Note-on velocity (raw MIDI 0-127, SFZ `xfout_hivel`) where this zone " +
+          "finishes fading out. See `velOutLo`."
+      ),
+  })
+  // `.strict()` (m26/sax-team defect B precedent — see `samplerZonePatchSchema`
+  // below): without it a typo'd field inside `crossfade` (e.g. "ccInL0") is
+  // silently stripped by zod's default parse mode instead of rejected, and
+  // the call still reports success with one fewer field than intended.
+  .strict()
+  .optional()
+  .describe(
+    "Dynamic-layer crossfade for THIS zone — the SFZ pp/mf/ff-layer technique: fade " +
+      "this zone's gain in/out against a CC stream and/or note-on velocity instead of " +
+      "a hard keyzone/velocity-range switch, so a library with separately-recorded " +
+      "dynamic layers blends between them rather than clicking from one to the next. " +
+      "Two INDEPENDENT domains, and a zone may use either or both (their gains " +
+      "multiply): the CC domain (`controller` + `ccInLo`/`ccInHi`/`ccOutLo`/`ccOutHi`) " +
+      "re-evaluates continuously while a note holds; the velocity domain " +
+      "(`velInLo`/`velInHi`/`velOutLo`/`velOutHi`) is fixed at note-on. Any bound you " +
+      "omit means \"no fade in that direction\" and resolves to a gain of exactly " +
+      "1.0 — so a zone with every field omitted (the default) is bit-identical to " +
+      "having no crossfade at all. Curve is SFZ's documented default, power " +
+      "(equal-power / constant loudness through the fade); there is no way to select " +
+      "a different curve. Typical use: give the LOUD/BRIGHT layer's zone `ccInLo`/" +
+      "`ccInHi` (or `velInLo`/`velInHi`) to fade it IN as the controller/velocity " +
+      "rises, and give the SOFT/DARK layer's zone the matching `ccOutLo`/`ccOutHi` " +
+      "(or `velOutLo`/`velOutHi`) to fade it OUT over the same span."
+  );
+
 const samplerZoneSchema = z.object({
   path: z
     .string()
     .min(1)
     .describe(
-      "REQUIRED. Absolute file path to this zone's sample audio file (wav/aiff/etc.). The " +
-        "file is copied into the project bundle on project_save, so the project stays " +
-        "portable — always pass the original source path here, not a bundle-relative one."
+      "REQUIRED. Absolute file path to this zone's sample audio file (wav/aiff/etc.), or " +
+        "the name of a sample the app ships, written `builtin:<name>`. The file is copied " +
+        "into the project bundle on project_save, so the project stays portable — always " +
+        "pass the original source path here, not a bundle-relative one. " +
+        "The only bundled sample today is `builtin:test-tone-a4` (m30-a): a 0.35 s A4 " +
+        "one-shot whose root pitch is MIDI 69, there so the sampler can be played and " +
+        "smoke-tested on a machine with no sample library of its own — e.g. to exercise " +
+        "`bendRangeSemitones` or `voiceMode`. A `builtin:` name that does not exist is " +
+        "REFUSED, and the error lists the ones that do; it is never silently accepted."
     ),
   rootPitch: z
     .number()
@@ -963,14 +1178,76 @@ const samplerZoneSchema = z.object({
         "piano-like zone a longer tail than the kit around it. Omitted = use the global " +
         "release."
     ),
-});
+  loopMode: z
+    .enum(["sustain", "continuous"])
+    .optional()
+    .describe(
+      "Loop this zone's playback across `loopStart`/`loopEnd` instead of playing the " +
+        "sample once start-to-end. \"sustain\": loops while the note continues (held, " +
+        "or held-by-sustain-pedal/CC64), then plays out past `loopEnd` to the sample's " +
+        "real end on release — the classic library idiom for a stable middle plus a " +
+        "natural tail. \"continuous\": loops straight through release as well, with no " +
+        "tail. LOOPING WINS OVER ONE-SHOT: a zone with `loopMode` set is NEVER treated " +
+        "as one-shot, even when the sampler's global `oneShot` or this zone's own " +
+        "`oneShot` says otherwise — a loop needs a note-off (or held-through-release) " +
+        "boundary to mean anything, so one-shot is simply not consulted once a loop is " +
+        "set. Omitted = no loop (the pre-existing behavior): the zone plays its span " +
+        "once per trigger."
+    ),
+  loopStart: z
+    .number()
+    .int()
+    .min(0)
+    .optional()
+    .describe(
+      "First SOURCE-FILE frame (inclusive) of the loop, in the sample file's own " +
+        "frames — same convention as `startFrame`. Only takes effect when `loopMode` " +
+        "is also set. Omitted = 0 (loop from the file's start, or from `startFrame` if " +
+        "that's set — the engine further clamps into the zone's real playable span)."
+    ),
+  loopEnd: z
+    .number()
+    .int()
+    .min(1)
+    .optional()
+    .describe(
+      "Last SOURCE-FILE frame of the loop, EXCLUSIVE — matching `endFrame`'s " +
+        "convention. Only takes effect when `loopMode` is also set. Must exceed " +
+        "`loopStart`: a value at or below it is RAISED to loopStart+1 (never swapped, " +
+        "matching `endFrame`'s own rule), and both clamp to the zone's real playable " +
+        "span. Omitted = the zone's resolved end (its `endFrame`, or the sample's own " +
+        "end)."
+    ),
+  crossfade: samplerCrossfadeSchema,
+})
+  // `.strict()` (sax-team defect B, 2026-08-20): closes the same hole one
+  // level up from `samplerCrossfadeSchema` above — a typo'd field inside one
+  // element of `track_set_instrument`'s wholesale `sampler.zones` array (e.g.
+  // "minPtich") would otherwise be silently stripped instead of rejected.
+  // `samplerZonePatchSchema` below reuses this schema's `.shape` (not this
+  // schema itself), so its own independent `.strict()` is unaffected either
+  // way — this fixes the SEPARATE `zones` (replace) path, not `zonePatches`
+  // (merge), which was already closed.
+  .strict();
 
 const samplerSchema = z
   .object({
     zones: z
       .array(samplerZoneSchema)
+      .optional()
       .describe(
-        "The sampler's keyzone map. For a played note, each GROUP of zones fires at most " +
+        "OPTIONAL. Omit it to leave the track's CURRENT zones exactly as they are — that " +
+          "is how you change a global (say `release`) on an imported 309-zone library " +
+          "without reading back and resending every zone. When PRESENT this array " +
+          "REPLACES the whole keyzone map, so `zones: []` is the deliberate way to clear " +
+          "a sampler, and a partial list silently drops the zones you left out. A zone's " +
+          "`id` (from a prior instrument_describe_sampler/project_snapshot) IS honoured " +
+          "when it already names a zone on THIS track; an id that doesn't (including one " +
+          "copied from a different track) is re-minted and the substitution is reported in " +
+          "the response's `remintedZoneIDs` — but this array can still only REPLACE, never " +
+          "MERGE. To edit a handful of zones by id and leave the rest of a large library " +
+          "completely untouched, use instrument_set_sampler_zones instead. " +
+          "The sampler's keyzone map. For a played note, each GROUP of zones fires at most " +
           "one voice: within a group, the first zone (array order) whose pitch AND velocity " +
           "ranges contain the note and whose round-robin/random gates pass is the one that " +
           "plays; zones in different `group`s layer simultaneously. Zones without the " +
@@ -1013,14 +1290,115 @@ const samplerSchema = z
         "The sampler's overall output level, 0-1, separate from each zone's own `gain` and " +
           "from the track fader set by track_set_volume. Defaults to 0.8."
       ),
+    expressionModDepth: z
+      .number()
+      .min(0)
+      .max(1)
+      .optional()
+      .describe(
+        "How far CC 1 (mod wheel) and CC 2 (breath) attenuate loudness, 0-1. NIL/0 IS " +
+          "OFF, not neutral-at-full: at 0 the CC1/CC2 attenuator is skipped and CC 11 " +
+          "(expression) alone drives continuous loudness on the built-in Sampler — " +
+          "clip_set_controller_lane's own description explains why (CC1/CC2's rest " +
+          "value is 0, so attenuating unconditionally would silence a clip until the " +
+          "lane's first point). At 1, an untouched CC1/CC2 (or one driven fully open) " +
+          "has no effect and a fully-closed one silences the voice. Set this above 0 " +
+          "before a CC1/CC2 controller lane will audibly do anything on this track's " +
+          "Sampler. Has no effect on `testTone`/`polySynth`."
+      ),
+    expressionFilterDepth: z
+      .number()
+      .min(0)
+      .max(1)
+      .optional()
+      .describe(
+        "How far the expression controller (CC 11 by default, or `expressionFilterCC`) " +
+          "sweeps a per-voice low-pass filter, 0-1 — the BRIGHTNESS complement to CC " +
+          "11's own LOUDNESS control, for making a held sax/string note read as a " +
+          "player leaning into it rather than a flat sustain. NIL/0 MEANS THE FILTER " +
+          "IS SKIPPED ENTIRELY, not run at unity/neutral — this is a real distinction: " +
+          "a project that never sets this is byte-identical to the pre-existing " +
+          "engine path, not merely 'filter wide open'. At depth 1 cutoff sweeps " +
+          "logarithmically from a dark ~400 Hz at controller 0 up to ~20 kHz " +
+          "(effectively unfiltered) at controller 127; intermediate depths compress " +
+          "that sweep toward the open end. Has no effect on `testTone`/`polySynth`."
+      ),
+    expressionFilterCC: z
+      .number()
+      .int()
+      .min(0)
+      .max(127)
+      .optional()
+      .describe(
+        "Which CC drives the `expressionFilterDepth` brightness sweep. Omitted = 11 " +
+          "(expression) — the same controller that drives loudness, so a played " +
+          "expression pedal/lane makes a note both louder AND brighter together. Set " +
+          "to 1 or 2 to drive brightness from mod wheel/breath instead (that does NOT " +
+          "require `expressionModDepth` to be set — the neutral-0 silencing hazard " +
+          "that gates the loudness path does not apply here, because a filter sitting " +
+          "at its low cutoff is dark, not silent). Only takes effect once " +
+          "`expressionFilterDepth` is above 0."
+      ),
+    bendRangeSemitones: z
+      .number()
+      .min(0)
+      .max(48)
+      .optional()
+      .describe(
+        "How many semitones a FULL pitch-bend deflection (raw 0 or 16383 on a pitch-bend " +
+          "controller lane; 8192 is centre) moves the note on the built-in Sampler. " +
+          "OMITTED = 2, the General MIDI default — and it stays 2 on purpose: every bend " +
+          "lane already written in every existing project was authored against ±2, so a " +
+          "wider default would multiply all of them silently on load. Set it per " +
+          "instrument instead. For a WIND library, measurement on 36 sax phrases (131 " +
+          "note boundaries) says ±2 leaves 28 boundaries audibly rough, ±4 leaves 6, and " +
+          "±6 leaves 0 — the curve SATURATES at 6, so 6 is the value to reach for; 12 " +
+          "buys full-range portamento but no further smoothness. 0 makes bend inert. " +
+          "⚠️ If you also generate vibrato with clip_apply_breath_contour or " +
+          "clip_apply_effort_shape, pass the SAME figure to that tool's own " +
+          "`bendRangeSemitones` — it converts cents to bend units and will scale every " +
+          "vibrato by the ratio if the two disagree (you get a warning when they do)."
+      ),
+    voiceMode: z
+      .enum(["poly", "mono"])
+      .optional()
+      .describe(
+        "How many notes the Sampler lets sound at once. Omitted = `poly` (the existing " +
+          "behaviour, 64 voices). `mono` is LAST-NOTE PRIORITY: a new note always takes " +
+          "over from the one sounding, because a wind line is one airstream and the " +
+          "newest note is the one being played. Use it for sax/flute/trumpet/solo-lead " +
+          "parts. Under the slight note OVERLAPS that legato writing needs, mono " +
+          "retriggers to the newest pitch — the overlap becomes the slur. A note-off for " +
+          "a note that has already been superseded is discarded: releasing an older " +
+          "still-held key does NOT fall back to it, because on a wind instrument that " +
+          "note ended when the player moved."
+      ),
   })
+  // `.strict()` — DEFECT B (sax-team, 2026-08-20): `registerTool`'s wrapper
+  // only applies `.strict()` at the TOP level of a tool's own inputSchema
+  // (see that function's header comment), so a NESTED object like this one
+  // fell back to zod's default "strip" parse mode. `track_set_instrument`
+  // ({..., sampler: samplerSchema.optional()}) accepted `sampler.zonePatches`
+  // — a real, working key one level down at the RAW control-protocol layer
+  // (`Commands.swift`'s `parseSampler`) but NOT a key this schema ever
+  // recognized — stripped it silently, and reported success having changed
+  // nothing. `instrument_set_sampler_zones`'s own `zonePatches` path (via
+  // `samplerZonePatchSchema`, already `.strict()`) was and remains the
+  // supported MCP route to that merge; this schema deliberately does not
+  // re-expose `zonePatches`, so it must now REJECT the key loudly instead of
+  // eating it — additive-only in effect, since no caller had a WORKING call
+  // that depended on this silent drop.
+  .strict()
   .describe(
-    "Sampler configuration, used only when `kind` is (or already is) `sampler`. Providing " +
-      "this object REPLACES the sampler's entire configuration at once — `zones` is not " +
-      "merged with any zones already on the track, so to add/remove/edit one zone you must " +
-      "resend the complete `zones` array. Omit `sampler` entirely to leave the track's " +
-      "current sampler configuration untouched (e.g. when this call only changes `kind` or " +
-      "is switching a different track's instrument). Has no effect on `testTone`/`polySynth`."
+    "Sampler configuration, used only when `kind` is (or already is) `sampler`. Every field " +
+      "here is independently a PARTIAL update — omit a field and it keeps its current value " +
+      "— with ONE exception: a PRESENT `zones` array replaces the whole keyzone map at once " +
+      "(see `zones`'s own description for what 'replaces' means for zone ids). Omit " +
+      "`sampler` entirely to leave the track's current sampler configuration untouched (e.g. " +
+      "when this call only changes `kind` or is switching a different track's instrument). " +
+      "Has no effect on `testTone`/`polySynth`. For narrower, harder-to-misuse edits, prefer " +
+      "instrument_set_sampler_param (one global) or instrument_set_sampler_zones (merge " +
+      "zones by id) over building this object by hand."
   );
 
 const audioUnitSchema = z
@@ -1050,6 +1428,15 @@ const audioUnitSchema = z
           "as returned by instrument_list_audio_units (e.g. \"appl\" for Apple)."
       ),
   })
+  // `.strict()` (m30-c): closes the same nested-object hole for
+  // track_set_instrument's `audioUnit` param — a typo'd field (e.g.
+  // "subTyp") would otherwise be silently stripped instead of rejected.
+  // Safe: this schema is a fixed component-triple IDENTITY, not a
+  // parameter dictionary — the AU's own parameter surface is addressed
+  // elsewhere (and is explicitly EMPTY for automation_add_lane's
+  // `effectParam`, per this schema's own description below), so there is
+  // no legitimate reason for an extra key here.
+  .strict()
   .describe(
     "Identifies one installed Audio Unit instrument by its component triple (type/subType/" +
       "manufacturer), used only when `kind` is (or is being set to) `audioUnit`. Call " +
@@ -1112,6 +1499,13 @@ const soundBankSchema = z
           "a nonzero LSB; instrument_list_sound_bank_programs reports it when a bank does."
       ),
   })
+  // `.strict()` (m30-c): closes the same nested-object hole for
+  // track_set_instrument's `soundBank` param — a typo'd field (e.g.
+  // "progam") would otherwise be silently stripped instead of rejected.
+  // Safe: this is a fixed source/program/bankMSB/bankLSB address, not an
+  // arbitrary parameter dictionary — there is no legitimate reason for an
+  // extra key here.
+  .strict()
   .describe(
     "Addresses a SoundFont2 (.sf2) or DLS (.dls) bank program — General MIDI or any other " +
       "discovered/imported bank — used only when `kind` is (or is being set to) `soundBank`. " +
@@ -1154,8 +1548,23 @@ registerTool(
       "instrument_list_audio_units first to discover what's installed). This " +
       "is a PARTIAL update: any field you omit keeps its current value, so you " +
       "can change just one knob (e.g. only `cutoffHz`) without resending the " +
-      "rest — EXCEPT `sampler`, which replaces the whole sampler configuration " +
-      "at once when provided (see its own description). The synth params only " +
+      "rest. For a single sampler GLOBAL (oneShot/attack/release/gain), prefer " +
+      "the narrower instrument_set_sampler_param — it wraps this same partial-" +
+      "update contract so you don't have to know it's safe. `sampler` here is " +
+      "partial too, at BOTH levels: omit `zones` and the track's existing " +
+      "zones stand, so `{sampler: {release: 0.4}}` retunes a 309-zone imported " +
+      "library without resending a single zone, and the globals you don't " +
+      "mention keep their values rather than snapping back to defaults. The " +
+      "one thing that is still wholesale is a PRESENT `zones` array — it " +
+      "REPLACES the zone list entirely, and an explicit `zones: []` is " +
+      "therefore how you deliberately clear a sampler. Zone ids ARE honoured " +
+      "on this replace path (a zone whose `id` already names a zone on this " +
+      "track keeps that identity; an id that doesn't is re-minted and the " +
+      "substitution is reported in the response's `remintedZoneIDs` — this is " +
+      "also how a zone map gets copied from one track onto another), but this " +
+      "array can still only REPLACE, never MERGE — to edit a handful of zones " +
+      "on a large library by id and leave the rest completely untouched, use " +
+      "instrument_set_sampler_zones instead. The synth params only " +
       "apply to `polySynth`: `waveform` is the oscillator shape (`saw`, " +
       "`square`, `triangle`, `sine` — saw is brightest/buzziest, sine is " +
       "purest/softest); `attack`/`decay`/`sustain`/`release` are the amplitude " +
@@ -1452,6 +1861,149 @@ server.registerTool(
   async () => toToolResult(() => bridge.send("midi.listInputs"))
 );
 
+// --- MIDI learn: map a hardware knob to something (m28-knob) ----------------
+//
+// Registered next to midi_list_inputs — its only sibling on this surface.
+// midi_get_control_map is READ-ONLY (server.registerTool, no before-capture);
+// the other two mutate.
+
+server.registerTool(
+  "midi_get_control_map",
+  {
+    title: "Read the hardware-knob mapping table",
+    description:
+      "Read which hardware MIDI controls (knobs, faders) are mapped to which " +
+      "DAW parameters, and what CAN be mapped. No params. Returns `bindings` " +
+      "(the mappings that exist), `targets` (the CATALOGUE — every parameter a " +
+      "control may be bound to, each with a plain-English `summary`, plus the " +
+      "`controller` number currently driving it if any), `learningTarget` " +
+      "(present only while midi_learn_control is armed), `lastControlChange` " +
+      "(the last controller message seen from ANY device, mapped or not) and " +
+      "`subscribed` (whether the DAW is currently listening to the controller " +
+      "feed). \n\n" +
+      "USE `lastControlChange` TO DIAGNOSE A DEAD KNOB: it separates \"your " +
+      "knob is not mapped\" from \"your knob is not sending anything\", which " +
+      "look identical from the outside. \n\n" +
+      "This call is PASSIVE — unlike midi_list_inputs it does not open the " +
+      "user's MIDI devices. \n\n" +
+      "⚠️ The mapping table is MACHINE SETUP, not part of the song: it is not " +
+      "saved into the project and does not survive an app relaunch yet.",
+  },
+  async () => toToolResult(() => bridge.send("midi.getControlMap"))
+);
+
+registerTool(
+  "midi_set_control_map",
+  {
+    title: "Map hardware knobs to parameters (whole table)",
+    description:
+      "Set the WHOLE hardware-control mapping table at once. `bindings` " +
+      "replaces everything that was there, and `bindings: []` clears the map. " +
+      "Read the current table with midi_get_control_map first, then write it " +
+      "back with your change — this call is idempotent. \n\n" +
+      "Each binding is {target, controller, channel?, sourceId?, inverted?}: " +
+      "`target` is one of the ids from midi_get_control_map's `targets` " +
+      "(currently `breathPadAngle` and `breathPadRadius`); `controller` is the " +
+      "MIDI CC number 0-127 that the knob sends; `channel` 0-15 is optional " +
+      "and OMITTING IT IS USUALLY RIGHT (omni — a controller's global channel " +
+      "can change and a channel-pinned mapping then dies silently); " +
+      "`sourceId` is a device's `uniqueID` from midi_list_inputs, and omitting " +
+      "it accepts any device; `inverted` flips a knob that runs backwards. \n\n" +
+      "ONE KNOB IS ENOUGH: bind a single knob to `breathPadAngle` and it walks " +
+      "the breath pad's dot all the way around the ring of playing styles at " +
+      "whatever depth it already has — that is the whole gesture. Add a second " +
+      "on `breathPadRadius` for depth. \n\n" +
+      "PREFER midi_learn_control when a human is present: turning the knob is " +
+      "faster and more reliable than looking its CC number up. \n\n" +
+      "⚠️ ABSOLUTE controls only (knobs and faders that send a POSITION). An " +
+      "endless/relative encoder sends deltas and will read as a jump to one " +
+      "end. \n\n" +
+      "⚠️ A mapped CC is NOT swallowed: it still reaches armed instrument " +
+      "tracks and is still recorded into a take. On a track hosting an Audio " +
+      "Unit it may also move a plugin parameter — pick a CC the plugin does " +
+      "not use.",
+    inputSchema: {
+      bindings: z
+        .array(
+          z.object({
+            target: z
+              .string()
+              .describe("a target id from midi_get_control_map's `targets`"),
+            controller: z
+              .number()
+              .int()
+              .min(0)
+              .max(127)
+              .describe("the MIDI CC number the knob sends"),
+            channel: z
+              .number()
+              .int()
+              .min(0)
+              .max(15)
+              .optional()
+              .describe("MIDI channel filter; omit for omni (usually right)"),
+            sourceId: z
+              .number()
+              .int()
+              .optional()
+              .describe("a device `uniqueID` from midi_list_inputs; omit for any device"),
+            inverted: z
+              .boolean()
+              .optional()
+              .describe("flip the sweep for a knob wired backwards"),
+          })
+            // `.strict()` (m30-c): a typo'd field (e.g. "contoller") inside
+            // one `bindings` element would otherwise be silently stripped
+            // instead of rejected.
+            .strict()
+        )
+        .describe("the WHOLE table — [] clears every mapping"),
+    },
+  },
+  async ({ bindings }: { bindings: unknown[] }) =>
+    toToolResult(() => bridge.send("midi.setControlMap", { bindings }))
+);
+
+registerTool(
+  "midi_learn_control",
+  {
+    title: "MIDI learn — turn a knob to map it",
+    description:
+      "Arm MIDI learn for `target`, then ask the user to TURN THE KNOB they " +
+      "want: the first controller message that arrives binds to that target " +
+      "and moves it immediately, so the user sees it work at once. Pass " +
+      "`cancel: true` instead to disarm without changing any mapping. \n\n" +
+      "This is the verb that WAKES THE MIDI SYSTEM UP. The DAW connects to " +
+      "MIDI inputs lazily, so a learn armed any other way can sit listening to " +
+      "a system that was never started. The response carries `inputs` (what " +
+      "the DAW can see right now) and a `hint` sentence — if the hint says no " +
+      "online input is connected, tell the user that rather than waiting. \n\n" +
+      "`target` is an id from midi_get_control_map's `targets` (currently " +
+      "`breathPadAngle`, which walks the breath pad's dot around its ring of " +
+      "playing styles, and `breathPadRadius`, which is depth). \n\n" +
+      "The learned binding pins the DEVICE but leaves the MIDI CHANNEL open on " +
+      "purpose, so changing the controller's global channel later does not " +
+      "silently break the mapping. \n\n" +
+      "⚠️ The FIRST controller message wins, whatever it is — a fader the user " +
+      "brushes will take the binding. Re-arm and try again; " +
+      "midi_get_control_map's `lastControlChange` shows what was heard.",
+    inputSchema: {
+      target: z
+        .string()
+        .optional()
+        .describe("the target id to arm; omit only when passing cancel"),
+      cancel: z.boolean().optional().describe("true to disarm, changing no mappings"),
+    },
+  },
+  async ({ target, cancel }: { target?: string; cancel?: boolean }) =>
+    toToolResult(() => {
+      const params: Record<string, unknown> = {};
+      if (target !== undefined) params.target = target;
+      if (cancel !== undefined) params.cancel = cancel;
+      return bridge.send("midi.learnControl", params);
+    })
+);
+
 registerTool(
   "note_audition",
   {
@@ -1473,7 +2025,21 @@ registerTool(
       "again in a moment), `engineStopped`, `engineRebuilding`. It " +
       "deliberately IGNORES the user's in-app 'audition while editing' " +
       "preference, because that preference means 'do not sound notes while I " +
-      "drag', not 'never make sound'. Refused while a take is recording.",
+      "drag', not 'never make sound'. Refused while a take is recording. " +
+      "WHAT `audible:true` DOES AND DOES NOT MEAN: it is a signal-PATH check, " +
+      "not a measurement. It says the strip isn't muted or solo-excluded, the " +
+      "engine is running, and — for `soundBank`/`audioUnit` instruments — a " +
+      "prepared instrument existed at that instant. It measures no level and no " +
+      "spectrum: NOTHING here confirms a sound was actually produced, and " +
+      "nothing describes its TIMBRE. Do not A/B two candidate patches with this " +
+      "tool and report which sounded better — you would be inventing the " +
+      "difference. The reply also carries `instrumentStatus` for `soundBank`/ " +
+      "`audioUnit` tracks (\"pending\"/\"ready\"/\"missing\"/\"failed: …\", the " +
+      "same string project_snapshot's instrument object reports): a patch you " +
+      "set moments ago may still be loading, so a `pending` status means retry " +
+      "before you trust what you heard — `audible:true` alongside `pending` " +
+      "means the path is clear but THIS patch may not have been the thing that " +
+      "sounded.",
     inputSchema: {
       trackId: z
         .string()
@@ -1520,6 +2086,106 @@ registerTool(
   }) =>
     toToolResult(() =>
       bridge.send("note.audition", { trackId, pitches, velocity, durationMs })
+    )
+);
+
+registerTool(
+  "pad_preview_effort",
+  {
+    title: "Breath pad: stream an effort value live (preview, not an edit)",
+    description:
+      "Stream ONE breath-pad effort value (0-1, 'how hard is the player " +
+      "blowing right now') to an instrument track as a live MIDI controller, " +
+      "so it can be HEARD while a pad gesture is in progress. This is a " +
+      "PREVIEW, not an edit: nothing is written to any clip, nothing is " +
+      "recorded, there is no undo entry, and a bounce will not contain it. " +
+      "The RECORD is the controller lane clip_apply_effort_shape writes — use " +
+      "that to commit a shape. " +
+      "GESTURE-SCOPED, AND THE SCOPING IS THE POINT: send `gesture:\"begin\"` " +
+      "once, then `gesture:\"move\"` as the value changes, then " +
+      "`gesture:\"end\"` exactly once, naming THE SAME trackId. A `move` or " +
+      "`end` with no `begin` open — or naming a different track than the open " +
+      "gesture — is REFUSED. The pad NEVER streams while the transport is " +
+      "merely rolling — only while a gesture is open — which is what keeps " +
+      "live playback, replay and an offline bounce agreeing sample-for-sample. " +
+      "`end` DOES NOT LEAVE YOUR LAST VALUE ON THE STRIP: it restores the " +
+      "controller to its neutral default (127 for CC 11, expression), because " +
+      "a MIDI controller is sticky and nothing else would take it back — a " +
+      "parked low value would quietly attenuate every later playback. If you " +
+      "start a gesture, ALWAYS end it. " +
+      "CAVEAT, MEASURED, DO NOT OVERSTATE THIS TOOL: neutral is not the same " +
+      "as the track's committed lane. If the track already HAS a CC 11 lane " +
+      "and you preview mid-playback, ending parks 127 and the strip stays " +
+      "there until that lane's next point — so playback is louder than a " +
+      "bounce over that span. It self-heals at the next point and cannot " +
+      "happen on a track with no lane yet. Prefer previewing with the " +
+      "transport stopped, or on a track you have not committed a shape to. " +
+      "The reply carries `controller` (which CC was moved), `controllerValue` " +
+      "(the raw 0-127 that went out), `streaming` (is a gesture open after " +
+      "this call), `delivered` (false when the 30 Hz rate cap or the " +
+      "unchanged-value filter coalesced this call away — normal during a fast " +
+      "drag, not an error — and also false, on any phase including `end`, " +
+      "when the value reached no instrument at all), and `audible` with a " +
+      "`reason` when " +
+      "false (`trackMuted`, `instrumentNotReady`, `engineStopped`, " +
+      "`engineRebuilding`) exactly as note_audition does. " +
+      "WHAT THIS DOES AND DOES NOT MOVE: effort rides CC 11 (expression). On " +
+      "the built-in sampler that moves loudness always, and brightness only " +
+      "when the track's sampler `expressionFilterDepth` is above 0. On a " +
+      "hosted Audio Unit or sound bank — where a GM sax lives — CC 11 was " +
+      "MEASURED to be exactly a gain and NOT a filter, so do not promise a " +
+      "timbre change there. Refused while a take is recording, and on audio " +
+      "or bus tracks.",
+    inputSchema: {
+      trackId: z
+        .string()
+        .describe(
+          "Id of the INSTRUMENT track to preview on (from project_snapshot). " +
+            "Audio and bus tracks carry no instrument and are refused."
+        ),
+      gesture: z
+        .enum(["begin", "move", "end"])
+        .describe(
+          "Where this call sits in the drag. 'begin' opens streaming, 'move' " +
+            "updates the value, 'end' closes it and restores the controller to " +
+            "neutral. A 'move' with no 'begin' open is refused."
+        ),
+      value: z
+        .number()
+        .min(0)
+        .max(1)
+        .optional()
+        .describe(
+          "Effort, 0-1: 0 is barely blowing, 1 is full pressure. Required for " +
+            "'begin' and 'move'; ignored for 'end', which always restores neutral."
+        ),
+      expressionCC: z
+        .number()
+        .int()
+        .min(0)
+        .max(127)
+        .optional()
+        .describe(
+          "Which CC carries the preview. Defaults to 11 (expression) — the " +
+            "same default clip_apply_effort_shape writes, so the preview and " +
+            "the commit land on one lane. Set it only if you will also pass " +
+            "the matching expressionCC when you commit."
+        ),
+    },
+  },
+  async ({
+    trackId,
+    gesture,
+    value,
+    expressionCC,
+  }: {
+    trackId: string;
+    gesture: "begin" | "move" | "end";
+    value?: number;
+    expressionCC?: number;
+  }) =>
+    toToolResult(() =>
+      bridge.send("pad.previewEffort", { trackId, gesture, value, expressionCC })
     )
 );
 
@@ -1713,6 +2379,303 @@ registerTool(
     )
 );
 
+registerTool(
+  "instrument_describe_sampler",
+  {
+    title: "Read a track's Sampler configuration (read-only)",
+    description:
+      "Read the built-in Sampler's configuration on an instrument track — the ANSWER to " +
+      "'which library is loaded and how is it mapped' without paying for project_snapshot's " +
+      "whole-project cost (measured 296,809 bytes on a real song). Mirrors " +
+      "au_describe_params: a cheap describe you call BEFORE editing, so instrument_set_" +
+      "sampler_param/instrument_set_sampler_zones don't have to guess a track's current " +
+      "state. Works even when the track's ACTIVE instrument is something else right now — " +
+      "sampler configuration is carried across kind switches (like soundBank/audioUnit), so " +
+      "you can inspect a previously-built sampler map before switching back to it; the " +
+      "response's own `kind` field tells you whether `sampler` is actually the SOUNDING " +
+      "instrument or just preserved state. Refuses readably for an audio/bus track (only " +
+      "instrument tracks carry an instrument), an unknown trackId, or an instrument track " +
+      "that has never had a sampler configured at all (use instrument_import_sample_library " +
+      "or track_set_instrument {kind:\"sampler\", sampler:{zones:[...]}} first; with no " +
+      "sample library of your own, mount the bundled one-shot — " +
+      "{path: \"builtin:test-tone-a4\", rootPitch: 69} — and you have a sound) — but a " +
+      "sampler that IS configured with zero zones (the deliberate `zones: []` clear) is a " +
+      "legal answer, not a refusal: you get `zoneSummary.count: 0` back. Returns {trackId, " +
+      "kind, oneShot, attack, release, gain, sourcePath?, displayName?, zoneSummary, " +
+      "effectiveGlobals?, warnings?}. " +
+      "⚠️ READ `effectiveGlobals` BEFORE TRUSTING top-level `release`/`attack`/`oneShot`. " +
+      "Those three are the STORED globals, and a zone that sets its own value WINS over " +
+      "them — so on an imported library they are routinely numbers the engine never reads. " +
+      "ANY per-zone value can do this, whichever way the sampler was built: a hand-authored " +
+      "zone over the wire, a `.dspreset` region (whose `attack`/`release` attributes carry " +
+      "no special prefix), or an SFZ region/group/global (whose native opcode names are " +
+      "`ampeg_attack`/`ampeg_release`) — SFZ is not the only way in. (Field report 2026-08-20: " +
+      "this verb answered `release: 3.4465` for an instrument that audibly released in 0.5 s, " +
+      "because the imported SFZ authored `ampeg_release` in its `<global>` block and every " +
+      "region inherited it. The engine was right; the answer was not.) `effectiveGlobals` is " +
+      "{release, attack, oneShot}, each " +
+      "{global, zonesOverriding, zonesInheriting, globalIsInert, effectiveValues, " +
+      "effectiveMin?, effectiveMax?, effectiveValuesTruncated?, note?}. " +
+      "`globalIsInert: true` means NO zone inherits that global: writing it with " +
+      "instrument_set_sampler_param will be accepted and change nothing you can hear — " +
+      "change the per-zone values instead (instrument_set_sampler_zones, patching `release` " +
+      "/ `attack` / `oneShot` per zone). `note` (present only when `globalIsInert`) says so in " +
+      "prose and, for `release`/`attack`, names the SFZ opcode (`ampeg_release`/`ampeg_attack`) " +
+      "ONLY when `sourcePath` actually ends in `.sfz` — never for a hand-built sampler or a " +
+      "`.dspreset` import, which would make the opcode name meaningless. Top-level `warnings` " +
+      "(a string array, present only when at least one global is inert) restates the same " +
+      "fact with BOTH the stored and the actually-applied number inline, so it is impossible " +
+      "to miss even for a caller that only reads the top level and never descends into " +
+      "`effectiveGlobals` at all. `effectiveValues` is the list of values the engine " +
+      "will actually apply across the zones, ascending, and is the number to quote to a " +
+      "user; it is meaningful in the MIXED case too (some zones overriding, some still " +
+      "tracking the global), which no single boolean can describe. It caps at 8 distinct " +
+      "values with `effectiveValuesTruncated: true`, but `effectiveMin`/`effectiveMax` stay " +
+      "exact. `oneShot` additionally reports `zonesWithLoopMode` when any zone loops: a " +
+      "looping voice is never one-shot regardless of the flag, provided its loop bounds are " +
+      "valid for the loaded sample (which only the engine can confirm, so it is reported " +
+      "rather than folded into the counts). `effectiveGlobals` is omitted entirely for a " +
+      "zero-zone sampler — there is no inheritance to describe, and such a sampler is " +
+      "silent for an unrelated reason. " +
+      "`sourcePath`/`displayName` (provenance from an import; `displayName` is a file STEM " +
+      "and therefore NOT unique — two different folders can both hold a \"Bass.sfz\", so " +
+      "`sourcePath` is what actually disambiguates them) appear only when set — a hand-built " +
+      "sampler has neither. `zoneSummary` is {count, pitchCoverage?, velocityCoverage?, " +
+      "groupCount, distinctSampleFiles}: `pitchCoverage`/`velocityCoverage` are each " +
+      "{min, max, gaps?} — the UNION of every zone's range, not a naive min/max, so a keymap " +
+      "with a hole in the middle is visible as a `gaps` entry INSIDE the envelope instead of " +
+      "silently reading as full 0-127 coverage (this is exactly the bug class the field " +
+      "report hit twice: a bass silent below MIDI 35, a library silent above 45). Both are " +
+      "omitted entirely when the sampler has zero zones. `groupCount` counts distinct " +
+      "layering groups (an unset zone group counts as group 0, the classic first-match " +
+      "default) and `distinctSampleFiles` counts unique sample audio files across all zones. " +
+      "The zone list itself is a SEPARATE, opt-in page: omit both `offset` and `limit` and " +
+      "the response has no `zones` key at all (just the summary); pass either one and you " +
+      "get a paged `zones` array (the exact shape track_set_instrument echoes back, ids " +
+      "included) plus `offset`, `limit`, `returnedZones`, and `truncated` so you know " +
+      "whether to page further.",
+    inputSchema: {
+      trackId: z.string().min(1).describe("Id of the instrument track to describe, from project_snapshot."),
+      offset: z
+        .number()
+        .int()
+        .min(0)
+        .optional()
+        .describe(
+          "Zero-based index into the sampler's zone list to start a page from. Providing " +
+            "EITHER `offset` or `limit` turns on paging and puts a `zones` array in the " +
+            "response; omitting both returns the summary only. Default 0 when `limit` is " +
+            "given alone. An offset past the end of the zone list is not an error — it " +
+            "returns an empty, untruncated page."
+        ),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(5000)
+        .optional()
+        .describe(
+          "Max zones to return in the page. Providing EITHER `offset` or `limit` turns on " +
+            "paging (see `offset`). Default 500 when `offset` is given alone; out-of-range " +
+            "values clamp silently into 1-5000 rather than erroring. Compare the response's " +
+            "`returnedZones` against `zoneSummary.count` (or check `truncated`) to know " +
+            "whether to page further."
+        ),
+    },
+  },
+  async ({ trackId, offset, limit }) =>
+    toToolResult(() => bridge.send("instrument.describeSampler", { trackId, offset, limit }))
+);
+
+const samplerGlobalParamSchema = z
+  .enum([
+    "oneShot",
+    "attack",
+    "release",
+    "gain",
+    "expressionModDepth",
+    "expressionFilterDepth",
+    "expressionFilterCC",
+    "bendRangeSemitones",
+    "voiceMode",
+  ])
+  .describe(
+    "Which Sampler GLOBAL to set — exactly one per call, matching one of the nine fields " +
+      "track_set_instrument's own `sampler` object carries at this level (everything else " +
+      "there, i.e. `zones`, is per-zone and out of reach of this narrower tool). `oneShot` " +
+      "(boolean): true = every triggered sample always plays to completion regardless of " +
+      "note-off (drum hits and other percussive one-shots); false = the sample follows " +
+      "note-off, fading out over `release` seconds, like a sustained instrument. `attack` " +
+      "(seconds, number, clamps 0-1): how long a triggered note takes to reach full volume. " +
+      "`release` (seconds, number, clamps 0.001-8): how long the sample fades to silence " +
+      "after note-off — ignored while `oneShot` is true. `gain` (0-1, number): the " +
+      "sampler's overall output level, separate from each zone's own `gain` and from the " +
+      "track fader (track_set_volume). `expressionModDepth` (0-1, number): how far CC 1 " +
+      "(mod wheel) / CC 2 (breath) attenuate loudness — NIL/0 IS OFF (the attenuator is " +
+      "skipped, not run at neutral), so a CC1/CC2 controller lane does nothing audible on " +
+      "this track's Sampler until this is set above 0. `expressionFilterDepth` (0-1, " +
+      "number): how far the expression controller sweeps a per-voice brightness (low-pass) " +
+      "filter — NIL/0 IS OFF, the filter branch is skipped entirely, not run at unity. " +
+      "`expressionFilterCC` (integer 0-127): which CC drives that filter sweep; omitted/nil " +
+      "= 11 (expression, the same controller that already drives loudness) — set it to 1 " +
+      "or 2 to drive brightness from mod wheel/breath instead. `bendRangeSemitones` " +
+      "(number 0-48): how many semitones a full pitch-bend deflection moves the note; " +
+      "omitted/nil = 2 (the General MIDI default, and what every already-authored bend " +
+      "lane assumes) — 6 is the measured saturation point for expressive wind writing. " +
+      "`voiceMode` (STRING, \"poly\" or \"mono\" — the one param here that takes a string): " +
+      "`mono` is last-note priority, for sax/flute/solo-lead lines. See " +
+      "track_set_instrument's `sampler` object for the full field-by-field description of " +
+      "each."
+  );
+
+registerTool(
+  "instrument_set_sampler_param",
+  {
+    title: "Set one Sampler global (oneShot/attack/release/gain/expression*/bend range/voice mode)",
+    description:
+      "Set exactly ONE global knob on a track's built-in Sampler — `oneShot`, `attack`, " +
+      "`release`, `gain`, `expressionModDepth`, `expressionFilterDepth`, " +
+      "`expressionFilterCC`, `bendRangeSemitones` or `voiceMode` — without touching " +
+      "anything else on the sampler. This is a " +
+      "thin, narrower wrapper around track_set_instrument {sampler: {<param>: value}}: the " +
+      "whole reason it exists is so you don't have to know that a partial sampler update is " +
+      "safe (added m26-g/h) — this call is GUARANTEED to leave the track's zones, " +
+      "`sourcePath`, and `displayName` exactly as they were, no matter which global you set " +
+      "or what an imported library's zone count is (tuning `release` on a 309-zone library " +
+      "through this tool can never touch a single zone). Has no audible effect unless the " +
+      "track's active instrument kind is `sampler` (see instrument_describe_sampler's " +
+      "`kind` field), though the value is still stored and takes effect the next time it is. " +
+      "Sending a boolean for a numeric param (or vice versa) is a readable error naming the " +
+      "mismatch. Out-of-range numbers clamp silently for the six original numeric params, " +
+      "through the same ranges track_set_instrument uses; `bendRangeSemitones` and " +
+      "`voiceMode` instead REFUSE an out-of-range number / unrecognised mode with a " +
+      "readable error, so a typo cannot land as a silently-different setting (see " +
+      "`param`'s own description for each range). Returns the full resolved instrument " +
+      "object, same shape as track_set_instrument.",
+    inputSchema: {
+      trackId: z.string().min(1).describe("Id of the instrument track, from project_snapshot."),
+      param: samplerGlobalParamSchema,
+      value: z
+        .union([z.number(), z.boolean(), z.string()])
+        .describe(
+          "The new value: a boolean for `param: \"oneShot\"`, the string \"poly\" or " +
+            "\"mono\" for `param: \"voiceMode\"`, and a number for every other `param` " +
+            "(seconds for `attack`/`release`, a 0-1 level for `gain`/" +
+            "`expressionModDepth`/`expressionFilterDepth`, an integer CC 0-127 for " +
+            "`expressionFilterCC`, semitones 0-48 for `bendRangeSemitones`). See " +
+            "`param`'s description for which type and range applies."
+        ),
+    },
+  },
+  async ({ trackId, param, value }) =>
+    toToolResult(() => {
+      // `value` had to widen to include `z.string()` so `voiceMode` could take
+      // "poly"/"mono" (m26-*, 2026-08-23). That widening SILENTLY re-admitted a
+      // string for every OTHER param — {param:"gain", value:"loud"} began passing
+      // schema validation and reaching the app, where it had previously been
+      // refused at this boundary. Re-narrow here, BEFORE the bridge call, so the
+      // boundary guarantee the union used to provide still holds.
+      // Deliberately minimal: this restores exactly what was lost and tightens
+      // nothing else (a boolean for a numeric param was accepted before and
+      // still is), because the wire contract is additive-only.
+      if (typeof value === "string" && param !== "voiceMode") {
+        throw new Error(
+          `sampler param "${param}" does not take a string — got ${JSON.stringify(value)}. ` +
+            `Only "voiceMode" is a string param ("poly" or "mono").`
+        );
+      }
+      if (param === "voiceMode" && typeof value !== "string") {
+        throw new Error(
+          `sampler param "voiceMode" takes the string "poly" or "mono" — got ${typeof value}.`
+        );
+      }
+      return bridge.send("track.setInstrument", { trackId, sampler: { [param]: value } });
+    })
+);
+
+/** Shared per-zone field shape (the samplerZoneSchema precedent) with `path`
+ * made OPTIONAL and an `id` added and REQUIRED — a zonePatches element edits
+ * an EXISTING zone by id, so it may change zero or more fields (including
+ * swapping the sample file itself) rather than authoring a whole new zone.
+ * Reuses samplerZoneSchema's own field schemas (not retyped) so the two
+ * shapes cannot drift apart on range/default text. `.strict()` here is
+ * load-bearing, not decoration: `registerTool`'s wrapper only applies
+ * `.strict()` at the TOP level, so without this a typo'd field INSIDE one
+ * patch element (e.g. "maxPtich") would be silently stripped by zod's
+ * default parse mode, the patch would land with one fewer field than
+ * intended, and the call would still report success. */
+const samplerZonePatchSchema = z
+  .object({
+    id: z
+      .string()
+      .uuid()
+      .describe(
+        "REQUIRED. The zone to edit, by id — read it from a prior " +
+          "instrument_describe_sampler or project_snapshot call " +
+          "(instrument.sampler.zones[].id). Must already name a zone on THIS track: an id " +
+          "copied from a DIFFERENT track is a readable error naming the id — this tool " +
+          "never silently inserts a new zone or re-mints the id. To copy a zone map onto a " +
+          "different track, use track_set_instrument's wholesale `zones` array instead, " +
+          "which mints fresh ids automatically and reports the substitution in the " +
+          "response's `remintedZoneIDs`."
+      ),
+    ...samplerZoneSchema.shape,
+    path: samplerZoneSchema.shape.path
+      .optional()
+      .describe(
+        "Absolute path to REPLACE this zone's sample audio file with. Omit to keep the " +
+          "zone's CURRENT file — most patches touch only a mapping/envelope field and leave " +
+          "the audio alone."
+      ),
+  })
+  .strict();
+
+registerTool(
+  "instrument_set_sampler_zones",
+  {
+    title: "Edit existing Sampler zones by id, leaving every other zone standing",
+    description:
+      "Edit one or more of a track's EXISTING Sampler zones by id — a targeted MERGE, the " +
+      "opposite of track_set_instrument's `sampler.zones`, which REPLACES the whole keyzone " +
+      "map wholesale (and whose `zones: []` is the only way to CLEAR a sampler; that " +
+      "replace-vs-merge choice is not available here). This is the tool for touching one " +
+      "zone of a 309-zone imported library without resending the other 308: each entry in " +
+      "`zones` below names an existing zone by `id` and changes only the fields it mentions " +
+      "— everything else on that zone (and every zone not named at all) is left exactly as " +
+      "it was, INCLUDING fields left nil (e.g. an unset `pan` stays unset, not reset to an " +
+      "explicit 0). A patch can even swap a zone's sample file via `path` while keeping its " +
+      "pitch/velocity mapping. Under the hood this wraps track_set_instrument's " +
+      "`sampler.zonePatches` merge path (m26-g). Ids are per-track and this tool is STRICT " +
+      "about them: an id from a prior instrument_describe_sampler/project_snapshot call on " +
+      "a DIFFERENT track, or one that never existed, or one repeated twice in the same call, " +
+      "is a readable error naming the id, and nothing lands — never a silent insert. " +
+      "(track_set_instrument's OWN `zones` array behaves differently on an unrecognized id: " +
+      "it mints a fresh one and reports the substitution in `remintedZoneIDs`, because that " +
+      "path is also how a zone map gets copied from one track onto another — this tool is " +
+      "narrower on purpose.) Returns the full resolved instrument object, same shape as " +
+      "track_set_instrument.",
+    inputSchema: {
+      trackId: z.string().min(1).describe("Id of the instrument track, from project_snapshot."),
+      zones: z
+        .array(samplerZonePatchSchema)
+        .describe(
+          "One or more zone edits, each naming the zone it applies to via `id` (required). " +
+            "Every other field is optional and PATCHES that one zone: omit a field to keep " +
+            "the zone's current value for it, unlike track_set_instrument's wholesale " +
+            "`zones` array where an omitted field falls back to a fresh-zone DEFAULT. Zones " +
+            "not named in this array are untouched. Zone ORDER on the track is preserved " +
+            "(a patch replaces its zone in place; it never reorders or appends), which " +
+            "matters because on an overlap the FIRST zone (array order) whose range " +
+            "contains a note wins."
+        ),
+    },
+  },
+  async ({ trackId, zones }) =>
+    toToolResult(() =>
+      bridge.send("track.setInstrument", { trackId, sampler: { zonePatches: zones } })
+    )
+);
+
 // ---------------------------------------------------------------------------
 // FX insert chains
 // ---------------------------------------------------------------------------
@@ -1740,7 +2703,10 @@ const fxKindSchema = z
       "band follows the same naming pattern), `highPassFreq`/`highPassSlopeDbPerOct`/" +
       "`highPassEnabled` for the high-pass (off until you set its frequency or enable it). " +
       "`compressor` is a soft-knee, stereo-linked dynamics processor: `thresholdDb`, " +
-      "`ratio`, `attackMs`, `releaseMs`, `kneeDb`, `makeupDb`. `limiter` is a lookahead " +
+      "`ratio`, `attackMs`, `releaseMs`, `kneeDb`, `makeupDb`, and `mix` — the parallel " +
+      "(New-York) compression blend, 0 = untouched dry signal, 1 = fully compressed " +
+      "(the default, so an existing project is unchanged). Crush hard and blend a little " +
+      "back with `mix` rather than duplicating the track. `limiter` is a lookahead " +
       "brick-wall limiter: `ceilingDb`, `releaseMs`, `truePeak` — it adds 5 ms of processing " +
       "latency, reported per-effect as `latencySamples` in project_snapshot's `effects` array. " +
       "MIND WHICH PEAK THE CEILING COUNTS (m23-ch): with `truePeak: 0` (the default) " +
@@ -2265,9 +3231,13 @@ registerTool(
       "every kick hit (`fx_set_sidechain {trackId: pad, effectId: comp, sourceTrackId: kick}`). " +
       "Pass `sourceTrackId: null` (or omit it) to CLEAR the key and return the effect to " +
       "self-keyed. Only compressor and gate inserts can be keyed (hosted Audio Unit sidechain " +
-      "inputs are a later phase); the keyed effect must live on an audio or bus track (route an " +
-      "instrument to a bus first); the key source is another audio track (bus key sources are a " +
-      "later phase); and a key that would form a feedback loop is rejected with the exact path. " +
+      "inputs are a later phase). WHERE THE PIECES MAY LIVE: the KEYED EFFECT must sit on an " +
+      "AUDIO or BUS track — an instrument track cannot host one, so in an all-MIDI project " +
+      "add a bus (track_add kind:\"bus\"), route the instrument into it with track_set_output, " +
+      "and key the compressor ON THE BUS. The KEY SOURCE, by contrast, may be ANY NON-BUS " +
+      "track — an INSTRUMENT track is a perfectly valid key source, so ducking off a MIDI kick " +
+      "needs no audio bounce (only bus key sources are deferred). " +
+      "A key that would form a feedback loop is rejected with the exact path. " +
       "The MASTER chain cannot host a sidechain-keyed effect and the master output cannot be a " +
       "key source: passing \"master\" as `trackId` or `sourceTrackId` is rejected — key an " +
       "effect on a track or bus instead (unlike fx_add/fx_remove/fx_reorder/fx_set_bypass/" +
@@ -2292,7 +3262,8 @@ registerTool(
         .nullable()
         .optional()
         .describe(
-          "Id of the audio track to key FROM (e.g. the kick). Pass null or omit to CLEAR the " +
+          "Id of the track to key FROM (e.g. the kick) — any NON-BUS track, instrument tracks " +
+            "included; it does NOT have to be an audio track. Pass null or omit to CLEAR the " +
             "key and return the effect to self-keyed."
         ),
     },
@@ -2539,7 +3510,12 @@ const noteSchema = z.object({
       "Note id (uuid). Omit when creating new notes — the server mints one; " +
         "include an existing note's id when resubmitting it unchanged via clip_set_notes."
     ),
-});
+})
+  // `.strict()` (m30-c): `registerTool`'s wrapper only strictens the TOP
+  // level of clip_add_midi/clip_set_notes's own inputSchema — a typo'd field
+  // inside one element of the `notes` array (e.g. "velocty") would otherwise
+  // be silently stripped instead of rejected.
+  .strict();
 
 registerTool(
   "clip_add_audio",
@@ -2588,9 +3564,22 @@ registerTool(
       "not the timeline), and `lengthBeats` (defaults to 1 beat). Audio and " +
       "bus tracks reject MIDI clips. Returns the created clip with " +
       "server-minted note ids and the notes normalized and sorted by " +
-      "startBeat. NOTE: MIDI clips are silent until an instrument is wired " +
-      "up (M3) — the data model and editing already work, so compose freely " +
-      "now and expect sound once an instrument lands.",
+      "startBeat. A new instrument track already SOUNDS — it resolves to the " +
+      "default poly synth even when nothing has been configured on it, so a " +
+      "clip written here is audible immediately. Use track_set_instrument to " +
+      "put it on a sound bank, sampler, or hosted Audio Unit instead. " +
+      "`returnNotes` (default true, UNCHANGED from before this param existed) controls " +
+      "whether the response echoes the notes array back at all: on the hot path of a " +
+      "composing session this echo is often the single biggest cost in the call, since " +
+      "the useful result is almost always just the new clip id, not per-note ids you " +
+      "rarely edit immediately. Pass `returnNotes: false` to get the clip back WITHOUT " +
+      "its `notes` array — the response instead carries `notesOmitted: true` and " +
+      "`noteCount` (how many notes were actually written), so it can never be mistaken " +
+      "for a genuinely empty clip. Nothing is lost: read the notes back any time with " +
+      "clip_get_notes (read-only, no undo step, takes the returned clip's id). Note " +
+      "this only trims what crosses back to YOU — the full payload still crosses the " +
+      "app's own control connection either way, so it saves your context budget, not " +
+      "wire bytes.",
     inputSchema: {
       trackId: z
         .string()
@@ -2622,10 +3611,29 @@ registerTool(
             "relative to the clip's own start. Omit (or pass an empty array) to " +
             "create an empty MIDI clip."
         ),
+      returnNotes: z
+        .boolean()
+        .optional()
+        .describe(
+          "Whether the response echoes the written notes back, each with its " +
+            "server-minted id. Defaults to true (unchanged prior behavior). Pass " +
+            "false to drop the notes array from the response and get back " +
+            "`notesOmitted: true` plus `noteCount` instead — the notes are still " +
+            "written and are always readable afterward via clip_get_notes; this " +
+            "only shrinks what comes back to you, not what crosses the app's own " +
+            "control connection."
+        ),
     },
   },
-  async ({ trackId, name, atBeat, lengthBeats, notes }) =>
-    toToolResult(() => bridge.send("clip.addMIDI", { trackId, name, atBeat, lengthBeats, notes }))
+  async ({ trackId, name, atBeat, lengthBeats, notes, returnNotes }) =>
+    toToolResult(async () => {
+      const result = await bridge.send("clip.addMIDI", { trackId, name, atBeat, lengthBeats, notes });
+      if (returnNotes === false && result && typeof result === "object" && Array.isArray((result as any).notes)) {
+        const { notes: writtenNotes, ...rest } = result as Record<string, unknown>;
+        return { ...rest, notesOmitted: true, noteCount: (writtenNotes as unknown[]).length };
+      }
+      return result;
+    })
 );
 
 registerTool(
@@ -2635,12 +3643,22 @@ registerTool(
     description:
       "Replace a MIDI clip's ENTIRE note array — the only note-editing " +
       "primitive. There is no add/remove-single-note tool: read the " +
-      "clip's current `notes` from project_snapshot, modify the array " +
+      "clip's current notes with clip_get_notes (preferred — one clip, not " +
+      "the whole project) or from project_snapshot, modify the array " +
       "(add, remove, or change notes) in your own code, then resubmit the " +
       "whole array here. One call = one undo step (edit_undo reverts the " +
       "entire replacement). `notes` may be empty to clear the clip. Errors " +
       "readably if `clipId` refers to an audio clip (audio clips have no " +
-      "notes).",
+      "notes). " +
+      "⭐ THE CLIP ID SURVIVES: this edits the clip in place and never " +
+      "creates a replacement, so `clipId` — and the clip's position, length " +
+      "and every other field — stay valid across a full replace. That makes " +
+      "RE-AUTHORING a clip wholesale a supported fallback when you cannot " +
+      "read it first (e.g. clip_get_notes is unavailable) AND you are the " +
+      "source of its content: rewrite the array you intended, and any ids " +
+      "your later steps depend on still resolve. Reading first remains " +
+      "preferred whenever the clip's notes came from anywhere else, since a " +
+      "whole-array write drops whatever you did not include.",
     inputSchema: {
       clipId: z.string().uuid().describe("Id of the MIDI clip to edit, from project_snapshot."),
       notes: z
@@ -2653,6 +3671,80 @@ registerTool(
     },
   },
   async ({ clipId, notes }) => toToolResult(() => bridge.send("clip.setNotes", { clipId, notes }))
+);
+
+registerTool(
+  "clip_get_notes",
+  {
+    title: "Read a MIDI clip's notes (read-only)",
+    description:
+      "Read a MIDI clip's notes back — the read half of the clip_set_notes / " +
+      "clip_add_midi pair. Since clip_set_notes replaces the ENTIRE note " +
+      "array, you need the CURRENT array (with its real note ids) before " +
+      "you can edit a subset of notes and resubmit the whole thing; this " +
+      "tool gets you that array. PREFER THIS over project_snapshot for note " +
+      "data: project_snapshot serializes the WHOLE project and measured " +
+      "~290 KB on a modest 6-track/38-clip/2367-note session (2026-08-17), " +
+      "which can overflow your output budget — clip_get_notes returns just " +
+      "one clip. `fromBeat`/`toBeat` are CLIP-RELATIVE beats (same frame as " +
+      "a note's startBeat: 0 = the clip's own start, NOT the timeline) and " +
+      "HALF-OPEN — a note is included when startBeat >= fromBeat AND < " +
+      "toBeat, so adjacent windows never double-count a note sitting " +
+      "exactly on the shared boundary. `pitchMin`/`pitchMax` are INCLUSIVE " +
+      "on both ends. IMPORTANT: `totalNotes` in the response is always the " +
+      "clip's UNFILTERED note count, while `returnedNotes` is how many " +
+      "survived your filters (equal to notes.length) — if you filtered and " +
+      "then call clip_set_notes with only the filtered array, you will " +
+      "SILENTLY DESTROY every note you never saw, so always check " +
+      "totalNotes === returnedNotes before doing a whole-array replace, or " +
+      "merge your edits back into a full clip_get_notes {} read first. Size " +
+      "math: a note is roughly 90-120 bytes of JSON, so a 900-note drum " +
+      "clip is ~80-110 KB — for big clips, filter by fromBeat/toBeat rather " +
+      "than pulling the whole clip. This tool is STRICTLY READ-ONLY: no " +
+      "undo entry, nothing dirtied, no engine call — unlike the old " +
+      "clip_humanize-with-zero-jitter 'peek' trick, which still marks the " +
+      "project dirty and still fires an engine refresh even though the " +
+      "notes come back unchanged. Calling this is free.",
+    inputSchema: {
+      clipId: z.string().uuid().describe("Id of the MIDI clip to read, from project_snapshot or clip_add_midi."),
+      fromBeat: z
+        .number()
+        .optional()
+        .describe(
+          "Only return notes whose startBeat is >= this (CLIP-RELATIVE beats, " +
+            "not timeline beats). Half-open with toBeat: a note starting exactly " +
+            "at fromBeat IS included. Omit for no lower bound."
+        ),
+      toBeat: z
+        .number()
+        .optional()
+        .describe(
+          "Only return notes whose startBeat is < this (CLIP-RELATIVE beats, " +
+            "not timeline beats). Half-open: a note starting exactly at toBeat is " +
+            "EXCLUDED (it belongs to the next window). Omit for no upper bound. " +
+            "Must be >= fromBeat when both are given."
+        ),
+      pitchMin: z
+        .number()
+        .int()
+        .min(0)
+        .max(127)
+        .optional()
+        .describe("Only return notes with pitch >= this, 0-127 INCLUSIVE. Omit for no lower bound."),
+      pitchMax: z
+        .number()
+        .int()
+        .min(0)
+        .max(127)
+        .optional()
+        .describe(
+          "Only return notes with pitch <= this, 0-127 INCLUSIVE. Omit for no " +
+            "upper bound. Must be >= pitchMin when both are given."
+        ),
+    },
+  },
+  async ({ clipId, fromBeat, toBeat, pitchMin, pitchMax }) =>
+    toToolResult(() => bridge.send("clip.getNotes", { clipId, fromBeat, toBeat, pitchMin, pitchMax }))
 );
 
 registerTool(
@@ -2911,6 +4003,10 @@ registerTool(
               .number()
               .describe("Gain at this breakpoint in decibels. Clamped to -72..24; 0 = unity."),
           })
+            // `.strict()` (m30-c): a typo'd field (e.g. "gainDB") inside one
+            // `points` element would otherwise be silently stripped instead
+            // of rejected.
+            .strict()
         )
         .optional()
         .describe(
@@ -3165,19 +4261,45 @@ registerTool(
 registerTool(
   "clip_humanize",
   {
-    title: "Add human feel to a MIDI clip (seeded timing + velocity jitter)",
+    title: "Add human feel to a MIDI clip (seeded timing + velocity jitter, optional legato overlap)",
     description:
       "The inverse-spirited sibling of clip_quantize: instead of snapping a MIDI clip's " +
       "notes to the grid, nudge them slightly OFF it so they feel played rather than " +
       "programmed. Each note gets an INDEPENDENT random timing offset (up to ±`timingBeats` " +
       "beats) and an independent random velocity offset (up to ±`velocityRange`), applied " +
       "as ONE undoable step. Onsets are clamped to stay inside the clip and velocities to " +
-      "1..127; note LENGTHS, ids, and order are preserved. The jitter is DETERMINISTIC and " +
+      "1..127; note ids and array order are ALWAYS preserved, and so are note LENGTHS " +
+      "UNLESS you pass `legatoOverlapBeats` > 0 — that is the one argument here that " +
+      "rewrites lengths, and it is off by default. " +
+      "LEGATO/GATE PASS (`legatoOverlapBeats` + `maxGapBeats`): every note followed within " +
+      "`maxGapBeats` is lengthened to end `legatoOverlapBeats` PAST the following note's " +
+      "start, so gaps close and joins overlap. A LARGER gap is a rest (for a wind part, a " +
+      "breath) and is left exactly as authored; notes that already overlap are left alone " +
+      "(the pass only ever extends, so running it twice with the same arguments changes " +
+      "nothing the second time); the last note is never extended; nothing is extended past " +
+      "the clip end; a note whose successor repeats its own PITCH abuts that successor " +
+      "exactly instead of overlapping it, because MIDI note-off carries only a pitch and an " +
+      "overlap there would cut the note that just started. " +
+      "⚠️ WHAT OVERLAP ACTUALLY BUYS: this engine has NO legato-hold mode — every note-on " +
+      "starts a brand-new voice with a fresh attack, on the built-in sampler and on a " +
+      "hosted AUSampler alike. The overlap MASKS each new attack under the previous note's " +
+      "decaying tail; it does NOT eliminate the retrigger and cannot produce true legato. " +
+      "Use ~0.02-0.05 beats for a melodic wind/brass line. `maxGapBeats` on its own does " +
+      "NOTHING: it is a ceiling on a pass that only runs when `legatoOverlapBeats` > 0. " +
+      "The jitter is DETERMINISTIC and " +
       "SEEDED: pass a `seed` to get an exact, repeatable result, or omit it to draw a fresh " +
       "one. Either way the response includes `seedUsed` (the seed actually applied) alongside " +
       "the updated clip fields — feed that same value back as `seed` to reproduce this exact " +
       "take, or omit `seed` again to re-roll a different feel. MIDI CLIPS ONLY: an audio clip " +
-      "is rejected. Returns the updated clip plus `seedUsed`.",
+      "is rejected. Returns the updated clip plus `seedUsed`. " +
+      "NOT IDEMPOTENT — the jitter is added to each note's CURRENT position, not to a stored " +
+      "quantized original, so calling this twice COMPOUNDS the feel (and repeated runs pile " +
+      "onsets against the clip boundary, where they clamp). `seed` reproduces a result only " +
+      "from the SAME starting state — same seed applied twice in a row does NOT give you the " +
+      "same clip as applying it once. Nothing on the clip records that it was humanized, so " +
+      "an agent picking up someone else's clip cannot tell: to re-roll a feel, edit_undo the " +
+      "previous humanize FIRST, then re-apply. Prefer one pass with the right amount over " +
+      "several nudges.",
     inputSchema: {
       clipId: z.string().uuid().describe("Id of the MIDI clip to humanize, from project_snapshot."),
       timingBeats: z
@@ -3211,10 +4333,46 @@ registerTool(
             "(and same params) to reproduce an exact result; omit it to draw a random seed. The " +
             "seed actually used is always returned as `seedUsed` so you can reproduce or re-roll."
         ),
+      legatoOverlapBeats: z
+        .number()
+        .min(0)
+        .max(0.25)
+        .optional()
+        .describe(
+          "How far each note is stretched PAST the start of the note that follows it, in BEATS, " +
+            "0..0.25 (default 0 = OFF, note lengths untouched). This is the only argument that " +
+            "changes note LENGTHS. ~0.024-0.048 beats is 20-40 ms at 72 BPM, a good range for a " +
+            "melodic wind/brass line. It masks each note's fresh attack under the previous note's " +
+            "tail — it does NOT eliminate the retrigger (no legato-hold mode exists in this " +
+            "engine), so bigger is not smoother: past ~0.06 beats it starts to read as two " +
+            "players. Deterministic and RNG-free, so a seeded result is unchanged by it."
+        ),
+      maxGapBeats: z
+        .number()
+        .min(0)
+        .max(4)
+        .optional()
+        .describe(
+          "The largest gap the legato pass will close, in BEATS, 0..4 (default 0.125 — a " +
+            "thirty-second note). A gap WIDER than this is treated as a rest — a breath in a " +
+            "wind part — and is preserved exactly, which is what keeps the pass musical rather " +
+            "than destructive. Raise it to close written rests too (1 = a quarter-note rest); " +
+            "lower it at very slow tempos, where 0.125 beat is more milliseconds. Does NOTHING " +
+            "on its own: it only bounds the pass that `legatoOverlapBeats` > 0 turns on."
+        ),
     },
   },
-  async ({ clipId, timingBeats, velocityRange, seed }) =>
-    toToolResult(() => bridge.send("clip.humanize", { clipId, timingBeats, velocityRange, seed }))
+  async ({ clipId, timingBeats, velocityRange, seed, legatoOverlapBeats, maxGapBeats }) =>
+    toToolResult(() =>
+      bridge.send("clip.humanize", {
+        clipId,
+        timingBeats,
+        velocityRange,
+        seed,
+        legatoOverlapBeats,
+        maxGapBeats,
+      })
+    )
 );
 
 server.registerTool(
@@ -3386,6 +4544,102 @@ registerTool(
 );
 
 registerTool(
+  "clip_detect_pitch",
+  {
+    title: "Detect the pitch of an audio clip, frame by frame",
+    description:
+      "Analyze an AUDIO clip's current source window for PITCH, frame by frame (~62.5 " +
+      "frames/second) -- fundamental frequency, confidence, level, and (for a silent or " +
+      "unvoiced frame) WHY no pitch was named. This is the wiring for the app's pitch " +
+      "detector (SwiftF0, run on-device via ONNX Runtime) -- the first tool that lets you " +
+      "hear, in numbers, what note someone actually sang. Feeds Kiffness-style workflows " +
+      "(chop a vocal phrase into fragments with clip_detect_transients + clip_split, then " +
+      "learn each fragment's pitch here before pitch-shifting it with clip_set_stretch) " +
+      "and any 'is this take in tune' question. Read-only: nothing is edited, no undo entry, " +
+      "and nothing is cached -- a repeat call re-runs the detector. AUDIO CLIPS ONLY -- a " +
+      "MIDI clip is rejected (its notes already have a definite pitch). Returns " +
+      "`{pitch: {frames, frameCount, voicedFrameCount, voicedFraction, frameRateHz, " +
+      "analysisSampleRateHz, sourceSampleRateHz, windowStartSeconds, windowDurationSeconds, " +
+      "confidenceThreshold, silenceFloorDbfs, minFrequencyHz, maxFrequencyHz}, " +
+      "clipWindowDurationSeconds, stretchRatio, pitchShiftSemitones}`. Each entry in " +
+      "`frames` is `{timeSeconds, frequencyHz?, confidence, levelDbfs?, absence?}` -- " +
+      "`timeSeconds` is a SOURCE-FILE-absolute second (the SAME numbers clip_detect_transients' " +
+      "`sourceSeconds` and clip_analyze_audio's `windowStartSeconds` use, so you can line " +
+      "pitch frames up against transient markers with no arithmetic). HONEST ABSENCE: an " +
+      "unvoiced frame OMITS `frequencyHz` ENTIRELY (never 0, never a fabricated value) and " +
+      "instead carries `absence`, one of `belowConfidence` (the model wasn't sure enough), " +
+      "`belowLevel` (too quiet to trust -- SwiftF0 is confidence-blind to level, so this " +
+      "catches near-silence confidence alone would miss), or `outOfRange` (a real pitch " +
+      "outside `[minFrequencyHz, maxFrequencyHz]`). Frames are never dropped, so the array " +
+      "is a uniform time grid you can read holes out of directly -- 'the singer stopped " +
+      "here' and 'this frame is unreliable' are DIFFERENT reasons and stay distinguishable. " +
+      "`voicedFraction` (0..1) is a quick 'how much of this actually has a pitch' summary " +
+      "before you look at individual frames. `confidenceThreshold` (0..1, default 0.9) and " +
+      "`silenceFloorDbfs` (default -75) are the two tuning knobs that decide voicing -- " +
+      "`silenceFloorDbfs` in particular is UNTUNED against real vocal recordings (only " +
+      "synthetic fixtures so far), so if real-take results look wrong, retune it here rather " +
+      "than assuming the detector is broken. `fromSeconds`/`durationSeconds` narrow the " +
+      "analyzed range (both SOURCE-FILE-absolute, like clip_analyze_audio's window); omit " +
+      "both to analyze the clip's WHOLE current window -- for a multi-minute clip that can " +
+      "be a large response (roughly 60 KB per 10 seconds of audio), so pass an explicit " +
+      "range for a long clip if you only need part of it. `stretchRatio`/`pitchShiftSemitones` " +
+      "echo the clip's current state (results are measured on the SOURCE audio, before " +
+      "either is applied) so you can derive the sounding pitch yourself " +
+      "(`frequencyHz * 2^(pitchShiftSemitones/12)`) if the clip is pitch-shifted.",
+    inputSchema: {
+      clipId: z.string().uuid().describe("Id of the AUDIO clip to analyze, from project_snapshot."),
+      fromSeconds: z
+        .number()
+        .min(0)
+        .optional()
+        .describe(
+          "Where to start, in SOURCE-FILE-absolute seconds (the clip_detect_transients/" +
+            "clip_analyze_audio domain) -- must fall inside the clip's current window. " +
+            "Omit to start at the clip's own window start."
+        ),
+      durationSeconds: z
+        .number()
+        .gt(0)
+        .optional()
+        .describe(
+          "How many seconds to analyze from fromSeconds. Must be > 0 when given. Omit for " +
+            "the rest of the clip's current window; a value that would run past the window " +
+            "end is clamped (never rejected) and the response's `pitch.windowDurationSeconds` " +
+            "reports what was actually analyzed."
+        ),
+      confidenceThreshold: z
+        .number()
+        .min(0)
+        .max(1)
+        .optional()
+        .describe(
+          "Voicing confidence gate, 0..1 (default 0.9, SwiftF0's own documented default). " +
+            "A frame under this reads as unvoiced with absence:'belowConfidence'."
+        ),
+      silenceFloorDbfs: z
+        .number()
+        .optional()
+        .describe(
+          "RMS level gate in dBFS (default -75). A frame quieter than this reads as unvoiced " +
+            "with absence:'belowLevel', regardless of confidence -- needed because the " +
+            "detector can report high confidence on near-silence. UNTUNED against real vocal " +
+            "recordings; adjust this while listening if real-take results look wrong."
+        ),
+    },
+  },
+  async ({ clipId, fromSeconds, durationSeconds, confidenceThreshold, silenceFloorDbfs }) =>
+    toToolResult(() =>
+      bridge.send("clip.detectPitch", {
+        clipId,
+        fromSeconds,
+        durationSeconds,
+        confidenceThreshold,
+        silenceFloorDbfs,
+      })
+    )
+);
+
+registerTool(
   "clip_delete_time_range",
   {
     title: "Delete a time range from a MIDI clip (excise + close the gap)",
@@ -3493,7 +4747,11 @@ const controllerPointSchema = z.object({
         "bend); 0-127 for cc / channelPressure lanes — a value outside the OWNING lane's " +
         "domain errors readably, naming the exact range."
     ),
-});
+})
+  // `.strict()` (m30-c): closes the same per-element hole for
+  // clip_set_controller_lane's `points` array — a typo'd field (e.g.
+  // "vlaue") would otherwise be silently stripped instead of rejected.
+  .strict();
 
 registerTool(
   "clip_set_controller_lane",
@@ -3514,10 +4772,22 @@ registerTool(
       "then resubmit the whole thing here. Values are RAW MIDI: 0-16383 for a " +
       "`pitchBend` lane (8192 = the center/no-bend position; built-in instruments apply " +
       "it as +/-2 semitones), 0-127 for `cc`/`channelPressure` lanes (CC 1 = mod wheel, " +
-      "CC 64 = sustain pedal — a value >= 64 counts as pedal-down). Built-in instruments " +
-      "only honor pitch bend and CC 64 sustain today; every other CC/channelPressure " +
-      "value is forwarded to hosted Audio Unit instruments and otherwise safely ignored " +
-      "by the built-ins. Controller values CHASE at play and at seek: the latest value " +
+      "CC 64 = sustain pedal — a value >= 64 counts as pedal-down). WHAT ACTUALLY " +
+      "SOUNDS depends on the track's instrument, and this tool now TELLS you: a lane " +
+      "the instrument cannot consume still succeeds and is still stored, but the " +
+      "response carries a `warnings` array naming the controller and why it will be " +
+      "silent — read it. The built-in SAMPLER honors pitch bend, CC 64 (sustain) and, " +
+      "for continuous breath/air expression, CC 11 (expression, unconditional), plus " +
+      "CC 1 (mod wheel) and CC 2 (breath) once `sampler.expressionModDepth` is set " +
+      "above 0 on the instrument — those two are gated because their neutral value is " +
+      "0, so routing them unconditionally would silence a clip until its lane's first " +
+      "point. The built-in POLY SYNTH honors pitch bend and CC 64 only. Hosted Audio " +
+      "Unit and sound-bank instruments receive every CC as raw MIDI. Note that CC 11 " +
+      "on the sampler scales LOUDNESS; for continuous BRIGHTNESS set " +
+      "`sampler.expressionFilterDepth` (and optionally `expressionFilterCC`), which " +
+      "sweeps a per-voice low-pass — that is what makes a long held sax or string note " +
+      "read as a player leaning into it rather than a flat sustain. Controller values " +
+      "CHASE at play and at seek: the latest value " +
       "at or before the playhead stays in effect, so a pedal held or a bend applied " +
       "earlier in the clip is still sounding after a jump — you don't need to re-state a " +
       "value at every seek target. clip_quantize/clip_humanize move only NOTES, never " +
@@ -3599,6 +4869,942 @@ registerTool(
   },
   async ({ clipId, type, controller }) =>
     toToolResult(() => bridge.send("clip.removeControllerLane", { clipId, type, controller }))
+);
+
+/**
+ * m27 leg D — the authoring primitive on top of clip_set_controller_lane.
+ *
+ * ⚠️ EVERY parameter named in the description below is also a key of
+ * `inputSchema` AND is forwarded in the handler's `bridge.send` payload. That
+ * is not a style note: `registerTool`'s `.strict()` wrapper rejects unknown
+ * keys, but a key the DESCRIPTION advertises and the SCHEMA omits is stripped
+ * by the SDK before the handler runs, and the tool then returns a perfectly
+ * successful result computed from the default. Three parameters shipped that
+ * way earlier in this round. If you add one here, add it in all three places.
+ */
+registerTool(
+  "clip_apply_breath_contour",
+  {
+    title: "Make a MIDI clip's held notes breathe (expression swell + delayed vibrato)",
+    description:
+      "Make held notes BREATHE — the single highest-value fix for a wind, brass, string " +
+      "or sustained-vocal part that sounds like a synthesizer holding a key down. In ONE " +
+      "call it writes the correlated performance contour a real player puts on a " +
+      "sustained note, which is otherwise dozens of hand-placed points per note via " +
+      "clip_set_controller_lane:\n" +
+      "• an EXPRESSION (CC 11) swell — a small dip just after the attack as the air " +
+      "column settles, a rise to a peak about two-thirds through the note, then a taper. " +
+      "On the built-in sampler CC 11 moves LOUDNESS always, and BRIGHTNESS too whenever " +
+      "the track's `sampler.expressionFilterDepth` is above 0 — that pairing is what " +
+      "reads as a player leaning in, and it is why this beats a volume-automation swell, " +
+      "which can only ever sound like a fader move.\n" +
+      "• DELAYED VIBRATO on the pitch-bend lane — straight for the first half second, " +
+      "then blooming from nothing to about ±12 cents at 5.5 Hz, and relaxing back to " +
+      "exact centre before the note ends. Constant vibrato from the attack is the classic " +
+      "MIDI giveaway; the delay is the whole point.\n" +
+      "• a few cents of MICRO-SHARPENING at the top of the swell, resolving as it falls " +
+      "(blowing harder pushes a wind instrument sharp).\n" +
+      "Shapes EVERY note in the clip by default, or only the ones in `noteIds`. It MERGES " +
+      "with whatever is already on those two lanes: points outside the shaped notes' spans " +
+      "survive exactly as authored, so you can run it note by note across a phrase, or " +
+      "after hand-drawing something else, without wiping your earlier work — unlike " +
+      "clip_set_controller_lane, which replaces a lane wholesale by contract. Notes too " +
+      "short for the straight opening plus one whole vibrato cycle get the expression " +
+      "contour ONLY and no pitch-bend lane at all; that is the intended shape for short " +
+      "notes, not a failure, and the response says how many. ⚠️ Pitch bend is CHANNEL-WIDE " +
+      "in MIDI, so the vibrato bends every voice sounding on that track — correct for the " +
+      "monophonic wind or vocal line this is built for, wrong for a chordal part (pass " +
+      "`vibratoDepthCents: 0` there and keep just the swell). Every parameter is optional " +
+      "and the defaults are a complete, musical result — reach for them only when the " +
+      "default shape is not what the part needs. One call = one undo step. MIDI clips " +
+      "only. Returns the updated clip (both lanes echo back in `controllerLanes`) plus " +
+      "`notesTouched`, `notesWithVibrato`, `expressionPointCount`, `pitchBendPointCount`, " +
+      "`perNotePointBudget`, and a `warnings` array — READ THE WARNINGS: they are how a " +
+      "contour that will only be half audible (e.g. brightness off, or no note long " +
+      "enough for vibrato) tells you so.",
+    inputSchema: {
+      clipId: z.string().uuid().describe("Id of the MIDI clip to shape, from project_snapshot."),
+      noteIds: z
+        .array(z.string().uuid().describe("A note id from clip_get_notes."))
+        .optional()
+        .describe(
+          "Ids of the notes to shape, from clip_get_notes. OMIT to shape EVERY note in " +
+            "the clip (the usual call). An id that is not in the clip is refused outright " +
+            "and nothing is written — a partly-applied contour would leave you unable to " +
+            "tell which notes got one."
+        ),
+      depth: z
+        .number()
+        .min(0)
+        .max(1)
+        .optional()
+        .describe(
+          "How far the swell falls below its peak, as a fraction of `peakValue`. Default " +
+            "0.25 — about 2.5 dB from peak to trough, which is the INVOLUNTARY contour of " +
+            "a note held steady rather than a written crescendo. Raise toward 0.5 for a " +
+            "hairpin. 0 turns the swell off (a flat lane at `peakValue`)."
+        ),
+      peakValue: z
+        .number()
+        .int()
+        .min(0)
+        .max(127)
+        .optional()
+        .describe(
+          "Raw CC value at the top of the swell, 0-127. Default 127, which is the " +
+            "expression lane's own neutral: the loudest instant of the note comes out " +
+            "exactly as loud as it would with no contour at all, so applying this can " +
+            "never quietly drop the level of a part you already balanced. Lower it to " +
+            "leave headroom above the peak for a later hand edit."
+        ),
+      peakPosition: z
+        .number()
+        .min(0.05)
+        .max(0.95)
+        .optional()
+        .describe(
+          "Where the peak of the swell sits, as a fraction of the note's length. Default " +
+            "0.65 — past the middle, so the note takes longer arriving than leaving, which " +
+            "is the asymmetry that reads as effort rather than as a tremolo."
+        ),
+      attackSettleSeconds: z
+        .number()
+        .min(0)
+        .max(1)
+        .optional()
+        .describe(
+          "Seconds from the attack to the bottom of the settling dip. Default 0.05. " +
+            "Automatically clamped to a quarter of the note, so a staccato note gets a " +
+            "scaled-down version of the same curve instead of being all dip."
+        ),
+      expressionCC: z
+        .number()
+        .int()
+        .min(0)
+        .max(127)
+        .optional()
+        .describe(
+          "Which CC number carries the swell. Default 11 (expression) — the one the " +
+            "built-in sampler routes to amplitude with no opt-in, and the default target " +
+            "of its brightness filter, so one lane moves both. Change it only if you have " +
+            "pointed `sampler.expressionFilterCC` somewhere else."
+        ),
+      expressionSpacingSeconds: z
+        .number()
+        .min(0.001)
+        .max(1)
+        .optional()
+        .describe(
+          "Seconds between emitted expression points. Default 0.02. Controller lanes are " +
+            "STEPWISE (a value holds until the next point), so a dense run is what makes a " +
+            "smooth swell instead of a staircase. Note this sets the finest step TIMING, " +
+            "not the point count: redundant points are dropped, so the run is only ever as " +
+            "long as the number of distinct CC values the contour passes through."
+        ),
+      vibratoOnsetSeconds: z
+        .number()
+        .min(0)
+        .max(10)
+        .optional()
+        .describe(
+          "Seconds of STRAIGHT playing before vibrato begins. Default 0.5. A note shorter " +
+            "than this plus one whole vibrato cycle gets no pitch-bend lane at all — lower " +
+            "this to bring vibrato to shorter notes."
+        ),
+      vibratoRateHz: z
+        .number()
+        .min(0.2)
+        .max(20)
+        .optional()
+        .describe(
+          "Vibrato rate in Hz. Default 5.5, the middle of the 5-7 Hz band conventionally " +
+            "quoted for instrumental vibrato."
+        ),
+      vibratoDepthCents: z
+        .number()
+        .min(0)
+        .max(200)
+        .optional()
+        .describe(
+          "Peak vibrato width in CENTS — a ± figure, so 12 spans 24 cents. Default 12, " +
+            "deliberately conservative: pitch bend is channel-wide and will bend any " +
+            "overlapping neighbouring note's tail too. 0 turns vibrato off entirely and " +
+            "writes no pitch-bend lane beyond the micro-sharpening."
+        ),
+      vibratoBloomSeconds: z
+        .number()
+        .min(0)
+        .max(10)
+        .optional()
+        .describe(
+          "Seconds over which the vibrato widens from nothing to full depth after it " +
+            "starts. Default 0.7 (about four cycles at the default rate)."
+        ),
+      vibratoReleaseSeconds: z
+        .number()
+        .min(0)
+        .max(10)
+        .optional()
+        .describe(
+          "Seconds before the note's end over which the vibrato relaxes back to centre. " +
+            "Default 0.08. Players do ease off, and it guarantees the lane lands on exact " +
+            "centre so the NEXT note cannot start detuned by this one's last vibrato phase."
+        ),
+      sharpenCents: z
+        .number()
+        .min(-200)
+        .max(200)
+        .optional()
+        .describe(
+          "Peak micro-sharpening in CENTS at the top of the swell, resolving to nothing as " +
+            "the contour falls. Default 4 — on its own that is below the ear's pitch " +
+            "threshold, but it is CORRELATED with the loudness swell, and that correlation " +
+            "is what is heard as effort. Negative values flatten instead."
+        ),
+      bendSpacingSeconds: z
+        .number()
+        .min(0.001)
+        .max(1)
+        .optional()
+        .describe(
+          "Seconds between emitted pitch-bend points. Default 0.008. Unlike expression, " +
+            "the bend run IS the vibrato waveform (nothing smooths it), so this is its " +
+            "sample rate — about 23 points per cycle at the default. Coarsening it much " +
+            "past 0.02 stops sounding like vibrato."
+        ),
+      bendRangeSemitones: z
+        .number()
+        .min(0.01)
+        .max(48)
+        .optional()
+        .describe(
+          "The instrument's pitch-bend range in semitones for a full ±8192 deflection, so " +
+            "the cents figures above land correctly. Default 2, which is exactly what the " +
+            "built-in sampler uses. A hosted Audio Unit may differ — if the vibrato comes " +
+            "out wider or narrower than asked, this is the parameter to correct it with."
+        ),
+    },
+  },
+  async ({
+    clipId,
+    noteIds,
+    depth,
+    peakValue,
+    peakPosition,
+    attackSettleSeconds,
+    expressionCC,
+    expressionSpacingSeconds,
+    vibratoOnsetSeconds,
+    vibratoRateHz,
+    vibratoDepthCents,
+    vibratoBloomSeconds,
+    vibratoReleaseSeconds,
+    sharpenCents,
+    bendSpacingSeconds,
+    bendRangeSemitones,
+  }) =>
+    toToolResult(() =>
+      bridge.send("clip.applyBreathContour", {
+        clipId,
+        noteIds,
+        depth,
+        peakValue,
+        peakPosition,
+        attackSettleSeconds,
+        expressionCC,
+        expressionSpacingSeconds,
+        vibratoOnsetSeconds,
+        vibratoRateHz,
+        vibratoDepthCents,
+        vibratoBloomSeconds,
+        vibratoReleaseSeconds,
+        sharpenCents,
+        bendSpacingSeconds,
+        bendRangeSemitones,
+      })
+    )
+);
+
+/**
+ * Breath pad P1 — the COMPOSING verb on top of `clip_apply_breath_contour`.
+ *
+ * ⚠️ EVERY parameter named in the description below is also a key of
+ * `inputSchema` AND is forwarded in the handler's `bridge.send` payload — the
+ * same three-place rule the sibling above carries, and for the same reason:
+ * `registerTool`'s `.strict()` rejects unknown keys, but a key the DESCRIPTION
+ * advertises and the SCHEMA omits is silently stripped by the SDK before the
+ * handler runs, and the tool then returns a perfectly successful result
+ * computed from the default. That has already happened once in this file.
+ *
+ * ⚠️ `depth`, `peakPosition`, `onsetLevel` and `releaseLevel` are deliberately
+ * ABSENT: those four ARE the pattern. `clip_apply_breath_contour` remains the
+ * verb for hand-authored shapes and its contract is untouched.
+ */
+registerTool(
+  "clip_apply_effort_shape",
+  {
+    title: "Shape how hard the player is blowing, with one named musical gesture",
+    description:
+      "Apply a NAMED effort gesture to a MIDI part — the composing verb on top of " +
+      "clip_apply_breath_contour. Instead of choosing a dozen numbers, pick the shape a " +
+      "musician would name, and every note gets the right contour for its place in the " +
+      "music:\n" +
+      "• `messaDiVoce` — grow to a peak in the MIDDLE of the note, then fade. The anchor " +
+      "gesture for a held wind or vocal note.\n" +
+      "• `lateBloom` — steady, then swell in the last third. The difference between singing " +
+      "a note and leaning into it.\n" +
+      "• `sforzandoPiano` — hit it hard, drop immediately to soft, then grow back (sfp).\n" +
+      "• `subToneEntry` — start almost breath-only and rise into full tone. The tenor-ballad " +
+      "gesture.\n" +
+      "• `flat` — no shaping. The identity; use it to hear the part with expression off.\n" +
+      "• `hairpinCrescendo` / `hairpinDiminuendo` — the whole PHRASE grows or falls away, " +
+      "note by note.\n" +
+      "• `terraced` — step to one level and hold it for the phrase (the baroque contrast to " +
+      "the hairpins).\n" +
+      "\n" +
+      "\n" +
+      "TWO WAYS TO CHOOSE, and you must use exactly one. `pattern` names ONE gesture. " +
+      "`ringAngle` puts a DOT on a circle of all eight and blends the two it sits between — " +
+      "which is how you get a gesture that has no name, like 'mostly a late bloom but leaning " +
+      "toward a phrase crescendo' (ringAngle 112). The blend is nearest-two and equal-gain: " +
+      "landing on a pattern's own angle gives that pattern exactly, nothing else leaks in, and " +
+      "two identical patterns blend to themselves rather than to something louder. " +
+      "`ringRadius` is how far out the dot is, 0-1, where 0 changes nothing at all. Passing " +
+      "both forms, or neither, or ringRadius/ring without ringAngle, is REFUSED with a " +
+      "sentence — none of those is silently resolved for you.\n" +
+      "\n" +
+      "THE PHRASE-SCOPED PATTERNS (the last three) are what clip_apply_breath_contour " +
+      "structurally cannot do: they split the part into phrases at the BREATHS — rests " +
+      "bigger than `maxGapBeats`, the same rule clip_humanize's legato pass uses — and place " +
+      "each note at its own point of the arc. A written crescendo is a property of the " +
+      "phrase, not of any one note.\n" +
+      "\n" +
+      "Everything else is the sibling verb's, unchanged: the two lanes are MERGED (points " +
+      "outside the shaped notes survive as authored), the clip-wide point budget applies, " +
+      "and it is ONE undo step.\n" +
+      "\n" +
+      "⛔ ON A TRACK HOSTING AN AUDIO UNIT — which includes EVERY sound-bank instrument, so " +
+      "the GM saxophone, flute, strings and so on — two limits were MEASURED on 2026-08-19 " +
+      "and are enforced here rather than hoped about:\n" +
+      "1. Bend VIBRATO is SUPPRESSED, not written. Pitch bend there is sampled at the " +
+      "offline render block rate, so an authored 5.5 Hz vibrato bounces as two vibratos " +
+      "beating. `notesWithVibrato` comes back 0 and a warning names the route that DOES " +
+      "work: the instrument's own vibrato on a CC 1 (mod wheel) lane, about 2.4 + 0.30 x CC1 " +
+      "cents at a fixed 5.4 Hz, which you author with clip_set_controller_lane.\n" +
+      "2. The shape moves LOUDNESS ONLY, never brightness. CC 11 on that path is exactly a " +
+      "gain. Brightness shaping is a built-in Sampler capability — it is not a setting to " +
+      "turn on here.\n" +
+      "\n" +
+      "MAKE THE DOT MOVE — this is what turns a setting into a performance. `path: \"drift\"` " +
+      "with a `pathSeed` sends the dot wandering from one gesture into the next and back, so " +
+      "note 9 is shaped differently from note 2 the way a player's effort is never twice the " +
+      "same. `path: \"orbit\"` travels the ring steadily instead. The wander is REPRODUCIBLE: " +
+      "it is a pure function of the clip beat and the seed, with nothing accumulating anywhere, " +
+      "so playback, replay, a looped cycle and a bounce that starts in the middle of the song " +
+      "all agree exactly. Same seed, same performance — change the seed for a different one.\n" +
+      "⚠️ The dot is read ONCE PER NOTE, at the note's start. It chooses each note's gesture and " +
+      "cannot shape inside one.\n" +
+      "\n" +
+      "THE AIR BUDGET — a wind player has a finite lungful. `airEnforced: true` makes a phrase " +
+      "that runs past it SAG toward the ground rather than hold, the way a real player does. " +
+      "⛔ IT DEFAULTS TO FALSE, deliberately: an air budget OVERRIDES what you wrote, and " +
+      "anything that does that is switched on once, on purpose, rather than assumed. Tune it " +
+      "with `airCapacitySeconds` (how long the player can sustain the part as authored — 6 s), " +
+      "`airConsumptionExponent` (how much faster loud playing burns air), " +
+      "`airRefillSecondsPerSecond` (how much a rest gives back), `airMinBreathSeconds` (a rest " +
+      "shorter than this is an articulation, not a breath) and `airReserveFraction` (when the " +
+      "sag begins). Every one of those is an ESTIMATE, which is exactly why it is a parameter.\n" +
+      "⭐ THE RESPONSE ALWAYS CARRIES `air`, whether or not you enforced it, because that is " +
+      "what answers \"why did this get quiet?\". Read `air.applied` first: false means the lane " +
+      "was NOT changed and the rest is a prediction of what enforcing would do — so you can ask " +
+      "the question without mutating anything. `air.constrainedNoteCount` is how many notes " +
+      "lost something, `air.lowestAir` how close the player came to empty, and when anything " +
+      "was constrained `air.phrases[].constrainedNotes` names each note with `effortRequested` " +
+      "beside `effortAllowed`, the two peak CC values, and the dB between them. " +
+      "`air.neverRecovered` means the rests are too short to keep up and the sag accumulates. " +
+      "⛔ A part can also get quiet because YOU asked for it — a hairpin diminuendo. Only the " +
+      "budget produces effortAllowed < effortRequested, which is why \"air runs out\" is " +
+      "deliberately NOT one of the patterns you can pick: one symptom, one cause.\n" +
+      "\n" +
+      "PHYSIOLOGICAL HUMANISATION — the involuntary layer. `driftDepth` is a slow 1/f sag in " +
+      "the effort baseline (period `driftScaleBeats`, default 8 beats); `tremorDepth` is a " +
+      "4-8 Hz micro-tremor INSIDE each note, at `tremorRateHz`, deepening with effort by " +
+      "`tremorEffortExponent`. ⛔ BOTH DEFAULT TO 0 — off, and off renders BYTE-IDENTICALLY to " +
+      "never mentioning them, which is what makes each one individually declinable after you " +
+      "hear it. Suggested starting values: driftDepth 0.05, tremorDepth 0.03 (about 0.29 dB). " +
+      "The drift is DOWNWARD ONLY: effort 1 means 'as authored', so it is a ceiling and there " +
+      "is nothing above it to drift into.\n" +
+      "⭐ THE TREMOR NOW LANDS ON HOSTED-AU TRACKS TOO (m28-bug, 2026-08-20). It used to be " +
+      "refused on every soundBank instrument including the GM sax, and that refusal was " +
+      "correct at the time: an offline bounce fed hosted AUs MIDI in 4096-frame blocks — an " +
+      "11.719 Hz sampler — so a tremor returned with a sample-and-hold copy at " +
+      "|11.719 - rate| Hz of depth rate/(11.719 - rate), which at 8 Hz was 2.14x LOUDER than " +
+      "the tremor itself and still 52% at 4 Hz. The offline block is now 512 frames, a " +
+      "93.75 Hz sampler, so that copy sits at |93.75 - rate| Hz — 3% of the tremor at 8 Hz, " +
+      "measured from rendered audio — and the whole 4-8 Hz band is delivered at about 88% of " +
+      "authored depth. ⛔ THE LIMIT STILL EXISTS, IT MOVED: rates above 18.75 Hz are still " +
+      "SUPPRESSED rather than quietly retuned, and the response says so when it happens. " +
+      "The DRIFT (three orders of magnitude slower) was never affected and lands everywhere.\n" +
+      "\n" +
+      "READ THE RESPONSE. `minEffort` and `maxEffort` equal means the shape ran and varied " +
+      "nothing (usually a phrase-scoped pattern on notes that all sit at one point of one " +
+      "phrase). `phraseCount` says how many arcs were drawn. `warnings` says what will and " +
+      "will not be audible. On the ring form there is also `ring`, carrying the resolved " +
+      "`angleDegrees`, `radius`, `patternIds`, per-pattern `weights`, and the `noteWeight` / " +
+      "`phraseWeight` split — read the weights rather than `patternId`, which names only the " +
+      "NEAREST gesture and not the only one that played. On a moving dot that `ring` block " +
+      "describes the ORIGIN, and a `path` block describes the journey: `moved` says whether the " +
+      "dot travelled at all, `patternIds` lists every gesture it actually reached, and " +
+      "`outrunsNotes` says the motion was faster than the notes could sample it. A wander that " +
+      "reports one entry in `patternIds` ran and did nothing musical. MIDI clips only.",
+    inputSchema: {
+      clipId: z.string().describe("Id of the MIDI clip to shape, from project_snapshot."),
+      pattern: z
+        .enum([
+          "flat",
+          "messaDiVoce",
+          "lateBloom",
+          "hairpinCrescendo",
+          "hairpinDiminuendo",
+          "terraced",
+          "sforzandoPiano",
+          "subToneEntry",
+        ])
+        .optional()
+        .describe(
+          "ONE named gesture — the simple form. An unknown name is REFUSED naming the valid " +
+            "ones; it is never silently defaulted to a shape you did not ask for. Pass EITHER " +
+            "this OR `ringAngle`, never both, and never neither — the app refuses each of those " +
+            "with a sentence rather than guessing."
+        ),
+      ringAngle: z
+        .number()
+        .min(0)
+        .max(360)
+        .optional()
+        .describe(
+          "THE RING — where the dot sits, in DEGREES, on a circle of the 8 gestures. This is " +
+            "the blending form: instead of one gesture you get the two the dot sits between, " +
+            "mixed by how close it is to each. The default ring is 45° apart starting at 0: " +
+            "0=flat, 45=messaDiVoce, 90=lateBloom, 135=hairpinCrescendo, 180=hairpinDiminuendo, " +
+            "225=terraced, 270=sforzandoPiano, 315=subToneEntry. So 157.5 is halfway between " +
+            "the crescendo and the diminuendo (which cancel to a steady mid-level), and 67.5 is " +
+            "part messa di voce, part late bloom. Landing exactly on a number above gives that " +
+            "gesture EXACTLY — the blend is nearest-two, so a pattern you are not near " +
+            "contributes nothing at all. Only two things ever mix."
+        ),
+      ringRadius: z
+        .number()
+        .min(0)
+        .max(1)
+        .optional()
+        .describe(
+          "How far out the dot sits, 0-1. Default 1 (the full gesture). 0 is a TRUE no-op — the " +
+            "shape is not applied at all and nothing changes level — not 'half as loud'. ⚠️ Not " +
+            "independent of `amount`: both scale the same thing, so only the PRODUCT survives " +
+            "(radius 0.5 with amount 1 is identical to radius 1 with amount 0.5). Requires " +
+            "`ringAngle`; on its own it is refused rather than defaulted."
+        ),
+      ring: z
+        .array(z.string())
+        .optional()
+        .describe(
+          "Your own ring, as pattern ids in ring order — replaces the default eight. They are " +
+            "spaced evenly, so N ids sit 360/N apart with the first at 0°. Duplicates are " +
+            "allowed (a ring of copies of one pattern is a legitimate way to pin the dot). " +
+            "Max 32. Requires `ringAngle`; on its own it is refused rather than defaulted."
+        ),
+      path: z
+        .enum(["fixed", "orbit", "drift"])
+        .optional()
+        .describe(
+          "HOW THE DOT MOVES while the part plays. Default 'fixed' — it stays where you put " +
+            "it, which is the behaviour every earlier call had.\n" +
+            "• 'orbit' — a steady revolution round the ring, so the part travels through every " +
+            "gesture in turn. Set `revolutionBeats`.\n" +
+            "• 'drift' — a seeded wander that flows from one gesture into the next and back. " +
+            "This is the one that sounds like a player rather than a setting. Set `pathSeed`, " +
+            "and optionally `scaleBeats` / `momentum` / `angleSwing`.\n" +
+            "With a path, `ringAngle` and `ringRadius` stop being where the dot IS and become " +
+            "where you PUT it — the path is an offset from there, so nudging the origin moves " +
+            "the whole journey instead of cancelling it.\n" +
+            "⚠️ THE DOT IS READ ONCE PER NOTE, at the note's start. It chooses each note's " +
+            "gesture; it cannot shape INSIDE a note (that is what the note-scoped patterns " +
+            "are for). A path that moves faster than the notes arrive comes back with a " +
+            "warning saying so rather than aliasing quietly.\n" +
+            "⚠️ Parameters belonging to another path are REFUSED, not ignored: " +
+            "`revolutionBeats` on a drift is an error with a sentence. Requires `ringAngle`."
+        ),
+      pathSeed: z
+        .number()
+        .int()
+        .min(0)
+        .max(4294967295)
+        .optional()
+        .describe(
+          "WHICH wander you get, 0-4294967295. Default 0. The same seed always produces the " +
+            "same performance at the same clip beats — in playback, on replay, and in a bounce " +
+            "alike, including one that starts in the middle of the song. Change it to audition " +
+            "a different take of the same idea. ⚠️ Capped at 32 bits deliberately: a JSON " +
+            "number is a double, so a larger seed would not survive the round trip and you " +
+            "would silently get a different wander back. Only means anything with path 'drift'."
+        ),
+      revolutionBeats: z
+        .number()
+        .min(0.25)
+        .max(4096)
+        .optional()
+        .describe(
+          "ORBIT ONLY. How many BEATS one full trip round the ring takes. Default 16. On the " +
+            "default 8-pattern ring that is one gesture every 2 beats. Long values are the " +
+            "useful ones: the dot is read once per note, so a revolution shorter than a few " +
+            "notes is heard as an alias rather than as motion, and is warned about."
+        ),
+      pathDirection: z
+        .enum(["clockwise", "counterclockwise"])
+        .optional()
+        .describe(
+          "ORBIT ONLY. Which way round. Default 'clockwise', which is the order you listed " +
+            "the patterns in (or the default ring's order: flat → messaDiVoce → lateBloom → …)."
+        ),
+      scaleBeats: z
+        .number()
+        .min(0.25)
+        .max(1024)
+        .optional()
+        .describe(
+          "DRIFT ONLY. How many BEATS one unit of the wander spans. Default 8 — about two bars " +
+            "of 4/4, which reads as phrasing rather than as wobble. Bigger is slower."
+        ),
+      octaves: z
+        .number()
+        .int()
+        .min(1)
+        .max(8)
+        .optional()
+        .describe(
+          "DRIFT ONLY. How many layers of detail the wander has. Default 4: one slow sway plus " +
+            "three progressively faster and quieter layers on top. 1 is a single pure sway."
+        ),
+      momentum: z
+        .number()
+        .min(0)
+        .max(1)
+        .optional()
+        .describe(
+          "DRIFT ONLY. How LAZY the wander is, 0-1. Default 0.5. 1 is one long unhurried sway; " +
+            "0 is twitchy; 0.5 is the 1/f middle that human drift tends to sit near. ⚠️ It is " +
+            "the spectral tilt of the noise, not a stored velocity — nothing in this feature " +
+            "accumulates, which is why a bounce from bar 33 matches playing through to it."
+        ),
+      angleSwing: z
+        .number()
+        .min(0)
+        .max(360)
+        .optional()
+        .describe(
+          "DRIFT ONLY. The furthest the dot ever wanders from `ringAngle`, in DEGREES either " +
+            "side. Default 45 — one pattern spacing on the default ring, so it reaches each " +
+            "neighbour and no further. This is an exact bound, not a typical value. A swing " +
+            "much smaller than the gap between gestures comes back with a warning that the " +
+            "dot moved and never left the gesture it started on."
+        ),
+      radiusSwing: z
+        .number()
+        .min(0)
+        .max(1)
+        .optional()
+        .describe(
+          "DRIFT ONLY. How far the dot also wanders IN AND OUT, 0-1. Default 0 — the wander " +
+            "changes WHICH gesture is playing, not how strongly it is applied, so one control " +
+            "has one visible outcome. Raise it to let the intensity breathe too."
+        ),
+      noteIds: z
+        .array(z.string())
+        .optional()
+        .describe(
+          "Ids of the notes to shape (from clip_get_notes). OMIT to shape every note in the " +
+            "clip. Phrases are still measured over the WHOLE clip, so shaping the middle " +
+            "three notes of a phrase places them where they really sit in it rather than " +
+            "renormalising them into a phrase of their own. An id not in the clip is refused " +
+            "outright — nothing is written."
+        ),
+      amount: z
+        .number()
+        .min(0)
+        .max(1)
+        .optional()
+        .describe(
+          "How strongly the pattern is applied, 0-1. Default 1. 0 is a VALID no-op on the " +
+            "shaping axis — a flat lane at peakValue — not an error, and it says so in warnings."
+        ),
+      maxGapBeats: z
+        .number()
+        .min(0)
+        .max(16)
+        .optional()
+        .describe(
+          "A gap larger than this counts as a BREATH and splits the phrase, so a hairpin " +
+            "starts over after it. Default 0.125 (a thirty-second note at a quarter-note " +
+            "beat) — the same threshold, and the same reasoning, as clip_humanize's " +
+            "maxGapBeats. Only the phrase-scoped patterns consult it."
+        ),
+      loudnessDepth: z
+        .number()
+        .min(0)
+        .max(1)
+        .optional()
+        .describe(
+          "How far a phrase-scoped shape may pull a quiet note's peak down, 0-1. Default " +
+            "0.55, which is about 9 dB across a full hairpin. ⚠️ Not linear in dB: CC 11 is " +
+            "a square law, so halving it is -12 dB, not -6."
+        ),
+      swellDepth: z
+        .number()
+        .min(0)
+        .max(1)
+        .optional()
+        .describe(
+          "How much a quiet note's own internal swell shrinks along with its level, 0-1. " +
+            "Default 0.5, on the reasoning that a player at low pressure has less to shape " +
+            "with. Set 0 to vary only the level and keep every note's internal shape identical."
+        ),
+      airEnforced: z
+        .boolean()
+        .optional()
+        .describe(
+          "THE AIR BUDGET SWITCH. ⛔ Default FALSE, and that is a decision, not an oversight: " +
+            "turning it on lets the model OVERRIDE what you wrote, pulling a phrase down when " +
+            "the simulated player runs out of breath, so it is opted into rather than assumed. " +
+            "With it false you still get the full `air` report saying what it WOULD have done — " +
+            "which is the cheapest way to find out whether a part is over-long before changing " +
+            "anything. A note is never taken to silence and no note's length or existence ever " +
+            "changes; the phrase sags, it does not stop."
+        ),
+      airCapacitySeconds: z
+        .number()
+        .min(0.25)
+        .max(3600)
+        .optional()
+        .describe(
+          "How many SECONDS the player can sustain the part AS AUTHORED before the lungful is " +
+            "gone. Default 6. This is an estimate and it is the first knob to reach for when " +
+            "the budget is firing more than you want — raise it. (There is no separate " +
+            "`referenceEffort`: it would be algebraically the same axis as this number.)"
+        ),
+      airConsumptionExponent: z
+        .number()
+        .min(0)
+        .max(8)
+        .optional()
+        .describe(
+          "How much faster loud playing burns air: rate = effort^this. Default 1.5, superlinear " +
+            "because blowing pressure rises steeply into fortissimo. At 1.5 a phrase at half the " +
+            "authored level lasts about 2.8x longer. 0 makes the level irrelevant."
+        ),
+      airRefillSecondsPerSecond: z
+        .number()
+        .min(0)
+        .max(100)
+        .optional()
+        .describe(
+          "How much of a lungful one second of rest gives back. Default 0.5, so a 2-second rest " +
+            "refills completely. ⚠️ If the part's rests are shorter than this can keep up with, " +
+            "the sag ACCUMULATES across the part instead of resetting at each breath — the " +
+            "response reports that as `air.neverRecovered` rather than leaving you to hear it."
+        ),
+      airMinBreathSeconds: z
+        .number()
+        .min(0)
+        .max(60)
+        .optional()
+        .describe(
+          "A rest shorter than this many SECONDS is an articulation, not a breath, and refills " +
+            "nothing. Default 0.15. ⚠️ This is in SECONDS while `maxGapBeats` is in BEATS, so at " +
+            "a fast tempo a gap can split the phrase and still be too quick to breathe in. That " +
+            "is not a contradiction, it is a player whose rest was too short — the response says " +
+            "so with breath.kind 'tooShort', which is a different answer from 'none' (the first " +
+            "phrase, which has nothing before it)."
+        ),
+      airReserveFraction: z
+        .number()
+        .min(0)
+        .max(1)
+        .optional()
+        .describe(
+          "Below this fraction of a lungful the player starts running out, and effort is scaled " +
+            "toward it so the phrase SAGS rather than stopping. Default 0.25. A note starting " +
+            "exactly AT the reserve is left alone; only notes below it lose anything."
+        ),
+      driftDepth: z
+        .number()
+        .min(0)
+        .max(1)
+        .optional()
+        .describe(
+          "How far a slow 1/f drift may pull the effort baseline BELOW what you wrote, as a " +
+            "fraction. Default 0 — off, and off is byte-identical to not mentioning it. 0.05 is " +
+            "the design's suggested starting value. DOWNWARD ONLY: effort 1 means 'as authored'."
+        ),
+      driftScaleBeats: z
+        .number()
+        .min(0.01)
+        .max(4096)
+        .optional()
+        .describe(
+          "The drift's period in BEATS. Default 8 (two bars of 4/4). Deliberately far slower " +
+            "than any note rate: effort is sampled once per note, so a fast drift would be " +
+            "aliased by the note grid rather than heard."
+        ),
+      driftOctaves: z
+        .number()
+        .int()
+        .min(1)
+        .max(8)
+        .optional()
+        .describe(
+          "How many fBm octaves the drift is built from. Default 4, persistence fixed at 0.5, " +
+            "which is the 1/f spectrum. ⚠️ '1/f breath pressure' is a MODELLING CHOICE this " +
+            "design made, not a measured finding — no measurement of 1/f structure in " +
+            "wind-instrument breath pressure was found."
+        ),
+      tremorDepth: z
+        .number()
+        .min(0)
+        .max(1)
+        .optional()
+        .describe(
+          "Peak-to-trough depth of the involuntary micro-tremor INSIDE each note, as a fraction " +
+            "of the contour level it rides on. Default 0 — off, and off is byte-identical. 0.03 " +
+            "is the suggested value and measures about 0.29 dB peak-to-trough; the line is " +
+            "0.0755 dB per CC of travel, MEASURED on the built-in sampler at ±1, ±2, ±4 and ±8 " +
+            "CC. ⛔ SUPPRESSED on hosted-AU tracks — read the warnings."
+        ),
+      tremorRateHz: z
+        .number()
+        .min(0.2)
+        .max(20)
+        .optional()
+        .describe(
+          "Tremor rate in Hz, 0.2-20. Default 4.565 = the vibrato rate x 0.83, so tremor and " +
+            "vibrato are not one oscillator at one rate summing into a single deeper vibrato. " +
+            "At the BOTTOM of the 4-8 Hz physiological band. On a hosted AU an offline bounce " +
+            "re-samples this lane at 93.75 Hz, so anything up to 18.75 Hz is written; above " +
+            "that it is suppressed and the response says so. The band is the vibrato " +
+            "band: below 0.2 Hz a tremor is a drift, which is what driftDepth is for, and a " +
+            "rate outside it is REJECTED rather than clamped so you are never handed a " +
+            "different gesture under the name you asked for."
+        ),
+      tremorEffortExponent: z
+        .number()
+        .min(0)
+        .max(8)
+        .optional()
+        .describe(
+          "How the tremor deepens with effort: depth is scaled by effort^this. Default 1 " +
+            "(linear). 0 makes the tremor the same depth however hard the player is blowing."
+        ),
+      peakValue: z
+        .number()
+        .int()
+        .min(0)
+        .max(127)
+        .optional()
+        .describe(
+          "CC value at FULL effort, 0-127. Default 127 — the lane's neutral, so the loudest " +
+            "instant is exactly as loud as the note with no contour at all, and applying this " +
+            "can never quietly drop the level of a part you already balanced."
+        ),
+      expressionCC: z
+        .number()
+        .int()
+        .min(0)
+        .max(127)
+        .optional()
+        .describe(
+          "Which CC carries the shape. Default 11 (expression) — the one the built-in " +
+            "sampler routes to amplitude with no opt-in."
+        ),
+      attackSettleSeconds: z
+        .number()
+        .min(0)
+        .max(1)
+        .optional()
+        .describe(
+          "Seconds from the attack to the settling dip. Default 0.05. A pattern that has its " +
+            "own early dip (sforzandoPiano) overrides this per note so its accent lands where " +
+            "the gesture says."
+        ),
+      expressionSpacingSeconds: z
+        .number()
+        .min(0.001)
+        .max(1)
+        .optional()
+        .describe(
+          "Seconds between expression points. Default 0.02. Controller lanes are STEPWISE, " +
+            "so a dense run is what makes a curve instead of a staircase."
+        ),
+      vibratoOnsetSeconds: z
+        .number()
+        .min(0)
+        .max(10)
+        .optional()
+        .describe(
+          "Seconds of STRAIGHT playing before vibrato starts. Default 0.5. A note shorter " +
+            "than this plus one cycle gets no vibrato at all."
+        ),
+      vibratoRateHz: z.number().min(0.2).max(20).optional().describe("Vibrato rate in Hz. Default 5.5."),
+      vibratoDepthCents: z
+        .number()
+        .min(0)
+        .max(200)
+        .optional()
+        .describe(
+          "Peak vibrato width in CENTS (a ± figure). Default 12; 0 turns vibrato off. " +
+            "IGNORED on a track hosting an Audio Unit, where vibrato is suppressed for the " +
+            "measured aliasing reason above — the response reports 0 notes with vibrato " +
+            "rather than pretending."
+        ),
+      vibratoBloomSeconds: z
+        .number()
+        .min(0)
+        .max(10)
+        .optional()
+        .describe("Seconds for the vibrato to widen from nothing to full depth. Default 0.7."),
+      vibratoReleaseSeconds: z
+        .number()
+        .min(0)
+        .max(10)
+        .optional()
+        .describe(
+          "Seconds before the note's end over which vibrato relaxes back to centre. Default " +
+            "0.08, which also guarantees the next note cannot start detuned by this one."
+        ),
+      sharpenCents: z
+        .number()
+        .min(-200)
+        .max(200)
+        .optional()
+        .describe(
+          "Peak micro-sharpening in CENTS at full effort, resolving as the shape falls. " +
+            "Default 4. It rides the pitch-bend lane on EVERY instrument kind, including " +
+            "hosted Audio Units, because it is a seconds-scale curve far below the block-rate " +
+            "limit that forbids vibrato there."
+        ),
+      bendSpacingSeconds: z
+        .number()
+        .min(0.001)
+        .max(1)
+        .optional()
+        .describe(
+          "Seconds between emitted pitch-bend points. Default 0.008 — about 23 points per " +
+            "cycle at the default vibrato rate."
+        ),
+      bendRangeSemitones: z
+        .number()
+        .min(0.01)
+        .max(48)
+        .optional()
+        .describe(
+          "The instrument's pitch-bend range in semitones for a full ±8192 deflection, so " +
+            "the cents figures land correctly. Default 2 — exactly the built-in sampler, and " +
+            "a hosted AUSampler was MEASURED at 2.0155, so the default is right to 0.78% " +
+            "there too."
+        ),
+    },
+  },
+  async ({
+    clipId,
+    pattern,
+    ringAngle,
+    ringRadius,
+    ring,
+    path,
+    pathSeed,
+    revolutionBeats,
+    pathDirection,
+    scaleBeats,
+    octaves,
+    momentum,
+    angleSwing,
+    radiusSwing,
+    noteIds,
+    amount,
+    maxGapBeats,
+    airEnforced,
+    driftDepth,
+    driftScaleBeats,
+    driftOctaves,
+    tremorDepth,
+    tremorRateHz,
+    tremorEffortExponent,
+    airCapacitySeconds,
+    airConsumptionExponent,
+    airRefillSecondsPerSecond,
+    airMinBreathSeconds,
+    airReserveFraction,
+    loudnessDepth,
+    swellDepth,
+    peakValue,
+    expressionCC,
+    attackSettleSeconds,
+    expressionSpacingSeconds,
+    vibratoOnsetSeconds,
+    vibratoRateHz,
+    vibratoDepthCents,
+    vibratoBloomSeconds,
+    vibratoReleaseSeconds,
+    sharpenCents,
+    bendSpacingSeconds,
+    bendRangeSemitones,
+  }) =>
+    toToolResult(() =>
+      bridge.send("clip.applyEffortShape", {
+        clipId,
+        pattern,
+        ringAngle,
+        ringRadius,
+        ring,
+        path,
+        pathSeed,
+        revolutionBeats,
+        pathDirection,
+        scaleBeats,
+        octaves,
+        momentum,
+        angleSwing,
+        radiusSwing,
+        noteIds,
+        amount,
+        maxGapBeats,
+        airEnforced,
+        driftDepth,
+        driftScaleBeats,
+        driftOctaves,
+        tremorDepth,
+        tremorRateHz,
+        tremorEffortExponent,
+        airCapacitySeconds,
+        airConsumptionExponent,
+        airRefillSecondsPerSecond,
+        airMinBreathSeconds,
+        airReserveFraction,
+        loudnessDepth,
+        swellDepth,
+        peakValue,
+        expressionCC,
+        attackSettleSeconds,
+        expressionSpacingSeconds,
+        vibratoOnsetSeconds,
+        vibratoRateHz,
+        vibratoDepthCents,
+        vibratoBloomSeconds,
+        vibratoReleaseSeconds,
+        sharpenCents,
+        bendSpacingSeconds,
+        bendRangeSemitones,
+      })
+    )
 );
 
 // ---------------------------------------------------------------------------
@@ -3714,7 +5920,11 @@ const compSegmentSchema = z.object({
   endBeat: z
     .number()
     .describe("Segment end, in ABSOLUTE timeline beats. Must be greater than startBeat."),
-});
+})
+  // `.strict()` (m30-c): closes the same per-element hole for
+  // take_set_comp's `segments` array — a typo'd field (e.g. "laneld") would
+  // otherwise be silently stripped instead of rejected.
+  .strict();
 
 registerTool(
   "take_group",
@@ -4080,7 +6290,23 @@ registerTool(
       "Set the master output gain of the whole mix, as a linear gain multiplier, " +
       "where 1.0 is unity gain (0 dB, no change). Range 0-2: 0 is silence, 1 is " +
       "unity, 2 is roughly +6 dB. This is linear gain, not decibels. To set an " +
-      "individual track's gain instead, use track_set_volume.",
+      "individual track's gain instead, use track_set_volume. " +
+      "2.0 is a HARD CEILING, not a soft one: a value above 2 is REJECTED by this " +
+      "tool's schema (it is not silently clamped), and 2.0 itself is the loudest " +
+      "this fader goes. When a mix needs more than +6 dB of makeup to reach a " +
+      "loudness target — common with quiet General-MIDI-sourced material — do NOT " +
+      "keep pushing here: add a `gain` insert at the FRONT of the master chain " +
+      "(fx_add with trackId \"master\", kind \"gain\", ahead of the eq/limiter) and " +
+      "take the remaining makeup there — its `gainLinear` param runs 0-4 (≈ +12 dB), " +
+      "and inserts stack if you somehow need more. " +
+      "Returns `{masterVolume}` — and, ONLY when a master volume automation lane is " +
+      "actually governing (enabled and holding at least one point), also " +
+      "`{automationControlled: true, automationPointCount}`. Those two keys are ABSENT " +
+      "in the ordinary case. When they appear, your value was stored (it is undoable and " +
+      "rules again the moment the lane is disabled or emptied) but the LANE, not this " +
+      "fader, decides what is heard and what renders — edit the lane with " +
+      "automation_set_points (trackId \"master\"), or disable it with " +
+      "automation_set_lane_enabled, if you meant this level to be audible.",
     inputSchema: {
       volume: z
         .number()
@@ -4100,6 +6326,12 @@ const mixerPresetSchema = z
     "master-glue",
     "warm-keys",
     "clean-boost",
+    "bass-round",
+    "guitar-crunch",
+    "acoustic-sparkle",
+    "horn-section",
+    "drum-room",
+    "lofi-tape",
   ])
   .describe(
     "Which curated mixer preset to apply — each is a small, ready-made insert chain of " +
@@ -4112,7 +6344,17 @@ const mixerPresetSchema = z
       "ties a whole mix together and holds the peaks just under clipping (use on the master or " +
       "a mix bus). `warm-keys`: EQ only — eases off the top end and adds a little low-end body " +
       "for a warmer keyboard/synth tone. `clean-boost`: a single gain stage at about +3 dB " +
-      "with no tone change — a clean level lift."
+      "with no tone change — a clean level lift. `bass-round`: the deliberate OPPOSITE of " +
+      "bass-tight — a low-shelf lift for weight, then a LOW ~2.5:1 ratio with a SLOW 20 ms " +
+      "attack so each note blooms before it is caught; pick it for blues, jazz, soul and " +
+      "anything played with feel, and pick bass-tight when the bass must sit rock-steady under " +
+      "a dense mix. `guitar-crunch`: saturator grit then an EQ scooping low-mid mud and lifting " +
+      "bite — a driven electric guitar that cuts through a band. `acoustic-sparkle`: EQ only — " +
+      "takes out the boxy honk and brings back string shimmer and air on an acoustic guitar. " +
+      "`horn-section`: lifts the brassy core, softens the harsh edge, then ~3:1 compression so " +
+      "the loud stabs stop jumping out. `drum-room`: a short, damped reverb at a modest 18% mix " +
+      "— the kit breathes without the mix going wet. `lofi-tape`: gentle saturation plus a " +
+      "high-shelf cut for the warm, dulled sound of old tape or vinyl."
   );
 
 registerTool(
@@ -4127,7 +6369,10 @@ registerTool(
       "instrument, and bus tracks. Choose `preset` from: drum-bus-glue (glue a drum group), " +
       "vocal-presence (forward, clear lead vocal), bass-tight (steady, defined bass), master-glue " +
       "(tie a whole mix together and stop it clipping), warm-keys (warmer, softer synth/keys tone), " +
-      "clean-boost (a clean ~+3 dB level lift). To fine-tune afterwards, nudge individual effects " +
+      "clean-boost (a clean ~+3 dB level lift), bass-round (warm, blooming bass — the opposite of " +
+      "bass-tight), guitar-crunch (driven electric guitar), acoustic-sparkle (open, shimmering " +
+      "acoustic guitar), horn-section (bold, even brass), drum-room (a small live room around the " +
+      "kit), lofi-tape (warm, dulled tape/vinyl character). To fine-tune afterwards, nudge individual effects " +
       "with fx_set_param, or build a chain by hand with fx_add. Returns `{trackId, effects}`: the " +
       "strip's full new insert chain (same shape as project_snapshot's per-track `effects` array), " +
       "so you can see exactly what the preset laid down.",
@@ -4438,6 +6683,88 @@ registerTool(
   async () => toToolResult(() => bridge.send("reference.compare"))
 );
 
+registerTool(
+  "audio_profile_file",
+  {
+    title: "Windowed peak/RMS profile of a file on disk",
+    description:
+      "Read an ARBITRARY audio file on disk (any absolute path -- not a project track, not " +
+      "a clip, not the reference slot) and report SAMPLE peak + RMS per consecutive time " +
+      "window, plus a file-header block (duration, sample rate, channel count, on-disk bit " +
+      "depth/float-ness -- the ffprobe readback). This answers \"what is the peak level " +
+      "between 53s and 54s of this WAV\" -- a WINDOWING question. It is NOT a loudness " +
+      "meter and NOT a substitute for one: `peakDb` is the raw inter-sample maximum, NOT " +
+      "the 4x-oversampled BS.1770 true peak render_measure_loudness/reference_analyze " +
+      "report as `truePeakDbtp` -- a window can read under 0 dBFS sample peak here and " +
+      "still exceed 0 dBTP true peak between samples. Use render_measure_loudness (the " +
+      "rendered SESSION, before quantization) or reference_analyze (a whole file, occupying " +
+      "the project's one reference slot) for LUFS/true-peak questions; use this tool when " +
+      "you need to see what a specific stretch of a file on disk actually contains -- e.g. " +
+      "verifying a bounce/render landed correctly, or checking exactly where a tail decays " +
+      "to silence, without leaving the app. Returns `{durationSeconds, sampleRateHz, " +
+      "channelCount, bitDepth?, isFloat?, windows: [{startSeconds, durationSeconds, " +
+      "peakDb?, rmsDb?}]}`. The header `durationSeconds` is the WHOLE file, independent of " +
+      "any fromSeconds/durationSeconds sub-range requested; `bitDepth`/`isFloat` are " +
+      "omitted for formats with no fixed PCM bit depth (compressed codecs) -- never " +
+      "fabricated. Each window's own `durationSeconds` is usually the requested " +
+      "`windowSeconds`, except the LAST window of the profiled range, which truncates at " +
+      "EOF (or at fromSeconds+durationSeconds) and reads shorter -- read it rather than " +
+      "assuming every window is the same width. `rmsDb` combines all channels using the " +
+      "same rule as `peakDb` (max-abs peak across channels, combined-channel RMS -- " +
+      "deliberately never a mono downmix first, which would under-report anti-phase " +
+      "content, i.e. a loud-but-opposite-polarity L/R pair). A digitally-silent window " +
+      "OMITS `peakDb`/`rmsDb` rather than reporting 0 -- honest absence (JSON has no " +
+      "'-infinity dB'), the same convention render_measure_loudness/reference_analyze use " +
+      "for gated-silent audio; treat a missing field as silence, never as a number. " +
+      "Read-only: never writes anything, never copies the file, and never touches the " +
+      "project's reference slot or the References library -- call this as often as you " +
+      "like without side effects. Errors readably: no file at path (names the path); no " +
+      "audio engine attached (a profile is never fabricated, so this needs the app running).",
+    inputSchema: {
+      path: z
+        .string()
+        .describe(
+          "Required. Absolute (or ~-prefixed) path to ANY audio file on disk -- not a " +
+            "project track, clip id, or the reference slot. Read-only: never copied, " +
+            "never modified, never imported anywhere."
+        ),
+      windowSeconds: z
+        .number()
+        .gt(0)
+        .describe(
+          "Required, > 0. Width of each analysis window in seconds -- e.g. 1.0 for one " +
+            "peak/RMS reading per second of audio. Smaller windows give finer time " +
+            "resolution at the cost of more windows in the response."
+        ),
+      fromSeconds: z
+        .number()
+        .min(0)
+        .optional()
+        .default(0)
+        .describe(
+          "Start of the profiled range, in seconds from the start of the FILE itself (not " +
+            "the project timeline). Must be >= 0. Defaults to 0 (the start of the file). " +
+            "Every window's `startSeconds` is an ABSOLUTE file position, so fromSeconds=53 " +
+            "with windowSeconds=1 yields windows starting at 53, 54, 55, ..."
+        ),
+      durationSeconds: z
+        .number()
+        .gt(0)
+        .optional()
+        .describe(
+          "Length of the profiled range in seconds, starting at fromSeconds. Must be > 0 " +
+            "when given. Defaults to the rest of the file (everything from fromSeconds to " +
+            "EOF). The final window truncates at this boundary (or at EOF) and reports its " +
+            "own, shorter `durationSeconds`."
+        ),
+    },
+  },
+  async ({ path, windowSeconds, fromSeconds, durationSeconds }) =>
+    toToolResult(() =>
+      bridge.send("audio.profileFile", { path, windowSeconds, fromSeconds, durationSeconds })
+    )
+);
+
 server.registerTool(
   "engine_performance_stats",
   {
@@ -4626,7 +6953,22 @@ server.registerTool(
 // ---------------------------------------------------------------------------
 
 const songSkeletonGenreSchema = z
-  .enum(["pop", "house", "hip-hop", "rock", "ballad"])
+  .enum([
+    "pop",
+    "house",
+    "hip-hop",
+    "rock",
+    "ballad",
+    "blues",
+    "jazz",
+    "country",
+    "r-and-b",
+    "funk",
+    "metal",
+    "folk",
+    "reggae",
+    "lo-fi",
+  ])
   .describe(
     "Which genre skeleton to scaffold — each sets a default tempo and a ready-made track roster. " +
       "`pop` (120 BPM): Drums, Bass (bass-tight preset), Keys (warm-keys), Lead, Vocals " +
@@ -4634,8 +6976,29 @@ const songSkeletonGenreSchema = z
       "`hip-hop` (90 BPM): Drums, 808 Bass (bass-tight), Samples, Lead, Vocals (vocal-presence). " +
       "`rock` (140 BPM): Drums, Bass (bass-tight), Rhythm Guitar, Lead Guitar, Vocals " +
       "(vocal-presence). `ballad` (72 BPM): Piano (warm-keys), Strings, Bass (bass-tight), Vocals " +
-      "(vocal-presence). Instrument tracks host built-in instruments; audio tracks take recordings " +
-      "or imports. Named mixer presets are applied to the strips shown in parentheses."
+      "(vocal-presence). `blues` (84 BPM): Drums (drum-room), Bass (bass-round), Rhythm Guitar, " +
+      "Lead Guitar (guitar-crunch), Organ (warm-keys), Vocals (vocal-presence) — and a genuine " +
+      "TWELVE-BAR form (Intro 4, Head 12, Verse 12, Solo 12, Verse 12, Outro 4). " +
+      "`jazz` (132 BPM): Drums (drum-room), Upright Bass (bass-round), Piano (warm-keys), Horn " +
+      "(horn-section), Guitar — a combo with no vocal track, in head/solos/head form with 32-bar " +
+      "choruses. `country` (100 BPM): Drums (drum-bus-glue), Bass (bass-round), Acoustic Guitar " +
+      "(acoustic-sparkle), Electric Guitar, Pedal Steel, Vocals (vocal-presence). " +
+      "`r-and-b` (88 BPM): Drums (drum-bus-glue), Bass (bass-round), Keys (warm-keys), Pads, Lead " +
+      "Vocal (vocal-presence), Backing Vocals — with a Pre-Chorus in the form. " +
+      "`funk` (108 BPM): Drums (drum-bus-glue), Bass (bass-tight — funk's bass wants the clamp), " +
+      "Rhythm Guitar, Clavinet (warm-keys), Horns (horn-section), Vocals (vocal-presence), with " +
+      "16-bar verses and a Breakdown. `metal` (170 BPM): Drums (drum-bus-glue), Bass (bass-tight), " +
+      "Rhythm Guitar L and Rhythm Guitar R (both guitar-crunch, for the hard-panned double-track), " +
+      "Lead Guitar (guitar-crunch), Vocals (vocal-presence). " +
+      "`folk` (96 BPM): Acoustic Guitar (acoustic-sparkle), Vocals (vocal-presence), Bass " +
+      "(bass-round), Fiddle, Percussion. `reggae` (76 BPM): Drums (drum-bus-glue), Bass " +
+      "(bass-round), Skank Guitar, Organ (warm-keys), Vocals (vocal-presence), with a Dub Break. " +
+      "`lo-fi` (78 BPM): Drums (lofi-tape), Bass (bass-round), Keys (warm-keys), Samples " +
+      "(lofi-tape), Vinyl FX — a loop-based form (Intro, Loop A, Loop B, Loop A, Outro) rather " +
+      "than verse/chorus. Instrument tracks host built-in instruments; audio tracks take recordings " +
+      "or imports. Named mixer presets are applied to the strips shown in parentheses. " +
+      "If none of these fits, keep the nearest `genre` and pass your own `tracks` roster and " +
+      "`sections` — both override the genre's defaults outright."
   );
 
 const songSkeletonSectionSchema = z
@@ -4654,6 +7017,30 @@ const songSkeletonSectionSchema = z
   })
   .describe("One arrangement section: a named span measured in bars.");
 
+const songSkeletonTrackSchema = z
+  .object({
+    name: z
+      .string()
+      .min(1)
+      .max(40)
+      .describe("Track name, e.g. \"Drums\", \"Rhodes\", \"Lead Vocal\" (1-40 characters)."),
+    kind: z
+      .enum(["instrument", "audio"])
+      .describe(
+        "\"instrument\" hosts a built-in instrument and takes MIDI clips (use it for every playable part); " +
+          "\"audio\" takes recordings and imported files. Skeletons never create buses — add one afterwards with track_add if you need it."
+      ),
+    mixerPreset: z
+      .string()
+      .optional()
+      .describe(
+        "Optional mixer preset applied to this strip as a fresh insert chain, by name (see mixer_apply_preset " +
+          "for the catalog — e.g. \"bass-tight\", \"vocal-presence\", \"warm-keys\"). Omit for an empty chain. " +
+          "An unknown name is a field-named error listing every valid preset."
+      ),
+  })
+  .describe("One roster track: a name, its kind, and an optional mixer preset.");
+
 registerTool(
   "macro_song_skeleton",
   {
@@ -4663,15 +7050,29 @@ registerTool(
       "named tracks (instrument and audio, with curated mixer presets pre-applied where noted), lays " +
       "the song's sections out as named EMPTY MIDI clips on a dedicated instrument \"Arrangement\" " +
       "guide track (each clip positioned back-to-back: its start = the running sum of prior section " +
-      "lengths, its length = bars x 4 beats), and enables the loop region over the whole arrangement " +
+      "lengths, its length = bars x 4 beats), DROPS A REAL SESSION MARKER at every section start " +
+      "(so marker_list returns the song's beat map immediately — you do NOT have to lay the section " +
+      "map by hand or re-derive it for a later composer/mix step; each marker is named exactly like " +
+      "its section, repeats included, so disambiguate by beat, and each is addressable by " +
+      "marker_rename / marker_move / marker_remove), and enables the loop region over the whole " +
+      "arrangement " +
       "(start 0 to the total length). This is ADDITIVE — it never wipes the project: everything is " +
-      "appended to whatever is already there (use project_new first if you want a clean slate). A " +
+      "appended to whatever is already there (use project_new first if you want a clean slate), and " +
+      "markers that already existed survive, merged into beat order. A " +
       "single edit_undo reverts the ENTIRE scaffold at once. Pass `genre` (required) to use its " +
-      "defaults, or override the tempo with `tempoBPM` (20-400) and/or the layout with `sections`. " +
-      "An unknown genre returns an error listing every valid genre; a bad tempo or section is a " +
+      "defaults, or override the tempo with `tempoBPM` (20-400), the layout with `sections`, and/or " +
+      "the track roster with `tracks`. `tracks` replaces THE GENRE ROSTER ONLY: the \"Arrangement\" " +
+      "guide track is ALWAYS added last, with its section clips and markers, no matter what you pass " +
+      "— you cannot suppress, reorder, or displace it (and a roster track of your own named " +
+      "\"Arrangement\" is allowed, it just sits in the roster with the real guide track after it). " +
+      "`genre` stays required even with a full roster override — it supplies the default tempo. " +
+      "An unknown genre returns an error listing every valid genre; a bad tempo, section, or roster " +
+      "track is a " +
       "field-named error. Returns `{genre, tempoBPM, tracks: [{id, name}], sectionClips: [{name, " +
-      "startBeat, lengthBeats}], loopStart, loopEnd, arrangementTrackId}` with real ids — `tracks` " +
-      "lists every created track (the roster then the Arrangement track last).",
+      "startBeat, lengthBeats}], markers: [{id, name, beat}], loopStart, loopEnd, " +
+      "arrangementTrackId}` with real ids — `tracks` " +
+      "lists every created track (the roster then the Arrangement track last), and `markers` lists " +
+      "just the ones this call created (marker_list returns the whole project's).",
     inputSchema: {
       genre: songSkeletonGenreSchema,
       tempoBPM: z
@@ -4690,10 +7091,22 @@ registerTool(
             "Each section is {name, bars}; sections are laid out contiguously in order. Omit to use the " +
             "genre's default sections."
         ),
+      tracks: z
+        .array(songSkeletonTrackSchema)
+        .min(1)
+        .max(24)
+        .optional()
+        .describe(
+          "Optional custom track roster (1-24 tracks), replacing the genre's default roster. Tracks are " +
+            "created in the order given, each {name, kind, mixerPreset?}. The \"Arrangement\" guide track " +
+            "is ALWAYS appended after this roster regardless — the section clips and beat-map markers are " +
+            "what this macro exists for, so an override can never remove or move them. Omit to use the " +
+            "genre's default roster."
+        ),
     },
   },
-  async ({ genre, tempoBPM, sections }) =>
-    toToolResult(() => bridge.send("macro.songSkeleton", { genre, tempoBPM, sections }))
+  async ({ genre, tempoBPM, sections, tracks }) =>
+    toToolResult(() => bridge.send("macro.songSkeleton", { genre, tempoBPM, sections, tracks }))
 );
 
 // ---------------------------------------------------------------------------
@@ -4702,34 +7115,47 @@ registerTool(
 
 const automationTargetSchema = z
   .discriminatedUnion("type", [
-    z.object({
-      type: z.literal("volume").describe("Automate the track's fader volume (linear gain multiplier)."),
-    }),
-    z.object({
-      type: z.literal("pan").describe("Automate the track's pan position."),
-    }),
-    z.object({
-      type: z
-        .literal("sendLevel")
-        .describe("Automate one send's level (see `sendId`). Rejected in v0 — no render path yet."),
-      sendId: z
-        .string()
-        .min(1)
-        .describe("Id of the send to automate, from track_add_send's result or project_snapshot."),
-    }),
-    z.object({
-      type: z
-        .literal("effectParam")
-        .describe("Automate one parameter of a built-in effect (see `effectId`/`param`)."),
-      effectId: z
-        .string()
-        .min(1)
-        .describe("Id of the effect to automate, from fx_add's result or project_snapshot."),
-      param: z
-        .string()
-        .min(1)
-        .describe("Exact parameter name, as listed by fx_describe for the effect's kind."),
-    }),
+    // `.strict()` on each discriminated-union member (m30-c): closes the
+    // same per-element hole for automation_add_lane's `target` — a typo'd
+    // field (e.g. "sendld") would otherwise be silently stripped instead of
+    // rejected. `.strict()` still returns a ZodObject, so discriminatedUnion
+    // accepts it unchanged.
+    z
+      .object({
+        type: z.literal("volume").describe("Automate the track's fader volume (linear gain multiplier)."),
+      })
+      .strict(),
+    z
+      .object({
+        type: z.literal("pan").describe("Automate the track's pan position."),
+      })
+      .strict(),
+    z
+      .object({
+        type: z
+          .literal("sendLevel")
+          .describe("Automate one send's level (see `sendId`). Rejected in v0 — no render path yet."),
+        sendId: z
+          .string()
+          .min(1)
+          .describe("Id of the send to automate, from track_add_send's result or project_snapshot."),
+      })
+      .strict(),
+    z
+      .object({
+        type: z
+          .literal("effectParam")
+          .describe("Automate one parameter of a built-in effect (see `effectId`/`param`)."),
+        effectId: z
+          .string()
+          .min(1)
+          .describe("Id of the effect to automate, from fx_add's result or project_snapshot."),
+        param: z
+          .string()
+          .min(1)
+          .describe("Exact parameter name, as listed by fx_describe for the effect's kind."),
+      })
+      .strict(),
   ])
   .describe(
     "What this lane drives on the track, by discriminator `type`. `volume`: the track " +
@@ -4772,7 +7198,11 @@ const automationPointSchema = z.object({
         "value until the next point steps. Has no effect on the lane's last point " +
         "(nothing follows it)."
     ),
-});
+})
+  // `.strict()` (m30-c): closes the same per-element hole for
+  // automation_set_points's `points` array — a typo'd field (e.g. "vlaue")
+  // would otherwise be silently stripped instead of rejected.
+  .strict();
 
 registerTool(
   "automation_add_lane",
@@ -4796,10 +7226,19 @@ registerTool(
       "`volume` target ONLY — a `pan`, `sendLevel`, or `effectParam` target on \"master\" is " +
       "rejected with a readable error (those lanes live on tracks — pass a track UUID). A " +
       "master volume lane is how you draw a final fade-out/fade-in or a level ride across the " +
-      "whole mix; it applies PRE-limiter (the fade feeds the master insert chain), and — like " +
-      "every master move — it is NOT baked into exported stems or a bounce, which stay " +
-      "fade-free by design (the master fade belongs to the mastered deliverable only, so stems " +
-      "hand off clean). The master lane rides project_snapshot's top-level `masterAutomation` " +
+      "whole mix; it applies PRE-limiter (the fade feeds the master insert chain, so the " +
+      "limiter rides ABOVE the fade — the professionally-correct order). WHAT RENDERS IT: " +
+      "render_mixdown and render_bounce DO bake the master fade — it lands in the " +
+      "deliverable, and you do NOT need to rebuild it as per-track lanes. render_stems " +
+      "deliberately EXCLUDES it (a fade is master performance, not material — baking it into " +
+      "every stem would destroy the re-mixable partition), and that exclusion also covers " +
+      "render_stems{includeMixdown}, whose file is confusingly named \"00 Mixdown.wav\" but " +
+      "is NOT a render_mixdown — use render_stems{includeMasteredMixdown} (\"00 Mastered " +
+      "Mix.wav\"), which DOES carry the fade. " +
+      "MIND THE WINDOW: a render's DEFAULT length comes from CLIP extents alone (+ a " +
+      "fixed 2.0 s tail) and never from automation, so points drawn past the last clip " +
+      "need an explicit render `durationSeconds` covering them or they are cut off. " +
+      "The master lane rides project_snapshot's top-level `masterAutomation` " +
       "array (same lane shape), absent when empty. " +
       "Returns `{lane: {id, target, points, isEnabled}}`.",
     inputSchema: {
@@ -4835,7 +7274,10 @@ registerTool(
       laneId: z
         .string()
         .min(1)
-        .describe("Id of the lane to remove, from automation_add_lane's result or project_snapshot."),
+        .describe(
+          "Id of the lane to remove, from project_overview's per-track `automation[].id`, " +
+            "project_snapshot, or automation_add_lane's result."
+        ),
     },
   },
   async ({ trackId, laneId }) =>
@@ -4865,8 +7307,13 @@ registerTool(
       "inert. " +
       "MASTER: pass `trackId` as the exact string \"master\" (m15-c) to draw the whole-mix " +
       "master VOLUME curve — a final fade or level ride; values clamp to 0-2 (the master " +
-      "fader range) exactly like a track volume lane. The master fade applies pre-limiter and " +
-      "is NOT baked into exported stems or a bounce (they stay fade-free by design). " +
+      "fader range) exactly like a track volume lane. The master fade applies pre-limiter, and " +
+      "it IS baked into render_mixdown and render_bounce (it lands in the deliverable). Only " +
+      "render_stems excludes it — including that call's \"00 Mixdown.wav\", which despite the " +
+      "name is a stem-class file; \"00 Mastered Mix.wav\" carries the fade. " +
+      "MIND THE WINDOW: a render's DEFAULT length comes from CLIP extents alone (+ a " +
+      "fixed 2.0 s tail) and never from automation, so points drawn past the last clip " +
+      "need an explicit render `durationSeconds` covering them or they are cut off. " +
       "Returns `{lane: {id, target, points, isEnabled}}` with the lane exactly as " +
       "stored (reordered/clamped/capped).",
     inputSchema: {
@@ -4880,7 +7327,10 @@ registerTool(
       laneId: z
         .string()
         .min(1)
-        .describe("Id of the lane to edit, from automation_add_lane's result or project_snapshot."),
+        .describe(
+          "Id of the lane to edit, from project_overview's per-track `automation[].id`, " +
+            "project_snapshot, or automation_add_lane's result."
+        ),
       points: z
         .array(automationPointSchema)
         .max(4096)
@@ -4918,7 +7368,10 @@ registerTool(
       laneId: z
         .string()
         .min(1)
-        .describe("Id of the lane to toggle, from automation_add_lane's result or project_snapshot."),
+        .describe(
+          "Id of the lane to toggle, from project_overview's per-track `automation[].id`, " +
+            "project_snapshot, or automation_add_lane's result."
+        ),
       enabled: z
         .boolean()
         .describe(
@@ -4951,7 +7404,19 @@ registerTool(
       "Errors only if the render range holds no clips at all — " +
       "of ANY kind, audio or MIDI — and no explicit `durationSeconds` was " +
       "given, since there would be nothing to render and no way to infer a " +
-      "render length.",
+      "render length. " +
+      "MASTER MOVES ARE INCLUDED: the master fader, the master insert chain, " +
+      "and any MASTER VOLUME AUTOMATION LANE (a fade-out/fade-in or level " +
+      "ride) are all baked into this file, as is every per-track automation " +
+      "lane. You do NOT need to rebuild a master fade as per-track lanes to " +
+      "make it survive. (Only render_stems excludes master moves — including " +
+      "its \"00 Mixdown.wav\", which despite the name is a stem-class file " +
+      "and is NOT what this tool produces.) " +
+      "BUT ONLY WITHIN THE RENDER WINDOW, and the DEFAULT window is computed " +
+      "from CLIP extents alone (+ a fixed 2.0 s tail) — automation extent is " +
+      "never consulted. So anything drawn past the last clip, or ringing " +
+      "longer than 2.0 s after it (a long fade-out, a reverb/delay tail), is " +
+      "CUT OFF unless you pass a `durationSeconds` that covers it.",
     inputSchema: {
       path: z
         .string()
@@ -5061,13 +7526,44 @@ registerTool(
       "usual streaming-platform convention (Spotify/YouTube/Apple " +
       "Music-style loudness normalization), -23 LUFS is EBU R128 broadcast " +
       "delivery. Any measurement field can come back OMITTED (absent/null) " +
-      "instead of a number — that means the program sits at or below the " +
-      "-70 LUFS absolute silence gate (JSON has no value for '-infinity " +
-      "dB'); always treat a missing field as gated silence, not zero. " +
+      "instead of a number — usually that means the program sits at or below " +
+      "the -70 LUFS absolute silence gate (JSON has no value for '-infinity " +
+      "dB'); treat a missing field as gated silence, not zero. The " +
+      "WINDOWED fields have a second, independent omission reason: a program " +
+      "shorter than the window has no value at all — 400 ms for " +
+      "maxMomentaryLufs, 3 s for maxShortTermLufs and loudnessRangeLu — so " +
+      "on a short excerpt those can be absent while integratedLufs and " +
+      "truePeakDbtp are perfectly healthy numbers. " +
       "Returns `{measurement: {integratedLufs?, truePeakDbtp?, " +
-      "maxMomentaryLufs?, maxShortTermLufs?}, durationSeconds, sampleRate}`. " +
+      "maxMomentaryLufs?, maxShortTermLufs?, loudnessRangeLu?}, " +
+      "durationSeconds, sampleRate}`. `loudnessRangeLu` is EBU Tech 3342 " +
+      "loudness range in LU — the 95th-minus-10th percentile spread of the " +
+      "gated short-term loudness distribution, i.e. how much the loudness " +
+      "MOVES rather than where it sits. It is the same figure " +
+      "reference_analyze reports under the same name, so a mix and a " +
+      "reference track are directly comparable on it. " +
       "Errors if the project has no clips in the requested window and no " +
-      "explicit `durationSeconds` was given.",
+      "explicit `durationSeconds` was given. " +
+      "TWO THINGS THIS TOOL IS NOT. (1) It measures a FRESH RENDER OF THE " +
+      "SESSION, never a file on disk — it cannot take a `path` (passing one is " +
+      "a hard error), so it verifies the MIX, not the artifact a render_bounce/" +
+      "render_mixdown wrote. To check a file that already exists, use " +
+      "audio_profile_file (windowed sample peak/RMS + real header — proves a " +
+      "bounce isn't silence-padded and where the tail decays) or, for true " +
+      "BS.1770 LUFS of a file, reference_import (which analyzes on import, but " +
+      "copies the file, occupies the project's single reference slot, and lands " +
+      "as an undoable edit). (2) A WINDOWED measurement is not an excerpt of the " +
+      "full render: a MIDI note whose note-ON falls BEFORE `fromBeat` is dropped " +
+      "entirely from the render (no note-on and no note-off), so measuring a " +
+      "window that starts mid-note reports gated silence for a passage that " +
+      "sounds perfectly fine from the top. A straddling AUDIO clip does NOT " +
+      "behave this way — it is entered mid-file and sounds. So an unexpectedly " +
+      "silent window over sustained MIDI (pads, held strings, long tails) is " +
+      "far more likely to be this scheduling rule than a real hole in your " +
+      "arrangement: re-measure from beat 0, or from the start of the clip in " +
+      "question, before reporting silence. Note the MIXED UNITS in one call: " +
+      "`fromBeat` is BEATS, `durationSeconds` is SECONDS, and there is no " +
+      "beat-range form.",
     inputSchema: {
       fromBeat: z
         .number()
@@ -5075,15 +7571,21 @@ registerTool(
         .optional()
         .default(0)
         .describe(
-          "Timeline position, in beats (quarter notes), to start measuring " +
-            "from. Must be >= 0. Defaults to 0 (the very start of the timeline)."
+          "Timeline position, in BEATS (quarter notes), to start measuring " +
+            "from. Must be >= 0. Defaults to 0 (the very start of the timeline). " +
+            "A non-zero value does NOT give you an excerpt of the whole render: " +
+            "MIDI notes already sounding at this beat (note-on earlier) are " +
+            "omitted from the render entirely, so a window starting mid-note " +
+            "under-reports, sometimes as total silence. Measure from 0 when the " +
+            "number has to be trustworthy."
         ),
       durationSeconds: z
         .number()
         .gt(0)
         .optional()
         .describe(
-          "How many seconds of audio to measure, starting at fromBeat. Must " +
+          "How many SECONDS of audio to measure (not beats — this tool mixes " +
+            "units deliberately), starting at fromBeat. Must " +
             "be > 0. When omitted, defaults to the extent of every track's " +
             "clips (audio AND instrument — broader than render_mixdown's " +
             "audio-only default) at the current tempo, plus a 2.0 s tail for " +
@@ -5103,6 +7605,13 @@ registerTool(
       "Render the session offline to a stereo 48 kHz WAV and report its " +
       "loudness — the measured/normalizing sibling of render_mixdown (which " +
       "stays the raw, fast bounce with no loudness report and no gain). " +
+      "Like render_mixdown, this BAKES IN every master move: the master " +
+      "fader, the master insert chain, and any MASTER VOLUME AUTOMATION LANE " +
+      "— a fade-out lands in the bounce and needs no per-track workaround. " +
+      "It lands only WITHIN THE RENDER WINDOW, though, and the DEFAULT window " +
+      "comes from CLIP extents alone (+ a fixed 2.0 s tail), never from " +
+      "automation: a fade or tail extending past the last clip is CUT OFF " +
+      "unless you pass a `durationSeconds` that covers it. " +
       "Pass `lufsTarget` to normalize toward a delivery target — -14 LUFS " +
       "integrated is the usual streaming-platform convention (Spotify/" +
       "YouTube/Apple Music-style), -23 LUFS is EBU R128 broadcast; OMIT it " +
@@ -5788,6 +8297,71 @@ server.registerTool(
   async () => toToolResult(() => bridge.send("edit.history"))
 );
 
+registerTool(
+  "edit_paste_clips",
+  {
+    title: "Paste the app's clipboard as clips",
+    description:
+      "Paste whatever CLIPS are currently on the DAW APP'S OWN clipboard — " +
+      "the same clipboard Cmd-C/Cmd-V use in the arrange view. This tool " +
+      "cannot PUT anything on that clipboard: there is no wire route to " +
+      "populate it, so a call only fires whatever the human user last " +
+      "copied in the app itself; if nothing has been copied (or the last " +
+      "copy was cleared by a later cut/copy elsewhere), there is nothing " +
+      "to paste. `trackId` is optional and overrides the destination for " +
+      "THIS paste only, without moving the app's own paste cursor — omit " +
+      "it to land on the same resolved active track a bare Cmd-V would " +
+      "use. One call is one undo step, reversible with edit_undo. The " +
+      "response NAMES which of four outcomes happened rather than a bare " +
+      "ok/fail, because 'nothing happened' has three different causes an " +
+      "agent needs to react to differently: (1) success — " +
+      "`{pasted:true, landings:[{clipId,trackId,startBeat}], skipped:[" +
+      "{sourceClipId,clipName,reason}], trimmedClipIDs:[string], " +
+      "removedClipIDs:[string]}` (`skipped`/`trimmedClipIDs`/" +
+      "`removedClipIDs` are usually empty — they only fill in when some " +
+      "pasted clips overlapped and had to be trimmed, removed, or dropped " +
+      "to make room, per the same placement policy Cmd-V uses); (2) " +
+      "`{pasted:false, reason:\"empty-clipboard\"}` — nothing has been " +
+      "copied yet; ask the user to copy a clip first, retrying will not " +
+      "help; (3) `{pasted:false, reason:\"wrong-payload-kind\", " +
+      "clipboardKind:\"notes\"}` — the clipboard holds copied MIDI NOTES " +
+      "(from inside the piano roll), not clips; there is no note-paste " +
+      "wire route, so read them with clip_get_notes and write them with " +
+      "clip_set_notes instead; (4) `{pasted:false, reason:<string>, " +
+      "skipped:[...]}` — the app deliberately refused the paste (e.g. no " +
+      "track can hold the payload, or every copied clip individually " +
+      "mismatched its destination, such as a MIDI clip landing on an " +
+      "audio track); `skipped` names each refused clip and why. Errors " +
+      "(distinct from all four outcomes above) only when this control " +
+      "session has no app UI attached (a headless session) — start " +
+      "DAWPro.app and retry.",
+    inputSchema: {
+      trackId: z
+        .string()
+        .uuid()
+        .optional()
+        .describe(
+          "Track to paste into, from project_snapshot. Overrides the " +
+            "resolved active track for THIS paste only. Omit to use the " +
+            "same active-track resolution a bare Cmd-V would use."
+        ),
+      atBeat: z
+        .number()
+        .optional()
+        .describe(
+          "Project beat to anchor the paste on. The EARLIEST copied clip " +
+            "lands here and the rest keep their offsets from it. Overrides " +
+            "the transport playhead for THIS paste only and does NOT move " +
+            "the playhead. Omit to anchor on the playhead, exactly as a " +
+            "bare Cmd-V does. A negative value slides the whole group to " +
+            "beat 0 rather than erroring."
+        ),
+    },
+  },
+  async ({ trackId, atBeat }) =>
+    toToolResult(() => bridge.send("edit.pasteClips", { trackId, atBeat }))
+);
+
 // ---------------------------------------------------------------------------
 // Project
 // ---------------------------------------------------------------------------
@@ -5823,7 +8397,8 @@ server.registerTool(
       "automation lanes as a top-level `[{id, target, points, isEnabled}]` array (same " +
       "lane shape as a track's, driven by automation_add_lane/_set_points/_set_lane_" +
       "enabled/_remove_lane with `trackId: \"master\"`) — ABSENT when there is no master " +
-      "lane; the master fade it draws is pre-limiter and is NOT baked into stems or a bounce. " +
+      "lane; the master fade it draws is pre-limiter, IS baked into render_mixdown and " +
+      "render_bounce, and is excluded only from render_stems (see automation_add_lane). " +
       "May also include `engineNotices` (m15-e): a top-level array of schedule-time " +
       "DEGRADATION reports — cases where playback proceeded on time but not exactly as " +
       "the project describes (e.g. a fade or gain envelope that couldn't be prepared in " +
@@ -5908,15 +8483,28 @@ server.registerTool(
       "instrument tracks (it resolves to the default poly synth even when " +
       "unconfigured), omitted on audio/bus tracks. `sends` is each " +
       "`{destinationBusID, level, preFader}` (preFader is always false today " +
-      "— v0 sends are post-fader only). `fx` is each `{name, bypassed}` in " +
+      "— v0 sends are post-fader only). `fx` is each `{id, name, bypassed}` in " +
       "chain order (use fx_describe or project_snapshot for actual parameter " +
-      "values). `clips` summarizes every clip as `{id, name, startBeat, " +
+      "values). That `id` is the ADDRESSABLE effect id — pass it straight to " +
+      "fx_set_param / fx_set_bypass / fx_reorder / fx_remove. It means you can " +
+      "tune a chain you INHERITED (from a mixer preset, a genre skeleton, or " +
+      "another agent) without calling fx_add first purely to make the ids " +
+      "appear in a reply — reading no longer requires writing. `clips` " +
+      "summarizes every clip as `{id, name, startBeat, " +
       "lengthBeats, kind: \"audio\"|\"midi\", noteCount?, takeLaneCount?, " +
       "activeLane?, hasStretch?, hasFades?, gainDb?}` — COUNTS, never the " +
       "actual MIDI notes, and no file paths (fetch a clip's real note data or " +
       "source file via project_snapshot/clip tools when you need it). " +
-      "`automation` summarizes every lane as `{target, enabled, pointCount}` " +
-      "— never the breakpoints themselves. `peakDb`/`rmsDb` are LEVELS in " +
+      "`automation` summarizes every lane as `{id, target, enabled, " +
+      "pointCount}` — never the breakpoints themselves. That `id` is the " +
+      "ADDRESSABLE lane id — pass it straight to automation_set_points / " +
+      "automation_set_lane_enabled / automation_remove_lane. Exactly like the " +
+      "effect ids above, it means you can drive a lane you INHERITED without " +
+      "calling automation_add_lane first purely to make its id appear in a " +
+      "reply — reading no longer requires writing. (MASTER volume lanes are " +
+      "not carried here; read their ids from project_snapshot's top-level " +
+      "`masterAutomation`, which has always included them.) " +
+      "`peakDb`/`rmsDb` are LEVELS in " +
       "dBFS (floor -80, always finite; a POSITIVE peakDb means it clipped), " +
       "carried BOTH per-track and on `master` — this is how you compare " +
       "loudness between tracks, and against the mix as a whole, without " +
@@ -6426,6 +9014,81 @@ registerTool(
   async () => toToolResult(() => bridge.send("vc.listVoices"))
 );
 
+registerTool(
+  "vc_import_voice_model",
+  {
+    title: "Import a third-party RVC voice model",
+    description:
+      "Import a user-supplied third-party RVC voice-conversion model (a " +
+      "`.pth` checkpoint, optionally with its companion `.index`) so it " +
+      "appears in vc_list_voices as a real voice, ready for `voiceId` on " +
+      "vc_convert_vocals. A PURE LOCAL FILE COPY into the app's own voice " +
+      "store — no sidecar call, so it works even while vc_sidecar_status " +
+      "isn't healthy. `modelPath` (required) is the absolute or `~`-expanded " +
+      "path to the `.pth` file on the user's disk. `indexPath` (optional) is " +
+      "the absolute or `~`-expanded path to a companion FAISS `.index` file, " +
+      "which raises conversion quality when present. `voiceId` (optional) " +
+      "sets the id this voice is listed under; omit to derive one from " +
+      "`name` (or the model file's own name) sanitised to letters/digits/" +
+      "`-`/`_` — the reserved smoke-test id \"base\" is refused. `name` " +
+      "(optional) is the display name; omit to reuse the same text `voiceId` " +
+      "is derived from. `overwrite` (optional, default false) replaces an " +
+      "existing voice at that id instead of refusing. IMPORTANT — THIS DOES " +
+      "NOT MAKE THE VOICE IMMEDIATELY USABLE: the RVC engine needs an MLX-" +
+      "converted `.npz`, which this tool does not produce (no conversion " +
+      "step exists yet), so the imported voice lands honestly in " +
+      "`needsConversion` state — the SAME state vc_list_voices already " +
+      "reports for a voice with a `.pth` but no `.npz`. Calling " +
+      "vc_convert_vocals with this voiceId before that conversion exists " +
+      "will fail; check vc_list_voices' `state` field, and tell the user " +
+      "conversion support is coming rather than implying the voice is ready " +
+      "now. Returns `{voiceId, name, hasIndex, state, directoryPath}`. " +
+      "RIGHTS-RESPONSIBILITY POLICY: third-party voice models are " +
+      "supported; the user is responsible for having the rights to " +
+      "whatever model they import — this tool implies no ownership or " +
+      "compatibility claim of its own.",
+    inputSchema: {
+      modelPath: z
+        .string()
+        .min(1)
+        .describe(
+          "Absolute or ~-expanded local path to the third-party RVC .pth checkpoint to import."
+        ),
+      indexPath: z
+        .string()
+        .optional()
+        .describe(
+          "Absolute or ~-expanded local path to the model's companion FAISS .index file, if " +
+            "the user has one. Omit if there isn't one — the voice still imports, just " +
+            "without the quality boost an index gives."
+        ),
+      voiceId: z
+        .string()
+        .optional()
+        .describe(
+          "The store id this voice is listed under (what vc_convert_vocals's voiceId will " +
+            "name). Omit to derive one from name/the model file's own name. The reserved id " +
+            "\"base\" is refused (it names the built-in smoke-test target)."
+        ),
+      name: z
+        .string()
+        .optional()
+        .describe("Display name for the voice. Omit to reuse the text voiceId is derived from."),
+      overwrite: z
+        .boolean()
+        .optional()
+        .describe(
+          "true: replace an existing voice already at this id. Omit or false (default): " +
+            "refuse instead, naming the conflicting id."
+        ),
+    },
+  },
+  async ({ modelPath, indexPath, voiceId, name, overwrite }) =>
+    toToolResult(() =>
+      bridge.send("vc.importVoiceModel", { modelPath, indexPath, voiceId, name, overwrite })
+    )
+);
+
 server.registerTool(
   "ai_provider_status",
   {
@@ -6843,6 +9506,10 @@ registerTool(
                   "syncopated\". Omit for a bare generic instruction."
               ),
           })
+            // `.strict()` (m30-c): a typo'd field (e.g. "trackNam") inside
+            // one `tracks` element would otherwise be silently stripped
+            // instead of rejected.
+            .strict()
         )
         .min(1)
         .describe("The tracks to generate — one entry per new track, each with its own local prompt."),
@@ -7556,10 +10223,17 @@ registerTool(
       "maps with the file's (refused when combined with a non-zero `atBeat` — the maps are " +
       "absolute, so there's no honest offset adoption); `\"ignore\"` never touches them. Note " +
       "positions land on the same beats under every policy — a MIDI file's beats come from its " +
-      "ticks, not its tempo. `instruments` is `\"none\"` (default: new tracks keep the default " +
-      "instrument) or `\"gm\"` (assigns General MIDI sound-bank programs from the file's " +
-      "program changes, channel 10 as the standard drum kit) — the program each part asks for " +
-      "is reported either way. `force` (default false) overrides the 32-track import-count " +
+      "ticks, not its tempo. `instruments` is `\"gm\"` (THE DEFAULT: assigns General MIDI " +
+      "sound-bank programs from the file's program changes, channel 10 as the standard drum " +
+      "kit, so the import sounds like the instruments the file names) or `\"none\"` (the " +
+      "explicit opt-out, leaving new tracks on the default instrument) — the program each part " +
+      "asks for is reported either way. EACH PART REPORTS TWO NAMES: `name` is the file's " +
+      "LITERAL name and `trackName` is what the track was actually called. They differ whenever " +
+      "the file's own name does not distinguish the parts — a format-0 file carries ONE chunk " +
+      "name for every channel, so `name` can be the song title 13 times while `trackName` reads " +
+      "\"Acoustic Grand Piano\", \"Standard Drum Kit\", \"Distortion Guitar (ch 9)\"… Read " +
+      "`trackName` when you need to find or describe a track you just imported. `force` " +
+      "(default false) overrides the 32-track import-count " +
       "refusal. The returned report is where every fidelity loss surfaces, never applied " +
       "silently: clamped out-of-range tempos, dropped or conflicting tempo/meter events, " +
       "controller lanes dropped or decimated past their cap, dropped release velocities and " +
@@ -7598,9 +10272,11 @@ registerTool(
         .enum(["none", "gm"])
         .optional()
         .describe(
-          "\"none\" (default) leaves new tracks on the default instrument. \"gm\" assigns " +
-            "General MIDI sound-bank programs from the file's program changes (channel 10 = " +
-            "the standard drum kit). The requested program is reported either way."
+          "\"gm\" (DEFAULT) assigns General MIDI sound-bank programs from the file's program " +
+            "changes (channel 10 = the standard drum kit), so the imported tracks sound like " +
+            "the instruments the file names. \"none\" is the opt-out and leaves new tracks on " +
+            "the default instrument. The requested program is reported either way. Omitting " +
+            "this gets \"gm\"."
         ),
       parts: z
         .array(z.number().int())

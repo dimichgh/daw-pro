@@ -158,6 +158,81 @@ struct MasterAutomationCommandTests {
         #expect(bad.error == "'trackId' is not a valid UUID: MASTER")
     }
 
+    /// m26-q. `ProjectStore.masterAutomation`'s own contract says the master
+    /// lane REPLACES the fader, and the render path gates on exactly that
+    /// predicate — so a bare `{masterVolume}` reply let an agent set a master
+    /// level, be told it succeeded, and never learn the level was inaudible.
+    /// The same annotation `track.setVolume` grew in m26-o, one level up.
+    ///
+    /// Two properties are pinned together and both are load-bearing:
+    /// `masterVolume` is ALWAYS present (this verb was never void-result, so
+    /// copying `track.setVolume`'s bare-`ok` shape would have been a breaking
+    /// change), and the two annotation keys appear ONLY while a lane actually
+    /// governs — an always-present flag broke a regression guard once and would
+    /// read as a warning on every ordinary call.
+    @Test("mixer.setMasterVolume annotates ONLY while a master lane actually governs")
+    func setMasterVolumeAnnotatesAutomationControl() async throws {
+        let (router, store) = makeRouter()
+
+        func setMasterVolume(_ value: Double) async -> ControlResponse {
+            await router.handle(ControlRequest(
+                id: "smv", command: "mixer.setMasterVolume",
+                params: ["volume": .number(value)]))
+        }
+
+        // 1. No lane at all → no annotation, and the pre-existing
+        //    `masterVolume` field is untouched (the change is ADDITIVE).
+        let bare = await setMasterVolume(0.5)
+        #expect(bare.ok)
+        #expect(bare.result?["masterVolume"]?.doubleValue == 0.5)
+        #expect(bare.result?["automationControlled"] == nil)
+        #expect(bare.result?["automationPointCount"] == nil)
+
+        // 2. An EMPTY lane is inert (the vii-a contract) — creating a lane must
+        //    NOT flip the flag, or the annotation would cry wolf on every lane
+        //    an agent makes before drawing into it.
+        let laneID = try #require(
+            await addMasterLane(router).result?["lane"]?["id"]?.stringValue)
+        let emptyLane = await setMasterVolume(0.6)
+        #expect(emptyLane.result?["masterVolume"]?.doubleValue == 0.6)
+        #expect(emptyLane.result?["automationControlled"] == nil)
+        #expect(emptyLane.result?["automationPointCount"] == nil)
+
+        // 3. Points drawn → the lane governs, and its point count comes back.
+        let points = await router.handle(ControlRequest(
+            id: "pts", command: "automation.setPoints",
+            params: ["trackId": .string("master"), "laneId": .string(laneID),
+                     "points": .array([
+                        .object(["beat": .number(0), "value": .number(1)]),
+                        .object(["beat": .number(4), "value": .number(0)]),
+                        .object(["beat": .number(8), "value": .number(1)]),
+                     ])]))
+        #expect(points.ok)
+
+        let governed = await setMasterVolume(0.7)
+        #expect(governed.ok, "the write still succeeds — this is an annotation, not a refusal")
+        #expect(governed.result?["masterVolume"]?.doubleValue == 0.7)
+        #expect(governed.result?["automationControlled"]?.boolValue == true)
+        #expect(governed.result?["automationPointCount"]?.doubleValue == 3)
+
+        // 4. A DISABLED lane is inert too — the manual value rules again, so the
+        //    annotation goes AWAY rather than sticking once it has been seen.
+        let disable = await router.handle(ControlRequest(
+            id: "off", command: "automation.setLaneEnabled",
+            params: ["trackId": .string("master"), "laneId": .string(laneID),
+                     "enabled": .bool(false)]))
+        #expect(disable.ok)
+        let afterDisable = await setMasterVolume(0.8)
+        #expect(afterDisable.result?["masterVolume"]?.doubleValue == 0.8)
+        #expect(afterDisable.result?["automationControlled"] == nil)
+        #expect(afterDisable.result?["automationPointCount"] == nil)
+
+        // Every write LANDED, annotated or not: the store holds the last value.
+        // That is what makes the annotation mean "a lane governs" rather than
+        // "your call was dropped".
+        #expect(store.masterVolume == 0.8)
+    }
+
     @Test("project.snapshot carries masterAutomation with the lane shape; key absent when empty")
     func snapshotCarriesMasterAutomation() async throws {
         let (router, _) = makeRouter()

@@ -57,7 +57,7 @@ import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node
 
 // The build/launch/pidfile-kill lifecycle lives in ONE place (m23-ac-1) —
 // `_staging.mjs`. It used to be copy-pasted into every gate that had it at all.
-import { launchStaging, stopStaging, sleep, ROOT, STAGING_PORT } from "./_staging.mjs";
+import { launchStaging, stopStaging, sleep, ROOT, STAGING_PORT, panelDensityGuard, verdict } from "./_staging.mjs";
 
 const GATE = "m23t";
 const OUT = process.env.M23T_OUT || "/tmp/daw-gate-out/m23t";
@@ -92,6 +92,7 @@ function ck(label, cond, detail = "") {
   if (cond) { pass++; console.log(`PASS ${label}`); }
   else { fail++; failures.push(label); console.log(`FAIL ${label} :: ${detail}`); }
 }
+const guard = panelDensityGuard(cmd);   // raw cmd — envelope shape, normalized inside
 
 // ---- crop geometry and cyan thresholds --------------------------------------
 // ⚠️ RECOVERED BY MEASUREMENT 2026-07-30 (m23-ac-1), not re-derived from taste.
@@ -155,7 +156,7 @@ try {
      layout.editorFraction === 0.45 && typeof layout.rowHeight === "number",
      JSON.stringify(layout));
 
-  r = await cmd("debug.panelDensity", { panel: "pianoRoll", mode: "pro" });
+  r = await guard.set("pianoRoll", "pro");
   ck("F4 piano roll staged to Pro", r.result?.mode === "pro", JSON.stringify(r.result));
 
   r = await cmd("track.add", { name: "Bar Ops Probe", kind: "instrument" });
@@ -193,7 +194,7 @@ try {
   ];
   const seen = {};
   for (const st of STATES) {
-    r = await cmd("debug.panelDensity", { panel: "pianoRoll", mode: st.density });
+    r = await guard.set("pianoRoll", st.density);
     ck(`${st.tag}.0 density staged to ${st.density}`, r.result?.mode === st.density,
        JSON.stringify(r.result));
     await cmd("transport.seek", { beats: st.beat });
@@ -336,9 +337,27 @@ try {
 
   // ---- no new wire surface -------------------------------------------------
   const commands = readFileSync(`${ROOT}/Sources/DAWControl/Commands.swift`, "utf8");
-  const body = commands.slice(commands.indexOf("public static let allCommands: [String] = ["));
-  const arr = body.slice(0, body.indexOf("\n    ]"));
-  const verbs = [...arr.matchAll(/"([a-zA-Z0-9._]+)"/g)].map((m) => m[1]);
+  // ⚠️⚠️ BOTH ENDS ARE GUARDED, AND THE TERMINATOR IS THE ONE THAT BITES (m25-p,
+  // 2026-08-24). `indexOf` returns -1 when the marker is absent, and
+  // `slice(0, -1)` is not "empty" — it is EVERYTHING BUT THE LAST CHARACTER, so
+  // a renamed declaration would silently widen this slice to the whole 133 KB
+  // file and every leg below would keep passing against unrelated source. A
+  // vacuous PASS is the failure mode this gate exists to prevent, so an absent
+  // marker must THROW rather than degrade.
+  const arrStart = commands.indexOf("public static let allCommands: [String] = [");
+  if (arrStart < 0) throw new Error("m23t: allCommands declaration not found in Commands.swift — the slice would have been vacuous");
+  const body = commands.slice(arrStart);
+  const arrEnd = body.indexOf("\n    ]");
+  if (arrEnd < 0) throw new Error("m23t: allCommands array terminator not found — slice(0,-1) would have swallowed the file");
+  const arr = body.slice(0, arrEnd);
+  // ⚠️⚠️ COMMENTS ARE STRIPPED AND A DOT IS REQUIRED (m25-p, 2026-08-24). The
+  // original regex was /"([a-zA-Z0-9._]+)"/ over the RAW body, which counted any
+  // quoted alphanumeric — including two occurrences of "16" inside a comment in
+  // this very array, giving 188 where the array holds 186 verbs. ⭐ The comment
+  // that inflated the count is itself a warning about a counting trap
+  // ("GREP THE LITERAL VALUE, NOT THE IDIOM"). A wire verb ALWAYS contains a dot.
+  const arrCode = arr.split("\n").map((l) => l.replace(/\/\/.*$/, "")).join("\n");
+  const verbs = [...arrCode.matchAll(/"([a-zA-Z0-9_]+(?:\.[a-zA-Z0-9_]+)+)"/g)].map((m) => m[1]);
   // ⚠️ CROSS-CYCLE TRIPWIRE, not an m23-t claim. A LATER cycle that legitimately
   // adds a wire command turns this leg red for a reason that has nothing to do
   // with the bar readout. When that happens: confirm the new verb is intended,
@@ -374,7 +393,19 @@ try {
   //         ways before writing it: this gate's own regex over the array body
   //         gives 173, and a comment-stripped count gives 173, with 173 UNIQUE
   //         verbs and zero duplicates.
-  const EXPECTED_VERBS = 173;
+  //   186 — m25-p, 2026-08-24. ⚠️⚠️ THIS BUMP IS NOT "173 GREW TO 186": THE
+  //         COUNTER ITSELF WAS WRONG. On its FIRST EVER RUN this gate reported
+  //         188 against a real array of 186, because its regex matched any
+  //         quoted alphanumeric over the RAW body and picked up two `"16"`
+  //         occurrences inside a comment IN the array. The regex now strips
+  //         comments and requires a dot. 186 was established three ways that
+  //         agree: brace-matched array literal (lines 211-540) comment-stripped
+  //         = 186 and comment-inclusive = 186 with zero duplicates; and
+  //         `Commands.swift:1076` says in its own words that `allCommands`
+  //         stays at 186. The Swift-side pin (`ReferenceCommandTests`) also
+  //         passed on this tree. ⭐ A COUNT PIN IS TWO CLAIMS — the NUMBER and
+  //         the COUNTING — and only the first one is visible when it fails.
+  const EXPECTED_VERBS = 186;
   ck(`W1 allCommands still holds ${EXPECTED_VERBS} verbs (counted off the ARRAY body, not the case labels)`,
      verbs.length === EXPECTED_VERBS, String(verbs.length));
   ck("W2 the probe added NO wire verb — nothing bar-ops-shaped is in allCommands",
@@ -389,8 +420,17 @@ try {
   // quotes the removed comment verbatim (that quote is the supersession record
   // and must survive), so a file-wide search would fail on the documentation
   // rather than on the code.
+  // ⚠️⚠️ THE TERMINATOR IS GUARDED TOO (m25-p, 2026-08-24) — this is the site
+  // m25-ac flagged. `clusterStart` was already guarded; the SECOND `indexOf` was
+  // not, and it is the dangerous one: absent, it yields -1 and
+  // `slice(clusterStart, -1)` runs to the end of a 133 KB file, so every
+  // presence-leg below would find its token SOMEWHERE and pass vacuously.
+  // An empty body fails loudly; a file-sized body passes silently.
   const clusterStart = view.indexOf("private var barOpsCluster: some View {");
-  const clusterBody = clusterStart < 0 ? "" : view.slice(clusterStart, view.indexOf("\n    }", clusterStart));
+  if (clusterStart < 0) throw new Error("m23t: barOpsCluster not found in PianoRollView.swift — presence legs would be vacuous");
+  const clusterEnd = view.indexOf("\n    }", clusterStart);
+  if (clusterEnd < 0) throw new Error("m23t: barOpsCluster terminator not found — slice would have run to EOF");
+  const clusterBody = view.slice(clusterStart, clusterEnd);
   // H3 is a claim about CODE, so it runs on the body with comment lines
   // stripped. The first draft ran it on the raw body and failed on the cluster's
   // OWN comment explaining why `.frame(width:)` and `.fixedSize` are refused
@@ -410,6 +450,7 @@ try {
   fail++; failures.push(`EXCEPTION ${err.message}`);
   console.log(`FAIL EXCEPTION :: ${err.stack}`);
 } finally {
+  await guard.restore("finally");
   try { ws?.close(); } catch { /* closed */ }
   stopStaging(GATE);
 }
@@ -417,4 +458,4 @@ try {
 console.log(`\n=== GATE === ${pass}/${pass + fail} checks passed`);
 if (failures.length) console.log(failures.map((f) => `  FAILED: ${f}`).join("\n"));
 writeFileSync(`${OUT}/gate.json`, JSON.stringify({ pass, fail, failures }, null, 2));
-process.exit(fail === 0 ? 0 : 1);
+verdict({ ran: pass + fail, failed: fail });

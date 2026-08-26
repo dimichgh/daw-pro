@@ -12,13 +12,15 @@ let package = Package(
         .library(name: "DAWAppKit", targets: ["DAWAppKit"]),
         .executable(name: "DAWApp", targets: ["DAWApp"]),
     ],
-    // THE PACKAGE'S FIRST AND ONLY REMOTE DEPENDENCY (m23-n1). WhisperKit is
-    // Argmax's on-device CoreML Whisper runtime; it is what makes local vocal
-    // transcription possible without anything leaving the machine. It arrives
-    // with a transitive graph of 7 more packages (swift-transformers,
-    // swift-crypto, swift-asn1, swift-collections, swift-argument-parser,
-    // swift-jinja, yyjson), so every build from here on can need a network
-    // fetch on a cold `.build`.
+    // TWO REMOTE DEPENDENCIES, both pinned `exact:`, both ML runtimes, and they
+    // are deliberately shaped nothing alike — see the ONNX Runtime block below.
+    //
+    // (1) WHISPERKIT (m23-n1) — Argmax's on-device CoreML Whisper runtime; it is
+    // what makes local vocal transcription possible without anything leaving the
+    // machine. It arrives with a transitive graph of 7 more packages
+    // (swift-transformers, swift-crypto, swift-asn1, swift-collections,
+    // swift-argument-parser, swift-jinja, yyjson), so every build from here on
+    // can need a network fetch on a cold `.build`.
     //
     // VERSION RULE — `exact:` on this edge, `Package.resolved` for the rest:
     //   * `exact:` (not `from:`) because the weights this runtime loads are a
@@ -35,11 +37,62 @@ let package = Package(
     //     authoritative here in a way it would not be if we were consumed.
     // Bump procedure: change the version here, run `swift package resolve`,
     // review the `Package.resolved` diff, re-run the full suite.
+    //
+    // (2) ONNX RUNTIME (m23-ap-2a) — Microsoft's cross-platform inference
+    // runtime, MIT. It exists here for exactly one reason: SwiftF0, the pitch
+    // detector the user ratified 2026-08-04, publishes ONLY an ONNX graph — no
+    // PyTorch checkpoint, no training code — and coremltools dropped its ONNX
+    // frontend at v6, so there is no conversion route to Core ML that we would
+    // not have to author and then own forever. The route spike
+    // (docs/research/2026-08-05-m23ap1-swiftf0-route-spike.md) costed all three
+    // options; the user was asked "do we take ONNX Runtime as a dependency?"
+    // and answered YES on 2026-08-13.
+    //
+    // VERSION RULE — `exact:`, for a DIFFERENT reason than WhisperKit's:
+    //   * WhisperKit is pinned exactly because a minor bump could change the
+    //     on-disk layout of frozen weights and fail at RUN time. This edge is
+    //     pinned exactly because it is a `binaryTarget` over a CHECKSUMMED
+    //     CocoaPods archive (`pod-archive-onnxruntime-c-1.24.2.zip`, 52 MB, its
+    //     SHA256 baked into ORT's own manifest). A floating version silently
+    //     changes both a 52 MB fetch on a cold `.build` AND the size of every
+    //     binary we ship — the link delta this dependency costs is measured in
+    //     tens of MB, which is not something a `from:` range should be allowed
+    //     to move without anyone looking.
+    //   * UNLIKE WhisperKit, this edge has NO transitive graph at all — ORT's
+    //     own manifest declares `dependencies: []`. So `exact:` here pins the
+    //     WHOLE subtree, not just the first hop, and `Package.resolved` gains
+    //     exactly one entry.
+    //   * The product is declared `type: .static` upstream, so the linker folds
+    //     `libonnxruntime.a` into the executable: no `Contents/Frameworks`, no
+    //     dylib, no `@rpath`, and therefore no library-validation entitlement
+    //     question and no new Xcode-specific bundling step.
+    // ⚠️ Landing HERE (DAWEngine) does NOT put inference near the render
+    // thread — see the §7.6 note at the top of Analysis/PitchTracker.swift.
+    // Bump procedure: same as WhisperKit's, plus RE-MEASURE the stripped binary
+    // size; that number is the whole cost of this dependency.
     dependencies: [
         .package(url: "https://github.com/argmaxinc/WhisperKit.git", exact: "0.18.0"),
+        .package(url: "https://github.com/microsoft/onnxruntime-swift-package-manager",
+                 exact: "1.24.2"),
     ],
     targets: [
-        .target(name: "DAWCore"),
+        // m30-a: the repo ships ONE tiny generated one-shot sample so the
+        // built-in Sampler can be smoke-tested — by a human or an agent —
+        // without sourcing audio from anywhere else. A fresh project otherwise
+        // has no sample content at all, and a sampler feature exercised with no
+        // content is indistinguishable from a broken one.
+        //
+        // `.copy` rather than `.process`, the swiftf0.onnx / SMF-fixtures
+        // precedent: these bytes are EVIDENCE. `scripts/make-bundled-samples.py`
+        // is the closed-form recipe that produced them, tests assert on the
+        // pitch that comes back out of a render, and `.process` reserves the
+        // right to transform a resource — a transcoded fixture would quietly
+        // change what those tests measure. `.copy` also preserves the
+        // directory, so the file loads at `BundledSamples/…` inside
+        // `daw-pro_DAWCore.bundle` (see `BundledSamples.url(for:)`, which
+        // resolves it WITHOUT `Bundle.module` and documents why).
+        .target(name: "DAWCore",
+                resources: [.copy("Resources/BundledSamples")]),
         // C11 stdatomic shim for render-thread-shared state (Swift 6 on the
         // macOS 14 floor has no RT-safe atomics in the SDK). DAWCore must NOT
         // depend on this — the domain stays dependency-free.
@@ -77,7 +130,32 @@ let package = Package(
                 .linkedFramework("Accelerate")
             ]
         ),
-        .target(name: "DAWEngine", dependencies: ["DAWCore", "CAtomics", "CSignalsmithStretch", "ObjCExceptionGuard"]),
+        // ONNX Runtime lands HERE and nowhere else (m23-ap-2a). Pitch detection
+        // is audio analysis, so it belongs to the engine, not to AIServices
+        // (which is the EXTERNAL-services module — sidecars and network clients
+        // — and is where WhisperKit lives for exactly that reason). DAWCore must
+        // NOT reach it: the domain stays dependency-free, same law as CAtomics
+        // and ObjCExceptionGuard above.
+        //
+        // The weights are a COMMITTED RESOURCE, not a download: 397,987 B is a
+        // rounding error against the shipped binary, so `ai.installSpeechModel`
+        // (which exists for models three orders of magnitude larger) is
+        // deliberately not involved. `.copy` rather than `.process` for the same
+        // reason as DAWCoreTests' SMF fixtures below — these bytes are pinned by
+        // SHA256 in a test, and `.process` reserves the right to transform a
+        // resource, which would break that pin. VENDORED.md and the upstream
+        // LICENSE sit beside the model (the CSignalsmithStretch/vendor
+        // precedent) and are excluded so they are neither compiled nor shipped
+        // as resources — an unhandled file in a target directory is a build
+        // warning, and this package builds clean.
+        .target(name: "DAWEngine",
+                dependencies: ["DAWCore", "CAtomics", "CSignalsmithStretch", "ObjCExceptionGuard",
+                               .product(name: "onnxruntime", package: "onnxruntime-swift-package-manager")],
+                exclude: [
+                    "Analysis/Resources/VENDORED.md",
+                    "Analysis/Resources/SwiftF0-LICENSE",
+                ],
+                resources: [.copy("Analysis/Resources/swiftf0.onnx")]),
         // AIServices dependency added M6 (i): the `ai.sidecarStatus|Start|Stop`
         // control commands route to AIServices' SidecarManager/SidecarStatus
         // (the local ACE-Step sidecar's lifecycle manager) — no cycle, since

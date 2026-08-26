@@ -76,7 +76,27 @@ public final class OfflineRenderer {
     /// at the renderer's rate — never the live engine's instruments). Wired to
     /// the graph's `audioUnitProvider` inside `render`. Internal so hosting
     /// tests can read per-track status via @testable.
-    let auRegistry = AUHostRegistry()
+    ///
+    /// ⭐ Leg R-1: built with `rendersOffline: true`, which is the ONE place in
+    /// production that flag is ever set. That is admissible only because this
+    /// registry is separate from `AudioEngine`'s — the flag invites a plugin to
+    /// BLOCK at render time, which is right for a bounce with no deadline and
+    /// catastrophic for live playback. See `AUHostRegistry.rendersOffline`.
+    ///
+    /// ⚠️ CONSEQUENCE FOR `renderCooperatively`, stated rather than discovered
+    /// later. m19-j's doc says yielding every quantum "caps the block at ONE
+    /// quantum (~85 ms of audio)" — that was always a bound on AUDIO time whose
+    /// translation to WALL time assumed each pull returns promptly. A plugin
+    /// that honours `renderingOffline` may now WAIT inside a pull for its own
+    /// loader, so one quantum's wall cost is bounded by the plugin, not by us,
+    /// and a long enough wait holds the main actor past the m18-b wedge
+    /// threshold. That is the trade this leg makes deliberately: a bounce that
+    /// takes longer beats a bounce that is silently missing its opening. It is
+    /// unmeasured against a real lazy-loading plugin (see the observation tests
+    /// in `OfflineRenderReadinessTests` for what could and could not be
+    /// measured), and it is the strongest argument for Leg R-2's pre-roll,
+    /// which moves the waiting OUT of the metered render pass.
+    let auRegistry: AUHostRegistry
 
     /// C0 SPIKE SEAM ONLY (m13-d, `MasterSandwichTransparencyTests`):
     /// forwarded to the graph so the KEPT bit-transparency gate can render
@@ -101,11 +121,24 @@ public final class OfflineRenderer {
     /// Default: a private throwaway (direct construction stays isolated).
     var performance = EnginePerformanceContext()
 
-    public init(sampleRate: Double = 48_000, channelCount: Int = 2,
-                maximumFrameCount: Int = 4_096) {
+    public convenience init(sampleRate: Double = 48_000, channelCount: Int = 2,
+                            maximumFrameCount: Int = RenderBlockSize.offlineFrames) {
+        self.init(sampleRate: sampleRate, channelCount: channelCount,
+                  maximumFrameCount: maximumFrameCount, rendersOffline: true)
+    }
+
+    /// Leg R-1 GATE SEAM ONLY (`OfflineRenderReadinessTests`), the
+    /// `masterSandwichEnabled`/`referenceLaneEnabled` precedent: production has
+    /// exactly one value, `true`, and the public initializer above is the only
+    /// door to it. `false` reconstructs the PRE-Leg-R-1 host — the negative
+    /// control the §15.5 gate needs, since a gate that cannot be shown going
+    /// red proves nothing. Internal: @testable only.
+    init(sampleRate: Double, channelCount: Int, maximumFrameCount: Int,
+         rendersOffline: Bool) {
         self.sampleRate = sampleRate
         self.channelCount = channelCount
         self.maximumFrameCount = maximumFrameCount
+        self.auRegistry = AUHostRegistry(rendersOffline: rendersOffline)
     }
 
     /// Instantiates and prepares a hosted instrument for every `.audioUnit`
@@ -350,32 +383,41 @@ public final class OfflineRenderer {
         graph.applyParameters(tracks: tracks, playheadBeat: fromBeat)
         try engine.start()
         graph.applyParameters(tracks: tracks, playheadBeat: fromBeat)
-        // m23-bv: the cause is STATED, not defaulted. A render begins at a
-        // beat the CALLER chose, which is a relocation by m23-bp's own rule
-        // (the anchor is not a position playback would have reached anyway),
-        // so `.relocation` is the same value `scheduleAll`'s default carries
-        // and this line is byte-identical to the pre-m23-bv tree. Writing it
-        // out is the point: a comment is not a compiler, and until m23-bv the
-        // only record that anyone had CHOSEN it lived in a test's header.
+        // m23-bv: the cause is STATED, not defaulted — and since the user's
+        // 2026-08-17 ruling it is `.offlineRender`, which CHASES held notes.
+        // THE RULING, verbatim: "make the bounce chase held notes, like the
+        // play button already does." A region bounce should sound like the
+        // song sounds at that instant.
         //
-        // ⚠️ WHAT IT COSTS IS MEASURED, NOT INFERRED — a MIDI note held across
-        // `fromBeat` is ABSENT from the bounce (RMS exactly 0.0 at bar 5 for a
-        // pad held bars 1-9), while the same instant played through from the
-        // top sounds (RMS 0.064), and a straddling AUDIO clip in the identical
-        // position DOES sound (RMS 0.354, entered mid-file). See
-        // `OfflineChaseDivergenceTests`. Whether a region bounce should chase
-        // — and whether that audio/MIDI asymmetry is wanted — is an OPEN
-        // PRODUCT question on the m23-bv roadmap entry. Do not flip this line
-        // without settling it: it is the offline byte-identity anchor.
+        // WHY A FOURTH CASE rather than reusing one. `.transportStart` means
+        // "the user pressed PLAY" and a bounce is not a transport start —
+        // making it lie would corrupt the one home of this mapping.
+        // `.relocation` stays correct (no chase) for its OTHER users — a seek
+        // while rolling, a record start, a loop-wrap jump — so flipping its
+        // `chasesHeldNotes` would have changed three live behaviours to fix
+        // one offline one. See `RescheduleCause` for the case's own doc and
+        // for THE ACCEPTED COST (a note already mid-decay re-attacks at full
+        // velocity: the bounce synthesises an attack the song does not have).
         //
-        // ⚠️ m23-cd (2026-08-04) DID NOT SETTLE IT. The user ruled that the
-        // PLAY BUTTON must chase ("lets do what other DAWs do") and
-        // `AudioEngine.startPlayback` now passes `.transportStart` — but that
-        // is the LIVE surface. This one is a bounce: same trade, different
-        // surface, and re-putting m23-bv WITH the m23-cd report attached is the
-        // path to an answer, not inheriting one. This line is still
-        // byte-identical to the pre-m23-bv tree.
-        graph.scheduleAll(fromBeat: fromBeat, tempoMap: tempoMap, cause: .relocation)
+        // WHAT WAS MEASURED, kept as history because it is why the ruling was
+        // asked for. Under the previous `.relocation` a MIDI note held across
+        // `fromBeat` was ABSENT from the bounce (RMS exactly 0.0 at bar 5 for
+        // a pad held bars 1-9) while the same instant played through from the
+        // top sounded (RMS 0.064) — the divergence the user ruled on. A
+        // straddling AUDIO clip in the identical position ALWAYS sounded (RMS
+        // 0.354, entered mid-file by `scheduleAll`'s `offsetSec = max(0,
+        // -clipStartSec)`): that audio/MIDI asymmetry at identical geometry is
+        // what this line now closes. See `OfflineChaseDivergenceTests`, which
+        // pins the convergence and still fails if MIDI regresses to silence.
+        //
+        // ⚠️ THIS LINE CHANGES RENDERED BYTES — that is the point, and the
+        // blast radius is CONTAINED, not assumed: chase can only ever ADD
+        // notes whose onset precedes `fromBeat` (`buildEvents`' guard is a
+        // STRICT `onBeat < fromBeat`), so no note can precede beat 0 and
+        // EVERY render from beat 0 is byte-identical to the pre-ruling tree.
+        // `NoteChaseGraphTests` machine-checks that containment through this
+        // very call, so it is checked rather than argued.
+        graph.scheduleAll(fromBeat: fromBeat, tempoMap: tempoMap, cause: .offlineRender)
         if let metronome {
             // One click per integer beat across the render range (the window
             // end is the inverse integral of the render duration — m12-b,

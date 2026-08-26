@@ -128,6 +128,8 @@ public enum SampleLibraryMapper {
 
         var zones: [SamplerZone] = []
         var loopedZoneCount = 0        // m20-g: counts REAL loops (sustain + continuous)
+        var crossfadedZoneCount = 0    // m27: zones with ANY usable crossfade
+        var ccCrossfadedZoneCount = 0  // m27: of those, the CONTINUOUS (CC-driven) ones
         var invalidLoopCount = 0       // §2.2 invalid-bounds degradation
         var pointsWithoutModeCount = 0 // §2.2 points-without-mode degradation
         // Per-file smpl-loop cache for the duration of ONE map() call — big
@@ -291,6 +293,28 @@ public enum SampleLibraryMapper {
             } else {
                 tuneCents = nil
             }
+            // — m27 leg B: dynamic-layer crossfade. Absent opcodes give an
+            //   all-nil crossfade, which `SamplerZone.init` drops to nil, so a
+            //   library without them imports byte-identically to pre-m27. The
+            //   curve opcodes are NOT parsed: the engine implements SFZ's
+            //   documented DEFAULT (equal-power), and a file that asks for a
+            //   different one is reason-coded below rather than silently given
+            //   the wrong curve. —
+            let crossfade = SamplerCrossfade(
+                controller: region.xfCC,
+                ccInLo: region.xfCcInLo, ccInHi: region.xfCcInHi,
+                ccOutLo: region.xfCcOutLo, ccOutHi: region.xfCcOutHi,
+                velInLo: region.xfVelInLo, velInHi: region.xfVelInHi,
+                velOutLo: region.xfVelOutLo, velOutHi: region.xfVelOutHi)
+            if !crossfade.isNoOp {
+                crossfadedZoneCount += 1
+                if region.xfCC != nil { ccCrossfadedZoneCount += 1 }
+            }
+            // A CC crossfade with NO bounds names a controller that can never
+            // move anything — the honest tally, not a silent drop.
+            if region.xfCC != nil, crossfade.isNoOp {
+                ignoredTally["xfin_locc/xfout_hicc (no bounds)", default: 0] += 1
+            }
             zones.append(SamplerZone(
                 audioFileURL: resolved.url,
                 rootPitch: region.keyCenter ?? 60,
@@ -316,7 +340,8 @@ public enum SampleLibraryMapper {
                 release: region.releaseSeconds,
                 loopMode: loopMode,
                 loopStart: loopStartOut,
-                loopEnd: loopEndOut
+                loopEnd: loopEndOut,
+                crossfade: crossfade
             ))
         }
 
@@ -328,6 +353,24 @@ public enum SampleLibraryMapper {
         if pointsWithoutModeCount > 0 {
             degradations.append(
                 "\(pointsWithoutModeCount) zone\(pointsWithoutModeCount == 1 ? "" : "s") author loop points without a loop mode and their samples embed no smpl loop — imported without looping (the SFZ default)")
+        }
+        // m27: say which KIND of crossfade was found. Velocity crossfade is
+        // fixed at note-on — it smooths transitions ACROSS notes and can never
+        // change a HELD note, which is a different thing from what a breath
+        // controller does, and the report must not let the two read alike.
+        if crossfadedZoneCount > 0 {
+            let velocityOnly = crossfadedZoneCount - ccCrossfadedZoneCount
+            var parts: [String] = []
+            if ccCrossfadedZoneCount > 0 {
+                parts.append("\(ccCrossfadedZoneCount) with a CONTINUOUS controller crossfade (audible while a note is held)")
+            }
+            if velocityOnly > 0 {
+                parts.append("\(velocityOnly) with a VELOCITY crossfade (fixed at note-on — it smooths layer changes between notes, not within one)")
+            }
+            degradations.append(
+                "dynamic-layer crossfade imported on \(crossfadedZoneCount) zone\(crossfadedZoneCount == 1 ? "" : "s"): "
+                    + parts.joined(separator: "; ")
+                    + ". Crossfades use SFZ's default equal-power curve; xf_cccurve/xf_velcurve are not read.")
         }
         if keyswitchSkipped > 0 {
             degradations.append(

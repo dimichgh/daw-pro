@@ -1,7 +1,9 @@
 // m18-c birth-latency scaling gate (ACTIVE players) — the m18-c cost model
 // said mid-play track-birth cost is core(~140-160 ms @41 strips) + ~6-7 ms x
 // CLIP-PLAYER-COUNT (play(at:) handshakes), i.e. linear in PLAYERS, not
-// strips. The model was never checked by varying player count at fixed
+// strips. ⚠️ That `core` is NOT the K10/K40 intercept this gate can derive —
+// see ">>> INTERCEPT IS NOT CORE <<<" below before comparing the two.
+// The model was never checked by varying player count at fixed
 // strip count — this gate does exactly that: 41 audio strips, K in {10,40}
 // tone clips, ALL of them actively rolling (playhead at 0) when the birth
 // happens.
@@ -23,7 +25,8 @@
 //   (a) A floor on an ABSOLUTE latency cannot catch a regression. Regressions
 //       make things slower. The only thing a floor can catch is the app getting
 //       FASTER — so a future cycle that genuinely sped up `play(at:)` handshakes
-//       or trimmed the ~170 ms core would have been told it broke this gate.
+//       or trimmed the ~170 ms INTERCEPT would have been told it broke this
+//       gate. (Said "core" before m23-dz; it is the intercept — see below.)
 //       Observed K40 medians ran 337..431 and the minimum cleared 330 by 7 ms,
 //       so that false alarm was roughly one quiet-machine run away.
 //   (b) The model claim this gate exists to test — birth cost is linear in
@@ -37,6 +40,46 @@
 // So: the ceiling is the regression guard, delta is the model assertion, and the
 // floor is a vacuity tripwire that no real improvement can trip. Do NOT raise
 // VACUITY_FLOOR back toward the observed distribution — that re-creates (a).
+//
+// >>> INTERCEPT IS NOT CORE (m23-dz, 2026-08-11) <<<
+// This gate can derive `K10 - delta/3` — the INTERCEPT of the mid-play birth
+// ROUND-TRIP. The filed model's `core` is a DIFFERENT quantity: a STOPPED-STATE
+// 41-strip rebuild of 138-141 ms, measured at m18-c with temporary in-process
+// instrumentation (ROADMAP:284), not over the wire. They were NEVER equal —
+// the historical intercepts are 185/171/180 (m18-c/m19-f/m19-h) against a
+// filed core of ~140. The gap is real work the round-trip pays and the
+// stopped rebuild does not (engine discard/dealloc ~48 ms, abort pass ~15,
+// ~1 ms/player quiesce, plus the socket hop).
+// ⚠️ THE WIRE CANNOT MEASURE `core` AT ALL. Probed directly at m23-dz: with the
+// transport STOPPED, `track.add` at 41 strips returns in 3 ms (K=10 and K=40
+// alike) against a 1 ms bare `project.overview` control — i.e. the stopped path
+// DEFERS the graph rebuild entirely, so there is nothing for a round-trip to
+// time. Do NOT read that 3 ms as "core got faster"; it is a different code path.
+// Re-measuring `core` needs m18-c's in-process instrumentation restored, which
+// is its own item — NOT something to infer from this gate.
+//
+// WHAT m23-dz DID SETTLE — the intercept fell ~55 ms and the slope did not:
+//   K10   historical {238,240,243} n=3  vs  modern {170..205} n=9 — DISJOINT, 33 ms gap
+//   K40   historical {404,431,438} n=3  vs  modern {335..390} n=18 — DISJOINT, 14 ms gap
+//         (all figures on these lines are per-run MEDIANS, never raw samples)
+//   slope 6.13 ms/player historical vs 6.00 modern — stable to 0.13
+//   intercept 179.0 -> 128.3 mean (drop 50.7 ms)
+// ⚠️ DATASET FROZEN AT n=9 (8 runs by the m23-dz orchestrator + the m23-bh run),
+// and the freeze is deliberate, not laziness. Editing this comment re-DRIFTS the
+// gate in the staleness advisory; clearing that drift means running it again;
+// that run is another data point, which changes these numbers, which requires
+// editing this comment. That regress does not terminate. ⭐ THE RULE: freeze the
+// sample when the analysis is written, state the freeze, and let the advisory
+// read DRIFTED — it is ADVISORY, and chasing it corrupts the sample it reports
+// on. Every run made is folded in up to the freeze; none was dropped for being
+// inconvenient (the last one, K10 205, is the WORST for the finding and is in).
+// The harness conversion is RULED OUT as the cause: m23-ac-3b-5's condition A
+// was the UNCONVERTED gate on the historical launch method and already read
+// 357/365/380, so the drop predates the conversion. It had happened by
+// 2026-07-30, which brackets the cause to 2026-07-16..07-30. Modern runs are
+// FASTER at HIGHER load (4.7-5.9 vs "light load" at calibration), so load
+// cannot explain it either. Cause not attributed — the commits in that window
+// are multi-cycle squashes; that is a separate item.
 //
 // Self-contained: generates its own 10 s / 440 Hz / mono / 16-bit / 48 kHz
 // tone fixture at runtime (same RIFF-writer pattern as m16h-second-cycle.mjs)
@@ -63,7 +106,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { buildOrAbort, startStaging, stopStaging, connect, sleep } from "./_staging.mjs";
+import { buildOrAbort, startStaging, stopStaging, connect, sleep, verdict } from "./_staging.mjs";
 
 const GATE = "m18c";                        // names the pidfile + staging out dir
 
@@ -105,7 +148,9 @@ function cmd(command, params, timeoutMs = 20000) {
 }
 const median = (a) => { const s = [...a].sort((x, y) => x - y); return s[Math.floor(s.length / 2)]; };
 let failures = 0;
+let ran = 0;
 const check = (label, cond, detail) => {
+  ran++;
   console.log(`${cond ? "PASS" : "FAIL"}  ${label}${detail !== undefined ? "  :: " + JSON.stringify(detail) : ""}`);
   if (!cond) failures++;
 };
@@ -165,11 +210,16 @@ console.log(`delta (K=40 minus K=10): ${delta} ms`);
 // VACUITY_FLOOR separates "no work happened" from "any work happened" — it is
 // deliberately NOT anchored to how fast a real birth is. If the births collapse,
 // K40 decays to a bare control round-trip (single-digit ms); 50 ms is ~10x that,
-// an order of magnitude of margin. ⚠️ It is anchored to the round-trip and NOT to
-// the core cost on purpose: m23-dz measured core falling ~60 ms below its filed
-// ~140-160 class in one calibration interval, so any justification written
-// against core would expire as the app gets faster — which is the exact failure
+// an order of magnitude of margin. ⭐ That "single-digit ms" was an estimate when
+// written; m23-dz MEASURED it — `project.overview` median 1 ms, and a stopped
+// (rebuild-deferred) `track.add` 3 ms — so the ~10x margin is real, not assumed.
+// ⚠️ It is anchored to the round-trip and NOT to the birth cost on purpose:
+// m23-dz CONFIRMED the mid-play INTERCEPT falling ~55 ms (179.0 -> 123.9, n=3
+// vs n=7, disjoint) in one calibration interval, so any justification written
+// against it would expire as the app gets faster — which is the exact failure
 // mode m23-bh removed. Do not re-derive this bound from a drifting quantity.
+// (This note said "core" before m23-dz; the quantity that drifted is the
+// INTERCEPT. The filed `core` is a stopped-state rebuild the wire cannot see.)
 const VACUITY_FLOOR = 50;
 check("regression: K=40 median under the 480 ms ceiling", m40 <= 480, m40);
 check(`vacuity: K=40 median above ${VACUITY_FLOOR} ms (the births really happened)`, m40 >= VACUITY_FLOOR, m40);
@@ -182,4 +232,4 @@ stopStaging(GATE);   // SIGTERMs by exact pid AND releases our session.lock
 ws.close();
 clearTimeout(killer);
 console.log(failures === 0 ? "\nORCH SCALING GATE (active): ALL PASS" : `\nORCH SCALING GATE (active): ${failures} FAILURE(S)`);
-process.exit(failures === 0 ? 0 : 1);
+verdict({ ran, failed: failures });

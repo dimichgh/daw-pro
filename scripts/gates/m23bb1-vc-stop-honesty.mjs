@@ -27,6 +27,7 @@
 import { spawnSync, spawn } from "node:child_process";
 import { mkdirSync, writeFileSync, existsSync, readFileSync, rmSync } from "node:fs";
 import { sleep, buildOrAbort, startStaging, stopStaging, connect } from "./_staging.mjs";
+import { verdict } from "./_verdict.mjs";
 
 const GATE = "m23bb1-vc-stop-honesty";
 const OUT = `/tmp/daw-gate-out/${GATE}`;
@@ -83,9 +84,16 @@ for (let i = 0; i < 60 && responderPort === null; i++) {
   else await sleep(100);
 }
 if (!responderPort) {
-  console.log("FAIL responder never reported a port — aborting");
+  // m23-fa-4b: this is a SCAFFOLDING failure, not a feature failure. The
+  // responder is this gate's own stub; if it never bound a port, ZERO `ck()`
+  // checks have run (the first is immediately below) and nothing whatsoever is
+  // known about `vc.sidecarStop`. Exiting 1 here would claim the FEATURE
+  // failed. `{ran: 0}` says the true thing — same call this gate's own
+  // milestone exists to make available, and the same mapping m16a's pre-loop
+  // abort got at m23-fa-5.
+  console.log("ABORT responder never reported a port — the harness never came up");
   if (responderPid && alive(responderPid)) process.kill(responderPid, "SIGKILL");
-  process.exit(1);
+  verdict({ ran: 0, failed: 0 });
 }
 console.log(`responder: pid ${responderPid} on 127.0.0.1:${responderPort}`);
 ck("A responder is a SIBLING, not an ancestor of this process", responderPid !== process.pid);
@@ -180,4 +188,11 @@ if (alive(responderPid)) {
 }
 
 console.log(`ORCH_M23BB1 pass=${pass} fail=${fail}`);
-process.exit(fail ? 1 : 0);
+// m23-fa-4b: was `process.exit(fail ? 1 : 0)` — the exact vacuous idiom this
+// milestone exists to remove. With every `ck()` deleted it would report 0
+// failures and exit 0, i.e. a gate that asserted NOTHING would be
+// indistinguishable from one that checked all thirteen legs and found them
+// good. `ran` counts BOTH counters (not just `pass`), so the bare `fail++` in
+// the responder-restore branch above — a failure with no matching `ck()` — is
+// still inside the total rather than pushing `failed` past `ran`.
+verdict({ ran: pass + fail, failed: fail });

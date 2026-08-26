@@ -184,6 +184,220 @@ public enum OfflineStretcher {
         return outBase.map { Array(UnsafeBufferPointer(start: $0, count: outputFrames)) }
     }
 
+    // MARK: - m23-q Phase 0 (E1): time-varying transpose — EXPERIMENT ONLY
+
+    /// **MEASURED, not chosen** (m23-q E1(a), 2026-08-17, 48 kHz, this exact
+    /// vendored build): a transpose value handed to
+    /// `stretchTransposeCurve` for output frame F appears in the delivered
+    /// output centred **2379 frames (49.56 ms) later**, on top of any hop
+    /// quantisation. Method: a 220 Hz sine, a 0 → +2 semitone step requested at
+    /// a hop-aligned frame, f0 tracked by phase-difference FFT; the 50 % point
+    /// of the transition landed at +2378.94 frames after subtracting the
+    /// tracker's own −1.22-frame bias (measured on a synthetic hard step).
+    /// Independent corroboration, sharing no machinery with the step beyond the
+    /// tracker itself: the vibrato leg's fitted phase lag, over a whole number
+    /// of modulation cycles, reads **2170.6 / 2285.7 / 2349.0 frames at
+    /// 1 / 5 / 8 Hz** — a 208-frame (4.3 ms) spread around the step's 2378.94,
+    /// with the rate dependence itself consistent with the transition taking
+    /// ≈712 frames to complete. All three are quoted rather than the closest
+    /// one, which would overstate the agreement.
+    ///
+    /// It is NOT `css_output_latency` (2880 frames / 60 ms) — design §2.3
+    /// derived ≈60 ms and flagged that the `outputSeek` recipe might make the
+    /// input and output latencies partly cancel. They partly do: the measured
+    /// figure is 501 frames short of the derived one. That §2.3 caveat is the
+    /// reason this is a measurement and not an arithmetic constant.
+    ///
+    /// Two terms sit on top of it and are NOT included here, because they
+    /// depend on the caller's curve rather than on the library:
+    ///   * hop quantisation — the curve is read once per chunk, so a request
+    ///     landing mid-hop waits 0…1439 frames (measured exactly one hop by
+    ///     `curveQuantisesToTheHop`);
+    ///   * transition width — the pitch ramps over ≈712 frames (14.8 ms)
+    ///     10 %→90 % as seen by a 21 ms tracker, not instantly.
+    ///
+    /// Nothing in this file compensates for it: E1 measures the raw path, and
+    /// deciding what to do about 50 ms is Phase 1's business.
+    static let measuredCurveLatencyFrames = 2379
+
+    /// The step value of a transpose curve at an output frame. Sample-and-hold:
+    /// the value in effect at `frame` is the last breakpoint at or before it,
+    /// and the first breakpoint's value extends backwards to output frame 0.
+    /// No interpolation — the hop grid quantises the curve anyway
+    /// (design §2.2 note 4), and interpolation is a Phase 1 decision.
+    /// `curve` must be sorted ascending by `outputFrame`; the caller's
+    /// entry point validates that.
+    static func transposeCurveValue(
+        _ curve: [(outputFrame: Int, semitones: Double)], at frame: Int
+    ) -> Double {
+        guard let first = curve.first else { return 0 }
+        var value = first.semitones
+        for point in curve {
+            if point.outputFrame > frame { break }
+            value = point.semitones
+        }
+        return value
+    }
+
+    /// **m23-q Phase 0 experiment surface — not a shipping path.** Renders with
+    /// a *time-varying* transpose: `css_set_transpose_semitones` is called
+    /// between `css_process` calls, and the chunk is exactly the stretcher's
+    /// own hop (`css_interval_samples`, measured not derived) so the curve
+    /// resolves per analysis block. The 4096-frame chunk of `stretch(...)`
+    /// spans ~2.8 hops at 48 k and would throw that resolution away.
+    ///
+    /// This is a deliberate near-duplicate of `stretch(...)` rather than a
+    /// refactor of it: `stretch` is live in `StretchRenderCache` and must stay
+    /// byte-for-byte identical while Phase 0 decides whether the curve path
+    /// survives at all. The E1(d) equivalence legs
+    /// (`OfflineStretcherCurveTests`) are the guard against the two copies
+    /// drifting — a constant curve must be bit-identical to the constant call.
+    ///
+    /// **No latency compensation.** The curve is indexed naively against the
+    /// output write cursor. Upstream centres a parameter change at the
+    /// *processing time*, which leads the delivered output; measuring that
+    /// offset is E1(a) and compensating for it is Phase 1. Anything that
+    /// pre-shifts the curve here would make E1(a) measure its own correction.
+    ///
+    /// `curve` is `(outputFrame, semitones)` breakpoints in DELIVERED output
+    /// frames, sorted ascending, non-empty. Returns exactly
+    /// `round(inputFrames × ratio)` frames, aligned to input frame 0 — the same
+    /// contract as `stretch(...)`.
+    static func stretchTransposeCurve(
+        input: [[Float]],
+        sampleRate: Double,
+        ratio: Double,
+        curve: [(outputFrame: Int, semitones: Double)],
+        formantPreserve: Bool,
+        isCancelled: () -> Bool = { false }
+    ) throws -> [[Float]] {
+        let channels = input.count
+        guard channels >= 1 else {
+            throw OfflineStretcherError.invalidInput("no channels")
+        }
+        let frames = input[0].count
+        guard frames >= 1 else {
+            throw OfflineStretcherError.invalidInput("empty input")
+        }
+        guard input.allSatisfy({ $0.count == frames }) else {
+            throw OfflineStretcherError.invalidInput("channels differ in length")
+        }
+        guard sampleRate.isFinite, sampleRate > 0 else {
+            throw OfflineStretcherError.invalidInput("bad sample rate \(sampleRate)")
+        }
+        guard ratio.isFinite, ratio > 0 else {
+            throw OfflineStretcherError.invalidInput("bad ratio \(ratio)")
+        }
+        guard !curve.isEmpty else {
+            throw OfflineStretcherError.invalidInput("empty curve")
+        }
+        guard curve.allSatisfy({ $0.semitones.isFinite }) else {
+            throw OfflineStretcherError.invalidInput("non-finite semitones in curve")
+        }
+        guard zip(curve, curve.dropFirst()).allSatisfy({ $0.outputFrame <= $1.outputFrame })
+        else {
+            throw OfflineStretcherError.invalidInput("curve not sorted by outputFrame")
+        }
+        let outputFrames = Int((Double(frames) * ratio).rounded())
+        guard outputFrames >= 1 else {
+            throw OfflineStretcherError.invalidInput("output would be empty")
+        }
+
+        guard let handle = css_create(Int32(channels), Float(sampleRate), rngSeed) else {
+            throw OfflineStretcherError.allocationFailed
+        }
+        defer { css_destroy(handle) }
+        // The pre-roll runs at the curve's initial value.
+        css_set_transpose_semitones(
+            handle, Float(transposeCurveValue(curve, at: 0)), tonalityLimitHz)
+        css_set_formant_preserve(handle, formantPreserve)
+
+        // MEASURED, never derived: the hop is whatever the stretcher says it
+        // is. Guarded because a zero would spin the loop forever.
+        let interval = Int(css_interval_samples(handle))
+        guard interval >= 1 else {
+            throw OfflineStretcherError.invalidInput(
+                "stretcher reported non-positive interval \(interval)")
+        }
+
+        let inputLatency = Int(css_input_latency(handle))
+        let outputLatency = Int(css_output_latency(handle))
+        let playbackRate = 1.0 / ratio
+        let seekLength = Int(Double(inputLatency) + playbackRate * Double(outputLatency))
+
+        let totalIn = max(frames, seekLength)
+        var inChans: [UnsafeMutableBufferPointer<Float>] = []
+        var outChans: [UnsafeMutableBufferPointer<Float>] = []
+        defer {
+            for b in inChans { b.deallocate() }
+            for b in outChans { b.deallocate() }
+        }
+        for channel in input {
+            let inBuf = UnsafeMutableBufferPointer<Float>.allocate(capacity: totalIn)
+            inBuf.initialize(repeating: 0)
+            channel.withUnsafeBufferPointer { src in
+                inBuf.baseAddress!.update(from: src.baseAddress!, count: frames)
+            }
+            inChans.append(inBuf)
+            let outBuf = UnsafeMutableBufferPointer<Float>.allocate(capacity: outputFrames)
+            outBuf.initialize(repeating: 0)
+            outChans.append(outBuf)
+        }
+        let inBase = inChans.map { UnsafePointer($0.baseAddress!) }
+        let outBase = outChans.map { $0.baseAddress! }
+
+        func withInPointers<R>(
+            offset: Int, _ body: (UnsafePointer<UnsafePointer<Float>>) -> R
+        ) -> R {
+            let shifted = inBase.map { $0 + offset }
+            return shifted.withUnsafeBufferPointer { body($0.baseAddress!) }
+        }
+        func withOutPointers<R>(
+            offset: Int, _ body: (UnsafePointer<UnsafeMutablePointer<Float>>) -> R
+        ) -> R {
+            let shifted = outBase.map { $0 + offset }
+            return shifted.withUnsafeBufferPointer { body($0.baseAddress!) }
+        }
+
+        withInPointers(offset: 0) { css_output_seek(handle, $0, Int32(seekLength)) }
+
+        // Chunked middle — identical bookkeeping to `stretch(...)` except that
+        // the chunk is `interval`, and the transpose is re-set before each one.
+        let processIn = totalIn - seekLength
+        let seekOut = Int(Double(seekLength) / playbackRate)
+        let processOut = max(0, outputFrames - seekOut)
+        var outDone = 0
+        var inDone = 0
+        while outDone < processOut {
+            if isCancelled() { throw OfflineStretcherError.cancelled }
+            let outBlock = min(interval, processOut - outDone)
+            let inTarget = Int(
+                (Double(outDone + outBlock) * Double(processIn) / Double(processOut))
+                    .rounded())
+            let inBlock = inTarget - inDone
+            css_set_transpose_semitones(
+                handle, Float(transposeCurveValue(curve, at: outDone)), tonalityLimitHz)
+            withInPointers(offset: seekLength + inDone) { inPtrs in
+                withOutPointers(offset: outDone) { outPtrs in
+                    css_process(
+                        handle, inPtrs, Int32(inBlock), outPtrs, Int32(outBlock))
+                }
+            }
+            outDone += outBlock
+            inDone = inTarget
+        }
+
+        if isCancelled() { throw OfflineStretcherError.cancelled }
+        let flushFrames = outputFrames - outDone
+        if flushFrames > 0 {
+            withOutPointers(offset: outDone) {
+                css_flush(handle, $0, Int32(flushFrames), playbackRate)
+            }
+        }
+
+        return outBase.map { Array(UnsafeBufferPointer(start: $0, count: outputFrames)) }
+    }
+
     /// AVAudioPCMBuffer convenience over the planar core. Requires
     /// deinterleaved float32 (the engine's working format everywhere).
     public static func stretch(

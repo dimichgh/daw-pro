@@ -25,6 +25,24 @@ final class FakeTakeEngine: AudioEngineControlling {
     private(set) var tracksDidChangeCount = 0
     private(set) var completion: (@MainActor (Result<TakeResult, Error>) -> Void)?
 
+    // m25-d end-of-content stop: every bound the store pushes, in order, plus
+    // the transport's `isRecording` AT THE MOMENT of each push. The second half
+    // is what makes the take-finalization ordering measurable instead of
+    // inferred — see `TransportEndStopTests.takeFinalizationNeverArmsMidTake`.
+    private(set) var endStopPushes: [Double?] = []
+    private(set) var endStopPushRecordingFlags: [Bool] = []
+    var currentEndStop: Double? { endStopPushes.last ?? nil }
+    /// Set by the test so each push can record the live transport state.
+    weak var observedStore: ProjectStore?
+    func setEndStop(beat: Double?) {
+        endStopPushes.append(beat)
+        endStopPushRecordingFlags.append(observedStore?.transport.isRecording ?? false)
+    }
+    func clearEndStopPushes() {
+        endStopPushes.removeAll()
+        endStopPushRecordingFlags.removeAll()
+    }
+
     func prepare() throws {
         prepareCalls += 1
         isRunning = true

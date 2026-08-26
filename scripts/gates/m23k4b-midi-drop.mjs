@@ -20,7 +20,7 @@
 //
 //   M23K4B_PIDFILE=<scratch>/staging.pid node scripts/gates/m23k4b-midi-drop.mjs
 import fs from "fs";
-import { buildOrAbort, startStaging, stopStaging } from "./_staging.mjs";
+import { buildOrAbort, startStaging, stopStaging, panelDensityGuard, verdict } from "./_staging.mjs";
 
 const GATE = "m23k4b";
 const PORT = process.env.DAW_CONTROL_PORT || "17695";
@@ -30,7 +30,12 @@ const BINARY = process.env.M23K4B_BINARY || ".build/debug/DAWApp";
 const REPO = process.env.M23K4B_REPO || process.cwd();
 const FIXTURES = `${OUT}/fixtures`;
 fs.mkdirSync(OUT, { recursive: true });
-const killer = setTimeout(() => { console.error("TIMEOUT"); process.exit(2); }, 600_000);
+let guard = null;   // m23-ej-2: `let` — assigned after connect, read by the killer below
+const killer = setTimeout(async () => {
+  console.error("TIMEOUT");
+  await guard?.restore("timeout");
+  process.exit(2);
+}, 600_000);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Fixture arithmetic, computed before any assertion (the m23-c2 law) and then
@@ -106,6 +111,7 @@ console.log(`staging pid ${stagingPid} on :${PORT}`);
 await sleep(4000);
 
 const { ws, req } = await connect();
+guard = panelDensityGuard(req);   // req already unwraps to .result ?? whole msg
 const checks = [];
 const check = (name, ok, detail) => {
   checks.push({ name, ok, detail });
@@ -127,7 +133,7 @@ try {
   await req("debug.arrangeZoom", { reset: true });
   const zoom = await req("debug.arrangeZoom", { ppb: PPB });
   await req("debug.arrangeZoom", { rowStep: "large" });
-  await req("debug.panelDensity", { panel: "arrange", mode: "pro" });
+  await guard.set("arrange", "pro");
   await req("transport.seek", { beats: 0 });
   await sleep(SETTLE_MS);
 
@@ -215,10 +221,30 @@ try {
         clipsOf(ov, audioId2).length === 0 && audioTracks4.length === 2,
         `hovered-lane clips=${clipsOf(ov, audioId2).length} audioTracks=${audioTracks4.length}`);
   const newAudio = audioTracks4.find((t) => t.id !== audioId2);
+  // m23-ee-2c-2: this leg had TWO nested vacuities, and they fail differently.
+  //
+  // OUTER — `inst4.every(…)` over `ov.tracks.filter(t => t.kind === "instrument")`.
+  // If the .mid imported nothing, `inst4` is [] and `[].every(f)` is true, so the
+  // leg passed having compared no beats at all. ⚠️ 4a's `results[1].tracksCreated
+  // === 2` does NOT cover this: that pins what the IMPORTER CLAIMED it made, off
+  // the drop RESPONSE, while `inst4` is read from the OVERVIEW. A disagreement
+  // between those two sources is precisely the bug this leg exists to catch, so
+  // pinning `inst4.length === 2` here is a genuine CROSS-CHECK, not a restatement.
+  //
+  // INNER — `t.clips.every(…)`. A track with NO clips also passes. So a .mid that
+  // created the right tracks and put nothing on them read as "lands on beat 8".
+  // The census flags only the outer receiver; fixing that alone half-closes it.
+  //
+  // Both pins are the MEASURED truth, not guesses: the green baseline reports
+  // `midi=[[8],[8]]` — two instrument tracks, exactly one clip each.
   check("4c mixed drop: BOTH halves land on the SAME beat (one resolved landing)",
         near(newAudio?.clips?.[0]?.startBeat, 8)
-          && inst4.every((t) => t.clips.every((c) => near(c.startBeat, 8))),
-        `wav=${newAudio?.clips?.[0]?.startBeat} midi=${JSON.stringify(inst4.map((t) => t.clips.map((c) => c.startBeat)))} decidedBeat=${e.decidedBeat}`);
+          && inst4.length === 2
+          && inst4.every((t) => t.clips.length >= 1
+                                && t.clips.every((c) => near(c.startBeat, 8))),
+        `wav=${newAudio?.clips?.[0]?.startBeat} instTracks=${inst4.length} `
+        + `midi=${JSON.stringify(inst4.map((t) => t.clips.map((c) => c.startBeat)))} `
+        + `decidedBeat=${e.decidedBeat}`);
 
   const hist4 = await history();
   // Newest-first, so the entries THIS drop added are the leading ones.
@@ -251,18 +277,25 @@ try {
   const bad = checks.filter((c) => !c.ok);
   console.log(`\n${bad.length === 0 ? "GREEN" : "RED"} — ${checks.length - bad.length}/${checks.length}`);
   fs.writeFileSync(`${OUT}/checks.json`, JSON.stringify({ checks, mixedDropUndoSteps: added, spent }, null, 2));
-  ws.close();
   clearTimeout(killer);
   // ⚠️ m23-ac-2a: this gate LEAKED — detached + unref, then exit with no
   // teardown. BOTH exit paths need it; the error path leaked too, and an
   // orphan left by a CRASHED gate is the one most likely to be adopted
   // unnoticed by whatever runs next.
+  // ⚠️ m23-ej-2: guard.restore() needs a LIVE socket — it round-trips
+  // debug.panelDensity over `req`, which sends via `ws`. Closing `ws` first
+  // made every restore write hang until the guard's own 3s internal timeout
+  // (measured live: arrange stuck at "pro" instead of restoring to "simple").
+  // restore MUST run before ws.close() on every exit path.
+  await guard.restore("normal exit");
+  ws.close();
   stopStaging(GATE, PIDFILE);
-  process.exit(bad.length === 0 ? 0 : 1);
+  verdict({ ran: checks.length, failed: bad.length });
 } catch (err) {
   console.error("GATE ERROR", err);
-  try { ws.close(); } catch {}
   clearTimeout(killer);
+  await guard.restore("catch");
+  try { ws.close(); } catch {}
   stopStaging(GATE, PIDFILE);
   process.exit(2);
 }

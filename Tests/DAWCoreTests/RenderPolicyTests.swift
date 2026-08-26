@@ -288,6 +288,66 @@ struct RenderPolicyTests {
         #expect(engine.written.isEmpty)
     }
 
+    /// ⚠️ PINS A DOCUMENTED LIMITATION, NOT A DESIRED BEHAVIOUR (2026-08-18
+    /// field report, O3). `renderWindowSeconds` derives the default window from
+    /// CLIP EXTENTS ONLY plus a fixed 2.0 s tail; automation extent is never
+    /// consulted. So a master fade drawn past the last clip is TRUNCATED — the
+    /// curve is baked in faithfully, but only for as long as the window lasts.
+    /// The reporter hit exactly this and read it as "the fade was dropped".
+    ///
+    /// It is documented rather than fixed because widening the default would
+    /// change the length of EVERY render of EVERY existing project, which is a
+    /// user-facing decision. **If that policy is ever deliberately changed,
+    /// THIS is the test to update** (and `renderWindowSeconds`' doc comment).
+    @Test("DOCUMENTED LIMITATION: the default window ignores automation extent")
+    func defaultWindowIgnoresAutomationExtent() async throws {
+        let engine = FakeBufferEngine()
+        engine.stub = stereo(sineSamples(dbfs: -23, seconds: 1))
+        let store = makeStore(with: engine)
+
+        // Last clip ends at beat 8 → 4 s at the default 120 BPM, + the fixed
+        // 2.0 s tail = a 6.0 s window.
+        let inst = store.addTrack(kind: .instrument)
+        _ = try store.addMIDIClip(
+            toTrack: inst.id,
+            notes: [MIDINote(pitch: 60, startBeat: 0, lengthBeats: 8)])
+
+        // A master fade whose LAST breakpoint sits at beat 32 — 16 s in, far
+        // past the window the clips imply.
+        let fade = try store.addMasterAutomationLane(target: .volume)
+        _ = try store.setMasterAutomationPoints(
+            laneID: fade.id,
+            points: [AutomationPoint(beat: 16, value: 1),
+                     AutomationPoint(beat: 32, value: 0)])
+
+        _ = try await store.renderBounce()   // no durationSeconds
+
+        // ANTI-VACUITY: the pin below only demonstrates TRUNCATION if the
+        // automation genuinely reaches past the window. 16 s > 6 s.
+        let fadeEndSeconds = store.transport.tempoMap.seconds(from: 0, to: 32)
+        #expect(abs(fadeEndSeconds - 16.0) <= 1e-9)
+        #expect(fadeEndSeconds > 6.0)
+
+        // Assert the WINDOW the store asked the engine for — NOT the result's
+        // durationSeconds, which `FakeBufferEngine.writeAudioFile` derives from
+        // `stub`'s frame count and would report 1.0 s whatever the policy did.
+        #expect(engine.renderCalls.count == 1)
+        #expect(abs(engine.renderCalls[0].duration - 6.0) <= 1e-9,
+                "the default window must still be clip-extent + 2.0 s — automation did not extend it")
+
+        // The same truncation on the other default-window verb, so this is a
+        // policy pin and not a one-call quirk.
+        _ = try await store.measureLoudness()
+        #expect(engine.renderCalls.count == 2)
+        #expect(abs(engine.renderCalls[1].duration - 6.0) <= 1e-9)
+
+        // And the escape hatch the docs point callers at: an explicit duration
+        // that covers the fade is honoured verbatim.
+        _ = try await store.renderBounce(durationSeconds: 18)
+        #expect(engine.renderCalls.count == 3)
+        #expect(abs(engine.renderCalls[2].duration - 18.0) <= 1e-9)
+    }
+
     // m16-d/F4 stems survey: render.stems' zero-param default was already the
     // shared all-clips window (renderWindowSeconds), so a MIDI-only project has
     // ALWAYS rendered on the zero-param call — the F4 bug lived only in

@@ -45,9 +45,11 @@
 // `Tests/DAWEngineTests/ResumeChaseTests.swift` (offline).
 //
 // THE TRIGGER ACT 1/2 BELOW USE (reconcile-during-playback). Currently
-// `AudioEngine.tracksDidChangeBody`, `AudioEngine.swift:1064-1070` — line
-// numbers in this hot file drift release to release (already shifted twice
-// since this gate was written); anchor on the SYMBOL, not the line:
+// `AudioEngine.tracksDidChangeBody`, `AudioEngine.swift:1076-1083` — line
+// numbers in this hot file drift release to release (already shifted three
+// times since this gate was written; this coordinate was itself stale at
+// `:1064-1070` until m23-bp-2b re-measured it); anchor on the SYMBOL, not
+// the line:
 //
 //     if changed, isRunning, let anchor = currentAnchor {
 //         restart(fromBeat: derivedBeats(), tempoMap: anchor.tempoMap,
@@ -62,11 +64,18 @@
 // the CURRENT playhead — exactly the mid-playback reschedule the bug used to
 // break, and exactly the site whose chase this gate proves live.
 //
-// m23-bp-2 (CYCLE B, this revision) ADDS three more `.continuation` sites,
-// each proven live with its OWN real user action through the control port —
-// see ACT 3 (setTempo), ACT 4 (loopChanged) and ACT 5 (recoverEngine) below.
-// Two more source-pinned `.continuation` sites are DELIBERATELY NOT covered
-// here — see "WHAT THIS GATE CANNOT PROVE".
+// m23-bp-2a (CYCLE B) ADDED three more `.continuation` sites, each proven
+// live with its OWN real user action through the control port — see ACT 3
+// (setTempo), ACT 4 (loopChanged) and ACT 5 (recoverEngine) below.
+// m23-bp-2b (THIS revision) adds the FOURTH: ACT 6, the `rebuildEngine`
+// RESUME SITE, reached by an announce-class reconcile.
+//
+// ⚠️ AFTER ACT 6 THERE IS EXACTLY ONE `.continuation` SITE WITH NO LIVE LEG —
+// the ROUTING-REWIRE resume — and it is SOURCE-PINNED ONLY (legs SP-0…SP-3
+// below), which the legs themselves say out loud rather than implying
+// coverage. The filed scope for m23-bp-2b called these "the two live legs";
+// that was wrong in one respect and the correction is ONE live leg (ACT 6)
+// plus ONE source pin (SP). See "WHAT THIS GATE CANNOT PROVE".
 //
 // ⚠️ ACT 1/2 ARE NOT A DEVICE FLIP. The roadmap filing blamed a device-flip
 // path; ACT 5 below now covers a device-RATE trigger, but ACT 1/2's own
@@ -145,18 +154,45 @@
 // this gate. The gate reports the measured number either way.
 //
 // WHAT THIS GATE CANNOT PROVE:
-//   • The two remaining source-pinned `.continuation` sites: routing rewire
-//     (`AudioEngine.tracksDidChangeBody`, currently `:1121`) and the
-//     `rebuildEngine` resume (currently `:1336`) — which is the device-FLIP
-//     path (switching output devices) the ORIGINAL m23-bp report actually
-//     described, distinct from ACT 5's device-RATE change below. DELIBERATELY
-//     deferred at m23-bp-2: both read `resumeAfterRoutingRewire`
-//     (`AudioEngine.swift:569`) and the `AnchorLine` type (`:209`), which are
-//     m23-bs-3a's construction — in the tree but UNAUTHORISED, awaiting the
-//     user's keep-or-revert ruling. A gate leg against a path that may be
-//     deleted is worse than none (m23-bl: a leg that fails for a reason
-//     unrelated to what it was built to catch). Both legs return free once
-//     the user rules either way.
+//   • THE ROUTING-REWIRE RESUME HAS NO LIVE LEG AND IS SOURCE-PINNED ONLY.
+//     `AudioEngine.tracksDidChangeBody`'s `if let resume =
+//     resumeAfterRoutingRewire` block (currently `:1132`) is covered by legs
+//     SP-0…SP-3 below — SOURCE TEXT ONLY. No act in this file executes that
+//     `startPlayers` call. The reason is the site's OWN comment: "an announce
+//     always aborts into the rebuild branch above, which consumes the resume
+//     state itself — so this should be unreachable." A live leg on an
+//     unreachable path either cannot be triggered at all or greens for a
+//     reason unrelated to what it claims — the m23-bl hazard. SP-3 therefore
+//     pins the STRUCTURAL PRECONDITION that makes it unreachable (the
+//     `needsEngineRebuild` branch `return`s earlier in the same function), so
+//     if that ever stops being true this pin reddens and this paragraph gets
+//     re-read instead of silently rotting.
+//     ⚠️ THE "UNAUTHORISED CODE" BLOCKER THAT DEFERRED THIS AT m23-bp-2 WAS
+//     NEVER REAL, and this comment used to repeat it. Retracted 2026-08-11 on
+//     the user's own word (an interrupt is a PAUSE, never a cancellation);
+//     `resumeAfterRoutingRewire` and `AnchorLine` landed in `efa861d` and are
+//     ancestors of `main`, so "in-tree, uncommitted, unauthorised" was wrong
+//     in every clause. The OTHER site deferred with it — the `rebuildEngine`
+//     resume — is now covered live by ACT 6.
+//   • THE DEVICE-SWITCH TRIGGER IS DELIBERATELY NOT BUILT (m23-bp-2b), and
+//     the framing that asked for it is RETIRED. Earlier revisions of this
+//     header called the `rebuildEngine` resume "the device-FLIP path
+//     (switching output devices) the ORIGINAL m23-bp report actually
+//     described". ⚠️ THAT WAS NEVER THE USER'S REPORT. The "my pad went
+//     silent when I switched audio devices" line the m23-bp filing put in
+//     quotation marks was the ORCHESTRATOR'S OWN GLOSS on an agent
+//     measurement, and it was re-quoted as testimony for nine days across
+//     three items. Asked directly on 2026-08-11 the user could not reproduce
+//     any device-switch symptom: what they reported and saw fixed was
+//     stopping mid-note (exactly the chase class m23-bp-1 shipped), and the
+//     device behaviour they do remember was AirPods re-pairing — Bluetooth
+//     route negotiation, and nothing in `RescheduleCause` is output-specific.
+//     So ACT 6 reaches `rebuildEngine`'s RESUME SITE through an announce-class
+//     reconcile (a bus-track add — no device is touched anywhere in it), and
+//     its label says RESUME SITE, never device switch. Driving
+//     `output.setDevice` mid-chord would also route a sustained pad to the
+//     user's REAL SPEAKERS on every future run of this gate, to chase a path
+//     the user cannot reproduce and half-attributes to hardware.
 //   • Sub-second precision on the "silenced" moment — the master tap's own
 //     20 dB/s release ballistics smear that boundary by design; the LATE
 //     window (t >= 6000 ms post-trigger) is chosen to sit past worst-case
@@ -182,9 +218,9 @@
 //
 // Staging: DAW_CONTROL_PORT=17695. The user's live app on 17600 is never a
 // target — `startStaging`/`connect` assert this.
-import { sleep, buildOrAbort, startStaging, stopStaging, connect, ROOT } from "./_staging.mjs";
+import { sleep, buildOrAbort, startStaging, stopStaging, connect, ROOT, verdict } from "./_staging.mjs";
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 const GATE = "m23bp-held-note";
@@ -200,6 +236,16 @@ const SETTLE_AFTER_PLAY_MS = 2000;
 const PRE_TRIGGER_WINDOW_MS = 1500;
 const ACT1_POST_TRIGGER_WINDOW_MS = 9000;
 const ACT2_POST_TRIGGER_WINDOW_MS = 12000; // >= the ~10 s the roadmap item asks for
+
+// ── ACT 6 only (m23-bp-2b). See ACT 6's header for the measurement these are
+// sized from. The note must END inside the observation window, so it is short
+// (30 beats = 15 s at the default 120 BPM, off at ~11.6 s after a trigger
+// that lands near beat 7), the window is long enough to hold the off plus a
+// decay grace plus several asserted-silence samples, and the grace is 4000 ms
+// against a MEASURED ~2.4 s fall to FLOOR_ISH_DB and ~4.0 s to −80.
+const ACT6_NOTE_BEATS = 30;
+const ACT6_POST_TRIGGER_WINDOW_MS = 20000;
+const ACT6_DECAY_GRACE_MS = 4000;
 
 // ── m23-bp-2 ACT 5 (recoverEngine) only. Shared with m20-d/m20-e: SOURCE is
 // committed (`m20d-bhrate.swift`), the compiled binary is a build artifact
@@ -302,6 +348,70 @@ async function monitor(label, ms, { intervalMs = 0 } = {}) {
   return { peaks, positions, minDB, maxDB, lateMax, firstAudible, lastAudible, callbackGrowth, perfReads };
 }
 
+/// ── m23-bp-2b — THE SOURCE PIN for the ROUTING-REWIRE resume ──────────────
+/// Reads `AudioEngine.swift` and locates every `if let resume =
+/// resumeAfterRoutingRewire` block, the `startPlayers(` call it resumes
+/// through, and the `cause:` that call passes.
+///
+/// ⚠️ WHY THE ENCLOSING FUNCTION IS THE KEY. There are TWO such blocks and
+/// their `startPlayers(...)` argument lists are TEXTUALLY IDENTICAL —
+/// `fromBeat: beats, tempoMap: resume.line.tempoMap, renderClockTrusted:
+/// false, cause: .continuation, anchorPolicy: .atHostTime(target)` in both.
+/// Nothing in the call itself distinguishes the routing-rewire resume from
+/// `rebuildEngine`'s. A pin that matched on call text alone would keep
+/// greening if the two sites were reordered or if one were deleted and the
+/// other duplicated, while silently describing the wrong one. So each site is
+/// attributed by the nearest PRECEDING `func` declaration, and the SET of
+/// enclosing function names is asserted, not just its members' causes.
+///
+/// Comment lines are stripped first, the same filter
+/// `NoteChaseSiteTests.stripComments` uses: the per-site prose right above
+/// each call contains the literal words "cause: .continuation" (and, at
+/// `:1124`, an all-caps note about live coverage), so counting comments as
+/// wiring would let a comment satisfy a pin about code.
+function scanRoutingRewireResumeSites() {
+  const file = path.join(ROOT, "Sources", "DAWEngine", "AudioEngine.swift");
+  const code = readFileSync(file, "utf8")
+    .split("\n")
+    .map((text, i) => ({ n: i + 1, text }))
+    .filter(l => {
+      const t = l.text.trim();
+      return !(t.startsWith("//") || t.startsWith("*") || t.startsWith("/*"));
+    });
+  const FUNC = /^\s*(?:@\w+\s+)?(?:(?:private|public|internal|fileprivate|static|final|override|nonisolated)\s+)*func\s+(\w+)/;
+  const sites = [];
+  let enclosing = null;
+  for (let i = 0; i < code.length; i++) {
+    const f = FUNC.exec(code[i].text);
+    if (f) enclosing = f[1];
+    if (!code[i].text.includes("if let resume = resumeAfterRoutingRewire")) continue;
+    // The call wraps over three lines, so scan forward for `startPlayers(`
+    // and then for the first `cause: .<token>` at or after it.
+    let call = null, cause = null;
+    for (let j = i + 1; j < Math.min(i + 60, code.length); j++) {
+      if (call === null && code[j].text.includes("startPlayers(")) call = code[j].n;
+      if (call === null) continue;
+      const c = /cause:\s*\.(\w+)/.exec(code[j].text);
+      if (c) { cause = c[1]; break; }
+    }
+    sites.push({ func: enclosing, block: code[i].n, call, cause });
+  }
+  // SP-3's precondition: inside `tracksDidChangeBody`, the announce-class
+  // branch must still `rebuildEngine(...)` and `return` BEFORE the resume
+  // block — that early return is the entire reason the resume below it is
+  // unreachable, and therefore the entire reason it gets no live leg.
+  const rewire = sites.find(s => s.func === "tracksDidChangeBody");
+  let earlyReturn = null;
+  if (rewire) {
+    for (let i = 0; i < code.length && code[i].n < rewire.block; i++) {
+      if (!code[i].text.includes("rebuildEngine(reason:")) continue;
+      const next = code[i + 1]?.text.trim();
+      earlyReturn = { call: code[i].n, returns: next === "return", next };
+    }
+  }
+  return { sites, rewire, earlyReturn, file };
+}
+
 /// From a `monitor()` result, the ms-since-window-start at which the
 /// transport position first moved past `fromBeat + 0.05`, or null if it
 /// never did inside the window — the "freeze duration" measurement for the
@@ -312,7 +422,7 @@ function freezeReport(result, fromBeat) {
 }
 
 /// m23-bp-2 — THE ONE HOME for the "held-note defect" measurement shape used
-/// by ACTs 3/4/5b (ACT 1/2 stay inline/untouched — historical, and Act 1's
+/// by ACTs 3/4/5b/6 (ACT 1/2 stay inline/untouched — historical, and Act 1's
 /// control shape differs). Builds ONE single-track fixture (a 128-beat note
 /// on a flat-sustaining GM organ patch, exactly ACT 2's fixture — see the
 /// header for why: an organ's own envelope cannot explain a post-trigger
@@ -332,10 +442,41 @@ function freezeReport(result, fromBeat) {
 /// (m23-bl: a failed precondition must never certify a dependent as PASS)
 /// rather than asserting on a run that never exercised the intended path.
 /// `assertFreeze`: true for a plain `restart()` (no engine bounce — A1/A2's
-/// own prediction applies); false for a real engine bounce (recoverEngine),
-/// where "no freeze" is m23-bq's property, not this gate's, and asserting it
-/// here would misattribute a bq regression to bp.
-async function runHeldNoteAct(label, { beforePlay, trigger, assertFreeze, postWindowMs = ACT2_POST_TRIGGER_WINDOW_MS }) {
+/// own prediction applies); false for a real engine bounce (recoverEngine,
+/// rebuildEngine), where "no freeze" is m23-bq's property, not this gate's,
+/// and asserting it here would misattribute a bq regression to bp.
+/// `site` (optional, m23-bp-2b): appended to the RECOVERY leg's name so the
+/// leg itself states which resume site it covers, instead of leaving that to
+/// a comment thirty lines away — the m23-bp "prose far from the code" failure
+/// in its own costume. Empty by default, so ACT 3/4/5b leg names are
+/// byte-identical to what m23-bp-2a shipped and mutation runs stay
+/// comparable across cycles.
+///
+/// `heldNoteBeats` / `silenceAfterNoteOffMs` (optional, m23-bp-2b) — THE
+/// SECOND HALF OF THE CLAIM, and it exists because of a MEASURED defect in
+/// the first half. "Audible in the late window" is not sufficient evidence of
+/// a chase at a site that DISCARDS THE ENGINE (ACT 6): the quiesce
+/// all-notes-off flush is issued on the outgoing graph and consumed by the
+/// RENDER THREAD, while `rebuildEngine` stops and drops that engine
+/// immediately after — so a voice that was sounding can SURVIVE into the
+/// fresh engine with no note-off ever scheduled, and ring forever. MEASURED
+/// 2026-08-11 under a `.relocation` mutant at `AudioEngine.swift:1347`: a
+/// 16-beat note was still at −22.3 dB at beat 24 and beat 30, i.e. long past
+/// its own end (3 of 10 probe runs; the other 7 floored, which is the flush
+/// winning the race). That is why the mutant sometimes leaves the recovery
+/// leg GREEN — for a reason that has nothing to do with note chase.
+/// So an act may additionally assert that the note STOPS when its own
+/// note-off is due: `heldNoteBeats` shortens the fixture so the off lands
+/// INSIDE the observation window, and `silenceAfterNoteOffMs` is the decay
+/// grace after it. The instant is derived from the MEASURED `preBeat` and the
+/// MEASURED tempo, never from an assumed beat — `preBeat` is whatever
+/// `derivedBeats()` returns after the settle, and hardcoding ~6.9 is exactly
+/// the kind of number that rots. Both branches of the mutant are then covered:
+/// flush-wins reddens the RECOVERY leg, voice-survives reddens THIS one.
+async function runHeldNoteAct(label, {
+  beforePlay, trigger, assertFreeze, postWindowMs = ACT2_POST_TRIGGER_WINDOW_MS, site = "",
+  heldNoteBeats = 128, silenceAfterNoteOffMs = null,
+}) {
   let r = await cmd("project.new", { discardChanges: true });
   ck(`${label} project.new ok (fresh project — no leftover state from a previous act)`, r.ok, JSON.stringify(r.error));
 
@@ -354,9 +495,10 @@ async function runHeldNoteAct(label, { beforePlay, trigger, assertFreeze, postWi
   console.log(`  [${label}] resolved instrument: ${r.result?.soundBank?.name ?? "?"}`);
   await sleep(SETTLE_AFTER_INSTRUMENT_MS);
 
-  const heldNotes = [{ pitch: 64, velocity: 100, startBeat: 0, lengthBeats: 128 }];
-  r = await cmd("clip.addMIDI", { trackId: heldId, atBeat: 0, lengthBeats: 128, name: "Held", notes: heldNotes });
-  ck(`${label} held clip added (one 128-beat note, matching the headless measurement's fixture)`,
+  const heldNotes = [{ pitch: 64, velocity: 100, startBeat: 0, lengthBeats: heldNoteBeats }];
+  r = await cmd("clip.addMIDI", { trackId: heldId, atBeat: 0, lengthBeats: heldNoteBeats, name: "Held", notes: heldNotes });
+  ck(`${label} held clip added (one ${heldNoteBeats}-beat note`
+     + `${heldNoteBeats === 128 ? ", matching the headless measurement's fixture" : ""})`,
      r.ok && r.result?.notes?.length === 1, JSON.stringify(r.error ?? r.result));
 
   let preconditionOk = true, preconditionDetail = "";
@@ -381,7 +523,8 @@ async function runHeldNoteAct(label, { beforePlay, trigger, assertFreeze, postWi
 
   let ov = await cmd("project.overview");
   const preBeat = ov.result?.transport?.positionBeats ?? 0;
-  console.log(`  [${label}] beat at trigger: ${preBeat.toFixed(2)}`);
+  const tempoBPM = ov.result?.transport?.tempoBPM ?? 120;
+  console.log(`  [${label}] beat at trigger: ${preBeat.toFixed(2)} (tempo ${tempoBPM} BPM)`);
 
   // ── THE TRIGGER — the real user action under test ────────────────────────
   const t = await trigger();
@@ -392,7 +535,8 @@ async function runHeldNoteAct(label, { beforePlay, trigger, assertFreeze, postWi
   if (preconditionOk) {
     ck(`${label} ⚠️ REQUIRED GREEN POST-FIX (m23-bp is fixed — a red leg here is a REGRESSION, `
        + `not the reproduction) — the held note MUST be audible again by the LATE window `
-       + `(t>=${LATE_WINDOW_MS}ms, past worst-case peak-hold decay) following the trigger`,
+       + `(t>=${LATE_WINDOW_MS}ms, past worst-case peak-hold decay) following the trigger`
+       + (site ? ` — SITE UNDER TEST: ${site}` : ""),
        h.lateMax > AUDIBLE_DB,
        `late[t>=${LATE_WINDOW_MS}] max ${Number.isFinite(h.lateMax) ? h.lateMax.toFixed(1) : "n/a"} dB `
        + `(whole-window min/max ${h.minDB.toFixed(1)}/${h.maxDB.toFixed(1)} dB)`);
@@ -401,6 +545,40 @@ async function runHeldNoteAct(label, { beforePlay, trigger, assertFreeze, postWi
   }
   ck(`${label} post-trigger: render callbacks kept flowing (rules out a dead render thread as `
      + `the explanation for either outcome)`, h.callbackGrowth, `reads=${h.perfReads}`);
+
+  // ── The note must also STOP when its own note-off is due (m23-bp-2b) ─────
+  if (silenceAfterNoteOffMs !== null) {
+    // Derived from MEASURED values, never assumed ones: `preBeat` is read off
+    // the transport a moment before the trigger and `tempoBPM` off the same
+    // projection. The monitor window's t=0 is slightly LATER than the instant
+    // preBeat was read (the trigger itself runs in between), so this estimate
+    // is conservative in the safe direction — it places the note-off slightly
+    // later than it really is, never earlier.
+    const noteOffAtMs = Math.max(0, ((heldNoteBeats - preBeat) / (tempoBPM / 60)) * 1000);
+    const silentFromMs = noteOffAtMs + silenceAfterNoteOffMs;
+    const tail = h.peaks.filter(s => s.t >= silentFromMs);
+    const tailMax = tail.length ? Math.max(...tail.map(s => s.db)) : NaN;
+    console.log(`  [${label}] note-off predicted at t+${noteOffAtMs.toFixed(0)}ms `
+      + `(beat ${heldNoteBeats} from measured beat ${preBeat.toFixed(3)} at ${tempoBPM} BPM); `
+      + `asserting silence from t+${silentFromMs.toFixed(0)}ms — ${tail.length} samples, `
+      + `max ${Number.isFinite(tailMax) ? tailMax.toFixed(1) : "n/a"} dB`);
+    if (preconditionOk) {
+      ck(`${label} ⚠️ THE SECOND HALF OF THE CLAIM — the chased note must also STOP when its `
+         + `OWN note-off is due (beat ${heldNoteBeats}), i.e. the chase re-admits the note WITH `
+         + `its off, never a voice that rings forever. This leg exists because "audible in the `
+         + `late window" is NOT sufficient at a site that DISCARDS the engine: the quiesce `
+         + `all-notes-off flush is consumed by the render thread, the outgoing engine is dropped `
+         + `immediately after, and a sounding voice can SURVIVE into the fresh engine with no `
+         + `note-off scheduled at all — measured at −22.3 dB a full 14 beats past a 16-beat `
+         + `note's end, in 3 of 10 probe runs, under a .relocation mutant at this site. Without `
+         + `this leg that mutant leaves the recovery leg GREEN for a reason unrelated to chase`,
+         tail.length > 0 && tailMax <= FLOOR_ISH_DB,
+         `${tail.length} samples from t>=${silentFromMs.toFixed(0)}ms, max `
+         + `${Number.isFinite(tailMax) ? tailMax.toFixed(1) : "n/a"} dB (want <= ${FLOOR_ISH_DB})`);
+    } else {
+      skip(`${label} note stops at its own note-off`, preconditionDetail);
+    }
+  }
 
   const freeze = freezeReport(h, preBeat);
   console.log(`  [${label}] transport freeze report: ${freeze.advanced
@@ -430,6 +608,67 @@ const baseStaged = bhrate(String(PROJECT_RATE));
 console.log(`staged -> ${baseStaged}`);
 ck("L0 loopback staged at 48000 (every rate leg below is measured against this baseline)",
    readBackOf(baseStaged) === PROJECT_RATE, baseStaged);
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SP — THE SOURCE PIN (m23-bp-2b). The ROUTING-REWIRE resume site, and ONLY
+// as source text. These four legs read `AudioEngine.swift` off disk; they
+// need no app, no device and no transport, which is why they run here, before
+// staging is even built — a source regression should not have to wait ~3
+// minutes of live acts to surface.
+//
+// ⚠️⚠️ READ THE LABELS LITERALLY: SP-2 IS NOT COVERAGE OF THE SITE'S
+// BEHAVIOUR. It asserts that one token in one line of Swift says
+// `.continuation`. Nothing here plays a note, and no act in this file makes
+// that `startPlayers` call execute. Stated this loudly because the honest
+// failure mode of a source pin is that a later reader counts it as a live
+// leg — see "WHAT THIS GATE CANNOT PROVE" in the header.
+//
+// SP-0 exists because a source pin has a second, quieter failure mode: a
+// pattern that matches NOTHING greens exactly like a pattern that matches
+// correct code. A grep that returns nothing where a match is visible is a
+// BROKEN PATTERN, not an absence — so the count of matched sites is asserted
+// before anything is asserted ABOUT them.
+// ═══════════════════════════════════════════════════════════════════════════
+try {
+  const sp = scanRoutingRewireResumeSites();
+  console.log(`  [SP] ${path.relative(ROOT, sp.file)} resume sites: ${JSON.stringify(sp.sites)}`);
+  console.log(`  [SP] announce-class early return before the rewire resume: ${JSON.stringify(sp.earlyReturn)}`);
+
+  ck("SP-0 ⚠️ THE PIN IS NOT BLIND — exactly TWO `if let resume = resumeAfterRoutingRewire` "
+     + "blocks were FOUND in AudioEngine.swift, each with a startPlayers call and a cause "
+     + "(a source pattern that silently matches nothing greens IDENTICALLY to one that "
+     + "matches correct code; this leg is the only thing separating those two outcomes)",
+     sp.sites.length === 2 && sp.sites.every(s => s.call !== null && s.cause !== null),
+     JSON.stringify(sp.sites));
+
+  ck("SP-1 the two resume sites live in exactly {rebuildEngine, tracksDidChangeBody} — the "
+     + "enclosing function is the ONLY thing that tells them apart, because their "
+     + "startPlayers(...) argument lists are TEXTUALLY IDENTICAL; a name-blind pin would keep "
+     + "greening while describing the other site",
+     JSON.stringify(sp.sites.map(s => s.func).sort()) === JSON.stringify(["rebuildEngine", "tracksDidChangeBody"]),
+     JSON.stringify(sp.sites.map(s => s.func)));
+
+  ck("SP-2 ⚠️ SOURCE PIN — NO LIVE COVERAGE. THIS GATE NEVER EXECUTES THIS SITE. The "
+     + "ROUTING-REWIRE resume (tracksDidChangeBody's `if let resume` block) passes "
+     + "`cause: .continuation` in the SOURCE TEXT. That is the whole claim: one token, read "
+     + "off disk. No act below triggers it, no note is measured across it, and it must not be "
+     + "counted as a live leg — the site is unreachable in this tree (SP-3) and a leg on an "
+     + "unreachable path fails for reasons unrelated to what it claims (m23-bl)",
+     sp.rewire?.cause === "continuation",
+     JSON.stringify(sp.rewire));
+
+  ck("SP-3 the UNREACHABILITY PRECONDITION still holds — inside the same function, the "
+     + "announce-class branch calls `rebuildEngine(reason:)` and `return`s BEFORE the "
+     + "routing-rewire resume block. That early return is the entire reason SP-2 gets no live "
+     + "leg (an announce always aborts into the rebuild, which consumes the resume state "
+     + "itself). If this reddens, the site may have become reachable and the 'source pin only' "
+     + "decision above must be re-made, not re-quoted",
+     sp.earlyReturn?.returns === true && sp.earlyReturn.call < (sp.rewire?.block ?? -1),
+     JSON.stringify({ earlyReturn: sp.earlyReturn, rewireBlock: sp.rewire?.block }));
+} catch (e) {
+  fail++;
+  console.log("FAIL SP source pin threw :: " + (e?.stack ?? e?.message ?? e));
+}
 
 buildOrAbort({ label: "building staging binary (m23bp)…" });
 startStaging({ gate: GATE, detached: true, logPath: STAGING_LOG });
@@ -838,12 +1077,131 @@ try {
   ck("A5b device rate restored to 48000 (read-back verified)",
      readBackOf(restored5b) === RESTORE_RATE, restored5b);
 
+  // ═══════════════════════════════════════════════════════════════════════
+  // ACT 6 — THE `rebuildEngine` RESUME SITE (m23-bp-2b).
+  // `AudioEngine.rebuildEngine` step 6, currently `AudioEngine.swift:1347`:
+  // `startPlayers(fromBeat: beats, tempoMap: resume.line.tempoMap,
+  // renderClockTrusted: false, cause: .continuation, anchorPolicy:
+  // .atHostTime(target))`.
+  //
+  // ⚠️ THIS LEG COVERS THE RESUME SITE, REACHED BY AN ANNOUNCE-CLASS
+  // RECONCILE. IT IS NOT A DEVICE-SWITCH LEG AND MUST NEVER BE DESCRIBED AS
+  // ONE — see "WHAT THIS GATE CANNOT PROVE" in the header for the user
+  // testimony that retired that framing, and for why driving
+  // `output.setDevice` mid-chord is forbidden here.
+  //
+  // THE TRIGGER, DERIVED FROM SOURCE (not guessed). `rebuildEngine` has
+  // exactly two callers: `AudioEngine.swift:1061` (the announce-class
+  // reconcile) and `:2779` (`releaseOutputDevicePin`, which resets output to
+  // the system default — forbidden here). So the trigger has to be a
+  // wire-reachable change that makes `PlaybackGraph.reconcile` ANNOUNCE while
+  // the transport rolls. Adding a BUS track is the cheapest such change:
+  //
+  //   • PlaybackGraph.swift:765-768 — bus-node birth (step 0a) announces and
+  //     ABORTS the pass whenever `engineHasRun && engine.isRunning`, i.e.
+  //     always during playback. `announceRoutingMutation()`
+  //     (`PlaybackGraph.swift:696-703`) fires `willMutateRoutingTopology`
+  //     (`AudioEngine.swift:697` — captures the AnchorLine, stops players,
+  //     nils the anchor) and sets `needsEngineRebuild`.
+  //   • AudioEngine.swift:1060-1063 — `if graph.needsEngineRebuild {
+  //     rebuildEngine(...); return }` takes the pass, so the `:1082` plain
+  //     restart A1/A2 use is NEVER reached in this act.
+  //   • AudioEngine.swift:1294 — `mustStart` is true because the quiesce left
+  //     `resumeAfterRoutingRewire` non-nil, so the fresh engine is started
+  //     and step 6 resumes through `:1347`.
+  //
+  // ⭐ THE CONTRAST WITH ACT 1/2 IS ONE WORD OF JSON, AND IT IS EVIDENCE.
+  // A1/A2 add `kind: "instrument"`; this act adds `kind: "bus"`. Instrument-
+  // strip birth on a running engine is a DELIBERATE announce EXCLUSION
+  // (`PlaybackGraph.swift:996-1002` — the m16-h reconfig defect is
+  // player-start-specific and instrument strips host no player nodes), which
+  // is exactly why A1/A2 reach the restart WITHOUT a rebuild. Bus birth is
+  // not excluded. Same verb, one word apart, opposite path.
+  //
+  // `assertFreeze: false` — this is a REAL engine discard/cold-build, so
+  // "the transport keeps advancing" is m23-bq's property, not bp's, exactly
+  // as in ACT 5b. The measured number is still printed as a diagnostic.
+  //
+  // ⚠️⚠️ WHY THIS ACT'S FIXTURE DIFFERS FROM ACT 3/4/5b's, AND WHY IT HAD TO
+  // (m23-bp-2b, measured — do not "tidy" it back to the 128-beat shape).
+  // A 128-beat note with only the "audible in the LATE window" assertion DOES
+  // NOT PROVE THIS SITE. Under a `.relocation` mutant at `:1347` that leg came
+  // back GREEN in 3 of 10 measured runs, because this site DISCARDS THE
+  // ENGINE: the quiesce all-notes-off flush is issued on the outgoing graph
+  // and consumed by the RENDER THREAD, while `rebuildEngine` stops and drops
+  // that engine immediately afterwards — a race. When the flush loses, the
+  // voice that was sounding SURVIVES into the fresh engine, and since
+  // `.relocation` drops the note's OFF as well as its ON, it rings forever.
+  // MEASURED: a 16-beat note still reading −22.3 dB at beat 24 and beat 30.
+  // The 7 runs where the flush won floored instead, which is the outcome the
+  // recovery leg was built to catch.
+  // ⭐ THIS IS A PROPERTY OF THE SITE, NOT A DEFECT IN THE FIXTURE. ACT 3/4/5b
+  // sit on `restart()`/`recoverEngine`, neither of which discards the engine,
+  // so their flush always lands and their mutants have ONE branch — which is
+  // why m23-bp-2a's method transferred cleanly there and does not here.
+  // So ACT 6 asserts BOTH halves: the note re-sounds (recovery leg) AND it
+  // STOPS when its own note-off is due (the second leg). A 30-beat note puts
+  // that off at ~beat 30, inside a 20 s window; on the clean tree the trace
+  // measured −22.3 dB flat to beat 30.10 and then −31.6 / −41.4 / −51.4 /
+  // −60.6 / −68.9 at 0.5 s intervals, i.e. through FLOOR_ISH_DB ~2.4 s after
+  // the off and −80.0 by ~4.0 s — which is what the 4000 ms decay grace below
+  // is sized from. MEASURED on this machine, not derived from the meter's
+  // "−20 dB/s peak-hold" header figure, which excludes the patch's own
+  // release tail.
+  // ═══════════════════════════════════════════════════════════════════════
+  console.log("\n── ACT 6: rebuildEngine RESUME SITE via an announce-class reconcile (AudioEngine.swift:1347) ──");
+  await runHeldNoteAct("A6", {
+    assertFreeze: false, // rebuildEngine discards and cold-builds the engine
+    heldNoteBeats: ACT6_NOTE_BEATS,
+    postWindowMs: ACT6_POST_TRIGGER_WINDOW_MS,
+    silenceAfterNoteOffMs: ACT6_DECAY_GRACE_MS,
+    site: "AudioEngine.swift:1347 — rebuildEngine's RESUME SITE, reached by an ANNOUNCE-CLASS "
+      + "RECONCILE (a bus-track add while rolling). NOT a device switch: no device is touched "
+      + "in this act, and this label must never be shortened to 'the device-flip path'",
+    trigger: async () => {
+      const rr = await cmd("track.add", { kind: "bus", name: "TriggerBus" });
+      const busId = (rr.result?.track ?? rr.result)?.id;
+      // A SETTER'S RETURN IS NOT PROOF IT TOOK: read the bus back out of the
+      // model projection, and check its KIND — a bus that came back as an
+      // audio track would take the `:846` announce instead, which is a
+      // different (still announce-class, but differently reasoned) path than
+      // the one this act's comment claims.
+      const ovr = await cmd("project.overview");
+      const tracks = ovr.result?.tracks ?? [];
+      const bus = tracks.find(t => String(t.id).toLowerCase() === String(busId).toLowerCase());
+      const busOk = !!bus && bus.kind === "bus";
+      // m20-j safety property, checked right after the trigger and BEFORE the
+      // recovery window (same shape as ACT 5a/5b). `rebuildEngine` discards
+      // and cold-builds the WHOLE AVAudioEngine; if the output pin did not
+      // survive that, a sustained organ note would be playing out of the
+      // user's real speakers for the next 12 seconds.
+      const dv = await cmd("output.listDevices");
+      const pinHeld = bhOf(devicesOf(dv)).isSelected === true;
+      ck("A6 output pin STILL held immediately after the announce-class rebuild (m20-j safety "
+         + "property — rebuildEngine discards and cold-builds the whole AVAudioEngine, so this "
+         + "is the one moment in this act where a lost pin would reach real speakers)",
+         pinHeld, JSON.stringify(bhOf(devicesOf(dv))));
+      return {
+        ok: rr.ok && busOk && pinHeld,
+        detail: `bus add -> id=${busId} readBackKind=${bus?.kind ?? "ABSENT"} pinHeld=${pinHeld}`
+          + (rr.ok ? "" : ` err=${JSON.stringify(rr.error)}`),
+      };
+    },
+  });
+
   // ── L-final: the m20-j safety property — release the pin and PROVE the ──
   // macOS system default was never moved. This must be an asserted leg, not
   // just an inference from "we only ever called output.setDevice with the
   // loopback uid" — a silent failure elsewhere could have changed it.
   r = await cmd("output.setDevice", {});
-  ck("L-final pin released", r.ok && devicesOf(r).every(d => !d.isSelected), JSON.stringify(r.error));
+  // m23-ee-2a: see m20d:261. This leg's own comment above says it "must be an
+  // asserted leg, not just an inference" — but `devicesOf` is `?? []` and
+  // `[].every(f)` is `true`, so with no device list it asserted nothing at all,
+  // which is the same failure the comment was written to prevent.
+  const releasedDevices = devicesOf(r);
+  ck("L-final pin released",
+     r.ok && releasedDevices.length >= 1 && releasedDevices.every(d => !d.isSelected),
+     `${releasedDevices.length} devices, selected=[${releasedDevices.filter(d => d.isSelected).map(d => d.uid).join(",")}] ${JSON.stringify(r.error)}`);
   r = await cmd("output.listDevices");
   ck("L-final SYSTEM DEFAULT UNMOVED across the whole gate",
      defaultUID(devicesOf(r)) === systemDefault, `${systemDefault} -> ${defaultUID(devicesOf(r))}`);
@@ -884,4 +1242,4 @@ console.log(fail
   : "ALL GREEN, as expected on a fixed tree. If you are running this against a tree WITHOUT "
     + "m23-bp/m23-bp-1 (RescheduleCause) applied, this all-green result means the gate is not "
     + "reproducing the defect and needs re-diagnosis before it can be trusted either way.");
-process.exit(fail ? 1 : 0);
+verdict({ ran: pass + fail, failed: fail });

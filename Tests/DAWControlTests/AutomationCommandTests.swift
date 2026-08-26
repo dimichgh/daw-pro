@@ -291,4 +291,80 @@ struct AutomationCommandTests {
         #expect(lane["points"]?.arrayValue?.first?["value"]?.doubleValue == -1)
         #expect(lane["isEnabled"]?.boolValue == true)
     }
+
+    // MARK: - track.setVolume vs an active lane (m26-o)
+
+    /// 2026-08-17 field report, N2. `track.setVolume` returned a bare
+    /// `{id, ok:true}`, so an agent that set a level while a volume lane was
+    /// active saw success and had no way to learn the level it set was
+    /// inaudible — the lane governs. The write is NOT a no-op (it is stored,
+    /// undoable, and rules again the moment the lane goes inactive), so the
+    /// fix is an annotation, not a refusal.
+    @Test("track.setVolume reports when a lane, not the caller's value, governs")
+    func setVolumeAnnotatesAutomationControl() async throws {
+        let (router, _) = makeRouter()
+        let trackID = await addTrack(router, name: "Bass", kind: "audio")
+
+        func setVolume(_ value: Double) async -> ControlResponse {
+            await router.handle(ControlRequest(
+                id: "sv", command: "track.setVolume",
+                params: ["trackId": .string(trackID.uuidString),
+                         "volume": .number(value)]))
+        }
+
+        // 1. No lane at all → the annotation is ABSENT, and the verb stays a
+        //    void-result "ok" (the disk rule; also what keeps it valid as the
+        //    bug-1 void-result regression guard's subject).
+        let bare = await setVolume(0.5)
+        #expect(bare.ok)
+        #expect(bare.result == nil,
+                "with no lane there is nothing to warn about — stay void")
+
+        // 2. An EMPTY lane is inert (the vii-a contract) — adding a lane with
+        //    no points must NOT flip the flag, or the annotation would cry
+        //    wolf on every lane an agent creates before drawing into it.
+        let added = await addLane(router, trackID: trackID,
+                                  target: .object(["type": .string("volume")]))
+        let laneID = try #require(added.result?["lane"]?["id"]?.stringValue)
+        let emptyLane = await setVolume(0.6)
+        #expect(emptyLane.result == nil)
+
+        // 3. Points drawn → the lane now governs, and the count comes back.
+        let points = await router.handle(ControlRequest(
+            id: "pts", command: "automation.setPoints",
+            params: ["trackId": .string(trackID.uuidString),
+                     "laneId": .string(laneID),
+                     "points": .array([
+                        .object(["beat": .number(0), "value": .number(1)]),
+                        .object(["beat": .number(4), "value": .number(0)]),
+                     ])]))
+        #expect(points.ok)
+
+        let governed = await setVolume(0.7)
+        #expect(governed.ok, "the write still succeeds — it is not a refusal")
+        #expect(governed.result?["automationControlled"]?.boolValue == true)
+        #expect(governed.result?["automationPointCount"]?.doubleValue == 2)
+
+        // 4. The write LANDED even while automated: disabling the lane must
+        //    reveal 0.7, not the 0.6 from step 2. This is what makes the
+        //    annotation "a lane governs" rather than "your call was dropped".
+        let disable = await router.handle(ControlRequest(
+            id: "dis", command: "automation.setLaneEnabled",
+            params: ["trackId": .string(trackID.uuidString),
+                     "laneId": .string(laneID),
+                     "enabled": .bool(false)]))
+        #expect(disable.ok)
+
+        let afterDisable = await setVolume(0.7)
+        #expect(afterDisable.result == nil,
+                "a disabled lane is inert — the manual value rules again")
+
+        let snapshot = await router.handle(ControlRequest(
+            id: "snap", command: "project.snapshot", params: [:]))
+        let tracks = try #require(snapshot.result?["tracks"]?.arrayValue)
+        let bass = try #require(tracks.first {
+            $0["id"]?.stringValue == trackID.uuidString })
+        #expect(bass["volume"]?.doubleValue == 0.7,
+                "the stored volume must be the last value written")
+    }
 }

@@ -14,9 +14,14 @@ import Testing
 @Suite("Automation engine — effect-param lanes", .serialized)
 struct AutomationFXParamTests {
     private static let sampleRate = 48_000.0
-    /// The OfflineRenderer pull size: every offline quantum spans 4 096
-    /// frames, so the effect-param envelope steps on these boundaries.
-    private static let quantum = 4_096
+    /// The OfflineRenderer pull size: the effect-param envelope steps on these
+    /// boundaries, so this must BE the renderer's block rather than a copy of
+    /// it. It was the literal `4_096` until m28-bug lowered the block to 512;
+    /// the staircase this suite measures is unchanged in KIND, it simply has 8×
+    /// as many steps, which is the automation-resolution half of that fix.
+    private static let quantum = RenderBlockSize.offlineFrames
+    /// Whole quanta inside the 96 000-frame render (the last is partial).
+    private static let wholeQuanta = 96_000 / RenderBlockSize.offlineFrames - 1
 
     // MARK: - Harness helpers (AutomationEngineTests idiom)
 
@@ -145,9 +150,12 @@ struct AutomationFXParamTests {
         // DC 0.25 for 2 s; the gain insert's gainLinear lane ramps 0→1 over
         // beats 0…4 (120 BPM = 96 000 samples). The lane is evaluated at the
         // QUANTUM START only (no intra-quantum ramp — spec), so the envelope
-        // is a staircase on 4 096-frame boundaries; GainEffect's own ~5 ms
-        // declick ramp settles 240 frames in, landing EXACTLY on the stepped
-        // target for the rest of the quantum.
+        // is a staircase on RenderBlockSize.offlineFrames boundaries;
+        // GainEffect's own ~5 ms declick ramp settles 240 frames in, landing
+        // EXACTLY on the stepped target for the rest of the quantum.
+        // ⚠️ At a 512-frame quantum the settled window is only frames 260…511 —
+        // still past the 240-frame declick, but the margin is 20 frames, not
+        // 3 856. A slower declick would break this test before it broke audio.
         let url = try writeConstantWAV(value: 0.25, frames: 96_000)
         defer { try? FileManager.default.removeItem(at: url) }
         let fx = EffectDescriptor(kind: .gain)   // knob at unity — the lane must rule
@@ -167,7 +175,7 @@ struct AutomationFXParamTests {
         var maxDiff = 0.0
         var maxIntraQuantumSpread: Float = 0
         var stepCount = 0
-        for k in 0...22 {
+        for k in 0...Self.wholeQuanta {
             let start = k * Self.quantum
             let settledFrom = start + 260          // past the 240-frame declick
             let settledTo = start + Self.quantum - 1
@@ -185,10 +193,10 @@ struct AutomationFXParamTests {
         }
         print("[measured] gainLinear staircase: max |settled − 0.25·laneValue(quantumStart)| "
               + "= \(maxDiff); max intra-quantum settled spread = \(maxIntraQuantumSpread); "
-              + "\(stepCount)/22 quantum boundaries stepped upward")
+              + "\(stepCount)/\(Self.wholeQuanta) quantum boundaries stepped upward")
         #expect(maxDiff < 1e-6)                 // quantum-start value, exactly held
         #expect(maxIntraQuantumSpread == 0)     // staircase — constant inside the quantum
-        #expect(stepCount == 22)                // every boundary steps (monotone lane)
+        #expect(stepCount == Self.wholeQuanta)  // every boundary steps (monotone lane)
     }
 
     // MARK: - 3. Delay mix 0→1: dry early, echoes later (+ determinism)

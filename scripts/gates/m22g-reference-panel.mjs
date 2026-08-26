@@ -13,7 +13,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync, mkdirSync } from "node:fs";
 import zlib from "node:zlib";
-import { buildOrAbort, startStaging, stopStaging, connect, sleep } from "./_staging.mjs";
+import { buildOrAbort, startStaging, stopStaging, connect, sleep, panelDensityGuard, verdict } from "./_staging.mjs";
 
 const GATE = "m22g-p3";                     // also names the pidfile + out dir
 const OUT = `/tmp/daw-gate-out/${GATE}`;
@@ -200,21 +200,20 @@ await cmd("ui.showMixer", { show: true });
 // runner and passed it for another, on nothing but a density a previous probe
 // had left behind — and `PanelDensityStore`'s own default is SIMPLE, so a fresh
 // machine would not even have run the density these comments are written for.
-// Both are therefore SET here rather than read. The collapse flag is put back at
-// the teardown; the density is not, because `debug.panelDensity` has no
-// read-only form to learn the prior value from (a bare call refuses). PRO is the
-// deliberate choice: it is the density with the most strip anatomy, so the
-// tightest fit is the one measured.
+// Both are therefore SET here rather than read. PRO is the deliberate choice
+// for density: it is the density with the most strip anatomy, so the tightest
+// fit is the one measured.
 const priorInsertsCollapsed =
   (await cmd("debug.panelLayout")).result?.mixerInsertsCollapsed ?? false;
-// m23-du(a) CLOSED the read gap this comment used to describe. The density is
-// now captured BEFORE it is overwritten, and restored alongside the collapse
-// flag. ⚠️ Read `stored`, NEVER `mode`: `mode` is the EFFECTIVE density and says
-// `simple` both for "explicitly simple" and for "never set", so writing it back
-// would convert an unset key into an explicit one.
-const priorMixerDensity = (await cmd("debug.panelDensity", { panel: "mixer" })).result?.stored ?? null;
-console.log(`   prior mixer density: stored=${priorMixerDensity ?? "UNSET"}`);
-await cmd("debug.panelDensity", { panel: "mixer", mode: "pro" });
+// m23-ej-2 UPGRADE: density now goes through the shared `panelDensityGuard`
+// (_staging.mjs) instead of this gate's own hand-rolled restore. The old
+// version's null-prior branch wrote the app default "simple" — documented at
+// length here as a compromise forced by `debug.panelDensity` having no clear
+// verb (m23-du(a) tracked that as still open). That verb shipped in m23-ej-1;
+// the guard restores a never-set prior with `{clear:true}`, so the compromise
+// and its comment are both gone.
+const guard = panelDensityGuard((command, params) => cmd(command, params));
+await guard.set("mixer", "pro");
 await cmd("debug.panelLayout", { mixerInsertsCollapsed: true });
 
 // ── m23-du(b): the restore must survive the THROW path, not just the happy one.
@@ -238,18 +237,9 @@ async function restoreAmbient(reason) {
   ambientRestored = true;
   try {
     await cmd("debug.panelLayout", { mixerInsertsCollapsed: priorInsertsCollapsed });
-    // m23-du(a): the density too — this gate's HEADLINE leak. A null prior means
-    // the panel was never set, and there is no clear verb yet, so the choice is
-    // between leaving OUR `pro` behind and writing the app default explicitly.
-    // `simple` is strictly better: a fresh machine's EFFECTIVE density is simple,
-    // so this leaves the next gate behaving identically to a fresh machine and
-    // differs only by a key existing. Leaving `pro` would change BEHAVIOUR, which
-    // is the defect m23-du exists to fix. Never silent.
-    const target = priorMixerDensity ?? "simple";
-    await cmd("debug.panelDensity", { panel: "mixer", mode: target });
+    const densityReport = await guard.restore(reason);   // m23-ej-2
     console.log(`   ambient restored (${reason}): mixerInsertsCollapsed=${priorInsertsCollapsed}`
-      + `, mixer density=${target}${priorMixerDensity ? "" : " (prior UNSET — wrote the app default; "
-      + "only a clear verb, m23-du(a) still open, could restore true absence)"}`);
+      + `, density=${JSON.stringify(densityReport.results)}`);
   } catch (e) {
     // Loud, never silent — a failed restore is exactly the condition that
     // poisons the NEXT gate, and it must not hide behind a red leg elsewhere.
@@ -630,4 +620,4 @@ await restoreAmbient("normal exit");
 console.log(`\n=== ${pass} PASS / ${fail} FAIL ===`);
 stopStaging(GATE);   // SIGTERMs by exact pid AND releases our session.lock
 ws.close();
-process.exit(fail ? 1 : 0);
+verdict({ ran: pass + fail, failed: fail });

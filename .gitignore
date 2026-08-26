@@ -33,3 +33,19 @@ __pycache__/
 # `scripts/gates/m20d-bhrate.swift`; the gate rebuilds it on demand and aborts
 # with the swiftc line if it is missing.
 /scripts/gates/m20d-bhrate
+
+# Per-gate coverage baseline (m23-ep-3). LOCAL RUN STATE, not a shared artifact:
+# it records that a gate ran *on this machine* (`ranAt`) alongside the gate
+# file's content hash. Checking it in would report CURRENT on a fresh checkout
+# for gates that never ran there — a false green, which is the exact defect
+# class this milestone exists to remove. It also rewrites on every single gate
+# invocation, so tracking it would churn the diff constantly.
+/scripts/gate-corpus-baseline.json
+
+# Append-only history of every baseline write (m25-q), sibling to the file
+# above and gitignored for the same reason: it is LOCAL RUN STATE, and a
+# tracked history would conflict on every gate run across this repo's
+# concurrent sessions. Unlike the baseline itself, this is never rewritten —
+# it grows — so keeping it out of git isn't about diff churn, it's the same
+# "this describes THIS machine's runs" reasoning as the baseline.
+/scripts/gate-corpus-baseline.json.history.jsonl

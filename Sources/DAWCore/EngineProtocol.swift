@@ -406,6 +406,30 @@ public protocol AudioEngineControlling: AnyObject {
     /// cache: the result persists in the project's reference slot.
     func analyzeReferenceFile(at url: URL) async throws -> ReferenceAnalysis
 
+    /// Offline windowed peak/RMS profile of an ARBITRARY file on disk
+    /// (m25-z, the `analyzeReferenceFile` sibling for a windowing question
+    /// instead of a program-loudness one): `FileProfiler`, streamed in
+    /// bounded chunks, never a full-file buffer. Runs in async/detached
+    /// context only — never touches the render thread. Read-only: no
+    /// cache, no project slot, nothing persisted, nothing copied.
+    func profileFile(at url: URL, windowSeconds: Double, fromSeconds: Double,
+                     durationSeconds: Double?) async throws -> FileProfile
+
+    /// Offline per-frame pitch detection over the source window
+    /// `[fromSeconds, fromSeconds + durationSeconds)` of the file at `url`
+    /// (m23-ap-3, wiring m23-ap-2b's `PitchTracker`/`SwiftF0PitchTracker`
+    /// seam — the PROTOCOL, never the concrete backend, by name, in this
+    /// signature). Results are SOURCE-domain (before any clip stretch/pitch
+    /// — `ProjectStore.detectClipPitch` attaches that echo). HONEST
+    /// ABSENCE crosses this boundary too: an unvoiced frame in the returned
+    /// `PitchDetectionResult` omits its frequency rather than reporting a
+    /// sentinel. Never result-cached (see `ClipPitchAnalyzer`'s header for
+    /// why). Runs in async/detached context only — never touches the
+    /// render thread.
+    func detectPitch(inFileAt url: URL, fromSeconds: Double, durationSeconds: Double,
+                     confidenceThreshold: Double,
+                     silenceFloorDbfs: Double) async throws -> PitchDetectionResult
+
     /// The project's reference SLOT changed (m22-g P2) — the
     /// `masterEffectsChanged` twin for the monitor lane: live engines cache
     /// the slot (path/offset/trim) for scheduling; an offset change while
@@ -816,6 +840,34 @@ public protocol AudioEngineControlling: AnyObject {
     /// activity; the UI reads it as a cheap blinking-LED source.
     func midiEventCount() -> Int
 
+    /// Installs (or clears, with nil) the MAIN-ACTOR sink for hardware
+    /// CONTROLLER changes — the feed `MIDIControlMap` is mapped against
+    /// (m28-knob). One observer; installing a second replaces the first.
+    ///
+    /// ## The seam, and why it is not a new one
+    ///
+    /// This REUSES the receive-thread → main-actor seam that already exists and
+    /// is the only one: the CoreMIDI receive thread pushes every parsed event to
+    /// `MIDIInputRTContext.captureRing` (SPSC, lock-free, drop-newest), and
+    /// `MIDIInputManager.drainCaptureRing()` pops it on the main actor from a
+    /// ~30 Hz task that is alive for as long as the MIDI client is. Nothing new
+    /// touches the receive thread, and the render path is untouched entirely.
+    ///
+    /// ⭐ **The observer is called ONCE PER DRAIN PASS, and the batch MAY BE
+    /// EMPTY.** The empty call is load-bearing, not noise: it is the idle tick a
+    /// mapped-knob gesture uses to notice that the hand STOPPED, which is the
+    /// only "release" a knob has. A subscriber that ignores empty batches leaves
+    /// a live preview parked on the strip forever.
+    ///
+    /// ⚠️ **Optional capability with a SILENT default** (the
+    /// `previewController` precedent, and the same hazard): an engine that
+    /// forgot to override this discards every event, mapped controls would do
+    /// nothing at all, and every model-layer test would still pass because the
+    /// map and the pad are written to work against an engine that has no MIDI.
+    /// `MIDIInputManagerTests`' control-change delivery test and
+    /// `AudioEngineControlObserverTests` close that hole against the REAL types.
+    func setControlChangeObserver(_ observer: (@MainActor ([MIDIControlChangeEvent]) -> Void)?)
+
     /// Sounds EXACTLY `pitches` on `trackID`'s instrument RIGHT NOW, outside the
     /// sequencer schedule and independent of transport state (m23-d note
     /// audition). SET semantics and idempotent: pitches already sounding are
@@ -831,11 +883,69 @@ public protocol AudioEngineControlling: AnyObject {
     @discardableResult
     func setAuditionPitches(trackID: UUID, pitches: [UInt8], velocity: UInt8) -> AuditionOutcome
 
+    /// Sends ONE controller value to `trackID`'s instrument RIGHT NOW, outside
+    /// the sequencer schedule (breath pad P6 — the live drag preview). Rides the
+    /// same per-renderer audition ring `setAuditionPitches` uses, so it is
+    /// delivered at offset 0 of whatever render quantum it drains in and touches
+    /// no voice: it opens nothing, closes nothing, and is NOT a liveness
+    /// heartbeat (bumping one would keep a stuck audition note alive).
+    ///
+    /// ⛔ **A PREVIEW, NEVER THE RECORD.** The controller lane on the clip is the
+    /// record; this is a gesture. THE PAD LAW (design-breath-pad §5.1) survives
+    /// because nothing here is ever consulted by playback, replay or bounce —
+    /// they all read the same event array and agree sample-for-sample. The
+    /// caller is responsible for the other half of that law: streaming happens
+    /// IF AND ONLY IF a gesture is in progress, and the gesture's end restores
+    /// the controller to `MIDIControllerType.neutralDefault` so no preview value
+    /// is left parked on the strip (`PadPreviewController` is the ONE home for
+    /// that policy — see `Sources/DAWCore/PadPreview.swift`).
+    ///
+    /// ⚠️ **Restoring neutral is not the same as restoring the committed lane,
+    /// and on a track that HAS one it is measurably not.** The chase that emits
+    /// `neutralDefault` is a schedule-BUILD-time prefix, not a per-block
+    /// re-assert, so a release mid-playback holds neutral until the lane's next
+    /// point. Scope, direction and the shared-merge fix are written out in
+    /// `PadPreviewController`'s "THE LIMIT OF RULE 3".
+    ///
+    /// `controller` is a CC number 0…127 and `value` a data byte 0…127; both are
+    /// masked rather than trusted. Never throws; the outcome reports why nothing
+    /// will be heard when that is the case, exactly as `setAuditionPitches` does.
+    @discardableResult
+    func previewController(trackID: UUID, controller: UInt8, value: UInt8) -> AuditionOutcome
+
     /// Releases every audition voice on every track and requests an
     /// all-notes-off on each renderer that held one. Called at engine
     /// shutdown, project boundary, and app resign-active — the paths where the
     /// main actor is about to stop being able to send note-offs.
     func stopAllAudition()
+
+    /// END-OF-CONTENT STOP BOUND (m25-d): the linear beat at which playback
+    /// should stop because there is no more material past it, or `nil` for
+    /// "run linearly forever" (today's behaviour, and the value during a
+    /// recording take or an active loop).
+    ///
+    /// **A PRE-COMPUTED SCALAR ON PURPOSE.** `ProjectStore` derives the value
+    /// off the playhead path — walking every track's clips — and hands the
+    /// engine one `Double?`. The engine's playhead tick then does a single
+    /// optional unwrap and one `>=` comparison per tick: no allocation, no
+    /// lock, no ObjC dispatch, no actor hop, and no call back into the store.
+    /// The store re-pushes on every transition that can change the answer
+    /// (play / seek / loop change / preference toggle / record / stop).
+    ///
+    /// Optional capability: the default discards, so fakes and headless
+    /// engines compile and behave exactly as before.
+    func setEndStop(beat: Double?)
+
+    /// Sink invoked once when the playhead reaches the `setEndStop` bound.
+    /// The engine does NOT tear its own transport down — `ProjectStore` owns
+    /// transport state and calls its ordinary `stop()`, so the end stop lands
+    /// on exactly the same path as a user pressing stop (no new semantics, no
+    /// journal entry: this is transport state, not an edit).
+    ///
+    /// A function rather than a `var` because a protocol property requirement
+    /// cannot carry a default implementation, and every existing conformer
+    /// must keep compiling untouched (the `setAuditionPitches` precedent).
+    func setEndStopHandler(_ handler: (() -> Void)?)
 
     /// PANIC (m23-af): all-notes-off on EVERY instrument renderer, whatever the
     /// transport is doing. Returns how many renderers were asked.
@@ -959,9 +1069,40 @@ extension AudioEngineControlling {
     public func setAuditionPitches(trackID: UUID, pitches: [UInt8],
                                    velocity: UInt8) -> AuditionOutcome { .unsupported }
 
+    /// The live controller preview is optional capability (breath pad P6, the
+    /// `setAuditionPitches` precedent): fakes and headless engines have no
+    /// instrument renderers, so the default reports `.unsupported` and every
+    /// existing conformer compiles unchanged.
+    ///
+    /// ⚠️ THE SAME VACUITY RISK AS `availableOutputDevices` BELOW, and it is
+    /// worse here because the symptom is silence rather than an empty list: an
+    /// `AudioEngine` that forgot to override this would report `.unsupported`
+    /// forever, the pad would preview nothing, and every model-layer test would
+    /// still pass because `PadPreviewController` is written to keep working
+    /// against an engine that cannot preview.
+    /// `Tests/DAWEngineTests/AuditionEngineTests.swift`'s
+    /// `theRealEngineImplementsTheControllerPreview` closes that hole by
+    /// asserting the REAL engine returns something other than `.unsupported`
+    /// for a track that has an instrument node (the `OutputDeviceTests`
+    /// precedent, applied to a method whose default is a silent no-sound).
+    public func previewController(trackID: UUID, controller: UInt8,
+                                  value: UInt8) -> AuditionOutcome { .unsupported }
+
     /// The audition all-stop is optional capability (m23-d): an engine with no
     /// audition support holds no voices, so the default is a no-op.
     public func stopAllAudition() {}
+
+    /// The end-of-content stop bound is optional capability (m25-d, the
+    /// `stopAllAudition` precedent). An engine that ignores it simply never
+    /// stops itself — and that is SAFE by construction, because the store's
+    /// headless ticker carries the same policy for the engine-less case and
+    /// `ProjectStore.stop()` remains the only thing that ends a take. A
+    /// silent default here can lose the feature, never a recording.
+    public func setEndStop(beat: Double?) {}
+
+    /// The end-stop sink is optional capability (m25-d): an engine that never
+    /// evaluates a bound never fires one, so the default discards.
+    public func setEndStopHandler(_ handler: (() -> Void)?) {}
 
     /// Output-device enumeration is optional capability (m20-j, the
     /// `availableMIDIInputs` shape): fakes and headless engines drive no
@@ -1041,6 +1182,26 @@ extension AudioEngineControlling {
     /// precedent). Fakes that need the surface override it; the import path
     /// catches the throw and lands the slot with `analysis: nil` + a warning.
     public func analyzeReferenceFile(at url: URL) async throws -> ReferenceAnalysis {
+        throw ProjectError.engineUnavailable
+    }
+
+    /// File profiling is optional capability (m25-z) — and like
+    /// `analyzeAudioContent`/`analyzeReferenceFile` above, a fabricated
+    /// profile would be a lie, so the default THROWS `engineUnavailable`.
+    /// Fakes that need the surface override it.
+    public func profileFile(at url: URL, windowSeconds: Double, fromSeconds: Double,
+                            durationSeconds: Double?) async throws -> FileProfile {
+        throw ProjectError.engineUnavailable
+    }
+
+    /// Pitch detection is optional capability (m23-ap-3) — and like
+    /// `analyzeAudioContent`/`profileFile` above, a fabricated contour would
+    /// be a lie (a phantom pitch curve is exactly the sentinel hazard this
+    /// subsystem exists to avoid), so the default THROWS `engineUnavailable`.
+    /// Fakes that need the surface override it.
+    public func detectPitch(inFileAt url: URL, fromSeconds: Double, durationSeconds: Double,
+                            confidenceThreshold: Double,
+                            silenceFloorDbfs: Double) async throws -> PitchDetectionResult {
         throw ProjectError.engineUnavailable
     }
 
@@ -1126,6 +1287,14 @@ extension AudioEngineControlling {
 
     public func availableMIDIInputs() -> [MIDIInputDevice] { [] }
     public func midiEventCount() -> Int { 0 }
+
+    /// Hardware controller observation is optional capability (m28-knob): an
+    /// engine with no CoreMIDI client has nothing to observe, so the default
+    /// discards the installation and every existing conformer compiles
+    /// unchanged. See the requirement's ⚠️ for why that default is dangerous
+    /// and which two tests hold the real engine to it.
+    public func setControlChangeObserver(
+        _ observer: (@MainActor ([MIDIControlChangeEvent]) -> Void)?) {}
 
     /// Master-mix analysis is optional capability: engines without it
     /// (fakes, headless) sit on the floor snapshot.

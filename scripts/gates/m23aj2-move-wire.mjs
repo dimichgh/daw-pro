@@ -24,7 +24,7 @@
 // Staging 17695 ONLY. 17600 is the user's LIVE app and is never touched.
 // Kill by EXACT pid from the pidfile — never pkill/pgrep. Lifecycle from
 // `_staging.mjs` (m23-ac-1).
-import { launchStaging, stopStaging, STAGING_PORT } from "./_staging.mjs";
+import { launchStaging, stopStaging, STAGING_PORT, verdict } from "./_staging.mjs";
 
 const GATE = "m23aj2";
 let ws, seq = 0, pass = 0, fail = 0;
@@ -308,4 +308,4 @@ try {
 
 console.log(`\nM23AJ2 ${pass}/${pass + fail}`);
 if (failures.length) console.log("failed legs:\n  " + failures.join("\n  "));
-process.exit(fail === 0 ? 0 : 1);
+verdict({ ran: pass + fail, failed: fail });

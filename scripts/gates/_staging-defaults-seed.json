@@ -1,0 +1,10 @@
+{
+  "_note": "m23-gf-e Phase E seed — SHRUNK to shipped-defaults-only (down from the m23-gf-b Phase B 17-key ambient snapshot). Every dropped key was value-identical to its shipped default EXCEPT the six panelDensity keys measured pro-vs-.simple (arrange/instrumentPicker/mixer/pianoRoll/quantize/transport) — those six now flip to whatever `PanelDensityStore` ships (.simple), which is the point of this phase: the corpus runs against what a real user's virgin install sees, not one machine's captured ambient prefs. `onboarding.state` is the one key that survives, and it is NOT a behaviour snapshot the way the dropped 16 were — it is LOAD-BEARING FOR THE HARNESS ITSELF: with it absent, `OnboardingModel.shouldOfferTour` (OnboardingModel.swift:282) reads `state == .inactive` == true, and `offerTourIfEligible()` (DAWProApp.swift ~3714-3716) starts the guided-tour overlay on every ContentView appear — landing in front of every UI gate in the corpus (the m23-gf-b trap 4). That is a structural break in what gates can even see, not a behaviour-under-test change, so it stays seeded. `type` selects the `defaults write -string`/`-float` flag `resetStagingDefaultsDomain()` uses. NEVER add an NS* key (NSWindow Frame …, NSSplitView …, NSToolbar …) — those must be left to regenerate in the staging domain; seeding one would defeat the whole point of the isolation seam (design §3.7, §7.2). Revert path (read-only, reproduces the prior 17-key seed exactly, sha 4c1f7c3b828e018b): `git show ad786a6:scripts/gates/_staging-defaults-seed.json > scripts/gates/_staging-defaults-seed.json`.",
+  "keys": {
+    "onboarding.state": {
+      "type": "string",
+      "value": "completed",
+      "why": "THE LOAD-BEARING KEY. With this absent, OnboardingModel.shouldOfferTour (OnboardingModel.swift:282) is `state == .inactive` == true, and offerTourIfEligible() (DAWProApp.swift:3714-3716) starts the guided tour on every ContentView appear — an overlay in front of every UI gate in the corpus. Must land in the SAME reset that clears the domain, never as a follow-up write (design §3.7 / brief trap 4)."
+    }
+  }
+}

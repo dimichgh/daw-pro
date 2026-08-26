@@ -13,6 +13,16 @@ import DAWAppKit
 /// + the built `QuantizeSettings` live there; the view routes Apply straight to
 /// `ProjectStore.quantizeClipNotes` (the wire's method) for ONE undo step.
 ///
+/// **A TAKE-COMP MEMBER IS REFUSED HERE, IN PLACE, WITH THE REASON (m25-c-2).**
+/// `quantizeClipNotes` rejects a comp member before touching notes; this panel
+/// used to offer Apply anyway, swallow the throw, and close having done nothing.
+/// `QuantizeModel.canApply` now asks the store at open time, Apply is dark, and
+/// `PanelRefusalLine` prints the store's own sentence — identical to the sibling
+/// `HumanizePanel`, because one bug with two faces gets one treatment.
+/// ⚠️ APPLY ONLY: extracting a groove READS the clip and the store allows it on a
+/// comp member, so the extract affordance stays live. A refusal must bite exactly
+/// where the store bites.
+///
 /// NO VIOLET anywhere — quantize is standard editing chrome, not AI content
 /// (docs/DESIGN-LANGUAGE.md Rule 3). Cyan marks only earned active state (the
 /// selected groove, the SF Mono readouts, the Apply button).
@@ -75,8 +85,13 @@ struct QuantizePanel: View {
                 grooveSection
             }
             if model.targetIsMIDI {
+                // ⚠️ `.explainable(.quantize)` now sits on the BUTTON inside
+                // `applyButton`, not here (m25-c-2). That view became a VStack
+                // (button + the refusal line), and an explain target measures the
+                // frame it decorates — leaving the modifier here would have grown
+                // the highlighted region by a line of prose whenever a refusal
+                // showed, which is a silent change to a captured surface.
                 applyButton
-                    .explainable(.quantize)
             }
         }
         .padding(16)
@@ -396,20 +411,36 @@ struct QuantizePanel: View {
 
     // MARK: - Apply
 
+    /// Apply, plus the one sentence saying why it is dark when it is (m25-c-2 —
+    /// a take-comp member; `quantizeClipNotes` refuses it and used to do so only
+    /// AFTER the press, with the panel already closing). The dim/disabled
+    /// treatment and the amber `PanelRefusalLine` are the `HumanizePanel` sibling's
+    /// VERBATIM — one refusal convention across the two panels, which is what
+    /// "fix both or neither" asked for. With nothing refusing, `canApply` is true
+    /// and this renders exactly as it always did.
     private var applyButton: some View {
-        Button(action: onApply) {
-            Text("APPLY QUANTIZE")
-                .font(.system(size: 12, weight: .heavy))
-                .tracking(1.2)
-                .foregroundStyle(DAWTheme.background)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 10)
-                .background(DAWTheme.playback)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-                .glow(DAWTheme.playback, radius: 6, intensity: 0.4)
+        VStack(alignment: .leading, spacing: 6) {
+            Button(action: onApply) {
+                Text("APPLY QUANTIZE")
+                    .font(.system(size: 12, weight: .heavy))
+                    .tracking(1.2)
+                    .foregroundStyle(model.canApply ? DAWTheme.background : DAWTheme.textFaint)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .background(model.canApply ? DAWTheme.playback : DAWTheme.panelRaised)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .glow(DAWTheme.playback, radius: 6, intensity: model.canApply ? 0.4 : 0)
+            }
+            .buttonStyle(.plain)
+            .disabled(!model.canApply)
+            .help("Apply the quantize to this clip (one undo step)")
+            // The explain target is the BUTTON — the same frame it decorated
+            // before this view became a VStack (see `card`).
+            .explainable(.quantize)
+            if let refusal = model.refusalMessage {
+                PanelRefusalLine(message: refusal)
+            }
         }
-        .buttonStyle(.plain)
-        .help("Apply the quantize to this clip (one undo step)")
     }
 
     // MARK: - Small helpers

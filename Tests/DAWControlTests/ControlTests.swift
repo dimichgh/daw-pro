@@ -48,6 +48,14 @@ final class FakeEngine: AudioEngineControlling {
         permissionRequests += 1
     }
 
+    /// m25-d end-of-content stop: every bound the store pushed, in order.
+    /// Spying the whole sequence (not just the latest value) is what lets a
+    /// test prove a take was DISARMED rather than merely never armed.
+    private(set) var endStopPushes: [Double?] = []
+    var currentEndStop: Double? { endStopPushes.last ?? nil }
+    func clearEndStopPushes() { endStopPushes.removeAll() }
+    func setEndStop(beat: Double?) { endStopPushes.append(beat) }
+
     /// m22-c: live loudness support, so the every-command routing loop can
     /// exercise `mixer.liveLoudness` inline (the protocol DEFAULT is nil →
     /// engineUnavailable — that teaching path is pinned in
@@ -1511,6 +1519,16 @@ struct CommandRouterTests {
             // m22-g P2: OFF is the idempotent never-refusing side of the A/B
             // monitor (design §5.6) — a legitimate headless route.
             "reference.setMonitor": ["on": .bool(false)],
+            // m28-knob. DRIVEN with params rather than EXCLUDED, because both
+            // of these have a genuinely inert form and route coverage is worth
+            // more than an exclusion entry: an empty `bindings` array clears an
+            // already-empty table, and `cancel` disarms a learn that was never
+            // armed. ⚠️ `cancel` and NOT `target` on purpose — arming would
+            // bring the CoreMIDI client up and connect to the user's real MIDI
+            // sources, which a unit test must never do. (Arming IS covered, in
+            // MIDIControlTests, against a fake engine.)
+            "midi.setControlMap": ["bindings": .array([])],
+            "midi.learnControl": ["cancel": .bool(true)],
             "transport.seek": ["beats": .number(0)],
             "marker.add": ["beat": .number(0)],
             "marker.remove": ["markerId": .string(removableMarkerID)],
@@ -1534,6 +1552,12 @@ struct CommandRouterTests {
             // Runs before transport.record in allCommands — the metronome
             // route is refused mid-take, so ordering is load-bearing here.
             "transport.setMetronome": ["enabled": .bool(true), "countInBars": .number(1)],
+            // m25-d. Registered LAST in allCommands, so this loop reaches it
+            // mid-take — and it is deliberately ACCEPTED while recording
+            // (inert, never armed) rather than refused, which is exactly what
+            // makes it safe to exercise here instead of excluding it. Sending
+            // `true` restores the default, leaving no state behind.
+            "transport.setStopAtContentEnd": ["enabled": .bool(true)],
             "track.add": [:],
             "track.remove": ["trackId": .string(trackID)],
             "track.rename": ["trackId": .string(trackID), "name": .string("X")],
@@ -1681,7 +1705,16 @@ struct CommandRouterTests {
             // IN the loop.
             if ["track.remove", "project.save", "project.open", "project.new",
                 "project.recover",
-                "edit.undo", "edit.redo", "clip.setNotes", "clip.remove",
+                "edit.undo", "edit.redo", "clip.setNotes",
+                // clip.getNotes needs a clip id like the other per-clip
+                // reads (the clip.analyzeAudio/clip.detectPitch rationale) —
+                // this loop's clip.addMIDI clip id is minted mid-loop, not
+                // known ahead of time. Proven by ClipGetNotesCommandTests
+                // (happy path, round trip, both filters, the totalNotes vs
+                // returnedNotes split, the read-only pin, and every
+                // rejection).
+                "clip.getNotes",
+                "clip.remove",
                 "clip.split", "clip.trim", "clip.move",
                 // clip.duplicate (m15-d) needs a clip id like the other per-clip
                 // edits; proven by ArrangeCommandTests (round-trip + overlap
@@ -1696,6 +1729,38 @@ struct CommandRouterTests {
                 // ControllerLaneCommandTests (round-trip + teaching errors) and
                 // DAWCore ControllerLaneStoreTests.
                 "clip.setControllerLane", "clip.removeControllerLane",
+                // clip.applyBreathContour (m27 leg D) needs a MIDI clip id for
+                // the same reason as the two directly above — it is the
+                // authoring primitive over that pair, and a bare call is the
+                // ordinary "missing or invalid required param 'clipId'"
+                // refusal this loop cannot express (it sends no params).
+                // Proven by ControllerLaneCommandTests (every-parameter
+                // round-trip through a real router call, plus the teaching
+                // errors) and DAWCore ControllerLaneStoreTests / DAWEngine
+                // SamplerTests' offline-render gate.
+                "clip.applyBreathContour",
+                // clip.applyEffortShape (breath pad P1) is the composing verb
+                // over clip.applyBreathContour and needs the same MIDI clip id
+                // — a bare call is the ordinary "missing or invalid required
+                // param 'clipId'" refusal this loop, which sends no params,
+                // cannot express.
+                // ⚠️ P2 (the ring) RETIRED THE SECOND REASON THIS COMMENT USED
+                // TO GIVE: `pattern` is NO LONGER required — it is now one of
+                // TWO accepted gesture forms (`pattern`, or `ringAngle`
+                // [+ optional `ringRadius`/`ring`]), and supplying NEITHER is
+                // refused app-side with an error naming both. `clipId` alone
+                // still keeps this verb out of the loop, so the exclusion is
+                // unchanged in effect — but the rationale is not, and a stale
+                // reason is how an exclusion silently goes vacuous.
+                // Proven by ControllerLaneCommandTests (round-trip,
+                // every-new-parameter reachability, case-insensitive pattern
+                // resolution, the unknown-pattern refusal that lists the valid
+                // ids, the pattern-owned-key rejections, and P2's ring
+                // round-trip / both-forms / orphan-decoration / neither-form
+                // fork with positive controls) and DAWCore
+                // ControllerLaneStoreTests / EffortPatternTests /
+                // EffortRingTests.
+                "clip.applyEffortShape",
                 "clip.setFades",
                 // clip.fitToContent (m21-d) needs a clip id like the other
                 // per-clip edits; proven by ClipFitToContentCommandTests
@@ -1712,6 +1777,18 @@ struct CommandRouterTests {
                 // engine-default-throw path) and DAWCore
                 // AudioContentAnalyzerTests.
                 "clip.analyzeAudio",
+                // clip.detectPitch (m23-ap-3) needs a clip id like the other
+                // per-clip reads AND a REAL file on disk (detectClipPitch
+                // checks FileManager.fileExists before calling the engine) —
+                // this bare router's shared clip points at a path nothing
+                // wrote, so it would hit the missing-file invalidClipEdit
+                // even with an engine override. Proven by
+                // ClipDetectPitchCommandTests (happy path shape, honest
+                // absence, window clamping, MIDI/missing-file/unknown-clip
+                // rejections, and the engine-default-throw path) and
+                // DAWEngineTests ClipPitchAnalyzerTests (real SwiftF0
+                // inference).
+                "clip.detectPitch",
                 // clip.crossfade (m11-d) needs TWO adjacent audio clips with source
                 // material on each side of the seam — a fixture this shared, single-
                 // clip project doesn't have. Proven by ClipCrossfadeCommandTests
@@ -1746,6 +1823,17 @@ struct CommandRouterTests {
                 // shape, undo, offline-render gate) by SampleLibraryCommandTests
                 // with temp-dir fixtures.
                 "instrument.importSampleLibrary",
+                // instrument.describeSampler (m26-i) needs a track whose
+                // sampler is ACTUALLY configured (`instrument?.sampler !=
+                // nil`) — this loop's own `track.setInstrument` entry for
+                // `instTrackID` only sets `waveform` (a polySynth knob) and
+                // never touches `sampler`, so a bare call here would
+                // legitimately hit the "no sampler configured yet" refusal,
+                // the au.describeParams "no live hosted instance" rationale.
+                // Proven end-to-end (globals, provenance, zone-summary
+                // coverage/gaps, paging, every refusal) by
+                // InstrumentDescribeSamplerCommandTests.
+                "instrument.describeSampler",
                 // m23-k3: both MIDI-import verbs read a REAL .mid off disk — a
                 // fixture this bare loop doesn't stage — and clip.importMIDI
                 // additionally needs an existing MIDI clip. The
@@ -1815,6 +1903,12 @@ struct CommandRouterTests {
                 // plugin.listOpenUIs is NOT excluded: it answers ok with
                 // {available:false} when the seam is nil.
                 "plugin.openUI", "plugin.closeUI",
+                // edit.pasteClips (m26-k) routes through CommandRouter.editPaste,
+                // the same app-layer-seam-nil-on-a-bare-router rationale as
+                // plugin.openUI/closeUI above — it legitimately returns the
+                // actionable headless error here. Proven by
+                // EditPasteClipsCommandTests (router + a fake EditPasteControlling).
+                "edit.pasteClips",
                 // au.describeParams / au.setParam (hosted-AU parameter
                 // surface) need a LIVE `.ready` hosted Audio Unit behind the
                 // target — this bare router's FakeEngine hosts none (the
@@ -1866,6 +1960,15 @@ struct CommandRouterTests {
                 // throws, and stays IN the loop.
                 "reference.import", "reference.remove",
                 "reference.analyze",
+                // audio.profileFile (m25-z) needs BOTH a real file on disk
+                // (this bare loop stages no fixture, the vc.importVoiceModel/
+                // clip.transcribe rationale) AND the profileFile capability
+                // this bare FakeEngine doesn't override — the
+                // reference.analyze/clip.analyzeAudio rationale. Proven by
+                // AudioProfileFileCommandTests with an injected temp file + a
+                // profiling-capable fake, and by FileProfilerTests (real DSP,
+                // no fake) at the DAWEngine layer.
+                "audio.profileFile",
                 // reference.setOffset/setTrim/compare (m22-g P2) need a slot
                 // that only exists after the import this loop deliberately
                 // doesn't run (compare additionally needs a live loudness
@@ -1885,6 +1988,25 @@ struct CommandRouterTests {
                 // AuditionCommandTests against a stopped transport — the
                 // reference.import rationale.
                 "note.audition",
+                // pad.previewEffort (breath pad P6) is note.audition's neighbour
+                // in allCommands and excluded for note.audition's reason PLUS
+                // one of its own. BOTH are written down because either alone
+                // invites the wrong repair:
+                //  1. `begin`/`move` are refused mid-take (same design §9 rule —
+                //     anything heard during a take is assumed to be in it), and
+                //     this loop leaves transport.record's take rolling.
+                //  2. ⛔ Do NOT "fix" this by feeding it {gesture:"end"}. `end`
+                //     is allowed mid-take on purpose, but with no gesture open
+                //     it throws by design ("'end' has nothing to release"), so
+                //     it would fail here too — and if it ever stopped throwing,
+                //     the loop would be exercising the degenerate no-op branch
+                //     while looking like route coverage. A green vacuous check
+                //     is worse than an honest exclusion.
+                // The route (all three phases, both identity guards, the rate
+                // cap, the release-to-neutral law) is proven against a stopped
+                // transport by PadPreviewCommandTests — the note.audition
+                // rationale verbatim.
+                "pad.previewEffort",
                 // clip.transcribe (m23-n2b) hits a REAL WhisperTranscriber —
                 // this bare router doesn't inject a fake (there is no
                 // WhisperTranscriber protocol to fake; the actor IS the
@@ -1930,7 +2052,17 @@ struct CommandRouterTests {
                 // ⚠️ `ai.modelResidency` is read-only, never throws, touches no
                 // filesystem on an unregistered coordinator, and stays IN the
                 // loop — the ai.sidecarStatus rationale.
-                "ai.modelUnload"].contains(command) {
+                "ai.modelUnload",
+                // vc.importVoiceModel (m23-di-2a) copies a real file into the
+                // app-owned voice store (~/Library/Application Support/DAWPro/
+                // VoiceModels on this bare router's default
+                // voiceModelImportDirectory) — the instrument.importSoundBank/
+                // reference.import real-FS-side-effect exclusion, verbatim.
+                // It also needs a real modelPath file on disk, a fixture this
+                // bare loop doesn't stage. Proven with injected temp dirs by
+                // VoiceModelImportCommandTests and AIServicesTests/
+                // VoiceModelImportTests.
+                "vc.importVoiceModel"].contains(command) {
                 continue
             }
             let response = await router.handle(ControlRequest(

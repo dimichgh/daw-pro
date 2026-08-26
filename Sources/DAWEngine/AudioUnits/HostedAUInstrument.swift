@@ -68,6 +68,14 @@ public final class HostedAUInstrument: InstrumentRendering, @unchecked Sendable 
     /// Sample rate the AU's render resources are currently allocated at.
     private var preparedSampleRate: Double
 
+    /// Leg R-1: the offline-render flag this instrument's AU was prepared with,
+    /// carried ONLY so the rate-renegotiation path below can re-assert it —
+    /// `deallocateRenderResources` + `allocateRenderResources` is a SECOND
+    /// allocate site, outside the registry's prepare body, and T6 already
+    /// measured that reallocation resets per-instance AU state. Never read on
+    /// the render thread. False for every live instrument.
+    let rendersOffline: Bool
+
     /// `scheduleMIDIOverride` is a TEST SEAM (m16-b2): it replaces the AU's
     /// captured schedule block so the exact bytes `render()`/`reset()` emit
     /// (kind translation, the 2-byte channel-pressure length, the reset
@@ -76,6 +84,7 @@ public final class HostedAUInstrument: InstrumentRendering, @unchecked Sendable 
     @MainActor
     init(au: AUAudioUnit, sampleRate: Double,
          serializedBankTeardown: Bool = false,
+         rendersOffline: Bool = false,
          scheduleMIDIOverride: AUScheduleMIDIEventBlock? = nil) throws {
         // Called AFTER allocateRenderResources — renderBlock is only valid then.
         guard let schedule = au.scheduleMIDIEventBlock else {
@@ -83,6 +92,7 @@ public final class HostedAUInstrument: InstrumentRendering, @unchecked Sendable 
         }
         auAudioUnit = au
         self.serializedBankTeardown = serializedBankTeardown
+        self.rendersOffline = rendersOffline
         renderBlock = au.renderBlock
         scheduleMIDI = scheduleMIDIOverride ?? schedule
         preparedSampleRate = sampleRate
@@ -145,6 +155,30 @@ public final class HostedAUInstrument: InstrumentRendering, @unchecked Sendable 
                     throw EngineError.renderFailed("no standard format at \(sampleRate) Hz")
                 }
                 try auAudioUnit.outputBusses[0].setFormat(format)
+                // Leg R-1 — THE SECOND ALLOCATE SITE, and this line is
+                // BELT-AND-BRACES, stated plainly because a reader deserves to
+                // know which lines are load-bearing.
+                //
+                // MEASURED 2026-08-20: `renderingOffline` SURVIVES a
+                // deallocate/allocate cycle on every component tested — a plain
+                // `AUAudioUnit` subclass, AUSampler through
+                // `AUAudioUnitV2Bridge`, and DecentSampler (the plugin in the
+                // field report) — and at the raw v2 layer across
+                // `AudioUnitUninitialize`/`AudioUnitInitialize` too. So the
+                // registry's single set before ITS allocate already covers this
+                // path today, and DELETING this line reddens nothing (verified
+                // by planting exactly that deletion).
+                //
+                // It stays because the persistence is an OBSERVED BEHAVIOUR of
+                // the components installed here, not a contract: Apple words
+                // the requirement per-allocate ("before asking the unit to
+                // allocate render resources") and documents nothing about
+                // survival. A plugin that cleared it on deallocate would
+                // silently regress a bounce after a rate renegotiation, and one
+                // property write on a path that already accepts a bounded
+                // main-actor stall is a cheap way to not depend on that.
+                AUHostRegistry.applyOfflineRenderFlag(to: auAudioUnit,
+                                                     rendersOffline: rendersOffline)
                 try withBankGateIfDLS { try auAudioUnit.allocateRenderResources() }
                 // Reallocation destroys per-instance sampler state (measured,
                 // m10-n T6) — restore it BEFORE the next render pull. The AU

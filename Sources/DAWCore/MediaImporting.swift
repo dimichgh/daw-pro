@@ -200,6 +200,13 @@ public enum ProjectError: Error, LocalizedError {
     // audition rejection lands BEFORE anything is pushed to a renderer, so a
     // refused call is guaranteed to have sounded nothing.
     case invalidAudition(String)
+    // Breath pad live preview (P6, pad.previewEffort): a gesture-scoped refusal
+    // built at throw time — a `move`/`end` with no gesture open, an effort
+    // outside 0…1, a CC outside 0…127, or a target that is not an instrument
+    // track. Its own case rather than `invalidAudition` because the preview is
+    // NOT an audition: it opens no voice, and a caller reading "audition" would
+    // look for a stuck note that cannot exist. Same ready-to-show contract.
+    case invalidPadPreview(String)
     // Speech-to-text (m23-n2b, clip.transcribe): resolves its `clipId` param
     // to that clip's backing audio file — a MIDI clip (or, structurally
     // unreachable via any current mutation, an audio clip with no backing
@@ -228,6 +235,19 @@ public enum ProjectError: Error, LocalizedError {
     // while `errorDescription` can reach no store to look one up.
     case clipsWouldOverlapOnDestination(firstID: UUID, firstName: String,
                                         secondID: UUID, secondName: String)
+    // audio.profileFile (m25-z): the `path` param names no file on disk.
+    // Deliberately its OWN case rather than reusing `.importFailed` (whose
+    // wording is import-specific, "Audio import failed: …") or
+    // `.referenceFileMissing` (whose wording assumes a prior import) —
+    // profileFile never imports or copies anything, so neither message
+    // would read correctly.
+    case audioFileNotFound(String)
+    // Pitch detection (m23-ap-3, clip.detectPitch): resolves its `clipId`
+    // param to that clip's backing audio file — a MIDI clip (or,
+    // structurally unreachable via any current mutation, an audio clip with
+    // no backing file) has none to analyze. Same shape as
+    // transcriptionRequiresAudioClip/analysisRequiresAudioClip.
+    case pitchDetectionRequiresAudioClip(UUID)
 
     public var errorDescription: String? {
         switch self {
@@ -538,6 +558,12 @@ public enum ProjectError: Error, LocalizedError {
             // Built at throw time (which audition field was out of range, and
             // what the legal range is); surfaced verbatim.
             return message
+        case .invalidPadPreview(let message):
+            // Built at throw time (which gesture rule or range was broken, and
+            // what to do instead); surfaced verbatim. Every pad-preview refusal
+            // lands BEFORE anything reaches a renderer, so a refused call is
+            // guaranteed to have moved no controller.
+            return message
         case .voiceConversionRequiresAudioClip(let id):
             // Exact wording is contract (control protocol + MCP surface it verbatim).
             return "clip \(id.uuidString) is a MIDI clip — vc.convertVocals converts an audio clip's backing recording only (pass 'path' instead, or point clipId at a real audio clip)"
@@ -581,6 +607,16 @@ public enum ProjectError: Error, LocalizedError {
                 + " (\(secondID.uuidString)) would overlap on the destination track — moving several tracks'"
                 + " clips onto one track needs them at different beats (move them one at a time, or use"
                 + " clip.moveManyByTracks to keep them on separate tracks)"
+        case .audioFileNotFound(let path):
+            // Exact wording is contract (control protocol + MCP surface it verbatim).
+            return "no audio file at \(path) — check the path (audio.profileFile reads "
+                + "an arbitrary file on disk, never a project track or the reference slot)"
+        case .pitchDetectionRequiresAudioClip(let id):
+            // Exact wording is contract (control protocol + MCP surface it
+            // verbatim). MIDI notes already have a definite pitch — nothing
+            // to detect.
+            return "clip \(id.uuidString) is a MIDI clip — clip.detectPitch applies only to "
+                + "audio clips (MIDI notes already carry a definite pitch — read them directly)"
         }
     }
 

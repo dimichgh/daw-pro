@@ -124,6 +124,29 @@ public enum ExplainID: String, CaseIterable, Sendable {
     /// chip — one card summarizes the whole affordance (its ⌘ shortcuts and the
     /// pinch gesture included, the `arrangeZoom` honest-scope precedent).
     case pianoRollZoom
+    /// The piano-roll header's MAXIMIZE toggle (m25-b-1) — one card for the whole
+    /// mode, its two exits included (the `pianoRollZoom` honest-scope precedent:
+    /// a card describes the affordance, not one of its buttons).
+    case pianoRollMaximize
+    /// The piano roll's corner VIEWPORT MINIMAP (m25-b-2) — one card for the whole
+    /// navigator, its click AND its drag included (the `pianoRollZoom` honest-scope
+    /// precedent: a card describes the affordance, not one of its gestures). The
+    /// card is anchored on the map itself, so it is reachable in the collapsed
+    /// state too — a control you cannot see is exactly the one a beginner needs
+    /// explained.
+    case pianoRollMinimap
+    /// The NOTES | STEPS chip pair (m23-cq-1) — which editor the pane shows for
+    /// this clip. One card for the whole pair (the `referenceABToggle` shared-
+    /// control rule): the two halves are one control, not two.
+    case stepSequencerMode
+    /// The step grid itself (m23-cq-1) — a Canvas; one card summarizes its whole
+    /// gesture vocabulary, which is a single click (the `pianoRollGrid`
+    /// honest-scope precedent).
+    case stepSequencerGrid
+    /// The Pro STEP chip (m23-cq-1) — how finely the bar is divided into boxes.
+    /// Distinct from `pianoRollSnap`, which loosens or tightens where a DRAGGED
+    /// note lands; this one decides how many boxes exist at all.
+    case stepSequencerStep
 
     // MARK: Arrange (timeline + sidebar)
     case arrangeSnap
@@ -132,6 +155,11 @@ public enum ExplainID: String, CaseIterable, Sendable {
     /// (its ⌘ shortcuts and the pinch gesture included — the honest-scope rule
     /// for gesture chrome).
     case arrangeZoom
+    /// The arrange-toolbar WAVE cluster (m25-e): the −/state/+ waveform-height
+    /// chip and the menu it opens. One card for the whole cluster (the
+    /// `arrangeZoom` honest-scope precedent) — it covers BOTH halves, the auto-fit
+    /// mode and the magnification, because they compose into one drawn height.
+    case arrangeWaveformZoom
     /// The arrange-toolbar FOLLOW chip (m23-c2). One card for the whole feature:
     /// it governs the timeline AND the note editor, so its scope is both surfaces
     /// (the `arrangeZoom` honest-scope precedent).
@@ -242,6 +270,15 @@ public enum ExplainID: String, CaseIterable, Sendable {
     /// Never offered for sound-bank or Audio Unit instruments. NOT an AI
     /// surface — no violet.
     case polySynthEditor
+
+    // MARK: Sampler editor (m26-i)
+    /// The built-in SAMPLER editor card — the TUNE affordance on the instrument
+    /// picker's Sampler row AND the card it opens share this ONE id, the same
+    /// shared-control + honest-scope rules the poly synth's entry follows: the
+    /// globals, the zone map and the per-zone inspector are one coherent
+    /// surface, so per-knob entries would fake curation. NOT an AI surface —
+    /// no violet.
+    case samplerEditor
 
     // MARK: AI panels (violet affordances — Rule 3)
     case aiCopilot
@@ -464,6 +501,21 @@ public enum ExplainCatalog {
         .pianoRollZoom: ExplainEntry(
             title: "Editor Zoom",
             body: "Zooms the note grid in for detailed edits or out to see the whole part. Use the magnifier buttons, pinch on the grid, or press the zoom keys while the editor is focused; your zoom is remembered."),
+        .pianoRollMaximize: ExplainEntry(
+            title: "Maximize Editor",
+            body: "Fills the window with the note editor when you need room to work, leaving only the ruler strip of the track area above it. Press it again to go back, or press Escape — either way you land on the editor height you had before."),
+        .pianoRollMinimap: ExplainEntry(
+            title: "Part Map",
+            body: "A small map of the whole part, with a box showing the slice you are looking at. Click anywhere on it to jump the editor there, or drag to slide through the part. Tap the corner button to tuck it away."),
+        .stepSequencerMode: ExplainEntry(
+            title: "Notes / Steps",
+            body: "Two ways to edit the same part. Notes is the piano roll for melodies; Steps is a drum-machine grid of boxes, which is far quicker for a kick, snare and hats pattern. Drum parts open in Steps."),
+        .stepSequencerGrid: ExplainEntry(
+            title: "Step Grid",
+            body: "One row per sound and one box per step. Click an empty box to place a hit, click a lit box to take it away — that is the whole surface, no keys needed. Rows are named for you on a drum kit."),
+        .stepSequencerStep: ExplainEntry(
+            title: "Step Size",
+            body: "How finely each bar is chopped into boxes: 1/16 is the usual drum grid, 1/8 is half as many boxes and twice as wide, and the triplet sizes give a swung, rolling feel. Simple mode keeps it at 1/16."),
 
         // MARK: Arrange (timeline + sidebar)
         .arrangeSnap: ExplainEntry(
@@ -472,6 +524,9 @@ public enum ExplainCatalog {
         .arrangeZoom: ExplainEntry(
             title: "Zoom",
             body: "Zooms the timeline in for fine edits or out to see the whole song — the view holds its place around the playhead so nothing jumps. You can also pinch the timeline, and S, M, L set how tall each track row is."),
+        .arrangeWaveformZoom: ExplainEntry(
+            title: "Waveform Height",
+            body: "Sets how tall the sound shapes are drawn inside your audio clips. Fit stretches quiet material up to fill the block so its pattern shows; True Level draws every clip at its real loudness so you can see which are louder. Use − and + to magnify further."),
         .arrangeFollow: ExplainEntry(
             title: "Follow the Playhead",
             body: "Keeps the playing position in view: as the song plays past the right edge, the timeline and the note editor turn to the next page on their own. Scroll somewhere yourself and following steps aside so it never fights you — press play again, or click FOLLOW, to hand it back."),
@@ -562,6 +617,11 @@ public enum ExplainCatalog {
         .polySynthEditor: ExplainEntry(
             title: "Poly Synth Controls",
             body: "The tuning panel for the built-in synth. Pick its basic wave shape, set how each note fades in and out, brighten or darken the tone with the filter, and set its level. Drag a knob to hear the change live; double-click resets it."),
+
+        // MARK: Sampler editor (m26-i)
+        .samplerEditor: ExplainEntry(
+            title: "Sampler Controls",
+            body: "The tuning panel for the built-in sampler. The top row sets the whole instrument; the list below shows every sample and which keys it answers to. Pick one to change its tuning, envelope, level and looping. Drag a knob and let go to apply."),
 
         // MARK: AI panels (violet affordances — Rule 3)
         .aiCopilot: ExplainEntry(

@@ -81,7 +81,7 @@
 //
 // Recorded as a SET of named legs, never a count (m20-e: a race makes totals a
 // range, the set is stable). See the close-out record for the measured sets.
-import { launchStaging, stopStaging, STAGING_PORT } from "./_staging.mjs";
+import { launchStaging, stopStaging, STAGING_PORT, verdict } from "./_staging.mjs";
 
 const GATE = "m23aj";
 const SETTLE_MS = 250;
@@ -585,6 +585,14 @@ try {
   //      `KeyPress`, so `.handled` / `.ignored` is never returned to anything and
   //      the `ScrollView` cannot react whatever the consume rule says. And the
   //      real-key route is closed too: m23-g1 MEASURED that an unbundled staging
+  // ⚠️ CORRECTED 2026-08-10 (m23-fh, at the m23-cf close). THE CLAIM BELOW IS WRONG.
+  // `keyDelete -> delivered:false` was NEVER a staging/tooling limitation. It was the
+  // app HONESTLY REPORTING THAT NOTHING HANDLED THE KEY: `firstResponder` read `none`
+  // with a clip selected, so no SwiftUI focus existed for `.onKeyPress` to attach to.
+  // A REAL APP DEFECT wearing the costume of a harness limit — m23-cf fixed it with a
+  // window-level NSEvent monitor and its gate now passes 27/27 with redden legs, so
+  // key-event gating on staging is DEMONSTRABLY POSSIBLE. Do not quote the text below
+  // as a reason not to write one. Root cause still open as m23-fi.
   //      binary does not route real key events (`keyDelete` -> `delivered:false`),
   //      re-probed at G3 below rather than inherited.
   //   2. NOTHING REPORTS A RAW PIXEL OFFSET. The shared `ScrollView(.vertical)`
@@ -881,4 +889,4 @@ try {
 console.log(`\nM23AJ ${pass}/${pass + fail}`
   + `  (${observations.length} observations, ${skips.length} skipped)`);
 if (failures.length) console.log("failed legs:\n  " + failures.join("\n  "));
-process.exit(fail === 0 ? 0 : 1);
+verdict({ ran: pass + fail, failed: fail });

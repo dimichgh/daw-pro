@@ -77,7 +77,7 @@
 // BINARY-TESTS-THE-PREVIOUS-BUILD.
 import fs from "fs";
 import { execFileSync } from "child_process";
-import { buildOrAbort, startStaging, stopStaging } from "./_staging.mjs";
+import { buildOrAbort, startStaging, stopStaging, panelDensityGuard, verdict } from "./_staging.mjs";
 
 const GATE = "m23ah";
 const PORT = process.env.DAW_CONTROL_PORT || "17695";
@@ -113,7 +113,15 @@ const SETTLE = 600;
 
 fs.mkdirSync(OUT, { recursive: true });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const killer = setTimeout(() => { console.error("TIMEOUT"); process.exit(2); }, 900_000);
+// m23-ej-2: `let`, not `const` — closed over by the killer and the
+// uncaughtException/unhandledRejection handlers below, both armed before
+// `guard` exists; `guard?.` everywhere it is used from here on.
+let guard = null;
+const killer = setTimeout(async () => {
+  console.error("TIMEOUT");
+  await guard?.restore("timeout");
+  process.exit(2);
+}, 900_000);
 
 // ── build, so the gate cannot certify the previous binary ────────────────────
 buildOrAbort({ root: REPO, skip: !!process.env.M23AH_SKIP_BUILD });
@@ -141,8 +149,9 @@ await sleep(4000);
 // deterministic rc=2 instead of an unhandled-rejection trace.) They deliberately
 // close over only GATE/PIDFILE, so they are valid the instant staging exists.
 for (const ev of ["uncaughtException", "unhandledRejection"]) {
-  process.on(ev, (e) => {
+  process.on(ev, async (e) => {
     console.error(`${ev}:`, e && e.stack ? e.stack : e);
+    await guard?.restore(ev);
     try { stopStaging(GATE, PIDFILE); } catch {}
     process.exit(2);
   });
@@ -174,6 +183,7 @@ async function connect() {
   throw new Error("no connect");
 }
 const { ws, req } = await connect();
+guard = panelDensityGuard(req);   // req already unwraps to .result ?? whole msg
 
 const checks = [];
 const check = (name, ok, detail) => {
@@ -272,7 +282,7 @@ try {
   // ══ FIXTURE — the geometry the band arithmetic was measured at ═════════════
   await req("project.new", { discardChanges: true });
   await req("debug.windowFrame", { width: WIN_W, height: WIN_H });
-  await req("debug.panelDensity", { panel: "arrange", mode: "simple" });
+  await guard.set("arrange", "simple");
   const lead = (await req("track.add", { kind: "instrument", name: "Lead" })).id;
   const vox = (await req("track.add", { kind: "audio", name: "Vox" })).id;
   const bus = (await req("track.add", { kind: "bus", name: "Reverb" })).id;
@@ -496,8 +506,9 @@ const pass = checks.filter((c) => c.ok).length;
 console.log(`\nM23AH ${pass}/${checks.length}`);
 for (const c of checks) if (!c.ok) console.log(`FAIL ${c.name}\n     ${c.detail}`);
 fs.writeFileSync(`${OUT}/results.json`, JSON.stringify(checks, null, 2));
+await guard.restore("normal exit");
 try { ws.close(); } catch {}
 stopStaging(GATE, PIDFILE);   // pidfile-EXACT, positional signature (_staging.mjs:265)
 clearTimeout(killer);
 // Explicit: without it node waits on lingering handles and never returns.
-process.exit(pass === checks.length ? 0 : 1);
+verdict({ ran: checks.length, failed: checks.length - pass });

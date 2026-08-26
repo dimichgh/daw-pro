@@ -45,6 +45,14 @@
 //
 // WHAT THIS DOES NOT PROVE: that SwiftUI hands a REAL DELETE key to the arrange
 // rather than to the roll. m23-g1 measured that an unbundled staging binary does
+// ⚠️ CORRECTED 2026-08-10 (m23-fh, at the m23-cf close). THE CLAIM BELOW IS WRONG.
+// `keyDelete -> delivered:false` was NEVER a staging/tooling limitation. It was the
+// app HONESTLY REPORTING THAT NOTHING HANDLED THE KEY: `firstResponder` read `none`
+// with a clip selected, so no SwiftUI focus existed for `.onKeyPress` to attach to.
+// A REAL APP DEFECT wearing the costume of a harness limit — m23-cf fixed it with a
+// window-level NSEvent monitor and its gate now passes 27/27 with redden legs, so
+// key-event gating on staging is DEMONSTRABLY POSSIBLE. Do not quote the text below
+// as a reason not to write one. Root cause still open as m23-fi.
 // not route real key events (`keyDelete` -> `delivered:false`), and m23-x/m23-y
 // both record that arbitration as a SKIP. It is recorded as a SKIP here too,
 // never as a pass.
@@ -83,7 +91,7 @@
 //
 //   node scripts/gates/m23ak-note-selection-drop.mjs
 import fs from "fs";
-import { buildOrAbort, startStaging, stopStaging } from "./_staging.mjs";
+import { buildOrAbort, startStaging, stopStaging, panelDensityGuard, verdict } from "./_staging.mjs";
 
 const GATE = "m23ak";
 const PORT = process.env.DAW_CONTROL_PORT || "17695";
@@ -93,7 +101,12 @@ const BINARY = process.env.M23AK_BINARY || ".build/debug/DAWApp";
 const REPO = process.env.M23AK_REPO || process.cwd();
 fs.mkdirSync(OUT, { recursive: true });
 
-const killer = setTimeout(() => { console.error("TIMEOUT"); process.exit(2); }, 600_000);
+let guard = null;   // m23-ej-2: `let` — assigned after connect, read by the killer below
+const killer = setTimeout(async () => {
+  console.error("TIMEOUT");
+  await guard?.restore("timeout");
+  process.exit(2);
+}, 600_000);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const LEN = 2;          // clip length in beats
@@ -155,6 +168,7 @@ console.log(`staging pid ${staging.pid} on :${PORT}`);
 await sleep(4500);
 
 const { ws, req } = await connect();
+guard = panelDensityGuard(req);   // req already unwraps to .result ?? whole msg
 const checks = [];
 const check = (name, ok, detail) => {
   checks.push({ name, ok, detail });
@@ -234,9 +248,12 @@ async function fixture(name) {
 }
 
 let teardownDone = false;
-function teardown() {
+async function teardown() {
   if (teardownDone) return;
   teardownDone = true;
+  // m23-ej-2: both call sites below (normal exit and the catch block) route
+  // through here, so the restore lives once, before staging goes down.
+  await guard?.restore("teardown");
   // PIDFILE-EXACT, our OWN child only. Never pkill/pgrep — 17600 is the user's
   // live app and must survive this script by construction.
   stopStaging(GATE, PIDFILE);
@@ -246,7 +263,7 @@ try {
   // ══ FIXTURE ══════════════════════════════════════════════════════════════
   await req("project.new", { discardChanges: true });
   await req("debug.windowFrame", { width: 1400, height: 1000 });
-  await req("debug.panelDensity", { panel: "arrange", mode: "pro" });
+  await guard.set("arrange", "pro");
   await req("debug.arrangeDrag", { snap: "bar" });
   const f0 = await sel({});
   check("F1 fixture: the arrange grid in force is BAR — one bare press is 4 beats, "
@@ -515,6 +532,16 @@ try {
   // as an `inout` argument across a module boundary — the growth path a
   // click-watching trigger is most likely to miss, and the biggest one there is
   // (m23-y: selecting a track selects ALL of its clips).
+  //
+  // ⚠️ m25-v: MUST BE ⇧, NOT PLAIN. m25-l-1 defect ② (USER RULING 2026-08-13)
+  // made a PLAIN header click clear the selection instead of growing it — so a
+  // plain click here would collapse the selection to nothing and close the
+  // roll (INV2) rather than widen past it, and this leg would be testing a
+  // different mechanism than the one it names. ⇧/⌘ still grows the selection
+  // via `formUnion` untouched, which is the "same trigger as a shift-click"
+  // this leg's own name already said. MEASURED at m25-v: unedited, this leg
+  // failed 2/2 (`notes=false count=0 editorClipId=false focus=false` — the
+  // plain click's clear, not a growth) before the one-line fix below.
   const L5 = await fixture("AK-TRACK");
   const [e1] = L5.clips;
   await sel({ act: "clear" });
@@ -526,11 +553,13 @@ try {
           && armed.count === 1,
         `editorClipId=${armed.editorClipId === e1} notes=${armed.pianoRollNoteSelection} `
         + `count=${armed.count}`);
-  await sel({ act: "clickTrack", trackId: L5.trackId });
+  await sel({ act: "clickTrack", trackId: L5.trackId, shift: true });
   const headed = await awaitNotes(false);
-  check("L5b a TRACK-HEADER click selects all three clips and drops the note "
+  check("L5b a ⇧ TRACK-HEADER click selects all three clips and drops the note "
         + "selection too, with the roll still open on its clip — the `inout` "
-        + "mutation path fires the same trigger as a shift-click",
+        + "mutation path fires the same trigger as a shift-click (m25-v: was "
+        + "a plain click before the m25-l-1 defect ② ruling made plain clear "
+        + "instead of grow)",
         headed.pianoRollNoteSelection === false && headed.count === 3
           && headed.editorClipId === e1 && headed.focusClipId === e1,
         `notes=${headed.pianoRollNoteSelection} count=${headed.count} `
@@ -572,13 +601,16 @@ try {
   for (const c of failed) console.log(`  FAILED: ${c.name} — ${c.detail}`);
   fs.writeFileSync(`${OUT}/result.json`, JSON.stringify({ checks, skips }, null, 2));
   clearTimeout(killer);
+  // ⚠️ m23-ej-2: teardown()'s guard.restore() round-trips over `req`/`ws` — it
+  // MUST run before ws.close(), never after (measured live on m23k4b's
+  // identical bug: closing first strands the restore write).
+  await teardown();
   ws.close();
-  teardown();
-  process.exit(failed.length ? 1 : 0);
+  verdict({ ran: checks.length, failed: failed.length });
 } catch (err) {
   console.error("GATE ERROR:", err);
   clearTimeout(killer);
+  await teardown();
   try { ws.close(); } catch {}
-  teardown();
   process.exit(2);
 }

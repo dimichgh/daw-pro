@@ -174,11 +174,18 @@ public enum CopilotToolCatalog {
     ]
 
     /// The versioned catalog of commands exposed to the Copilot. `v1` is the
-    /// curated allow-list (design §3), now 55 commands: transport (6),
-    /// tempo (2, m12-d), marker (5, m11-c), track (7), clip (16, m23-aj added
-    /// moveManyByTracks/moveManyToTrack), arrange (2, m15-d), take (2), mixer
-    /// (1), fx (5, m13-d master chain), render (2), ai (6), discovery (2),
-    /// edit (1).
+    /// curated allow-list (design §3): transport (6), tempo (2, m12-d),
+    /// marker (5, m11-c), track (7), clip (18 — m23-aj added
+    /// moveManyByTracks/moveManyToTrack, m27 leg D added applyBreathContour,
+    /// breath-pad P1 added applyEffortShape), arrange (2, m15-d), take (2),
+    /// mixer (1), fx (5, m13-d master chain), render (2), ai (6),
+    /// discovery (2), edit (1).
+    ///
+    /// ⚠️ The figures above are a READING AID and have rotted before (the
+    /// leading total said "55 commands" while `v1.count` was 76). The AUTHORITY
+    /// is `CopilotCatalogTests`, which pins `v1.count` and asserts the set is a
+    /// subset of `allCommands` and disjoint from `neverInclude`. Do not add one
+    /// to a number here and call it measured.
     public static let v1: [CopilotTool] = [
         // MARK: transport (6)
 
@@ -235,6 +242,13 @@ public enum CopilotToolCatalog {
                 ("countInBars", integerSchema(
                     "Number of bars of count-in clicks before recording starts, 0-4. Omit to keep the current value.",
                     minimum: 0, maximum: 4)),
+            ], required: ["enabled"])
+        ),
+        CopilotTool(
+            command: "transport.setStopAtContentEnd",
+            description: "Control whether playback stops automatically when the playhead reaches the end of the last clip (the end of the song). ON by default. Turn it OFF to let the transport keep running into empty space past the last clip, which is what Logic and Live do by default. A recording take NEVER stops at the content end regardless of this setting — recording past the end of existing material is the point of recording — and an active loop takes precedence, cycling forever. This is a session preference, not project data: it is not saved with the project and edit.undo does not affect it. Returns {stopAtContentEnd, contentEndBeat}, where contentEndBeat is the measured end of the last clip across all tracks (0 when the project has no clips). On project.snapshot the setting appears under the inverted name runsPastContentEnd, and only once it has been turned off — absent there means playback stops at the content end.",
+            schema: schemaObject([
+                ("enabled", booleanSchema("True to stop playback at the end of the last clip, false to keep running past it.")),
             ], required: ["enabled"])
         ),
 
@@ -567,6 +581,172 @@ public enum CopilotToolCatalog {
                             minimum: 0, maximum: 16383)),
                     ], required: ["beat", "value"]))),
             ], required: ["clipId", "type", "points"])
+        ),
+        CopilotTool(
+            command: "clip.applyBreathContour",
+            description: "Make held notes BREATHE — the single best fix for a wind, brass, string or vocal part that sounds like a synthesizer holding a key down. Generates the correlated performance contour a real player puts on a sustained note: an expression (CC 11) swell that dips just after the attack, peaks about two-thirds through, then tapers — moving LOUDNESS and, when the track's sampler has expressionFilterDepth above 0, BRIGHTNESS together — plus DELAYED vibrato (straight for the first ~0.5 s, then blooming to ±12 cents at 5.5 Hz) and a few cents of micro-sharpening at the top of the swell. Constant vibrato from the attack is the classic MIDI giveaway; this is the fix. Shapes every note in the clip by default, or just the ones in noteIds. MERGES with what is already on the lanes: points outside the shaped notes survive untouched, so you can run it note by note, or after hand-drawing something else. Notes too short for the straight opening plus one vibrato cycle get the swell only and no vibrato — that is deliberate, and the result says how many. Prefer this over hand-placing points with clip.setControllerLane, and over a volume-automation swell, which reads as a fader move rather than a player leaning in. One undo step. MIDI clips only. Read the response's `warnings`: they say when the contour will only be half audible.",
+            schema: schemaObject([
+                ("clipId", stringSchema("Id of the MIDI clip to shape, from project.snapshot.")),
+                ("noteIds", arraySchema(
+                    "Ids of the notes to shape (from clip.getNotes). OMIT to shape every note in the clip. An id not in the clip is refused outright — nothing is written.",
+                    items: stringSchema("A note id."))),
+                ("depth", numberSchema(
+                    "How far the swell falls below its peak, as a fraction of peakValue. Default 0.25 (about -2.5 dB peak to trough, the involuntary contour of a note held steady). Raise toward 0.5 for a written crescendo.",
+                    minimum: 0, maximum: 1)),
+                ("peakValue", integerSchema(
+                    "CC value at the top of the swell, 0-127. Default 127 — the lane's neutral, so the loudest instant is exactly as loud as the note with no contour at all and applying this can never quietly drop a balanced part.",
+                    minimum: 0, maximum: 127)),
+                ("peakPosition", numberSchema(
+                    "Where the peak sits as a fraction of the note's length. Default 0.65 — past the middle, so the note takes longer arriving than leaving.",
+                    minimum: 0.05, maximum: 0.95)),
+                ("attackSettleSeconds", numberSchema(
+                    "Seconds from the attack to the settling dip (the air column settling). Default 0.05, clamped to a quarter of a short note.",
+                    minimum: 0, maximum: 1)),
+                ("expressionCC", integerSchema(
+                    "Which CC carries the swell. Default 11 (expression) — the one the built-in sampler routes to amplitude with no opt-in, and the default target of its brightness filter.",
+                    minimum: 0, maximum: 127)),
+                ("expressionSpacingSeconds", numberSchema(
+                    "Seconds between expression points. Default 0.02. Controller lanes are STEPWISE, so a dense run is what makes a swell instead of a staircase.",
+                    minimum: 0.001, maximum: 1)),
+                ("vibratoOnsetSeconds", numberSchema(
+                    "Seconds of STRAIGHT playing before vibrato starts. Default 0.5. A note shorter than this plus one vibrato cycle gets no vibrato at all.",
+                    minimum: 0, maximum: 10)),
+                ("vibratoRateHz", numberSchema(
+                    "Vibrato rate in Hz. Default 5.5 (the middle of the 5-7 Hz band quoted for instrumental vibrato).",
+                    minimum: 0.2, maximum: 20)),
+                ("vibratoDepthCents", numberSchema(
+                    "Peak vibrato width in cents (a ± figure). Default 12 — deliberately conservative, because pitch bend is CHANNEL-WIDE and bends every voice sounding on the track. 0 turns vibrato off.",
+                    minimum: 0, maximum: 200)),
+                ("vibratoBloomSeconds", numberSchema(
+                    "Seconds for the vibrato to widen from nothing to full depth. Default 0.7.",
+                    minimum: 0, maximum: 10)),
+                ("vibratoReleaseSeconds", numberSchema(
+                    "Seconds before the note's end over which vibrato relaxes back to centre. Default 0.08.",
+                    minimum: 0, maximum: 10)),
+                ("sharpenCents", numberSchema(
+                    "Peak micro-sharpening in cents at the top of the swell, resolving as it falls (blowing harder pushes a wind instrument sharp). Default 4 — below the pitch JND on its own, but correlated with the swell, which is what reads as effort.",
+                    minimum: -200, maximum: 200)),
+                ("bendSpacingSeconds", numberSchema(
+                    "Seconds between pitch-bend points. Default 0.008. The bend run IS the vibrato waveform, so this is its sample rate.",
+                    minimum: 0.001, maximum: 1)),
+                ("bendRangeSemitones", numberSchema(
+                    "The instrument's pitch-bend range in semitones for a full deflection, so cents map correctly. Default 2 — exactly what the built-in sampler uses.",
+                    minimum: 0.01, maximum: 48)),
+            ], required: ["clipId"])
+        ),
+        CopilotTool(
+            command: "clip.applyEffortShape",
+            description: "Shape HOW HARD the player is blowing, using one named musical gesture instead of a pile of numbers — the composing verb on top of clip.applyBreathContour. Pick a pattern and it becomes the right contour for every note: `messaDiVoce` (grow to a peak mid-note, then fade), `lateBloom` (steady, then swell in the last third), `sforzandoPiano` (hit it, drop to soft, grow back), `subToneEntry` (start almost breath-only and rise into tone), `flat` (no shaping — the identity), `hairpinCrescendo` / `hairpinDiminuendo` (the whole PHRASE grows or falls away, note by note), `terraced` (step to one level and hold it for the phrase). The phrase-scoped patterns are the ones clip.applyBreathContour structurally cannot do: they split the part into phrases at the BREATHS (rests bigger than maxGapBeats) and place each note at its own point of the arc. Everything else — merging with what is already on the lanes, the point budget, the single undo step — is that verb's, unchanged. On a track hosting an Audio Unit (any sound-bank instrument, including the GM sax) bend vibrato is now WRITTEN normally at musical rates — m28-bug lowered the offline render block from 4096 to 512 frames, which took the bend lane's sampler from 11.719 Hz to 93.75 Hz and moved its alias out of the vibrato band; on that path the shape still moves LOUDNESS only, never brightness. Read the response: `minEffort` and `maxEffort` being equal means the shape ran and varied nothing. MAKE THE DOT MOVE with `path`: `drift` plus a `pathSeed` sends it wandering from one gesture into the next and back, so note 9 is shaped differently from note 2 the way a player's effort never repeats — and it is fully reproducible, because the wander is a pure function of the clip beat and the seed, so playback, a looped cycle and a bounce starting mid-song all agree. The response then carries a `path` block: `moved` says whether the dot travelled, `patternIds` lists every gesture it reached (one entry means the wander ran and did nothing musical), and `outrunsNotes` says it moved faster than the notes could sample it. THE AIR BUDGET: a wind player has a finite lungful, and `airEnforced` (DEFAULT FALSE, because it overrides what you wrote) makes a phrase that runs past it sag rather than hold. The response ALWAYS carries an `air` block whether or not you enforced it, because that is what answers \"why did this get quiet?\" — read `air.applied` first (false means the lane was not touched and the rest is a prediction), then `air.constrainedNoteCount`, and when anything was constrained `air.phrases[].constrainedNotes` names each note with what it asked for beside what the budget allowed. A part can also get quiet because you asked for it with a diminuendo; only the budget produces effortAllowed below effortRequested, which is why \"air runs out\" is deliberately not a pattern you can pick. PHYSIOLOGICAL HUMANISATION: `driftDepth` adds a slow 1/f sag to the baseline and `tremorDepth` a 4-8 Hz micro-tremor inside each note. Both DEFAULT TO 0 and off is byte-identical, so each is individually declinable after you hear it. The tremor is written on hosted-AU tracks too, up to 18.75 Hz — an offline bounce re-samples that lane at 93.75 Hz, so the alias copy is a few percent of the tremor instead of louder than it — and above that ceiling it is suppressed with a warning; the drift lands everywhere.",
+            schema: schemaObject([
+                ("clipId", stringSchema("Id of the MIDI clip to shape, from project.snapshot.")),
+                ("pattern", stringSchema("ONE named gesture. One of: flat, messaDiVoce, lateBloom, hairpinCrescendo, hairpinDiminuendo, terraced, sforzandoPiano, subToneEntry. An unknown name is refused, never silently defaulted. Pass EITHER this OR ringAngle — never both, never neither.")),
+                ("ringAngle", numberSchema(
+                    "THE RING — where the dot sits, in DEGREES, on a circle of all eight gestures, blending the two it sits between. 0=flat, 45=messaDiVoce, 90=lateBloom, 135=hairpinCrescendo, 180=hairpinDiminuendo, 225=terraced, 270=sforzandoPiano, 315=subToneEntry. Landing exactly on one gives that gesture exactly; only ever two mix.",
+                    minimum: 0, maximum: 360)),
+                ("ringRadius", numberSchema(
+                    "How far out the dot sits, 0-1. Default 1. 0 is a TRUE no-op, not 'half'. Not independent of amount — only the product of the two survives. Requires ringAngle.",
+                    minimum: 0, maximum: 1)),
+                ("ring", arraySchema(
+                    "Your own ring, as pattern ids in ring order, replacing the default eight. Spaced evenly, first at 0°. Duplicates allowed, max 32. Requires ringAngle.",
+                    items: stringSchema("A pattern id."))),
+                ("path", stringSchema(
+                    "HOW THE DOT MOVES as the part plays. One of: `fixed` (default — it stays where you put it), `orbit` (a steady revolution round the ring, set revolutionBeats), `drift` (a seeded wander that flows from one gesture into the next, set pathSeed). With a path, ringAngle/ringRadius become where you PUT the dot and the path is an offset from there. The dot is read ONCE PER NOTE, at the note's start: it chooses each note's gesture and cannot shape inside one. A parameter belonging to another path is REFUSED, not ignored. Requires ringAngle.")),
+                ("pathSeed", integerSchema(
+                    "WHICH wander you get. Default 0. The same seed always gives the same performance at the same clip beats — in playback, on replay, in a loop and in a bounce that starts mid-song alike, because nothing accumulates. Change it for a different take of the same idea. Capped at 2^32-1 because a JSON number is a double. Path `drift` only.",
+                    minimum: 0, maximum: 4_294_967_295)),
+                ("revolutionBeats", numberSchema(
+                    "How many BEATS one full trip round the ring takes. Default 16. Long values are the useful ones: the dot is read once per note, so a revolution shorter than a few notes is heard as an alias and is warned about. Path `orbit` only.",
+                    minimum: 0.25, maximum: 4096)),
+                ("pathDirection", stringSchema(
+                    "Which way an orbit travels: `clockwise` (default — the order the ring is listed in) or `counterclockwise`. Path `orbit` only.")),
+                ("scaleBeats", numberSchema(
+                    "How many BEATS one unit of the wander spans. Default 8 — about two bars of 4/4, which reads as phrasing rather than wobble. Bigger is slower. Path `drift` only.",
+                    minimum: 0.25, maximum: 1024)),
+                ("octaves", integerSchema(
+                    "How many layers of detail the wander has. Default 4: one slow sway plus three progressively faster and quieter layers. Path `drift` only.",
+                    minimum: 1, maximum: 8)),
+                ("momentum", numberSchema(
+                    "How LAZY the wander is, 0-1. Default 0.5. 1 is one long unhurried sway, 0 is twitchy, 0.5 is the 1/f middle human drift tends to sit near. It is the spectral tilt of the noise, not a stored velocity. Path `drift` only.",
+                    minimum: 0, maximum: 1)),
+                ("angleSwing", numberSchema(
+                    "The furthest the dot ever wanders from ringAngle, in DEGREES either side. Default 45 — one pattern spacing on the default ring, so it reaches each neighbour and no further. An exact bound, not a typical value; a swing much smaller than the gap between gestures is warned about. Path `drift` only.",
+                    minimum: 0, maximum: 360)),
+                ("radiusSwing", numberSchema(
+                    "How far the dot also wanders IN AND OUT, 0-1. Default 0 — the wander changes WHICH gesture plays, not how strongly it is applied. Path `drift` only.",
+                    minimum: 0, maximum: 1)),
+                ("noteIds", arraySchema(
+                    "Ids of the notes to shape (from clip.getNotes). OMIT to shape every note. Phrases are still measured over the WHOLE clip, so shaping the middle of a phrase places those notes where they really sit in it.",
+                    items: stringSchema("A note id."))),
+                ("amount", numberSchema(
+                    "How strongly the pattern is applied, 0-1. Default 1. 0 is a valid no-op — a flat lane at peakValue — not an error.",
+                    minimum: 0, maximum: 1)),
+                ("maxGapBeats", numberSchema(
+                    "A gap larger than this counts as a BREATH and splits the phrase, so a hairpin starts over after it. Default 0.125 (a thirty-second note), the same meaning it has in clip.humanize. Only matters for the phrase-scoped patterns.",
+                    minimum: 0, maximum: 16)),
+                ("airEnforced", booleanSchema(
+                    "THE AIR BUDGET. A wind player has a finite lungful; turn this on and a phrase that runs past it SAGS toward the ground the way a real player does. DEFAULT FALSE, deliberately — it OVERRIDES what you wrote, so it is opted into rather than assumed. Left false you still get the full `air` report saying what it would have done, which is how to find out whether a part is over-long without changing anything. It never silences a note and never changes any note's length.")),
+                ("airCapacitySeconds", numberSchema(
+                    "How many SECONDS the player can sustain the part AS AUTHORED before the lungful is gone. Default 6. An estimate, and the first knob to raise if the budget fires more than you want.",
+                    minimum: 0.25, maximum: 3600)),
+                ("airConsumptionExponent", numberSchema(
+                    "How much faster loud playing burns air: rate = effort^this. Default 1.5, so a phrase at half the authored level lasts about 2.8x longer. 0 makes the level irrelevant.",
+                    minimum: 0, maximum: 8)),
+                ("airRefillSecondsPerSecond", numberSchema(
+                    "How much of a lungful one second of rest gives back. Default 0.5, so a 2-second rest refills completely. If the part's rests are shorter than this can keep up with, the sag accumulates and the response says so as air.neverRecovered.",
+                    minimum: 0, maximum: 100)),
+                ("airMinBreathSeconds", numberSchema(
+                    "A rest shorter than this many SECONDS is an articulation, not a breath, and refills nothing. Default 0.15. In SECONDS while maxGapBeats is in BEATS, so at a fast tempo a gap can split the phrase and still be too quick to breathe in — reported as breath.kind 'tooShort'.",
+                    minimum: 0, maximum: 60)),
+                ("airReserveFraction", numberSchema(
+                    "Below this fraction of a lungful the player starts running out and effort is scaled toward it, so the phrase SAGS instead of stopping. Default 0.25. A note starting exactly at the reserve is left alone.",
+                    minimum: 0, maximum: 1)),
+                ("driftDepth", numberSchema(
+                    "PHYSIOLOGICAL HUMANISATION — how far a slow 1/f drift may pull the effort baseline BELOW what you wrote, as a fraction. Default 0 (off), and off renders byte-identically to not mentioning it; 0.05 is the suggested starting value. Downward only: effort 1 means 'as authored', so it is a ceiling with nothing above it to drift into.",
+                    minimum: 0, maximum: 1)),
+                ("driftScaleBeats", numberSchema(
+                    "The drift's period in BEATS. Default 8 (two bars of 4/4). Far slower than any note rate on purpose: effort is sampled once per note, so a fast drift would be aliased by the note grid rather than heard.",
+                    minimum: 0.01, maximum: 4096)),
+                ("driftOctaves", integerSchema(
+                    "How many fBm octaves the drift is built from. Default 4, persistence fixed at 0.5, which is the 1/f spectrum. '1/f breath pressure' is a modelling choice this design made, not a measured finding.",
+                    minimum: 1, maximum: 8)),
+                ("tremorDepth", numberSchema(
+                    "Peak-to-trough depth of the involuntary micro-tremor INSIDE each note, as a fraction of the contour level it rides on. Default 0 (off), byte-identical when off; 0.03 is the suggested value and measures about 0.29 dB. WRITTEN EVERYWHERE up to 18.75 Hz, including on tracks hosting an Audio Unit (m28-bug). It used to be refused there: an offline bounce fed hosted AUs MIDI in 4096-frame blocks, an 11.719 Hz sampler, so a tremor returned with a copy at |11.719 - rate| Hz that was 2.14x LOUDER than the tremor at 8 Hz. The offline block is now 512 frames (93.75 Hz), so that copy is 3% of the tremor at 8 Hz and the whole 4-8 Hz band arrives at about 88% of authored depth. Above 18.75 Hz it is still suppressed rather than retuned, and the warnings say so; the drift was never affected.",
+                    minimum: 0, maximum: 1)),
+                ("tremorRateHz", numberSchema(
+                    "Tremor rate in Hz, 0.2-20. Default 4.565 = the vibrato rate x 0.83, so tremor and vibrato are not one oscillator summing into a single deeper vibrato. Deliberately at the BOTTOM of the 4-8 Hz physiological band. The band is the vibrato band: below 0.2 Hz a tremor is a drift, which is what driftDepth is for.",
+                    minimum: EffortField.Humanisation.minTremorRateHz,
+                    maximum: EffortField.Humanisation.maxTremorRateHz)),
+                ("tremorEffortExponent", numberSchema(
+                    "How the tremor deepens with effort: depth is scaled by effort^this. Default 1 (linear). 0 makes the tremor the same depth however hard the player is blowing.",
+                    minimum: 0, maximum: 8)),
+                ("loudnessDepth", numberSchema(
+                    "How far a phrase-scoped shape may pull a quiet note's peak down, 0-1. Default 0.55, which is about 9 dB across a full hairpin (CC 11 is a square law, so this is not linear in dB).",
+                    minimum: 0, maximum: 1)),
+                ("swellDepth", numberSchema(
+                    "How much a quiet note's own swell shrinks along with it, 0-1. Default 0.5. Set 0 to keep every note's internal shape identical and vary only the level.",
+                    minimum: 0, maximum: 1)),
+                ("peakValue", integerSchema(
+                    "CC value at FULL effort, 0-127. Default 127 — the lane's neutral, so the loudest instant is exactly as loud as the note with no contour at all.",
+                    minimum: 0, maximum: 127)),
+                ("expressionCC", integerSchema(
+                    "Which CC carries the shape. Default 11 (expression).",
+                    minimum: 0, maximum: 127)),
+                ("vibratoDepthCents", numberSchema(
+                    "Peak vibrato width in cents (a ± figure). Default 12; 0 turns vibrato off. Ignored on a track hosting an Audio Unit, where it is suppressed and reported.",
+                    minimum: 0, maximum: 200)),
+                ("vibratoRateHz", numberSchema("Vibrato rate in Hz. Default 5.5.", minimum: 0.2, maximum: 20)),
+                ("vibratoOnsetSeconds", numberSchema(
+                    "Seconds of STRAIGHT playing before vibrato starts. Default 0.5.",
+                    minimum: 0, maximum: 10)),
+                ("sharpenCents", numberSchema(
+                    "Peak micro-sharpening in cents at full effort, resolving as the shape falls. Default 4.",
+                    minimum: -200, maximum: 200)),
+            // ⚠️ `pattern` left the required list at breath pad P2: it is now
+            // one of TWO ways to choose a gesture (the other is `ringAngle`),
+            // and the app refuses "neither" with a sentence that names both.
+            // Keeping it required here would have hidden the ring form from
+            // the copilot entirely.
+            ], required: ["clipId"])
         ),
         CopilotTool(
             command: "clip.crossfade",
