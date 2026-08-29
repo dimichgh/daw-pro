@@ -548,26 +548,33 @@ the file itself.
   is readable only through `project_snapshot`'s `masterEffects`, which
   `project_overview` does not carry.
 
-⭐⭐ **BRIGHTNESS IS A GATE, NOT A VIBE — RUN THIS BEFORE YOU CALL A FLIP DONE.**
+⭐⭐ **KNOW WHERE YOUR FLIP SITS SPECTRALLY — THIS IS AWARENESS, NOT A GATE.**
 Bounce the flip, `clip_analyze_audio` it, and **compare its
-`spectral.centroidHz` against the SOURCE's.** If the flip's centroid has fallen
-a long way below the record's, it will sound dull and muddy — the single most
-common way a technically correct flip disappoints a listener.
+`spectral.centroidHz` against the SOURCE's.** The point is to know what you
+made, deliberately, rather than to hit a number.
 
-This is not hypothetical; it is the one failure both dogfood runs shipped:
+⚠️⚠️ **A DARKER FLIP IS NOT A DEFECT. Do not "correct" it.** Low-frequency
+weight is a legitimate and very traditional aesthetic here — a chop pitched
+down an octave, a sub layer under the drums, and a heavy low-mid are the sound
+of a great deal of hip-hop, lo-fi and boom bap. **A flip measuring well below
+its source can be exactly right.**
+
+Real numbers from two runs, offered as calibration and not as a target:
 
 | | source | flip |
 |---|---|---|
-| run 1 (a kick pad played an OCTAVE DOWN) | 1084 Hz | user heard "deep and dull" |
-| run 2 pass 1 (a GM sub layer's harmonics) | 1084 Hz | **535 Hz** — caught by measuring |
-| run 2 pass 2 (after correction) | 1084 Hz | **1169 Hz** ✅ |
+| run 1 (a kick pad played an OCTAVE DOWN) | 1084 Hz | listener: *"deep… low frequencies which creates a nice effect"* — **liked it** |
+| run 2 (a GM sub layer's harmonics) | 1084 Hz | **535 Hz** before adjustment |
+| run 2 as shipped (sub high-passed, air shelf added) | 1084 Hz | **1169 Hz** — listener also liked it, called the FX *"more pronounced"* |
 
-⚠️ **Two DIFFERENT mechanisms produced the same dull result, and the second was
-found only because someone measured.** Pitching a chop down is varispeed, so it
-drags the attack transient down with it; a sub layer piles harmonics into the
-low-mid without anyone pitching anything. **Reasoning about your own arrangement
-will not catch either one.** If the centroid has collapsed: high-pass the sub
-layer toward its fundamental, and give something up top an air shelf.
+⭐ **Both were good. The listener preferred neither.** What the measurement
+buys you is knowing WHICH ONE YOU BUILT — two different mechanisms can drive a
+flip dark without you intending it (varispeed drags the attack transient down
+with the pitch; a sub layer piles harmonics into the low-mid with nothing
+pitched at all). Measure so the darkness is a choice you made rather than one
+that happened to you. If you want more air: high-pass the sub layer toward its
+fundamental and give something up top a shelf. **If you want the weight, keep
+it.**
 - **Mute the source clip before you bounce.** The original recording is usually
   still sitting on its own track from step 1, and a bounce that includes it is
   the record playing under your flip — which measures fine and is not what you

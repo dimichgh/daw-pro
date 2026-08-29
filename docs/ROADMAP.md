@@ -2688,11 +2688,23 @@ better than we had:** *"F2, F3b, F5, F6, F8 and F11 are all one shape — a call
 something that looks like a valid answer. On this surface the refusals are outstanding; the
 successes are what you have to distrust."*
 
-⭐ **On the user's "deep and dull" report: the agent pitched NOTHING down and reproduced the
-defect anyway**, by a mechanism nobody had considered — a GM sub layer's harmonics piling 12 dB
-into the low-mid. Caught it by measuring `centroidHz` (534.9 vs the source's 1083.9), corrected,
-and shipped at **1169.1 Hz — brighter than the record it was cut from.** Its own conclusion:
-**"the reasoning was not the safeguard; the measurement was."**
+⚠️⚠️ **CORRECTION LOGGED 2026-08-29, AND IT IS MINE: "DEEP AND DULL" WAS NEVER A DEFECT REPORT.**
+The user's clarification, verbatim: *"I did not mean bad, it was just variance, but it was
+pleasant… it was low frequencies which creates a nice effect, also 2nd version was good too and
+FX was interesting and more pronounced."* **They were DESCRIBING the flip and they liked it. I
+read a neutral description as a defect**, briefed the round-3b agent to treat it as one, wrote a
+pass/fail brightness gate into the skill, and called it a "musical failure" here. ⭐⭐ **THE LAW:
+A NON-MUSICIAN DESCRIBING WHAT THEY HEAR IS NOT FILING A BUG. Ask "did you like it?" before
+acting; "deep" is a description, "wrong" is a verdict, and only the user can supply the second
+one.** The skill's brightness section is now framed as AWARENESS, not a gate, and says plainly
+that a darker flip is a legitimate aesthetic.
+
+⭐ **What survives the correction, and it is still worth having:** the agent pitched NOTHING down
+and still landed at `centroidHz` **534.9** vs the source's 1083.9 — a GM sub layer's harmonics
+piling into the low-mid, with nobody intending it. It adjusted to **1169.1 Hz** and the user liked
+**both**. So the value is not "brighter is better" — it is that **two different mechanisms can
+drive a flip dark without the arranger noticing**, and measuring is how the darkness becomes a
+choice rather than an accident.
 
 ✅ **FIXED IN THE SKILL IMMEDIATELY (all verified by me on a running build, not taken on report):**
 F1 — **my own round-3 fix was wrong**: I wrote that `tonic`/`mode` are ABSENT when
@@ -2738,8 +2750,9 @@ accepted with `warnings: []` and never sounds; fit grows it 4 → 21). · F8 —
 - [ ] (m33-p) 📄 **Skill gaps round 3b named that are NOT yet fixed:** no full zone schema in the
   document (recovered from `describeSampler`'s output); "mute the source before bouncing" appears
   only in the self-contained recipe, not in §§1–9 which the doc itself calls the real recipe; and
-  **no step tells you to compare the result's `centroidHz` against the source's** — the run's worst
-  musical failure passed every gate the skill does prescribe. Route: `docs-scribe`.
+  **no step told you to compare the result's `centroidHz` against the source's** — now added, and
+  deliberately framed as awareness rather than a threshold (see the correction above). Route:
+  `docs-scribe`.
 
 ⭐ **F2 RECURRED EXACTLY** (merging keeps the earliest onset, ate a 0.992-strength backbeat,
 `warnings: []`) — independent confirmation of **m33-e** from a second agent that had not seen the
