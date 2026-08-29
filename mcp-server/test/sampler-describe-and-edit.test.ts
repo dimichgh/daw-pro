@@ -352,6 +352,42 @@ test("instrument_set_sampler_zones accepts {id, release}/{id, attack}/{id, oneSh
   }
 });
 
+// M32's new per-zone fields. `samplerZoneSchema` is `.strict()` and
+// `samplerZonePatchSchema` reuses its `.shape`, so a field missing from the
+// schema is REJECTED at the MCP boundary and never reaches the app — the
+// Swift side can be perfectly wired and an agent still cannot use it. Each
+// case carries its own positive control (a typo of the same field), because
+// "the call succeeded" only means something if a near-miss fails.
+test("M32 per-zone fields pass the strict zone schema and forward verbatim; a typo of each is rejected", async () => {
+  const trackId = randomUUID();
+
+  for (const [field, value] of [["reverse", true], ["chokeGroup", 3]] as const) {
+    const zoneId = randomUUID();
+    queuedResult = { kind: "sampler", sampler: { zones: [] } };
+    calls = [];
+    const accepted = (await client.callTool({
+      name: "instrument_set_sampler_zones",
+      arguments: { trackId, zones: [{ id: zoneId, [field]: value }] },
+    })) as any;
+    assert.ok(!accepted.isError, `${field} must reach the app: ${JSON.stringify(accepted)}`);
+    assert.deepEqual(calls[0]!.params, {
+      trackId,
+      sampler: { zonePatches: [{ id: zoneId, [field]: value }] },
+    });
+
+    // Positive control: the same value under a misspelling must be refused,
+    // which is what proves the acceptance above was the schema knowing the
+    // field rather than the schema accepting anything.
+    calls = [];
+    const typo = (await client.callTool({
+      name: "instrument_set_sampler_zones",
+      arguments: { trackId, zones: [{ id: zoneId, [`${field}X`]: value }] },
+    })) as any;
+    assert.ok(typo.isError, `a typo of ${field} must be rejected, not silently dropped`);
+    assert.equal(calls.length, 0);
+  }
+});
+
 test("instrument_set_sampler_zones requires trackId and zones (schema layer, zero bridge calls)", async () => {
   const trackId = randomUUID();
 

@@ -166,10 +166,25 @@ extension ProjectStore {
     /// headless, and the same comp-member / MIDI / stretch rejections
     /// `applyAudioQuantize` surfaces, so an agent gets the actionable error
     /// without waiting on analysis. Returns the emitted slices.
+    ///
+    /// m32-b1: `settings.divisions` skips detection entirely — boundaries are
+    /// N equal parts of the clip's own source window — so that path needs no
+    /// engine and succeeds headless. Every other rejection is unchanged.
     @discardableResult
     public func quantizeAudioClip(trackId: UUID, clipId: UUID,
                                   settings: AudioQuantizeSettings) async throws -> [Clip] {
-        guard let engine else { throw ProjectError.engineUnavailable }
+        // m32-b1: the engine is needed ONLY to detect transients. A
+        // fixed-division chop derives its boundaries arithmetically from the
+        // clip's own window, so it works headless.
+        //
+        // ⚠️ The guard deliberately stays FIRST rather than moving below the
+        // validation block: for a detector-path caller (`divisions == nil`)
+        // the thrown-error ORDER must be byte-identical to the shipped
+        // behaviour. Moving it down would flip headless + MIDI clip from
+        // `engineUnavailable` to `quantizeRequiresAudioClip`.
+        guard settings.divisions != nil || engine != nil else {
+            throw ProjectError.engineUnavailable
+        }
         // Pre-detection validation (fast, correct errors).
         let (t, c) = try locateClip(trackId: trackId, clipId: clipId)
         try requireNotCompMember(trackIndex: t, clipIndex: c)
@@ -182,6 +197,17 @@ extension ProjectStore {
             throw ProjectError.invalidClipEdit(
                 "clip \(clipId.uuidString) has no audio file to quantize")
         }
+        // m32-b1: fixed-division chop — no detection, no PCM, no engine.
+        // `[]` says out loud that the transient argument is unused here
+        // (`AudioQuantizePlan.compute` ignores it whenever `divisions` is set).
+        if settings.divisions != nil {
+            return try applyAudioQuantize(
+                trackId: trackId, clipId: clipId,
+                transientsSourceSeconds: [], settings: settings)
+        }
+        // Unreachable when `divisions == nil` (the first guard already proved
+        // the engine is present); re-bound here only to unwrap it.
+        guard let engine else { throw ProjectError.engineUnavailable }
         let markers = try await engine.detectTransients(inFileAt: url, sensitivity: settings.sensitivity)
         // Re-locate by id (spec §8 risk 7) happens inside applyAudioQuantize.
         return try applyAudioQuantize(

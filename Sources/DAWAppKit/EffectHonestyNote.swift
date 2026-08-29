@@ -83,11 +83,23 @@ public struct EffectHonestyNote: Sendable, Equatable {
         case .bassEnhancer:
             return bassEnhancer
         case .gain, .eq, .compressor, .limiter, .reverb, .delay, .saturator,
-             .gate, .chorus, .audioUnit:
+             .gate, .chorus, .bitCrusher, .audioUnit:
             // No gap between promise and mechanism — see the criterion above.
             // `saturator`/`reverb`/`chorus` DO create content the source did
             // not contain; they are excluded because nothing in this app tells
             // the user they are revealing it.
+            //
+            // `bitCrusher` (m32-e) was put to the same test rather than waved
+            // through: it promises DEGRADATION and performs degradation. Its
+            // name, its knobs (BITS, RATE) and its copy all say "this makes
+            // your audio worse on purpose", so there is no gap between the
+            // promise and the mechanism. The near-miss worth naming: its
+            // `antiAlias: false` default DOES add frequency content that was
+            // not in the source (images folding down below Nyquist) — but the
+            // param's own `note` says exactly that, in those words, and the
+            // user reaching for a bit-crusher is asking for it. A disclosure
+            // here would be a tax on harmonic generation, which is precisely
+            // the line this type refuses to draw.
             return nil
         }
     }

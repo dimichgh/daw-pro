@@ -17,9 +17,11 @@ follow up with `project_snapshot`.
 - `mixer_master_analysis` for a live read of the mix's tonal balance (24
   frequency bands, short-term level/peak, spectral centroid/brightness,
   spectral flux/busyness) — call it a couple of times during playback
-  (start playback with `transport_play` if nothing's currently rolling; the
-  producer agent's toolset owns transport control) rather than once at a
-  standstill, since it decays to floor values when silent/stopped.
+  rather than once at a standstill (start playback with `transport_play`
+  if nothing's currently rolling; mix-engineer carries playback-only
+  transport for exactly this re-check need, producer's toolset is the
+  fuller one). If the transport isn't rolling, it now refuses with a
+  teaching error rather than returning a silent floor reading.
 - `render_measure_loudness` for the number that actually matters for
   delivery: integrated LUFS, max momentary/short-term LUFS, true peak
   (dBTP). Compare against -14 LUFS integrated (streaming convention) or

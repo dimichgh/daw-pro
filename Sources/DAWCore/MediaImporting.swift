@@ -123,6 +123,21 @@ public enum ProjectError: Error, LocalizedError {
     case audioQuantizeNoTransients(UUID)
     // Audio quantize under a multi-segment tempo map (m12-c).
     case audioQuantizeTempoBoundaryUnsupported(UUID)
+    // Fixed-division chop (m32-b1): `divisions` parts of this clip's window
+    // would each be narrower than the minimum slice width, so every boundary
+    // is squeezed out. Deliberately its own case rather than reusing
+    // audioQuantizeNoTransients — no detector ran, so "raise sensitivity" is
+    // wrong advice, and "fewer than 2 transients" is the wrong arithmetic (the
+    // divisions path is legal with ONE boundary).
+    case audioQuantizeDivisionsTooFine(UUID, divisions: Int,
+                                       windowSeconds: Double,
+                                       minSliceSeconds: Double)
+    // Chop to sampler (m32-b2): a PITCH-SHIFTED source clip. Deliberately its
+    // own case rather than reusing audioQuantizeStretchUnsupported — the fix
+    // is different (clear the pitch shift, not the ratio) and a message
+    // telling someone to "un-stretch" a clip they never stretched is the kind
+    // of plausible-but-wrong answer this tree keeps paying for.
+    case sliceToSamplerPitchShiftUnsupported(UUID)
     // Tempo map (m12-d): transport.setTempo refuses on a multi-segment map,
     // pointing the caller at tempo.setMap (silently flattening is destructive).
     case tempoMapMultiSegment
@@ -446,6 +461,26 @@ public enum ProjectError: Error, LocalizedError {
             // verbatim). m12-c cut: slice-and-nudge assumes one constant
             // tempo across the clip (AudioQuantizePlan.compute).
             return "clip \(id.uuidString) spans a tempo change — audio quantize needs one constant tempo across the clip; split the clip at the tempo boundary (clip.split) and quantize each part"
+        case .audioQuantizeDivisionsTooFine(let id, let divisions, let window, let minSlice):
+            // Exact wording is contract (control protocol + MCP surface it
+            // verbatim). m32-b1: carries the arithmetic, because "too fine"
+            // without the numbers leaves the caller guessing which knob moved.
+            let each = divisions > 0 ? window / Double(divisions) : 0
+            let most = Int((window / max(minSlice, .leastNormalMagnitude)).rounded(.down))
+            let advice = most >= 2
+                ? "ask for at most \(most) divisions, or lengthen the clip's window"
+                : "this window is shorter than two minimum slices, so it cannot be divided at all — lengthen the clip's window"
+            return "clip \(id.uuidString) cannot be cut into \(divisions) equal parts — its source window is "
+                + String(format: "%.3f", window) + " s, so each part would be "
+                + String(format: "%.4f", each) + " s, under the "
+                + String(format: "%.3f", minSlice) + " s minimum slice width; " + advice
+        case .sliceToSamplerPitchShiftUnsupported(let id):
+            // Exact wording is contract (control protocol + MCP surface it
+            // verbatim). m32-b2: sampler zones read RAW source frames, so the
+            // pads would play the UNSHIFTED record while the timeline clip
+            // plays the shifted one — a reconstruction that silently does not
+            // match what the user is hearing.
+            return "clip \(id.uuidString) has a pitch shift — chop-to-sampler reads raw source frames, so the pads would play the original pitch, not what you hear; clear the shift (clip.setStretch pitch 0) or bounce the clip first"
         case .tempoMapMultiSegment:
             // Exact wording is contract (control protocol + MCP surface it
             // verbatim). transport.setTempo is the single-tempo fast path; a
@@ -538,7 +573,7 @@ public enum ProjectError: Error, LocalizedError {
         case .masterChainBuiltInOnly:
             // Exact wording is contract (design-m13d §4; control protocol +
             // MCP surface it verbatim, gate-checked in C6).
-            return "the master chain hosts built-in effects only in v1 — pick one of gain|eq|compressor|limiter|reverb|delay|saturator|gate|chorus|bassEnhancer"
+            return "the master chain hosts built-in effects only in v1 — pick one of gain|eq|compressor|limiter|reverb|delay|saturator|gate|chorus|bassEnhancer|bitCrusher"
         case .sidechainMasterUnsupported:
             // Exact wording is contract (design-m13d §4; surfaced verbatim over
             // the wire on `fx.setSidechain {trackId:"master"}`, gate-checked in

@@ -123,10 +123,18 @@ public struct SoundBankInfo: Codable, Sendable, Equatable {
     /// loadable bank, so the field is additive everywhere — an older payload
     /// without the key decodes to `nil`, i.e. supported.
     /// ⛔ An entry carrying a reason must NEVER be selectable as an
-    /// instrument. Three independent gates enforce that and none of them
-    /// reads this field: `ProjectStore.validateSoundBank`, the wire's
-    /// `parseSoundBankSource`, and `SoundBankLibrary.importBank` all reject
-    /// by extension. This field is for LABELLING, not for guarding.
+    /// instrument. The SELECTION gates enforce that and neither of them reads
+    /// this field: `ProjectStore.validateSoundBank` and the wire's
+    /// `parseSoundBankSource` both reject by extension. This field is for
+    /// LABELLING, not for guarding.
+    ///
+    /// ⚠️ m31-h narrowed the count from three to two, and the distinction is
+    /// the whole safety argument. `SoundBankLibrary.importBank` is no longer a
+    /// pure gate: it admits a `.sf3` when a `VorbisDecoder` is wired. But it
+    /// admits it in order to CONVERT it, and what lands in the library is a
+    /// real `.sf2` — so the thing that becomes selectable is a file that
+    /// passes the selection gates on its own extension, never a `.sf3` waved
+    /// through one. `isSupportedExtension("sf3")` is still `false`.
     public var unsupportedReason: String?
 
     /// True when this bank can actually be loaded. Derived, never stored.
@@ -167,7 +175,22 @@ public struct SoundBankLibrary: Sendable {
     /// copied.
     public var scanDirectories: [URL]
 
-    public init(libraryDirectory: URL? = nil, scanDirectories: [URL]? = nil) {
+    /// Injected Vorbis decoder that makes `.sf3` import possible (m31-h). Nil
+    /// when running headless or in a test that has no need of it, in which case
+    /// `importBank` keeps m31-g's honest refusal verbatim rather than pretending
+    /// — a build that cannot convert says so.
+    ///
+    /// ⛔ This is NOT a gate. `isSupportedExtension` still answers `false` for
+    /// `.sf3` whether or not a decoder is present, so the three load gates
+    /// (`ProjectStore.validateSoundBank`, the wire's `parseSoundBankSource`,
+    /// and this type's own import guard) are unchanged. The decoder's only
+    /// power is to produce a REAL `.sf2` on disk, which then passes those gates
+    /// on its own merits.
+    public var vorbisDecoder: (any VorbisDecoding)?
+
+    public init(libraryDirectory: URL? = nil, scanDirectories: [URL]? = nil,
+                vorbisDecoder: (any VorbisDecoding)? = nil) {
+        self.vorbisDecoder = vorbisDecoder
         let resolvedLibrary = libraryDirectory ?? Self.defaultLibraryDirectory()
         self.libraryDirectory = resolvedLibrary
         self.scanDirectories = scanDirectories ?? [
@@ -236,7 +259,7 @@ public struct SoundBankLibrary: Sendable {
                 let standardized = url.standardizedFileURL.path
                 guard !seen.contains(standardized) else { continue }
                 seen.insert(standardized)
-                results.append(Self.bankInfo(at: url))
+                results.append(Self.bankInfo(at: url, canConvert: vorbisDecoder != nil))
             }
         }
         return results
@@ -251,7 +274,12 @@ public struct SoundBankLibrary: Sendable {
     public func importBank(from url: URL) throws -> SoundBankInfo {
         let fm = FileManager.default
         let ext = url.pathExtension.lowercased()
-        guard Self.isSupportedExtension(ext) else {
+        // ⛔ The import gate. `.sf3` is admitted ONLY when a decoder is wired to
+        // convert it (m31-h); with no decoder it keeps m31-g's refusal word for
+        // word, because a build that cannot convert must say so rather than
+        // accept the file and produce nothing.
+        let converting = ext == "sf3" && vorbisDecoder != nil
+        guard Self.isSupportedExtension(ext) || converting else {
             throw ProjectError.importFailed(
                 "sound bank must be a .sf2 or .dls file — got \(url.lastPathComponent)")
         }
@@ -265,6 +293,22 @@ public struct SoundBankLibrary: Sendable {
         }
         try fm.createDirectory(at: libraryDirectory, withIntermediateDirectories: true)
         let taken = Set((try? fm.contentsOfDirectory(atPath: libraryDirectory.path)) ?? [])
+
+        if converting, let decoder = vorbisDecoder {
+            // The converted bank lands as a REAL `.sf2` — same uniquifying
+            // rule, extension swapped, so what arrives in the library is a file
+            // the load gates accept on its own merits rather than a `.sf3`
+            // special-cased past them.
+            let sf2Name = url.deletingPathExtension().lastPathComponent + ".sf2"
+            let name = ProjectBundle.uniqueName(for: sf2Name, taken: taken)
+            let destination = libraryDirectory.appendingPathComponent(name)
+            // Throws — with a reason naming the sample — rather than writing a
+            // bank with silent holes in it. `convert` removes its own partial
+            // output on failure, so a failed import leaves the library clean.
+            try SoundFontCompression.convert(sf3: url, toSF2: destination, decoder: decoder)
+            return Self.bankInfo(at: destination)
+        }
+
         let name = ProjectBundle.uniqueName(for: url.lastPathComponent, taken: taken)
         let destination = libraryDirectory.appendingPathComponent(name)
         try fm.copyItem(at: url, to: destination)
@@ -337,6 +381,19 @@ public struct SoundBankLibrary: Sendable {
             + "Open it in MuseScore or Polyphone and export a .sf2, then import that.",
     ]
 
+    /// The remedy shown for a discovered `.sf3` when this build CAN convert one
+    /// (m31-h). It differs from the table above because the way out differs:
+    /// the file still isn't playable where it sits — the load gates reject it
+    /// by extension, unchanged — but importing it now produces a real `.sf2`
+    /// instead of sending the user to another application.
+    ///
+    /// ⭐ Two texts rather than one because the honest sentence depends on
+    /// whether a decoder is actually wired, and a build that cannot convert
+    /// must not promise that it will.
+    static let convertibleSF3Reason =
+        "SF3 SoundFonts (Vorbis-compressed) can't be played directly. "
+        + "Import it and DAW Pro will convert it to a .sf2 you can use."
+
     /// True for an extension `scan()` should LIST — loadable or explicitly
     /// unsupported. Case-insensitive.
     public static func isDiscoverableExtension(_ ext: String) -> Bool {
@@ -352,8 +409,12 @@ public struct SoundBankLibrary: Sendable {
 
     /// The user-facing sentence for a discovered-but-unloadable extension;
     /// `nil` for a supported one.
-    static func unsupportedReason(forExtension ext: String) -> String? {
-        unsupportedExtensions[ext.lowercased()]
+    static func unsupportedReason(forExtension ext: String,
+                                  canConvert: Bool = false) -> String? {
+        let lowered = ext.lowercased()
+        guard let stated = unsupportedExtensions[lowered] else { return nil }
+        if canConvert && lowered == "sf3" { return convertibleSF3Reason }
+        return stated
     }
 
     /// The system GM bank's info — nil when the bank is absent (R12).
@@ -370,7 +431,7 @@ public struct SoundBankLibrary: Sendable {
     /// `ext == "sf2" ? "sf2" : "dls"`, which labelled anything else `"dls"` —
     /// a loadable-looking lie the moment `scan()` stopped filtering unknown
     /// extensions out (m31-g).
-    static func bankInfo(at url: URL) -> SoundBankInfo {
+    static func bankInfo(at url: URL, canConvert: Bool = false) -> SoundBankInfo {
         let standardized = url.standardizedFileURL
         let format = standardized.pathExtension.lowercased()
         return SoundBankInfo(
@@ -378,7 +439,7 @@ public struct SoundBankLibrary: Sendable {
             name: standardized.deletingPathExtension().lastPathComponent,
             path: standardized.path, format: format, builtin: false,
             sizeBytes: fileSize(atPath: standardized.path),
-            unsupportedReason: unsupportedReason(forExtension: format))
+            unsupportedReason: unsupportedReason(forExtension: format, canConvert: canConvert))
     }
 
     private static func fileSize(atPath path: String) -> Int {

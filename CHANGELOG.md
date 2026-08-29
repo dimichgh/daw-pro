@@ -1,5 +1,239 @@
 # Changelog
 
+## 2026-08-29 — Sixty-four pads out of one record, and the 23 milliseconds nobody could hear were missing
+
+Two fixes underneath the sampler. Neither is a feature, and both had to land before chopping a whole record onto pads was something you could actually do rather than something the tool would let you attempt.
+
+**One file, loaded once.** A sampler zone used to load its audio privately: open the file, allocate the whole thing, per channel, per zone. That is invisible and fine at eight zones and ruinous at sixty-four, because chopping a record means sixty-four zones pointing at *the same file* — and the sampler was keeping sixty-four copies of it. A four-minute stereo 44.1 kHz rip is about 81 MB in memory; sixty-four pads of it came to roughly **5 GB**. Nothing warned you, because nothing was wrong in the sense the code understood — it just allocated, and kept allocating.
+
+Zones now share one buffer per source file. Sixty-four pads of a record cost what one pad costs. Measured on a sixteen-zone chop of a single file, the load dropped from 2,883,584 bytes to 180,224 — exactly the sixteen-to-one you would predict, which is the point of quoting it. The test that pins this also loads eight zones from **eight different** files and asserts that memory stays at eight copies: sharing that ignored which file a zone actually pointed at would pass a naive dedup test and produce silence-or-worse in real use, so the wrong answer is held permanently in view next to the right one.
+
+**And the end of every mono sample was being dropped.** `AVAudioFile.read(into:)` does not necessarily deliver the frames you asked for in one call on a mono file — it stops on an internal boundary and reports the short count, which the sampler was believing. Up to **1,023 frames, about 23 ms at 44.1 kHz**, vanished off the end of every mono zone. Stereo files were never affected, which is exactly why this survived: every stereo test passed, and stereo is what a test author reaches for.
+
+At a full sample length that is an inaudibly clipped tail. On a *chop* it is not, because a chop is short — a 100 ms hi-hat losing 23 ms has lost a quarter of itself, and the shorter the slice the larger the fraction. This is the kind of defect that reads as "the pads sound a bit dead" rather than as a bug.
+
+The fix reads in a loop until the file is exhausted. Worth naming the trap, because the obvious version of that loop is wrong in a way that destroys audio rather than merely failing: each `read(into:)` **rewrites the buffer from frame 0 and resets its frame count**, so "keep reading until the count reaches the file length" never terminates usefully and leaves the count at zero — and a zero-length zone is not a quiet zone, it is a silent one. The correct loop advances a write offset into the buffer itself. Both the loss and the fix are pinned by a test that reads mono files at lengths on either side of the boundary, with stereo alongside as the control that must not change.
+
+DAW Pro could already cut an audio clip into separate slices sitting exactly where they were, in one undo step, with clean joins. Nobody could tell, because the way to ask for it was `clip_quantize_audio` with `strength: 0` — a quantize tool, set to quantize by nothing. If you were looking for a way to chop a break into pieces you could rearrange, that is not a tool you would have opened.
+
+Nothing about the cutting has changed. The tool now says what it does: with `strength: 0` this is a **pure chop**, and the description leads with that instead of burying it behind the grid maths. That is the whole of the discoverability fix, and it was deliberately bought at description cost rather than by adding a second `chop` command — two commands doing one thing is a bill you pay forever.
+
+Worth knowing why the chop is clean, because it is a property rather than a promise: slice *i* ends at the exact sample where slice *i+1* begins, so playing them in order **is** the original waveform. There is nothing to crossfade and nothing to click. (Cutting a record into *sampler pads* is a different problem — a pad played alone starts and stops at arbitrary sample values — which is why `clip_slice_to_sampler` snaps its cuts and this does not need to.)
+
+**The new part is `divisions`.** Ask for `divisions: 8` and the clip is cut into eight equal parts instead of at its transients. This is the fallback for material the detector has no useful opinion about: drones, ambient beds, sustained pads, and loops that are already perfectly quantized and have no attacks to find. It runs no detection at all, which also means it works on a clip whose transients would have come out wrong, and it is fast.
+
+`divisions` chooses where the clip is **cut**; the grid settings still choose where each slice **moves to**. They compose — `divisions: 4` with `strength: 1` cuts into quarters and snaps each one to the grid. And since `gridBeats` means nothing when nothing is being nudged, you may now omit it entirely at `strength: 0`. Above `strength: 0` it is still required, exactly as before.
+
+Two things it refuses rather than fudges. Sending `sensitivity` together with `divisions` is an error, not a silent no-op — sensitivity is the detector's knob and no detector is running, so a caller who sent it would have received a plausible-looking chop that ignored them. And asking for more divisions than the clip's length allows is refused with the arithmetic spelled out (how long the window is, how thin each part would be, how many parts would fit) instead of quietly returning fewer pieces than you asked for.
+
+## 2026-08-29 — The twelve-bit sound, and why it is not filtered
+
+A new insert effect, **Bit Crusher**, reduces bit depth and sampling rate — the lo-fi character of a 1980s sampling drum machine, the sound a chopped break has on a record you already know.
+
+It starts on the E-mu SP-1200: **12 bits at 26,040 Hz**. Those are that machine's real numbers, not a flavour of them. Set `downsampleHz` to 40,000 and you have the Akai MPC60 instead, which is why MPC60 chops read as cleaner than SP-1200 chops of the same era.
+
+**The two switches that look wrong are the point of the effect, and they ship OFF.** `antiAlias` and `dither` both default to 0. A bit-crusher that filters politely and dithers away the quantization noise sounds clean-but-crunchy; it does not sound gritty, and it does not sound like the record. The reason is specific and worth knowing rather than obeying: the SP-1200's signature comes from its converter *omitting* the reconstruction filter, so everything above the reduced Nyquist frequency images back down into the audible band. That folding is not a defect being tolerated — it is the character. Turn `antiAlias: 1` on when someone asks for a tamer, modern crush, and `dither: 1` on when you are reducing depth for delivery rather than for sound.
+
+What `bits` does is exact rather than approximate: at `bits: N` the output takes exactly 2^N distinct levels, the code range of a real N-bit converter, and the test suite counts them on a rendered ramp instead of trusting the setting. `downsampleHz` holds each captured sample for the right number of frames — at 8 kHz into a 48 kHz project, every value repeats exactly six times, and at the 26,040 Hz default the runs are a measured mix of ones and twos because the ratio is 1.8433 and not an integer. That is why it is built on a fractional accumulator: an effect that rounded the rate to something divisible would quietly be a different machine, and one that restarted its count every audio block would sound different depending on your buffer size.
+
+`mix` blends the crushed signal against your untouched input, so you can put a little grit under an intact transient; at `mix: 0` the effect is a bit-exact bypass. It adds no latency, and it is available on tracks, buses, and the master chain.
+
+Two honest limits. `downsampleHz` tops out at 48,000, so in a project running at 88.2 or 96 kHz even the maximum setting still halves the rate — the effect is never transparent there, and you should bypass or remove it rather than turn it up. And a project saved with a Bit Crusher **still opens in an older build of DAW Pro, just without the effect**: the insert is an unknown kind to that build, so it is dropped with a warning and the track plays uncrushed rather than the file being refused. The thing to watch is what happens next — save from that older build and the insert is gone for good, because it was never in that build's model to write back. Projects without one are unaffected.
+
+## 2026-08-29 — Play a pad backwards, and let one pad cut another off
+
+Two small switches on a sampler zone, both of which a producer reaches for within about ten minutes of chopping their first break.
+
+**`reverse`** plays a zone's span backwards. That is the reversed cymbal before a downbeat, the sucked-in vocal, the swell into a chorus. It costs nothing: the audio is read backwards where it already sits, never copied, so a reversed pad uses exactly as much memory as a forward one and a whole record chopped across sixty-four pads still holds one copy of the file. Playing a reversed pad higher up the keyboard repitches it exactly as a forward pad would.
+
+Two honest limits, stated rather than half-solved. A reversed zone **ignores loops** in this version — set both and it plays its span once, backwards, and tells you it dropped the loop. What a sustain loop means played backwards, and which end of it the crossfade belongs to, is a real question and this is not an answer to it. And `attack`/`release` are not swapped for you: they shape what you hear, so a short release still trims the tail of the reversed sound, which is what you wanted.
+
+**`chokeGroup`** (0–63) is the open/closed hi-hat rule. Give every hat zone the same choke group and a new hat ends the one still ringing, while the kicks and snares in the same instrument stay fully polyphonic. It is also the switch that makes a re-chopped break sound tight instead of like the loose loop it came from, since slices stop ringing into each other. A choked note is not cut dead — it goes into its own release, so a pad with a long release chokes slowly; shorten that pad's release for a hard choke. Pads generated by `clip_slice_to_sampler` already carry a 10 ms release, so a chop chokes tight without being asked.
+
+`chokeGroup` is a different field from `group`, and the difference matters: `group` decides *which* zone fires when a new note arrives (round-robin and alternate layers are built on it), while `chokeGroup` ends notes that are *already playing*. A zone can use both. Two zones layered by the same note never choke each other, and a note never chokes itself.
+
+Both fields survive save and reload, both can be set on a whole keymap or patched onto one zone by id, and both are optional: a project that uses neither renders bit-for-bit identically to before — which is asserted, on a render containing a looping voice and a bent one, against a checksum taken before either feature was written.
+
+## 2026-08-29 — Chop a record into pads, and get the groove back for free
+
+Sampling a break has always been the same three moves: find the hits, cut between them, and put the pieces on pads you can play. DAW Pro could do the first two and had nowhere to put the pieces. Zones with frame spans existed; nothing populated a set of them from a list of slice points.
+
+`clip_slice_to_sampler` does that in one call. Point it at an audio clip and it cuts at the transients — or at N equal parts, or on the musical grid — and builds one sampler pad per slice, all reading the same file, one per MIDI note from C1 up. Then it writes a MIDI clip that plays them back in the original order at the original times.
+
+That last part is the point of the whole thing, and it is worth being precise about what it means: the reconstruction is **bit-exact**. Rendered side by side, the sampler track and the original clip measure the same level to 0.0 dB. You are not starting from an approximation of the record and hoping. You are starting from the record, expressed as pads, and every change you make from there is one you chose.
+
+Getting that took two decisions that look like details and are not. Reconstruction notes fire at **velocity 127**, not at the detector's confidence in each hit — because a sampler pad's level is already the level of the audio inside it, and firing a quiet-looking hit at velocity 13 would put it 20 dB below its own recording. And when the tool makes a new track for you, the sampler's output gain is 1, not the usual 0.8, so nothing sits two decibels under the thing it is reproducing. Velocity still works normally for any new pattern you write; `velocityFromStrength` opts into the detector's dynamics if you want them.
+
+The cuts themselves are snapped to the quietest nearby sample so a pad played alone does not click, and each pad reports how quiet its cut actually was — on a stereo record there is often no point where both channels cross zero at once, and the tool says so rather than implying a clean cut it did not find. Each pad also gets a 10 ms release, which is what actually fixes the click at the *end* of a slice.
+
+Two things it refuses to do rather than do badly. A chop that would make more pads than you allowed, or run past MIDI note 127, is rejected outright with the arithmetic named — it never quietly keeps the first 32 and drops your last bar, because a chop missing its ending still looks like a successful chop. And a clip that is time-stretched or pitch-shifted is refused, because pads read the raw file: the pads would play the original and you would be listening to something else.
+
+Afterwards, the pads are ordinary sampler zones. Widen one pad's key range to play it chromatically, retune another, set the sampler to mono for the classic choked-soul feel — all without resending the rest.
+
+## 2026-08-28 — Changing a few notes no longer means resending all of them
+
+Editing a MIDI clip's notes had exactly one door: send the clip's entire note array back, every note, whether it changed or not. Raising the velocity of 48 shaker hits meant reading and resubmitting all 907 notes in that clip. A legato pass that shortened 225 note lengths had to round-trip all 225. The cost scaled with the clip, not with the edit.
+
+It also carried a quieter hazard. Reading a filtered slice of a clip's notes and writing it back as if it were the whole clip silently deleted everything the filter left out — a real trap, defended only by a warning in the tool's own description.
+
+A new tool, `clip_patch_notes`, changes specific notes by id instead: pitch, velocity, start position, or length, on exactly the notes you name, leaving everything else in the clip untouched. It cannot add or remove a note under any input, so the deletion hazard above cannot happen through it at all — there is no path from calling it to a note disappearing. An id that isn't actually in the clip refuses the whole call and says which id, rather than doing nothing silently. One call is one undo step, whether it touches one note or a thousand.
+
+The existing whole-array tool, `clip_set_notes`, is unchanged and still the right choice for adding, removing, or reordering notes, or rewriting a clip from scratch. The two tools' descriptions now point at each other, so the choice between them is a one-line read rather than a guess.
+
+## 2026-08-28 — A mixing assistant now produces the signal it needs to measure
+
+When a mixing assistant reads a mix's balance and loudness, it has to listen while the song plays. With the transport stopped, the analysis tool used to return -80 dB across the spectrum and a 0 Hz centroid — exactly what silence measures. That output looks entirely legitimate. An AI assistant would believe it, see "this mix is extremely quiet in every band," and make tonal corrections that were not needed, all without anything going wrong visibly. Silent wrong answers are worse than loud failures.
+
+Now the tool refuses when the transport is stopped. It explains why — the bus is silent because nothing is playing — and what to do: start the song, let it run a moment, then measure again. It refuses only for a stopped transport. A mix that is genuinely quiet while playing, or a muted master, still returns a real reading. The tool never claims a cause it cannot establish.
+
+The assistant now holds transport control. It can play, stop, and seek through a session. It still cannot arm a track or record — a live performance stays a human-at-the-instrument job — but it can produce the signal it needs to listen and measure. The change reaches you only after updating the installed plugin; it is not automatic.
+
+## 2026-08-28 — One gain stage now reaches a streaming level, and a clamped value stops pretending
+
+Sound-bank material is quiet. A solo General-MIDI piano part renders at about
+-28 LUFS at velocity 100 and near -35 LUFS at velocity 64, so getting a mix from
+there to a -14 LUFS streaming level takes +14 to +21 dB of makeup. The `gain`
+insert stopped at +12.04 dB, so it took TWO of them chained together — which, as
+the person who hit it put it, "reads like a workaround because it is one".
+
+The gain insert's ceiling is now 16 linear, +24.08 dB, up from 4. That figure is
+not a round number picked for looks: it is the smallest of the candidates that
+covers the quietest ordinary case measured (a soft solo GM piano, +21.49 dB) with
+a little spare. One insert now does what two used to.
+
+Raising a ceiling is safe for work you already have — every gain you ever saved
+was 4 or less and is still in range, so nothing moves and no automation point
+re-clamps. Lowering one would not have been.
+
+The headroom is real, not free. The gain stage is a plain multiply with no
+protection of its own, so a big boost can drive a mix into clipping. Put a limiter
+after it, and check the result with a loudness measurement rather than trusting
+the multiplier. The tool descriptions now say exactly this instead of implying the
+room is free.
+
+**And the more important half.** Asking for more than the ceiling used to return
+`ok` and a value you had not asked for, with nothing anywhere saying so — the same
+shape of failure as a tool that looks like it worked. Raising the ceiling alone
+would only have moved that silent lie to a new number. So the clamp now speaks:
+`fx.setParam`, `fx.add`'s seeded parameters, and `mixer.setMasterVolume` return a
+`warnings` sentence naming what you asked for, what was actually stored, and the
+range. The key is absent when nothing was clamped, so seeing it at all means the
+stored value is not the one you sent. Values still clamp rather than erroring —
+that behaviour was already documented and callers depend on it.
+
+One thing worth stating plainly, because it was reported the other way round: the
+master fader and the gain insert do NOT disagree about out-of-range values at the
+engine level. Both clamp. The refusal a caller sees above 2.0 comes from the MCP
+tool's own schema, one layer above the app — `mixer.setMasterVolume` itself clamps
+silently, which is exactly why it now warns too.
+
+## 2026-08-28 — When you change an instrument, the app now says what your old data will do
+
+Controller lanes — expression, mod wheel, sustain, pitch bend — are performance data
+that rides alongside a clip's notes. Which of them actually SOUND depends entirely on
+the instrument the track is using, and different instruments honour different sets.
+That was already true and already documented. What was missing is that swapping the
+instrument silently changes the answer for data you wrote earlier.
+
+This bit someone hard. A composer drew expression lanes while the track was on the
+built-in poly synth, which ignores expression entirely — so they were correct data that
+did nothing. Later the track was given a sound bank, which honours everything. The
+lanes woke up, and because expression rests at FULL when there is no lane at all,
+values that look perfectly ordinary — peaking around 108, dipping to 42 — were a broad
+volume cut. A finished, checked mix came back 1.25 LU quieter and nobody could see why.
+
+Now changing a track's instrument tells you. If the track carries controller data whose
+meaning just changed, the response says so in plain words: which controller, which
+direction, and — for expression, channel volume and pan, the three whose rest value is
+not zero — why that shows up as a level change rather than as shaping. It warns in both
+directions, because data that STOPS working is the same surprise in reverse.
+
+Two things it deliberately does not do. It never touches your lanes: they are correct
+data, and quietly neutralising them would be a worse bug than the one being fixed. And
+it stays quiet unless the change actually affects a lane you really wrote — switching
+from the poly synth to a sound bank changes the answer for all 128 controllers, and a
+warning that fires every single time is one nobody reads.
+
+Alongside it, every instrument now reports which controllers it honours, so you can
+check before you write rather than after you bounce. That answer depends on the
+instrument's SETTINGS, not just its type — the sampler starts honouring the mod wheel
+and breath controllers only once its expression depth is turned up.
+
+Fixing this turned up a related bug of exactly the same shape. When the sampler's
+brightness filter is switched on, it really does follow whichever controller you point
+it at — but the app was still telling people such a lane "will not sound". It was
+wrong, in the confident way that is worse than saying nothing. Sampler zones that
+crossfade between soft and loud recordings had the same problem. Both now report
+honestly.
+
+
+## 2026-08-28 — The soundfont everyone recommends now actually plays
+
+If you go looking for a free soundfont, you end up at MuseScore. It is the biggest
+distribution channel there is, and what it hands you today is a `.sf3` — that is the
+only format it ships. Until now DAW Pro could see that file and tell you, honestly,
+that it could not play it. That was better than the silence it replaced, but it still
+meant the one file a newcomer is most likely to have was the one file that did not work.
+
+Now it works. Import a `.sf3` and it is converted to a real `.sf2` as it lands in your
+library — everything downstream, from the program list to the sampler, is unchanged
+because what arrives is an ordinary soundfont. MuseScore's own `FluidR3Mono_GM.sf3`
+takes about six seconds and comes out with all 197 of its preset names intact.
+
+Two things worth knowing before you do it. The conversion decompresses the audio, so a
+24 MB download becomes roughly 220 MB in your library — that is the real size of the
+sound, and the `.sf3` was simply a zipped version of it. And if any part of the file
+cannot be read, the whole import fails and tells you so, rather than quietly giving you
+a bank with silent gaps in it. A soundfont that loads and makes no sound is a worse
+outcome than one that refuses, so it refuses.
+
+Under the hood this needed a Vorbis decoder, which is the compressed-audio format
+hiding inside every `.sf3`. macOS turns out to have one, but it is undocumented, it is
+not present on every version we support, and — the deciding fact — it could not read 17
+of the 1186 sounds in that MuseScore file. All 17 were the short single-cycle waveforms
+that the classic synth patches are built from, so leaning on it would have shipped you a
+soundfont where Square Lead, Saw Lead, Synth Bass and Synth Brass were silent while
+every other instrument sounded fine. We carry our own decoder instead, and the test that
+guards this plays those patches and listens.
+
+## 2026-08-28 — One bar, repeated, and the undo step that almost joined a stranger's edit
+
+An AI composing agent writing a twelve-bar blues has one bar of rhythm and eleven more
+bars that are just that bar again. Writing it out in full costs real money and real
+context: expressing that one pattern across all twelve bars was measured at roughly
+30 KB of JSON, crossing the wire twice — once to generate the notes, once to send them
+back to the app. A different, denser piece with 5,248 notes would have cost over
+330 KB for information that is, in truth, one bar and a repeat count.
+
+`clip.repeatNotes` is the fix: name a source (a beat window, or an explicit set of note
+ids), a period, and a count, and the clip grows by that many copies without a single
+note crossing the wire in either direction. The response reports counts — how many
+copies, how many notes were added, whether the clip grew to fit them, whether the
+copies span a meter change, and how many new notes land past the clip's end — and never
+the notes themselves.
+
+The obvious way to build it is also the wrong way, and the wrong way passes its own
+test. Read the existing notes, append the copies in memory, write the result back
+through the same path every other note edit already uses — that path journals its undo
+entry under a key scoped to the clip, and the undo journal folds two edits sharing a key
+if they land inside an 800ms window. A repeat issued shortly after any other edit to
+that clip — which, for an agent iterating on a pattern, is the common case, not the rare
+one — would silently merge into that edit's undo step. Undo once and both the repeat and
+whatever came before it are gone together, with no error and no warning.
+
+The test that catches this has to be about timing, not about notes: edit a clip, repeat
+inside the same clip within the coalescing window, and assert that one undo removes only
+the repeat. It passed against the real implementation, then was run again on purpose
+against the naive shape — routed through the keyed path instead — and went red exactly
+as predicted: the undo count stopped growing, the undo label showed the older edit's
+name instead of the repeat's, and one undo reverted both changes at once. The real
+implementation shares no journal key with anything, so a repeat can never fold into a
+neighbor.
+
+Not everything the underlying item named shipped. Both examples above already have a
+cheaper path today — writing a Standard MIDI File and importing it — but that path is
+still undocumented as the general-purpose thing it actually is; that half is unstarted.
+
 ## 2026-08-28 — The instrument meter was calling good instruments dead
 
 The measurement described below shipped, passed twenty-six tests, and was wrong.

@@ -109,6 +109,31 @@ let package = Package(
                 .linkedFramework("Foundation")
             ]
         ),
+        // Flat-C shim over the vendored stb_vorbis Ogg Vorbis decoder (m31-h),
+        // the CSignalsmithStretch precedent: one shim TU, the vendored source
+        // + license in vendor/, pins in VENDORED.md. It exists so `.sf3`
+        // SoundFonts — the format MuseScore ships EXCLUSIVELY, and therefore
+        // the one a consumer most likely already has — can be converted to a
+        // real `.sf2` at IMPORT time. Offline only, never the render thread.
+        //
+        // WHY VENDORED RATHER THAN THE OS, all three measured before choosing:
+        // macOS 26.4 does decode Vorbis, but (1) via NO public API — there is
+        // no `Ogg`/`Vorbis` constant in any AudioToolbox or AVFAudio header,
+        // positive-controlled against `kAudioFileFLACType`, which is there;
+        // (2) our floor is macOS 14, untestable here, and m26-d makes bank
+        // install an UNATTENDED FIRST-RUN path; (3) it is incomplete — on the
+        // real FluidR3Mono_GM.sf3, AVAudioFile decoded 1169 of 1186 samples
+        // and failed 17 short wavetables that stb_vorbis reads fine.
+        // `vendor/stb_vorbis.c` is EXCLUDED: shim.c #includes it, so its
+        // symbols exist exactly once and are not exported past that TU.
+        .target(
+            name: "CStbVorbis",
+            exclude: [
+                "VENDORED.md",
+                "vendor/LICENSE.txt",
+                "vendor/stb_vorbis.c",
+            ]
+        ),
         // Flat-C shim over the vendored signalsmith-stretch header-only C++
         // (offline time-stretch/pitch-shift, M5 ii). shim.cpp is the only C++
         // TU in the package; vendored headers + licenses live in vendor/
@@ -149,7 +174,8 @@ let package = Package(
         // as resources — an unhandled file in a target directory is a build
         // warning, and this package builds clean.
         .target(name: "DAWEngine",
-                dependencies: ["DAWCore", "CAtomics", "CSignalsmithStretch", "ObjCExceptionGuard",
+                dependencies: ["DAWCore", "CAtomics", "CSignalsmithStretch", "CStbVorbis",
+                               "ObjCExceptionGuard",
                                .product(name: "onnxruntime", package: "onnxruntime-swift-package-manager")],
                 exclude: [
                     "Analysis/Resources/VENDORED.md",
@@ -210,7 +236,13 @@ let package = Package(
         // m23-m3's export dialog must be proven by the FILE ON DISK it produces
         // through the real store and the real engine, and both the on-disk
         // harness (`TestSignals`) and that engine live in this target.
-        .testTarget(name: "DAWEngineTests", dependencies: ["DAWEngine", "DAWCore", "DAWAppKit"]),
+        // `.copy`, the DAWCoreTests-fixtures precedent below: the m31-h SF3
+        // fixture's sample data is REAL MuseScore-produced Ogg Vorbis and the
+        // tests assert on frame counts that come out of decoding it, so
+        // `.process` — which reserves the right to transform a resource —
+        // would quietly change what those tests measure.
+        .testTarget(name: "DAWEngineTests", dependencies: ["DAWEngine", "DAWCore", "DAWAppKit"],
+                    resources: [.copy("Fixtures")]),
         .testTarget(name: "DAWAppKitTests", dependencies: ["DAWAppKit", "DAWCore", "AIServices"]),
         .testTarget(name: "AIServicesTests", dependencies: ["AIServices"]),
     ],

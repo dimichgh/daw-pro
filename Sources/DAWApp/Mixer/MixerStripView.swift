@@ -10,7 +10,7 @@ import DAWAppKit
 /// omission).
 private let addableEffectKinds: [EffectDescriptor.Kind] =
     [.gain, .eq, .compressor, .limiter, .reverb, .delay, .saturator, .gate, .chorus,
-     .bassEnhancer]
+     .bassEnhancer, .bitCrusher]
 
 /// One channel or bus strip. Channels (audio/instrument) show the full anatomy;
 /// bus strips drop arm, sends, and the output picker (buses always sum to

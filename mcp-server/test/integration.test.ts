@@ -390,7 +390,32 @@ test("tools/list returns exactly the audit-enforced tool count", { skip: SKIP_RE
   // RE-MEASURED, not derived, by the same two name-capturing regexes:
   // **35 direct + 157 wrapper = 192**, 0 duplicates, 0 names in both sets, and
   // a bogus-name negative control (`"zzz_not_a_tool"`) that returned 0.
-  assert.equal(result.tools.length, 192);
+  //
+  // 192 -> 193 at m31-c (`clip_repeat_notes` — copy a clip-relative note
+  // window/selection into the same clip N times, periodBeats apart, so an
+  // agent authors one bar and repeats it instead of paying for every note;
+  // it takes required arguments and rides the strict-schema wrapper, so it
+  // joined the wrapper count). Command<->tool bijection stays mechanical
+  // (`clip.repeatNotes` -> `clip_repeat_notes`), no exception-table entry
+  // needed: **35 direct + 158 wrapper = 193**.
+  //
+  // 193 -> 194 at m26-a/m27-n (`clip_patch_notes` — BY-ID partial note edit:
+  // change pitch/velocity/startBeat/lengthBeats on specific notes without
+  // resubmitting the clip's other notes, the missing rung between
+  // clip_get_notes and clip_set_notes; it takes required arguments and
+  // rides the strict-schema wrapper, so it joined the wrapper count).
+  // Command<->tool bijection stays mechanical (`clip.patchNotes` ->
+  // `clip_patch_notes`), no exception-table entry needed: **35 direct +
+  // 159 wrapper = 194**.
+  //
+  // 194 -> 195 at m32-b2 (`clip_slice_to_sampler` — THE SAMPLE FLIP: chop an
+  // audio clip at its transients/divisions/grid into sampler PADS plus a MIDI
+  // clip that replays the original groove; it takes a required `clipId` and
+  // rides the strict-schema wrapper, so it joined the wrapper count).
+  // Command<->tool bijection stays mechanical (`clip.sliceToSampler` ->
+  // `clip_slice_to_sampler`), no exception-table entry needed: **35 direct +
+  // 160 wrapper = 195**.
+  assert.equal(result.tools.length, 195);
 });
 
 // ---------------------------------------------------------------------------

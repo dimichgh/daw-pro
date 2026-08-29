@@ -264,6 +264,50 @@ public struct TransientMarker: Sendable, Equatable, Codable {
     }
 }
 
+/// m32-b2 — slice boundaries resolved against a source file's OWN PCM.
+///
+/// ⭐ **THE POINT OF THIS TYPE IS THAT IT KEEPS THE RATE AND THE FRAMES
+/// TOGETHER.** Transients arrive in SECONDS; sampler zones want FRAMES at the
+/// FILE's own sample rate. A 48 kHz rip chopped against a hardcoded 44100
+/// lands every chop 8.8 % off — and it would still sound like music, which is
+/// why the usual "just be careful" rule is not enough. Here the ONLY way to
+/// obtain a frame number is from a value that also carries the rate those
+/// frames are in, produced by the code that actually opened the file. The unit
+/// trap is unrepresentable rather than merely forbidden, so **do not flatten
+/// this into loose parameters.**
+///
+/// All three arrays are index-aligned with the `boundarySeconds` the caller
+/// passed in, so a caller can always say which candidate a result belongs to.
+public struct SliceBoundaryGeometry: Codable, Sendable, Equatable {
+    /// The FILE's own sample rate (its `processingFormat`), never the graph's.
+    public var sampleRate: Double
+    /// The FILE's own length in frames.
+    public var frameCount: Int
+    /// The snapped boundary positions, in frames at `sampleRate`. Ascending
+    /// and STRICTLY increasing (the snapper enforces it defensively even when
+    /// a caller's snap window was wide enough to let two candidates meet).
+    public var boundaryFrames: [Int]
+    /// Signed movement applied to each boundary (`chosen − candidate`), so a
+    /// caller can reconstruct the unsnapped position exactly.
+    public var snapOffsetFrames: [Int]
+    /// `max_c |x_c[k]|` at the chosen frame, 0...1 — the residual
+    /// discontinuity. ⚠️ Reported HONESTLY rather than implied away: a stereo
+    /// file often has no simultaneous zero crossing inside the search window,
+    /// so this says whether a real crossing was found or merely the quietest
+    /// available point. That is also why the operation is called a "boundary
+    /// snap" and not a "zero-crossing snap".
+    public var residualAmplitude: [Double]
+
+    public init(sampleRate: Double, frameCount: Int, boundaryFrames: [Int],
+                snapOffsetFrames: [Int], residualAmplitude: [Double]) {
+        self.sampleRate = sampleRate
+        self.frameCount = frameCount
+        self.boundaryFrames = boundaryFrames
+        self.snapOffsetFrames = snapOffsetFrames
+        self.residualAmplitude = residualAmplitude
+    }
+}
+
 /// The MIDI side of one finished take, reported by the engine when the take
 /// finalizes. Notes are clip-relative beats, canonically ordered.
 public struct MIDIRecordingResult: Sendable, Equatable {
@@ -386,6 +430,25 @@ public protocol AudioEngineControlling: AnyObject {
     /// onsets. Runs in async/detached context only — never touches the
     /// render thread.
     func detectTransients(inFileAt url: URL, sensitivity: Double) async throws -> [TransientMarker]
+
+    /// m32-b2: resolve slice boundaries against a source file's own PCM.
+    ///
+    /// `boundarySeconds` are SOURCE-FILE seconds (the `detectTransients`
+    /// domain), ascending. Each is snapped to the frame within
+    /// ±`snapWindowSeconds` that minimises `max_c |x_c[k]|` — a true zero
+    /// crossing on a mono file, and on a stereo file the point of least
+    /// combined discontinuity, which is what "no click" physically means.
+    /// `snapWindowSeconds: 0` disables snapping and returns the candidates
+    /// rounded to frames, exactly.
+    ///
+    /// ⭐ The result carries the file's OWN sample rate and frame count
+    /// alongside the snapped positions IN FRAMES, so no caller ever converts
+    /// seconds to frames against a rate it guessed — see
+    /// `SliceBoundaryGeometry`.
+    ///
+    /// Runs in async/detached context only — never touches the render thread.
+    func resolveSliceBoundaries(inFileAt url: URL, boundarySeconds: [Double],
+                                snapWindowSeconds: Double) async throws -> SliceBoundaryGeometry
 
     /// Offline audio-content analysis of the file at `url` over the source
     /// window `[windowStartSeconds, +windowDurationSeconds)` (m21-e,
@@ -1165,6 +1228,22 @@ extension AudioEngineControlling {
     /// Transient analysis is optional capability: engines without it (fakes,
     /// headless) report no onsets.
     public func detectTransients(inFileAt url: URL, sensitivity: Double) async throws -> [TransientMarker] { [] }
+
+    /// Slice-boundary resolution is optional capability (m32-b2) — and it
+    /// deliberately DIVERGES from its neighbour `detectTransients`, which
+    /// returns `[]`.
+    ///
+    /// ⚠️ An empty onset list is a defensible "no onsets here". A fabricated
+    /// `SliceBoundaryGeometry{sampleRate: 0, frameCount: 0, boundaryFrames: []}`
+    /// is not: it would flow into the planner and produce zones with nonsense
+    /// frame spans — **a plausible-looking valid answer from an engine that
+    /// cannot answer**, which is this tree's characteristic failure mode. So
+    /// the default THROWS, following `analyzeAudioContent`/`liveLoudness`
+    /// rather than `detectTransients`. Fakes that need the surface override it.
+    public func resolveSliceBoundaries(inFileAt url: URL, boundarySeconds: [Double],
+                                       snapWindowSeconds: Double) async throws -> SliceBoundaryGeometry {
+        throw ProjectError.engineUnavailable
+    }
 
     /// Audio-content analysis is optional capability — but unlike
     /// `detectTransients` (an empty marker list is honest data), a fabricated

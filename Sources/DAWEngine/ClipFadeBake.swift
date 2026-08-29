@@ -331,7 +331,14 @@ enum ClipFadeBake {
                 "cannot allocate a \(frameCount)-frame fade buffer")
         }
         file.framePosition = AVAudioFramePosition(sourceStartFrame)
-        try file.read(into: buffer, frameCount: AVAudioFrameCount(frameCount))
+        // ⚠️ m32-h: NOT a bare `read(into:frameCount:)`. That variant
+        // short-reads MONO sources too, and from a non-zero `framePosition`
+        // as well (measured: start 1000 + 21 528 frames = 22 528, a
+        // 1024-aligned FILE POSITION, not an aligned count). A short fade
+        // piece is a fade whose tail is missing, so the envelope below would
+        // be applied to less audio than the caller scheduled.
+        try AudioFileFullRead.fill(buffer, from: file,
+                                   frameCount: AVAudioFrameCount(frameCount))
         applyEnvelope(buffer: buffer, clip: clip,
                       clipRelativeStartFrame: clipRelativeStartFrame,
                       tempoMap: tempoMap, fileRate: format.sampleRate)

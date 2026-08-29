@@ -484,13 +484,48 @@ Fix shape, two tiers:
    the new field, so labelling a format can never accidentally make it
    loadable. Behavioural gates plant a real `.sf3` in a real temp scan
    directory: `Tests/DAWCoreTests/SoundBankUnsupportedFormatTests.swift`.
-2. **Better — NOT DONE.** Decompress SF3→SF2 at import. SF3 is structurally
-   SF2 with Vorbis-encoded sample data, so the conversion is mechanical
-   and one-way at import time and nothing downstream changes. It needs a
-   Vorbis decoder, which the tree does not currently link.
+2. **Better — ✅ SHIPPED 2026-08-28 (m31-h tier ②).** Import now decompresses
+   SF3→SF2, producing a REAL `.sf2` in the central library, so `scan`,
+   `programs` and the AUSampler path are untouched. Verified on the real
+   `FluidR3Mono_GM.sf3`: 23.7 MB in, 218 MB out in 6.3 s, 197 parsed preset
+   names, then AUDITIONED — "Square Lead" rendered at peak 0.620 against a
+   no-note control of exactly 0.0.
 
-Until (2) exists, "consumers can import what they want" is only true for `.sf2`
-and `.dls` — but a consumer who drops an `.sf3` in now gets told so, in the
-list, with the way out ("export a .sf2 from MuseScore or Polyphone"). Our
-documentation should still say `.sf2`/`.dls` plainly rather than implying
-general SoundFont support.
+   ⚠️ **The decoder question resolved AGAINST the cheap answer, and only
+   because it was measured.** macOS 26.4 turns out to decode Vorbis — but via
+   NO public API (there is no `Ogg`/`Vorbis` constant in any AudioToolbox or
+   AVFAudio header; the grep was positive-controlled against
+   `kAudioFileFLACType`, which is present), on a tree whose floor is macOS 14,
+   and INCOMPLETELY: it failed 17 of this bank's 1186 streams, every one a
+   short single-cycle wavetable. Those 17 are used by 15 mainstream GM presets
+   — 80 Square Lead, 81 Saw Lead, 38/39 Synth Bass, 62/63 Synth Brass — so an
+   OS-only decode would have shipped a bank whose classic lead sounds are
+   silent while every structural check passed. `stb_vorbis` (MIT/public
+   domain, vendored at `Sources/CStbVorbis`) decodes all 1186.
+
+   ⚠️ Note the size story this changes: the `.sf3` is **9.21× smaller** than
+   what it becomes on disk. The 23.7 MB download is real; the 218 MB library
+   entry is also real. **Both byte counts RE-MEASURED independently by the main
+   session 2026-08-28** — the real file fetched from MuseScore's own repo
+   (23,712,790 B, the size the GitHub API reports for `master`) and converted
+   through `SoundBankLibrary(vorbisDecoder: StbVorbisDecoder())` into a scratch
+   directory: **218,422,622 B in 6.10 s**, i.e. **9.211 : 1**. ⚠️ An earlier
+   draft of this paragraph said "~10.4×", which no arithmetic on those two
+   numbers produces — 23,712,790 × 10.4 would be 246.6 MB. The byte counts were
+   measured; the ratio between them was not, and it was wrong by 13 %. Left
+   recorded because it is this project's most-repeated failure: **an unmeasured
+   number is not a measured one however it reached you.**
+
+   ⚠️ **`MS Basic.sf3` is the bigger one and is UNTESTED.** It is MuseScore's
+   *default* bank and the GitHub API reports it at **51,278,610 B** (measured).
+   At the ratio above that PROJECTS to roughly **470 MB** on disk — a
+   projection, not a measurement, and nobody has run the conversion on it.
+   m26-d should not adopt that number without converting the file.
+
+With (2) shipped, "consumers can import what they want" is now true for
+`.sf2`, `.dls` AND `.sf3` — the three formats a consumer actually encounters.
+A `.sf3` sitting in a scan directory is still listed as not-playable-as-it-sits
+(the load gates reject by extension, deliberately unchanged), but the remedy it
+names is now our own import, not another application. Documentation should say
+those three formats plainly rather than implying general SoundFont support:
+`.sfz`, `.sfArk` and friends are still not handled.

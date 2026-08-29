@@ -991,6 +991,11 @@ struct MainActorOccupancySiteTests {
     /// carve-out is for a measurement correction, not a precedent for
     /// skipping it.
     ///
+    /// ✅ SUPERSEDED 2026-08-28 (m31-i): a PASSING campaign now exists and is
+    /// pasted verbatim in Leg C's comment below — use it, and re-run the gate
+    /// for any genuinely new hog. The paragraph below is kept for the record
+    /// because it documents why this obligation was unmeetable for 24 days.
+    ///
     /// ⚠️ Prior to m23-aw-3, as of m23-aw's own close (2026-08-03/04): NO
     /// PASSING `scripts/gates/m23aw-prepare-headroom.mjs` CAMPAIGN EXISTS to
     /// paste for a genuinely new hog — both real 5-run campaigns run at that
@@ -1022,16 +1027,101 @@ struct MainActorOccupancySiteTests {
 
     // MARK: - Leg C — THE REVIEW CADENCE
 
-    /// `@MainActor`-isolated suite count <= 330 (measured 298, design §6.3).
+    /// `@MainActor`-isolated suite count <= 349 (measured 332, m31-i 2026-08-28).
     /// NOT a physical threshold — `ds/dN` is unmeasured and (per design §4.3)
     /// unmeasurable from existing data; this exists only to force a periodic
     /// re-measurement. Bumping it requires pasting a fresh gate result, same
     /// obligation as Leg B step 3 — raising it without running the gate is
     /// the same act as raising the horizon.
     ///
-    /// ⚠️ Same standing caveat as Leg B above: as of m23-aw's own close, no
-    /// passing campaign exists to paste — see m23-aw-4 for the measured
-    /// validity/threshold calibration gap this surfaced.
+    /// ══ CAMPAIGN RESULT PASTED FOR THIS BUMP (m31-i, 2026-08-28) ═════════
+    /// VERBATIM output of `node scripts/gates/m23aw-prepare-headroom.mjs
+    /// --from-logs <5 green full-suite runs>`, 2026-08-28. ⭐ This is the FIRST
+    /// PASSING CAMPAIGN THIS GATE HAS EVER PRODUCED — m23-aw-4 recorded that
+    /// its exit-0 branch had never once executed, so this is also
+    /// first-observation evidence about the gate itself. The printed table was
+    /// cross-checked against an independent tabulation of the same five logs
+    /// before being pasted (mean 1.605, spread 1.626x, cushion 16.962x — all
+    /// reproduced), because a never-executed branch is not a trusted one.
+    ///
+    ///     ✔ PASS: worst-of-5 T1 = 2.063s <= 35s (0.059x of limit, 16.962x
+    ///       cushion). Horizon confirmed 60s in both channels, every run.
+    ///       Median campaign wall 209.7s (validity limit 248s).
+    ///
+    ///       channel                          n   min      max      mean     spread
+    ///       T1 GM prepare (THIS campaign)    5   1.269   2.063   1.605   1.626x
+    ///         rows: 1.269  1.388  1.342  2.063  1.963
+    ///
+    ///       m19-e `max` column — RECORDED, NEVER ASSERTED (design §1.3/§5.3.6):
+    ///         n=5  min 19.015  max 35.863  mean 25.052  spread 1.886x
+    ///         rows: 19.015  35.863  24.772  21.690  23.920
+    ///
+    ///     GATE PASSED.
+    ///     VERDICT: 1/1 check(s) passed.
+    ///
+    /// Campaign: 5 consecutive green `./scripts/test.sh` runs (6752 tests /
+    /// 630 suites, 0 `✘` each) plus ONE m23-ab-2 adversarial run (20 CPU hogs,
+    /// torn down PID-exact and verified dead). The gate's own `--selftest`
+    /// scored 5/5 immediately before and after the constants moved. BOTH §6.1
+    /// constants were re-derived TOGETHER (validity 120 -> 248 s, threshold
+    /// 36 -> 35 s); neither moved alone.
+    ///
+    /// ⚠️ THE DROP IN T1 IS MEASURED AND NOT EXPLAINED. Worst-normal T1 was
+    /// 30.994 s (2026-08-03) and 45.925 s (2026-08-04); it is 2.063 s today.
+    /// The channel is still ALIVE — it inflates 1.678x under the adversarial
+    /// protocol, and m23-ab-3's recorded isolated figure is ~45-70 ms, so
+    /// 1.3-2.1 s is still ~30x queueing-dominated — but nothing here explains
+    /// the fall, and this bound's 16.96x cushion rests on it. Do not treat
+    /// that cushion as durable until the cause is known.
+    ///
+    /// ⚠️ MACHINE STATE, RECORDED VERBATIM because m23-aw-4 requires it and
+    /// because it qualifies the reading: this machine was NOT idle. Load
+    /// average 4.83-5.14; Chrome ~117 % across helpers, WindowServer ~49 %,
+    /// jamf-protect ~29 %. That is the same contention class that caused
+    /// m23-aw-4 to REFUSE to run on 2026-08-04. The conclusions survive it —
+    /// ~2 cores of desktop load on 18 cannot explain a 209.7 s vs 120 s
+    /// finding, and every derived margin is >= 16x — but whether a non-idle
+    /// campaign discharges m23-aw-4's own idle-machine requirement is the
+    /// user's call, not an agent's, and that item is left open.
+    ///
+    /// ══ HOW 349 WAS DERIVED — THE CADENCE IS THE INVARIANT, NOT "+10 %" ══
+    /// Design §6.3 fixes the JOB ("force a periodic re-measurement") and the
+    /// CADENCE ("roughly weekly"); `298 + ~10 %` was only how that cadence
+    /// was spelled at the then-current growth rate of 5.2 suites/day. Re-spelt
+    /// at today's measured rate:
+    ///
+    ///   349 = 332 (measured census today) + 17 (= ceil(7 days x 2.44/day))
+    ///
+    /// ⚠️ THE RATE IS NOT §1.6's 5.2/day, AND NOT A NAIVE TWO-POINT LINE.
+    /// Census re-measured at 12 revisions with ONE instrument — this file's own
+    /// scanner, re-implemented and cross-checked against it (it reproduces
+    /// `@Suite` 449 exactly at `5ca7944`, and 332 today). Design §1.6's
+    /// `@MainActor` column came from `git grep`, a DIFFERENT instrument that
+    /// reads 280 where this scanner reads 286 at the same revision, so the two
+    /// are never mixed:
+    ///
+    ///     2026-07-30 5ca7944  286      2026-08-19 096825e  330
+    ///     2026-08-13 1696b2e  315      2026-08-20 412cb33  330
+    ///     2026-08-13 129353c  322      2026-08-23 06dca3d  330
+    ///     2026-08-14 9da47b4  322      2026-08-24 223b06f  330
+    ///     2026-08-17 e01e751  330      2026-08-28 bc9bde9  332
+    ///     2026-08-18 cd6bc64  330
+    ///
+    /// ⭐⭐ THE LAST SEVEN DAYS ARE NOT AN ADMISSIBLE RATE SAMPLE — THE BOUND
+    /// WAS SUPPRESSING THE QUANTITY IT MEASURES. The census sat at EXACTLY the
+    /// 330 cap from 2026-08-17 to 2026-08-24 while +24 files and +16 `@Suite`
+    /// declarations landed, of which ZERO were `@MainActor`. At the tree's own
+    /// 53 % `@MainActor` share that is p ~ 0.46^16 ~ 4e-6 by chance. Reading a
+    /// growth rate off a capped window would derive the next cap from the
+    /// previous cap — circular. The rate above is therefore taken from the
+    /// last UNSUPPRESSED window, 2026-07-30 -> 2026-08-17: (330-286)/18 days =
+    /// 2.44/day. (Inference from counts, not from intent: no author was asked.)
+    ///
+    /// ⚠️ CONSEQUENCE, STATED SO IT IS NOT A SURPRISE: if suppressed demand
+    /// releases, the rate can rebound toward §1.6's 5.2/day and this bound
+    /// fires in ~3 days rather than ~7. That is the bound WORKING. Re-measure
+    /// with the table above (one instrument, uniformly applied); do not widen
+    /// the cap because it fired quickly.
     @Test("Leg C — THE REVIEW CADENCE: @MainActor-isolated suite count stays inside the cadence")
     func mainActorSuiteCountStaysInsideCadence() {
         let counts = Self.structuralCounts()
@@ -1040,9 +1130,9 @@ struct MainActorOccupancySiteTests {
               + "prepare/prepareEffect-like sites \(counts.prepareLikeSites) (PRINTED ONLY — design §4.3 "
               + "rejects this as a ratchet channel; it is a proxy for the channel measured NOT to drift), "
               + "files \(counts.files)")
-        #expect(counts.mainActorSuites <= 330, """
-            @MainActor-isolated suite count is \(counts.mainActorSuites), over the 330 cadence limit \
-            (measured 298 at m23-aw). This is a REVIEW CADENCE, not a physical threshold — ds/dN is \
+        #expect(counts.mainActorSuites <= 349, """
+            @MainActor-isolated suite count is \(counts.mainActorSuites), over the 349 cadence limit \
+            (measured 332 at m31-i). This is a REVIEW CADENCE, not a physical threshold — ds/dN is \
             unmeasured. Bumping this number requires pasting a fresh \
             scripts/gates/m23aw-prepare-headroom.mjs campaign result into the comment above this bound \
             first; raising it without running the gate is the same act as raising the horizon.

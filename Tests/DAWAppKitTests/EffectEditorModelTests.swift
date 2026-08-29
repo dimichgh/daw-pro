@@ -458,8 +458,18 @@ struct EffectEditorModelTests {
             for spec in EffectParamSpec.specs(for: kind) {
                 // m22-f adds the delay's tempo `sync` to the binary family.
                 // m23-ch adds the limiter's truePeak mode to the family.
+                // m32-e adds the bit-crusher's antiAlias/dither switches.
+                // ⚠️ THIS LEG RESTATES THE SOURCE'S OWN EXPRESSION and therefore
+                // proves only that the two have not drifted APART — it cannot
+                // notice a binary param that neither side knows about. That is
+                // not hypothetical: m32-e's two switches were missing from both
+                // for a while and this leg stayed green.
+                // `binaryModelParamsRenderAsToggles` below is the leg that
+                // actually checks, by DERIVING the answer from the store.
                 let expected = spec.name == "pingPong" || spec.name == "sync"
-                    || spec.name == "truePeak" || spec.name.hasSuffix("Enabled")
+                    || spec.name == "truePeak"
+                    || spec.name == "antiAlias" || spec.name == "dither"
+                    || spec.name.hasSuffix("Enabled")
                 #expect(EffectEditorModel.isToggleParam(spec) == expected,
                         "\(kind).\(spec.name)")
             }
@@ -486,6 +496,50 @@ struct EffectEditorModelTests {
         #expect(model.value(for: spec) == 1, "the model layer rounds to binary")
         model.set(name: "pingPong", value: 0)
         #expect(model.value(for: spec) == 0)
+    }
+
+    /// ⭐ THE STRUCTURAL LEG, derived rather than restated. For every built-in
+    /// param whose range is 0…1, write 0.4 through a REAL store and read back
+    /// what it kept: a param the MODEL LAYER snaps to 0 or 1 is binary, and a
+    /// binary param MUST render as a toggle — otherwise the card offers a knob
+    /// over a continuum the model does not have, and its readout says a number
+    /// the sound does not use.
+    ///
+    /// The 0…1 filter is deliberate and not a shortcut around the question:
+    /// `mix`, `amount`, `roomSize`, `damping`, `feedback` and `width` all live
+    /// in that range and all keep 0.4, so the discriminator is the SNAP, not the
+    /// range. `division` is excluded by the range filter because it snaps to
+    /// note lengths in beats, not to 0/1 — it has its own picker rendering.
+    @Test("every param the STORE snaps to binary renders as a toggle (derived)")
+    func binaryModelParamsRenderAsToggles() throws {
+        let store = ProjectStore()
+        let track = store.addTrack(kind: .audio)
+        var snapping: [String] = []
+        var continuous: [String] = []
+        for kind in Self.builtInKinds {
+            let fx = try store.addEffect(toTrack: track.id, kind: kind)
+            for spec in EffectParamSpec.specs(for: kind) where spec.range == 0...1 {
+                let updated = try store.setEffectParam(
+                    trackID: track.id, effectID: fx.id, name: spec.name, value: 0.4)
+                let stored = try #require(
+                    EffectEditorModel.paramValue(spec.name, in: updated),
+                    "\(kind).\(spec.name) has no value accessor")
+                let snapped = stored == 0 || stored == 1
+                let label = "\(kind).\(spec.name)"
+                if snapped { snapping.append(label) } else { continuous.append(label) }
+                let shape = snapped ? "BINARY (needs a toggle)" : "CONTINUOUS (needs a knob)"
+                let says = EffectEditorModel.isToggleParam(spec)
+                #expect(says == snapped,
+                        "\(label): a 0.4 write was stored as \(stored), so it is \(shape), but isToggleParam says \(says)")
+            }
+            try store.removeEffect(trackID: track.id, effectID: fx.id)
+        }
+        print("[measured] binary 0...1 params: \(snapping)")
+        print("[measured] continuous 0...1 params: \(continuous)")
+        // Non-vacuity in BOTH directions: the sweep must have seen real
+        // examples of each, or "they agree" would be an empty claim.
+        #expect(snapping.count >= 8, "the sweep saw too few binary params: \(snapping)")
+        #expect(continuous.count >= 6, "the sweep saw too few continua: \(continuous)")
     }
 
     // MARK: - Undo discipline (the store's coalescing carries the card)

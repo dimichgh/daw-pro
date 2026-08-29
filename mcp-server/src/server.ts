@@ -1278,6 +1278,41 @@ const samplerZoneSchema = z.object({
         "end)."
     ),
   crossfade: samplerCrossfadeSchema,
+  reverse: z
+    .boolean()
+    .optional()
+    .describe(
+      "Play this zone BACKWARDS (m32-d): the note starts at the last frame of the zone's " +
+        "span (`endFrame`, or the file's end) and reads toward `startFrame`, at the same " +
+        "repitched speed a forward note would use. This is the classic reversed-cymbal / " +
+        "reversed-vocal swell, and it costs no extra memory — the audio is read backwards " +
+        "in place, never copied. REVERSED ZONES IGNORE LOOPS IN THIS VERSION: a zone with " +
+        "both `reverse` and `loopMode` plays its span once, backwards, and the loop is " +
+        "dropped with a note in the sampler's zone-load notes (backwards-loop behaviour is " +
+        "deliberately not guessed at). `attack`/`release` are NOT swapped: they shape what " +
+        "you HEAR, so a short release still trims the tail of the reversed sound. " +
+        "Omitted or false = forward, exactly as before."
+    ),
+  chokeGroup: z
+    .number()
+    .int()
+    .min(0)
+    .max(63)
+    .optional()
+    .describe(
+      "CHOKE group, 0-63 (m32-f). Playing any zone in this group ENDS whatever is already " +
+        "sounding from the same group: the open/closed hi-hat rule, and the way you stop " +
+        "chopped slices ringing into each other so a re-chop sounds tight instead of like " +
+        "the original loose loop. Give every hat zone chokeGroup 1 and the closed hat cuts " +
+        "the open one, while kicks and snares in the same instrument stay fully polyphonic. " +
+        "NOT THE SAME FIELD AS `group`: `group` decides WHICH zone fires on a new note " +
+        "(round-robin and alternate layers are built on it), while `chokeGroup` ends notes " +
+        "that are ALREADY PLAYING. A zone can use both, independently. A choked note is not " +
+        "cut dead — it goes into its own `release`, so a zone with a long `release` chokes " +
+        "slowly; shorten that zone's `release` for a tight choke. Zones layered by the SAME " +
+        "note-on never choke each other, and a note never chokes itself. " +
+        "Omitted = no choke (unchanged behaviour)."
+    ),
 })
   // `.strict()` (sax-team defect B, 2026-08-20): closes the same hole one
   // level up from `samplerCrossfadeSchema` above — a typo'd field inside one
@@ -1315,7 +1350,9 @@ const samplerSchema = z
           "one voice per note. Use one zone for a single mapped sample; non-overlapping " +
           "pitch ranges to split samples across the keyboard; velocity ranges for " +
           "soft/loud layers; `seqLength`/`seqPosition` or `randMin`/`randMax` within a " +
-          "group for round-robin/random alternation; different `group`s to stack sounds."
+          "group for round-robin/random alternation; different `group`s to stack sounds; " +
+          "`reverse` to play one zone backwards for a swell; `chokeGroup` so one pad cuts " +
+          "another off (the open/closed hi-hat rule)."
       ),
     oneShot: z
       .boolean()
@@ -1647,7 +1684,26 @@ registerTool(
       "Default instrument (a " +
       "fresh instrument track) is polySynth with a saw wave. Audio and bus " +
       "tracks reject this — use track_add or project_snapshot to find/create " +
-      "an instrument track first.",
+      "an instrument track first. THE RESPONSE ANSWERS TWO THINGS ABOUT " +
+      "PERFORMANCE CONTROLLER DATA. (1) `honoredControllers` — always " +
+      "present — says which controllers THIS instrument actually acts on: " +
+      "`{all, cc, pitchBend, channelPressure}`, where `all: true` (the " +
+      "soundBank / audioUnit kinds) means every CC is forwarded to the plug-in " +
+      "and `cc` is empty because there is nothing to enumerate, while for the " +
+      "built-ins `cc` lists the exact CC numbers that will sound. Read it " +
+      "BEFORE writing lanes with clip_set_controller_lane, and note it depends " +
+      "on the SETTINGS too, not just the kind — a sampler honors CC 1 and CC 2 " +
+      "only once `sampler.expressionModDepth` is above 0. Its " +
+      "`neutralDefaults` map gives each controller its REST value, which is " +
+      "127 for CC 11, 100 for CC 7 and 64 for CC 10 rather than 0. (2) " +
+      "`warnings` — present ONLY when it matters — fires when this very call " +
+      "CHANGED the meaning of controller lanes the track already carries: " +
+      "lanes that were inert under the old instrument and now sound, or that " +
+      "sounded and now do not. That is a real regression source: CC 11 lanes " +
+      "authored against polySynth (which ignores them) became a broad " +
+      "attenuation the moment a soundBank was assigned, and cost a finished " +
+      "mix 1.25 LU. Your lanes are never rewritten or muted — the warning " +
+      "just tells you the meaning moved, and names the controller.",
     inputSchema: {
       trackId: z.string().min(1).describe("Id of the instrument track, from project_snapshot."),
       kind: z
@@ -2291,12 +2347,13 @@ server.registerTool(
       "`format` (the file's real extension — \"dls\", \"sf2\", or \"sf3\"); `builtin` (true " +
       "only for the General MIDI entry); `sizeBytes` (file size in bytes — some SF2 " +
       "libraries run into the gigabytes); `supported` (false for a bank that was FOUND but " +
-      "CANNOT be loaded — today that means MuseScore's Vorbis-compressed .sf3); and " +
-      "`unsupportedReason` (null when supported, else a sentence telling the user what to " +
-      "do about it). An entry with `supported: false` is listed so you can SEE it exists " +
+      "cannot be played AS IT SITS — today that means MuseScore's Vorbis-compressed .sf3); " +
+      "and `unsupportedReason` (null when supported, else a sentence telling the user what " +
+      "to do about it). An entry with `supported: false` is listed so you can SEE it exists " +
       "rather than wonder why your file vanished — its `source` will be REJECTED by " +
-      "track_set_instrument and by instrument_import_sound_bank, so never offer it as a " +
-      "playable choice; relay its `unsupportedReason` instead. Don't " +
+      "track_set_instrument, so never offer it as a playable choice. For a .sf3 the way " +
+      "forward is instrument_import_sound_bank, which CONVERTS it to a real .sf2 and " +
+      "returns that bank; select the converted bank's `source`, not the .sf3's. Don't " +
       "see a bank you expect? Import it first with instrument_import_sound_bank. Next step: " +
       "call instrument_list_sound_bank_programs with a bank's `source` to see its exact " +
       "playable programs before selecting one on track_set_instrument.",
@@ -2348,9 +2405,14 @@ registerTool(
       "Copy a .sf2 or .dls sound bank file into DAW Pro's central sound bank library " +
       "(`~/Library/Application Support/DAWPro/SoundBanks/`) so it shows up in " +
       "instrument_list_sound_banks and can be selected on track_set_instrument going " +
-      "forward. `path` must be the ABSOLUTE path to an existing, readable .sf2 or .dls file " +
-      "on this Mac — a relative path, wrong extension, or missing file is rejected with a " +
-      "readable error. This is always a COPY: the source file at `path` is left in place, " +
+      "forward. `path` must be the ABSOLUTE path to an existing, readable .sf2, .dls or " +
+      ".sf3 file on this Mac — a relative path, wrong extension, or missing file is " +
+      "rejected with a readable error. A .sf3 (MuseScore's Vorbis-compressed SoundFont, " +
+      "which is what MuseScore ships) is CONVERTED to a real .sf2 as it is imported, so " +
+      "the bank you get back is a normal .sf2 with a .sf2 path; expect it to take a few " +
+      "seconds and to be roughly ten times the size of the .sf3. If any part of a .sf3 " +
+      "cannot be decoded the whole import FAILS with a readable error rather than landing " +
+      "a bank with silent gaps in it. This is always a COPY: the source file at `path` is left in place, " +
       "never moved or deleted. A name collision in the library is uniquified automatically " +
       "(e.g. \"Vintage-2\") rather than overwriting an existing bank. Returns `{bank: " +
       "{source, name, path, format, builtin, sizeBytes}}` — the freshly imported bank's " +
@@ -2363,8 +2425,9 @@ registerTool(
         .string()
         .min(1)
         .describe(
-          "Absolute path to the .sf2 or .dls file to import on this Mac. Copied into the " +
-            "central library; the original file at this path is left untouched."
+          "Absolute path to the .sf2, .dls or .sf3 file to import on this Mac. Copied into " +
+            "the central library (a .sf3 is converted to .sf2 on the way in); the original " +
+            "file at this path is left untouched."
         ),
     },
   },
@@ -2865,6 +2928,7 @@ const fxKindSchema = z
     "gate",
     "chorus",
     "bassEnhancer",
+    "bitCrusher",
     "audioUnit",
   ])
   .describe(
@@ -2915,6 +2979,19 @@ const fxKindSchema = z
       "phones. It is NOT the `saturator`: the shaper only ever sees the low band and the " +
       "series stops at the 4th partial. Be honest with users that it ADDS harmonics that " +
       "were not in the recording. `amount` 0 or `mix` 0 is bit-exact bypass. " +
+      "`bitCrusher` is a bit-depth + sample-rate reducer - the lo-fi character of " +
+      "a 1980s sampling drum machine: `bits` (1-16, whole numbers), `downsampleHz` " +
+      "(1000-48000), `antiAlias`, `dither` (both 0 or 1), `mix`. ITS DEFAULTS ARE THE " +
+      "POINT AND YOU SHOULD USUALLY LEAVE THEM: 12 bits at 26040 Hz is the E-mu " +
+      "SP-1200, and `antiAlias: 0` / `dither: 0` are DELIBERATE. The SP-1200's " +
+      "signature comes specifically from its converter OMITTING the reconstruction " +
+      "filter, so content above the reduced Nyquist images back down as audible grit; " +
+      "a politely filtered, dithered bit-crusher sounds clean-but-crunchy instead of " +
+      "gritty and does NOT hit that reference. Turn `antiAlias: 1` on only when a " +
+      "user asks for a tamer, modern crush, and `dither: 1` only when you are " +
+      "reducing depth for DELIVERY rather than for character. `downsampleHz: 40000` " +
+      "is the Akai MPC60, which is why MPC60 chops read as cleaner. Reach for it on a " +
+      "chopped sample or a whole drum bus. `mix: 0` is a bit-exact bypass. " +
       "`audioUnit` hosts an " +
       "installed Audio Unit EFFECT plugin — third-party or Apple effects registered " +
       "with the system — selected via fx_add's `audioUnit` param (REQUIRED when this " +
@@ -2972,7 +3049,11 @@ registerTool(
       "out-of-range values clamp into range rather than erroring. `params` seeds the " +
       "new effect's parameters by name (e.g. `{ gain: 1.5 }`); call fx_describe first " +
       "to see each kind's exact parameter names, ranges, defaults, and units — omitted " +
-      "params start at their default, and out-of-range values clamp. `audioUnit` " +
+      "params start at their default, and out-of-range values clamp — when one does, " +
+      "the response carries a `warnings` array saying which parameter was clamped, to " +
+      "what, and why, so a seeded value that did not fit never passes for one that did. " +
+      "(A `gain` insert's `gainLinear` seeds anywhere in 0-16, up to +24.08 dB.) " +
+      "`audioUnit` " +
       "(see its own description) selects a specific installed Audio Unit effect plugin " +
       "by component triple and is REQUIRED when `kind` is `audioUnit` (call " +
       "fx_list_audio_units first to discover what's installed); it's ignored for every " +
@@ -2982,11 +3063,12 @@ registerTool(
       "mix's master output chain (post-fader, the last stop before the speakers) instead " +
       "of a track/bus. The master chain hosts BUILT-IN effects only in v1 — `kind: " +
       "\"audioUnit\"` on \"master\" is rejected (pick one of gain|eq|compressor|limiter|" +
-      "reverb|delay|saturator|gate|chorus|bassEnhancer). Classic mastering move: fx_add {trackId: " +
+      "reverb|delay|saturator|gate|chorus|bassEnhancer|bitCrusher). Classic mastering move: fx_add {trackId: " +
       "\"master\", kind: \"eq\"} then {trackId: \"master\", kind: \"limiter\"}, then " +
       "render_measure_loudness to check the level. Returns " +
       "`{effectId, effects}`: the new effect's server-minted id, and the track's full " +
-      "updated insert chain (same shape as project_snapshot's per-track `effects` array).",
+      "updated insert chain (same shape as project_snapshot's per-track `effects` array) " +
+      "— plus `warnings` when a seeded `params` value had to be clamped (absent otherwise).",
     inputSchema: {
       trackId: z
         .string()
@@ -3368,9 +3450,23 @@ registerTool(
       "chain (m13-d — e.g. a mastering limiter's `ceilingDb`). " +
       "Parameter names, ranges, defaults, and units are discoverable per effect kind via " +
       "fx_describe — pass the exact `name` it lists. Out-of-range `value`s clamp to the " +
-      "parameter's valid range rather than erroring. Edits apply LIVE, in place, without " +
+      "parameter's valid range rather than erroring, and the clamp is NO LONGER SILENT: " +
+      "when your value did not fit, the response carries a `warnings` array with a plain " +
+      "sentence naming what you asked for, what was actually stored, and the range. That " +
+      "key is ABSENT on an ordinary in-range call, so its presence always means the stored " +
+      "value is not the one you sent — read it back rather than assuming your number took. " +
+      "GAIN CEILING: the `gain` insert's `gainLinear` runs 0-16, i.e. up to +24.08 dB " +
+      "(1 = unity, 2 = +6 dB, 4 = +12 dB; dB = 20*log10(gainLinear)). It is that wide on " +
+      "purpose, because sound-bank / General-MIDI material is quiet: a solo GM piano part " +
+      "measures about -28 LUFS at velocity 100 and near -35 LUFS at velocity 64, so a " +
+      "-14 LUFS streaming target needs roughly +14 to +21 dB of makeup. ONE gain insert now " +
+      "covers that range — chaining a second one, which used to be necessary, is not. The " +
+      "headroom is not free: this is a plain multiply with no protection of its own, so a " +
+      "big boost can drive the mix into hard clipping. Put a limiter AFTER the gain insert " +
+      "when you push it hard, and check the result with render_measure_loudness rather than " +
+      "trusting the multiplier. Edits apply LIVE, in place, without " +
       "interrupting or glitching playback. Returns the full updated insert chain " +
-      "(`effects`, same shape as project_snapshot).",
+      "(`effects`, same shape as project_snapshot) plus `warnings` when a value was clamped.",
     inputSchema: {
       trackId: z.string().min(1).describe("Id of the track or bus that owns the effect, from project_snapshot, OR \"master\" for the master output chain."),
       effectId: z
@@ -3385,7 +3481,8 @@ registerTool(
         .number()
         .describe(
           "New parameter value. Out-of-range values clamp to the parameter's valid range " +
-            "— see fx_describe for that range."
+            "— see fx_describe for that range — and the response's `warnings` says so when " +
+            "that happens. For a gain insert's `gainLinear` the range is 0-16 (+24.08 dB)."
         ),
     },
   },
@@ -3529,7 +3626,11 @@ server.registerTool(
       "`bassEnhancer` (psychoacoustic bass enhancer — crossoverHz/amount/mix: it " +
       "generates the 2nd/3rd/4th harmonics of the sub-crossover content and adds them " +
       "above the crossover so small speakers imply a fundamental they cannot play; the " +
-      "params' `note`s teach the exact semantics).",
+      "params' `note`s teach the exact semantics), and `bitCrusher` (bit-depth + " +
+      "sample-rate reduction - bits/downsampleHz/antiAlias/dither/mix, defaulting to " +
+      "the SP-1200's 12 bits at 26040 Hz with anti-aliasing and dither deliberately " +
+      "OFF because the aliasing IS the character; read its notes before turning " +
+      "either switch on).",
     inputSchema: {
       kind: fxKindSchema.optional().describe("Effect kind to describe. Omit to list every available kind."),
     },
@@ -3814,8 +3915,13 @@ registerTool(
   {
     title: "Replace a MIDI clip's notes",
     description:
-      "Replace a MIDI clip's ENTIRE note array — the only note-editing " +
-      "primitive. There is no add/remove-single-note tool: read the " +
+      "Replace a MIDI clip's ENTIRE note array — the tool for ADDING, " +
+      "REMOVING, or reordering notes, or rewriting a clip's content " +
+      "wholesale. If you are only CHANGING FIELDS (pitch/velocity/startBeat/" +
+      "lengthBeats) on notes that already exist, and not adding or removing " +
+      "any, use clip_patch_notes instead — it edits by id without " +
+      "resubmitting notes you are not touching, and it can never drop a " +
+      "note you didn't mean to. To add/remove/reorder here: read the " +
       "clip's current notes with clip_get_notes (preferred — one clip, not " +
       "the whole project) or from project_snapshot, modify the array " +
       "(add, remove, or change notes) in your own code, then resubmit the " +
@@ -3893,7 +3999,11 @@ registerTool(
       "then call clip_set_notes with only the filtered array, you will " +
       "SILENTLY DESTROY every note you never saw, so always check " +
       "totalNotes === returnedNotes before doing a whole-array replace, or " +
-      "merge your edits back into a full clip_get_notes {} read first. Size " +
+      "merge your edits back into a full clip_get_notes {} read first — or, " +
+      "better, if you are only changing FIELDS on notes that already exist " +
+      "and not adding/removing any, skip this hazard entirely with " +
+      "clip_patch_notes, which edits by id and cannot drop a note it wasn't " +
+      "told about. Size " +
       "math: a note is roughly 90-120 bytes of JSON, so a 900-note drum " +
       "clip is ~80-110 KB — for big clips, filter by fromBeat/toBeat rather " +
       "than pulling the whole clip. This tool is STRICTLY READ-ONLY: no " +
@@ -3941,6 +4051,218 @@ registerTool(
   },
   async ({ clipId, fromBeat, toBeat, pitchMin, pitchMax }) =>
     toToolResult(() => bridge.send("clip.getNotes", { clipId, fromBeat, toBeat, pitchMin, pitchMax }))
+);
+
+registerTool(
+  "clip_repeat_notes",
+  {
+    title: "Repeat a note pattern into the same clip",
+    description:
+      "Copy a clip-relative note window (or an explicit set of note ids) into the SAME clip, " +
+      "`count` times, `periodBeats` apart — the write-surface answer to 'lay down one bar and " +
+      "repeat it N times' without generating and sending every repeated note yourself. A " +
+      "twelve-bar blues drum part is one bar (~13 notes) plus one clip_repeat_notes call " +
+      "instead of 149 hand-authored notes. " +
+      "`fromBeat`/`toBeat` are CLIP-RELATIVE beats (same frame as a note's startBeat, like " +
+      "clip_get_notes) and HALF-OPEN: a note is selected when startBeat >= fromBeat AND < " +
+      "toBeat. Omit both to select the whole clip. `noteIds` selects an explicit set of notes " +
+      "instead, and is mutually exclusive with fromBeat/toBeat. `periodBeats` is an EXPLICIT " +
+      "beat offset between copies — this tool is meter-blind BY DESIGN (it never guesses 'one " +
+      "bar' across a meter change), so `meterChangesInSpan` in the response tells you when the " +
+      "written span crosses a meter change; the copies are still exact beat translations either " +
+      "way. `firstCopyAtBeat` (clip-relative) is where copy 1 starts; omit it to place copy 1 " +
+      "immediately after the source window/selection, `periodBeats` later. `transposeSemitones` " +
+      "shifts each copy's pitches — pass one number to apply it to every copy, or exactly " +
+      "`count` numbers for one shift per copy. IMPORTANT: this is CHROMATIC transposition " +
+      "(pitch + n), NOT diatonic and NOT key-aware — moving a blues riff up a fourth is a valid " +
+      "parallel move, but transposing a diatonic melody this way will land in the wrong mode; " +
+      "author the pitches yourself when you need harmonic correctness. `extendClip` (default " +
+      "true) grows the clip when a copy lands past its end, exactly like clip_set_notes' " +
+      "double-click-to-extend gesture — capped at the next clip on the track, which is never " +
+      "trimmed or removed. " +
+      "NO NOTES ARE RETURNED, ever — the whole point of this tool is to avoid paying for the " +
+      "repeated notes twice (once to generate, once to receive back). Read the written notes " +
+      "with clip_get_notes if you need their ids. The response also reports " +
+      "`preExistingNotesInSpan` and `copiesOverlapEachOther`, since stacked notes are legal and " +
+      "never deduped or trimmed, and `pitchesClamped` (a transposed pitch outside 0-127 is " +
+      "clamped, not refused — check this to catch a silently-wrong interval). " +
+      "This call COMPOUNDS on re-run: calling it twice produces twice the copies. If you " +
+      "generated too many, undo (edit_undo) rather than calling it again to 'fix' the count — " +
+      "the whole repeat is ONE undo step, so one edit_undo removes exactly the copies this call " +
+      "added (and any clip-length extension it made), never folding into a note edit made just " +
+      "before or after it.",
+    inputSchema: {
+      clipId: z.string().uuid().describe("Id of the MIDI clip to repeat notes within, from project_snapshot."),
+      fromBeat: z
+        .number()
+        .optional()
+        .describe(
+          "Only select source notes whose startBeat is >= this (CLIP-RELATIVE beats). " +
+            "Half-open with toBeat. Mutually exclusive with noteIds. Omit for no lower bound."
+        ),
+      toBeat: z
+        .number()
+        .optional()
+        .describe(
+          "Only select source notes whose startBeat is < this (CLIP-RELATIVE beats). " +
+            "Half-open. Mutually exclusive with noteIds. Omit for no upper bound."
+        ),
+      noteIds: z
+        .array(z.string().uuid())
+        .optional()
+        .describe(
+          "An explicit set of note ids to repeat (from clip_get_notes), instead of a " +
+            "fromBeat/toBeat window. Mutually exclusive with fromBeat/toBeat."
+        ),
+      periodBeats: z
+        .number()
+        .describe(
+          "Beats between the start of each copy. Must be > 0. Explicit and meter-blind by " +
+            "design — see the tool description for why."
+        ),
+      count: z
+        .number()
+        .int()
+        .min(1)
+        .max(512)
+        .describe(
+          "How many copies to make, 1-512. 512 is a judgment-call ceiling (not a measured " +
+            "limit) so a typo like 100000 fails loudly instead of allocating."
+        ),
+      firstCopyAtBeat: z
+        .number()
+        .optional()
+        .describe(
+          "CLIP-RELATIVE start beat of copy 1. Omit to place it immediately after the source " +
+            "window/selection, periodBeats later."
+        ),
+      transposeSemitones: z
+        .array(z.number().int())
+        .max(512)
+        .optional()
+        .describe(
+          "Chromatic pitch shift per copy, in semitones. Pass ONE number to apply it to every " +
+            "copy, or exactly `count` numbers for one shift per copy. Omit for no transpose. " +
+            "NOT diatonic or key-aware — see the tool description."
+        ),
+      extendClip: z
+        .boolean()
+        .optional()
+        .describe(
+          "Whether a copy landing past the clip's current end grows the clip to cover it " +
+            "(capped at the next clip on the track). Defaults to true."
+        ),
+    },
+  },
+  async ({ clipId, fromBeat, toBeat, noteIds, periodBeats, count, firstCopyAtBeat,
+          transposeSemitones, extendClip }) =>
+    toToolResult(() =>
+      bridge.send("clip.repeatNotes", {
+        clipId, fromBeat, toBeat, noteIds, periodBeats, count, firstCopyAtBeat,
+        transposeSemitones, extendClip,
+      })
+    )
+);
+
+/**
+ * One BY-ID field update for clip_patch_notes (m26-a / m27-n). Every field
+ * but `id` is optional — an omitted field is left UNCHANGED, the entire
+ * point of this tool. `.strict()` here (m30-c, "17 schemas not 2"):
+ * `registerTool`'s wrapper only strictens the TOP level of its own
+ * inputSchema, so a typo'd field INSIDE one element of `update` (e.g.
+ * "velocty") would otherwise be silently stripped rather than rejected —
+ * on a patch verb that means the field silently does not change while the
+ * call still reports success, exactly the class of failure this tree keeps
+ * paying for.
+ */
+const notePatchSchema = z
+  .object({
+    id: z
+      .string()
+      .uuid()
+      .describe(
+        "Id of an EXISTING note in this clip, from clip_get_notes. Must already exist — " +
+          "clip_patch_notes can never create or remove a note."
+      ),
+    pitch: z
+      .number()
+      .int()
+      .min(0)
+      .max(127)
+      .optional()
+      .describe("New MIDI pitch number, 0-127 (60 = middle C). Omit to leave the pitch unchanged."),
+    velocity: z
+      .number()
+      .int()
+      .min(1)
+      .max(127)
+      .optional()
+      .describe("New note-on velocity, 1-127. Omit to leave it unchanged."),
+    startBeat: z
+      .number()
+      .min(0)
+      .optional()
+      .describe(
+        "New start position in beats (quarter notes), RELATIVE TO THE CLIP'S START " +
+          "(not the timeline). Omit to leave it unchanged."
+      ),
+    lengthBeats: z
+      .number()
+      .positive()
+      .optional()
+      .describe("New duration in beats. Must be > 0. Omit to leave it unchanged."),
+  })
+  .strict();
+
+registerTool(
+  "clip_patch_notes",
+  {
+    title: "Update specific notes in a MIDI clip by id",
+    description:
+      "Change pitch/velocity/startBeat/lengthBeats on SPECIFIC notes in a MIDI clip, addressed " +
+      "by id, WITHOUT resubmitting the clip's other notes. This is the tool for 'raise the " +
+      "velocity of these 48 notes' or 'shorten these 225 notes for legato' — before this tool, " +
+      "either edit required reading and resending the clip's ENTIRE note array through " +
+      "clip_set_notes even when only a handful of notes actually changed (the reports that " +
+      "motivated this tool: a legato pass changing lengthBeats on 225 of a clip's notes, and a " +
+      "velocity bump on 48 of a 907-note, ~80 KB clip). " +
+      "NOT clip_set_notes: that replaces the clip's WHOLE note array (can add, remove, and " +
+      "reorder notes — anything you don't include is GONE). clip_patch_notes can only ever " +
+      "change fields on notes that ALREADY EXIST — there is no code path from calling it to a " +
+      "note disappearing — and it leaves every note you don't name in `update` completely " +
+      "untouched. Use clip_get_notes first to learn real note ids (or reuse ids you already " +
+      "have from clip_add_midi/clip_set_notes). Reach for clip_set_notes instead when you're " +
+      "adding/removing notes, or authoring/replacing a clip's content wholesale. " +
+      "Each `update` entry needs `id` plus AT LEAST ONE of pitch/velocity/startBeat/lengthBeats " +
+      "— an entry naming none of them is refused as an almost-certain mistake, not silently " +
+      "accepted as a no-op. An id that isn't actually in this clip REFUSES THE WHOLE CALL and " +
+      "names the offending id in the error; nothing is partially applied, and the SAME id " +
+      "named twice in one call is refused the same way (which value should win is ambiguous, " +
+      "so it's an error rather than a guess). " +
+      "One call is ONE undo step (edit_undo reverts every note this call touched together), " +
+      "and it never merges with a note edit made just before or after it — coalescing is " +
+      "deliberately OFF for this tool, the clip_repeat_notes precedent. " +
+      "The response is COUNTS ONLY (`updated`, `totalNotes`, `latentNotesPastClipEnd`) — never " +
+      "a notes array, since you already know exactly which ids and fields you changed. Read " +
+      "the result back with clip_get_notes if you need to see it. " +
+      "This tool does NOT grow the clip: unlike clip_set_notes/clip_repeat_notes, there is no " +
+      "auto-extend, so a patched startBeat/lengthBeats that lands past the clip's current end " +
+      "stores fine but won't sound — `latentNotesPastClipEnd` in the response is your only " +
+      "signal; use clip_set_notes or clip_fit_to_content if you need the clip itself to grow.",
+    inputSchema: {
+      clipId: z.string().uuid().describe("Id of the MIDI clip to edit, from project_snapshot or clip_get_notes."),
+      update: z
+        .array(notePatchSchema)
+        .max(4096)
+        .describe(
+          "Notes to update, by id, up to 4096 entries. Each entry must include `id` and at " +
+            "least one of pitch/velocity/startBeat/lengthBeats to change. May be empty (a no-op " +
+            "— ok, zero updated, no undo entry)."
+        ),
+    },
+  },
+  async ({ clipId, update }) =>
+    toToolResult(() => bridge.send("clip.patchNotes", { clipId, update }))
 );
 
 registerTool(
@@ -4740,34 +5062,63 @@ server.registerTool(
 registerTool(
   "clip_quantize_audio",
   {
-    title: "Quantize an audio clip's timing to the grid (slice + nudge)",
+    title: "Quantize OR CHOP an audio clip on the timeline (slice + nudge)",
     description:
-      "Tighten an AUDIO clip's rhythm to a GRID by slicing it at its transients and " +
-      "nudging each slice onto the grid (destructive, but ONE undo step reverts it). " +
-      "This is the audio counterpart of clip_quantize: the clip is detected for onsets " +
-      "(same engine as clip_detect_transients), cut into slices at each onset, and every " +
-      "slice is moved so its onset lands on the grid; the gaps at the joins are filled " +
-      "by the source continuing (NO time-stretch in v0 — slices play at natural speed) " +
-      "with short equal-power CROSSFADES so the joins are seamless. `gridBeats` is the " +
-      "grid in beats (1 = 1/4 note, 0.5 = 1/8, 0.25 = 1/16). `strength` (0..1, default 1) " +
-      "is how far each slice moves toward its slot (1 = snap fully, 0.5 = halfway). " +
-      "`swing` (50..75, default 50) delays the offbeat slots (MPC groove). `sensitivity` " +
-      "(0..1, default 0.5) tunes onset detection (low = strong hits only, high = more " +
-      "onsets). `crossfadeMs` (0..50, default 10) is the join crossfade width in " +
-      "milliseconds. AUDIO CLIPS ONLY (a MIDI clip is rejected — use clip_quantize); a " +
-      "time-STRETCHED clip is rejected (un-stretch or bounce it first — per-slice stretch " +
-      "is a future feature); a take-comp member is rejected (change the comp or " +
-      "take_flatten first); a clip with fewer than 2 detectable onsets is rejected " +
-      "(nothing to quantize — raise sensitivity or pick a more percussive clip). Slices " +
-      "never reorder. Returns {clips} — the head + slice clips that replaced the original.",
+      "QUANTIZE or CHOP an AUDIO clip on the TIMELINE. **With `strength: 0` this is a " +
+      "pure CHOP** — the clip is cut at its transients (or, with `divisions`, into N " +
+      "equal parts) into slices that stay EXACTLY where they were, in ONE undo step, " +
+      "with clean sample-exact joins and no crossfades. That is the tool to reach for " +
+      "when you want to chop a loop, break, or sample into separate clips you can " +
+      "rearrange, delete, or reverse. (To chop into SAMPLER PADS you can play from a " +
+      "keyboard instead, use clip_slice_to_sampler.) With `strength` above 0 it also " +
+      "tightens the rhythm to a GRID: the clip is detected for onsets (same engine as " +
+      "clip_detect_transients), cut into slices at each onset, and every slice is moved " +
+      "so its onset lands on the grid; the gaps at the joins are filled by the source " +
+      "continuing (NO time-stretch in v0 — slices play at natural speed) with short " +
+      "equal-power CROSSFADES so the joins are seamless. Destructive, but ONE undo step " +
+      "reverts it. `gridBeats` is the grid in beats (1 = 1/4 note, 0.5 = 1/8, 0.25 = " +
+      "1/16) and may be OMITTED when `strength` is 0, where nothing is nudged and a " +
+      "pure chop needs no grid. `strength` (0..1, default 1) is how far each slice moves " +
+      "toward its slot (1 = snap fully, 0.5 = halfway, 0 = chop only). `swing` (50..75, " +
+      "default 50) delays the offbeat slots (MPC groove). `sensitivity` (0..1, default " +
+      "0.5) tunes onset detection (low = strong hits only, high = more onsets). " +
+      "`divisions` (2..128) cuts into that many EQUAL parts instead of at transients — " +
+      "the fallback for material whose transients are wrong or absent (drones, ambient " +
+      "beds, already-quantized loops); it does not run the detector, so `sensitivity` " +
+      "alongside it is REJECTED rather than ignored. `crossfadeMs` (0..50, default 10) " +
+      "is the join crossfade width in milliseconds. AUDIO CLIPS ONLY (a MIDI clip is " +
+      "rejected — use clip_quantize); a time-STRETCHED clip is rejected (un-stretch or " +
+      "bounce it first — per-slice stretch is a future feature); a take-comp member is " +
+      "rejected (change the comp or take_flatten first); a clip with fewer than 2 " +
+      "detectable onsets is rejected (nothing to quantize — raise sensitivity, pass " +
+      "`divisions` instead, or pick a more percussive clip). Slices never reorder. " +
+      "Returns {clips} — the head + slice clips that replaced the original.",
     inputSchema: {
       trackId: z.string().uuid().describe("Id of the track holding the clip, from project_snapshot."),
       clipId: z.string().uuid().describe("Id of the AUDIO clip to quantize, from project_snapshot."),
       gridBeats: z
         .number()
         .positive()
+        .optional()
         .describe(
-          "Grid resolution in beats: 1 = 1/4 note, 0.5 = 1/8, 0.25 = 1/16, 0.125 = 1/32. Must be > 0."
+          "Grid resolution in beats: 1 = 1/4 note, 0.5 = 1/8, 0.25 = 1/16, 0.125 = 1/32. " +
+            "Must be > 0. REQUIRED unless strength is 0 — at strength 0 nothing is nudged, " +
+            "so a pure chop needs no grid and this may be omitted."
+        ),
+      divisions: z
+        .number()
+        .int()
+        .min(2)
+        .max(128)
+        .optional()
+        .describe(
+          "Cut the clip into this many EQUAL parts instead of at its transients, 2..128. " +
+            "The fallback when transients are wrong or absent (drones, pads, ambient beds, " +
+            "already-quantized loops): divisions: 8 on a one-bar loop gives eight 1/8-note " +
+            "slices. No detector runs, so `sensitivity` sent alongside is rejected. " +
+            "Orthogonal to gridBeats/strength/swing/groove — divisions picks where the clip " +
+            "is CUT, those pick where each slice MOVES TO. Parts thinner than the minimum " +
+            "slice width (50 ms) are refused with the arithmetic, never silently thinned."
         ),
       strength: z
         .number()
@@ -4811,17 +5162,250 @@ registerTool(
         ),
     },
   },
-  async ({ trackId, clipId, gridBeats, strength, swing, sensitivity, crossfadeMs, groove }) =>
+  async ({
+    trackId,
+    clipId,
+    gridBeats,
+    divisions,
+    strength,
+    swing,
+    sensitivity,
+    crossfadeMs,
+    groove,
+  }) =>
     toToolResult(() =>
       bridge.send("clip.quantizeAudio", {
         trackId,
         clipId,
         gridBeats,
+        divisions,
         strength,
         swing,
         sensitivity,
         crossfadeMs,
         groove,
+      })
+    )
+);
+
+registerTool(
+  "clip_slice_to_sampler",
+  {
+    title: "Chop an audio clip into sampler pads (the sample flip)",
+    description:
+      "THE SAMPLE FLIP: turn a record into an instrument. Chops an AUDIO clip at its " +
+      "TRANSIENTS (or at equal divisions, or on the musical grid) into SAMPLER PADS -- " +
+      "one zone per slice, all pointing at the SAME source file, one pad per MIDI note " +
+      "from `baseNote` up -- and, by default, writes a MIDI clip that REPLAYS THE " +
+      "ORIGINAL GROOVE. That is the whole point of the workflow: you start from a " +
+      "reconstruction that plays back identically to the record, then reorder, mute, " +
+      "retune and rearrange the pads to make something new. This is the MPC / SP-1200 / " +
+      "Recycle chop, and it is how a break becomes a beat. " +
+      "The SOURCE CLIP IS NOT TOUCHED -- it is not sliced, moved or replaced. (To cut " +
+      "the clip itself into slices ON THE TIMELINE instead, use clip_quantize_audio with " +
+      "strength 0.) " +
+      "`targetTrackId` picks an existing INSTRUMENT track; omit it and a new one named " +
+      "\"<clip> chops\" is created and returned as `createdTrackId`. Chopping onto a " +
+      "track that already has zones REPLACES them (a zones array is wholesale) and says " +
+      "so in `warnings`. " +
+      "`mode`: \"transients\" (default -- detected onsets, tuned by `sensitivity`), " +
+      "\"divisions\" (N equal parts, needs `divisions` 2..128), or \"grid\" (musical " +
+      "grid lines, needs `gridBeats`). Parameters that do not belong to the chosen mode " +
+      "are REJECTED by name rather than silently ignored. " +
+      "`includeHead` (default false) keeps the audio BEFORE the first slice point as pad " +
+      "1 -- off by default because that material is usually pre-roll, but `headSeconds` " +
+      "is always reported and a large discarded head is warned about, so a missed " +
+      "downbeat can never vanish quietly. " +
+      "Each boundary is SNAPPED once (within +/-`snapWindowMs`, default 3) to the " +
+      "quietest nearby frame and shared by both adjacent pads, so a pad played on its own " +
+      "does not click; every pad also gets a 0 ms attack (keeps the transient) and a 10 " +
+      "ms release (the real fix for the click at the END of a slice). On a stereo file " +
+      "there is often no simultaneous zero crossing, so each slice reports " +
+      "`residualAmplitude` -- how quiet the cut actually is -- rather than implying a " +
+      "clean one. " +
+      "Reconstruction notes are VELOCITY 127, not the detector's strength: the sampler's " +
+      "amp law is velocity/127 x zone gain and the slice already carries its own recorded " +
+      "level, so a ghost note fired at velocity 13 would land about 20 dB below itself. " +
+      "127/127 is exactly 1.0 -- a level-faithful replay -- while velocity stays live for " +
+      "any NEW pattern you write. Set `velocityFromStrength` to opt into the detector's " +
+      "dynamics (deliberately quieter than the source); `strength` is in the response " +
+      "either way. " +
+      "REFUSALS, all of which change nothing: a MIDI clip; a time-STRETCHED or " +
+      "PITCH-SHIFTED clip (pads read RAW source frames, so the reconstruction would not " +
+      "match what you hear -- un-stretch, clear the pitch, or bounce first); mode " +
+      "\"grid\" on a clip spanning a tempo change (\"transients\" and \"divisions\" are " +
+      "fine there); a non-instrument `targetTrackId`; no usable boundary; and -- " +
+      "importantly -- MORE PADS THAN `maxSlices`, or a pad past MIDI note 127. Those two " +
+      "REJECT rather than truncate, because a chop quietly missing its last bar still " +
+      "looks like a successful chop. " +
+      "AFTERWARDS: tweak ONE pad without resending the rest with " +
+      "instrument_set_sampler_zones, the merge-by-id tool (widen a pad's maxPitch for " +
+      "chromatic \"16 Levels\" play, tune it with tuneCents, play it backwards with " +
+      "reverse, or give the hats a chokeGroup). Do NOT try to reach that merge through " +
+      "track_set_instrument: `sampler.zonePatches` is a RAW-WIRE field that " +
+      "instrument_set_sampler_zones wraps for you, and this tool's own schema REJECTS the " +
+      "key. Remember a `zones` array sent to track_set_instrument replaces the whole pad " +
+      "map wholesale and re-mints every id. " +
+      "Set the sampler to mono voice mode (instrument_set_sampler_param) for the classic " +
+      "chopped-soul global choke, or per-pad chokeGroup for independent groups. " +
+      "Everything lands in ONE undo step. Returns {trackId, createdTrackId?, midiClipId?, " +
+      "sampleRate, frameCount, sliceCount, headSeconds, slices: [{index, pitch, " +
+      "startFrame, endFrame?, sourceSeconds, beat, strength?, snapOffsetFrames?, " +
+      "residualAmplitude?}], warnings} -- `sampleRate`/`frameCount` are the SOURCE FILE's " +
+      "own, and every frame number is in those units.",
+    inputSchema: {
+      clipId: z
+        .string()
+        .uuid()
+        .describe(
+          "Id of the AUDIO clip to chop, from project_snapshot. The clip's CURRENT " +
+            "SOURCE WINDOW is the chop region -- trim the clip to the passage you want first."
+        ),
+      targetTrackId: z
+        .string()
+        .uuid()
+        .optional()
+        .describe(
+          "Existing INSTRUMENT track to receive the pads. Omit to create a new one " +
+            "(returned as `createdTrackId`; one undo removes it, its pads and the MIDI clip together)."
+        ),
+      mode: z
+        .enum(["transients", "divisions", "grid"])
+        .optional()
+        .describe(
+          "Where the slice points come from (default \"transients\"). \"divisions\" needs " +
+            "`divisions`; \"grid\" needs `gridBeats`. Parameters belonging to another mode are rejected."
+        ),
+      sensitivity: z
+        .number()
+        .min(0)
+        .max(1)
+        .optional()
+        .describe(
+          "Onset-detection sensitivity 0..1 (default 0.5), mode \"transients\" ONLY. " +
+            "Lower = strong hits only; higher = more (and weaker) slice points."
+        ),
+      divisions: z
+        .number()
+        .int()
+        .min(2)
+        .max(128)
+        .optional()
+        .describe(
+          "Number of EQUAL parts to cut the clip window into, 2..128. Required by (and " +
+            "only valid in) mode \"divisions\" -- the fallback when transients are absent " +
+            "or wrong (drones, pads, already-quantized material)."
+        ),
+      gridBeats: z
+        .number()
+        .positive()
+        .optional()
+        .describe(
+          "Grid resolution in beats (1 = 1/4 note, 0.5 = 1/8, 0.25 = 1/16). Required by " +
+            "(and only valid in) mode \"grid\"."
+        ),
+      minSliceSeconds: z
+        .number()
+        .min(0.001)
+        .max(10)
+        .optional()
+        .describe(
+          "Minimum pad width in seconds (default 0.05). Slice points closer together " +
+            "than this merge -- raise it to get fewer, longer pads from busy material."
+        ),
+      maxSlices: z
+        .number()
+        .int()
+        .min(1)
+        .max(96)
+        .optional()
+        .describe(
+          "Refusal ceiling on the number of pads (default 32, hard cap 96). Exceeding it " +
+            "REJECTS the whole chop and changes nothing -- pads are never silently dropped."
+        ),
+      includeHead: z
+        .boolean()
+        .optional()
+        .describe(
+          "Keep the audio BEFORE the first slice point as pad 1 (default false). Turn it " +
+            "on when `headSeconds` shows the detector missed the downbeat."
+        ),
+      baseNote: z
+        .number()
+        .int()
+        .min(0)
+        .max(127)
+        .optional()
+        .describe(
+          "MIDI note of pad 1 (default 36 = C1, the MPC pad-1 note). Pad i sits at " +
+            "baseNote + i; running past 127 is rejected."
+        ),
+      snapWindowMs: z
+        .number()
+        .min(0)
+        .max(20)
+        .optional()
+        .describe(
+          "Half-width of the boundary snap search in milliseconds (default 3; 0 disables " +
+            "snapping). Automatically limited to half of minSliceSeconds so slices cannot reorder."
+        ),
+      generateMIDI: z
+        .boolean()
+        .optional()
+        .describe(
+          "Write the reconstruction MIDI clip that replays the original groove (default " +
+            "true). Set false to build only the pads."
+        ),
+      atBeat: z
+        .number()
+        .min(0)
+        .optional()
+        .describe(
+          "Where the reconstruction clip lands (default: the source clip's own start, so " +
+            "it lines up for A/B). The groove moves intact; it is not re-timed."
+        ),
+      velocityFromStrength: z
+        .boolean()
+        .optional()
+        .describe(
+          "Map detector strength to note velocity instead of using 127 (default false), " +
+            "mode \"transients\" ONLY. Deliberately QUIETER than the source -- the slice " +
+            "already carries its own recorded level."
+        ),
+    },
+  },
+  async ({
+    clipId,
+    targetTrackId,
+    mode,
+    sensitivity,
+    divisions,
+    gridBeats,
+    minSliceSeconds,
+    maxSlices,
+    includeHead,
+    baseNote,
+    snapWindowMs,
+    generateMIDI,
+    atBeat,
+    velocityFromStrength,
+  }) =>
+    toToolResult(() =>
+      bridge.send("clip.sliceToSampler", {
+        clipId,
+        targetTrackId,
+        mode,
+        sensitivity,
+        divisions,
+        gridBeats,
+        minSliceSeconds,
+        maxSlices,
+        includeHead,
+        baseNote,
+        snapWindowMs,
+        generateMIDI,
+        atBeat,
+        velocityFromStrength,
       })
     )
 );
@@ -5055,7 +5639,15 @@ registerTool(
       "then resubmit the whole thing here. Values are RAW MIDI: 0-16383 for a " +
       "`pitchBend` lane (8192 = the center/no-bend position; built-in instruments apply " +
       "it as +/-2 semitones), 0-127 for `cc`/`channelPressure` lanes (CC 1 = mod wheel, " +
-      "CC 64 = sustain pedal — a value >= 64 counts as pedal-down). WHAT ACTUALLY " +
+      "CC 64 = sustain pedal — a value >= 64 counts as pedal-down). CAUTION, THE " +
+      "REST VALUE IS NOT ALWAYS 0: a controller with NO lane sits at its MIDI neutral, " +
+      "and for three of them that is FULL or CENTRE, not off — CC 11 (expression) rests " +
+      "at 127, CC 7 (channel volume) at 100, CC 10 (pan) at 64; everything else rests " +
+      "at 0. So a CC 11 lane drawn at ordinary-looking values (say 106 down to 42) is a " +
+      "broad ATTENUATION of the track relative to having no lane at all, not a gentle " +
+      "shaping — that mistake cost a finished mix 1.25 LU. Write CC 11 near 127 for " +
+      "\"full\", and use lower values only where you actually want the track quieter. " +
+      "WHAT ACTUALLY " +
       "SOUNDS depends on the track's instrument, and this tool now TELLS you: a lane " +
       "the instrument cannot consume still succeeds and is still stored, but the " +
       "response carries a `warnings` array naming the controller and why it will be " +
@@ -5068,7 +5660,8 @@ registerTool(
       "Unit and sound-bank instruments receive every CC as raw MIDI. Note that CC 11 " +
       "on the sampler scales LOUDNESS; for continuous BRIGHTNESS set " +
       "`sampler.expressionFilterDepth` (and optionally `expressionFilterCC`), which " +
-      "sweeps a per-voice low-pass — that is what makes a long held sax or string note " +
+      "sweeps a per-voice low-pass (that CC then counts as honored too) — that is " +
+      "what makes a long held sax or string note " +
       "read as a player leaning into it rather than a flat sustain. Controller values " +
       "CHASE at play and at seek: the latest value " +
       "at or before the playhead stays in effect, so a pedal held or a bend applied " +
@@ -6576,12 +7169,20 @@ registerTool(
       "individual track's gain instead, use track_set_volume. " +
       "2.0 is a HARD CEILING, not a soft one: a value above 2 is REJECTED by this " +
       "tool's schema (it is not silently clamped), and 2.0 itself is the loudest " +
-      "this fader goes. When a mix needs more than +6 dB of makeup to reach a " +
+      "this fader goes. Note the layer that refusal lives in — the SCHEMA. The " +
+      "underlying `mixer.setMasterVolume` control command clamps to 0-2 rather than " +
+      "erroring, exactly like an effect parameter, and answers a clamped call with a " +
+      "`warnings` sentence; this tool refuses first so you never get that far. " +
+      "When a mix needs more than +6 dB of makeup to reach a " +
       "loudness target — common with quiet General-MIDI-sourced material — do NOT " +
       "keep pushing here: add a `gain` insert at the FRONT of the master chain " +
-      "(fx_add with trackId \"master\", kind \"gain\", ahead of the eq/limiter) and " +
-      "take the remaining makeup there — its `gainLinear` param runs 0-4 (≈ +12 dB), " +
-      "and inserts stack if you somehow need more. " +
+      "(fx_add with trackId \"master\", kind \"gain\", index 0, ahead of the eq/limiter) and " +
+      "take the remaining makeup there — its `gainLinear` param runs 0-16 (+24.08 dB), " +
+      "which is enough to lift even a quiet solo GM part to a streaming level in ONE " +
+      "stage (measured: solo GM piano is about -28 LUFS at velocity 100, near -35 LUFS " +
+      "at velocity 64, so -14 LUFS needs roughly +14 to +21 dB). Chaining two gain " +
+      "inserts used to be necessary for this and no longer is. Follow a large boost " +
+      "with a limiter — the gain stage has no protection of its own. " +
       "Returns `{masterVolume}` — and, ONLY when a master volume automation lane is " +
       "actually governing (enabled and holding at least one point), also " +
       "`{automationControlled: true, automationPointCount}`. Those two keys are ABSENT " +
@@ -6706,14 +7307,51 @@ server.registerTool(
       "source) also reads correlation +1 because mono-summing it cancels nothing. The " +
       "snapshot refreshes at roughly 30-60 Hz " +
       "while the engine runs; poll it repeatedly (e.g. once a second during playback) to " +
-      "watch the mix evolve. When the transport is stopped or the session is silent, every " +
-      "value decays to its floor (-80 dB bands/levels, centroid 0, flux 0, correlation +1, " +
-      "width 0, balance 0) — never an " +
-      "error, and every field is always a finite number. Feeds the app's session vibe " +
-      "meter; as an agent, use it to sanity-check a mix's energy, tonal balance, and mono " +
+      "watch the mix evolve, and every field is always a finite number. NEEDS LIVE " +
+      "PLAYBACK: this reads the master bus AS IT PLAYS, so call transport_play first " +
+      "(transport_seek to a marker or beat before that, to meter one section in " +
+      "isolation) — if the transport is stopped, this tool refuses with a teaching error " +
+      "instead of a reading. The underlying floor (-80 dB bands/levels, centroid 0, flux " +
+      "0, correlation +1, width 0, balance 0) is honest data when the mix genuinely is " +
+      "that quiet DURING PLAYBACK, but with the transport stopped it is indistinguishable " +
+      "from 'no signal was ever generated' — so a stopped transport is refused rather " +
+      "than silently handed back as if it were a measurement of your mix. Feeds the app's " +
+      "session vibe meter (unaffected by this refusal — it polls the engine directly); as " +
+      "an agent, use it to sanity-check a mix's energy, tonal balance, and mono " +
       "compatibility while it plays without rendering anything to disk.",
   },
-  async () => toToolResult(() => bridge.send("mixer.masterAnalysis"))
+  async () =>
+    toToolResult(async () => {
+      const result = await bridge.send("mixer.masterAnalysis");
+      // m27-d: refuse when we can PROVE there is no live signal — the
+      // transport is not rolling — rather than silently forwarding the
+      // honest `.floor` reading, which is indistinguishable from a
+      // legitimately quiet mix once it reaches an agent with no other
+      // context (docs/ROADMAP.md m27-d). Strict `=== false` so a missing
+      // key (an app built before this change shipped `transportPlaying` on
+      // this response) is treated as "unknown" and never refused — this
+      // refusal only activates once the CONNECTED app binary is new enough
+      // to report the field. Any other value (including `true`, i.e.
+      // genuinely playing-but-quiet, muted master, or a headless/fake
+      // engine that never produces real signal even while "playing")
+      // passes the reading through UNCHANGED: those causes are not
+      // independently verifiable from here, and this tool must not claim a
+      // cause it has not established.
+      if (
+        result &&
+        typeof result === "object" &&
+        (result as Record<string, unknown>).transportPlaying === false
+      ) {
+        throw new Error(
+          "the transport is stopped — mixer_master_analysis reads the live master bus, " +
+            "and a stopped session reads only its decayed floor (-80 dB bands, 0 Hz " +
+            "centroid), not the mix. Call transport_play, let playback run a moment, then " +
+            "poll mixer_master_analysis again (transport_seek first to meter a specific " +
+            "section)."
+        );
+      }
+      return result;
+    })
 );
 
 server.registerTool(
@@ -7500,7 +8138,8 @@ const automationTargetSchema = z
       "EXACT name from fx_describe for that effect's kind): one parameter of a " +
       "BUILT-IN effect already in the track's insert chain — use it for filter sweeps, " +
       "reverb-mix rises, delay-feedback build-ups, etc.; built-in kinds (gain, eq, " +
-      "compressor, limiter, reverb, delay, saturator, gate, chorus, bassEnhancer) work today. " +
+      "compressor, limiter, reverb, delay, saturator, gate, chorus, bassEnhancer, " +
+      "bitCrusher) work today. " +
       "`effectParam` is REJECTED in v0 when the effect is a hosted Audio Unit " +
       "(`kind: \"audioUnit\"` from fx_add), since its generic parameter surface is empty."
   );

@@ -11,31 +11,32 @@ This is the shared reference every agent in this plugin (`producer`, `composer`,
 points at.
 
 ⚠️ **THE TWO COUNTS BELOW WERE STALE (last measured 2026-08-17) — RE-MEASURED
-2026-08-28 (m27-h) by a stated, defensible method, not a guess.** Do NOT infer
-from a past-wrong count that the traps further down are stale too: each of
-those is pinned to a session that paid for it and is maintained separately.
-Live totals live in `docs/ARCHITECTURE.md` §"Wire surface — CURRENT TOTALS";
-naive greps lie on both surfaces (`grep -c 'registerTool('` alone returns 195,
-which OVER-counts — see the method below), so a real count needs a derivation
-you can state and defend, not a bare `grep -c`.
+2026-08-28 (m27-h, then again same day at the m31-c close for
+`clip.repeatNotes`, then again same day at the m26-a/m27-n close for
+`clip.patchNotes`) by a stated, defensible method, not a guess.** Do NOT
+infer from a past-wrong count that the traps further down are stale too: each
+of those is pinned to a session that paid for it and is maintained
+separately. Live totals live in `docs/ARCHITECTURE.md` §"Wire surface —
+CURRENT TOTALS"; naive greps lie on both surfaces (`grep -c 'registerTool('`
+alone over-counts — see the method below), so a real count needs a
+derivation you can state and defend, not a bare `grep -c`.
 
 It reflects the tool surface enumerated from
-`mcp-server/src/server.ts` (**192 tools**, re-derived 2026-08-28: the MCP
-tool↔command bijection test, `mcp-server/test/audit-tools.test.ts`, defines
-`tool count = commands + |exception table B| + |exception table C|` — 187
+`mcp-server/src/server.ts` (**195 tools**, re-derived 2026-08-29 at the
+m32-b2 close: the MCP tool↔command bijection test,
+`mcp-server/test/audit-tools.test.ts`, defines
+`tool count = commands + |exception table B| + |exception table C|` — 190
 commands (below) + 3 Table-B tools with no backing command at all
 (`generate_image`, `generate_lyrics`, `generate_song_suno` — they call a
 generation provider directly) + 2 Table-C tools that bridge to an EXISTING
 command, `track.setInstrument`, under a friendlier name/shape
-(`instrument_set_sampler_param`, `instrument_set_sampler_zones`) = 192.
-Cross-checked by extracting the literal name argument of every `registerTool(`
-call: 192 unique names — and the raw `registerTool(` occurrence count, 195,
-minus its 3 non-registration matches (one doc comment, the wrapper's own
-`function registerTool(` definition, and the wrapper's internal
-`server.registerTool(name, …)` call, which passes a variable, not a literal)
-also lands on 192, agreeing three ways) and
+(`instrument_set_sampler_param`, `instrument_set_sampler_zones`) = 195.
+⚠️ The authoritative pin is `mcp-server/test/integration.test.ts`'s
+`assert.equal(result.tools.length, 195)` — **NOT** a `grep -c 'registerTool('`,
+which is a known liar on this file and previously anchored this paragraph at a
+stale 194) and
 `Sources/DAWControl/Commands.swift`
-(**187 commands** — the `CommandRouter.allCommands.count == 187` pin in
+(**190 commands** — the `CommandRouter.allCommands.count == 190` pin in
 `Tests/DAWControlTests/RenderCommandTests.swift`)
 in the DAW Pro repo — not memory, and not the app's own in-app Copilot
 catalog (`Sources/DAWControl/CopilotCatalog.swift`), which is a **different,
@@ -149,6 +150,20 @@ what `totalNotes` (unfiltered) next to `returnedNotes` (what you got) is
 for — if they differ, you are not holding the whole clip. Read unfiltered
 before a write, or write back through a re-read.
 
+⭐ **Or skip the hazard entirely: `clip_patch_notes` (2026-08-28).** If you
+are only CHANGING FIELDS (pitch/velocity/startBeat/lengthBeats) on notes
+that already exist — not adding, removing, or reordering any — use
+`clip_patch_notes {clipId, update: [{id, pitch?, velocity?, startBeat?,
+lengthBeats?}]}` instead of `clip_get_notes` + filter + `clip_set_notes`.
+It edits BY ID, can never drop a note it wasn't told about (there is no
+code path from "call this" to "note gone"), and an id not in the clip
+refuses the WHOLE call rather than silently doing nothing. One call is one
+undo step. This was the actual motivating case: a legato pass changing
+`lengthBeats` on 225 of a clip's notes, and a velocity bump on 48 of 907,
+both had to round-trip the WHOLE array before this tool existed.
+`clip_set_notes` is still the right tool for adding/removing/reordering
+notes, or rewriting a clip wholesale.
+
 ### `project_snapshot` will overflow your output budget
 
 MEASURED 2026-08-17 on a modest song — 6 tracks, 38 clips, 2,367 notes:
@@ -200,10 +215,28 @@ sources are deferred. (`mix-engineer` holds `track_add` for exactly this.)
 ### The master fader stops at +6 dB
 
 `mixer_set_master_volume` is capped at 2.0 linear and a bigger value is
-REJECTED, not clamped. General-MIDI-sourced material regularly needs more
-than +6 dB to reach -14 LUFS. When it does, put a `gain` insert
-(`gainLinear` 0-4, ≈ +12 dB) at the front of the master chain rather than
-pushing the fader — the fader is a trim, not a makeup stage.
+REJECTED by the MCP tool's schema. (One layer down, the
+`mixer.setMasterVolume` control command clamps to 0-2 instead of erroring
+and reports the clamp in `warnings` — the refusal is the schema's, not the
+engine's.) General-MIDI-sourced material regularly needs more than +6 dB to
+reach -14 LUFS. When it does, put a `gain` insert (`gainLinear` 0-16, up to
++24.08 dB) at index 0 of the master chain rather than pushing the fader —
+the fader is a trim, not a makeup stage.
+
+One insert is now enough. MEASURED: a solo GM piano part renders about
+-28 LUFS at velocity 100 and near -35 LUFS at velocity 64, so -14 LUFS costs
++14 to +21 dB of makeup; the old +12 dB ceiling forced two chained gain
+inserts, and the current +24.08 dB one does not. The headroom is real, not
+free — the gain stage is a bare multiply, so follow a large boost with a
+limiter and confirm with `render_measure_loudness`.
+
+### A clamped value now says so
+
+`fx_set_param`, `fx_add`'s seeded `params`, and `mixer.setMasterVolume` all
+clamp out-of-range values rather than erroring. They now return a `warnings`
+array of plain sentences naming what you asked for, what was stored, and the
+range. The key is ABSENT when nothing was clamped, so seeing it at all means
+the stored value is not the one you sent.
 
 ### A present `zones` array replaces the whole sampler map
 
@@ -357,7 +390,7 @@ guessing. What is actually measurable:
 |---|---|
 | Is a signal reaching the master at all? | `project_snapshot`'s `meters`, after `transport_play` |
 | How loud is the mix, properly? | `mixer_live_loudness` (live), `render_measure_loudness` (offline BS.1770-4 ground truth) |
-| What's the tonal balance right now? | `mixer_master_analysis` (24 bands, centroid/brightness, flux) |
+| What's the tonal balance right now? | `mixer_master_analysis` (24 bands, centroid/brightness, flux) — needs `transport_play` running first, or it refuses with a teaching error rather than a silent floor reading |
 | What does ONE track/effect chain look like spectrally? | `fx_spectrum` |
 | What key/tempo/spectral balance is this audio clip? | `clip_analyze_audio` |
 | What pitch is this audio, over time? | `clip_detect_pitch` |

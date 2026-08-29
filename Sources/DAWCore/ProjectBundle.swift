@@ -186,7 +186,13 @@ public enum ProjectBundle {
             guard track.kind == .instrument else { continue }
             for zone in track.instrument?.sampler?.zones ?? [] {
                 let stdSource = zone.audioFileURL.standardizedFileURL
-                let stdPath = stdSource.path
+                // m32-a: ONE HOME for the "same source file?" key. Byte-identical
+                // to the expression that was inlined here — `sourceFileKey` IS
+                // `audioFileURL.standardizedFileURL.path` — but now the sampler
+                // loader's buffer dedup reads the same property, so the two
+                // cannot drift into a project that plays one way and reloads
+                // another.
+                let stdPath = zone.sourceFileKey
 
                 if stdSource.deletingLastPathComponent().path == mediaDirPath {
                     let name = stdSource.lastPathComponent

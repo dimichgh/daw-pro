@@ -314,8 +314,10 @@ struct InstrumentPickerOverlay: View {
             .overlay(RoundedRectangle(cornerRadius: 5).stroke(DAWTheme.hairline, lineWidth: 1))
         }
         .buttonStyle(.plain)
-        .help("Import a SoundFont (.sf2) or DLS bank file into your library — "
-              + "compressed .sf3 SoundFonts aren't supported yet")
+        // m31-h: this tooltip said .sf3 "aren't supported yet" — true when it
+        // was written, a lie the moment import learned to convert them.
+        .help("Import a SoundFont (.sf2 or .sf3) or DLS bank file into your library — "
+              + "a compressed .sf3 is converted as it's added, which takes a few seconds")
     }
 
     /// One bank row. ⚠️ m31-g: a DISCOVERED-BUT-UNSUPPORTED bank (a `.sf3`)

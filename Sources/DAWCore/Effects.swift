@@ -32,6 +32,11 @@ public struct EffectDescriptor: Identifiable, Codable, Sendable, Equatable {
         /// NOT the broadband `saturator` — the shaper only ever sees the
         /// low band, and its output is high-passed at the same corner.
         case bassEnhancer
+        /// Bit-depth reduction + sample-rate reduction, the SP-1200 / MPC60
+        /// lo-fi sampler character (m32-e). Defaults to 12 bits at 26.04 kHz
+        /// with NO anti-alias filtering and NO dither, because the aliasing
+        /// and the raw quantization noise ARE the reference sound.
+        case bitCrusher
         /// A hosted Audio Unit effect ('aufx', see `audioUnit`) — M4 (v).
         case audioUnit
     }
@@ -49,6 +54,7 @@ public struct EffectDescriptor: Identifiable, Codable, Sendable, Equatable {
     public var gate: GateParams?
     public var chorus: ChorusParams?
     public var bassEnhancer: BassEnhancerParams?
+    public var bitCrusher: BitCrusherParams?
     /// Hosted Audio Unit selection (additive optional, reusing the instrument
     /// `AudioUnitConfig`: component triple + display names + saved
     /// `fullStateForDocument`). Unlike the instrument rule, `kind ==
@@ -76,6 +82,7 @@ public struct EffectDescriptor: Identifiable, Codable, Sendable, Equatable {
     public var resolvedGate: GateParams { gate ?? GateParams() }
     public var resolvedChorus: ChorusParams { chorus ?? ChorusParams() }
     public var resolvedBassEnhancer: BassEnhancerParams { bassEnhancer ?? BassEnhancerParams() }
+    public var resolvedBitCrusher: BitCrusherParams { bitCrusher ?? BitCrusherParams() }
 
     public init(
         id: UUID = UUID(),
@@ -91,6 +98,7 @@ public struct EffectDescriptor: Identifiable, Codable, Sendable, Equatable {
         gate: GateParams? = nil,
         chorus: ChorusParams? = nil,
         bassEnhancer: BassEnhancerParams? = nil,
+        bitCrusher: BitCrusherParams? = nil,
         audioUnit: AudioUnitConfig? = nil,
         sidechainSourceTrackID: UUID? = nil
     ) {
@@ -107,6 +115,7 @@ public struct EffectDescriptor: Identifiable, Codable, Sendable, Equatable {
         self.gate = gate
         self.chorus = chorus
         self.bassEnhancer = bassEnhancer
+        self.bitCrusher = bitCrusher
         self.audioUnit = audioUnit
         self.sidechainSourceTrackID = sidechainSourceTrackID
     }
@@ -115,10 +124,37 @@ public struct EffectDescriptor: Identifiable, Codable, Sendable, Equatable {
 /// Parameters for the built-in gain/trim effect. Clamped on init so a
 /// descriptor is always renderable as-is (PolySynthParams pattern).
 public struct GainParams: Codable, Sendable, Equatable {
-    /// Linear gain, 0...4 (1 = unity, up to +12 dB).
+    /// Linear gain, 0...16 (1 = unity, up to +24.08 dB).
     public var gainLinear: Double
 
-    public static let gainRange: ClosedRange<Double> = 0...4
+    /// m27-c: RAISED 4 (+12.04 dB) → 16 (+24.08 dB). The old ceiling could
+    /// not lift General-MIDI-sourced material to a streaming level in ONE
+    /// stage, so reaching −14 LUFS took two chained gain inserts — a
+    /// workaround the reporter correctly read as one.
+    ///
+    /// MEASURED (headless `OfflineRenderer`, 48 kHz, 10 s, GM system bank,
+    /// BS.1770-4 gated integrated — scratchpad `m27c-gm-levels.txt`):
+    ///  · full 4-track GM arrangement  −18.14 LUFS → needs  +4.14 dB
+    ///  · solo GM piano v100           −28.35 LUFS → needs +14.35 dB
+    ///    (independently reproduces the reported −28.05 / +14.88 anchor)
+    ///  · solo GM piano v64            −35.49 LUFS → needs +21.49 dB  ← worst
+    /// A ceiling of 8 (+18.06 dB) is 3.43 dB SHORT of that last, entirely
+    /// ordinary case; 16 (+24.08 dB) covers it with 2.59 dB spare. Values
+    /// beyond that belong to material that should be re-authored louder,
+    /// and chaining a second insert is still available.
+    ///
+    /// RAISING is safe for existing projects: every stored value was already
+    /// ≤ 4 and stays in range, so no saved gain moves and no automation point
+    /// re-clamps (`AutomationTarget.valueRange` resolves from this same spec).
+    /// LOWERING would not be — it would silently re-clamp stored values on
+    /// load, through this very init.
+    ///
+    /// The ceiling is REAL headroom, not free headroom: the gain stage is a
+    /// memoryless multiply with no protection of its own, so a hot source
+    /// pushed hard here will clip unless something downstream (a limiter, or
+    /// the bounce's own true-peak ceiling) holds it. That tradeoff is stated
+    /// in the `fx.describe` note and in the MCP tool description.
+    public static let gainRange: ClosedRange<Double> = 0...16
 
     public init(gainLinear: Double = 1) {
         self.gainLinear = gainLinear.clamped(to: Self.gainRange)
@@ -773,6 +809,96 @@ public struct BassEnhancerParams: Codable, Sendable, Equatable {
     }
 }
 
+/// Parameters for the built-in bit-crusher / sample-rate reducer (m32-e) — the
+/// lo-fi character of a 1980s sampling drum machine. Clamped on init (GainParams
+/// pattern); `bits` additionally ROUNDS to a whole number (the `DelayParams`
+/// `pingPong` precedent for a numeric-but-discrete field).
+///
+/// WHAT IT DOES, in the order the render path does it: the input is optionally
+/// low-passed (`antiAlias`), then SAMPLED AND HELD at `downsampleHz`, and each
+/// captured value is optionally dithered and then quantized to `bits` — one
+/// value per capture, held flat until the next. Optionally the held staircase is
+/// low-passed again (the reconstruction filter a real converter would have).
+///
+/// ⭐ WHY THE DEFAULTS ARE `antiAlias: false` / `dither: false`, which look like
+/// the "wrong" engineering choice: the reference sound is the E-mu SP-1200's,
+/// and that machine's signature comes specifically from its D/A stage OMITTING
+/// the reconstruction filter — content above the reduced Nyquist images straight
+/// back down into the audible band as the grit people buy the machine for.
+/// A bit-crusher that filters politely and dithers away the quantization noise
+/// sounds "clean-but-crunchy", not "gritty", and does not hit the reference
+/// (`docs/research/sampling-flip-workflow.md` §2.4). Both switches exist, both
+/// default OFF, and turning them ON gives the modern, tamer crush.
+///
+/// The defaults `bits: 12` / `downsampleHz: 26040` ARE the SP-1200's measured
+/// storage depth and sampling rate. The MPC60 is commonly cited at 40 kHz with
+/// the same 12-bit storage, which is why MPC60 chops read as cleaner — set
+/// `downsampleHz: 40000` for that flavour.
+///
+/// ⚠️ `downsampleHz` tops out at 48 000, so at graph rates ABOVE 48 kHz even the
+/// maximum setting still halves the rate. The effect is never a no-op there;
+/// bypass it (or remove it) if you want the untouched signal at 88.2/96 kHz.
+public struct BitCrusherParams: Codable, Sendable, Equatable {
+    /// Storage depth in bits, 1…16, WHOLE numbers (values round). The rendered
+    /// signal takes exactly `2^bits` distinct levels — a real N-bit converter's
+    /// code range, −2^(N−1) … 2^(N−1)−1, scaled back to ±1.
+    public var bits: Double
+    /// The rate the input is sampled and held at, in Hz. Below the graph rate
+    /// this is heard as the classic "grainy/aliased" downsample; at or above
+    /// the graph rate every sample is captured and the stage is transparent.
+    public var downsampleHz: Double
+    /// ⭐ OFF by default and that is deliberate — see the type's doc comment.
+    /// ON adds a 4th-order Butterworth low-pass BEFORE the sample-and-hold (so
+    /// input content above the reduced Nyquist cannot fold down) and another
+    /// AFTER the hold (the reconstruction filter that removes the staircase's
+    /// images). Both corners sit at `downsampleHz / 2`.
+    public var antiAlias: Bool
+    /// ⭐ OFF by default — see the type's doc comment. ON adds ±1 LSB TPDF
+    /// dither to each captured value before it is quantized, trading the
+    /// correlated quantization distortion for a steady noise floor. The dither
+    /// generator is seeded deterministically per channel, so a render is
+    /// reproducible byte-for-byte with dither on.
+    public var dither: Bool
+    /// Dry/wet, 0…1. 0 is a BIT-EXACT bypass of the whole unit (and advances no
+    /// internal state), 1 (the default) is fully crushed.
+    public var mix: Double
+
+    public static let bitsRange: ClosedRange<Double> = 1...16
+    public static let downsampleRange: ClosedRange<Double> = 1_000...48_000
+    public static let mixRange: ClosedRange<Double> = 0...1
+
+    public init(bits: Double = 12, downsampleHz: Double = 26_040,
+                antiAlias: Bool = false, dither: Bool = false, mix: Double = 1) {
+        // NaN FIRST, then clamp, then round — and the NaN leg is not defensive
+        // padding. `clamped` is `min(max(…))`, and BOTH comparisons are false
+        // against NaN, so a NaN survives a clamp unchanged; the render path
+        // then does `Int(bits)` to build a shift, and `Int(Double.nan)` TRAPS.
+        // The trap would fire ON THE RENDER THREAD — the same shape as m32-f's
+        // `1 << 99`, reached through a different door.
+        self.bits = (bits.isFinite ? bits : 12).clamped(to: Self.bitsRange).rounded()
+        self.downsampleHz =
+            (downsampleHz.isFinite ? downsampleHz : 26_040).clamped(to: Self.downsampleRange)
+        self.antiAlias = antiAlias
+        self.dither = dither
+        self.mix = mix.clamped(to: Self.mixRange)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case bits, downsampleHz, antiAlias, dither, mix
+    }
+
+    /// Decoding routes through the clamping init.
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            bits: try c.decodeIfPresent(Double.self, forKey: .bits) ?? 12,
+            downsampleHz: try c.decodeIfPresent(Double.self, forKey: .downsampleHz) ?? 26_040,
+            antiAlias: try c.decodeIfPresent(Bool.self, forKey: .antiAlias) ?? false,
+            dither: try c.decodeIfPresent(Bool.self, forKey: .dither) ?? false,
+            mix: try c.decodeIfPresent(Double.self, forKey: .mix) ?? 1)
+    }
+}
+
 /// Static parameter schema for every effect kind — the single source of truth
 /// for `fx.describe`, control-layer validation, and MCP tool schemas.
 public struct EffectParamSpec: Sendable, Equatable {
@@ -799,8 +925,25 @@ public struct EffectParamSpec: Sendable, Equatable {
     public static func specs(for kind: EffectDescriptor.Kind) -> [EffectParamSpec] {
         switch kind {
         case .gain:
-            return [EffectParamSpec(name: "gainLinear", range: GainParams.gainRange,
-                                    defaultValue: 1, unit: "linear")]
+            return [EffectParamSpec(
+                name: "gainLinear", range: GainParams.gainRange,
+                defaultValue: 1, unit: "linear",
+                // m27-c: the teaching a bare 0…16 cannot carry — one home,
+                // read by every client through `fx.describe`.
+                note: "Linear multiplier, not decibels: 1 is unity (no change), "
+                    + "2 is +6 dB, 4 is +12 dB, and the 16 maximum is +24.08 dB "
+                    + "(dB = 20·log10(gainLinear)). The ceiling is deliberately "
+                    + "wide because sound-bank / General-MIDI material is quiet "
+                    + "— a solo GM piano part renders around -28 LUFS at "
+                    + "velocity 100 and near -35 LUFS at velocity 64, so "
+                    + "reaching a -14 LUFS streaming level takes +14 to +21 dB. "
+                    + "One insert now covers that; you no longer need to chain "
+                    + "two. This is a plain multiply with no protection of its "
+                    + "own, so large boosts can drive the mix into clipping "
+                    + "— put a limiter AFTER this insert, and remember a "
+                    + "normalizing bounce applies its gain after the whole "
+                    + "master chain. Out-of-range values are clamped, not "
+                    + "rejected, and the clamp is reported in `warnings`.")]
         case .eq:
             return [
                 EffectParamSpec(name: "lowShelfFreq", range: EQParams.lowShelfFreqRange,
@@ -1019,6 +1162,55 @@ public struct EffectParamSpec: Sendable, Equatable {
                                     + "so mix is a master trim on everything it contributes; 0 "
                                     + "is bit-exact dry. Use `amount` to change the character "
                                     + "and `mix` to change how much of it you hear."),
+            ]
+        case .bitCrusher:
+            return [
+                EffectParamSpec(name: "bits", range: BitCrusherParams.bitsRange,
+                                defaultValue: 12, unit: "bits",
+                                note: "Storage depth. Whole numbers only - a value in between "
+                                    + "rounds. The output takes exactly 2^bits distinct levels, "
+                                    + "so 12 (the default, and the E-mu SP-1200's depth) is 4096 "
+                                    + "levels and 4 is 16. Lower is grittier: the quantization "
+                                    + "error becomes signal-correlated distortion rather than "
+                                    + "noise, which is the sound. 16 is effectively clean."),
+                EffectParamSpec(name: "downsampleHz", range: BitCrusherParams.downsampleRange,
+                                defaultValue: 26_040, unit: "Hz",
+                                note: "The rate the input is sampled and held at, INDEPENDENT of "
+                                    + "the project rate. The default 26040 is the SP-1200's "
+                                    + "measured rate; 40000 is the Akai MPC60, which is why "
+                                    + "MPC60 chops read as cleaner. Every sample is held until "
+                                    + "the next capture, so the staircase itself adds harmonics "
+                                    + "above this rate that fold back down - that folding is the "
+                                    + "character, and antiAlias is what removes it. At or above "
+                                    + "the project rate this stage is transparent (so at 88.2 or "
+                                    + "96 kHz even the 48000 maximum still halves the rate)."),
+                EffectParamSpec(name: "antiAlias", range: 0...1,
+                                defaultValue: 0, unit: "linear",
+                                note: "0 (the DEFAULT, and the authentic setting) filters "
+                                    + "nothing: content above the reduced Nyquist images back "
+                                    + "down into the audible band. That is not a bug - the "
+                                    + "SP-1200's signature comes from its converter omitting "
+                                    + "exactly this filter, and a politely filtered crusher "
+                                    + "sounds clean-but-crunchy instead of gritty. 1 adds a "
+                                    + "4th-order low-pass before the sample-and-hold and another "
+                                    + "after it, for a modern, tamer crush that keeps the bit "
+                                    + "reduction without the aliasing."),
+                EffectParamSpec(name: "dither", range: 0...1,
+                                defaultValue: 0, unit: "linear",
+                                note: "0 (the DEFAULT, and the authentic setting) leaves the "
+                                    + "quantization error correlated with the signal, which is "
+                                    + "the crunch you want here. 1 adds plus/minus one-LSB TPDF "
+                                    + "dither before quantizing, trading that crunch for a "
+                                    + "steady noise floor - the correct choice when you are "
+                                    + "reducing depth for delivery rather than for character. "
+                                    + "The generator is deterministically seeded, so a render "
+                                    + "with dither on is still reproducible."),
+                EffectParamSpec(name: "mix", range: BitCrusherParams.mixRange,
+                                defaultValue: 1, unit: "linear",
+                                note: "Dry/wet. 0 is a bit-exact bypass of the whole unit; 1 "
+                                    + "(the default) is fully crushed. Values between are "
+                                    + "parallel crush - blend a little grit under an intact "
+                                    + "transient rather than replacing it."),
             ]
         case .audioUnit:
             // AU parameters are not on the generic name/value surface in v0;

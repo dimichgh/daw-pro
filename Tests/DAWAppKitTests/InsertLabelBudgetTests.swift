@@ -84,9 +84,14 @@ struct InsertLabelBudgetTests {
 
     /// The sweep above passes vacuously if the vocabulary is empty or the budget
     /// is enormous. This states what it is actually holding back.
-    @Test("The sweep is not vacuous: ten names, and the widest is Bass Enhancer")
+    @Test("The sweep is not vacuous: eleven names, and the widest is Bass Enhancer")
     func sweepIsNotVacuous() {
-        #expect(builtInKinds.count == 10)
+        // 11 since m32-e added `bitCrusher`. This count is the whole point of
+        // the test — it is what makes the sweep above non-vacuous, and it fired
+        // exactly as its doc comment promised ("the eleventh built-in effect
+        // somebody adds") the moment the kind landed. Bump it deliberately,
+        // having checked the new name against the budget, never to quiet a red.
+        #expect(builtInKinds.count == 11)
         let widest = builtInKinds
             .map { MixerFormat.effectDisplayName(EffectDescriptor(kind: $0)) }
             .max { width($0) < width($1) }
@@ -98,6 +103,13 @@ struct InsertLabelBudgetTests {
         #expect(w > MixerStripLayout.insertLabelWidth(
             rowWidth: MixerStripLayout.channelInsertRowWidth, trailingGlyph: true),
                 "if this ever fits WITH a trailing glyph, m23-s's mechanism is no longer necessary")
+
+        // m32-e's new name, measured and pinned so a later rename cannot quietly
+        // widen past the budget the sweep above enforces.
+        let crusher = width("Bit Crusher")
+        print("[measured] Bit Crusher draws at \(crusher) pt against an 85 pt budget")
+        #expect(crusher < w, "Bass Enhancer must stay the widest built-in name")
+        #expect(crusher <= MixerStripLayout.builtInInsertLabelWidth)
     }
 
     /// The three names the shipping app was drawing truncated, named explicitly

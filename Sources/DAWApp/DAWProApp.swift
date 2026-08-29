@@ -3803,6 +3803,13 @@ final class AppModel {
             engine?.effectState(forEffect: effectID)
         }
         store.media = AudioFileImporter()
+        // SF3→SF2 conversion at import (m31-h). The `store.media` seam exactly:
+        // DAWCore declares the protocol, DAWEngine owns the vendored decoder,
+        // and the app is where the two meet. Without this line the app still
+        // runs — `.sf3` import simply keeps m31-g's honest refusal — so the
+        // wiring is what turns the capability on, never what makes a `.sf3`
+        // loadable: the extension gates are untouched and still reject it.
+        store.soundBankLibrary.vorbisDecoder = StbVorbisDecoder()
         // Crash-recovery autosave (M9 crash-b): detect a prior crash (a surviving
         // session.lock) BEFORE writing this session's lock, then run the rolling
         // 30-s snapshot loop. This supersedes the legacy `startAutosave` in-place
@@ -9940,14 +9947,23 @@ final class AppModel {
     /// Imports a SoundFont/DLS via NSOpenPanel (not headless — the app view drives
     /// it), then refreshes the picker's bank list. Errors surface inline in the
     /// Sound Banks section (`model.importError`). A cancelled panel is a no-op.
+    ///
+    /// ⚠️ m31-h: `.sf3` MUST be in `allowedContentTypes`. The converter can read
+    /// it, the wire accepts it and the library converts it — but this panel is
+    /// the ONLY way a person reaches any of that, and a filter that omits the
+    /// extension greys the file out in the chooser. The capability would have
+    /// shipped working and unreachable, which is indistinguishable from absent.
     func importSoundBankViaPanel() {
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
-        panel.allowedContentTypes =
-            [UTType(filenameExtension: "sf2"), UTType(filenameExtension: "dls")].compactMap { $0 }
+        panel.allowedContentTypes = [
+            UTType(filenameExtension: "sf2"), UTType(filenameExtension: "dls"),
+            UTType(filenameExtension: "sf3"),
+        ].compactMap { $0 }
         panel.prompt = "Add"
-        panel.message = "Choose a SoundFont (.sf2) or DLS bank file to add to your library."
+        panel.message = "Choose a SoundFont (.sf2 or .sf3) or DLS bank file to add to your "
+            + "library. A compressed .sf3 is converted as it is added."
         guard panel.runModal() == .OK, let url = panel.url else { return }
         instrumentPicker.importBank(from: url)
     }

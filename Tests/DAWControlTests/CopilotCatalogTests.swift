@@ -72,7 +72,11 @@ struct CopilotCatalogTests {
         // group delete/move, and strictly better undo atomicity for a
         // capability (clip.remove/clip.move) already IN the catalog — took it
         // 69 -> 71.
-        #expect(CopilotToolCatalog.v1.count == 77)   // 72 at m23-af (transport.panic) -> 74 at m23-aj-2 (moveManyByTracks/moveManyToTrack) -> 75 at m25-d (transport.setStopAtContentEnd) -> 76 at m27 leg D (clip.applyBreathContour) -> 77 at breath pad P1 (clip.applyEffortShape)
+        #expect(CopilotToolCatalog.v1.count == 79)   // 72 at m23-af (transport.panic) -> 74 at m23-aj-2 (moveManyByTracks/moveManyToTrack) -> 75 at m25-d (transport.setStopAtContentEnd) -> 76 at m27 leg D (clip.applyBreathContour) -> 77 at breath pad P1 (clip.applyEffortShape) -> 78 at m31-c (clip.repeatNotes — the in-app copilot composes music too, and this is the exact "author one bar, repeat it" efficiency verb an autonomous agent wants; siblings clip.setNotes/clip.addMIDI are both already in the catalog) -> 79 at m26-a/m27-n (clip.patchNotes — the most obvious autonomous-agent framing of any verb in this file: it exists BECAUSE an agent doing "raise the velocity of 48 shaker notes out of 907" should not have to round-trip the other 859)
+        #expect(CopilotToolCatalog.tool(command: "clip.repeatNotes") != nil,
+                "clip.repeatNotes missing from the catalog — m21-b2 requires a new user-facing\n                 capability to be visible to the in-app copilot, and this verb exists\n                 specifically to save an authoring agent from generating repeated material")
+        #expect(CopilotToolCatalog.tool(command: "clip.patchNotes") != nil,
+                "clip.patchNotes missing from the catalog — m21-b2: a new user-facing capability\n                 must be visible to the in-app copilot, and this verb's whole reason to exist\n                 is an authoring agent's own workflow")
         #expect(CopilotToolCatalog.tool(command: "clip.applyBreathContour") != nil,
                 "clip.applyBreathContour missing from the catalog — the copilot is exactly\n                 the caller that should reach for a breath contour, and m21-b2 requires a\n                 new user-facing capability to be visible to it")
         #expect(CopilotToolCatalog.tool(command: "transport.setStopAtContentEnd") != nil,

@@ -18,11 +18,46 @@ import Foundation
 /// be authoring for an instrument they have not chosen yet, and because a
 /// controller lane survives an instrument switch.
 public enum MIDIControllerRouting {
-    /// The CCs the built-in SAMPLER consumes (m16-b2 CC64 + m27 expression).
-    /// Anything outside this set is dropped at the voice.
+    /// The CCs the built-in SAMPLER consumes REGARDLESS of its parameters
+    /// (m16-b2 CC64 + m27 expression).
+    ///
+    /// ⚠️ **NOT the whole sampler answer** — see `samplerParameterRoutedCCs`,
+    /// which adds the controllers a particular descriptor routes. Treating this
+    /// constant as the complete set is a bug that shipped: a sampler with
+    /// `expressionFilterDepth > 0` and `expressionFilterCC: 74` really does
+    /// sweep its filter from CC74, and `clip.setControllerLane` told the user
+    /// the lane "will not sound" (m27-b, found while building the
+    /// instrument-change warning). Always go through `routing(for:instrument:)`.
     public static let samplerRoutedCCs: Set<Int> = [1, 2, 11, 64]
     /// The CCs the built-in POLY SYNTH consumes — sustain only (m16-b2).
     public static let polySynthRoutedCCs: Set<Int> = [64]
+
+    /// The CCs THIS sampler descriptor routes on top of `samplerRoutedCCs`,
+    /// because of parameters rather than of being a sampler at all. Mirrors
+    /// `SamplerInstrument`'s own `ccInteresting` seeding:
+    ///  · the brightness filter's controller, while `expressionFilterDepth > 0`
+    ///    (the engine's `filterEnabled` gate; `expressionFilterCC` defaults to
+    ///    11, which is already unconditional);
+    ///  · every zone's CC-domain dynamic-layer crossfade controller, under the
+    ///    engine's `hasCcXfade` rule — a controller AND at least one CC bound.
+    ///    A velocity-only crossfade is fixed at note-on and routes no CC.
+    public static func samplerParameterRoutedCCs(_ params: SamplerParams) -> Set<Int> {
+        var extra: Set<Int> = []
+        if (params.expressionFilterDepth ?? 0) > 0 {
+            let filterCC = params.expressionFilterCC ?? 11
+            if (0...127).contains(filterCC) { extra.insert(filterCC) }
+        }
+        for zone in params.zones {
+            guard let crossfade = zone.crossfade,
+                  let controller = crossfade.controller,
+                  crossfade.ccInLo != nil || crossfade.ccInHi != nil
+                    || crossfade.ccOutLo != nil || crossfade.ccOutHi != nil,
+                  (0...127).contains(controller)
+            else { continue }
+            extra.insert(controller)
+        }
+        return extra
+    }
 
     /// How a lane of `type` fares on `instrument`.
     public enum Routing: Equatable, Sendable {
@@ -40,6 +75,19 @@ public enum MIDIControllerRouting {
     /// letting the lane look accepted.
     public static func routing(for type: MIDIControllerType,
                                instrument: InstrumentDescriptor?) -> Routing {
+        routing(for: type, instrument: instrument, samplerExtra: nil)
+    }
+
+    /// The verdict, with `samplerParameterRoutedCCs` optionally PRECOMPUTED.
+    ///
+    /// ⭐ Exists only so `honoredCCs` can ask 128 questions while scanning the
+    /// zone list ONCE. A 309-zone imported library answered the naive way costs
+    /// 128 × 309 zone visits per track per `project.snapshot`, which is a
+    /// scaling trap for a field that is on every snapshot. Passing nil computes
+    /// it, so there is still exactly ONE derivation of that set.
+    private static func routing(for type: MIDIControllerType,
+                                instrument: InstrumentDescriptor?,
+                                samplerExtra: Set<Int>?) -> Routing {
         guard let instrument else {
             return .inert(reason: "this track has no instrument yet, so nothing will play it")
         }
@@ -78,10 +126,24 @@ public enum MIDIControllerRouting {
                 return .inert(reason: "the built-in sampler consumes no channel pressure "
                     + "(aftertouch)")
             case .cc(let controller):
-                guard samplerRoutedCCs.contains(controller) else {
+                // m27-b: the sampler's routed set is DESCRIPTOR-dependent, not
+                // a constant — the filter's controller and any zone crossfade
+                // controller are routed by THIS instrument's parameters.
+                let extra = samplerExtra
+                    ?? samplerParameterRoutedCCs(instrument.resolvedSampler)
+                guard samplerRoutedCCs.contains(controller) || extra.contains(controller) else {
+                    let extraNote = extra.isEmpty ? "" : ", plus "
+                        + extra.sorted().map { describe(.cc(controller: $0)) }
+                            .joined(separator: " and ")
+                        + " on this track's sampler settings"
                     return .inert(reason: "the built-in sampler consumes only CC1 (mod wheel), "
-                        + "CC2 (breath), CC11 (expression), CC64 (sustain) and pitch bend")
+                        + "CC2 (breath), CC11 (expression), CC64 (sustain) and pitch bend"
+                        + extraNote)
                 }
+                // A controller routed by a PARAMETER (filter/crossfade) sounds
+                // whatever the mod depth is — the depth gate below governs the
+                // CC1/CC2 amplitude path only, so it must not veto that.
+                if extra.contains(controller) { return .routed }
                 // CC1/CC2 are wired but gated by a depth that defaults to 0 —
                 // see `SamplerParams.expressionModDepth` for why they cannot
                 // be unconditional (their MIDI neutral is 0, so an
@@ -101,6 +163,50 @@ public enum MIDIControllerRouting {
                 }
                 return .routed
             }
+        }
+    }
+
+    // MARK: - The honoured set (m27-b)
+
+    /// **Does a lane of `type` change what the listener hears on `instrument`?**
+    /// The one-line spelling of `routing(...) == .routed`, so no caller has to
+    /// remember that `.routedButDisabled` is a NO — a controller that reaches
+    /// the instrument through a parameter turned down to 0 sounds exactly the
+    /// same as one that never arrives.
+    public static func honors(_ type: MIDIControllerType,
+                              instrument: InstrumentDescriptor?) -> Bool {
+        routing(for: type, instrument: instrument) == .routed
+    }
+
+    /// Whether `instrument` forwards EVERY controller it is sent, making an
+    /// enumerated answer meaningless. True for the hosted-AU kinds only:
+    /// `HostedAUInstrument` re-emits each event as raw MIDI (`0xB0` for CC)
+    /// with no filter, and what the plug-in then does with it is its business.
+    public static func forwardsAllControllers(instrument: InstrumentDescriptor?) -> Bool {
+        guard let instrument else { return false }
+        switch instrument.kind {
+        case .audioUnit, .soundBank: return true
+        case .sampler, .polySynth, .testTone: return false
+        }
+    }
+
+    /// The CC numbers `instrument` acts on, ascending — empty when
+    /// `forwardsAllControllers` (there is nothing to enumerate) and empty for
+    /// an instrument-less track.
+    ///
+    /// ⭐ DERIVED by asking `routing` all 128 questions rather than by keeping
+    /// a second list. That is the point: this file's header calls itself the
+    /// ONE definition of "does this controller reach the sound?", and a
+    /// parallel list is exactly how the two would drift.
+    public static func honoredCCs(instrument: InstrumentDescriptor?) -> [Int] {
+        guard let instrument, !forwardsAllControllers(instrument: instrument) else { return [] }
+        // Scan the zone list once, not 128 times — see the private `routing`
+        // overload. nil for every non-sampler kind, which ignores it anyway.
+        let extra = instrument.kind == .sampler
+            ? samplerParameterRoutedCCs(instrument.resolvedSampler) : []
+        return (0...127).filter {
+            routing(for: .cc(controller: $0), instrument: instrument,
+                    samplerExtra: extra) == .routed
         }
     }
 

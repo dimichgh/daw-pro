@@ -11,6 +11,9 @@ tools: >-
   mcp__plugin_daw-pro-music-team_daw-pro__project_snapshot,
   mcp__plugin_daw-pro-music-team_daw-pro__track_add,
   mcp__plugin_daw-pro-music-team_daw-pro__marker_list,
+  mcp__plugin_daw-pro-music-team_daw-pro__transport_play,
+  mcp__plugin_daw-pro-music-team_daw-pro__transport_stop,
+  mcp__plugin_daw-pro-music-team_daw-pro__transport_seek,
   mcp__plugin_daw-pro-music-team_daw-pro__track_set_volume,
   mcp__plugin_daw-pro-music-team_daw-pro__track_set_pan,
   mcp__plugin_daw-pro-music-team_daw-pro__track_set_mute,
@@ -139,17 +142,35 @@ there.
   `render_stems{includeMixdown}` — its file is named `00 Mixdown.wav` but is
   a stem-class render, NOT a `render_mixdown`; the one that carries the fade
   is `includeMasteredMixdown` → `00 Mastered Mix.wav`.
+- **Get a live signal before you read one.** You hold PLAYBACK transport —
+  `transport_play`, `transport_stop`, `transport_seek` — for exactly one
+  reason: `mixer_master_analysis` and `mixer_live_loudness` both read the
+  live master bus, and there is nothing to read if nothing is playing.
+  `transport_seek` (a beat, or a name from `marker_list`) then
+  `transport_play` gets you to a section before you meter it;
+  `transport_stop` when you're done. You do NOT hold recording transport —
+  no `transport_record`, `track_set_arm`, `transport_set_punch` — capturing
+  a live performance stays a human-at-the-instrument workflow, same as
+  every other agent here (`daw-wire-reference` covers the full withheld
+  list).
 - **Read the mix as you go.** `mixer_master_analysis` is a live vibe-meter
   (band energy, level/peak dB, brightness, spectral movement) — poll it
   during playback to sanity-check tonal balance without rendering anything.
-  `mixer_live_loudness` is the live LOUDNESS meter on the master
-  (momentary/short-term/integrated LUFS, LRA, true peak, DC/crest) — poll
-  it while the session plays; missing fields mean "not enough audio yet",
-  and `reset: true` restarts the running measurement to meter one section
-  in isolation. `render_measure_loudness` gives the offline BS.1770-4
-  ground truth without writing a file — check against -14 LUFS (streaming)
-  or -23 LUFS (broadcast) before handing off to `finisher` for the final,
-  verified bounce.
+  ⚠️ It needs playback actually running: with the transport stopped it
+  refuses with a teaching error instead of a reading, because the honest
+  floor a stopped session reads (-80 dB bands, 0 Hz centroid) is otherwise
+  indistinguishable from a genuinely silent mix — call `transport_play`
+  first, THEN poll. `mixer_live_loudness` is the live LOUDNESS meter on the
+  master (momentary/short-term/integrated LUFS, LRA, true peak, DC/crest) —
+  poll it while the session plays; missing fields mean "not enough audio
+  yet". Unlike `mixer_master_analysis`, it is TRANSPORT-INDEPENDENT: the
+  measurement keeps accumulating across a stop, so play a passage, stop,
+  and its integrated/LRA/peak readings are still there to read — `reset:
+  true` restarts the running measurement to meter one section in isolation.
+  `render_measure_loudness` gives the offline BS.1770-4 ground truth
+  without writing a file — check against -14 LUFS (streaming) or -23 LUFS
+  (broadcast) before handing off to `finisher` for the final, verified
+  bounce.
 
 ## What you must NOT do
 
@@ -169,6 +190,11 @@ there.
   `render_stems`) — that's `finisher`'s job; you check loudness with
   `render_measure_loudness` (writes nothing) while you work, finisher does
   the verified, file-writing render.
+- Don't record. Your transport grant is playback-only (`transport_play`/
+  `transport_stop`/`transport_seek`, to feed `mixer_master_analysis`/
+  `mixer_live_loudness` a live signal) — `transport_record`,
+  `track_set_arm`, and `transport_set_punch` are not in your toolset.
+  Capturing a live performance is a human-at-the-instrument workflow.
 
 ## Working style
 

@@ -156,6 +156,42 @@ struct AUPrepareRenegotiationStressTests {
     /// the same quantity one level down. That gate distinguishes INVALID
     /// (exit 2) from FAILED (exit 1); this is the in-suite spelling of the
     /// same distinction.
+    /// ══ RE-DERIVATION ATTEMPTED AND DELIBERATELY DECLINED (m31-i, 2026-08-28) ══
+    /// The 2026-08-28 note above called this a STOPGAP and said the envelope
+    /// should be re-derived from >= 5 green full-suite runs at the current
+    /// harness size. Those five runs now exist (the m23-aw campaign pasted in
+    /// `MainActorOccupancySiteTests` Leg C). **THE ANSWER IS THAT THE ENVELOPE
+    /// MUST NOT MOVE, AND THE DATA IS DECISIVE — this is a measured finding,
+    /// not a deferral.**
+    ///
+    ///   run   median    min      under1s   would the two bounds hold?
+    ///   1     7.6997    0.7333      1      yes
+    ///   2     7.8443    0.8316      1      yes
+    ///   3     8.2114    1.5224      0      NO  — min >= 1.0 budget AND under1s 0
+    ///   4     7.7624    0.8903      1      yes
+    ///   5     7.7496    1.5600      0      NO  — min >= 1.0 budget AND under1s 0
+    ///
+    /// A SIXTH independent full-suite run (the post-edit verification, same
+    /// day) read median 7.4602 / min 1.2491 / under1s 0 — failing both bounds
+    /// again, making it **3 of 6** observed. The 40 % figure below is if
+    /// anything optimistic.
+    ///
+    /// Raising the envelope to admit these runs (it would need >= 8.212 s)
+    /// does not restore coverage — it manufactures a **40 % flake**: 2 of 5
+    /// green full-suite runs fail BOTH bounds outright. And this file's own
+    /// re-derivation rule for the min bound demands >= 5x headroom over the
+    /// worst observation: 5 x 1.5600 = 7.80 s, which has no solution under a
+    /// 1.0 s `cleanPathBudgetSeconds` that is itself on the forbidden-to-loosen
+    /// list above (it is shared with
+    /// `instantiateRegressionTripsCleanPathBudget`, so loosening it silently
+    /// weakens that discriminator too).
+    ///
+    /// ⭐ SO THERE IS NO ADMISSIBLE FULL-SUITE ENVELOPE AT ALL — not a value
+    /// that is merely hard to pick. The bounds stay fenced to quiet/`--filter`ed
+    /// runs, and the resting place is **m23-aw-1 (reduce the harness's
+    /// main-actor load)**, which can now be argued with numbers rather than
+    /// suspicion. Do not re-open this by raising the envelope; the campaign
+    /// above is the evidence that route is closed.
     private static let populationValidityMaxMedianSeconds = 4.637244
 
     /// `Duration` → `Double` seconds. Local to this suite on purpose: it is

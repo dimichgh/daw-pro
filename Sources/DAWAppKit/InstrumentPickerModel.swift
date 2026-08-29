@@ -32,7 +32,8 @@ public final class InstrumentPickerModel {
     private let programsProvider: (SoundBankSource) -> (programs: [SoundBankProgram], namesParsed: Bool)
     /// Installed Audio Unit music devices (wired to `ProjectStore.availableAudioUnits`).
     private let audioUnitsProvider: () -> [AudioUnitComponentInfo]
-    /// Copies a `.sf2`/`.dls` into the central library (wired to
+    /// Copies a `.sf2`/`.dls` into the central library, or CONVERTS a `.sf3`
+    /// into one on the way in (m31-h; wired to
     /// `ProjectStore.importSoundBank`); throws in the MediaImporting tone.
     private let bankImporter: (URL) throws -> SoundBankInfo
 
@@ -258,7 +259,8 @@ public final class InstrumentPickerModel {
 
     // MARK: - Import
 
-    /// Imports a `.sf2`/`.dls` into the central library, refreshes the bank list,
+    /// Imports a `.sf2`/`.dls` — or a `.sf3`, converted on the way in (m31-h) —
+    /// into the central library, refreshes the bank list,
     /// and returns the new bank (so the view can drill straight into it). On
     /// failure sets `importError` for the inline alert and returns nil.
     @discardableResult

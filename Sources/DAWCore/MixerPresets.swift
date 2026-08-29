@@ -52,6 +52,7 @@ extension EffectDescriptor {
             gate: gate,
             chorus: chorus,
             bassEnhancer: bassEnhancer,
+            bitCrusher: bitCrusher,
             audioUnit: audioUnit)
     }
 }

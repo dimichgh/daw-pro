@@ -266,6 +266,8 @@ public final class CommandRouter {
         "clip.addMIDI",
         "clip.setNotes",
         "clip.getNotes",
+        "clip.repeatNotes",
+        "clip.patchNotes",
         "clip.remove",
         "clip.split",
         "clip.trim",
@@ -323,6 +325,7 @@ public final class CommandRouter {
         "clip.humanize",
         "clip.detectTransients",
         "clip.quantizeAudio",
+        "clip.sliceToSampler",
         "arrange.insertBars",
         "arrange.deleteBars",
         "take.group",
@@ -1096,8 +1099,17 @@ public final class CommandRouter {
             // error, and the only way to avoid it was to resend all 309 zones
             // read back from a ~1 MB project.snapshot. Reported 2026-08-17 by
             // an agent driving the app end-to-end (finding 12).
-            let instCurrentSampler = store.tracks
-                .first(where: { $0.id == instTrackID })?.instrument?.sampler
+            let instTrackBefore = store.tracks.first(where: { $0.id == instTrackID })
+            let instCurrentSampler = instTrackBefore?.instrument?.sampler
+            // m27-b: the incoming instrument may HONOUR CONTROLLER DATA THE OLD
+            // ONE IGNORED (or stop honouring data the old one used). Capture
+            // both halves of that comparison BEFORE the store mutates: the
+            // outgoing descriptor, and the controller lane types this track
+            // actually carries. Warnings are computed after the write and ride
+            // the response; nothing here changes the user's lanes.
+            let instOldDescriptor = instTrackBefore?.instrument
+            let instCarriedLaneTypes = InstrumentControllerChangeWarnings
+                .carriedLaneTypes(in: instTrackBefore?.clips ?? [])
             // `remintedZoneIDs` (m26-g): ids the caller sent on the `zones`
             // path that name no zone here. Copying one track's map onto another
             // is the shape that produces these, and it must keep WORKING (it
@@ -1138,6 +1150,34 @@ public final class CommandRouter {
             // case is that nothing was substituted.
             if !instRemintedZoneIDs.isEmpty, case .object(var instObj) = instPayload {
                 instObj["remintedZoneIDs"] = .array(instRemintedZoneIDs.map { .string($0) })
+                instPayload = .object(instObj)
+            }
+            // m27-b: `warnings` — the controller lanes whose MEANING just
+            // changed. Same only-when-non-empty idiom as `remintedZoneIDs`
+            // directly above, and for the same reason: an always-present empty
+            // array reads as a field worth checking on every call, and the
+            // ordinary instrument change moves no authored data at all.
+            //
+            // ⚠️ THE NOISE TRAP: this is intersected with the lane types the
+            // track REALLY CARRIES. Every polySynth → soundBank change alters
+            // the honoured answer for all 128 CCs; warning on that would make
+            // the field noise, and noise is ignored — taking the one warning
+            // that mattered with it. See `InstrumentControllerChangeWarnings`.
+            //
+            // SHAPE: an array of PLAIN SENTENCES, matching every other
+            // `warnings` field on this wire (clip.setControllerLane,
+            // instrument.describeSampler, media import, project.open) — the
+            // media-import idiom, surfaced verbatim. clip.setControllerLane is
+            // this feature's complementary half (it warns when a lane is
+            // AUTHORED against an instrument that will not play it), so the two
+            // must not disagree about what a `warnings` element even is. The
+            // sentence names the controller with the same
+            // `MIDIControllerRouting.describe` copy that verb uses.
+            let instWarnings = InstrumentControllerChangeWarnings.warnings(
+                changingFrom: instOldDescriptor, to: descriptor,
+                carriedLaneTypes: instCarriedLaneTypes)
+            if !instWarnings.isEmpty, case .object(var instObj) = instPayload {
+                instObj["warnings"] = .array(instWarnings.map { .string($0.message) })
                 instPayload = .object(instObj)
             }
             return .success(request.id, instPayload)
@@ -1236,11 +1276,16 @@ public final class CommandRouter {
             ]))
 
         case "instrument.importSoundBank":
-            // params: path (required, absolute .sf2/.dls). Copies into the
+            // params: path (required, absolute .sf2/.dls/.sf3). Copies into the
             // central library (collision-uniquified), NEVER moving/deleting the
             // source; the project is untouched. Response {bank: <SoundBankInfo>}
             // (§6.4). Extension/existence/readability errors surface in the
             // MediaImporting "Audio import failed: …" tone.
+            // m31-h: a `.sf3` is CONVERTED to a real `.sf2` here (the returned
+            // bank is that `.sf2`), and a stream that will not decode fails the
+            // whole import loudly rather than landing a bank with silent gaps.
+            // Deliberately no extension pre-check at this layer — the library
+            // owns that rule, so the wire cannot drift from it.
             try params.rejectUnknownKeys(
                 ["path"], verb: "instrument.importSoundBank")
             let importRawPath = try params.require("path", \.stringValue)
@@ -1821,7 +1866,13 @@ public final class CommandRouter {
                     _ = try store.setEffectParam(trackID: fxAddTrackID, effectID: fxDescriptor.id,
                                                  name: name, value: value)
                 }
-                return .success(request.id, fxResult(trackID: fxAddTrackID, effectID: fxDescriptor.id))
+                // m27-c: initial params clamp through the SAME store call
+                // fx.setParam uses, so they had the same silent lie — and this
+                // is the natural one-call authoring path ("add a gain insert
+                // already set to +18 dB"). Same notice, same shape.
+                return .success(request.id, fxResult(
+                    trackID: fxAddTrackID, effectID: fxDescriptor.id,
+                    warnings: Self.paramClampWarnings(kind: fxKind, requests: fxInitialParams)))
             case .master:
                 // Master hosts built-in effects only in v1 (design D4a): the
                 // store throws masterChainBuiltInOnly for kind "audioUnit"
@@ -1831,7 +1882,9 @@ public final class CommandRouter {
                     _ = try store.setMasterEffectParam(effectID: fxDescriptor.id,
                                                        name: name, value: value)
                 }
-                return .success(request.id, masterFxResult(effectID: fxDescriptor.id))
+                return .success(request.id, masterFxResult(
+                    effectID: fxDescriptor.id,
+                    warnings: Self.paramClampWarnings(kind: fxKind, requests: fxInitialParams)))
             }
 
         case "fx.remove":
@@ -1890,10 +1943,19 @@ public final class CommandRouter {
         case "fx.setParam":
             // params: trackId (required — a track UUID or "master", m13-d),
             // effectId (required UUID), name (required string), value (required
-            // number, clamps silently through the spec range like
-            // track.setVolume). An unknown name surfaces unknownEffectParam
-            // (listing the valid names); effectNotFound/trackNotFound also
-            // surface via the LocalizedError mapping.
+            // number, clamps through the spec range like track.setVolume). An
+            // unknown name surfaces unknownEffectParam (listing the valid
+            // names); effectNotFound/trackNotFound also surface via the
+            // LocalizedError mapping.
+            //
+            // m27-c: the clamp is no longer SILENT. It still clamps rather than
+            // erroring — `fx_set_param`'s shipped description promises exactly
+            // that, so rejecting would break a documented contract on a live
+            // verb — but an out-of-range write now comes back with `warnings`
+            // naming what you asked for, what was stored, and the range.
+            // Computed here rather than in the store because the store's
+            // return is the CLAMPED descriptor: by then the requested value is
+            // gone, and only this layer still knows what was asked for.
             try params.rejectUnknownKeys(
                 ["trackId", "effectId", "name", "value"], verb: "fx.setParam")
             let fxParEffectID = try params.requireEffectID()
@@ -1903,11 +1965,19 @@ public final class CommandRouter {
             case .track(let fxParTrackID):
                 let fxParDescriptor = try store.setEffectParam(
                     trackID: fxParTrackID, effectID: fxParEffectID, name: fxParName, value: fxParValue)
-                return .success(request.id, fxResult(trackID: fxParTrackID, effectID: fxParDescriptor.id))
+                return .success(request.id, fxResult(
+                    trackID: fxParTrackID, effectID: fxParDescriptor.id,
+                    warnings: Self.paramClampWarnings(
+                        kind: fxParDescriptor.kind,
+                        requests: [(fxParName, fxParValue)])))
             case .master:
                 let fxParDescriptor = try store.setMasterEffectParam(
                     effectID: fxParEffectID, name: fxParName, value: fxParValue)
-                return .success(request.id, masterFxResult(effectID: fxParDescriptor.id))
+                return .success(request.id, masterFxResult(
+                    effectID: fxParDescriptor.id,
+                    warnings: Self.paramClampWarnings(
+                        kind: fxParDescriptor.kind,
+                        requests: [(fxParName, fxParValue)])))
             }
 
         case "fx.setSidechain":
@@ -2062,6 +2132,29 @@ public final class CommandRouter {
                 masterVolumePayload["automationPointCount"] =
                     .number(Double(masterVolumeLane.points.count))
             }
+            // m27-c: this fader clamps too. MEASURED while verifying m27-c's
+            // premise — the item asserts this verb REJECTS above 2.0 while the
+            // gain insert clamps, and that asymmetry is real but lives one
+            // layer up: `mixer_set_master_volume`'s zod schema is
+            // `.min(0).max(2)`, so an MCP caller is refused, while
+            // `ProjectStore.setMasterVolume` clamps to `Track.volumeRange`
+            // exactly like an effect param. A wire caller could therefore send
+            // 3.0 and be told `{masterVolume: 2}` with nothing saying why.
+            //
+            // Same only-when-clamped idiom as the two annotation keys directly
+            // above, and for the m26-q reason recorded there: an always-present
+            // field reads as a warning on every ordinary call. The advice
+            // sentence points at the same cure this verb's MCP description
+            // already recommends — a front-of-chain gain insert — which m27-c
+            // just widened to +24.08 dB, so it now genuinely finishes the job.
+            if let masterVolumeClamp = ClampNotice.sentence(
+                control: "volume", requested: volume, stored: store.masterVolume,
+                range: Track.volumeRange,
+                advice: "For more level than +6 dB, add a gain insert at the FRONT of the "
+                    + "master chain (fx.add trackId \"master\", kind \"gain\", index 0) and "
+                    + "take the makeup there — its gainLinear reaches 16 (+24.08 dB).") {
+                masterVolumePayload["warnings"] = .array([.string(masterVolumeClamp)])
+            }
             return .success(request.id, .object(masterVolumePayload))
 
         case "mixer.applyPreset":
@@ -2102,8 +2195,31 @@ public final class CommandRouter {
             // +1 = all right; floor 0). The goniometer's raw sample pairs
             // deliberately do NOT ride this always-on payload — they stay on
             // the app-side engine accessor (MasterScopeFrame).
+            // m27-d ADDITIVE `transportPlaying` key (assembled here, NOT on
+            // `MasterAnalysisSnapshot` — that struct stays exactly what
+            // `MasterMixAnalyzerTests`/`MasterAnalysisCommandTests` pin, and
+            // the app's own VibeMeterView calls `store.masterAnalysis()`
+            // in-process and never sees this wire response at all): the
+            // store's OWN `transport.isPlaying`, sampled at the same instant
+            // as the snapshot. The analyzer's `.floor` is ONE static value
+            // returned for at least three different causes — transport
+            // stopped, an attached engine reading genuine silence, and no
+            // engine at all (see `MasterAnalysisSnapshot.floor` and
+            // `AudioEngineControlling`'s default) — and nothing in the
+            // snapshot itself can tell those apart. `transportPlaying` lets
+            // a caller (the `mixer_master_analysis` MCP tool) verify the ONE
+            // fact that IS independently knowable — is the transport
+            // actually rolling — without this wire command's own contract
+            // changing: it still never throws, and still reads `false` for
+            // BOTH "stopped" and "headless/no store" in exactly the way
+            // `transport.isPlaying` already always has.
             try params.rejectUnknownKeys([], verb: "mixer.masterAnalysis")
-            return .success(request.id, try JSONValue(encoding: store.masterAnalysis()))
+            var masterAnalysisResult = try JSONValue(encoding: store.masterAnalysis())
+            if case .object(var masterAnalysisObject) = masterAnalysisResult {
+                masterAnalysisObject["transportPlaying"] = .bool(store.transport.isPlaying)
+                masterAnalysisResult = .object(masterAnalysisObject)
+            }
+            return .success(request.id, masterAnalysisResult)
 
         case "mixer.liveLoudness":
             // params: reset? (bool, default false). Live master-bus loudness
@@ -2779,6 +2895,157 @@ public final class CommandRouter {
                 "notes": try JSONValue(encoding: getNotesOrdered),
             ]))
 
+        case "clip.repeatNotes":
+            // m31-c. params: clipId (required UUID). fromBeat/toBeat? —
+            // CLIP-RELATIVE, half-open on startBeat, the clip.getNotes
+            // window convention exactly (mutually exclusive with noteIds;
+            // omitting both selects the whole clip). noteIds? — an
+            // explicit note selection, mutually exclusive with
+            // fromBeat/toBeat. periodBeats (required, > 0) — explicit
+            // beats between copies, meter-blind BY CONSTRUCTION so there
+            // is nothing to silently mis-infer across a meter change.
+            // count (required whole number, 1...512 — a judgment-call
+            // ceiling, not a measured limit, so a typo'd count fails
+            // loudly instead of allocating). firstCopyAtBeat? —
+            // clip-relative start of copy 1; omit for the source window's
+            // own origin + periodBeats. transposeSemitones? — [] (no
+            // transpose, the default), one entry (broadcasts to every
+            // copy), or exactly `count` entries (one per copy); CHROMATIC,
+            // not diatonic — pitch + n, clamped like every other note
+            // write. extendClip? (default true) — mirrors
+            // setClipNotes'/pasteNotes' auto-extend.
+            //
+            // Writes copies back into the SAME clip in ONE UNCOALESCED
+            // undo step (no coalescing key — see
+            // ProjectStore+RepeatNotes.swift's banner: a coalescing key
+            // would silently fold a repeat into a neighbouring note edit,
+            // and one undo would then revert both). Repeat COMPOUNDS on
+            // re-run: calling it twice produces twice the copies — undo,
+            // don't re-call, to fix an over-generous count.
+            //
+            // Response is COUNTS AND GEOMETRY ONLY — no notes array, ever,
+            // under any parameter. Read the written notes back with
+            // clip.getNotes. clipNotFound/clipInTakeGroup/notAMIDIClip
+            // surface via the LocalizedError mapping; every other
+            // rejection is a field-named invalidClipEdit message built at
+            // throw time in the store.
+            try params.rejectUnknownKeys(
+                ["clipId", "fromBeat", "toBeat", "noteIds", "periodBeats", "count",
+                 "firstCopyAtBeat", "transposeSemitones", "extendClip"],
+                verb: "clip.repeatNotes",
+                hint: "beats here are CLIP-relative, like clip.getNotes")
+            let repeatClipID = try params.requireClipID()
+            let repeatFromBeat = try Self.optionalNumber(params["fromBeat"], "'fromBeat'")
+            let repeatToBeat = try Self.optionalNumber(params["toBeat"], "'toBeat'")
+            let repeatNoteIDs: Set<UUID>?
+            if params["noteIds"] == nil {
+                repeatNoteIDs = nil
+            } else {
+                repeatNoteIDs = Set(try parseClipIDs(
+                    params["noteIds"], field: "noteIds",
+                    requirement: " (the notes to repeat, mutually exclusive with fromBeat/toBeat)"))
+            }
+            let repeatPeriodBeats = try params.require("periodBeats", \.doubleValue)
+            guard let repeatCountValue = params["count"]?.doubleValue, Self.isInteger(repeatCountValue) else {
+                throw ControlError("missing or invalid required param 'count' — must be a whole number")
+            }
+            let repeatCount = Int(repeatCountValue)
+            let repeatFirstCopyAtBeat = try Self.optionalNumber(params["firstCopyAtBeat"], "'firstCopyAtBeat'")
+            var repeatTranspose: [Int] = []
+            if let transposeValue = params["transposeSemitones"] {
+                guard case .array(let rawTranspose) = transposeValue else {
+                    throw ControlError(
+                        "'transposeSemitones' must be an array of whole-number semitone offsets")
+                }
+                for (i, entry) in rawTranspose.enumerated() {
+                    guard let number = entry.doubleValue, Self.isInteger(number) else {
+                        throw ControlError("transposeSemitones[\(i)] must be a whole number of semitones")
+                    }
+                    repeatTranspose.append(Int(number))
+                }
+            }
+            let repeatExtendClip = try Self.optionalBool(params["extendClip"], "'extendClip'") ?? true
+            let repeatReport = try store.repeatNotes(
+                clipID: repeatClipID, fromBeat: repeatFromBeat, toBeat: repeatToBeat,
+                noteIDs: repeatNoteIDs, periodBeats: repeatPeriodBeats, count: repeatCount,
+                firstCopyAtBeat: repeatFirstCopyAtBeat, transposeSemitones: repeatTranspose,
+                extendClip: repeatExtendClip)
+            return .success(request.id, .object([
+                "clipId": .string(repeatReport.clipID.uuidString),
+                "copiesMade": .number(Double(repeatReport.copiesMade)),
+                "sourceNoteCount": .number(Double(repeatReport.sourceNoteCount)),
+                "notesAdded": .number(Double(repeatReport.notesAdded)),
+                "totalNotes": .number(Double(repeatReport.totalNotes)),
+                "patternSpanBeats": .number(repeatReport.patternSpanBeats),
+                "firstCopyStartBeat": .number(repeatReport.firstCopyStartBeat),
+                "lastCopyEndBeat": .number(repeatReport.lastCopyEndBeat),
+                "clipLengthBeats": .number(repeatReport.clipLengthBeats),
+                "extended": .bool(repeatReport.extended),
+                "extendRefusal": repeatReport.extendRefusal.map(JSONValue.string) ?? .null,
+                "latentNotesPastClipEnd": .number(Double(repeatReport.latentNotesPastClipEnd)),
+                "meterChangesInSpan": .number(Double(repeatReport.meterChangesInSpan)),
+                "preExistingNotesInSpan": .number(Double(repeatReport.preExistingNotesInSpan)),
+                "copiesOverlapEachOther": .bool(repeatReport.copiesOverlapEachOther),
+                "pitchesClamped": .number(Double(repeatReport.pitchesClamped)),
+            ]))
+
+        case "clip.patchNotes":
+            // m26-a / m27-n (filed twice, MERGED — see the roadmap). params:
+            // clipId (required UUID), update (required array, may be []).
+            // Each update[] entry: {id (required — an EXISTING note's
+            // uuid), pitch?, velocity?, startBeat?, lengthBeats?}. Every
+            // field but id is OPTIONAL; an omitted (or explicit JSON null)
+            // field is left UNCHANGED. This is the missing rung between
+            // clip.getNotes (read) and clip.setNotes (whole-array replace):
+            // editing 48 notes out of a 907-note clip no longer means
+            // resubmitting all 907.
+            //
+            // ⚠️ NOT clip.setNotes: that replaces the clip's ENTIRE note
+            // array (can add, remove, and reorder notes — any id you don't
+            // include is GONE). clip.patchNotes can only ever change fields
+            // on notes that ALREADY EXIST — it never creates or removes a
+            // note, so there is no way to call it and lose data. Reach for
+            // clip.setNotes when authoring/replacing a clip's content;
+            // reach for clip.patchNotes when you already hold real note ids
+            // (from clip.getNotes, or from a prior clip.setNotes/
+            // clip.addMIDI response) and are changing a FEW of their
+            // fields.
+            //
+            // ONE undo step per call, UNCOALESCED (no coalescing key — the
+            // clip.repeatNotes precedent: a coalescing key would let a
+            // batch patch fold into a stranger's edit inside the 800ms
+            // window, or vice versa). NO auto-extend (unlike clip.setNotes/
+            // clip.repeatNotes) — a patched startBeat/lengthBeats landing
+            // past the clip's end stores fine (legal but latent, m18-f) and
+            // is reported via latentNotesPastClipEnd, but the clip does not
+            // grow to reach it.
+            //
+            // Response is COUNTS ONLY — {clipId, updated, totalNotes,
+            // latentNotesPastClipEnd} — never a notes array: read changed
+            // notes back with clip.getNotes. clipNotFound/clipInTakeGroup/
+            // notAMIDIClip surface via the LocalizedError mapping; an
+            // unknown id, a duplicate id within 'update', or an update
+            // entry that sets none of pitch/velocity/startBeat/lengthBeats
+            // is a field-named invalidClipEdit message built at throw time
+            // in the store (which is ALL-OR-NOTHING: any one of those
+            // refuses the WHOLE call before anything is written).
+            try params.rejectUnknownKeys(
+                ["clipId", "update"], verb: "clip.patchNotes",
+                hint: "to add or remove notes, or replace a clip's content wholesale, use "
+                + "clip.setNotes instead")
+            let patchClipID = try params.requireClipID()
+            guard let patchUpdateValue = params["update"] else {
+                throw ControlError("missing or invalid required param 'update'")
+            }
+            let patchUpdates = try parseNotePatches(patchUpdateValue)
+            let patchReport = try store.patchNotes(clipID: patchClipID, update: patchUpdates)
+            return .success(request.id, .object([
+                "clipId": .string(patchReport.clipID.uuidString),
+                "updated": .number(Double(patchReport.updated)),
+                "totalNotes": .number(Double(patchReport.totalNotes)),
+                "latentNotesPastClipEnd": .number(Double(patchReport.latentNotesPastClipEnd)),
+            ]))
+
         case "clip.remove":
             // params: clipId (required UUID). Removes an audio or MIDI clip.
             // clipNotFound surfaces via the LocalizedError mapping.
@@ -3317,20 +3584,40 @@ public final class CommandRouter {
             return .success(request.id, try JSONValue(encoding: clipAnalysis))
 
         case "clip.quantizeAudio":
-            // params: trackId (required), clipId (required), gridBeats (required,
-            // > 0), strength? (0...1, default 1), swing? (50...75, default 50),
-            // sensitivity? (0...1, default 0.5 — detector knob), crossfadeMs?
-            // (0...50 ms, default 10 — join crossfade width). Audio quantize v0
-            // (M5 iii-f): detect the clip's transients on the engine (content-key
-            // cached, off the render thread), slice at them, nudge each slice
-            // toward the grid, and replace the clip with the slices in ONE
-            // undo step — NO per-slice time-stretch. An audio clip ONLY: a MIDI
-            // clip surfaces quantizeRequiresAudioClip verbatim; a non-identity
-            // stretch surfaces audioQuantizeStretchUnsupported; a comp member
-            // surfaces clipInTakeGroup; fewer than 2 usable transients surface
-            // audioQuantizeNoTransients (nothing changes); headless surfaces
-            // engineUnavailable; clipNotFound/trackNotFound via the LocalizedError
-            // mapping. Response: {"clips": [...slices...]}.
+            // QUANTIZE **OR CHOP** an audio clip. With strength: 0 this is a
+            // pure CHOP — the clip is cut at its transients (or, with
+            // divisions, into N equal parts) into slices that stay EXACTLY
+            // where they were, in ONE undo step, with clean sample-exact joins
+            // and no crossfades. That is the chop-to-TIMELINE verb; the
+            // chop-to-SAMPLER-PADS verb is clip.sliceToSampler.
+            //
+            // params: trackId (required), clipId (required), gridBeats
+            // (required, > 0 — OPTIONAL when strength is explicitly 0, where
+            // nothing is nudged and the grid is irrelevant), strength? (0...1,
+            // default 1), swing? (50...75, default 50), sensitivity? (0...1,
+            // default 0.5 — detector knob) [transient slicing only],
+            // divisions? (2...128 — cut into N EQUAL parts instead of at
+            // transients; the fallback when transients are wrong or absent:
+            // drones, ambient beds, already-quantized loops), crossfadeMs?
+            // (0...50 ms, default 10 — join crossfade width). Audio quantize
+            // v0 (M5 iii-f): detect the clip's transients on the engine
+            // (content-key cached, off the render thread), slice at them, nudge
+            // each slice toward the grid, and replace the clip with the slices
+            // in ONE undo step — NO per-slice time-stretch. An audio clip ONLY:
+            // a MIDI clip surfaces quantizeRequiresAudioClip verbatim; a
+            // non-identity stretch surfaces audioQuantizeStretchUnsupported; a
+            // comp member surfaces clipInTakeGroup; fewer than 2 usable
+            // transients surface audioQuantizeNoTransients (nothing changes);
+            // headless surfaces engineUnavailable; clipNotFound/trackNotFound
+            // via the LocalizedError mapping. Response: {"clips": [...slices...]}.
+            //
+            // ⭐ divisions (m32-b1) does NOT run the detector, so it needs no
+            // engine and works headless; 'sensitivity' alongside it is
+            // REJECTED BY NAME rather than silently ignored. It is orthogonal
+            // to gridBeats/strength/swing/groove — divisions picks where the
+            // clip is CUT, those pick where each slice MOVES TO. Divisions so
+            // fine that every boundary falls under the minimum slice width
+            // surface audioQuantizeDivisionsTooFine, carrying the arithmetic.
             //
             // groove? (M5 iii-g): optional ref (built-in swing name, saved
             // template id, or name) resolved to settings.groove
@@ -3339,13 +3626,96 @@ public final class CommandRouter {
             // MIDI path uses; an unknown ref is a field-named 'groove' error.
             try params.rejectUnknownKeys(
                 ["trackId", "clipId", "gridBeats", "strength", "swing", "sensitivity",
-                    "crossfadeMs", "groove"], verb: "clip.quantizeAudio")
+                    "crossfadeMs", "groove", "divisions"], verb: "clip.quantizeAudio")
             let aqTrackID = try params.requireTrackID()
             let aqClipID = try params.requireClipID()
             let aqSettings = try parseAudioQuantizeSettings(params)
             let aqSlices = try await store.quantizeAudioClip(
                 trackId: aqTrackID, clipId: aqClipID, settings: aqSettings)
             return .success(request.id, .object(["clips": try JSONValue(encoding: aqSlices)]))
+
+        case "clip.sliceToSampler":
+            // params: clipId (required — the SOURCE REGION; the clip's own
+            // window bounds the chop, so trim a clip to the four bars you want
+            // and chop that). targetTrackId? (instrument track to receive the
+            // pads; omitted = a new one is created and reported as
+            // createdTrackId). mode? "transients" (default) | "divisions" |
+            // "grid". sensitivity? (0...1, default 0.5) [transients only].
+            // divisions? (2...128) [divisions only]. gridBeats? (> 0) [grid
+            // only]. minSliceSeconds? (default 0.05). maxSlices? (1...96,
+            // default 32). includeHead? (default false). baseNote? (0...127,
+            // default 36 = C1, the MPC pad-1 note). snapWindowMs? (0...20,
+            // default 3; 0 disables snapping). generateMIDI? (default true).
+            // atBeat? (where the reconstruction clip lands; default = the
+            // source clip's own startBeat). velocityFromStrength? (default
+            // FALSE — see below) [transients only].
+            //
+            // THE SAMPLE-FLIP CHOP (m32-b2). Turns an AUDIO clip into a bank
+            // of sampler pads: each boundary-to-boundary span becomes a
+            // SamplerZone with startFrame/endFrame on ONE shared source file,
+            // one pad per MIDI note from baseNote up — plus, by default, a
+            // MIDI clip that replays the ORIGINAL GROOVE, so you start from
+            // "plays back identically to the record" and edit from there.
+            // The source clip is READ-ONLY: it is not sliced, moved or
+            // replaced (chop-to-TIMELINE is the separate
+            // clip.quantizeAudio {strength: 0}).
+            //
+            // ⭐ Reconstruction notes are velocity 127, NOT the detector's
+            // strength. The sampler's amp law is velocity/127 × zone.gain, and
+            // a slice ALREADY contains its own recorded amplitude — a ghost
+            // note detected at strength 0.1 and fired at velocity 13 would
+            // land ~20 dB below its own level. 127/127 = exactly 1.0.
+            // velocityFromStrength: true opts into the detector's dynamics
+            // (deliberately quieter than the source); `strength` is in the
+            // response either way.
+            //
+            // Each boundary is SNAPPED ONCE, to the frame within ±snapWindowMs
+            // minimising max|sample| across channels, and shared by both
+            // adjacent pads. On mono that is the zero crossing; on stereo a
+            // simultaneous crossing often does not exist, so the response
+            // reports residualAmplitude per pad rather than implying a clean
+            // cut. Pads get attack 0 (keep the transient) and release 10 ms
+            // (the real end-of-slice click fix).
+            //
+            // Rejections, verbatim: a MIDI clip surfaces
+            // transientsRequireAudioClip; a pitch-shifted clip surfaces
+            // sliceToSamplerPitchShiftUnsupported and a time-stretched one
+            // audioQuantizeStretchUnsupported (zones read RAW source frames,
+            // so the pads would not match what you hear); mode "grid" across a
+            // tempo change surfaces audioQuantizeTempoBoundaryUnsupported
+            // ("transients"/"divisions" are source-domain and are NOT
+            // rejected); a non-instrument targetTrackId surfaces
+            // instrumentRequiresInstrumentTrack; no usable boundary surfaces
+            // audioQuantizeNoTransients; more pads than maxSlices, or a pad
+            // past MIDI 127, REJECT with a teaching error and change nothing —
+            // slices are NEVER silently truncated. Headless surfaces
+            // engineUnavailable; clipNotFound/trackNotFound via the
+            // LocalizedError mapping.
+            //
+            // ONE undo step ("Chop to Sampler", no coalescing). Response:
+            // {trackId, createdTrackId?, midiClipId?, sampleRate, frameCount,
+            // sliceCount, headSeconds, slices: [{index, pitch, startFrame,
+            // endFrame?, sourceSeconds, beat, strength?, snapOffsetFrames?,
+            // residualAmplitude?}], warnings}.
+            try params.rejectUnknownKeys(
+                ["clipId", "targetTrackId", "mode", "sensitivity", "divisions",
+                 "gridBeats", "minSliceSeconds", "maxSlices", "includeHead",
+                 "baseNote", "snapWindowMs", "generateMIDI", "atBeat",
+                 "velocityFromStrength"],
+                verb: "clip.sliceToSampler")
+            let chopClipID = try params.requireClipID()
+            var chopTargetTrackID: UUID?
+            if let raw = params["targetTrackId"]?.stringValue {
+                guard let id = UUID(uuidString: raw) else {
+                    throw ControlError("'targetTrackId' is not a valid UUID: \(raw)")
+                }
+                chopTargetTrackID = id
+            }
+            let chopSettings = try parseSliceToSamplerSettings(params)
+            let chopResult = try await store.sliceClipToSampler(
+                clipId: chopClipID, targetTrackId: chopTargetTrackID,
+                settings: chopSettings)
+            return .success(request.id, try JSONValue(encoding: chopResult))
 
         case "clip.detectPitch":
             // params: clipId (required). fromSeconds?/durationSeconds?
@@ -7390,26 +7760,59 @@ public final class CommandRouter {
     /// one round trip: `{"trackId", "effects": [<resolved effect>]}`. `fx.add`
     /// and `fx.setParam` also carry `"effectId"`. Effects use the same resolved
     /// shape as the snapshot (see `effectsJSON`).
-    private func fxResult(trackID: UUID, effectID: UUID? = nil) -> JSONValue {
+    private func fxResult(trackID: UUID, effectID: UUID? = nil,
+                          warnings: [String] = []) -> JSONValue {
         let effects = store.tracks.first(where: { $0.id == trackID })?.effects ?? []
         var obj: [String: JSONValue] = [
             "trackId": .string(trackID.uuidString),
             "effects": effectsJSON(effects, trackID: trackID),
         ]
         if let effectID { obj["effectId"] = .string(effectID.uuidString) }
+        // m27-c: `warnings` — only-when-non-empty, the m27-b idiom. An
+        // always-present empty array reads as a field worth checking on every
+        // call, and the ordinary in-range set clamps nothing at all.
+        if !warnings.isEmpty { obj["warnings"] = .array(warnings.map(JSONValue.string)) }
         return .object(obj)
+    }
+
+    /// The clamp sentences for a batch of requested effect-param writes —
+    /// EMPTY when every value landed as asked (m27-c). Generic over the kind's
+    /// whole spec table rather than special-cased to `gainLinear`, because the
+    /// clamp itself is generic (`ProjectStore.setEffectParam` /
+    /// `setMasterEffectParam` both clamp EVERY param through `spec.range`), so
+    /// a gain-only notice would be more code teaching less truth.
+    ///
+    /// An unknown name yields nothing: the store already rejects those with
+    /// `unknownEffectParam` before anything is written, and `.audioUnit` has
+    /// no generic spec table at all (its own clamping is the plugin's, and
+    /// `au_set_param` documents its read-back separately).
+    private static func paramClampWarnings(
+        kind: EffectDescriptor.Kind, requests: [(name: String, value: Double)]
+    ) -> [String] {
+        let specs = EffectParamSpec.specs(for: kind)
+        return requests.compactMap { request in
+            guard let spec = specs.first(where: { $0.name == request.name }) else { return nil }
+            return ClampNotice.sentence(control: request.name, requested: request.value,
+                                        stored: request.value.clamped(to: spec.range),
+                                        range: spec.range)
+        }
     }
 
     /// `fxResult` twin for the MASTER chain (m13-d): echoes the `trackId:
     /// "master"` sentinel so an agent re-orients, plus the resolved master
     /// insert chain (same `effectsJSON` shape as the snapshot's top-level
     /// `masterEffects`, with the master per-effect latency resolver).
-    private func masterFxResult(effectID: UUID? = nil) -> JSONValue {
+    private func masterFxResult(effectID: UUID? = nil,
+                                warnings: [String] = []) -> JSONValue {
         var obj: [String: JSONValue] = [
             "trackId": .string("master"),
             "effects": masterEffectsJSON(),
         ]
         if let effectID { obj["effectId"] = .string(effectID.uuidString) }
+        // m27-c, the `fxResult` twin — same only-when-non-empty idiom, and it
+        // must stay the twin: the master chain is exactly where a gain insert
+        // gets clamped in practice (it is the front-of-chain makeup stage).
+        if !warnings.isEmpty { obj["warnings"] = .array(warnings.map(JSONValue.string)) }
         return .object(obj)
     }
 
@@ -8080,6 +8483,16 @@ public final class CommandRouter {
                 "amount": .number(bass.amount),
                 "mix": .number(bass.mix),
             ])
+        case .bitCrusher:
+            let crusher = effect.resolvedBitCrusher
+            return .object([
+                "bits": .number(crusher.bits),
+                "downsampleHz": .number(crusher.downsampleHz),
+                // Binary on the numeric surface (the truePeak precedent).
+                "antiAlias": .number(crusher.antiAlias ? 1 : 0),
+                "dither": .number(crusher.dither ? 1 : 0),
+                "mix": .number(crusher.mix),
+            ])
         case .audioUnit:
             // Hosted AU: the component triple + display name. AU parameters
             // are not on the generic surface in v0, and captured state never
@@ -8151,6 +8564,73 @@ public final class CommandRouter {
                                   startBeat: startBeat, lengthBeats: lengthBeats))
         }
         return notes
+    }
+
+    /// Parses an `update` param into `[NotePatch]` for clip.patchNotes. Each
+    /// element requires `id` (an existing note's uuid — EXISTENCE is checked
+    /// STORE-SIDE, where the clip's real note ids live, not here); every
+    /// other field is OPTIONAL and, when present, validated with the EXACT
+    /// ranges `parseNotes`/clip.setNotes use, so a value clip.setNotes would
+    /// reject is refused here too rather than silently clamped. Absent OR
+    /// explicit JSON `null` both mean "leave this field alone" — present
+    /// with any other wrong-shaped value is a teaching error, never a
+    /// silent no-op. Whether an entry sets at least one field, and whether
+    /// an id repeats within the array, are both semantic (not shape)
+    /// questions the STORE owns (`ProjectStore.patchNotes`'s single home for
+    /// this verb's validation) — this parser only turns JSON into
+    /// `NotePatch` values.
+    private func parseNotePatches(_ value: JSONValue) throws -> [NotePatch] {
+        guard let array = value.arrayValue else {
+            throw ControlError(
+                "'update' must be an array of {id, pitch?, velocity?, startBeat?, lengthBeats?}")
+        }
+        guard array.count <= Self.maxNotesPerClip else {
+            throw ControlError("'update' exceeds the 4096-notes-per-clip limit (got \(array.count))")
+        }
+        func isSet(_ element: JSONValue, _ field: String) -> Bool {
+            guard let raw = element[field] else { return false }
+            if case .null = raw { return false }
+            return true
+        }
+        var patches: [NotePatch] = []
+        patches.reserveCapacity(array.count)
+        for (i, element) in array.enumerated() {
+            guard let rawID = element["id"]?.stringValue, let id = UUID(uuidString: rawID) else {
+                throw ControlError("update[\(i)].id is required and must be a valid note UUID")
+            }
+            var pitch: Int?
+            if isSet(element, "pitch") {
+                guard let v = element["pitch"]?.doubleValue, Self.isInteger(v), v >= 0, v <= 127 else {
+                    throw ControlError("update[\(i)].pitch must be an integer 0-127")
+                }
+                pitch = Int(v)
+            }
+            var velocity: Int?
+            if isSet(element, "velocity") {
+                guard let v = element["velocity"]?.doubleValue, Self.isInteger(v), v >= 1, v <= 127 else {
+                    throw ControlError("update[\(i)].velocity must be an integer 1-127 (0 is note-off)")
+                }
+                velocity = Int(v)
+            }
+            var startBeat: Double?
+            if isSet(element, "startBeat") {
+                guard let v = element["startBeat"]?.doubleValue, v >= 0 else {
+                    throw ControlError(
+                        "update[\(i)].startBeat must be a number >= 0 (beats, relative to the clip start)")
+                }
+                startBeat = v
+            }
+            var lengthBeats: Double?
+            if isSet(element, "lengthBeats") {
+                guard let v = element["lengthBeats"]?.doubleValue, v > 0 else {
+                    throw ControlError("update[\(i)].lengthBeats must be > 0")
+                }
+                lengthBeats = v
+            }
+            patches.append(NotePatch(id: id, pitch: pitch, velocity: velocity,
+                                     startBeat: startBeat, lengthBeats: lengthBeats))
+        }
+        return patches
     }
 
     /// Parses a `points` param into `[ClipGainPoint]` for clip.setGainEnvelope.
@@ -8914,9 +9394,42 @@ public final class CommandRouter {
     /// iii-g seam. Same dual-error collection as `parseQuantizeSettings` (m16-e,
     /// audit F8b) — every field validates independently and every problem is
     /// reported together via `combinedFieldProblems`.
+    ///
+    /// m32-b1 adds `divisions?` (2...128, the fixed-division chop) and relaxes
+    /// `gridBeats` to optional at an explicit `strength: 0`. `sensitivity`
+    /// alongside `divisions` is REJECTED BY NAME rather than silently ignored.
     private func parseAudioQuantizeSettings(_ params: [String: JSONValue]) throws -> AudioQuantizeSettings {
         var problems: [String] = []
 
+        // m32-b1 — the fixed-division chop. Read FIRST because two other
+        // fields are scoped by it: 'sensitivity' (the detector knob, and no
+        // detector runs here) is rejected by name, and 'gridBeats' relaxes.
+        // Keyed on the RAW param, not the parsed value, so a caller who sent
+        // an out-of-range `divisions` still gets the scoping problems reported
+        // alongside the range one (the dual-error style, m16-e).
+        let wantsDivisions = params["divisions"] != nil
+        var divisions: Int?
+        if wantsDivisions {
+            if let raw = params["divisions"]?.doubleValue,
+               raw == raw.rounded(),
+               AudioQuantizeSettings.divisionsRange.contains(Int(raw)) {
+                divisions = Int(raw)
+            } else {
+                problems.append(
+                    "'divisions' must be a whole number between "
+                    + "\(AudioQuantizeSettings.divisionsRange.lowerBound) and "
+                    + "\(AudioQuantizeSettings.divisionsRange.upperBound) — the clip's window is cut "
+                    + "into that many EQUAL parts instead of at its transients")
+            }
+        }
+
+        // m32-b1: 'gridBeats' is the NUDGE TARGET, not the boundary source, so
+        // it stays legal (and orthogonal) alongside 'divisions'. It becomes
+        // optional only at an EXPLICIT strength of 0, where nothing is nudged
+        // at all — `new = old + 0·(target − old)` is an identity, so every
+        // positive grid produces the same slices and demanding one makes a
+        // pure chop read like a mistake. Omitted strength still defaults to 1
+        // and still requires the grid, so no shipped caller changes.
         var gridBeats = 0.0
         if let raw = params["gridBeats"]?.doubleValue {
             if raw > 0 {
@@ -8924,8 +9437,12 @@ public final class CommandRouter {
             } else {
                 problems.append("'gridBeats' must be greater than 0 (beats: 1 = 1/4 note, 0.5 = 1/8, 0.25 = 1/16)")
             }
+        } else if params["strength"]?.doubleValue == 0 {
+            gridBeats = 1.0   // irrelevant at strength 0; any positive value slices identically
         } else {
-            problems.append("missing or invalid required param 'gridBeats'")
+            problems.append(
+                "missing or invalid required param 'gridBeats' — omit it only with strength: 0, "
+                + "where nothing is nudged and a pure CHOP needs no grid")
         }
 
         let strength = params["strength"]?.doubleValue ?? 1
@@ -8938,9 +9455,21 @@ public final class CommandRouter {
             problems.append("'swing' must be between 50 and 75 (50 = straight, 75 = max MPC shuffle)")
         }
 
+        // ⭐ MODE-SCOPED, REJECTED BY NAME, NOT IGNORED (m32-b1). A caller who
+        // sends 'sensitivity' with 'divisions' believes the detector is
+        // running; it is not, and they would get a plausible-looking chop that
+        // ignored them. Half-inert parameters are this tree's silent-success
+        // shape. Keyed on presence so the shipped default path is untouched.
         let sensitivity = params["sensitivity"]?.doubleValue ?? 0.5
-        if !(0...1).contains(sensitivity) {
-            problems.append("'sensitivity' must be between 0 and 1 (0.5 = default; higher finds more onsets)")
+        if params["sensitivity"] != nil {
+            if wantsDivisions {
+                problems.append(
+                    "'sensitivity' only applies to transient slicing — it is the detector knob, and "
+                    + "'divisions' cuts the window into equal parts without running the detector; "
+                    + "send one or the other, not both")
+            } else if !(0...1).contains(sensitivity) {
+                problems.append("'sensitivity' must be between 0 and 1 (0.5 = default; higher finds more onsets)")
+            }
         }
 
         let crossfadeMs = params["crossfadeMs"]?.doubleValue ?? 10
@@ -8961,7 +9490,139 @@ public final class CommandRouter {
         return AudioQuantizeSettings(
             gridBeats: gridBeats, strength: strength, swingPercent: swing,
             groove: groove, sensitivity: sensitivity,
-            crossfadeSeconds: crossfadeMs / 1000.0)
+            crossfadeSeconds: crossfadeMs / 1000.0,
+            divisions: divisions)
+    }
+
+    /// Builds a `SliceToSamplerSettings` from the `clip.sliceToSampler` params
+    /// (m32-b2). Same dual-error collection as `parseAudioQuantizeSettings` —
+    /// every field validates independently and every problem is reported
+    /// together via `combinedFieldProblems`.
+    ///
+    /// ⭐ MODE-SCOPED PARAMS ARE REJECTED, NOT IGNORED. `sensitivity` in
+    /// `divisions` mode, `divisions` in `grid` mode, `velocityFromStrength`
+    /// where no detector ran — each is a named error. A verb where half the
+    /// parameters silently do nothing is the exact silent-success shape this
+    /// design rejected a `destination` parameter to avoid; a caller who sends
+    /// `sensitivity` with `mode: "divisions"` believes the detector is
+    /// running, and would get a plausible-looking chop that ignored them.
+    private func parseSliceToSamplerSettings(
+        _ params: [String: JSONValue]) throws -> SliceToSamplerSettings {
+        var problems: [String] = []
+
+        var mode = SliceBoundaryMode.transients
+        if let raw = params["mode"]?.stringValue {
+            if let parsed = SliceBoundaryMode(rawValue: raw) {
+                mode = parsed
+            } else {
+                problems.append(
+                    "'mode' must be one of "
+                    + SliceBoundaryMode.allCases.map { "'\($0.rawValue)'" }
+                        .joined(separator: ", ")
+                    + " (transients = detected onsets, divisions = N equal parts, "
+                    + "grid = musical grid lines) — got '\(raw)'")
+            }
+        } else if params["mode"] != nil {
+            problems.append("'mode' must be a string")
+        }
+
+        let sensitivity = params["sensitivity"]?.doubleValue ?? 0.5
+        if params["sensitivity"] != nil {
+            if mode != .transients {
+                problems.append(
+                    "'sensitivity' only applies to mode 'transients' — it is the detector knob, "
+                    + "and mode '\(mode.rawValue)' does not run the detector")
+            } else if !(0...1).contains(sensitivity) {
+                problems.append(
+                    "'sensitivity' must be between 0 and 1 (0.5 = default; higher finds more onsets)")
+            }
+        }
+
+        var divisions: Int?
+        if let raw = params["divisions"]?.doubleValue {
+            if mode != .divisions {
+                problems.append(
+                    "'divisions' only applies to mode 'divisions' — pass mode: \"divisions\" to "
+                    + "cut the clip into N equal parts")
+            } else if SliceToSamplerSettings.divisionsRange.contains(Int(raw)),
+                      raw == raw.rounded() {
+                divisions = Int(raw)
+            } else {
+                problems.append(
+                    "'divisions' must be a whole number between "
+                    + "\(SliceToSamplerSettings.divisionsRange.lowerBound) and "
+                    + "\(SliceToSamplerSettings.divisionsRange.upperBound)")
+            }
+        } else if mode == .divisions {
+            problems.append("mode 'divisions' requires 'divisions' (2...128 equal parts)")
+        }
+
+        var gridBeats: Double?
+        if let raw = params["gridBeats"]?.doubleValue {
+            if mode != .grid {
+                problems.append(
+                    "'gridBeats' only applies to mode 'grid' — pass mode: \"grid\" to cut on the "
+                    + "musical grid")
+            } else if raw > 0 {
+                gridBeats = raw
+            } else {
+                problems.append(
+                    "'gridBeats' must be greater than 0 (beats: 1 = 1/4 note, 0.5 = 1/8, 0.25 = 1/16)")
+            }
+        } else if mode == .grid {
+            problems.append("mode 'grid' requires 'gridBeats' (> 0 beats per slice)")
+        }
+
+        let minSliceSeconds = params["minSliceSeconds"]?.doubleValue
+            ?? SliceToSamplerSettings.defaultMinSliceSeconds
+        if !(0.001...10).contains(minSliceSeconds) {
+            problems.append(
+                "'minSliceSeconds' must be between 0.001 and 10 (default 0.05 — boundaries closer "
+                + "than this merge, and no pad is narrower)")
+        }
+
+        let maxSlices = params["maxSlices"]?.doubleValue
+            .map { Int($0) } ?? SliceToSamplerSettings.defaultMaxSlices
+        if !(1...SliceToSamplerSettings.maxSlicesHardCap).contains(maxSlices) {
+            problems.append(
+                "'maxSlices' must be between 1 and \(SliceToSamplerSettings.maxSlicesHardCap) "
+                + "(default \(SliceToSamplerSettings.defaultMaxSlices)) — a chop that would exceed "
+                + "it is REFUSED, never truncated")
+        }
+
+        let baseNote = params["baseNote"]?.doubleValue
+            .map { Int($0) } ?? SliceToSamplerSettings.defaultBaseNote
+        if !SamplerZone.pitchRange.contains(baseNote) {
+            problems.append("'baseNote' must be between 0 and 127 (36 = C1, the MPC pad-1 note)")
+        }
+
+        let snapWindowMs = params["snapWindowMs"]?.doubleValue
+            ?? SliceToSamplerSettings.defaultSnapWindowSeconds * 1000
+        let snapLoMs = SliceToSamplerSettings.snapWindowRange.lowerBound * 1000
+        let snapHiMs = SliceToSamplerSettings.snapWindowRange.upperBound * 1000
+        if !(snapLoMs...snapHiMs).contains(snapWindowMs) {
+            problems.append(
+                "'snapWindowMs' must be between 0 and 20 (default 3; 0 disables boundary snapping)")
+        }
+
+        let velocityFromStrength = params["velocityFromStrength"]?.boolValue ?? false
+        if params["velocityFromStrength"] != nil && mode != .transients {
+            problems.append(
+                "'velocityFromStrength' only applies to mode 'transients' — no other mode produces "
+                + "a per-slice strength to map")
+        }
+
+        guard problems.isEmpty else {
+            throw combinedFieldProblems(problems, verb: "clip.sliceToSampler")
+        }
+        return SliceToSamplerSettings(
+            mode: mode, sensitivity: sensitivity, divisions: divisions,
+            gridBeats: gridBeats, minSliceSeconds: minSliceSeconds,
+            maxSlices: maxSlices, includeHead: params["includeHead"]?.boolValue ?? false,
+            baseNote: baseNote, snapWindowSeconds: snapWindowMs / 1000.0,
+            generateMIDI: params["generateMIDI"]?.boolValue ?? true,
+            atBeat: params["atBeat"]?.doubleValue,
+            velocityFromStrength: velocityFromStrength)
     }
 
     /// Parses an optional `sampler` object into a `SamplerParams` — a WHOLESALE
@@ -9031,6 +9692,8 @@ public final class CommandRouter {
         var loopStart: Int?
         var loopEnd: Int?
         var crossfade: SamplerCrossfade?
+        var reverse: Bool?
+        var chokeGroup: Int?
     }
 
     /// Parses one zone object's fields. `label` is the wire path prefix
@@ -9115,6 +9778,8 @@ public final class CommandRouter {
         f.loopStart = try optionalInteger(zone["loopStart"], "\(label).loopStart")
         f.loopEnd = try optionalInteger(zone["loopEnd"], "\(label).loopEnd")
         f.crossfade = try parseCrossfade(zone["crossfade"], "\(label).crossfade")
+        f.reverse = try optionalBool(zone["reverse"], "\(label).reverse")
+        f.chokeGroup = try optionalInteger(zone["chokeGroup"], "\(label).chokeGroup")
         return f
     }
 
@@ -9249,7 +9914,13 @@ public final class CommandRouter {
             loopMode: f.loopMode ?? base.loopMode,
             loopStart: f.loopStart ?? base.loopStart,
             loopEnd: f.loopEnd ?? base.loopEnd,
-            crossfade: f.crossfade ?? base.crossfade)
+            crossfade: f.crossfade ?? base.crossfade,
+            // ⚠️ m32-d/m32-f: a new zone field that is NOT listed here parses
+            // fine, sets fine via `zones`, and then SILENTLY NO-OPS via
+            // `zonePatches`. There is no compiler help for the omission — the
+            // model init would just use its nil default.
+            reverse: f.reverse ?? base.reverse,
+            chokeGroup: f.chokeGroup ?? base.chokeGroup)
     }
 
     /// A brand-new zone: every unmentioned field resolves to the MODEL DEFAULT.
@@ -9283,7 +9954,9 @@ public final class CommandRouter {
             loopMode: f.loopMode,
             loopStart: f.loopStart,
             loopEnd: f.loopEnd,
-            crossfade: f.crossfade)
+            crossfade: f.crossfade,
+            reverse: f.reverse,
+            chokeGroup: f.chokeGroup)
     }
 
     /// Parses a zone's optional `crossfade` object (m27 leg B). Absent → nil.
@@ -9899,6 +10572,40 @@ public final class CommandRouter {
         if let displayName = sampler.displayName {
             samplerObject["name"] = .string(displayName)
         }
+        // m27-b: WHICH PERFORMANCE CONTROLLERS THIS INSTRUMENT ACTUALLY ACTS
+        // ON — so a caller can know BEFORE authoring controller lanes whether
+        // they will do anything, instead of finding out in a loudness
+        // measurement. Additive, always present (unlike the only-when-SET keys
+        // above): the whole point is that it is a reliable place to look, and
+        // it is derived, not stored, so it cannot make a project file grow.
+        //
+        // `all: true` (the hosted-AU kinds) means every controller is
+        // forwarded and `cc` is not enumerable. Answered by DAWCore's ONE
+        // routing table — `MIDIControllerRouting`, the same type
+        // clip.setControllerLane's inert-lane warning consults — and it is
+        // DESCRIPTOR-level, not kind-level, because several sampler entries are
+        // parameter-gated: raising `expressionModDepth` off 0 makes CC1/CC2
+        // live, and a filter/crossfade controller is routed by settings alone,
+        // both with no kind change at all.
+        var supportObject: [String: JSONValue] = [
+            "all": .bool(MIDIControllerRouting.forwardsAllControllers(instrument: d)),
+            "cc": .array(MIDIControllerRouting.honoredCCs(instrument: d)
+                .map { .number(Double($0)) }),
+            "pitchBend": .bool(MIDIControllerRouting.honors(.pitchBend, instrument: d)),
+            "channelPressure": .bool(
+                MIDIControllerRouting.honors(.channelPressure, instrument: d)),
+        ]
+        // ⚠️ The three controllers whose NEUTRAL IS NOT ZERO — an absent lane
+        // means full scale (CC11=127), 100 (CC7) or centre (CC10), so
+        // authoring a lane at "normal-looking" values CUTS or MOVES the track
+        // relative to authoring none. Emitted next to the honoured set because
+        // that is where a caller is already looking when deciding to write.
+        supportObject["neutralDefaults"] = .object(
+            Dictionary(uniqueKeysWithValues: [7, 10, 11, 1, 2, 64].map { controller in
+                (String(controller),
+                 JSONValue.number(Double(
+                    MIDIControllerType.cc(controller: controller).neutralDefault)))
+            }))
         return .object([
             "kind": .string(d.kind.rawValue),
             "polySynth": .object([
@@ -9912,6 +10619,7 @@ public final class CommandRouter {
                 "gain": .number(poly.gain),
             ]),
             "sampler": .object(samplerObject),
+            "honoredControllers": .object(supportObject),
         ])
     }
 
@@ -9988,6 +10696,13 @@ public final class CommandRouter {
             if let v = crossfade.velOutLo { xf["velOutLo"] = .number(Double(v)) }
             if let v = crossfade.velOutHi { xf["velOutHi"] = .number(Double(v)) }
             object["crossfade"] = .object(xf)
+        }
+        // m32-d: same only-when-SET emission, so a zone that never mentioned
+        // `reverse` keeps a wire shape byte-identical to pre-m32-d.
+        if let reverse = zone.reverse { object["reverse"] = .bool(reverse) }
+        // m32-f: likewise only-when-SET.
+        if let chokeGroup = zone.chokeGroup {
+            object["chokeGroup"] = .number(Double(chokeGroup))
         }
         return .object(object)
     }

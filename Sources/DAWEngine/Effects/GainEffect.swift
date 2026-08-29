@@ -17,7 +17,11 @@ import Foundation
 /// Render-path contract: `process()`/`reset()` allocate nothing, take no
 /// locks, log nothing, touch no ObjC. Gain is memoryless (no feedback state),
 /// so it can neither generate denormals nor blow up: the published value is
-/// clamped finite (0...4) by `GainParams`' clamping init.
+/// clamped finite (0...16, m27-c — was 0...4) by `GainParams`' clamping init.
+/// The wider ceiling costs the render path nothing: this is still one multiply
+/// per sample, and 16× a full-scale sample is ~24 dB inside Float32's range —
+/// it can OVERDRIVE the mix (that is the point, and the caller's business) but
+/// it cannot overflow, denormalize, or become non-finite.
 final class GainEffect: EffectRendering, @unchecked Sendable {
     /// Immutable box crossing main actor → render thread. POD payload — no
     /// ARC or bridging work on the render-side read.

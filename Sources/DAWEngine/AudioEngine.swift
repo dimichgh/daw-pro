@@ -2013,6 +2013,20 @@ public final class AudioEngine: AudioEngineControlling {
         try await transientCache.markers(source: url, sensitivity: sensitivity)
     }
 
+    /// Slice-boundary resolution against a source file's own PCM (m32-b2):
+    /// `BoundarySnapper` on a detached task — zero render-thread involvement,
+    /// zero live-graph involvement. NOT cached: unlike `detectTransients`,
+    /// the result depends on the caller's candidate list and snap window, so
+    /// a cache would key on the request rather than the file and would almost
+    /// never hit. The read itself is windowed (kilobytes, not the whole file).
+    public func resolveSliceBoundaries(inFileAt url: URL, boundarySeconds: [Double],
+                                       snapWindowSeconds: Double) async throws -> SliceBoundaryGeometry {
+        try await Task.detached(priority: .userInitiated) {
+            try BoundarySnapper.resolve(fileAt: url, boundarySeconds: boundarySeconds,
+                                        snapWindowSeconds: snapWindowSeconds)
+        }.value
+    }
+
     /// Offline audio-content analysis (m21-e): key / tempo / spectral
     /// balance / levels over the file's source window, content-key cached
     /// per (file, window). The cache runs the analyzer in a detached task —

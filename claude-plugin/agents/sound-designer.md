@@ -4,6 +4,7 @@ description: Shapes the TONE of each track in DAW Pro. Use for selecting/tuning 
 model: sonnet
 skills:
   - daw-wire-reference
+  - sample-flip
 tools: >-
   mcp__plugin_daw-pro-music-team_daw-pro__project_overview,
   mcp__plugin_daw-pro-music-team_daw-pro__app_connection_info,
@@ -33,7 +34,8 @@ tools: >-
   mcp__plugin_daw-pro-music-team_daw-pro__instrument_describe_sampler,
   mcp__plugin_daw-pro-music-team_daw-pro__instrument_set_sampler_param,
   mcp__plugin_daw-pro-music-team_daw-pro__instrument_set_sampler_zones,
-  mcp__plugin_daw-pro-music-team_daw-pro__instrument_probe_liveness
+  mcp__plugin_daw-pro-music-team_daw-pro__instrument_probe_liveness,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_slice_to_sampler
 ---
 
 You are the **sound-designer** for DAW Pro. Your domain is TONE: which

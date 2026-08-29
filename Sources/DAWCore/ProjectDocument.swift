@@ -671,6 +671,7 @@ public struct EffectDocument: Codable, Sendable, Equatable {
     public var gate: GateParams?
     public var chorus: ChorusParams?
     public var bassEnhancer: BassEnhancerParams?
+    public var bitCrusher: BitCrusherParams?
     /// Hosted Audio Unit selection + inlined state (stateData rides as base64
     /// through Codable's Data default) — the InstrumentDocument.audioUnit
     /// mirror. Additive optional: pre-M4 (v) files have no key and stay
@@ -682,7 +683,7 @@ public struct EffectDocument: Codable, Sendable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case id, kind, bypassed, gain, eq, compressor, limiter
-        case reverb, delay, saturator, gate, chorus, bassEnhancer, audioUnit
+        case reverb, delay, saturator, gate, chorus, bassEnhancer, bitCrusher, audioUnit
         case sidechainSourceTrackID
     }
 
@@ -703,6 +704,7 @@ public struct EffectDocument: Codable, Sendable, Equatable {
         gate = effect.gate
         chorus = effect.chorus
         bassEnhancer = effect.bassEnhancer
+        bitCrusher = effect.bitCrusher
         audioUnit = effect.audioUnit
         sidechainSourceTrackID = effect.sidechainSourceTrackID
     }
@@ -722,6 +724,7 @@ public struct EffectDocument: Codable, Sendable, Equatable {
         gate = try c.decodeIfPresent(GateParams.self, forKey: .gate)
         chorus = try c.decodeIfPresent(ChorusParams.self, forKey: .chorus)
         bassEnhancer = try c.decodeIfPresent(BassEnhancerParams.self, forKey: .bassEnhancer)
+        bitCrusher = try c.decodeIfPresent(BitCrusherParams.self, forKey: .bitCrusher)
         audioUnit = try c.decodeIfPresent(AudioUnitConfig.self, forKey: .audioUnit)
         sidechainSourceTrackID = try c.decodeIfPresent(UUID.self, forKey: .sidechainSourceTrackID)
     }
@@ -744,6 +747,7 @@ public struct EffectDocument: Codable, Sendable, Equatable {
         try c.encodeIfPresent(gate, forKey: .gate)
         try c.encodeIfPresent(chorus, forKey: .chorus)
         try c.encodeIfPresent(bassEnhancer, forKey: .bassEnhancer)
+        try c.encodeIfPresent(bitCrusher, forKey: .bitCrusher)
         try c.encodeIfPresent(audioUnit, forKey: .audioUnit)
         try c.encodeIfPresent(sidechainSourceTrackID, forKey: .sidechainSourceTrackID)
     }
@@ -758,6 +762,7 @@ public struct EffectDocument: Codable, Sendable, Equatable {
                                 eq: eq, compressor: compressor, limiter: limiter,
                                 reverb: reverb, delay: delay, saturator: saturator,
                                 gate: gate, chorus: chorus, bassEnhancer: bassEnhancer,
+                                bitCrusher: bitCrusher,
                                 audioUnit: audioUnit,
                                 sidechainSourceTrackID: sidechainSourceTrackID)
     }
@@ -845,7 +850,11 @@ public struct InstrumentDocument: Codable, Sendable, Equatable {
                     loopStart: zd.loopStart, loopEnd: zd.loopEnd,
                     // m27 leg B: absent (every pre-m27 project) -> nil ->
                     // hard layer switching, exactly as before.
-                    crossfade: zd.crossfade)
+                    crossfade: zd.crossfade,
+                    // m32-d: absent (every pre-m32-d project) -> nil -> forward.
+                    reverse: zd.reverse,
+                    // m32-f: absent -> nil -> no choke.
+                    chokeGroup: zd.chokeGroup)
             }
             return SamplerParams(zones: zones, oneShot: s.oneShot,
                                  attack: s.attack, release: s.release, gain: s.gain,
@@ -977,7 +986,18 @@ public struct SamplerZoneDocument: Codable, Sendable, Equatable {
     public var loopEnd: Int?
     // m27 leg B dynamic-layer crossfade -- nil never encodes.
     public var crossfade: SamplerCrossfade?
+    // m32-d reverse playback -- nil never encodes.
+    public var reverse: Bool?
+    // m32-f per-zone choke group -- nil never encodes.
+    public var chokeGroup: Int?
 
+    /// ⚠️ EVERY field of this struct is enumerated by hand THREE more times
+    /// below — in `CodingKeys`, in `init(from decoder:)` and in `encode(to:)` —
+    /// and once again in `instrumentDescriptor`'s converter. There is no
+    /// synthesis to save you: a new field added to the struct and forgotten in
+    /// this list PARSES, PLAYS, and then VANISHES on the next save/load, with
+    /// nothing failing anywhere. That is why every new zone field ships with a
+    /// full `zones` → save → open → describe round-trip test.
     private enum CodingKeys: String, CodingKey {
         case id, media, rootPitch, minPitch, maxPitch, gain
         case minVelocity, maxVelocity, group, seqLength, seqPosition, randMin, randMax
@@ -985,6 +1005,8 @@ public struct SamplerZoneDocument: Codable, Sendable, Equatable {
         case attack, decay, sustain, release
         case loopMode, loopStart, loopEnd
         case crossfade
+        case reverse
+        case chokeGroup
     }
 
     init(from z: SamplerZone, media: String?) {
@@ -1015,6 +1037,8 @@ public struct SamplerZoneDocument: Codable, Sendable, Equatable {
         loopStart = z.loopStart
         loopEnd = z.loopEnd
         crossfade = z.crossfade
+        reverse = z.reverse
+        chokeGroup = z.chokeGroup
     }
 
     public init(from decoder: any Decoder) throws {
@@ -1046,6 +1070,8 @@ public struct SamplerZoneDocument: Codable, Sendable, Equatable {
         loopStart = try c.decodeIfPresent(Int.self, forKey: .loopStart)
         loopEnd = try c.decodeIfPresent(Int.self, forKey: .loopEnd)
         crossfade = try c.decodeIfPresent(SamplerCrossfade.self, forKey: .crossfade)
+        reverse = try c.decodeIfPresent(Bool.self, forKey: .reverse)
+        chokeGroup = try c.decodeIfPresent(Int.self, forKey: .chokeGroup)
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -1079,6 +1105,8 @@ public struct SamplerZoneDocument: Codable, Sendable, Equatable {
         try c.encodeIfPresent(loopStart, forKey: .loopStart)
         try c.encodeIfPresent(loopEnd, forKey: .loopEnd)
         try c.encodeIfPresent(crossfade, forKey: .crossfade)
+        try c.encodeIfPresent(reverse, forKey: .reverse)
+        try c.encodeIfPresent(chokeGroup, forKey: .chokeGroup)
     }
 }
 

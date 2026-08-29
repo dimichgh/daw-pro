@@ -247,7 +247,7 @@ struct FXCommandTests {
         #expect(response.error == "unknown parameter 'bogus' for gain effect — valid: gainLinear")
     }
 
-    @Test("fx.setParam clamps an out-of-range value silently")
+    @Test("fx.setParam clamps an out-of-range value — and SAYS SO (m27-c)")
     func fxSetParamClampsValue() async throws {
         let (router, _) = makeRouter()
         let trackID = await addTrack(router, name: "Vox", kind: "audio")
@@ -260,8 +260,113 @@ struct FXCommandTests {
                      "name": .string("gainLinear"), "value": .number(100)]
         ))
         #expect(response.ok)
-        // gainLinear range is 0...4 — 100 clamps to 4.
-        #expect(response.result?["effects"]?.arrayValue?.first?["params"]?["gainLinear"]?.doubleValue == 4)
+        // gainLinear range is 0...16 (m27-c raised it from 0...4) — 100 clamps to 16.
+        #expect(response.result?["effects"]?.arrayValue?.first?["params"]?["gainLinear"]?.doubleValue == 16)
+        // m27-c: the clamp is no longer silent. Still `ok` — warning, not
+        // rejection, because fx_set_param's shipped description promises
+        // clamping rather than erroring.
+        let warnings = try #require(response.result?["warnings"]?.arrayValue)
+        #expect(warnings.count == 1)
+        let sentence = try #require(warnings.first?.stringValue)
+        #expect(sentence == "gainLinear was clamped to its maximum 16 — you asked for 100, "
+                + "and this control accepts 0 to 16.")
+    }
+
+    @Test("m27-c: a value inside the range clamps nothing, so `warnings` is ABSENT")
+    func fxSetParamInRangeCarriesNoWarnings() async throws {
+        let (router, _) = makeRouter()
+        let trackID = await addTrack(router, name: "Vox", kind: "audio")
+        let effectID = await addEffect(router, trackID: trackID)
+
+        // 5.045 — the value the m27-c measurement needed, and one the OLD
+        // 0...4 range would have clamped. It must pass through untouched AND
+        // announce nothing: an always-present `warnings` key would read as a
+        // warning on every ordinary call, which is how a field becomes noise.
+        let response = await router.handle(ControlRequest(
+            id: "1", command: "fx.setParam",
+            params: ["trackId": .string(trackID.uuidString),
+                     "effectId": .string(effectID.uuidString),
+                     "name": .string("gainLinear"), "value": .number(5.045)]
+        ))
+        #expect(response.ok)
+        #expect(response.result?["effects"]?.arrayValue?.first?["params"]?["gainLinear"]?
+            .doubleValue == 5.045)
+        #expect(response.result?["warnings"] == nil)
+    }
+
+    @Test("m27-c: the clamp notice reaches the MASTER chain too, and names the minimum")
+    func fxSetParamClampNoticeOnMasterChain() async throws {
+        let (router, _) = makeRouter()
+        let addResponse = await router.handle(ControlRequest(
+            id: "add", command: "fx.add",
+            params: ["trackId": .string("master"), "kind": .string("gain")]
+        ))
+        let effectID = try #require(addResponse.result?["effectId"]?.stringValue)
+
+        // Below the floor — the other side of the clamp, so the sentence
+        // cannot be hard-coded to say "maximum".
+        let response = await router.handle(ControlRequest(
+            id: "1", command: "fx.setParam",
+            params: ["trackId": .string("master"),
+                     "effectId": .string(effectID),
+                     "name": .string("gainLinear"), "value": .number(-3)]
+        ))
+        #expect(response.ok)
+        #expect(response.result?["trackId"]?.stringValue == "master")
+        let sentence = try #require(response.result?["warnings"]?.arrayValue?.first?.stringValue)
+        #expect(sentence == "gainLinear was clamped to its minimum 0 — you asked for -3, "
+                + "and this control accepts 0 to 16.")
+    }
+
+    @Test("m27-c: the notice is GENERIC — a clamped compressor ratio warns the same way")
+    func fxSetParamClampNoticeIsNotGainSpecific() async throws {
+        let (router, _) = makeRouter()
+        let trackID = await addTrack(router, name: "Bus", kind: "audio")
+        let addResponse = await router.handle(ControlRequest(
+            id: "add", command: "fx.add",
+            params: ["trackId": .string(trackID.uuidString), "kind": .string("compressor")]
+        ))
+        let effectID = try #require(addResponse.result?["effectId"]?.stringValue)
+
+        let response = await router.handle(ControlRequest(
+            id: "1", command: "fx.setParam",
+            params: ["trackId": .string(trackID.uuidString),
+                     "effectId": .string(effectID),
+                     "name": .string("ratio"), "value": .number(999)]
+        ))
+        #expect(response.ok)
+        let sentence = try #require(response.result?["warnings"]?.arrayValue?.first?.stringValue)
+        #expect(sentence.hasPrefix("ratio was clamped to its maximum "))
+        #expect(sentence.contains("you asked for 999"))
+    }
+
+    @Test("m27-c: fx.add's seeded params warn when they are clamped")
+    func fxAddSeededParamsWarnOnClamp() async throws {
+        let (router, _) = makeRouter()
+        let trackID = await addTrack(router, name: "Vox", kind: "audio")
+
+        // The natural one-call authoring path: add a gain insert already set
+        // to a level. It clamps through the same store call fx.setParam uses,
+        // so it had the same silent lie.
+        let response = await router.handle(ControlRequest(
+            id: "1", command: "fx.add",
+            params: ["trackId": .string(trackID.uuidString), "kind": .string("gain"),
+                     "params": .object(["gainLinear": .number(40)])]
+        ))
+        #expect(response.ok)
+        #expect(response.result?["effects"]?.arrayValue?.first?["params"]?["gainLinear"]?
+            .doubleValue == 16)
+        let sentence = try #require(response.result?["warnings"]?.arrayValue?.first?.stringValue)
+        #expect(sentence.contains("gainLinear was clamped to its maximum 16"))
+
+        // …and an in-range seed stays quiet.
+        let quiet = await router.handle(ControlRequest(
+            id: "2", command: "fx.add",
+            params: ["trackId": .string(trackID.uuidString), "kind": .string("gain"),
+                     "params": .object(["gainLinear": .number(12)])]
+        ))
+        #expect(quiet.ok)
+        #expect(quiet.result?["warnings"] == nil)
     }
 
     @Test("fx.describe lists the gain schema from the spec table")
@@ -278,9 +383,16 @@ struct FXCommandTests {
         let param = try #require(gain["params"]?.arrayValue?.first)
         #expect(param["name"]?.stringValue == "gainLinear")
         #expect(param["min"]?.doubleValue == 0)
-        #expect(param["max"]?.doubleValue == 4)
+        #expect(param["max"]?.doubleValue == 16)   // m27-c: raised from 4
         #expect(param["default"]?.doubleValue == 1)
         #expect(param["unit"]?.stringValue == "linear")
+        // m27-c: the ceiling is only half the fix — `note` is the ONE home
+        // that teaches why it is that wide and what it costs, and every
+        // client reads it through this verb.
+        let note = try #require(param["note"]?.stringValue)
+        #expect(note.contains("+24.08 dB"))
+        #expect(note.contains("clipping"))
+        #expect(note.contains("warnings"))
     }
 
     // m23-n2h: `fx.describe` used to be one of 26 verbs that never called
@@ -310,7 +422,7 @@ struct FXCommandTests {
         #expect(kinds.compactMap { $0["kind"]?.stringValue }
                 == ["gain", "eq", "compressor", "limiter",
                     "reverb", "delay", "saturator", "gate", "chorus", "bassEnhancer",
-                    "audioUnit"])
+                    "bitCrusher", "audioUnit"])
         // AU params are not on the generic surface in v0 — empty schema.
         #expect(kinds.last?["params"]?.arrayValue?.isEmpty == true)
 
@@ -344,6 +456,10 @@ struct FXCommandTests {
         #expect(paramNames("saturator") == ["driveDb", "mix", "outputDb"])
         #expect(paramNames("gate") == ["thresholdDb", "attackMs", "holdMs", "releaseMs"])
         #expect(paramNames("chorus") == ["rateHz", "depthMs", "mix"])
+        // m32-e: the two boolean switches ride the numeric surface as 0/1 (the
+        // truePeak precedent), so an agent never has to guess a type.
+        #expect(paramNames("bitCrusher")
+                == ["bits", "downsampleHz", "antiAlias", "dither", "mix"])
 
         // Spot-check schema fields per unit family.
         let eq = try #require(kinds.first(where: { $0["kind"]?.stringValue == "eq" }))
@@ -477,13 +593,14 @@ struct FXCommandTests {
         #expect(!badKind.ok)
         #expect(badKind.error == "unknown effect kind 'phaser' — use "
                 + "gain|eq|compressor|limiter|reverb|delay|saturator|gate|chorus|"
-                + "bassEnhancer|audioUnit")
+                + "bassEnhancer|bitCrusher|audioUnit")
 
         // The remaining kinds add and expose their resolved params on the wire.
         for (kind, expected) in [("compressor", "thresholdDb"), ("limiter", "ceilingDb"),
                                  ("reverb", "roomSize"), ("delay", "timeMs"),
                                  ("saturator", "driveDb"), ("gate", "thresholdDb"),
-                                 ("chorus", "rateHz"), ("bassEnhancer", "crossoverHz")] {
+                                 ("chorus", "rateHz"), ("bassEnhancer", "crossoverHz"),
+                                 ("bitCrusher", "bits")] {
             let response = await router.handle(ControlRequest(
                 id: "add-\(kind)", command: "fx.add",
                 params: ["trackId": .string(trackID.uuidString), "kind": .string(kind)]

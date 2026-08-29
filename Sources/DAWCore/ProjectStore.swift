@@ -2574,6 +2574,7 @@ public final class ProjectStore {
         switch kind {
         case .eq: return "EQ"
         case .bassEnhancer: return "Bass Enhancer"
+        case .bitCrusher: return "Bit Crusher"
         default: return kind.rawValue.prefix(1).uppercased() + kind.rawValue.dropFirst()
         }
     }
@@ -3064,6 +3065,23 @@ public final class ProjectStore {
             default: return
             }
             effect.bassEnhancer = params
+        case .bitCrusher:
+            var params = effect.resolvedBitCrusher
+            switch name {
+            // `bits` snaps to a whole number through the clamping init (the
+            // pingPong numeric-but-discrete precedent); the rebuild carries
+            // every other field so a bits write can never silently drop them.
+            case "bits": params = BitCrusherParams(
+                bits: value, downsampleHz: params.downsampleHz,
+                antiAlias: params.antiAlias, dither: params.dither, mix: params.mix)
+            case "downsampleHz": params.downsampleHz = value
+            // Binary on the numeric surface (the truePeak/pingPong precedent).
+            case "antiAlias": params.antiAlias = value >= 0.5
+            case "dither": params.dither = value >= 0.5
+            case "mix": params.mix = value
+            default: return
+            }
+            effect.bitCrusher = params
         case .audioUnit:
             // Unreachable: specs(for: .audioUnit) is empty, so name validation
             // in setEffectParam rejects every name first. AU params are not

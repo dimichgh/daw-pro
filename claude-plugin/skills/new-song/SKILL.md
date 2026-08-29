@@ -76,7 +76,9 @@ producer set in step 1.
 Delegate to **mix-engineer** for levels, pans, buses/sends, sidechain, and
 automation, then a master-chain pass (typically an `eq` then a `limiter`).
 Ask for a `mixer_master_analysis`/`render_measure_loudness` read at the end
-of this step so you know where the mix stands before finishing.
+of this step so you know where the mix stands before finishing (mix-engineer
+carries playback-only transport now, so it can start playback itself for
+this rather than handing back to producer just to take a reading).
 
 ## 5. Finish (finisher)
 

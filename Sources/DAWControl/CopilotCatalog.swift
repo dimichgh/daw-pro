@@ -469,6 +469,49 @@ public enum CopilotToolCatalog {
             ], required: ["clipId", "notes"])
         ),
         CopilotTool(
+            command: "clip.repeatNotes",
+            description: "Copy a note window (or an explicit note selection) into the SAME clip, count times, periodBeats apart — write one bar and repeat it instead of authoring every repeated note yourself. Beats are clip-relative and the window is half-open, like clip.setNotes' own note positions. transposeSemitones shifts pitches CHROMATICALLY (not diatonic, not key-aware) per copy. Returns counts and geometry only, never a note array — read the result with clip.getNotes.",
+            schema: schemaObject([
+                ("clipId", stringSchema("Id of the MIDI clip to repeat notes within, from project.snapshot.")),
+                ("fromBeat", numberSchema("Only select source notes with startBeat >= this (clip-relative). Mutually exclusive with noteIds.")),
+                ("toBeat", numberSchema("Only select source notes with startBeat < this (clip-relative, half-open). Mutually exclusive with noteIds.")),
+                ("noteIds", arraySchema(
+                    "An explicit set of note ids to repeat, instead of a fromBeat/toBeat window.",
+                    items: stringSchema("A note id from clip.getNotes."))),
+                ("periodBeats", numberSchema("Beats between the start of each copy. Must be > 0.")),
+                ("count", integerSchema("How many copies to make.", minimum: 1, maximum: 512)),
+                ("firstCopyAtBeat", numberSchema("Clip-relative start of copy 1. Omit to place it immediately after the source window, periodBeats later.")),
+                ("transposeSemitones", arraySchema(
+                    "Chromatic pitch shift per copy in semitones — one value to apply to every copy, or exactly `count` values for one per copy.",
+                    items: integerSchema("A semitone offset."))),
+                ("extendClip", booleanSchema("Whether a copy landing past the clip's end grows the clip to cover it. Defaults to true.")),
+            ], required: ["clipId", "periodBeats", "count"])
+        ),
+        CopilotTool(
+            command: "clip.patchNotes",
+            description: "Change pitch/velocity/startBeat/lengthBeats on SPECIFIC notes in a MIDI clip, by id, without resubmitting the clip's other notes — the tool for 'raise the velocity of these notes' or 'shorten these notes for legato' on a clip too big to whole-array-replace. NOT clip.setNotes: that replaces the ENTIRE note array (can add/remove/reorder; anything you omit is GONE). patchNotes can only ever change fields on notes that already exist — it never creates or removes one. Get real note ids from clip.getNotes first. Each update entry needs id plus at least one of pitch/velocity/startBeat/lengthBeats; an id not in the clip refuses the WHOLE call, naming it — nothing is partially applied. One call is one undo step. Returns counts only (updated, totalNotes, latentNotesPastClipEnd), never a note array — read changed notes back with clip.getNotes. Does NOT grow the clip: a patched startBeat/lengthBeats landing past the clip's end stores fine but won't sound (see latentNotesPastClipEnd).",
+            schema: schemaObject([
+                ("clipId", stringSchema("Id of the MIDI clip to edit, from project.snapshot.")),
+                ("update", arraySchema(
+                    "Notes to update, by id. May be empty (a no-op).",
+                    items: schemaObject([
+                        ("id", stringSchema("Id of an EXISTING note in this clip, from clip.getNotes. Must already exist.")),
+                        ("pitch", integerSchema(
+                            "New MIDI pitch, 0-127. Omit to leave the pitch unchanged.",
+                            minimum: 0, maximum: 127)),
+                        ("velocity", integerSchema(
+                            "New note-on velocity, 1-127. Omit to leave it unchanged.",
+                            minimum: 1, maximum: 127)),
+                        ("startBeat", numberSchema(
+                            "New start position in beats, RELATIVE TO THE CLIP'S START. Omit to leave it unchanged.",
+                            minimum: 0)),
+                        ("lengthBeats", numberSchema(
+                            "New duration in beats. Must be > 0. Omit to leave it unchanged.",
+                            minimum: 0)),
+                    ], required: ["id"]))),
+            ], required: ["clipId", "update"])
+        ),
+        CopilotTool(
             command: "clip.move",
             description: "Slide a clip to a new timeline start beat without changing its length or content (same-track only).",
             schema: schemaObject([
@@ -875,7 +918,7 @@ public enum CopilotToolCatalog {
 
         CopilotTool(
             command: "mixer.setMasterVolume",
-            description: "Set the master output gain of the whole mix as a linear gain multiplier, where 1.0 is unity gain (0 dB).",
+            description: "Set the master output gain of the whole mix as a linear gain multiplier, where 1.0 is unity gain (0 dB). Values above 2.0 clamp to 2.0 and the response says so in warnings; when a mix needs more than +6 dB of makeup, add a gain insert at index 0 of the master chain instead (its gainLinear reaches 16, +24.08 dB).",
             schema: schemaObject([
                 ("volume", numberSchema(
                     "Linear master gain, 0-2, where 1 = unity gain (0 dB). This is linear gain, not decibels.",
@@ -937,7 +980,7 @@ public enum CopilotToolCatalog {
                 ("trackId", stringSchema("Id of the track or bus to add the effect to, OR the string \"master\" for the master output chain.")),
                 ("kind", stringSchema(
                     "Which built-in effect to add. On the master chain only these built-ins are allowed.",
-                    enumValues: ["gain", "eq", "compressor", "limiter", "reverb", "delay", "saturator", "gate", "chorus", "bassEnhancer"])),
+                    enumValues: ["gain", "eq", "compressor", "limiter", "reverb", "delay", "saturator", "gate", "chorus", "bassEnhancer", "bitCrusher"])),
                 ("index", integerSchema("Position in the chain, 0 = processed first. Omit to append at the end; out-of-range values clamp.", minimum: 0)),
             ], required: ["trackId", "kind"])
         ),
@@ -951,7 +994,7 @@ public enum CopilotToolCatalog {
         ),
         CopilotTool(
             command: "fx.setParam",
-            description: "Change one named parameter of an effect on a track, a bus, or the master output chain — the way to ride an FX knob (e.g. a limiter's ceilingDb, a compressor's ratio, an eq band's gain). Pass trackId as a track/bus id from project.snapshot, or the string \"master\" for the master output chain. Call fx.describe first to see each kind's exact parameter names, ranges, defaults, and units. Out-of-range values clamp. Applies live without interrupting playback. Returns the updated insert chain.",
+            description: "Change one named parameter of an effect on a track, a bus, or the master output chain — the way to ride an FX knob (e.g. a limiter's ceilingDb, a compressor's ratio, an eq band's gain). Pass trackId as a track/bus id from project.snapshot, or the string \"master\" for the master output chain. Call fx.describe first to see each kind's exact parameter names, ranges, defaults, and units. Out-of-range values clamp rather than erroring, and the response carries a warnings sentence saying so when they do — that key is absent when your value fit. A gain insert's gainLinear runs 0-16 (up to +24.08 dB), wide enough to lift quiet General-MIDI material to a streaming level in ONE stage; follow a big boost with a limiter, since the gain stage has no protection of its own. Applies live without interrupting playback. Returns the updated insert chain.",
             schema: schemaObject([
                 ("trackId", stringSchema("Id of the track or bus that owns the effect, OR the string \"master\" for the master output chain.")),
                 ("effectId", stringSchema("Id of the effect to change, from fx.add's result or project.snapshot.")),

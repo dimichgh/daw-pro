@@ -49,6 +49,10 @@ struct MasterAnalysisCommandTests {
         #expect(response.result?["correlation"]?.doubleValue == 1)
         #expect(response.result?["width"]?.doubleValue == 0)
         #expect(response.result?["balance"]?.doubleValue == 0)
+        // m27-d additive key: a fresh store never played, so isPlaying
+        // defaults false — same "no live signal" fact whether the floor
+        // came from being headless or from being stopped.
+        #expect(response.result?["transportPlaying"]?.boolValue == false)
     }
 
     @Test("an engine's snapshot threads through the store onto the wire")
@@ -96,6 +100,35 @@ struct MasterAnalysisCommandTests {
         #expect(response.result?["correlation"]?.doubleValue == 1)
         #expect(response.result?["width"]?.doubleValue == 0)
         #expect(response.result?["balance"]?.doubleValue == 0)
+    }
+
+    @Test("m27-d: transportPlaying tracks store.play()/stop() independent of the analysis fields")
+    func transportPlayingTracksStoreState() async throws {
+        let (router, store) = makeRouter()
+
+        let stoppedResponse = await router.handle(ControlRequest(
+            id: "1", command: "mixer.masterAnalysis"))
+        #expect(stoppedResponse.ok)
+        #expect(stoppedResponse.result?["transportPlaying"]?.boolValue == false)
+
+        store.play()
+        let playingResponse = await router.handle(ControlRequest(
+            id: "2", command: "mixer.masterAnalysis"))
+        #expect(playingResponse.ok)
+        #expect(playingResponse.result?["transportPlaying"]?.boolValue == true)
+        // Still headless/floor: transportPlaying is independent of the
+        // analysis fields themselves — a headless engine reads floor either
+        // way, and this key never claims otherwise.
+        #expect(playingResponse.result?["levelDB"]?.doubleValue
+                == Double(MasterAnalysisSnapshot.floorDB))
+
+        // m25-d: play() headless starts a free-running position ticker —
+        // stop() before the test ends so it doesn't outlive this test.
+        store.stop()
+        let restoppedResponse = await router.handle(ControlRequest(
+            id: "3", command: "mixer.masterAnalysis"))
+        #expect(restoppedResponse.ok)
+        #expect(restoppedResponse.result?["transportPlaying"]?.boolValue == false)
     }
 }
 

@@ -145,6 +145,22 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
         var oneShotOverride: Int8    // -1 = inherit the LIVE global / 0 / 1
         var startFrame: Int          // resolved into 0..<frameCount; nil → 0
         var endFrame: Int            // resolved into (startFrame+1)...frameCount; nil → frameCount
+        /// `Double(startFrame)`, precomputed (the `loopLen` idiom) so the
+        /// render loop's low-side span check is a plain Double compare rather
+        /// than an Int→Double conversion per frame.
+        var startFrameD: Double
+        // m32-d reverse (§7) — resolved ONCE here, and the render loop never
+        // sees this Bool: it reads the per-voice `readBase`/`readDir` scalars
+        // `trigger` derives from it, so the hot loop gains no branch.
+        var reverse: Bool
+        /// m32-f choke group, −1 = none. ⚠️ NOT `group` above: that one selects
+        /// WHICH zone fires at note-on (round-robin / alternate layers); this
+        /// one ends voices that are ALREADY SOUNDING. Resolved into −1...63
+        /// here so the trigger path's `1 << chokeGroup` can never shift out of
+        /// range — a raw `Codable` decode bypasses the model's clamping init
+        /// (the same reason `startFrame`/`endFrame` are re-clamped above), and
+        /// an over-wide shift traps ON THE RENDER THREAD.
+        var chokeGroup: Int32
         // Per-zone envelope, seconds/level. attack/release carry a -1
         // sentinel = "inherit the LIVE global coefficient at trigger time"
         // (design §4.4); decay/sustain have constant nil-defaults (0 / 1) and
@@ -248,9 +264,30 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
         // a mid-note global toggle changes noteOff handling exactly as it did
         // pre-m19-b; 0/1 = the zone's override wins over the global.
         var oneShotOverride: Int8 = -1
-        var position = 0.0           // fractional playhead, source-file frames
+        /// Fractional playhead in source-file frames — the LOCAL coordinate.
+        /// It always starts at the zone's `startFrame` and always ADVANCES by
+        /// `increment`, whichever way the zone plays; the direction lives in
+        /// `readBase`/`readDir` below, never in the sign of `increment`.
+        /// (`applyBendFactor` overwrites `increment` on every sounding voice
+        /// mid-note, so a negative increment would be silently undone by the
+        /// first pitch-bend event.)
+        var position = 0.0
         var increment = 0.0          // baseIncrement × bendFactor
         var baseIncrement = 0.0      // unbent source frames per output frame (m16-b2)
+        // m32-d (design §7): the per-voice DIRECTION SCALAR. The frame actually
+        // read is `readBase + readDir × position`.
+        //
+        // ⭐ FORWARD IS AN IEEE IDENTITY, and that is the whole reason this
+        // shape was chosen over two specialised loop bodies or an inner-loop
+        // branch: `0 + 1.0 × x` is EXACTLY `x` for every finite x, so a forward
+        // voice reads the same frames, in the same order, with the same
+        // rounding, as it did before this field existed.
+        //
+        // Reversed: `readBase = endFrame − 1 + startFrame`, `readDir = −1`, so
+        // the first read is at `endFrame − 1` and the last at `startFrame` —
+        // the exact mirror of the forward span.
+        var readBase = 0.0
+        var readDir = 1.0
         var gainL: Float = 0         // amp × zone.panL (amp = velocity law × zone.gain)
         var gainR: Float = 0         // amp × zone.panR
         var level: Float = 0         // envelope, 0...1
@@ -266,6 +303,12 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
                                      // disarmed at release start for sustain mode
         var loopMode: UInt8 = 0      // zone.loopMode copy — the disarm rule reads
                                      // it without a zones deref in the noteOff path
+        /// m32-f: the zone's choke group, copied at trigger for the same reason
+        /// `loopMode` is — the choke sweep tests it once per voice and must not
+        /// dereference `zones` to do it. −1 (the `Voice()` default, and every
+        /// freed slot) never matches a real group, so a voice from a zone with
+        /// no choke group is structurally unchokable.
+        var chokeGroup: Int32 = -1
         // m27 continuous expression (design: breath/air §A). A SEPARATE
         // multiplier from `gainL`/`gainR` ON PURPOSE: those are trigger-time
         // constants and the release anchor (`releaseFrom`/`releaseSlope`) is
@@ -306,12 +349,64 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
     private let zones: UnsafeMutablePointer<LoadedZone>
     private let zoneCount: Int
     /// Owned sample memory backing `zones` (freed in deinit).
+    ///
+    /// ⚠️ OWNERSHIP LAW (m32-a) — this is the SOLE allocation ledger. Every
+    /// entry is freed exactly once, in `deinit`. `LoadedZone.left`/`.right`
+    /// are BORROWED aliases into this ledger and are never freed through a
+    /// zone. Two zones whose `SamplerZone.sourceFileKey` matches alias the
+    /// SAME pair of pointers. Positively stated, and pinned by
+    /// `SamplerZoneBufferDedupTests`: this array contains no two entries with
+    /// the same `baseAddress`, and every `LoadedZone.left`/`.right` equals the
+    /// `baseAddress` of exactly one entry.
+    ///
+    /// This is a widening of an alias relationship the loader ALREADY relied
+    /// on — a mono file has always pointed a zone's `right` at its `left`, and
+    /// `deinit` has always freed the ledger rather than the zones.
     private var ownedChannelBuffers: [UnsafeMutableBufferPointer<Float>] = []
 
     /// Human-readable notes for zones skipped at load (missing/unreadable/
     /// empty files). Populated in init — reconcile time — and never touched
     /// by the render path.
     private(set) var zoneLoadNotes: [String] = []
+
+    /// m32-a gate seam: how many times `init` actually opened an audio file.
+    /// Counts open ATTEMPTS that reached `AVAudioFile(forReading:)`, so a
+    /// fixture that fails a load guard (empty/unreadable) is re-opened — and
+    /// re-counted — per zone, because failures are deliberately NOT cached.
+    /// Secondary to the ledger reading below; it measures the "skip the open"
+    /// half of the dedup, which byte counts cannot see.
+    private(set) var audioFileOpenCount: Int = 0
+
+    /// m32-a gate seam: total sample bytes ACTUALLY held, summed from the
+    /// allocation ledger ITSELF — so a loader that forgot to dedup cannot
+    /// report otherwise. A ledger reading, not a setter's return value.
+    var loadedSampleBytes: Int {
+        ownedChannelBuffers.reduce(0) { $0 + $1.count * MemoryLayout<Float>.size }
+    }
+
+    /// m32-a gate seam: channel buffers on the ledger — 2 per distinct STEREO
+    /// source file, 1 per distinct MONO source file (mono aliases L into R).
+    var ownedSampleBufferCount: Int { ownedChannelBuffers.count }
+
+    /// m32-a gate seam: base addresses of loaded zone `index`'s channel
+    /// pointers as integers — the aliasing invariant, observable without
+    /// dereferencing anything. ⚠️ `index` is into the GROUP-SORTED zone array,
+    /// not `params.zones`; with all-nil groups the sort is an identity.
+    func zoneBufferBaseAddresses(_ index: Int) -> (left: UInt, right: UInt)? {
+        guard index >= 0, index < zoneCount else { return nil }
+        return (UInt(bitPattern: UnsafeRawPointer(zones[index].left)),
+                UInt(bitPattern: UnsafeRawPointer(zones[index].right)))
+    }
+
+    /// One source file's decoded PCM, as the m32-a init-local dedup cache
+    /// stores it. The pointers BORROW from `ownedChannelBuffers`; this struct
+    /// owns nothing and is discarded when `init` returns.
+    private struct LoadedFileBuffers {
+        let left: UnsafePointer<Float>
+        let right: UnsafePointer<Float>
+        let frameCount: Int
+        let fileRate: Double
+    }
 
     // Render-thread-only state.
     private var sampleRate: Double
@@ -363,6 +458,17 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
     /// that fires several zones (one voice per group, m19-a) must choke the
     /// PREVIOUS note once — not choke itself on its own second group.
     private var monoPendingChoke = false
+    /// m32-f: which CHOKE GROUPS this note-on has already fired, one bit per
+    /// group (hence the model's 0...63 range). Reset once per note-on, tested
+    /// and set inside `trigger`.
+    ///
+    /// ⭐ IT EXISTS FOR THE LAYERING CASE. Mono needs no such memory because it
+    /// disarms after the first zone that sounds; choke groups do, because ONE
+    /// note-on can legitimately fire several zones (one per m19-a `group`) that
+    /// share a choke group — an open hat layered with its own noise tail, say.
+    /// Without the mask the second layer would choke the first, and the user
+    /// would hear one of the two sounds they authored.
+    private var chokeFiredMask: UInt64 = 0
     // m19-a RR/RNG runtime state (design §4.3): per-zone round-robin counters
     // and one xorshift64* state var — allocated/seeded in init (main actor),
     // mutated ONLY inside `apply(event:)` on the render thread, the same
@@ -475,41 +581,90 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
         let seed = randomSeed ?? systemGenerator.next()
         rngState = seed == 0 ? 0x9E37_79B9_7F4A_7C15 : seed
 
+        // m32-a: one decode per DISTINCT source file per load pass, keyed by
+        // `SamplerZone.sourceFileKey`. Chopping points many zones at one long
+        // file; before this, a 4-minute stereo rip cost 80.7 MiB PER ZONE (64
+        // zones = 5.05 GB) and never errored — it just allocated. The cache is
+        // LOCAL to `init` deliberately: a process-wide refcounted cache would
+        // put a mutable global's lifetime in the hands of a `deinit` running
+        // on an arbitrary thread while the retire bin may still let the render
+        // thread read those exact bytes. See the `ownedChannelBuffers`
+        // ownership law — the ledger owns, zones borrow.
+        var loadedFiles: [String: LoadedFileBuffers] = [:]
         var loaded: [LoadedZone] = []
         for zone in params.zones {
             do {
-                let file = try AVAudioFile(forReading: zone.audioFileURL)
-                // processingFormat is deinterleaved Float32 at the file's
-                // native rate, so floatChannelData below is always valid.
-                guard file.length > 0,
-                      let buffer = AVAudioPCMBuffer(
-                        pcmFormat: file.processingFormat,
-                        frameCapacity: AVAudioFrameCount(file.length))
-                else {
-                    zoneLoadNotes.append(
-                        "zone skipped (empty file): \(zone.audioFileURL.lastPathComponent)")
-                    continue
-                }
-                try file.read(into: buffer)
-                guard buffer.frameLength > 0, let channels = buffer.floatChannelData else {
-                    zoneLoadNotes.append(
-                        "zone skipped (no readable frames): \(zone.audioFileURL.lastPathComponent)")
-                    continue
-                }
-                let frames = Int(buffer.frameLength)
-                let left = UnsafeMutableBufferPointer<Float>.allocate(capacity: frames)
-                _ = left.initialize(from: UnsafeBufferPointer(start: channels[0], count: frames))
-                ownedChannelBuffers.append(left)
-                let rightBase: UnsafePointer<Float>
-                if Int(buffer.format.channelCount) >= 2 {
-                    let right = UnsafeMutableBufferPointer<Float>.allocate(capacity: frames)
-                    _ = right.initialize(
-                        from: UnsafeBufferPointer(start: channels[1], count: frames))
-                    ownedChannelBuffers.append(right)
-                    rightBase = UnsafePointer(right.baseAddress!)
+                let source: LoadedFileBuffers
+                if let cached = loadedFiles[zone.sourceFileKey] {
+                    // HIT — skip the open and BOTH allocations. Every per-zone
+                    // field below still resolves independently, against this
+                    // file's cached frame count and rate.
+                    source = cached
                 } else {
-                    rightBase = UnsafePointer(left.baseAddress!)  // mono → both channels
+                    let file = try AVAudioFile(forReading: zone.audioFileURL)
+                    audioFileOpenCount += 1
+                    // processingFormat is deinterleaved Float32 at the file's
+                    // native rate, so floatChannelData below is always valid.
+                    guard file.length > 0,
+                          let buffer = AVAudioPCMBuffer(
+                            pcmFormat: file.processingFormat,
+                            frameCapacity: AVAudioFrameCount(file.length))
+                    else {
+                        zoneLoadNotes.append(
+                            "zone skipped (empty file): \(zone.audioFileURL.lastPathComponent)")
+                        continue
+                    }
+                    // ⚠️ m32-h: NOT a bare `file.read(into: buffer)`. A single
+                    // read silently short-reads MONO files to a 1024-aligned
+                    // position, taking up to 1023 frames (23.2 ms at 44.1 kHz)
+                    // off the tail with no error — a drum one-shot's decay
+                    // stopping early. Drum one-shots are usually mono, so this
+                    // landed on exactly this loader. See `AudioFileFullRead`
+                    // for the measurements and for why the intuitive
+                    // "loop until frameLength == file.length" is worse.
+                    try AudioFileFullRead.fill(buffer, from: file,
+                                               frameCount: AVAudioFrameCount(file.length))
+                    guard buffer.frameLength > 0, let channels = buffer.floatChannelData else {
+                        zoneLoadNotes.append(
+                            "zone skipped (no readable frames): "
+                            + "\(zone.audioFileURL.lastPathComponent)")
+                        continue
+                    }
+                    let frames = Int(buffer.frameLength)
+                    // Honest-absence convention: a file that delivers fewer
+                    // frames than its header claims is a real short file (the
+                    // 1024 artefact can no longer cause this), and the user is
+                    // told rather than left with a silently clipped tail.
+                    if frames < Int(file.length) {
+                        zoneLoadNotes.append(
+                            "loaded short: \(frames) of \(file.length) frames from "
+                            + "\(zone.audioFileURL.lastPathComponent)")
+                    }
+                    let left = UnsafeMutableBufferPointer<Float>.allocate(capacity: frames)
+                    _ = left.initialize(from: UnsafeBufferPointer(start: channels[0], count: frames))
+                    ownedChannelBuffers.append(left)
+                    let rightBase: UnsafePointer<Float>
+                    if Int(buffer.format.channelCount) >= 2 {
+                        let right = UnsafeMutableBufferPointer<Float>.allocate(capacity: frames)
+                        _ = right.initialize(
+                            from: UnsafeBufferPointer(start: channels[1], count: frames))
+                        ownedChannelBuffers.append(right)
+                        rightBase = UnsafePointer(right.baseAddress!)
+                    } else {
+                        rightBase = UnsafePointer(left.baseAddress!)  // mono → both channels
+                    }
+                    source = LoadedFileBuffers(
+                        left: UnsafePointer(left.baseAddress!),
+                        right: rightBase,
+                        frameCount: frames,
+                        fileRate: file.processingFormat.sampleRate)
+                    // Recorded only on SUCCESS. A file that fails a load guard
+                    // above is retried (and re-noted) per zone — that keeps
+                    // today's one-note-per-skipped-zone behaviour verbatim,
+                    // and a failed open allocates nothing.
+                    loadedFiles[zone.sourceFileKey] = source
                 }
+                let frames = source.frameCount
                 // m19-a: resolve the optional selection fields ONCE, here —
                 // nil collapses to the full-span/no-gate values so a legacy
                 // zone is exactly the pre-m19 degenerate case.
@@ -545,10 +700,25 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
                 // loopEndExcl clamps to the resolved endFrame (not frames): an `end=` trim
                 // bounds the loop too, and loopEndExcl ≤ endFrame is the invariant that
                 // lets a looping voice never trip the `idx >= zone.endFrame` free check.
+                // m32-d: a REVERSED zone plays its span once and ignores loops
+                // entirely (design §7 — reversed-loop interaction is a real
+                // design question v1 does not answer). Forcing the mode off
+                // HERE, at load, is what keeps the render loop free of a
+                // reverse branch: a reversed voice can never be `looping`, so
+                // only the non-looping branch ever sees a direction scalar.
+                let reverse = zone.reverse ?? false
                 var loopMode: UInt8 = 0
                 var loopStart = 0
                 var loopEndExcl = endFrame
-                if let mode = zone.loopMode {                       // .sustain / .continuous
+                if reverse, zone.loopMode != nil {
+                    // Noted only when a loop was actually AUTHORED — a plain
+                    // reversed zone must not spam a note about a loop it never
+                    // had.
+                    zoneLoadNotes.append(
+                        "zone loop ignored (reverse zones play their span once in v1): "
+                        + "\(zone.audioFileURL.lastPathComponent)")
+                }
+                if let mode = zone.loopMode, !reverse {             // .sustain / .continuous
                     loopStart = min(max(0, zone.loopStart ?? 0), frames - 1)
                     loopEndExcl = min(max(loopStart + 1, zone.loopEnd ?? endFrame), endFrame)
                     if loopEndExcl <= loopStart {                   // loop outside the span
@@ -569,10 +739,13 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
                 let loopXfade = loopMode == 0 ? 0
                     : min(512, loopStart, loopEndExcl - loopStart)
                 loaded.append(LoadedZone(
-                    left: UnsafePointer(left.baseAddress!),
-                    right: rightBase,
+                    // m32-a: BORROWED from `ownedChannelBuffers`, never freed
+                    // through the zone. Zones sharing a `sourceFileKey` share
+                    // this exact pointer pair.
+                    left: source.left,
+                    right: source.right,
                     frameCount: frames,
-                    fileRate: file.processingFormat.sampleRate,
+                    fileRate: source.fileRate,
                     rootPitch: Int32(zone.rootPitch),
                     minPitch: Int32(zone.minPitch),
                     maxPitch: Int32(zone.maxPitch),
@@ -591,6 +764,12 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
                     oneShotOverride: zone.oneShot.map { $0 ? 1 : 0 } ?? -1,
                     startFrame: startFrame,
                     endFrame: endFrame,
+                    startFrameD: Double(startFrame),
+                    reverse: reverse,
+                    // Defensive clamp, not decoration: see the field's doc.
+                    chokeGroup: zone.chokeGroup.map {
+                        Int32(min(max(0, $0), 63))
+                    } ?? -1,
                     envAttack: zone.attack.map { Float($0) } ?? -1,
                     envDecay: Float(zone.decay ?? 0),
                     envSustain: Float(zone.sustain ?? 1),
@@ -825,6 +1004,7 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
         monoActiveNoteID = 0
         monoStarted = false
         monoPendingChoke = false
+        chokeFiredMask = 0
         // m27: controller state neutralises with the voice wipe, exactly like
         // the bend re-centre above. A stale attenuator surviving a stop/seek
         // would quietly duck the next notes; if a lane really is present, the
@@ -954,9 +1134,27 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
                 right += sR * (voices[index].level * voices[index].gainR * voices[index].expGain)
                 voices[index].position = position + voices[index].increment
             } else {
-                let position = voices[index].position
+                // m32-d: the read frame is `readBase + readDir × position`.
+                // Forward voices carry base 0 / dir +1, so this is `0 + 1.0 × x`
+                // — an IEEE identity, the same Double the loop used before this
+                // item, bit for bit. Reversed voices walk the same span
+                // backwards. Interpolation is UNCHANGED and direction-agnostic:
+                // a fractional position always sits between `idx` and `idx + 1`
+                // of the underlying signal, whichever way the playhead travels.
+                let position = voices[index].readBase
+                    + voices[index].readDir * voices[index].position
                 let idx = Int(position)
-                if idx >= zone.endFrame {
+                // The span check is two-sided now. The high half is the shipped
+                // check, VERBATIM and first, so a forward voice frees itself on
+                // exactly the frame it always did. The low half can only ever
+                // fire for a REVERSED voice — a forward one starts at
+                // `startFrame` and `increment` is always > 0 — and it is a
+                // Double compare, not `idx < startFrame`: `Int` truncates
+                // TOWARD ZERO, so on a zone with `startFrame == 0` a reversed
+                // playhead at −0.5 would give idx 0, pass an integer check, and
+                // read a NEGATIVE fraction (an extrapolated sample). This is
+                // the whole-file reversed zone, i.e. the common case.
+                if idx >= zone.endFrame || position < zone.startFrameD {
                     voices[index] = Voice()
                     continue
                 }
@@ -980,7 +1178,13 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
                 }
                 left += sL * (voices[index].level * voices[index].gainL * voices[index].expGain)
                 right += sR * (voices[index].level * voices[index].gainR * voices[index].expGain)
-                voices[index].position = position + voices[index].increment
+                // ⚠️ m32-d: the LOCAL coordinate advances, not the read frame.
+                // `position` above is now `base + dir × local`, so re-adding
+                // the increment to IT would run a reversed voice forwards
+                // (and, worse, would be invisible on every forward voice).
+                // For a forward voice `local == position`, so this is the same
+                // arithmetic on the same value as before the item.
+                voices[index].position += voices[index].increment
             }
         }
         return (left, right)
@@ -1146,6 +1350,12 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
             // here, so a note that selects no zone leaves the sounding note
             // alone rather than opening a hole.
             monoPendingChoke = monoVoiceMode
+            // m32-f: ARM here, FIRE in `trigger` — the exact `monoPendingChoke`
+            // discipline, for the exact same reason. Choking in this selection
+            // loop would let a note-on that ultimately selects NO zone (out of
+            // every pitch/velocity span, or gated out by round-robin) silence
+            // the note that IS sounding, opening a hole nobody asked for.
+            chokeFiredMask = 0
             let pitch = Int32(event.pitch)
             let velocity = Int32(event.velocity)
             let draw = nextRandom01()
@@ -1307,7 +1517,31 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
     /// Render thread; one O(64) sweep, no allocation.
     @inline(__always)
     private func monoChoke() {
+        choke(group: Self.chokeEveryVoice)
+    }
+
+    /// `choke(group:)`'s "no filter" sentinel — the mono law, where every
+    /// sounding voice is a candidate. Deliberately outside 0...63, the model's
+    /// own choke-group range, so it can never collide with a real group.
+    private static let chokeEveryVoice: Int32 = -1
+
+    /// THE ONE CHOKE IN THIS INSTRUMENT (m32-f). Mono voice mode and per-zone
+    /// choke groups differ ONLY in which voices are candidates; what happens to
+    /// a chosen voice is one body, so the two can never drift into sounding
+    /// different. The body below is `monoChoke`'s, unchanged — no new ramp, no
+    /// hard cut, no invented constant.
+    ///
+    /// `group == chokeEveryVoice` is mono's sweep; `group >= 0` chokes only
+    /// voices whose ZONE carries that choke group. The filter costs one compare
+    /// per voice in an event-rate O(64) sweep — never per frame.
+    ///
+    /// ⭐ Called from `trigger` BEFORE the new voice's slot is written, so a
+    /// note can never choke itself, and (via the per-note-on fired mask) two
+    /// same-group zones LAYERED by one note-on cannot choke each other.
+    @inline(__always)
+    private func choke(group: Int32) {
         for index in 0..<Self.voiceCount where voices[index].active {
+            if group >= 0, voices[index].chokeGroup != group { continue }
             if voices[index].level <= 0 {
                 voices[index] = Voice()  // never audible; free the slot outright
                 continue
@@ -1337,6 +1571,18 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
             monoStarted = true
         }
         let zone = zones[zoneIndex]
+        // m32-f: the per-zone choke, fired HERE — before this voice's slot is
+        // written, so the note can never choke itself — and at most ONCE per
+        // choke group per note-on, so same-group layers do not choke each
+        // other. `chokeGroup` is resolved into −1...63 at load, so the shift
+        // below cannot overflow.
+        if zone.chokeGroup >= 0 {
+            let bit = UInt64(1) << UInt64(zone.chokeGroup)
+            if chokeFiredMask & bit == 0 {
+                chokeFiredMask |= bit
+                choke(group: zone.chokeGroup)
+            }
+        }
         var slot = -1
         var oldestSerial = UInt64.max
         var oldestIndex = 0
@@ -1365,7 +1611,19 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
         voice.loopMode = zone.loopMode
         voice.looping = zone.loopMode != 0
         if voice.looping { voice.oneShotOverride = 0 }
+        // m32-f: copied so the choke sweep never dereferences `zones`.
+        voice.chokeGroup = zone.chokeGroup
         voice.position = Double(zone.startFrame)
+        // m32-d: the direction scalar. Forward keeps `Voice()`'s defaults
+        // (base 0, dir +1) UNTOUCHED, so the read expression collapses to the
+        // IEEE identity `0 + 1.0 × position` and a forward voice is
+        // bit-identical to pre-m32-d. A reversed voice starts at `endFrame − 1`
+        // and walks down to `startFrame`: with `position` starting at
+        // `startFrame` and rising, `base − position` runs endFrame−1 … start.
+        if zone.reverse {
+            voice.readBase = Double(zone.endFrame - 1 + zone.startFrame)
+            voice.readDir = -1
+        }
         // m19-b: the zone's precomputed tune factor rides the SAME multiply
         // chain (×1.0 for nil zones is a float identity — bit-compat).
         voice.baseIncrement = exp2((Double(event.pitch) - Double(zone.rootPitch)) / 12.0)

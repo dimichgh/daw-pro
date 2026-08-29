@@ -1114,4 +1114,150 @@ struct SamplerZoneIdentityWireTests {
         #expect(zeroLimit.ok)
         #expect(zeroLimit.result?["limit"]?.doubleValue == 1)
     }
+
+    // MARK: - M32 new zone fields — THE FULL ROUND TRIP, one per field
+
+    /// ⭐⭐ THE SIX-SITE GATE. A new `SamplerZone` field has to land in SIX
+    /// places, and TWO of them fail SILENTLY:
+    ///
+    ///  1 `SamplerZone` + its clamping init ......... won't compile if missed
+    ///  2 `parseZoneFields` + `makeZone` ............ unsettable via `zones`
+    ///  3 ⚠️ `merge(_:into:)` ....................... SILENT: sets via `zones`,
+    ///                                                NO-OPS via `zonePatches`
+    ///  4 ⚠️ `SamplerZoneDocument` (property, ....... SILENT: parses, plays,
+    ///       `CodingKeys`, BOTH converters)           then VANISHES on save
+    ///  5 `samplerZoneSchema` (mcp-server) .......... MCP rejects the key
+    ///  6 `samplerZoneJSON` echo .................... unreadable after setting
+    ///
+    /// Nothing smaller than ONE FULL ROUND TRIP — `zones` → save → open →
+    /// `describeSampler` → `zonePatches` → `describeSampler` — walks all six.
+    /// A test that only sets and reads back passes with 3 AND 4 missing.
+    ///
+    /// ⚠️ `zonePatches` is a FIELD of `track.setInstrument`'s `sampler` object,
+    /// not a verb of its own.
+    private func roundTripZoneField(
+        set setValue: JSONValue, then patchValue: JSONValue,
+        key: String,
+        modelReads: @escaping (SamplerZone) -> JSONValue?,
+        file: String = #file
+    ) async throws {
+        let (router, store) = makeRouter()
+        let trackID = store.addTrack(kind: .instrument).id.uuidString
+
+        // 1. SET through the wholesale `zones` path.
+        let set = await router.handle(ControlRequest(
+            id: "1", command: "track.setInstrument",
+            params: ["trackId": .string(trackID), "kind": .string("sampler"),
+                     "sampler": .object(["zones": .array([
+                         .object(["path": .string(Self.pingPath), key: setValue]),
+                     ])])]))
+        #expect(set.ok, "setting \(key) failed: \(set.error ?? "-")")
+        #expect(set.result?["sampler"]?["zones"]?.arrayValue?.first?[key] == setValue,
+                "the echo did not report \(key) — site 6")
+
+        // 2. SAVE and REOPEN. `ProjectBundle.planMedia` copies each zone's
+        //    source into the bundle, so the path must really exist; Ping.aiff
+        //    does.
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("daw-pro-m32-zonefield-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let path = dir.appendingPathComponent("field.dawproj").path
+        let saved = await router.handle(ControlRequest(
+            id: "2", command: "project.save", params: ["path": .string(path)]))
+        #expect(saved.ok, "save failed: \(saved.error ?? "-")")
+        let opened = await router.handle(ControlRequest(
+            id: "3", command: "project.open", params: ["path": .string(path)]))
+        #expect(opened.ok, "open failed: \(opened.error ?? "-")")
+
+        // 3. The REOPENED model still carries it — site 4.
+        let reopened = try #require(store.tracks.first { $0.instrument?.kind == .sampler })
+        let reopenedZone = try #require(reopened.instrument?.sampler?.zones.first)
+        #expect(modelReads(reopenedZone) == setValue,
+                "\(key) did not survive save/open — SamplerZoneDocument (site 4)")
+
+        // 4. …and `describeSampler` reports it. (`zones` is emitted only when
+        //    offset/limit are supplied.)
+        let described = await describeSampler(router, reopened.id.uuidString, offset: 0, limit: 8)
+        #expect(described.ok)
+        #expect(described.result?["zones"]?.arrayValue?.first?[key] == setValue)
+
+        // 5. CHANGE it through the merge-by-id `zonePatches` path — site 3,
+        //    the one that no-ops silently when `merge(_:into:)` forgets a field.
+        let patched = await router.handle(ControlRequest(
+            id: "4", command: "track.setInstrument",
+            params: ["trackId": .string(reopened.id.uuidString), "kind": .string("sampler"),
+                     "sampler": .object(["zonePatches": .array([
+                         .object(["id": .string(reopenedZone.id.uuidString), key: patchValue]),
+                     ])])]))
+        #expect(patched.ok, "patching \(key) failed: \(patched.error ?? "-")")
+
+        // 6. …and the change is really there.
+        let redescribed = await describeSampler(router, reopened.id.uuidString, offset: 0, limit: 8)
+        #expect(redescribed.result?["zones"]?.arrayValue?.first?[key] == patchValue, """
+            zonePatches did not change \(key) — this is the SILENT failure: \
+            `merge(_:into:)` (site 3) does not know the field, so the patch parsed, \
+            reported success, and changed nothing.
+            """)
+        let patchedZone = try #require(
+            store.tracks.first { $0.instrument?.kind == .sampler }?
+                .instrument?.sampler?.zones.first)
+        #expect(modelReads(patchedZone) == patchValue)
+        #expect(patchedZone.id == reopenedZone.id, "the patch re-minted the zone id")
+    }
+
+    @Test("m32-d: `reverse` survives zones → save → open → describeSampler → zonePatches")
+    func reverseFieldMakesTheFullRoundTrip() async throws {
+        try await roundTripZoneField(set: .bool(true), then: .bool(false), key: "reverse",
+                                     modelReads: { $0.reverse.map(JSONValue.bool) })
+    }
+
+    @Test("m32-f: `chokeGroup` survives zones → save → open → describeSampler → zonePatches")
+    func chokeGroupFieldMakesTheFullRoundTrip() async throws {
+        try await roundTripZoneField(set: .number(3), then: .number(9), key: "chokeGroup",
+                                     modelReads: { $0.chokeGroup.map { .number(Double($0)) } })
+    }
+
+    @Test("m32-f: `chokeGroup` clamps into 0...63 through the model, on BOTH zone paths")
+    func chokeGroupClampsOnBothPaths() async throws {
+        let (router, store) = makeRouter()
+        let trackID = store.addTrack(kind: .instrument).id.uuidString
+        let set = await router.handle(ControlRequest(
+            id: "1", command: "track.setInstrument",
+            params: ["trackId": .string(trackID), "kind": .string("sampler"),
+                     "sampler": .object(["zones": .array([
+                         .object(["path": .string(Self.pingPath), "chokeGroup": .number(9_999)]),
+                     ])])]))
+        #expect(set.ok)
+        #expect(set.result?["sampler"]?["zones"]?.arrayValue?.first?["chokeGroup"]?.doubleValue == 63)
+
+        // The merge path must reach the SAME state — a patch must not be able
+        // to reach a value the wholesale path cannot.
+        let zoneID = try #require(store.tracks.first { $0.id.uuidString == trackID }?
+            .instrument?.sampler?.zones.first?.id)
+        let patched = await router.handle(ControlRequest(
+            id: "2", command: "track.setInstrument",
+            params: ["trackId": .string(trackID), "kind": .string("sampler"),
+                     "sampler": .object(["zonePatches": .array([
+                         .object(["id": .string(zoneID.uuidString),
+                                  "chokeGroup": .number(-4)]),
+                     ])])]))
+        #expect(patched.ok)
+        #expect(patched.result?["sampler"]?["zones"]?.arrayValue?.first?["chokeGroup"]?.doubleValue == 0)
+    }
+
+    @Test("m32-d: `reverse` must be a boolean, and the error names the field path")
+    func reverseRejectsNonBoolean() async throws {
+        let (router, store) = makeRouter()
+        let trackID = store.addTrack(kind: .instrument).id.uuidString
+        let bad = await router.handle(ControlRequest(
+            id: "1", command: "track.setInstrument",
+            params: ["trackId": .string(trackID), "kind": .string("sampler"),
+                     "sampler": .object(["zones": .array([
+                         .object(["path": .string(Self.pingPath),
+                                  "reverse": .string("yes")]),
+                     ])])]))
+        #expect(!bad.ok)
+        #expect(bad.error?.contains("sampler.zones[0].reverse") == true,
+                "error did not name the field path: \(bad.error ?? "-")")
+    }
 }

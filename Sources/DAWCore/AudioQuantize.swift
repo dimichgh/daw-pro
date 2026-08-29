@@ -33,6 +33,20 @@ public struct AudioQuantizeSettings: Sendable, Equatable {
     /// Onsets closer together than this MERGE; also the minimum time-width of
     /// every emitted slice (the monotone nudge clamp keeps slices this far apart).
     public var minSliceSeconds: Double
+    /// m32-b1 — FIXED-DIVISION chop. When set, slice boundaries are `divisions`
+    /// EQUAL parts of the clip's source window (`SliceBoundaries.equalDivisions`)
+    /// and **the transient detector is not consulted at all** — this is the
+    /// fallback for material whose transients are wrong or absent (drones,
+    /// ambient beds, already-quantized loops).
+    ///
+    /// Orthogonal to `gridBeats`/`strength`/`swingPercent`/`groove`: `divisions`
+    /// picks where the clip is CUT, the grid settings pick where each slice is
+    /// MOVED TO. `divisions: 8, strength: 0` is a pure chop into eighths;
+    /// `divisions: 8, gridBeats: 0.5, strength: 1` cuts into eighths and snaps
+    /// each to the 1/8 grid.
+    ///
+    /// `nil` (the default) keeps the shipped detector behaviour exactly.
+    public var divisions: Int?
 
     /// Join-crossfade width bounds (seconds) — half the take-comp range, since a
     /// slice join is finer-grained than a comp join.
@@ -41,6 +55,10 @@ public struct AudioQuantizeSettings: Sendable, Equatable {
     public static let defaultCrossfadeSeconds: Double = 0.010
     /// Default minimum slice width (seconds).
     public static let defaultMinSliceSeconds: Double = 0.05
+    /// Accepted `divisions` values (m32-b1) — the same range
+    /// `SliceToSamplerSettings.divisionsRange` uses, so the two chop
+    /// destinations cannot drift on what "too many parts" means.
+    public static let divisionsRange: ClosedRange<Int> = 2...128
 
     public init(
         gridBeats: Double,
@@ -49,7 +67,8 @@ public struct AudioQuantizeSettings: Sendable, Equatable {
         groove: GrooveTemplate? = nil,
         sensitivity: Double = 0.5,
         crossfadeSeconds: Double = AudioQuantizeSettings.defaultCrossfadeSeconds,
-        minSliceSeconds: Double = AudioQuantizeSettings.defaultMinSliceSeconds
+        minSliceSeconds: Double = AudioQuantizeSettings.defaultMinSliceSeconds,
+        divisions: Int? = nil
     ) {
         self.gridBeats = gridBeats
         self.strength = strength.clamped(to: 0...1)
@@ -58,6 +77,7 @@ public struct AudioQuantizeSettings: Sendable, Equatable {
         self.sensitivity = sensitivity.clamped(to: 0...1)
         self.crossfadeSeconds = crossfadeSeconds.clamped(to: Self.crossfadeSecondsRange)
         self.minSliceSeconds = max(0.001, minSliceSeconds)
+        self.divisions = divisions
     }
 
     /// The shared straight/swing target evaluator's settings — the audio and MIDI
@@ -117,7 +137,14 @@ public enum AudioQuantizePlan {
     ///  - `audioQuantizeTempoBoundaryUnsupported` when the clip's span crosses
     ///    a tempo-map segment boundary (m12-c cut — see below),
     ///  - `audioQuantizeNoTransients` when fewer than 2 usable onsets fall inside
-    ///    the clip's source window.
+    ///    the clip's source window (detector path only),
+    ///  - `audioQuantizeDivisionsTooFine` when `settings.divisions` is set and
+    ///    every equal-division boundary is squeezed out by `minSliceSeconds`
+    ///    (m32-b1 — the divisions path's own count rule; see below).
+    ///
+    /// ⚠️ m32-b1: when `settings.divisions` is set, `transientsSourceSeconds` is
+    /// IGNORED — boundaries come from `SliceBoundaries.equalDivisions` and no
+    /// detector runs. Callers should pass `[]` to say so.
     public static func compute(clip: Clip,
                                transientsSourceSeconds: [Double],
                                tempoMap: TempoMap,
@@ -157,14 +184,47 @@ public enum AudioQuantizePlan {
         // 1. Onsets: strictly inside the window, sorted, merged when closer than
         //    minSlice, and kept at least minSlice from both window edges so the
         //    head and tail spans are never sub-minSlice in the SOURCE domain.
-        var onsets: [Double] = []
-        for o in transientsSourceSeconds.sorted() where o > windowStart && o < windowEnd {
-            if (o - windowStart) < minSlice || (windowEnd - o) < minSlice { continue }
-            if let last = onsets.last, (o - last) < minSlice { continue }
-            onsets.append(o)
-        }
-        guard onsets.count >= 2 else {
-            throw ProjectError.audioQuantizeNoTransients(clip.id)
+        //
+        //    m32-b0: this conditioning moved VERBATIM to `SliceBoundaries` —
+        //    the ONE HOME shared with the fixed-division chop and
+        //    `SliceToSamplerPlan`, so "where does a slice start?" cannot drift
+        //    between the timeline and the sampler destinations. The extraction
+        //    gate is that this planner's output is byte-identical before and
+        //    after, so the call below must stay a pure move.
+        //    ⚠️ The `>= 2` COUNT rule deliberately stays HERE: this planner
+        //    always emits a head and a tail, while the sampler chopper is
+        //    legal with a single boundary.
+        //
+        //    m32-b1: `settings.divisions` swaps the boundary SOURCE for equal
+        //    parts of the same window. `transientsSourceSeconds` is then
+        //    IGNORED — the detector never runs on that path, which is the
+        //    whole point (the fallback exists for material whose transients
+        //    are wrong or absent). The two branches carry DIFFERENT count
+        //    rules on purpose: "fewer than 2 transients" means detection
+        //    failed and "raise sensitivity" is the right advice, while a chop
+        //    into 2 equal parts is a perfectly ordinary request that yields
+        //    exactly ONE interior boundary (head + tail = 2 slices). Folding
+        //    them together would either forbid halving a clip or hand the
+        //    detector path advice that does not apply.
+        let onsets: [Double]
+        if let divisions = settings.divisions {
+            onsets = SliceBoundaries.equalDivisions(
+                windowStart: windowStart, windowEnd: windowEnd,
+                divisions: divisions, minSliceSeconds: minSlice)
+            guard !onsets.isEmpty else {
+                throw ProjectError.audioQuantizeDivisionsTooFine(
+                    clip.id, divisions: divisions,
+                    windowSeconds: windowEnd - windowStart,
+                    minSliceSeconds: minSlice)
+            }
+        } else {
+            onsets = SliceBoundaries.condition(
+                onsetsSourceSeconds: transientsSourceSeconds,
+                windowStart: windowStart, windowEnd: windowEnd,
+                minSliceSeconds: minSlice)
+            guard onsets.count >= 2 else {
+                throw ProjectError.audioQuantizeNoTransients(clip.id)
+            }
         }
         let n = onsets.count
 

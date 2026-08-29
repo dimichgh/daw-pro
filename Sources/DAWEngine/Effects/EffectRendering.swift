@@ -57,6 +57,11 @@ protocol EffectRendering: AnyObject {
     ///   chorus        arithmetic only; depth is math (lines MAX-sized)
     ///   bassEnhancer  2× RBJ cut sections (sin/cos) + 1 exp — pure, no
     ///                 alloc; state FIXED (2 biquads + detector per channel)
+    ///   bitCrusher    1 int shift + 2 RBJ cut sections (sin/cos) — pure, no
+    ///                 alloc; state FIXED (4 biquads + phase + hold per
+    ///                 channel). `bits`/`downsampleHz` are RE-CLAMPED in the
+    ///                 derive because a field-by-field overlay poke bypasses
+    ///                 the params init, and `Int(bits)` feeds a shift
     ///   audioUnit     default no-op below (empty spec surface in v0)
     func storeAutomatedParam(slot: Int, value: Double)
 }

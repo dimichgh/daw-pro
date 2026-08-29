@@ -231,6 +231,15 @@ public final class EffectEditorModel {
                 ("HARMONICS", [("amount", nil)]),
                 ("OUTPUT", [("mix", nil)]),
             ]
+        case .bitCrusher:
+            // BITS and RATE are the character pair; ALIASING groups the two
+            // authenticity switches together, because they are one decision
+            // (authentic vs. tamed) taken twice.
+            return [
+                ("RESOLUTION", [("bits", nil), ("downsampleHz", "RATE")]),
+                ("ALIASING", [("antiAlias", "FILTER"), ("dither", nil)]),
+                ("OUTPUT", [("mix", nil)]),
+            ]
         case .audioUnit:
             // AU params are not on the generic surface (M3 vi-b).
             return []
@@ -283,12 +292,27 @@ public final class EffectEditorModel {
     /// Binary-at-the-model-layer params render as TOGGLES, never knobs
     /// (report §3/§6): delay `pingPong` (`DelayParams` rounds it), the
     /// EQ's `*Enabled` band bypasses (the store snaps ≥ 0.5 to on, m22-a),
-    /// the delay's tempo `sync` (m22-f, same ≥ 0.5 snap), and the limiter's
-    /// `truePeak` mode (m23-ch, same ≥ 0.5 snap). The wire shape is
-    /// untouched: the toggle still writes 0.0/1.0 through the same `set`
+    /// the delay's tempo `sync` (m22-f, same ≥ 0.5 snap), the limiter's
+    /// `truePeak` mode (m23-ch, same ≥ 0.5 snap), and the bit-crusher's
+    /// `antiAlias`/`dither` switches (m32-e, same ≥ 0.5 snap). The wire shape
+    /// is untouched: the toggle still writes 0.0/1.0 through the same `set`
     /// path.
+    ///
+    /// ⚠️ THIS LIST IS THE FAILURE MODE, AND IT IS NOT SELF-ENFORCING. A binary
+    /// param missing from it renders as a KNOB over a 0…1 continuum, so the user
+    /// can park it at 0.43, watch the readout say "0.43", and hear a value the
+    /// store already snapped to OFF — a control that visibly disagrees with the
+    /// sound. m32-e arrived with exactly that gap, and the suite stayed green
+    /// because the pinning test RESTATED this same expression instead of
+    /// checking it. `binaryModelParamsRenderAsToggles` now derives the expected
+    /// answer from what a REAL store does to a 0.4 write, which is the fact the
+    /// toggle rendering is justified by in the first place.
+    ///
+    /// It cannot be replaced by "the range is 0…1": `mix`, `amount`, `roomSize`
+    /// and `damping` all share that range and are genuine continua.
     public static func isToggleParam(_ spec: EffectParamSpec) -> Bool {
         spec.name == "pingPong" || spec.name == "sync" || spec.name == "truePeak"
+            || spec.name == "antiAlias" || spec.name == "dither"
             || spec.name.hasSuffix("Enabled")
     }
 
@@ -668,6 +692,16 @@ public final class EffectEditorModel {
             switch name {
             case "crossoverHz": return p.crossoverHz
             case "amount": return p.amount
+            case "mix": return p.mix
+            default: return nil
+            }
+        case .bitCrusher:
+            let p = effect.resolvedBitCrusher
+            switch name {
+            case "bits": return p.bits
+            case "downsampleHz": return p.downsampleHz
+            case "antiAlias": return p.antiAlias ? 1 : 0
+            case "dither": return p.dither ? 1 : 0
             case "mix": return p.mix
             default: return nil
             }

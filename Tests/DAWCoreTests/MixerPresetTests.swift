@@ -64,7 +64,7 @@ struct MixerPresetTests {
         // reverb + saturator and had to widen it by two).
         let allowed: Set<EffectDescriptor.Kind> = [
             .eq, .compressor, .limiter, .gain, .reverb, .delay,
-            .saturator, .gate, .chorus, .bassEnhancer,
+            .saturator, .gate, .chorus, .bassEnhancer, .bitCrusher,
         ]
         var kindsSeen: Set<EffectDescriptor.Kind> = []
         for preset in MixerPresetCatalog.v1 {

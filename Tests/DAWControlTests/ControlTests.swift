@@ -322,7 +322,7 @@ struct CommandRouterTests {
     }
 
     @Test("mixer.setMasterVolume sets and returns the clamped gain")
-    func setMasterVolume() async {
+    func setMasterVolume() async throws {
         let (router, store) = makeRouter()
 
         let response = await router.handle(ControlRequest(
@@ -331,14 +331,30 @@ struct CommandRouterTests {
         #expect(response.ok)
         #expect(response.result?["masterVolume"]?.doubleValue == 0.5)
         #expect(store.masterVolume == 0.5)
+        // In range: nothing was clamped, so nothing is announced.
+        #expect(response.result?["warnings"] == nil)
 
         // Out-of-range values clamp; the response reports the applied gain.
+        //
+        // ⭐ m27-c, MEASURED WHILE VERIFYING THAT ITEM'S PREMISE: the item
+        // asserts this verb REJECTS above 2.0 while the gain insert clamps.
+        // It does NOT — this line is the proof, and it predates m27-c. The
+        // asymmetry is real but lives one layer up, in
+        // `mixer_set_master_volume`'s zod `.min(0).max(2)`: the MCP tool
+        // refuses, the control command clamps. So a WIRE caller could send
+        // 3.0 and be told `{masterVolume: 2}` with nothing saying why.
         let clamped = await router.handle(ControlRequest(
             id: "2", command: "mixer.setMasterVolume", params: ["volume": .number(3)]
         ))
         #expect(clamped.ok)
         #expect(clamped.result?["masterVolume"]?.doubleValue == 2)
         #expect(store.masterVolume == 2)
+        // m27-c: it now says why, in the same `warnings` shape fx.setParam
+        // uses — and points at the cure that actually reaches the level.
+        let sentence = try #require(clamped.result?["warnings"]?.arrayValue?.first?.stringValue)
+        #expect(sentence.hasPrefix("volume was clamped to its maximum 2 — you asked for 3, "
+                                   + "and this control accepts 0 to 2."))
+        #expect(sentence.contains("gainLinear reaches 16 (+24.08 dB)"))
     }
 
     @Test("mixer.setMasterVolume without volume reports the missing param")
@@ -1714,6 +1730,27 @@ struct CommandRouterTests {
                 // returnedNotes split, the read-only pin, and every
                 // rejection).
                 "clip.getNotes",
+                // clip.repeatNotes (m31-c) needs a REAL MIDI clip id and a
+                // note already in it, like the other per-clip edits above —
+                // this loop's clip.addMIDI clip id is minted mid-loop, not
+                // known ahead of time, and a bare call would just be the
+                // ordinary "missing or invalid required param 'clipId'"
+                // refusal this loop (which sends no params to an unlisted
+                // command) cannot express. Proven by
+                // ClipRepeatNotesCommandTests (wire round-trip, every
+                // rejection, the no-notes-key response shape).
+                "clip.repeatNotes",
+                // clip.patchNotes (m26-a/m27-n) needs a REAL MIDI clip id
+                // and a real note id already in it, like clip.repeatNotes
+                // directly above — this loop's clip.addMIDI clip/note ids
+                // are minted mid-loop, not known ahead of time, and a bare
+                // call would just be the ordinary "missing or invalid
+                // required param 'clipId'" refusal this loop (which sends
+                // no params to an unlisted command) cannot express. Proven
+                // by ClipPatchNotesCommandTests (wire round-trip, every
+                // rejection including the ALL-OR-NOTHING unknown/duplicate
+                // id refusals, the counts-only response shape).
+                "clip.patchNotes",
                 "clip.remove",
                 "clip.split", "clip.trim", "clip.move",
                 // clip.duplicate (m15-d) needs a clip id like the other per-clip
@@ -1797,6 +1834,18 @@ struct CommandRouterTests {
                 "clip.setStretch", "clip.stretchToLength",
                 "clip.deleteTimeRange", "clip.insertTimeRange", "clip.quantize",
                 "clip.humanize", "clip.detectTransients", "clip.quantizeAudio",
+                // clip.sliceToSampler (m32-b2) is clip-id-dependent like its
+                // detectTransients/quantizeAudio siblings above, AND needs a
+                // real engine implementing the m32-b2 slice-boundary seam
+                // (whose protocol default deliberately THROWS rather than
+                // fabricating a geometry). Proven by
+                // SliceToSamplerCommandTests (all three modes, the whole
+                // rejection ladder, undo granularity, snap reporting, and a
+                // save/open/zonePatches round trip), DAWCore
+                // SliceToSamplerPlanTests/SliceToSamplerRateTests, and
+                // DAWEngine BoundarySnapperTests/
+                // SliceToSamplerReconstructionTests.
+                "clip.sliceToSampler",
                 "fx.remove", "fx.reorder", "fx.setBypass", "fx.setParam",
                 // fx.setSidechain (m12-g) is effect-id-dependent AND needs a
                 // compressor/gate keyed from a valid source track — the shared

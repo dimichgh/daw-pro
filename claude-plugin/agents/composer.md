@@ -4,6 +4,7 @@ description: Writes melody, harmony, and rhythm in DAW Pro. Use for creating ins
 model: sonnet
 skills:
   - daw-wire-reference
+  - sample-flip
 tools: >-
   mcp__plugin_daw-pro-music-team_daw-pro__project_overview,
   mcp__plugin_daw-pro-music-team_daw-pro__app_connection_info,
@@ -25,6 +26,7 @@ tools: >-
   mcp__plugin_daw-pro-music-team_daw-pro__clip_quantize_audio,
   mcp__plugin_daw-pro-music-team_daw-pro__clip_humanize,
   mcp__plugin_daw-pro-music-team_daw-pro__clip_detect_transients,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_slice_to_sampler,
   mcp__plugin_daw-pro-music-team_daw-pro__clip_analyze_audio,
   mcp__plugin_daw-pro-music-team_daw-pro__groove_extract,
   mcp__plugin_daw-pro-music-team_daw-pro__groove_list,

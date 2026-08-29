@@ -412,7 +412,8 @@ struct FXPack2Tests {
         // the M4 (v) hosted-AU kind (order = declaration order).
         #expect(EffectDescriptor.Kind.allCases.map(\.rawValue) == [
             "gain", "eq", "compressor", "limiter",
-            "reverb", "delay", "saturator", "gate", "chorus", "bassEnhancer", "audioUnit",
+            "reverb", "delay", "saturator", "gate", "chorus", "bassEnhancer",
+            "bitCrusher", "audioUnit",
         ])
         #expect(EffectParamSpec.specs(for: .reverb).map(\.name)
                 == ["roomSize", "damping", "mix", "preDelayMs", "width"])
