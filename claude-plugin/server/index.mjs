@@ -33232,6 +33232,10 @@ var EMPTY_COMPLETION_RESULT = {
   }
 };
 
+// src/server.ts
+import { fileURLToPath as fileURLToPath2 } from "node:url";
+import { statSync as statSync2 } from "node:fs";
+
 // src/bridge.ts
 var DEFAULT_PORT = "17600";
 var REQUEST_TIMEOUT_MS = 5e3;
@@ -44670,6 +44674,16 @@ function installMcpLogging(server2, bridge2) {
 }
 
 // src/server.ts
+var SERVER_MODULE_PATH = fileURLToPath2(import.meta.url);
+var SERVER_PROCESS_STARTED_AT = (/* @__PURE__ */ new Date()).toISOString();
+function statMtimeIso(path6) {
+  try {
+    return statSync2(path6).mtime.toISOString();
+  } catch {
+    return null;
+  }
+}
+var SERVER_BUILD_MTIME_AT_STARTUP = statMtimeIso(SERVER_MODULE_PATH);
 function textResult(value) {
   return { content: [{ type: "text", text: formatToolText(value) }] };
 }
@@ -44683,6 +44697,22 @@ async function toToolResult(fn) {
   } catch (err) {
     return errorResult(err);
   }
+}
+function stripNotesFromResult(result) {
+  if (!result || typeof result !== "object") return result;
+  const stripOne = (obj) => {
+    if (!obj || typeof obj !== "object" || !Array.isArray(obj.notes)) return obj;
+    const { notes, ...rest } = obj;
+    return { ...rest, notesOmitted: true, noteCount: notes.length };
+  };
+  const withClips = result;
+  if (Array.isArray(withClips.clips)) {
+    return { ...withClips, clips: withClips.clips.map(stripOne) };
+  }
+  if (withClips.first && typeof withClips.first === "object" && withClips.second && typeof withClips.second === "object") {
+    return { ...withClips, first: stripOne(withClips.first), second: stripOne(withClips.second) };
+  }
+  return stripOne(result);
 }
 var bridge = new DawBridge();
 var server = new McpServer({
@@ -45442,7 +45472,7 @@ server.registerTool(
   "instrument_list_sound_banks",
   {
     title: "List available SoundFont2/DLS sound banks",
-    description: 'List every sound bank this Mac can use as a track_set_instrument `soundBank` source \u2014 the built-in General MIDI bank is ALWAYS FIRST (`source: "gm"`; ships with every Mac, zero downloads, zero setup \u2014 the go-to default for realistic instrument sounds without hunting for sample libraries), followed by every .sf2/.dls file found in the central imported-bank library and the two standard macOS bank folders (deduplicated, alphabetized within each folder). No params, never errors (an unreadable folder is skipped silently). Each entry has: `source` (pass this straight into instrument_list_sound_bank_programs\'s `source` or track_set_instrument\'s `soundBank.source` \u2014 "gm" for the built-in bank, or the bank\'s absolute file path); `name` (display name \u2014 "General MIDI" for the built-in bank, else the filename without its extension); `path` (the resolved absolute file path, for reference); `format` ("dls" or "sf2"); `builtin` (true only for the General MIDI entry); and `sizeBytes` (file size in bytes \u2014 some SF2 libraries run into the gigabytes). Don\'t see a bank you expect? Import it first with instrument_import_sound_bank. Next step: call instrument_list_sound_bank_programs with a bank\'s `source` to see its exact playable programs before selecting one on track_set_instrument.'
+    description: 'List every sound bank this Mac can use as a track_set_instrument `soundBank` source \u2014 the built-in General MIDI bank is ALWAYS FIRST (`source: "gm"`; ships with every Mac, zero downloads, zero setup \u2014 the go-to default for realistic instrument sounds without hunting for sample libraries), followed by every .sf2/.dls file found in the central imported-bank library and the two standard macOS bank folders (deduplicated, alphabetized within each folder). No params, never errors (an unreadable folder is skipped silently). Each entry has: `source` (pass this straight into instrument_list_sound_bank_programs\'s `source` or track_set_instrument\'s `soundBank.source` \u2014 "gm" for the built-in bank, or the bank\'s absolute file path); `name` (display name \u2014 "General MIDI" for the built-in bank, else the filename without its extension); `path` (the resolved absolute file path, for reference); `format` (the file\'s real extension \u2014 "dls", "sf2", or "sf3"); `builtin` (true only for the General MIDI entry); `sizeBytes` (file size in bytes \u2014 some SF2 libraries run into the gigabytes); `supported` (false for a bank that was FOUND but CANNOT be loaded \u2014 today that means MuseScore\'s Vorbis-compressed .sf3); and `unsupportedReason` (null when supported, else a sentence telling the user what to do about it). An entry with `supported: false` is listed so you can SEE it exists rather than wonder why your file vanished \u2014 its `source` will be REJECTED by track_set_instrument and by instrument_import_sound_bank, so never offer it as a playable choice; relay its `unsupportedReason` instead. Don\'t see a bank you expect? Import it first with instrument_import_sound_bank. Next step: call instrument_list_sound_bank_programs with a bank\'s `source` to see its exact playable programs before selecting one on track_set_instrument.'
   },
   async () => toToolResult(() => bridge.send("instrument.listSoundBanks"))
 );
@@ -45515,6 +45545,33 @@ registerTool(
     }
   },
   async ({ trackId, offset, limit: limit3 }) => toToolResult(() => bridge.send("instrument.describeSampler", { trackId, offset, limit: limit3 }))
+);
+registerTool(
+  "instrument_probe_liveness",
+  {
+    title: "Measure whether velocity changes an instrument's TONE, not just its volume",
+    description: "Renders a VELOCITY LADDER on an instrument track \u2014 the same pitch played at several ascending velocities, one note each \u2014 and measures how far the spectral CENTROID (brightness) moved against how far the RMS (level) moved. On a real acoustic instrument, playing harder changes the SPECTRUM as well as the level: a saxophone leaned on throws far more upper-harmonic energy. A single-sample patch just gets louder. Big level spread + flat centroid = velocity is a volume knob, and the patch will read as a toy on any exposed melodic line. CALL THIS BEFORE BUILDING AN ARRANGEMENT ON A LEAD SOUND \u2014 that is the whole point: a user listened to a finished render and said the sax 'sounded awful, like a toy', and no automated check in this project can hear. This one can, for this one specific question. \u26A0\uFE0F IT MEASURES LIVELINESS, NOT QUALITY. It says nothing about tuning, articulation, or whether the sound is pleasant \u2014 those still need a human. Do not quote a LIVE verdict as 'the instrument sounds good'. NOT AN EDIT: the ladder is rendered from a throwaway copy of the track. Nothing is inserted, no undo step is created, the project is untouched. The copy is rendered DRY \u2014 track effects, sends, automation, mute/solo, fader, bus routing and the whole master chain are all stripped \u2014 so the reading describes the PATCH, not the mix around it. It runs an offline render, so expect it to take a few seconds. Returns {trackId, instrumentKind, instrumentDetail?, pitch, noteSeconds, sampleRate, selfCheck, ladder, rmsSpreadDb?, centroidSpreadPercent?, distinctTimbreCount, verdict, summary, thresholds, caveats}. `verdict` is one of: `static` (level moved, timbre did not \u2014 one sample with a volume knob), `live` (velocity changes the tone), `inconclusive` (the ladder did not move the LEVEL enough to test the question at all \u2014 a velocity-insensitive patch, or a compressor/limiter flattening it), or `silent` (at least one rung produced no measurable signal). \u26A0\uFE0F `silent` IS NOT `static`. 'The probe could not measure this' and 'the probe measured it and found it flat' are different answers and are deliberately reported differently \u2014 a silent result usually means the instrument is not loaded, does not cover that pitch, or is muted upstream. Do not report it as a dead instrument. `ladder` is the EVIDENCE \u2014 one entry per velocity, {velocity, rmsDb, centroidHz?, timbreGroup?} \u2014 and `distinctTimbreCount` is the single most informative number: how many distinct timbres (velocity layers) the ladder actually found. 1 means one sample. It is a LOWER BOUND: four velocities cannot see a fifth layer, and two layers that happen to share a brightness read as one. Prefer it to `centroidSpreadPercent`, which is a crude min-to-max summary \u2014 layered banks step between PLATEAUS and need not be monotonic (a soft layer can legitimately be brighter than the one above it; a real GM piano measured 1856 / 1063 / 3662 / 3662 Hz). Rungs sharing a `timbreGroup` share a layer. `thresholds` echoes the numbers the verdict was computed with AND carries `calibrated: false`, because they are a HYPOTHESIS derived from one instrument family, not a calibrated rule. READ `ladder` AND FORM YOUR OWN VIEW rather than inheriting the verdict silently. `selfCheck` is the meter's proof, on this very run, that it can discriminate at all: it measures a synthesised 440 Hz and 1760 Hz tone through the SAME code path and requires the high one to read more than twice the low one. \u2B50 IF THAT CONTROL FAILS THE TOOL ERRORS OUT AND RETURNS NO VERDICT \u2014 never a `static` one. A flat centroid is exactly the shape a BROKEN measurement produces, so a reading from a meter that cannot tell those two tones apart is not evidence of anything. Refuses readably for an audio/bus track (only instrument tracks carry an instrument), an unknown trackId, a fewer-than-two-rung ladder, or when no audio engine is available.",
+    inputSchema: {
+      trackId: external_exports.string().min(1).describe("Id of the instrument track to probe, from project_snapshot."),
+      pitch: external_exports.number().int().min(0).max(127).optional().describe(
+        "MIDI note number every rung plays. Default 57 (A3) \u2014 the pitch the shipped calibration figures were measured at, and a comfortable mid-register note for most instruments. Choose one your instrument actually covers: a pitch outside the keymap comes back `silent`, not `static`."
+      ),
+      velocities: external_exports.array(external_exports.number().int().min(1).max(127)).min(2).optional().describe(
+        "ASCENDING MIDI velocities, one note each. Default [25, 60, 95, 127] \u2014 pp to ff. At least two are required (one rung cannot show whether the timbre moves). More rungs find more velocity layers: `distinctTimbreCount` is only ever a lower bound over the velocities you actually sampled."
+      ),
+      noteSeconds: external_exports.number().min(0.05).optional().describe(
+        "Length of each note in seconds. Default 1.0. The analysis window sits 0.30 s in and runs 0.60 s \u2014 past the attack transient, inside the sustain \u2014 so shortening this below ~1 s risks measuring the release instead of the tone."
+      )
+    }
+  },
+  async ({ trackId, pitch, velocities, noteSeconds }) => toToolResult(
+    () => bridge.send("instrument.probeLiveness", {
+      trackId,
+      ...pitch !== void 0 ? { pitch } : {},
+      ...velocities !== void 0 ? { velocities } : {},
+      ...noteSeconds !== void 0 ? { noteSeconds } : {}
+    })
+  )
 );
 var samplerGlobalParamSchema = external_exports.enum([
   "oneShot",
@@ -45923,15 +45980,21 @@ registerTool(
   "clip_set_notes",
   {
     title: "Replace a MIDI clip's notes",
-    description: "Replace a MIDI clip's ENTIRE note array \u2014 the only note-editing primitive. There is no add/remove-single-note tool: read the clip's current notes with clip_get_notes (preferred \u2014 one clip, not the whole project) or from project_snapshot, modify the array (add, remove, or change notes) in your own code, then resubmit the whole array here. One call = one undo step (edit_undo reverts the entire replacement). `notes` may be empty to clear the clip. Errors readably if `clipId` refers to an audio clip (audio clips have no notes). \u2B50 THE CLIP ID SURVIVES: this edits the clip in place and never creates a replacement, so `clipId` \u2014 and the clip's position, length and every other field \u2014 stay valid across a full replace. That makes RE-AUTHORING a clip wholesale a supported fallback when you cannot read it first (e.g. clip_get_notes is unavailable) AND you are the source of its content: rewrite the array you intended, and any ids your later steps depend on still resolve. Reading first remains preferred whenever the clip's notes came from anywhere else, since a whole-array write drops whatever you did not include.",
+    description: "Replace a MIDI clip's ENTIRE note array \u2014 the only note-editing primitive. There is no add/remove-single-note tool: read the clip's current notes with clip_get_notes (preferred \u2014 one clip, not the whole project) or from project_snapshot, modify the array (add, remove, or change notes) in your own code, then resubmit the whole array here. One call = one undo step (edit_undo reverts the entire replacement). `notes` may be empty to clear the clip. Errors readably if `clipId` refers to an audio clip (audio clips have no notes). \u2B50 THE CLIP ID SURVIVES: this edits the clip in place and never creates a replacement, so `clipId` \u2014 and the clip's position, length and every other field \u2014 stay valid across a full replace. That makes RE-AUTHORING a clip wholesale a supported fallback when you cannot read it first (e.g. clip_get_notes is unavailable) AND you are the source of its content: rewrite the array you intended, and any ids your later steps depend on still resolve. Reading first remains preferred whenever the clip's notes came from anywhere else, since a whole-array write drops whatever you did not include. `returnNotes` (default true, UNCHANGED from before this param existed, m31-b/m30-g) controls whether the response echoes the written notes back: since notes without an id get one SERVER-MINTED on write, the echo is often needed to learn those new ids before a follow-up edit, unlike the pure-mutation tools (clip_duplicate, clip_remove_many, clip_humanize) where it defaults off. Pass `returnNotes: false` to get the clip back WITHOUT its `notes` array when you already know you won't need the ids this call \u2014 the response instead carries `notesOmitted: true` and `noteCount`. Nothing is lost either way: read the notes back any time with clip_get_notes.",
     inputSchema: {
       clipId: external_exports.string().uuid().describe("Id of the MIDI clip to edit, from project_snapshot."),
       notes: external_exports.array(noteSchema).max(4096).describe(
         "The clip's complete new note array (replaces all existing notes), up to 4096 entries. Pass an empty array to remove all notes."
+      ),
+      returnNotes: external_exports.boolean().optional().describe(
+        "Whether the response echoes the written notes back, each with its server-minted id (notes without one get one on write). Defaults to true (unchanged prior behavior). Pass false to drop the notes array from the response and get back `notesOmitted: true` plus `noteCount` instead \u2014 the notes are still written and always readable afterward via clip_get_notes."
       )
     }
   },
-  async ({ clipId, notes }) => toToolResult(() => bridge.send("clip.setNotes", { clipId, notes }))
+  async ({ clipId, notes, returnNotes }) => toToolResult(async () => {
+    const result = await bridge.send("clip.setNotes", { clipId, notes });
+    return returnNotes === false ? stripNotesFromResult(result) : result;
+  })
 );
 registerTool(
   "clip_get_notes",
@@ -45972,16 +46035,22 @@ registerTool(
   "clip_split",
   {
     title: "Split a clip in two at a beat",
-    description: "Cut a clip into two independent clips at a TIMELINE beat \u2014 the core arrangement-editing move for lifting out a section, tightening a phrase boundary, or isolating a region to delete/move/re-gain on its own. `atBeat` must fall STRICTLY inside the clip (not touching either edge) or the call errors readably. The left half keeps the original clip's id; the right half is a brand-new clip inserted immediately after it. For a MIDI clip, notes are partitioned by start beat (a note straddling the cut is truncated into the left half); for an audio clip, the right half's source offset advances so it keeps playing the correct region of the file. Fades: the left half keeps its fade-in and loses its fade-out; the right half gains a zero fade-in and keeps the original fade-out. One call = one undo step (edit_undo restores the single original clip). Returns `{first, second}`, the two resulting clips.",
+    description: "Cut a clip into two independent clips at a TIMELINE beat \u2014 the core arrangement-editing move for lifting out a section, tightening a phrase boundary, or isolating a region to delete/move/re-gain on its own. `atBeat` must fall STRICTLY inside the clip (not touching either edge) or the call errors readably. The left half keeps the original clip's id; the right half is a brand-new clip inserted immediately after it. For a MIDI clip, notes are partitioned by start beat (a note straddling the cut is truncated into the left half); for an audio clip, the right half's source offset advances so it keeps playing the correct region of the file. Fades: the left half keeps its fade-in and loses its fade-out; the right half gains a zero fade-in and keeps the original fade-out. One call = one undo step (edit_undo restores the single original clip). Returns `{first, second}`, the two resulting clips. `returnNotes` (default true, UNCHANGED \u2014 deliberately NOT defaulted off like clip_duplicate/clip_remove_many/clip_humanize/clip_move_many's family, m31-b): a split TRUNCATES any note straddling the cut, so unlike a duplicate (verbatim copy) or a humanize (same notes, nudged), the resulting `notes` are NEW information you did not already have \u2014 you cannot predict exactly which note landed on which side or how a straddling note got shortened without reading them back. `second` is also a brand-new clip whose id you need immediately, the clip_add_midi precedent. Pass `returnNotes: false` to drop both halves' `notes` arrays if you don't need them for this call \u2014 `first`/`second`'s `id` (and every other field) always survive either way; the response instead carries `notesOmitted: true` and `noteCount` on the half that had notes. Nothing is lost: read either half's notes any time with clip_get_notes.",
     inputSchema: {
       trackId: external_exports.string().min(1).describe("Id of the track that owns the clip, from project_snapshot."),
       clipId: external_exports.string().uuid().describe("Id of the clip to split, from project_snapshot."),
       atBeat: external_exports.number().describe(
         "Timeline position in beats (quarter notes) to cut at. Must fall strictly inside the clip's span [startBeat, startBeat + lengthBeats] \u2014 splitting at or beyond either edge errors readably instead of producing an empty clip."
+      ),
+      returnNotes: external_exports.boolean().optional().describe(
+        "Whether `first`/`second` echo their notes back. Defaults to true (unchanged prior behavior) \u2014 a split truncates notes at the cut, so the result is new information, unlike the pure-mutation clip tools that default this off. Pass false to drop both halves' `notes` arrays; every id and other field is unaffected either way."
       )
     }
   },
-  async ({ trackId, clipId, atBeat }) => toToolResult(() => bridge.send("clip.split", { trackId, clipId, atBeat }))
+  async ({ trackId, clipId, atBeat, returnNotes }) => toToolResult(async () => {
+    const result = await bridge.send("clip.split", { trackId, clipId, atBeat });
+    return returnNotes === false ? stripNotesFromResult(result) : result;
+  })
 );
 registerTool(
   "clip_trim",
@@ -46028,7 +46097,7 @@ registerTool(
   "clip_duplicate",
   {
     title: "Duplicate a clip",
-    description: "Copy a clip, value-copying EVERYTHING it carries \u2014 audio media or MIDI notes, gain, fades + curves, gain envelope, and stretch/pitch \u2014 under a brand-new id. Use this to repeat a phrase, stash a variation to edit separately, or seed a new section from an existing one, without re-building it note by note. Omit `toStartBeat` to land the copy FLUSH right after the source clip's own tail; omit `toTrackId` to duplicate onto the source's own track. A cross-track duplicate is type-checked by content, same as any other clip placement: a MIDI clip only lands on an instrument track, an audio clip only on an audio track. OVERLAP POLICY: identical to clip_move's \u2014 a copy dropped onto an occupied region TRIMS the ordinary resident clips it covers (their edge is trimmed, or they're removed if fully covered) so two clips never sound at once with no crossfade; use clip_crossfade instead to deliberately blend two audio clips. A comp/take-group member source is rejected \u2014 call take_flatten first, then duplicate the flattened clip. NOTE IDS: the new clip gets a brand-new clip id, but for a MIDI clip its individual notes keep their SOURCE note ids verbatim (not re-minted), so the source clip and the duplicate end up with two different clips whose notes share the same per-note ids. One undo step. Returns the new clip's fields (unwrapped, the track_add/clip_add_midi convention), plus additive `trimmed` and `removed` arrays listing the ids of any stationary clips the overlap policy edited (empty on a clean landing).",
+    description: "Copy a clip, value-copying EVERYTHING it carries \u2014 audio media or MIDI notes, gain, fades + curves, gain envelope, and stretch/pitch \u2014 under a brand-new id. Use this to repeat a phrase, stash a variation to edit separately, or seed a new section from an existing one, without re-building it note by note. Omit `toStartBeat` to land the copy FLUSH right after the source clip's own tail; omit `toTrackId` to duplicate onto the source's own track. A cross-track duplicate is type-checked by content, same as any other clip placement: a MIDI clip only lands on an instrument track, an audio clip only on an audio track. OVERLAP POLICY: identical to clip_move's \u2014 a copy dropped onto an occupied region TRIMS the ordinary resident clips it covers (their edge is trimmed, or they're removed if fully covered) so two clips never sound at once with no crossfade; use clip_crossfade instead to deliberately blend two audio clips. A comp/take-group member source is rejected \u2014 call take_flatten first, then duplicate the flattened clip. NOTE IDS: the new clip gets a brand-new clip id, but for a MIDI clip its individual notes keep their SOURCE note ids verbatim (not re-minted), so the source clip and the duplicate end up with two different clips whose notes share the same per-note ids. One undo step. Returns the new clip's fields (unwrapped, the track_add/clip_add_midi convention), plus additive `trimmed` and `removed` arrays listing the ids of any stationary clips the overlap policy edited (empty on a clean landing). \u26A0\uFE0F NOTES ARE OMITTED BY DEFAULT (changed from earlier behavior, m31-b): a duplicate is a pure mutation \u2014 the caller already knows the notes (they're identical to the source, same per-note ids, per the NOTE IDS paragraph above), so echoing them back a second time was pure cost with no new information. Measured: duplicating a 149-note clip cost 24,702 chars just for the echo. The response instead carries `notesOmitted: true` and `noteCount` (never mistakable for a genuinely empty clip). Pass `returnNotes: true` to get the full array back anyway, or read it anytime with clip_get_notes using the new clip's id.",
     inputSchema: {
       clipId: external_exports.string().uuid().describe("Id of the clip to duplicate, from project_snapshot."),
       toStartBeat: external_exports.number().min(0).optional().describe(
@@ -46036,10 +46105,16 @@ registerTool(
       ),
       toTrackId: external_exports.string().min(1).optional().describe(
         "Id of the track to land the copy on, from project_snapshot. Omit to duplicate onto the source clip's own track. A MIDI source needs an instrument track; an audio source needs an audio track \u2014 a mismatch errors readably."
+      ),
+      returnNotes: external_exports.boolean().optional().describe(
+        "Whether the response echoes the duplicated clip's notes back. Defaults to FALSE (changed from earlier behavior, m31-b) since a duplicate's notes are identical to the source's \u2014 pass true to get them back inline anyway, or read them anytime with clip_get_notes. When omitted the response carries `notesOmitted: true` plus `noteCount` instead of `notes`."
       )
     }
   },
-  async ({ clipId, toStartBeat, toTrackId }) => toToolResult(() => bridge.send("clip.duplicate", { clipId, toStartBeat, toTrackId }))
+  async ({ clipId, toStartBeat, toTrackId, returnNotes }) => toToolResult(async () => {
+    const result = await bridge.send("clip.duplicate", { clipId, toStartBeat, toTrackId });
+    return returnNotes === true ? result : stripNotesFromResult(result);
+  })
 );
 registerTool(
   "clip_set_gain",
@@ -46150,7 +46225,7 @@ registerTool(
   "clip_quantize",
   {
     title: "Quantize a MIDI clip's timing to the grid",
-    description: "Snap a MIDI clip's note onsets toward a rhythmic GRID (destructive, but one undo step reverts it). `gridBeats` is the grid resolution in BEATS (quarter notes): 1 = 1/4 note, 0.5 = 1/8, 0.25 = 1/16, 0.125 = 1/32; use 2/3-scaled values for triplets (~0.3333 = 1/8 triplet, ~0.1667 = 1/16 triplet). `strength` (0..1, default 1) is HOW FAR each note moves toward its target slot: 1 snaps fully to the grid, 0.5 moves it exactly halfway (tightens the feel while keeping human timing), 0 leaves it untouched. `swing` (50..75, MPC convention, default 50) shuffles the feel by DELAYING the offbeat slots: 50 = straight, 66 ~ classic MPC groove, 75 = maximum (a half-grid late, a triplet-ish shuffle); it is applied to the grid targets BEFORE the strength move. `quantizeEnds` (default false) also snaps each note's END to the grid \u2014 otherwise note LENGTHS are preserved and only onsets move (a note is never shortened below the minimum). MIDI CLIPS ONLY in v0: an audio clip is rejected verbatim (audio quantize is a later, separate op); a take-comp member clip is rejected (change the comp with take_set_comp/take_select, or take_flatten first). Rapid re-quantizes on the same clip (e.g. scrubbing strength) fold into ONE undo step. Returns the updated clip.",
+    description: "Snap a MIDI clip's note onsets toward a rhythmic GRID (destructive, but one undo step reverts it). `gridBeats` is the grid resolution in BEATS (quarter notes): 1 = 1/4 note, 0.5 = 1/8, 0.25 = 1/16, 0.125 = 1/32; use 2/3-scaled values for triplets (~0.3333 = 1/8 triplet, ~0.1667 = 1/16 triplet). `strength` (0..1, default 1) is HOW FAR each note moves toward its target slot: 1 snaps fully to the grid, 0.5 moves it exactly halfway (tightens the feel while keeping human timing), 0 leaves it untouched. `swing` (50..75, MPC convention, default 50) shuffles the feel by DELAYING the offbeat slots: 50 = straight, 66 ~ classic MPC groove, 75 = maximum (a half-grid late, a triplet-ish shuffle); it is applied to the grid targets BEFORE the strength move. `quantizeEnds` (default false) also snaps each note's END to the grid \u2014 otherwise note LENGTHS are preserved and only onsets move (a note is never shortened below the minimum). MIDI CLIPS ONLY in v0: an audio clip is rejected verbatim (audio quantize is a later, separate op); a take-comp member clip is rejected (change the comp with take_set_comp/take_select, or take_flatten first). Rapid re-quantizes on the same clip (e.g. scrubbing strength) fold into ONE undo step. Returns the updated clip. \u26A0\uFE0F NOTES ARE OMITTED BY DEFAULT (changed from earlier behavior, m31-b): this is shape-identical to clip_humanize (a seeded/parametric mutation of a note array you already hold, ids and order preserved) and now behaves the same way. The response instead carries `notesOmitted: true` and `noteCount`. Pass `returnNotes: true` to get the quantized array back inline anyway, or read it anytime with clip_get_notes.",
     inputSchema: {
       clipId: external_exports.string().uuid().describe("Id of the MIDI clip to quantize, from project_snapshot."),
       gridBeats: external_exports.number().positive().describe(
@@ -46167,16 +46242,29 @@ registerTool(
       ),
       groove: external_exports.string().optional().describe(
         "Optional GROOVE to quantize to instead of the straight/swing grid. Pass a built-in swing name (swing8:54..75 or swing16:54..75, e.g. \"swing8:66\"), or a saved groove template's id or name (see groove_list / groove_extract). A groove REPLACES `swing` (groove wins). Use gridBeats matching the groove's grid (1/8 for swing8, 1/16 for swing16) for musically-correct targets."
+      ),
+      returnNotes: external_exports.boolean().optional().describe(
+        "Whether the response echoes the quantized notes back. Defaults to FALSE (changed from earlier behavior, m31-b) \u2014 pass true to get the quantized array back inline anyway, or read it anytime with clip_get_notes. When omitted the response carries `notesOmitted: true` plus `noteCount` instead of `notes`."
       )
     }
   },
-  async ({ clipId, gridBeats, strength, swing, quantizeEnds, groove }) => toToolResult(() => bridge.send("clip.quantize", { clipId, gridBeats, strength, swing, quantizeEnds, groove }))
+  async ({ clipId, gridBeats, strength, swing, quantizeEnds, groove, returnNotes }) => toToolResult(async () => {
+    const result = await bridge.send("clip.quantize", {
+      clipId,
+      gridBeats,
+      strength,
+      swing,
+      quantizeEnds,
+      groove
+    });
+    return returnNotes === true ? result : stripNotesFromResult(result);
+  })
 );
 registerTool(
   "clip_humanize",
   {
     title: "Add human feel to a MIDI clip (seeded timing + velocity jitter, optional legato overlap)",
-    description: "The inverse-spirited sibling of clip_quantize: instead of snapping a MIDI clip's notes to the grid, nudge them slightly OFF it so they feel played rather than programmed. Each note gets an INDEPENDENT random timing offset (up to \xB1`timingBeats` beats) and an independent random velocity offset (up to \xB1`velocityRange`), applied as ONE undoable step. Onsets are clamped to stay inside the clip and velocities to 1..127; note ids and array order are ALWAYS preserved, and so are note LENGTHS UNLESS you pass `legatoOverlapBeats` > 0 \u2014 that is the one argument here that rewrites lengths, and it is off by default. LEGATO/GATE PASS (`legatoOverlapBeats` + `maxGapBeats`): every note followed within `maxGapBeats` is lengthened to end `legatoOverlapBeats` PAST the following note's start, so gaps close and joins overlap. A LARGER gap is a rest (for a wind part, a breath) and is left exactly as authored; notes that already overlap are left alone (the pass only ever extends, so running it twice with the same arguments changes nothing the second time); the last note is never extended; nothing is extended past the clip end; a note whose successor repeats its own PITCH abuts that successor exactly instead of overlapping it, because MIDI note-off carries only a pitch and an overlap there would cut the note that just started. \u26A0\uFE0F WHAT OVERLAP ACTUALLY BUYS: this engine has NO legato-hold mode \u2014 every note-on starts a brand-new voice with a fresh attack, on the built-in sampler and on a hosted AUSampler alike. The overlap MASKS each new attack under the previous note's decaying tail; it does NOT eliminate the retrigger and cannot produce true legato. Use ~0.02-0.05 beats for a melodic wind/brass line. `maxGapBeats` on its own does NOTHING: it is a ceiling on a pass that only runs when `legatoOverlapBeats` > 0. The jitter is DETERMINISTIC and SEEDED: pass a `seed` to get an exact, repeatable result, or omit it to draw a fresh one. Either way the response includes `seedUsed` (the seed actually applied) alongside the updated clip fields \u2014 feed that same value back as `seed` to reproduce this exact take, or omit `seed` again to re-roll a different feel. MIDI CLIPS ONLY: an audio clip is rejected. Returns the updated clip plus `seedUsed`. NOT IDEMPOTENT \u2014 the jitter is added to each note's CURRENT position, not to a stored quantized original, so calling this twice COMPOUNDS the feel (and repeated runs pile onsets against the clip boundary, where they clamp). `seed` reproduces a result only from the SAME starting state \u2014 same seed applied twice in a row does NOT give you the same clip as applying it once. Nothing on the clip records that it was humanized, so an agent picking up someone else's clip cannot tell: to re-roll a feel, edit_undo the previous humanize FIRST, then re-apply. Prefer one pass with the right amount over several nudges.",
+    description: "The inverse-spirited sibling of clip_quantize: instead of snapping a MIDI clip's notes to the grid, nudge them slightly OFF it so they feel played rather than programmed. Each note gets an INDEPENDENT random timing offset (up to \xB1`timingBeats` beats) and an independent random velocity offset (up to \xB1`velocityRange`), applied as ONE undoable step. Onsets are clamped to stay inside the clip and velocities to 1..127; note ids and array order are ALWAYS preserved, and so are note LENGTHS UNLESS you pass `legatoOverlapBeats` > 0 \u2014 that is the one argument here that rewrites lengths, and it is off by default. LEGATO/GATE PASS (`legatoOverlapBeats` + `maxGapBeats`): every note followed within `maxGapBeats` is lengthened to end `legatoOverlapBeats` PAST the following note's start, so gaps close and joins overlap. A LARGER gap is a rest (for a wind part, a breath) and is left exactly as authored; notes that already overlap are left alone (the pass only ever extends, so running it twice with the same arguments changes nothing the second time); the last note is never extended; nothing is extended past the clip end; a note whose successor repeats its own PITCH abuts that successor exactly instead of overlapping it, because MIDI note-off carries only a pitch and an overlap there would cut the note that just started. \u26A0\uFE0F WHAT OVERLAP ACTUALLY BUYS: this engine has NO legato-hold mode \u2014 every note-on starts a brand-new voice with a fresh attack, on the built-in sampler and on a hosted AUSampler alike. The overlap MASKS each new attack under the previous note's decaying tail; it does NOT eliminate the retrigger and cannot produce true legato. Use ~0.02-0.05 beats for a melodic wind/brass line. `maxGapBeats` on its own does NOTHING: it is a ceiling on a pass that only runs when `legatoOverlapBeats` > 0. The jitter is DETERMINISTIC and SEEDED: pass a `seed` to get an exact, repeatable result, or omit it to draw a fresh one. Either way the response includes `seedUsed` (the seed actually applied) alongside the updated clip fields \u2014 feed that same value back as `seed` to reproduce this exact take, or omit `seed` again to re-roll a different feel. MIDI CLIPS ONLY: an audio clip is rejected. Returns the updated clip plus `seedUsed`. NOT IDEMPOTENT \u2014 the jitter is added to each note's CURRENT position, not to a stored quantized original, so calling this twice COMPOUNDS the feel (and repeated runs pile onsets against the clip boundary, where they clamp). `seed` reproduces a result only from the SAME starting state \u2014 same seed applied twice in a row does NOT give you the same clip as applying it once. Nothing on the clip records that it was humanized, so an agent picking up someone else's clip cannot tell: to re-roll a feel, edit_undo the previous humanize FIRST, then re-apply. Prefer one pass with the right amount over several nudges. \u26A0\uFE0F NOTES ARE OMITTED BY DEFAULT (changed from earlier behavior, m31-b): humanize is a pure mutation of an array you already hold (ids and order are preserved, so you already know which note is which) \u2014 echoing the whole array back was pure cost. Measured: humanizing one guitar clip cost 260,354 chars for the echo alone. The response instead carries `notesOmitted: true` and `noteCount` alongside `seedUsed`. Pass `returnNotes: true` to get the jittered array back inline anyway, or read it anytime with clip_get_notes.",
     inputSchema: {
       clipId: external_exports.string().uuid().describe("Id of the MIDI clip to humanize, from project_snapshot."),
       timingBeats: external_exports.number().min(0).max(0.25).optional().describe(
@@ -46193,19 +46281,23 @@ registerTool(
       ),
       maxGapBeats: external_exports.number().min(0).max(4).optional().describe(
         "The largest gap the legato pass will close, in BEATS, 0..4 (default 0.125 \u2014 a thirty-second note). A gap WIDER than this is treated as a rest \u2014 a breath in a wind part \u2014 and is preserved exactly, which is what keeps the pass musical rather than destructive. Raise it to close written rests too (1 = a quarter-note rest); lower it at very slow tempos, where 0.125 beat is more milliseconds. Does NOTHING on its own: it only bounds the pass that `legatoOverlapBeats` > 0 turns on."
+      ),
+      returnNotes: external_exports.boolean().optional().describe(
+        "Whether the response echoes the humanized notes back. Defaults to FALSE (changed from earlier behavior, m31-b) since ids and order are unchanged so you already know which note is which \u2014 pass true to get the jittered array back inline anyway, or read it anytime with clip_get_notes. When omitted the response carries `notesOmitted: true` plus `noteCount` instead of `notes`."
       )
     }
   },
-  async ({ clipId, timingBeats, velocityRange, seed, legatoOverlapBeats, maxGapBeats }) => toToolResult(
-    () => bridge.send("clip.humanize", {
+  async ({ clipId, timingBeats, velocityRange, seed, legatoOverlapBeats, maxGapBeats, returnNotes }) => toToolResult(async () => {
+    const result = await bridge.send("clip.humanize", {
       clipId,
       timingBeats,
       velocityRange,
       seed,
       legatoOverlapBeats,
       maxGapBeats
-    })
-  )
+    });
+    return returnNotes === true ? result : stripNotesFromResult(result);
+  })
 );
 server.registerTool(
   "clip_detect_transients",
@@ -47106,9 +47198,21 @@ server.registerTool(
   "app_connection_info",
   {
     title: "Read the control endpoint this agent is connected through",
-    description: 'Read-only introspection of the LIVE control WebSocket endpoint this bridge reached the app on \u2014 the bound port, and where that port came from. No params, never throws. Returns `{url, port, source, defaultPort}`: `url` is the loopback WebSocket URL (`ws://127.0.0.1:<port>`) \u2014 the same value the app\'s Settings > Agent Connection section shows and lets a human copy; `port` is the currently bound port; `source` is one of `"environment"` (the `DAW_CONTROL_PORT` env var overrode everything for this launch \u2014 always wins), `"settings"` (an operator changed the port field in the app\'s Settings), or `"default"` (the built-in 17600, untouched); `defaultPort` is that built-in 17600 for reference, so a caller can tell at a glance whether the endpoint has been customized. Useful for diagnostics (confirming exactly which app instance/port this session is bridged to before reporting a bug) and for agents that manage multiple DAW Pro instances or non-default setups. The port is deliberately READ-only here: changing it can sever the caller\'s own connection mid-session, so re-pointing the control server stays a human decision in the app\'s Settings, not something this tool can do.'
+    description: "Read-only introspection of the LIVE control WebSocket endpoint this bridge reached the app on \u2014 the bound port, and where that port came from. No params, never throws. Returns `{url, port, source, defaultPort}`: `url` is the loopback WebSocket URL (`ws://127.0.0.1:<port>`) \u2014 the same value the app's Settings > Agent Connection section shows and lets a human copy; `port` is the currently bound port; `source` is one of `\"environment\"` (the `DAW_CONTROL_PORT` env var overrode everything for this launch \u2014 always wins), `\"settings\"` (an operator changed the port field in the app's Settings), or `\"default\"` (the built-in 17600, untouched); `defaultPort` is that built-in 17600 for reference, so a caller can tell at a glance whether the endpoint has been customized. Useful for diagnostics (confirming exactly which app instance/port this session is bridged to before reporting a bug) and for agents that manage multiple DAW Pro instances or non-default setups. The port is deliberately READ-only here: changing it can sever the caller's own connection mid-session, so re-pointing the control server stays a human decision in the app's Settings, not something this tool can do. \u2B50 ALSO reports this MCP SERVER PROCESS's own build identity (m31-a), separate from the app it's bridged to \u2014 the two `serverBuildMtime*` fields never touch the app or the wire at all, they are computed locally from this process's own file on disk: `serverProcessStartedAt` (when THIS process launched), `serverBuildMtimeAtStartup` (the mtime of `dist/server.js` captured ONCE, at that launch), and `serverBuildMtimeNow` (the SAME file's mtime re-read live, on THIS call). MEASURED: a rebuild landed 6h10m after a process launched, and the artifact-side grep check (grep dist/server.js for the new code) passed \u2014 the process had simply never read the rebuild, and nothing else visible said so. `serverBuildMayBeStale` is `true` exactly when `serverBuildMtimeNow` differs from `serverBuildMtimeAtStartup` \u2014 that disagreement IS the diagnosis: it means a build has landed on disk since this process started, and this process is STILL SERVING THE OLD ONE (an MCP stdio server only picks up a rebuild on restart, never live). If it reads true, the fix is to restart the MCP server process \u2014 not just rebuild \u2014 and re-call this tool to confirm `serverBuildMtimeAtStartup` moved to match. Any field reading `null` means the file could not be stat'd (moved/deleted) rather than a hard failure."
   },
-  async () => toToolResult(() => bridge.send("app.connectionInfo"))
+  async () => toToolResult(async () => {
+    const connectionInfo = await bridge.send("app.connectionInfo");
+    const buildIdentity = {
+      serverProcessStartedAt: SERVER_PROCESS_STARTED_AT,
+      serverBuildMtimeAtStartup: SERVER_BUILD_MTIME_AT_STARTUP,
+      serverBuildMtimeNow: statMtimeIso(SERVER_MODULE_PATH)
+    };
+    return {
+      ...connectionInfo && typeof connectionInfo === "object" ? connectionInfo : {},
+      ...buildIdentity,
+      serverBuildMayBeStale: buildIdentity.serverBuildMtimeAtStartup !== null && buildIdentity.serverBuildMtimeNow !== null && buildIdentity.serverBuildMtimeAtStartup !== buildIdentity.serverBuildMtimeNow
+    };
+  })
 );
 var songSkeletonGenreSchema = external_exports.enum([
   "pop",
@@ -47126,7 +47230,7 @@ var songSkeletonGenreSchema = external_exports.enum([
   "reggae",
   "lo-fi"
 ]).describe(
-  "Which genre skeleton to scaffold \u2014 each sets a default tempo and a ready-made track roster. `pop` (120 BPM): Drums, Bass (bass-tight preset), Keys (warm-keys), Lead, Vocals (vocal-presence). `house` (124 BPM): Drums, Bass (bass-tight), Synth, Pads (warm-keys), FX. `hip-hop` (90 BPM): Drums, 808 Bass (bass-tight), Samples, Lead, Vocals (vocal-presence). `rock` (140 BPM): Drums, Bass (bass-tight), Rhythm Guitar, Lead Guitar, Vocals (vocal-presence). `ballad` (72 BPM): Piano (warm-keys), Strings, Bass (bass-tight), Vocals (vocal-presence). `blues` (84 BPM): Drums (drum-room), Bass (bass-round), Rhythm Guitar, Lead Guitar (guitar-crunch), Organ (warm-keys), Vocals (vocal-presence) \u2014 and a genuine TWELVE-BAR form (Intro 4, Head 12, Verse 12, Solo 12, Verse 12, Outro 4). `jazz` (132 BPM): Drums (drum-room), Upright Bass (bass-round), Piano (warm-keys), Horn (horn-section), Guitar \u2014 a combo with no vocal track, in head/solos/head form with 32-bar choruses. `country` (100 BPM): Drums (drum-bus-glue), Bass (bass-round), Acoustic Guitar (acoustic-sparkle), Electric Guitar, Pedal Steel, Vocals (vocal-presence). `r-and-b` (88 BPM): Drums (drum-bus-glue), Bass (bass-round), Keys (warm-keys), Pads, Lead Vocal (vocal-presence), Backing Vocals \u2014 with a Pre-Chorus in the form. `funk` (108 BPM): Drums (drum-bus-glue), Bass (bass-tight \u2014 funk's bass wants the clamp), Rhythm Guitar, Clavinet (warm-keys), Horns (horn-section), Vocals (vocal-presence), with 16-bar verses and a Breakdown. `metal` (170 BPM): Drums (drum-bus-glue), Bass (bass-tight), Rhythm Guitar L and Rhythm Guitar R (both guitar-crunch, for the hard-panned double-track), Lead Guitar (guitar-crunch), Vocals (vocal-presence). `folk` (96 BPM): Acoustic Guitar (acoustic-sparkle), Vocals (vocal-presence), Bass (bass-round), Fiddle, Percussion. `reggae` (76 BPM): Drums (drum-bus-glue), Bass (bass-round), Skank Guitar, Organ (warm-keys), Vocals (vocal-presence), with a Dub Break. `lo-fi` (78 BPM): Drums (lofi-tape), Bass (bass-round), Keys (warm-keys), Samples (lofi-tape), Vinyl FX \u2014 a loop-based form (Intro, Loop A, Loop B, Loop A, Outro) rather than verse/chorus. Instrument tracks host built-in instruments; audio tracks take recordings or imports. Named mixer presets are applied to the strips shown in parentheses. If none of these fits, keep the nearest `genre` and pass your own `tracks` roster and `sections` \u2014 both override the genre's defaults outright."
+  "Which genre skeleton to scaffold \u2014 each sets a default tempo and a ready-made track roster. \u26A0\uFE0F TRACK KIND MATTERS: every track below is `instrument` (takes MIDI clips) EXCEPT the ones marked `[audio]` (takes recordings/imports ONLY \u2014 a MIDI clip is rejected with 'track kind audio cannot host an instrument'). This is NOT only a vocal-track thing: `lo-fi` has no vocal at all and STILL carries two `[audio]` tracks (Samples, Vinyl FX) \u2014 notably, `lo-fi`'s \"Samples\" track is audio-only and canNOT host the Sampler instrument (the Sampler goes on an INSTRUMENT track; use track_add kind=instrument for a sample-playback part, or clip_add_audio on the roster's \"Samples\" track for actual audio recordings/loops). Check the `[audio]` tags below before writing a MIDI clip to a roster track by name. `pop` (120 BPM): Drums, Bass (bass-tight preset), Keys (warm-keys), Lead, Vocals [audio] (vocal-presence). `house` (124 BPM): Drums, Bass (bass-tight), Synth, Pads (warm-keys), FX [audio]. `hip-hop` (90 BPM): Drums, 808 Bass (bass-tight), Samples [audio], Lead, Vocals [audio] (vocal-presence). `rock` (140 BPM): Drums, Bass (bass-tight), Rhythm Guitar, Lead Guitar, Vocals [audio] (vocal-presence). `ballad` (72 BPM): Piano (warm-keys), Strings, Bass (bass-tight), Vocals [audio] (vocal-presence). `blues` (84 BPM): Drums (drum-room), Bass (bass-round), Rhythm Guitar, Lead Guitar (guitar-crunch), Organ (warm-keys), Vocals [audio] (vocal-presence) \u2014 and a genuine TWELVE-BAR form (Intro 4, Head 12, Verse 12, Solo 12, Verse 12, Outro 4). `jazz` (132 BPM): Drums (drum-room), Upright Bass (bass-round), Piano (warm-keys), Horn (horn-section), Guitar \u2014 ALL instrument, a combo with no vocal track, in head/solos/head form with 32-bar choruses. `country` (100 BPM): Drums (drum-bus-glue), Bass (bass-round), Acoustic Guitar (acoustic-sparkle), Electric Guitar, Pedal Steel, Vocals [audio] (vocal-presence). `r-and-b` (88 BPM): Drums (drum-bus-glue), Bass (bass-round), Keys (warm-keys), Pads, Lead Vocal [audio] (vocal-presence), Backing Vocals [audio] \u2014 with a Pre-Chorus in the form. `funk` (108 BPM): Drums (drum-bus-glue), Bass (bass-tight \u2014 funk's bass wants the clamp), Rhythm Guitar, Clavinet (warm-keys), Horns (horn-section), Vocals [audio] (vocal-presence), with 16-bar verses and a Breakdown. `metal` (170 BPM): Drums (drum-bus-glue), Bass (bass-tight), Rhythm Guitar L and Rhythm Guitar R (both guitar-crunch, for the hard-panned double-track), Lead Guitar (guitar-crunch), Vocals [audio] (vocal-presence). `folk` (96 BPM): Acoustic Guitar (acoustic-sparkle), Vocals [audio] (vocal-presence), Bass (bass-round), Fiddle, Percussion. `reggae` (76 BPM): Drums (drum-bus-glue), Bass (bass-round), Skank Guitar, Organ (warm-keys), Vocals [audio] (vocal-presence), with a Dub Break. `lo-fi` (78 BPM): Drums (lofi-tape), Bass (bass-round), Keys (warm-keys), Samples [audio] (lofi-tape), Vinyl FX [audio] \u2014 NO vocal track, a loop-based form (Intro, Loop A, Loop B, Loop A, Outro) rather than verse/chorus. Instrument tracks host built-in instruments (including the Sampler) and take MIDI clips; `[audio]` tracks take recordings or imports only. Named mixer presets are applied to the strips shown in parentheses. If none of these fits, keep the nearest `genre` and pass your own `tracks` roster and `sections` \u2014 both override the genre's defaults outright, and there you choose `kind` explicitly instead of reading it off this list."
 );
 var songSkeletonSectionSchema = external_exports.object({
   name: external_exports.string().min(1).max(40).describe(`Section label, e.g. "Verse", "Chorus", "Drop" (1-40 characters). Becomes the guide clip's name.`),
@@ -47319,7 +47423,7 @@ registerTool(
   "render_bounce",
   {
     title: "Bounce the session to a loudness-measured, optionally normalized WAV",
-    description: "Render the session offline to a stereo 48 kHz WAV and report its loudness \u2014 the measured/normalizing sibling of render_mixdown (which stays the raw, fast bounce with no loudness report and no gain). Like render_mixdown, this BAKES IN every master move: the master fader, the master insert chain, and any MASTER VOLUME AUTOMATION LANE \u2014 a fade-out lands in the bounce and needs no per-track workaround. It lands only WITHIN THE RENDER WINDOW, though, and the DEFAULT window comes from CLIP extents alone (+ a fixed 2.0 s tail), never from automation: a fade or tail extending past the last clip is CUT OFF unless you pass a `durationSeconds` that covers it. Pass `lufsTarget` to normalize toward a delivery target \u2014 -14 LUFS integrated is the usual streaming-platform convention (Spotify/YouTube/Apple Music-style), -23 LUFS is EBU R128 broadcast; OMIT it for a measured but UN-normalized bounce (the loudness report is still included, nothing about the audio changes). Normalization applies ONE static gain toward the target, CLAMPED so the true peak never exceeds `truePeakCeilingDb` (default -1.0 dBTP) \u2014 there is NO limiter in v0, so when the clamp bites, the bounce lands QUIETER than asked and `report.limitedByCeiling` is true; `report.output` is the loudness ACTUALLY achieved (compare it to your target to see the shortfall \u2014 never assume the target was hit without checking this). If you need to close that gap, add the built-in limiter effect to the master bus (or the track/bus feeding it) and call render_bounce again: the limiter does real dynamics control, letting a subsequent gain push closer to the ceiling safely. `report.input` is the pre-gain measurement; `report.output` is RE-MEASURED from the gained audio (never derived from input + gain), so it is ground truth for the file written to disk. Any loudness field \u2014 in either input or output \u2014 can come back OMITTED (null): that means the signal sits at/below the -70 LUFS silence gate. A gated-silent program WITH a requested `lufsTarget` errors (there is nothing to normalize toward); silence without a target still succeeds, with all-null measurements. Pass `excludeTrackIds` to bounce an INSTRUMENTAL / minus-vocal version \u2014 the full session with those tracks silenced for this render only, project untouched; note that normalization then measures the instrumental's OWN loudness, not the full mix's, so a mix and its instrumental normalized to the same target end up at the same LUFS as each other rather than at the same relative level. Returns `{path, durationSeconds, sampleRate, channels, report: {input, output, appliedGainDb, lufsTarget?, truePeakCeilingDbtp, limitedByCeiling}, excludedTracks?}`.",
+    description: "Render the session offline to a stereo 48 kHz WAV and report its loudness \u2014 the measured/normalizing sibling of render_mixdown (which stays the raw, fast bounce with no loudness report and no gain). Like render_mixdown, this BAKES IN every master move: the master fader, the master insert chain, and any MASTER VOLUME AUTOMATION LANE \u2014 a fade-out lands in the bounce and needs no per-track workaround. It lands only WITHIN THE RENDER WINDOW, though, and the DEFAULT window comes from CLIP extents alone (+ a fixed 2.0 s tail), never from automation: a fade or tail extending past the last clip is CUT OFF unless you pass a `durationSeconds` that covers it. Pass `lufsTarget` to normalize toward a delivery target \u2014 -14 LUFS integrated is the usual streaming-platform convention (Spotify/YouTube/Apple Music-style), -23 LUFS is EBU R128 broadcast; OMIT it for a measured but UN-normalized bounce (the loudness report is still included, nothing about the audio changes). Normalization applies ONE static gain toward the target, CLAMPED so the true peak never exceeds `truePeakCeilingDb` (default -1.0 dBTP) \u2014 there is NO limiter in v0, so when the clamp bites, the bounce lands QUIETER than asked and `report.limitedByCeiling` is true; `report.output` is the loudness ACTUALLY achieved (compare it to your target to see the shortfall \u2014 never assume the target was hit without checking this). \u26A0\uFE0F `report.limitedByCeiling` DOES NOT TELL YOU WHETHER THE CLAMP ACTUALLY COST YOU LOUDNESS \u2014 it reads `true` in BOTH a near-miss and a bounce that landed far under target; the field that discriminates is `report.output.integratedLufs` against your `lufsTarget`. \u26A0\uFE0F ADDING A MASTER LIMITER DOES NOT FIX A SHORTFALL BY ITSELF (MEASURED: with a limiter at truePeak/ceilingDb -1 already on the master chain, a bounce still landed -18.34 LUFS against a -14 target, appliedGainDb 3.90, limitedByCeiling true \u2014 unchanged). MECHANISM: this tool's normalizing gain is applied AFTER the whole master insert chain, and its clamp is computed from the POST-chain true peak \u2014 so a limiter sitting later in that same chain has nothing left to protect; it never sees the un-normalized signal at a level where clamping would bite less. What actually works is putting a `gain` insert at the FRONT of the master chain, index 0, AHEAD of the limiter (fx_add with trackId \"master\", kind \"gain\", same move mixer_set_master_volume's own description recommends past its +6 dB ceiling) \u2014 MEASURED: gainLinear 2.5 ahead of the limiter landed -14.83 LUFS / -1.0000 dBTP, on target. `report.input` is the pre-gain measurement; `report.output` is RE-MEASURED from the gained audio (never derived from input + gain), so it is ground truth for the file written to disk. Any loudness field \u2014 in either input or output \u2014 can come back OMITTED (null): that means the signal sits at/below the -70 LUFS silence gate. A gated-silent program WITH a requested `lufsTarget` errors (there is nothing to normalize toward); silence without a target still succeeds, with all-null measurements. Pass `excludeTrackIds` to bounce an INSTRUMENTAL / minus-vocal version \u2014 the full session with those tracks silenced for this render only, project untouched; note that normalization then measures the instrumental's OWN loudness, not the full mix's, so a mix and its instrumental normalized to the same target end up at the same LUFS as each other rather than at the same relative level. Returns `{path, durationSeconds, sampleRate, channels, report: {input, output, appliedGainDb, lufsTarget?, truePeakCeilingDbtp, limitedByCeiling}, excludedTracks?}`.",
     inputSchema: {
       path: external_exports.string().min(1).optional().describe(
         "Absolute path (or a path starting with ~ for the home directory) to write the rendered .wav file to. When omitted, the app picks a temp file location and returns it in the result's `path`."
@@ -48330,36 +48434,48 @@ registerTool(
   "clip_remove_many",
   {
     title: "Remove several clips as one undo step",
-    description: "Permanently remove SEVERAL clips \u2014 audio or MIDI, on one or several tracks \u2014 in ONE undo step. Prefer this over calling clip_remove in a loop: N separate clip_remove calls cost N undo steps, so edit_undo would only restore the last one. ALL-OR-NOTHING: every id must resolve to a live clip and must not belong to a take group (the clip_remove contract) or the WHOLE call is refused and the project is left untouched \u2014 never a partial delete. Duplicate ids collapse. `ids` may be empty, which is a safe no-op. WHICH refusal you get is deterministic (m23-am): an unknown id is reported before any take-group member, and when several ids are take-group members the error names the first one in arrangement order \u2014 track order, then the clip's position in its track \u2014 never the order you happened to pass them in. Returns `{clips}`, the removed clips.",
+    description: "Permanently remove SEVERAL clips \u2014 audio or MIDI, on one or several tracks \u2014 in ONE undo step. Prefer this over calling clip_remove in a loop: N separate clip_remove calls cost N undo steps, so edit_undo would only restore the last one. ALL-OR-NOTHING: every id must resolve to a live clip and must not belong to a take group (the clip_remove contract) or the WHOLE call is refused and the project is left untouched \u2014 never a partial delete. Duplicate ids collapse. `ids` may be empty, which is a safe no-op. WHICH refusal you get is deterministic (m23-am): an unknown id is reported before any take-group member, and when several ids are take-group members the error names the first one in arrangement order \u2014 track order, then the clip's position in its track \u2014 never the order you happened to pass them in. Returns `{clips}`, the removed clips. \u26A0\uFE0F EACH REMOVED MIDI CLIP'S NOTES ARE OMITTED BY DEFAULT (changed from earlier behavior, m31-b): a deletion is a pure mutation \u2014 you almost never need the content of what you just deleted, and it is gone anyway (recoverable only via edit_undo, which restores it whole, not by copying notes out of this response). Measured: removing ten clips cost 199,858 chars / 7,332 lines to report a deletion. Each entry in `clips` instead carries `notesOmitted: true` and `noteCount`. Pass `returnNotes: true` to get every removed clip's notes back inline anyway.",
     inputSchema: {
       ids: external_exports.array(external_exports.string().uuid()).describe(
         "Ids of the clips to remove, from project_snapshot. May be empty (a no-op). Order does not matter; duplicates collapse."
+      ),
+      returnNotes: external_exports.boolean().optional().describe(
+        "Whether each removed MIDI clip's notes are echoed back in `clips`. Defaults to FALSE (changed from earlier behavior, m31-b) \u2014 pass true to get them back inline anyway. When omitted each clip in the response carries `notesOmitted: true` plus `noteCount` instead of `notes`."
       )
     }
   },
-  async ({ ids }) => toToolResult(() => bridge.send("clip.removeMany", { ids }))
+  async ({ ids, returnNotes }) => toToolResult(async () => {
+    const result = await bridge.send("clip.removeMany", { ids });
+    return returnNotes === true ? result : stripNotesFromResult(result);
+  })
 );
 registerTool(
   "clip_move_many",
   {
     title: "Move several clips together, rigidly, as one undo step",
-    description: "Translate SEVERAL clips \u2014 possibly on different tracks \u2014 by the SAME beat delta in ONE undo step, so every gap between them survives the move exactly. Prefer this over calling clip_move in a loop: a per-clip loop applies `toStartBeat`'s own `>= 0` clamp to EACH clip independently, which can weld gaps shut the moment any one clip would cross beat 0 while the others still have room. `byBeats` is signed (positive = later, negative = earlier) and applies identically to every listed clip. WHOLE-GROUP CLAMP: if translating the group by the full `byBeats` would carry its leftmost clip past beat 0, the delta actually applied is reduced (never per-clip) so that clip lands exactly on 0 and every other clip's offset from it is preserved \u2014 check the response's `clamped`/`effectiveDeltaBeats` rather than assuming the requested `byBeats` fully applied, since it can legitimately be less. Same ALL-OR-NOTHING validation as clip_remove_many (an unknown id or a take-group member refuses the whole call). `ids` may be empty, or the clamp may reduce the effective delta to exactly 0 (e.g. the group is already at beat 0 and `byBeats` is negative) \u2014 both are safe no-ops with no undo step recorded. Landing on another same-track clip trims or removes it, same overlap policy as clip_move. Returns `{requestedDeltaBeats, effectiveDeltaBeats, clamped, trimmedClipIDs, removedClipIDs, clips}` \u2014 `clips` is every moved clip's current fields; `trimmedClipIDs`/`removedClipIDs` name any OTHER (stationary) clips the overlap policy edited.",
+    description: "Translate SEVERAL clips \u2014 possibly on different tracks \u2014 by the SAME beat delta in ONE undo step, so every gap between them survives the move exactly. Prefer this over calling clip_move in a loop: a per-clip loop applies `toStartBeat`'s own `>= 0` clamp to EACH clip independently, which can weld gaps shut the moment any one clip would cross beat 0 while the others still have room. `byBeats` is signed (positive = later, negative = earlier) and applies identically to every listed clip. WHOLE-GROUP CLAMP: if translating the group by the full `byBeats` would carry its leftmost clip past beat 0, the delta actually applied is reduced (never per-clip) so that clip lands exactly on 0 and every other clip's offset from it is preserved \u2014 check the response's `clamped`/`effectiveDeltaBeats` rather than assuming the requested `byBeats` fully applied, since it can legitimately be less. Same ALL-OR-NOTHING validation as clip_remove_many (an unknown id or a take-group member refuses the whole call). `ids` may be empty, or the clamp may reduce the effective delta to exactly 0 (e.g. the group is already at beat 0 and `byBeats` is negative) \u2014 both are safe no-ops with no undo step recorded. Landing on another same-track clip trims or removes it, same overlap policy as clip_move. Returns `{requestedDeltaBeats, effectiveDeltaBeats, clamped, trimmedClipIDs, removedClipIDs, clips}` \u2014 `clips` is every moved clip's current fields; `trimmedClipIDs`/`removedClipIDs` name any OTHER (stationary) clips the overlap policy edited. \u26A0\uFE0F EACH MOVED MIDI CLIP'S NOTES ARE OMITTED BY DEFAULT (changed from earlier behavior, m31-b): a rigid group move is a pure mutation \u2014 the notes are unchanged by it, so echoing them back was pure cost, same class of defect as clip_duplicate/clip_remove_many/clip_humanize. Each entry in `clips` instead carries `notesOmitted: true` and `noteCount`. Pass `returnNotes: true` to get every moved clip's notes back inline anyway.",
     inputSchema: {
       ids: external_exports.array(external_exports.string().uuid()).describe(
         "Ids of the clips to move together, from project_snapshot. May be empty (a no-op). Order does not matter; duplicates collapse."
       ),
       byBeats: external_exports.number().describe(
         "Signed beat delta applied identically to every listed clip. Positive moves later, negative moves earlier. May be reduced (never per-clip) if it would carry the group's leftmost clip past beat 0 \u2014 see `clamped` in the response."
+      ),
+      returnNotes: external_exports.boolean().optional().describe(
+        "Whether each moved MIDI clip's notes are echoed back in `clips`. Defaults to FALSE (changed from earlier behavior, m31-b) \u2014 pass true to get them back inline anyway. When omitted each clip carries `notesOmitted: true` plus `noteCount` instead of `notes`."
       )
     }
   },
-  async ({ ids, byBeats }) => toToolResult(() => bridge.send("clip.moveMany", { ids, byBeats }))
+  async ({ ids, byBeats, returnNotes }) => toToolResult(async () => {
+    const result = await bridge.send("clip.moveMany", { ids, byBeats });
+    return returnNotes === true ? result : stripNotesFromResult(result);
+  })
 );
 registerTool(
   "clip_move_many_by_tracks",
   {
     title: "Move several clips down or up the track list, rigidly, as one undo step",
-    description: "Move SEVERAL clips DOWN or UP the track list by the SAME whole number of tracks, rigidly, in ONE undo step \u2014 a selection spanning several tracks keeps its shape (vertical offsets between the clips are preserved). A move onto a track that cannot hold the clip REFUSES THE WHOLE CALL: a MIDI clip needs an instrument track, an audio clip needs an audio track, and bus tracks hold no clips at all \u2014 nothing is skipped and nothing is partially applied. Running off the top or bottom of the track list is CLAMPED, not refused (the whole group, never per clip) \u2014 read `effectiveTrackDelta`/`clampedTracks` rather than assuming `byTracks` fully applied, the same precedent as clip_move_many's `clamped`. `byBeats` optionally rides along in the SAME undo step, so one call can move down AND along at once (same whole-group beat-0 clamp as clip_move_many). `landings` is the per-clip truth: a move of a selection spanning several tracks lands on several tracks, so there is no single destination to report. Prefer clip_move_many_to_track when you know the destination track by id rather than a relative offset \u2014 an agent choosing the wrong one of these two is the most likely misuse. Returns `{requestedTrackDelta, effectiveTrackDelta, clampedTracks, requestedDeltaBeats, effectiveDeltaBeats, clamped, landings: [{clipId, fromTrackId, toTrackId}], trimmedClipIDs, removedClipIDs, clips}`.",
+    description: "Move SEVERAL clips DOWN or UP the track list by the SAME whole number of tracks, rigidly, in ONE undo step \u2014 a selection spanning several tracks keeps its shape (vertical offsets between the clips are preserved). A move onto a track that cannot hold the clip REFUSES THE WHOLE CALL: a MIDI clip needs an instrument track, an audio clip needs an audio track, and bus tracks hold no clips at all \u2014 nothing is skipped and nothing is partially applied. Running off the top or bottom of the track list is CLAMPED, not refused (the whole group, never per clip) \u2014 read `effectiveTrackDelta`/`clampedTracks` rather than assuming `byTracks` fully applied, the same precedent as clip_move_many's `clamped`. `byBeats` optionally rides along in the SAME undo step, so one call can move down AND along at once (same whole-group beat-0 clamp as clip_move_many). `landings` is the per-clip truth: a move of a selection spanning several tracks lands on several tracks, so there is no single destination to report. Prefer clip_move_many_to_track when you know the destination track by id rather than a relative offset \u2014 an agent choosing the wrong one of these two is the most likely misuse. Returns `{requestedTrackDelta, effectiveTrackDelta, clampedTracks, requestedDeltaBeats, effectiveDeltaBeats, clamped, landings: [{clipId, fromTrackId, toTrackId}], trimmedClipIDs, removedClipIDs, clips}`. \u26A0\uFE0F EACH MOVED MIDI CLIP'S NOTES ARE OMITTED BY DEFAULT (changed from earlier behavior, m31-b) \u2014 same reasoning as clip_move_many: the notes are unchanged by a move. Each entry in `clips` instead carries `notesOmitted: true` and `noteCount`. Pass `returnNotes: true` to get them back inline anyway.",
     inputSchema: {
       ids: external_exports.array(external_exports.string().uuid()).describe(
         "Ids of the clips to move together, from project_snapshot. May be empty (a no-op). Order does not matter; duplicates collapse."
@@ -48369,16 +48485,22 @@ registerTool(
       ),
       byBeats: external_exports.number().optional().describe(
         "Optional signed beat delta applied at the same time, so one call can move down AND along in ONE undo step. Same whole-group beat-0 clamp as clip_move_many. Defaults to 0."
+      ),
+      returnNotes: external_exports.boolean().optional().describe(
+        "Whether each moved MIDI clip's notes are echoed back in `clips`. Defaults to FALSE (changed from earlier behavior, m31-b) \u2014 pass true to get them back inline anyway. When omitted each clip carries `notesOmitted: true` plus `noteCount` instead of `notes`."
       )
     }
   },
-  async ({ ids, byTracks, byBeats }) => toToolResult(() => bridge.send("clip.moveManyByTracks", { ids, byTracks, byBeats }))
+  async ({ ids, byTracks, byBeats, returnNotes }) => toToolResult(async () => {
+    const result = await bridge.send("clip.moveManyByTracks", { ids, byTracks, byBeats });
+    return returnNotes === true ? result : stripNotesFromResult(result);
+  })
 );
 registerTool(
   "clip_move_many_to_track",
   {
     title: "Move several clips onto one named destination track, as one undo step",
-    description: 'Move SEVERAL clips onto ONE NAMED destination track, in ONE undo step. This COLLAPSES a multi-track selection by construction: relative BEAT offsets survive, relative TRACK offsets do not (there is nowhere for them to go \u2014 everything lands on one track). Use this when you know the destination by id ("move these to the Drums track"); use clip_move_many_by_tracks instead when the goal is a shape-preserving relative move \u2014 an agent choosing the wrong one of these two is the most likely misuse. A move onto a track that cannot hold a clip REFUSES THE WHOLE CALL (a MIDI clip needs an instrument track, an audio clip needs an audio track, bus tracks hold no clips at all). An unknown `toTrackId` is refused EVEN WHEN `ids` is empty \u2014 a typo\'d track id must be caught immediately, not silently ignored. Because several source tracks can collapse onto one, two of the listed clips ending up on the same beats on the destination is ALSO refused whole (move them one at a time, or use clip_move_many_by_tracks to keep them on separate tracks); two clips that already overlapped each other on the SAME source track \u2014 a sanctioned crossfade \u2014 are unaffected by this check. `byBeats` optionally rides along in the SAME undo step. Returns the SAME shape as clip_move_many_by_tracks MINUS `requestedTrackDelta`/`effectiveTrackDelta` (a destination-shaped move has no delta to report \u2014 they are omitted, not null): `{clampedTracks, requestedDeltaBeats, effectiveDeltaBeats, clamped, landings: [{clipId, fromTrackId, toTrackId}], trimmedClipIDs, removedClipIDs, clips}`.',
+    description: "Move SEVERAL clips onto ONE NAMED destination track, in ONE undo step. This COLLAPSES a multi-track selection by construction: relative BEAT offsets survive, relative TRACK offsets do not (there is nowhere for them to go \u2014 everything lands on one track). Use this when you know the destination by id (\"move these to the Drums track\"); use clip_move_many_by_tracks instead when the goal is a shape-preserving relative move \u2014 an agent choosing the wrong one of these two is the most likely misuse. A move onto a track that cannot hold a clip REFUSES THE WHOLE CALL (a MIDI clip needs an instrument track, an audio clip needs an audio track, bus tracks hold no clips at all). An unknown `toTrackId` is refused EVEN WHEN `ids` is empty \u2014 a typo'd track id must be caught immediately, not silently ignored. Because several source tracks can collapse onto one, two of the listed clips ending up on the same beats on the destination is ALSO refused whole (move them one at a time, or use clip_move_many_by_tracks to keep them on separate tracks); two clips that already overlapped each other on the SAME source track \u2014 a sanctioned crossfade \u2014 are unaffected by this check. `byBeats` optionally rides along in the SAME undo step. Returns the SAME shape as clip_move_many_by_tracks MINUS `requestedTrackDelta`/`effectiveTrackDelta` (a destination-shaped move has no delta to report \u2014 they are omitted, not null): `{clampedTracks, requestedDeltaBeats, effectiveDeltaBeats, clamped, landings: [{clipId, fromTrackId, toTrackId}], trimmedClipIDs, removedClipIDs, clips}`. \u26A0\uFE0F EACH MOVED MIDI CLIP'S NOTES ARE OMITTED BY DEFAULT (changed from earlier behavior, m31-b) \u2014 same reasoning as clip_move_many. Each entry in `clips` instead carries `notesOmitted: true` and `noteCount`. Pass `returnNotes: true` to get them back inline anyway.",
     inputSchema: {
       ids: external_exports.array(external_exports.string().uuid()).describe(
         "Ids of the clips to move together, from project_snapshot. May be empty \u2014 toTrackId is still validated even so. Order does not matter; duplicates collapse."
@@ -48388,10 +48510,16 @@ registerTool(
       ),
       byBeats: external_exports.number().optional().describe(
         "Optional signed beat delta applied at the same time, so one call can move down AND along in ONE undo step. Defaults to 0."
+      ),
+      returnNotes: external_exports.boolean().optional().describe(
+        "Whether each moved MIDI clip's notes are echoed back in `clips`. Defaults to FALSE (changed from earlier behavior, m31-b) \u2014 pass true to get them back inline anyway. When omitted each clip carries `notesOmitted: true` plus `noteCount` instead of `notes`."
       )
     }
   },
-  async ({ ids, toTrackId, byBeats }) => toToolResult(() => bridge.send("clip.moveManyToTrack", { ids, toTrackId, byBeats }))
+  async ({ ids, toTrackId, byBeats, returnNotes }) => toToolResult(async () => {
+    const result = await bridge.send("clip.moveManyToTrack", { ids, toTrackId, byBeats });
+    return returnNotes === true ? result : stripNotesFromResult(result);
+  })
 );
 
 // src/index.ts

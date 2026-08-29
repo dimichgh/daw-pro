@@ -10,19 +10,33 @@ This is the shared reference every agent in this plugin (`producer`, `composer`,
 `arranger`, `sound-designer`, `mix-engineer`, `finisher`) and every skill
 points at.
 
-⚠️ **THE TWO COUNTS BELOW ARE STALE (last measured 2026-08-17) and are kept only as a
-rough sense of scale. Do not quote them as current — and do NOT infer from a wrong count
-that the traps further down are stale too: each of those is pinned to a session that paid
-for it and is maintained separately.** Live totals live in `docs/ARCHITECTURE.md`
-§"Wire surface — CURRENT TOTALS"; naive greps lie on both surfaces, so a real count needs
-a `ReferenceCommandTests` run, not a `grep -c`.
+⚠️ **THE TWO COUNTS BELOW WERE STALE (last measured 2026-08-17) — RE-MEASURED
+2026-08-28 (m27-h) by a stated, defensible method, not a guess.** Do NOT infer
+from a past-wrong count that the traps further down are stale too: each of
+those is pinned to a session that paid for it and is maintained separately.
+Live totals live in `docs/ARCHITECTURE.md` §"Wire surface — CURRENT TOTALS";
+naive greps lie on both surfaces (`grep -c 'registerTool('` alone returns 195,
+which OVER-counts — see the method below), so a real count needs a derivation
+you can state and defend, not a bare `grep -c`.
 
 It reflects the tool surface enumerated from
-`mcp-server/src/server.ts` (185 tools — re-counted 2026-08-17, m26-k:
-151 registered through the strict wrapper + 34 direct) and
+`mcp-server/src/server.ts` (**192 tools**, re-derived 2026-08-28: the MCP
+tool↔command bijection test, `mcp-server/test/audit-tools.test.ts`, defines
+`tool count = commands + |exception table B| + |exception table C|` — 187
+commands (below) + 3 Table-B tools with no backing command at all
+(`generate_image`, `generate_lyrics`, `generate_song_suno` — they call a
+generation provider directly) + 2 Table-C tools that bridge to an EXISTING
+command, `track.setInstrument`, under a friendlier name/shape
+(`instrument_set_sampler_param`, `instrument_set_sampler_zones`) = 192.
+Cross-checked by extracting the literal name argument of every `registerTool(`
+call: 192 unique names — and the raw `registerTool(` occurrence count, 195,
+minus its 3 non-registration matches (one doc comment, the wrapper's own
+`function registerTool(` definition, and the wrapper's internal
+`server.registerTool(name, …)` call, which passes a variable, not a literal)
+also lands on 192, agreeing three ways) and
 `Sources/DAWControl/Commands.swift`
-(180 commands; the 3 extra tools call a generation provider directly and have no
-backing command)
+(**187 commands** — the `CommandRouter.allCommands.count == 187` pin in
+`Tests/DAWControlTests/RenderCommandTests.swift`)
 in the DAW Pro repo — not memory, and not the app's own in-app Copilot
 catalog (`Sources/DAWControl/CopilotCatalog.swift`), which is a **different,
 smaller, differently-named** tool set for a different AI (the app's built-in
@@ -196,11 +210,21 @@ pushing the fader — the fader is a trim, not a makeup stage.
 `track_set_instrument` is a partial update everywhere, `sampler` included —
 omit `zones` and the track's zones stand, so a one-global tweak
 (`{sampler: {release: 0.4}}`) no longer costs a 309-zone resend. **But a
-`zones` array you DO send replaces the map wholesale.** There is no
-merge-by-zone-id yet (zone ids are emitted in snapshots but re-minted on
-every set), so a partial zone list deletes the zones you left out. Send
-`zones` only when you mean the complete map; `zones: []` is the deliberate
-clear.
+`zones` array you DO send to `track_set_instrument` replaces the map
+wholesale and re-mints every zone's `id`** (ids you captured before that
+call are dead afterward), so a partial zone list deletes the zones you
+left out. Send `zones` only when you mean the complete map; `zones: []`
+is the deliberate clear.
+
+**For touching one or a few EXISTING zones, don't use `track_set_instrument`
+at all — use `instrument_set_sampler_zones`.** ⚠️ CORRECTED 2026-08-28: this
+is now the real merge-by-zone-id path (m26-g). Each entry names a zone by
+`id` (captured from `instrument_describe_sampler`/`project_snapshot` on the
+SAME track — an id from a different track, or one that never existed, is a
+readable error and nothing lands) and patches only the fields it mentions;
+every other field on that zone, and every zone not named at all, is left
+exactly as it was. Reach for it before resending a 309-zone map to change
+one release time.
 
 ### Making the sampler sound when you have no sample files
 
@@ -298,6 +322,31 @@ that just started. The engine model allows same-pitch overlap (offs pair
 by note id) but that id is lost when flattened for a hosted AU, so the
 rule that is safe everywhere wins.
 
+### Bulk composition: Standard MIDI File + `clip_import_midi`, not JSON + `clip_add_midi`
+
+Composing large arrangements as JSON notes is prohibitively expensive. A
+twelve-bar blues expressed as notes costs ~30 KB (drums 149 notes / 9.2 KB,
+guitar 144 notes / 8.9 KB, …), and a complete arrangement's 5,248 notes
+would have been ~330 KB on the wire. Write a Standard MIDI File instead:
+that arrangement went in as **45 KB of SMF**, one call per part, with a
+per-part note-count report.
+
+**The recipe:** Write a `.mid` file with your preferred tool. Create a MIDI
+clip for each part in DAW Pro. Call `clip_import_midi` with `dryRun: true`
+first to see which parts are in the file. Then import the part you want by
+index.
+
+⚠️ **THE CRITICAL LIMIT:** `clip_import_midi` **replaces the clip's notes
+WHOLESALE and never changes the clip's length.** Do not use it to append to
+a groove you have already placed — every note in that clip will be silently
+deleted and replaced. An agent that reaches for it expecting to extend
+material will lose what was there. It is not an additive operation.
+
+To grow the clip after import, call `clip.fitToContent`. If you need true
+additive composition, write everything into the SMF and import once. This
+is the same wall as `project_snapshot`'s ~290 KB size, approached from the
+write side.
+
 ### Nobody in this plugin can hear anything
 
 No agent here has ears. Every timbral judgement you make is inference from
@@ -314,6 +363,66 @@ guessing. What is actually measurable:
 | What pitch is this audio, over time? | `clip_detect_pitch` |
 | What did the file I just wrote actually contain? | `audio_profile_file` (peak/RMS/DC/silence — explicitly NOT a loudness meter) |
 | How does my mix compare to a reference track? | `reference_import` + `reference_compare` |
+| Does velocity change this patch's TONE, or only its volume? | `instrument_probe_liveness` |
+
+`instrument_probe_liveness` renders a velocity ladder — the same pitch played
+at several ascending velocities — on one instrument track, and measures how
+far the spectral CENTROID (brightness, Hz) moved against how far the RMS
+(level, dB) moved. Big level spread + flat centroid means velocity is wired
+to nothing but a volume knob, which is exactly what makes a lead sound "like
+a toy" on an exposed line — a judgement no other tool here can make, because
+it is about timbre, not level or loudness. It returns FOUR verdicts, not two:
+`static` (level moved, timbre did not), `live` (velocity changes the tone),
+`silent` (a rung produced no measurable signal at all), and `inconclusive`
+(the ladder never moved the LEVEL enough to test the question — a
+velocity-insensitive patch, or a compressor/limiter flattening it). Wire
+values are lowercase strings. ⚠️ **`silent` is deliberately NOT `static`** —
+"the probe could not measure this" and "the probe measured it and found it
+flat" are different diagnoses (silent usually means the instrument is not
+loaded, does not cover that pitch, or is muted upstream; do not report it as
+a dead patch). ⚠️ **The verdict thresholds are an uncalibrated hypothesis
+derived from one instrument family** (the response's `thresholds` carries
+`calibrated: false`) — the raw per-velocity `ladder` (rmsDb, centroidHz,
+timbreGroup) is always returned specifically so you can read the evidence and
+form your own view instead of inheriting the verdict blind. ⚠️ **It measures
+LIVELINESS, not quality** — nothing about tuning, articulation, or whether a
+sound is pleasant; never quote a `live` verdict as "the instrument sounds
+good." It is not an edit (a throwaway dry render, no undo step). Measured
+ground truth worth citing: Apple's built-in GM DLS alto sax reads centroid
+~2100 / 2099 / 2100 / 2099 Hz across a 28 dB RMS spread across four
+velocities — `static`, and the exact patch a user separately called "a toy"
+by ear. GeneralUser GS's alto sax, sampled at the same pitch, reads
+2237 → 2331 → 2384 Hz — `live`.
+
+⭐⭐ **THOSE FIGURES ARE NOW CONFIRMED LIVE, and confirming them found a real
+bug — so the numbers you get today are NOT the ones an older document may
+quote.** Measured on staging 2026-08-28 against both real banks:
+
+| bank | ladder (Hz) | spread | verdict |
+|---|---|---|---|
+| Apple GM DLS alto sax | 2165 / 2167 / 2165 / 2167 | 0.09 % | `static` |
+| GeneralUser GS alto sax | 2371 / 2489 / 2557 / 2557 | 7.87 % | `live` |
+
+The GeneralUser reading resolves into **three distinct timbre groups**, with
+velocity 95 and 127 sharing one — real velocity layers, visible in
+`timbreGroup`.
+
+⚠️ **Until that run, the tool answered `static` for BOTH — it called the
+layered saxophone lifeless.** The centroid was power-weighted (|X|²) instead
+of the standard magnitude-weighted (|X|), which over-weights the fundamental
+and under-weights the upper harmonics — precisely where layers differ. It
+compressed a true 6.59 % spread to 0.295 %. Fixed in `TimbreLiveness.centroid`.
+
+⭐ **The lesson worth carrying, because it generalises past this tool: the
+probe's own self-check could not catch it.** The control measures pure sines,
+and a single-partial signal reads identically under both weightings. **A
+control built from a signal simpler than the signal under test can be blind
+to an entire class of error while passing perfectly.** Twenty-six passing
+tests agreed with it. Only a real instrument disagreed.
+
+So: trust the returned table, and if a reading ever looks implausible for a
+patch you have reason to believe in, say so rather than accepting the verdict
+— that scepticism is what found this.
 
 `note_audition` is a SIGNAL-PATH check, not a timbre check. `audible: true`
 means the strip isn't muted or solo-excluded, the engine is running, and —
@@ -366,9 +475,10 @@ been what sounded** — retry before trusting it.
 ## Policy: voice-conversion tools are intentionally not exposed
 
 `vc_sidecar_status` / `vc_sidecar_start` / `vc_sidecar_stop` /
-`vc_convert_vocals` / `vc_train_voice` / `vc_list_voices` exist on the MCP
-surface but are **not** granted to any agent in this plugin, to keep the
-roster tight and avoid any ambiguity around voice content. If a future
+`vc_convert_vocals` / `vc_train_voice` / `vc_list_voices` /
+`vc_import_voice_model` exist on the MCP surface but are **not** granted to
+any agent in this plugin, to keep the roster tight and avoid any ambiguity
+around voice content. If a future
 version of this plugin adds them (only to `sound-designer`, per the DAW Pro
 project's own policy), the **rights-responsibility policy** applies: a
 `voiceId` may be trained from the user's own recordings **or** be a
@@ -397,6 +507,20 @@ real conversion).
   `project_overview` for its connection-sanity check instead.
 - **`generate_image`**: generates DAW Pro's own UI/marketing assets — a dev
   tool, not a music-making one.
+- **MIDI-learn** (`midi_get_control_map`, `midi_set_control_map`,
+  `midi_learn_control`): mapping a hardware knob to a DAW parameter is the
+  same human-at-the-instrument category as live recording input —
+  `midi_learn_control`'s entire mechanism is "ask the user to turn the knob
+  they want," which no agent can do, and the other two exist to serve that
+  same physical rig. The mapping table is machine setup, not song content: it
+  is not saved with the project.
+- **`pad_preview_effort`**: streams ONE live breath-pad value so a gesture can
+  be HEARD while it is in progress — nothing is written, no undo step, and
+  its entire value proposition is a human listening in real time during a
+  drag. No agent here has ears (see "Nobody in this plugin can hear
+  anything" above), so this tool cannot do anything useful in an agent's
+  hands. The tool that actually commits a shape, `clip_apply_effort_shape`,
+  IS granted (to `composer`) and needs no live listener.
 
 ## Genre-neutral defaults worth knowing
 

@@ -1,5 +1,141 @@
 # Changelog
 
+## 2026-08-28 — The instrument meter was calling good instruments dead
+
+The measurement described below shipped, passed twenty-six tests, and was wrong.
+
+Run against two real saxophones — one a single recorded sample, one with genuine
+velocity layers — it reported both as lifeless. The layered one is precisely the case
+the tool exists to recognise, and it was told, confidently, that velocity was only a
+volume knob.
+
+The cause was in how brightness was averaged across the spectrum. The measurement
+weighted each frequency by the square of its strength rather than its strength. That
+sounds like a technicality and is not: squaring makes the lowest, loudest part of a note
+dominate, and the lowest part of a note barely changes when you play harder. The
+information that distinguishes a layered instrument lives in the upper harmonics, and
+squaring is exactly what buries it. A real difference of 6.6% was reported as 0.3%.
+
+It is fixed. The same two instruments now read 0.09% and 7.9%, and the layered one
+resolves into three distinct tones — with the two loudest velocities correctly sharing
+one, which is how that instrument was actually built.
+
+Two things about how this was found are worth saying, because neither is about
+saxophones.
+
+The tool checks itself before every measurement: it generates a low tone and a high one
+and refuses to answer at all if it cannot tell them apart. That check passed the whole
+time, and could never have failed. A pure tone has only one frequency in it, and for a
+single frequency both ways of averaging give the same answer. **A self-test built from
+something simpler than the real thing can be blind to an entire category of mistake
+while passing perfectly.**
+
+And every existing test agreed with it. They used a synthetic instrument whose layers
+were far enough apart that both methods reached the same verdict. Twenty-six passing
+tests, and the only thing that disagreed was a real instrument.
+
+There is now a test that would have caught it, built from a tone with several harmonics
+and checked against the arithmetic rather than against a previously recorded result.
+Put the old method back and it is the only test that fails.
+
+## 2026-08-28 — An instrument that only gets louder can now be measured
+
+A saxophone sounded, in one listener's words, "like a toy". Nothing in the app disagreed: every
+test passed, the levels were correct, the mix met its loudness target. The problem was real and
+none of our instruments could see it.
+
+It is measurable, though. On a real instrument, playing harder changes the tone as well as the
+volume — lean on a saxophone and it gets brighter, not just louder. A single recorded sample
+played at different volumes does not. So: play the same note at rising velocities, and compare
+how far the loudness moved against how far the brightness moved. A large change in one with no
+change in the other is the signature of a sound that will read as lifeless.
+
+That measurement is now a command. It reports the full table, not just a verdict, so you can
+disagree with the conclusion from the evidence.
+
+Four answers are possible, and the distinctions matter: the tone moved (fine), the tone did not
+move (this will sound lifeless on anything exposed), nothing sounded at all, or the velocities
+never changed the loudness in the first place — in which case the question was never actually
+tested. "Nothing was measured" and "we measured, and it was flat" are different findings and
+never share an answer.
+
+It also refuses to answer at all if it cannot first tell a low tone from a high one on a signal
+it generates itself. A meter that cannot hear the difference would report every instrument as
+lifeless, and that reading would look exactly like a true one.
+
+What it does not do is judge quality. It cannot tell you a sound is out of tune, wrong for the
+part, or simply ugly. Taste is still yours. Lifelessness is now ours.
+
+## 2026-08-28 — Bulk edits stop mailing back every note they touched
+
+Duplicating a clip, humanising a performance, or deleting several clips used to return every
+note involved. Measured: duplicating a 149-note clip returned about 24,000 characters; removing
+ten clips returned nearly 200,000 — two hundred kilobytes to report a deletion; humanising a
+guitar part returned 260,000. The useful answer in each case was a handful of identifiers and a
+count.
+
+Those replies now carry the counts, and say explicitly that the notes were left out so a short
+reply is never mistaken for an empty clip.
+
+**This one changes the default**, unlike the same fix applied to note-writing earlier this month,
+where the previous behaviour was kept. Ask for the notes and they come back in full, exactly as
+before.
+
+Two operations deliberately kept the old default, for the same underlying reason: splitting a
+clip and writing its notes both return information you could not have predicted. A split
+truncates any note crossing the cut, and writing notes mints new identifiers. Those still arrive
+complete.
+
+## 2026-08-28 — The tool server now says when it is running stale code
+
+A rebuilt server that has not been restarted serves the old code, and nothing about it looks
+wrong. This cost a whole working session: the source was correct, the build was correct, a search
+of the built file found the new feature — and the running process had never read it, having
+started six hours earlier. The failure mimics "that was never built", which is the exact wrong
+conclusion.
+
+The connection report now carries when the process started, when its code was last built as the
+process saw it, and what that file says now. When the last two disagree, the process is running
+stale code, and the report says so directly rather than leaving it to be inferred.
+
+## 2026-08-28 — Corrections to two pieces of guidance that were wrong
+
+The advice for fixing a too-quiet export did not work. It suggested adding a limiter and then
+raising the level; measured, that lands nowhere near the target, because the level adjustment
+happens after the whole master chain and is limited by what that chain already did. The
+correction names the ordering that does work: the gain goes at the front of the chain, ahead of
+the limiter.
+
+Separately, the song templates listed each genre's tracks by name without saying which ones can
+hold played notes and which can only hold recorded audio. Every genre is now annotated. The
+lo-fi template is the trap worth naming: its track called "Samples" is audio-only, and it is
+exactly the one you would reach for to hold a sampler.
+
+## 2026-08-28 — A sound bank we cannot play now says so, instead of vanishing
+
+Dropping a `.sf3` SoundFont into your bank folder used to do nothing at all. No error, no
+warning, no entry in the list — the file was simply not there as far as the app was concerned.
+You could open the folder, see the file, open the instrument picker, and not see it, with
+nothing to tell you why.
+
+That matters more than it sounds, because `.sf3` is the format most people already have.
+MuseScore, which is where nearly everyone gets a free soundfont, hands out `.sf3` files and
+nothing else. So the most likely first thing anyone tries is also the one thing that failed in
+silence.
+
+The bank list now shows it. An `.sf3` appears with an UNSUPPORTED badge and a line saying what
+to do — open it in MuseScore or Polyphone, export a `.sf2`, and import that. It is deliberately
+shown rather than hidden: being invisible was the whole problem.
+
+Showing it does not make it playable, and that was guarded carefully. You cannot pick it, an
+agent cannot select it, and importing it still refuses with the same plain message it always
+gave. Clicking it in the picker does not quietly do nothing either — it repeats the reason.
+Trading a bank that fails silently for an instrument that plays silence would have been a worse
+bug than the one being fixed.
+
+Playing `.sf3` files directly is a separate, larger job and is not done. Today the app plays
+`.sf2` and `.dls`, and now it says so where you can see it.
+
 ## 2026-08-23 — Arrow keys step over a track they cannot land on
 
 Dragging a clip to another track worked with the mouse and got stuck with the keyboard. With an

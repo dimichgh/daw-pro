@@ -106,6 +106,46 @@ Number them (F1, F2, …) so the roadmap and the log can cite each other.
   agent's hours-old `467/467` was quoted in the commit message for a tree where it was no
   longer true.
 
+- ⛔⛔⛔ **RESTART THE SERVING PROCESS, AND VERIFY THE RESTART FROM THE CLIENT SIDE.**
+  **VERIFYING THE ARTIFACT IS NOT VERIFYING WHAT IS RUNNING**, and the grep-the-bundle step
+  above does NOT cover this — it passes while being completely wrong.
+
+  Bought 2026-08-24, session 2: the MCP server process had started at **16:41:06** and
+  `dist/server.js` was built at **22:51:31** — a **6 h 10 min** gap. The source was right,
+  the build was right, `grep` found the new parameter in both, **and the live tool schema
+  did not have it**, because the node process had never read the file. An entire session ran
+  against a tool surface six hours stale.
+
+  ⚠️ **The failure is SILENT and it mimics "that feature was never built"** — which is the
+  exact wrong conclusion. Only reading the source proved otherwise.
+
+  So: after regenerating, **restart the server process**, then confirm from the CLIENT that
+  a schema field which did not exist before is now present. A file on disk is not evidence
+  about a process that started before it.
+
+  ⭐⭐ **THERE IS NOW AN INSTRUMENT FOR THIS — USE IT INSTEAD OF INVENTING A PROBE (m31-a,
+  shipped 2026-08-28).** `app_connection_info` reports the server's OWN build identity:
+
+  | field | meaning |
+  |---|---|
+  | `serverProcessStartedAt` | when the running process booted |
+  | `serverBuildMtimeAtStartup` | `server.js` mtime **as the process read it** |
+  | `serverBuildMtimeNow` | that same file's mtime **right now** |
+  | `serverBuildMayBeStale` | the two disagree — the diagnosis, not a hint |
+
+  **`serverBuildMayBeStale: true` means the process is serving code older than what is on
+  disk.** That is the whole 6-hour bug, reported as a boolean instead of reconstructed from
+  timestamps by hand.
+
+  ⚠️ **AND IT IS ITS OWN POSITIVE CONTROL, WHICH IS WHY IT BEATS A HAND-BUILT PROBE.** These
+  four fields did not exist before m31-a. If `app_connection_info` comes back WITHOUT them,
+  you have not restarted — you are talking to the old process, and it just told you so. A
+  probe that cannot distinguish "restarted" from "never restarted" is the failure this whole
+  entry is about; this one cannot fail that way.
+
+  ⛔ **Do not read these off a bundle grep.** The point is what the PROCESS answers, not what
+  the file contains — that confusion is the original defect.
+
 - **Verify the session's own shipped work in the running app**, not just in the suite. A
   feature that has only ever been exercised by tests has not been used.
 
@@ -164,3 +204,19 @@ it: an image whose parameters are unstated is not evidence.
 
 - `docs/dogfood/2026-08-23-session-1.md` — 7 defects, 2 meta-findings, one real regression
   caught the same day it shipped. Roadmap: **M30**.
+- `docs/dogfood/2026-08-24-session-2.md` — 5 findings, 2 meta-findings, 2 near-misses I
+  caught on myself. Three arrangements in three contrasting FORMS (twelve-bar, loop-based,
+  32-bar AABA), all landing within 0.9 dB of −14 LUFS at −1.00 dBTP, cycle 1 independently
+  re-measured with `ffmpeg ebur128`. Roadmap: **M31**.
+
+  ⭐ **Its keeper: nothing that broke was in the audio.** Every finding sat on the agent
+  surface, and three of five were cases where **the product knew something and did not say
+  it** — the server knew its build time, the roster knew its track kinds, the duplicate knew
+  the caller already had those notes.
+
+  ⭐ **And its practical tip: for bulk composition, write a Standard MIDI File and
+  `clip_import_midi` it.** Jazz's 5,248 notes went in as **45 KB of SMF instead of ~330 KB
+  of JSON**, one call per part, with a per-part note-count report to verify against. ⚠️
+  **The critical limit (see daw-wire-reference): `clip_import_midi` replaces notes
+  wholesale and never changes clip length — it is not additive.** An agent that reaches
+  for it expecting to append will silently lose the existing notes.

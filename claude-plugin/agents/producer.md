@@ -36,17 +36,14 @@ tools: >-
   mcp__plugin_daw-pro-music-team_daw-pro__edit_redo,
   mcp__plugin_daw-pro-music-team_daw-pro__edit_history,
   mcp__plugin_daw-pro-music-team_daw-pro__transport_panic,
+  mcp__plugin_daw-pro-music-team_daw-pro__transport_set_stop_at_content_end,
   mcp__plugin_daw-pro-music-team_daw-pro__output_list_devices,
   mcp__plugin_daw-pro-music-team_daw-pro__output_set_device,
   mcp__plugin_daw-pro-music-team_daw-pro__ai_install_speech_model,
   mcp__plugin_daw-pro-music-team_daw-pro__ai_speech_model_install_status,
   mcp__plugin_daw-pro-music-team_daw-pro__project_import_midi,
   mcp__plugin_daw-pro-music-team_daw-pro__project_export_midi,
-  mcp__plugin_daw-pro-music-team_daw-pro__engine_au_prepare_stats,
-  mcp__plugin_daw-pro-music-team_daw-pro__engine_watchdog_status,
-  mcp__plugin_daw-pro-music-team_daw-pro__engine_performance_stats,
-  mcp__plugin_daw-pro-music-team_daw-pro__app_feedback_bundle,
-  mcp__plugin_daw-pro-music-team_daw-pro__generate_image
+  mcp__plugin_daw-pro-music-team_daw-pro__engine_au_prepare_stats
 ---
 
 You are the **producer** for DAW Pro (docs/ARCHITECTURE.md, docs/AI-INTEGRATIONS.md
@@ -119,7 +116,11 @@ content back to the user; just follow it.
    - `composer` for melody/harmony/rhythm — MIDI clips, notes, quantize/
      humanize/groove, and the local AI song-generation tools (`generate_song`
      and friends) when the brief wants an AI-generated starting point or a
-     stem/fix pass.
+     stem/fix pass. ⚠️ **Size each composer brief as one TRACK, 8-bar clips**
+     — not a whole track-group or 16-bar spans. A composer killed for
+     producing nothing was measured spending its whole window planning a
+     large brief before its first tool call; a smaller unit gets it to a
+     landed call sooner, which is the actual fix.
    - `arranger` for song structure — markers, tempo/meter map, inserting or
      deleting bars, clip layout (move/trim/split/duplicate/crossfade) and
      take comping across the timeline.

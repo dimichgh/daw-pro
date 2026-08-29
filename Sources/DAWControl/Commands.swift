@@ -250,6 +250,7 @@ public final class CommandRouter {
         "instrument.importSoundBank",
         "instrument.importSampleLibrary",
         "instrument.describeSampler",
+        "instrument.probeLiveness",
         "mixer.setMasterVolume",
         "mixer.applyPreset",
         "mixer.masterAnalysis",
@@ -1208,9 +1209,12 @@ public final class CommandRouter {
             ]))
 
         case "instrument.listSoundBanks":
-            // No params. GM first, then each scanned dir's *.sf2/*.dls (§6.2).
-            // Never errors — an unreadable scan dir is skipped silently. Pure
-            // file discovery through the store's injected SoundBankLibrary.
+            // No params. GM first, then each scanned dir's *.sf2/*.dls (§6.2)
+            // AND any *.sf3, which is listed with supported:false plus an
+            // unsupportedReason instead of being dropped in silence (m31-g);
+            // every selection gate still refuses it. Never errors — an
+            // unreadable scan dir is skipped silently. Pure file discovery
+            // through the store's injected SoundBankLibrary.
             try params.rejectUnknownKeys([], verb: "instrument.listSoundBanks")
             return .success(request.id, .object([
                 "banks": .array(store.availableSoundBanks().map(soundBankInfoJSON)),
@@ -1446,6 +1450,94 @@ public final class CommandRouter {
                 describeSamplerResult["zones"] = .array(describeSamplerPage.map(Self.samplerZoneJSON))
             }
             return .success(request.id, .object(describeSamplerResult))
+
+        case "instrument.probeLiveness":
+            // m31-f ② — "does this instrument have more than one timbre?", as
+            // a measurement an agent that cannot hear can act on.
+            //
+            // Renders a VELOCITY LADDER on the track (same pitch, one note per
+            // velocity, ascending) and reports how far the spectral CENTROID
+            // moved against how far the RMS moved. A big level spread with a
+            // flat centroid is a single-sample patch: velocity is a volume
+            // knob, and it reads as a toy on any exposed melodic part. That is
+            // the exact complaint a user made about an M31 dogfood render while
+            // three cycles of green tests said nothing.
+            //
+            // Named `instrument.probeLiveness` for sibling consistency with the
+            // existing read-only `instrument.*` verbs (`describeSampler`,
+            // `listSoundBanks`) — it asks a question about the INSTRUMENT on a
+            // track, not about the render, so `render.*` would have filed it
+            // next to the wrong neighbours. The mechanical MCP rule maps it to
+            // `instrument_probe_liveness` with no exception-table entry.
+            //
+            // params: trackId (required), pitch? (default 57 = A3 — the pitch
+            // the shipped calibration figures were measured at), velocities?
+            // (default [25, 60, 95, 127], ascending, >= 2), noteSeconds?
+            // (default 1.0, the shell probe's geometry).
+            //
+            // NOT an edit: the ladder is rendered from a synthetic one-track
+            // copy built and thrown away inside the store. Nothing is inserted,
+            // no undo entry is pushed, `store.tracks` is untouched. There is
+            // deliberately no `fromBeat`: a windowed render DROPS every MIDI
+            // note whose note-on precedes the window and would report silence
+            // for material that is fine from the top.
+            //
+            // Response: `TimbreLiveness.Result` threaded through its own
+            // Codable (can-never-drift) — {trackId, instrumentKind,
+            // instrumentDetail?, pitch, noteSeconds, sampleRate, selfCheck,
+            // ladder:[{velocity, rmsDb, centroidHz?, timbreGroup?}],
+            // rmsSpreadDb?, centroidSpreadPercent?, distinctTimbreCount,
+            // verdict, summary, thresholds, caveats}.
+            //
+            // ⭐ THREE THINGS THE SHAPE IS LOAD-BEARING ABOUT:
+            //
+            //  1. `selfCheck` rides in EVERY response, and a FAILED self-check
+            //     is an ERROR, never a verdict. A flat centroid is exactly the
+            //     shape a broken measurement produces, so a meter that cannot
+            //     tell 440 Hz from 1760 Hz is not allowed to report deadness —
+            //     that failure would be indistinguishable from a true finding.
+            //  2. `verdict: "silent"` is a DISTINCT answer from `"static"`:
+            //     "never measured anything" and "measured and found it flat"
+            //     must not produce the same output (this tree's characteristic
+            //     failure mode).
+            //  3. `ladder` is the evidence and `thresholds.calibrated` is
+            //     false on purpose. The 5 %/6 dB numbers are a HYPOTHESIS from
+            //     one instrument family; a caller is expected to be able to
+            //     disagree with the verdict from the raw table rather than
+            //     inherit an uncalibrated rule silently. `distinctTimbreCount`
+            //     — the layer count, a LOWER BOUND at these velocities — is
+            //     the more informative number than the min-to-max percentage,
+            //     because layered banks step between plateaus and need not be
+            //     monotonic.
+            try params.rejectUnknownKeys(
+                ["trackId", "pitch", "velocities", "noteSeconds"],
+                verb: "instrument.probeLiveness")
+            let livenessTrackID = try params.requireTrackID()
+            let livenessPitch = params["pitch"]?.doubleValue.map { Int($0.rounded()) }
+                ?? ProjectStore.livenessDefaultPitch
+            var livenessVelocities = ProjectStore.livenessDefaultVelocities
+            if let raw = params["velocities"] {
+                guard let array = raw.arrayValue else {
+                    throw ControlError("`velocities` must be an array of MIDI velocities"
+                        + " (1-127), ascending — e.g."
+                        + " \(ProjectStore.livenessDefaultVelocities).")
+                }
+                let parsed = array.compactMap { $0.doubleValue.map { Int($0.rounded()) } }
+                guard parsed.count == array.count else {
+                    throw ControlError("`velocities` must contain only numbers.")
+                }
+                guard parsed.count >= 2 else {
+                    throw ControlError("a velocity ladder needs at least two velocities —"
+                        + " one rung cannot show whether the timbre moves.")
+                }
+                livenessVelocities = parsed
+            }
+            let livenessNoteSeconds = params["noteSeconds"]?.doubleValue
+                ?? ProjectStore.livenessNoteSeconds
+            let livenessResult = try await store.probeInstrumentLiveness(
+                trackId: livenessTrackID, pitch: livenessPitch,
+                velocities: livenessVelocities, noteSeconds: livenessNoteSeconds)
+            return .success(request.id, try JSONValue(encoding: livenessResult))
 
         case "project.importMIDI":
             // params: path (required, absolute or ~-prefixed; .mid/.midi),
@@ -9521,7 +9613,10 @@ public final class CommandRouter {
             throw ControlError("no sound bank file at \(raw) — see instrument.listSoundBanks")
         }
         let ext = url.pathExtension.lowercased()
-        guard ext == "sf2" || ext == "dls" else {
+        // ⛔ m31-g: the wire gate that keeps a listed-but-unsupported bank
+        // (`.sf3`) unselectable. Rejects by extension, independently of
+        // `SoundBankInfo.unsupportedReason`.
+        guard SoundBankLibrary.isSupportedExtension(ext) else {
             throw ControlError(
                 "sound bank must be a .sf2 or .dls file — got \(url.lastPathComponent) (see instrument.listSoundBanks)")
         }
@@ -9572,7 +9667,10 @@ public final class CommandRouter {
         return "\(suffix) · P\(program)"
     }
 
-    /// Wire JSON for a `SoundBankInfo` (§6.2/§6.4 shape).
+    /// Wire JSON for a `SoundBankInfo` (§6.2/§6.4 shape). `supported` and
+    /// `unsupportedReason` are ADDITIVE (m31-g): every pre-existing key keeps
+    /// its meaning, and a loadable bank reads `supported: true,
+    /// unsupportedReason: null` exactly as before it had them.
     private func soundBankInfoJSON(_ info: SoundBankInfo) -> JSONValue {
         .object([
             "source": .string(info.source.rawString),
@@ -9581,6 +9679,8 @@ public final class CommandRouter {
             "format": .string(info.format),
             "builtin": .bool(info.builtin),
             "sizeBytes": .number(Double(info.sizeBytes)),
+            "supported": .bool(info.supported),
+            "unsupportedReason": info.unsupportedReason.map { JSONValue.string($0) } ?? .null,
         ])
     }
 

@@ -314,31 +314,50 @@ struct InstrumentPickerOverlay: View {
             .overlay(RoundedRectangle(cornerRadius: 5).stroke(DAWTheme.hairline, lineWidth: 1))
         }
         .buttonStyle(.plain)
-        .help("Import a SoundFont (.sf2) or DLS bank file into your library")
+        .help("Import a SoundFont (.sf2) or DLS bank file into your library — "
+              + "compressed .sf3 SoundFonts aren't supported yet")
     }
 
+    /// One bank row. ⚠️ m31-g: a DISCOVERED-BUT-UNSUPPORTED bank (a `.sf3`)
+    /// is shown here rather than hidden — being invisible was the defect — but
+    /// it must read as unavailable at a glance: amber icon, "UNSUPPORTED"
+    /// badge, its reason in place of the size line, no drill-in chevron. The
+    /// row stays tappable ONLY so the model can restate the reason in the
+    /// inline alert; it can never produce a selection.
     private func bankRow(_ bank: SoundBankInfo) -> some View {
-        Button { model.drillInto(bank) } label: {
+        let reason = bank.unsupportedReason
+        return Button { model.drillInto(bank) } label: {
             HStack(spacing: 9) {
-                Image(systemName: "pianokeys")
+                Image(systemName: reason == nil ? "pianokeys" : "exclamationmark.triangle")
                     .font(.system(size: 12))
-                    .foregroundStyle(DAWTheme.textDim)
+                    .foregroundStyle(reason == nil ? DAWTheme.textDim : DAWTheme.record)
                     .frame(width: 18)
                 VStack(alignment: .leading, spacing: 1) {
                     HStack(spacing: 6) {
                         Text(bank.name)
                             .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(DAWTheme.textPrimary)
+                            .foregroundStyle(reason == nil ? DAWTheme.textPrimary : DAWTheme.textDim)
                         if bank.builtin { tag("BUILT-IN") }
+                        if reason != nil { tag("UNSUPPORTED") }
                     }
-                    Text("\(bank.format.uppercased()) · \(byteLabel(bank.sizeBytes))")
-                        .font(.system(size: 9.5, design: .monospaced))
-                        .foregroundStyle(DAWTheme.textDim)
+                    if let reason {
+                        Text(reason)
+                            .font(.system(size: 9.5))
+                            .foregroundStyle(DAWTheme.textDim)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .multilineTextAlignment(.leading)
+                    } else {
+                        Text("\(bank.format.uppercased()) · \(byteLabel(bank.sizeBytes))")
+                            .font(.system(size: 9.5, design: .monospaced))
+                            .foregroundStyle(DAWTheme.textDim)
+                    }
                 }
                 Spacer(minLength: 0)
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(DAWTheme.textFaint)
+                if reason == nil {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(DAWTheme.textFaint)
+                }
             }
             .padding(.horizontal, 10).padding(.vertical, 8)
             .background(DAWTheme.panelRaised.opacity(0.5))
@@ -346,7 +365,7 @@ struct InstrumentPickerOverlay: View {
             .overlay(RoundedRectangle(cornerRadius: 7).stroke(DAWTheme.hairline, lineWidth: 1))
         }
         .buttonStyle(.plain)
-        .help("Browse the programs in \(bank.name)")
+        .help(reason ?? "Browse the programs in \(bank.name)")
     }
 
     // MARK: - Program browser (Pro, drilled into a bank)

@@ -109,21 +109,39 @@ public struct SoundBankInfo: Codable, Sendable, Equatable {
     public var name: String
     /// The resolved absolute path — transparency only, never persisted.
     public var path: String
-    /// `"dls"` or `"sf2"`.
+    /// `"dls"`, `"sf2"`, or a DISCOVERED-BUT-UNSUPPORTED format such as
+    /// `"sf3"` (m31-g). Always the file's real extension, lowercased — never
+    /// a guess, because a wrong `format` is exactly the silent lie this
+    /// field's neighbour exists to end.
     public var format: String
     /// True only for the system General MIDI bank.
     public var builtin: Bool
     /// File size in bytes.
     public var sizeBytes: Int
+    /// Non-nil when this bank was DISCOVERED but CANNOT be loaded (m31-g):
+    /// a user-facing sentence saying what to DO about it. `nil` for every
+    /// loadable bank, so the field is additive everywhere — an older payload
+    /// without the key decodes to `nil`, i.e. supported.
+    /// ⛔ An entry carrying a reason must NEVER be selectable as an
+    /// instrument. Three independent gates enforce that and none of them
+    /// reads this field: `ProjectStore.validateSoundBank`, the wire's
+    /// `parseSoundBankSource`, and `SoundBankLibrary.importBank` all reject
+    /// by extension. This field is for LABELLING, not for guarding.
+    public var unsupportedReason: String?
+
+    /// True when this bank can actually be loaded. Derived, never stored.
+    public var supported: Bool { unsupportedReason == nil }
 
     public init(source: SoundBankSource, name: String, path: String,
-                format: String, builtin: Bool, sizeBytes: Int) {
+                format: String, builtin: Bool, sizeBytes: Int,
+                unsupportedReason: String? = nil) {
         self.source = source
         self.name = name
         self.path = path
         self.format = format
         self.builtin = builtin
         self.sizeBytes = sizeBytes
+        self.unsupportedReason = unsupportedReason
     }
 }
 
@@ -143,8 +161,10 @@ public struct SoundBankLibrary: Sendable {
     /// `~/Library/Application Support/DAWPro/SoundBanks/` (created lazily at
     /// import time, m10-n-2 — joins the Autosave/Feedback family).
     public var libraryDirectory: URL
-    /// Scanned in order for `*.sf2`/`*.dls` (m10-n-2); the two standard
-    /// macOS bank folders are referenced in place, never copied.
+    /// Scanned in order for `*.sf2`/`*.dls`, plus the explicitly-unsupported
+    /// `*.sf3` so it can be REPORTED rather than swallowed (m10-n-2, m31-g);
+    /// the two standard macOS bank folders are referenced in place, never
+    /// copied.
     public var scanDirectories: [URL]
 
     public init(libraryDirectory: URL? = nil, scanDirectories: [URL]? = nil) {
@@ -183,9 +203,13 @@ public struct SoundBankLibrary: Sendable {
 
     // MARK: - Discovery (m10-n-2)
 
-    /// The GM entry FIRST (§4.1), then each scan dir's `*.sf2`/`*.dls`
-    /// (case-insensitive), deduped by standardized path, alphabetical within a
-    /// dir. Read-only: an absent/unreadable scan dir is skipped silently, and
+    /// The GM entry FIRST (§4.1), then each scan dir's `*.sf2`/`*.dls` AND
+    /// the unloadable `*.sf3` (case-insensitive), deduped by standardized
+    /// path, alphabetical within a dir. An `.sf3` comes back with
+    /// `format: "sf3"` and a non-nil `unsupportedReason`; it is listed so the
+    /// user can SEE it, and is refused by every selection gate (m31-g —
+    /// before this it was dropped in silence, so a file that was there and a
+    /// file that was not produced the same output). Read-only: an absent/unreadable scan dir is skipped silently, and
     /// the GM entry is omitted only if the system bank is missing (the
     /// `.missing` impossible-case, R12). Never throws.
     public func scan() -> [SoundBankInfo] {
@@ -203,7 +227,7 @@ public struct SoundBankLibrary: Sendable {
                 at: dir, includingPropertiesForKeys: nil,
                 options: [.skipsHiddenFiles]) else { continue }
             let banks = entries
-                .filter { ["sf2", "dls"].contains($0.pathExtension.lowercased()) }
+                .filter { Self.isDiscoverableExtension($0.pathExtension) }
                 .sorted {
                     $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent)
                         == .orderedAscending
@@ -227,7 +251,7 @@ public struct SoundBankLibrary: Sendable {
     public func importBank(from url: URL) throws -> SoundBankInfo {
         let fm = FileManager.default
         let ext = url.pathExtension.lowercased()
-        guard ext == "sf2" || ext == "dls" else {
+        guard Self.isSupportedExtension(ext) else {
             throw ProjectError.importFailed(
                 "sound bank must be a .sf2 or .dls file — got \(url.lastPathComponent)")
         }
@@ -295,6 +319,43 @@ public struct SoundBankLibrary: Sendable {
                          bankLSB: 0, name: "Program \($0)", category: "")
     }
 
+    // MARK: - Formats (m31-g)
+
+    /// The extensions AUSampler can actually load. Lowercased, no dots.
+    public static let supportedExtensions: Set<String> = ["sf2", "dls"]
+
+    /// Extensions that are REPORTED by `scan()` but cannot be loaded — each
+    /// mapped to the sentence the user sees. ⭐ The point of this table is
+    /// that a `.sf3` sitting in a scan directory used to be indistinguishable
+    /// from no file at all: no error, no log, no listing. Surfacing it as an
+    /// unsupported entry is the fix; loading it is a separate, larger job.
+    /// ⚠️ Deliberately NOT "every unknown extension" — the two standard macOS
+    /// bank folders are shared with other apps, and listing every stray file
+    /// in them would be noise, not diagnosis.
+    public static let unsupportedExtensions: [String: String] = [
+        "sf3": "SF3 SoundFonts (Vorbis-compressed) can't be played yet. "
+            + "Open it in MuseScore or Polyphone and export a .sf2, then import that.",
+    ]
+
+    /// True for an extension `scan()` should LIST — loadable or explicitly
+    /// unsupported. Case-insensitive.
+    public static func isDiscoverableExtension(_ ext: String) -> Bool {
+        let lowered = ext.lowercased()
+        return supportedExtensions.contains(lowered)
+            || unsupportedExtensions[lowered] != nil
+    }
+
+    /// True for an extension that can actually be loaded. Case-insensitive.
+    public static func isSupportedExtension(_ ext: String) -> Bool {
+        supportedExtensions.contains(ext.lowercased())
+    }
+
+    /// The user-facing sentence for a discovered-but-unloadable extension;
+    /// `nil` for a supported one.
+    static func unsupportedReason(forExtension ext: String) -> String? {
+        unsupportedExtensions[ext.lowercased()]
+    }
+
     /// The system GM bank's info — nil when the bank is absent (R12).
     static func gmBankInfo() -> SoundBankInfo? {
         let path = systemGMBankPath
@@ -305,14 +366,19 @@ public struct SoundBankLibrary: Sendable {
     }
 
     /// Info for a scanned/imported bank file (never the built-in GM bank).
+    /// ⚠️ `format` is the file's REAL extension. It used to be
+    /// `ext == "sf2" ? "sf2" : "dls"`, which labelled anything else `"dls"` —
+    /// a loadable-looking lie the moment `scan()` stopped filtering unknown
+    /// extensions out (m31-g).
     static func bankInfo(at url: URL) -> SoundBankInfo {
         let standardized = url.standardizedFileURL
-        let format = standardized.pathExtension.lowercased() == "sf2" ? "sf2" : "dls"
+        let format = standardized.pathExtension.lowercased()
         return SoundBankInfo(
             source: .file(path: standardized.path),
             name: standardized.deletingPathExtension().lastPathComponent,
             path: standardized.path, format: format, builtin: false,
-            sizeBytes: fileSize(atPath: standardized.path))
+            sizeBytes: fileSize(atPath: standardized.path),
+            unsupportedReason: unsupportedReason(forExtension: format))
     }
 
     private static func fileSize(atPath path: String) -> Int {

@@ -167,6 +167,8 @@ public final class InstrumentPickerModel {
     // MARK: - Sound Banks section
 
     /// The bank list (Pro), filtered by search. GM first (provider order).
+    /// Includes DISCOVERED-BUT-UNSUPPORTED banks (m31-g) — they are shown,
+    /// badged, and not drillable; hiding them is the defect.
     public var filteredBanks: [SoundBankInfo] {
         banks.filter { Self.matches($0.name, query: searchText) }
     }
@@ -181,7 +183,18 @@ public final class InstrumentPickerModel {
 
     /// Drills into a bank's program browser (Pro): loads its programs, resets the
     /// browser search + collapse. A no-op-safe call for any bank.
+    /// ⛔ m31-g: an UNSUPPORTED bank (a discovered `.sf3`) is listed so the
+    /// user can see it exists, but must never become a selection — drilling in
+    /// would offer programs that cannot load. It is refused here, and refused
+    /// LOUDLY: the reason goes to the same inline alert an import failure uses,
+    /// because a click that silently does nothing is this very defect wearing
+    /// a different hat.
     public func drillInto(_ bank: SoundBankInfo) {
+        if let reason = bank.unsupportedReason {
+            importError = reason
+            return
+        }
+        importError = nil
         let listing = programsProvider(bank.source)
         drilledBankSource = bank.source
         drilledBank = bank

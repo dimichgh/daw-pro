@@ -118,9 +118,9 @@ function lastLogLine(): any {
 // Instrumentation coverage (both registration paths)
 // ---------------------------------------------------------------------------
 
-test("both registration paths are instrumented: 191 total, empty symmetric difference vs tools/list", async () => {
+test("both registration paths are instrumented: 192 total, empty symmetric difference vs tools/list", async () => {
   const instrumented = instrumentedToolNames();
-  assert.equal(instrumented.length, 191, `expected 191 instrumented registrations, got ${instrumented.length}`);
+  assert.equal(instrumented.length, 192, `expected 192 instrumented registrations, got ${instrumented.length}`);
 
   const listed = await client.listTools();
   const listedNames = new Set(listed.tools.map((t) => t.name));
@@ -134,7 +134,7 @@ test("both registration paths are instrumented: 191 total, empty symmetric diffe
 });
 
 // ---------------------------------------------------------------------------
-// Breadth: the count test (191, empty symmetric difference) proves the
+// Breadth: the count test (192, empty symmetric difference) proves the
 // wrapped SET of names is right; it does NOT prove every registration path's
 // handler actually runs the wrapper. These three cover the three call
 // SHAPES the SDK produces (mcp.js `executeToolHandler`): a mutating,

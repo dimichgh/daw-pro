@@ -3175,7 +3175,11 @@ public final class ProjectStore {
     private func validateSoundBank(_ config: SoundBankConfig) throws {
         let url = try soundBankLibrary.resolve(config.source)
         let ext = url.pathExtension.lowercased()
-        guard ext == "sf2" || ext == "dls" else {
+        // ⛔ m31-g: this is one of the gates that makes a DISCOVERED-but-
+        // unsupported bank (`.sf3`) unselectable. It rejects by extension and
+        // never reads `SoundBankInfo.unsupportedReason`, so listing a format
+        // can never accidentally make it loadable.
+        guard SoundBankLibrary.isSupportedExtension(ext) else {
             throw ProjectError.importFailed(
                 "sound bank must be a .sf2 or .dls file — got \(url.lastPathComponent)")
         }

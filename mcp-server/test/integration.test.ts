@@ -383,7 +383,14 @@ test("tools/list returns exactly the audit-enforced tool count", { skip: SKIP_RE
   // not derived, by the same two regexes: **35 direct + 156 wrapper = 191**,
   // 0 duplicates, 0 names in both sets, and a bogus-name negative control that
   // returned nothing.
-  assert.equal(result.tools.length, 191);
+  //
+  // 191 -> 192 at m31-f (`instrument_probe_liveness` — render a velocity
+  // ladder and report whether the TIMBRE moves with it; it takes arguments and
+  // rides the strict-schema wrapper, so it joined the wrapper count).
+  // RE-MEASURED, not derived, by the same two name-capturing regexes:
+  // **35 direct + 157 wrapper = 192**, 0 duplicates, 0 names in both sets, and
+  // a bogus-name negative control (`"zzz_not_a_tool"`) that returned 0.
+  assert.equal(result.tools.length, 192);
 });
 
 // ---------------------------------------------------------------------------

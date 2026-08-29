@@ -48,7 +48,8 @@ tools: >-
   mcp__plugin_daw-pro-music-team_daw-pro__clip_import_midi,
   mcp__plugin_daw-pro-music-team_daw-pro__project_import_midi,
   mcp__plugin_daw-pro-music-team_daw-pro__project_export_midi,
-  mcp__plugin_daw-pro-music-team_daw-pro__track_export_midi
+  mcp__plugin_daw-pro-music-team_daw-pro__track_export_midi,
+  mcp__plugin_daw-pro-music-team_daw-pro__edit_paste_clips
 ---
 
 You are the **arranger** for DAW Pro. Your domain is song structure: where
@@ -89,6 +90,10 @@ take 1-based bar numbers, meter-aware; almost everything else here is beats.
   audio source) — prefer it over hand-computed trims when the goal is "make
   the clip the size of its material"; `clip_crossfade` blends two
   adjacent/overlapping audio clips with complementary equal-power fades;
+  `edit_paste_clips` pastes whatever is on the app's OWN Cmd-C/Cmd-V
+  clipboard (populated only by the human user in the app itself — there is
+  no wire route for you to put something on it), landing at an optional
+  `trackId`/`atBeat` you choose or the app's own resolved paste point;
   `clip_set_fades` sets a clip's own fade-in/out; `clip_set_stretch`/
   `clip_stretch_to_length` time-stretch audio to fit a new length (audio
   clips only); `clip_delete_time_range`/`clip_insert_time_range` cut or open

@@ -1834,6 +1834,26 @@ struct CommandRouterTests {
                 // coverage/gaps, paging, every refusal) by
                 // InstrumentDescribeSamplerCommandTests.
                 "instrument.describeSampler",
+                // instrument.probeLiveness (m31-f) RENDERS a velocity
+                // ladder offline: it needs a real track carrying a real
+                // instrument AND a live engine to render through, neither
+                // of which this bare loop stages — the
+                // instrument.describeSampler rationale directly above,
+                // verbatim. ⚠️ It is a READ-ONLY probe (lands no clip,
+                // pushes no undo step) but "read-only" is not the
+                // exclusion here; needing a rendered fixture is.
+                // TWO suites cover this verb, one per layer: the
+                // store/measurement layer — STATIC/LIVE/SILENT/INCONCLUSIVE
+                // verdicts, the self-check gate, the no-edit guarantee — is
+                // proven by TimbreLivenessProbeTests (DAWCoreTests, calling
+                // store.probeInstrumentLiveness directly; it never crosses
+                // the control layer). THIS verb's own wire contract — param
+                // decoding/defaulting, the control layer's OWN velocities
+                // validation, refusal wording, the JSON field shape, and
+                // that a failed self-check surfaces as a control-layer
+                // ERROR rather than a STATIC verdict — is proven by
+                // InstrumentProbeLivenessCommandTests, this target.
+                "instrument.probeLiveness",
                 // m23-k3: both MIDI-import verbs read a REAL .mid off disk — a
                 // fixture this bare loop doesn't stage — and clip.importMIDI
                 // additionally needs an existing MIDI clip. The

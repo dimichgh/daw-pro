@@ -117,6 +117,66 @@ struct SoundBankCommandTests {
         #expect(vintage["source"]?.stringValue?.hasSuffix("Vintage.sf2") == true)
     }
 
+    // 1b. m31-g — the WIRE half of "a .sf3 is reported, never playable". The
+    //     two new keys are ADDITIVE: `supported` is present on every entry and
+    //     `unsupportedReason` is null for a loadable one.
+    @Test("listSoundBanks: a .sf3 is listed with supported:false + a reason; .sf2 stays supported")
+    func listSoundBanksSurfacesSF3() async throws {
+        let dir = tempDir()
+        try writeFile("Vintage.sf2", in: dir, bytes: String(repeating: "x", count: 100))
+        try writeFile("FluidR3Mono_GM.sf3", in: dir, bytes: String(repeating: "y", count: 50))
+        let (router, _) = makeRouter(
+            library: SoundBankLibrary(libraryDirectory: dir, scanDirectories: [dir]))
+
+        let response = await router.handle(ControlRequest(id: "1", command: "instrument.listSoundBanks"))
+        #expect(response.ok)
+        let banks = try #require(response.result?["banks"]?.arrayValue)
+
+        // Positive control: the supported neighbour proves the probe works.
+        let vintage = try #require(banks.first { $0["name"]?.stringValue == "Vintage" })
+        #expect(vintage["supported"]?.boolValue == true)
+        #expect(vintage["unsupportedReason"] == .null)
+
+        let sf3 = try #require(
+            banks.first { $0["name"]?.stringValue == "FluidR3Mono_GM" },
+            "the .sf3 must appear on the wire, not be swallowed")
+        #expect(sf3["format"]?.stringValue == "sf3")
+        #expect(sf3["supported"]?.boolValue == false)
+        #expect(sf3["unsupportedReason"]?.stringValue?.contains(".sf2") == true)
+        #expect(sf3["builtin"]?.boolValue == false)
+        #expect(sf3["sizeBytes"]?.doubleValue == 50)
+    }
+
+    // 1c. m31-g — ⛔ listing it must not make it selectable. Same verb, same
+    //     shape, only the extension differs from the passing case.
+    @Test("setInstrument soundBank: a listed .sf3 is REFUSED and nothing lands")
+    func setInstrumentRefusesSF3() async throws {
+        let dir = tempDir()
+        let sf3 = try writeFile("FluidR3Mono_GM.sf3", in: dir)
+        let sf2 = try writeFile("Fine.sf2", in: dir)
+        let (router, store) = makeRouter(
+            library: SoundBankLibrary(libraryDirectory: dir, scanDirectories: [dir]))
+        let trackID = store.addTrack(kind: .instrument).id.uuidString
+
+        let refused = await router.handle(ControlRequest(
+            id: "1", command: "track.setInstrument",
+            params: ["trackId": .string(trackID),
+                     "soundBank": .object(["source": .string(sf3.path)])]))
+        #expect(!refused.ok)
+        #expect(refused.error?.contains(".sf2 or .dls") == true)
+        #expect(refused.error?.contains("instrument.listSoundBanks") == true)
+        #expect(store.tracks[0].instrument == nil)
+
+        // Positive control: the identical request with a .sf2 is ACCEPTED, so
+        // the refusal above is the format gate, not a broken fixture.
+        let accepted = await router.handle(ControlRequest(
+            id: "2", command: "track.setInstrument",
+            params: ["trackId": .string(trackID),
+                     "soundBank": .object(["source": .string(sf2.path)])]))
+        #expect(accepted.ok)
+        #expect(store.tracks[0].instrument != nil)
+    }
+
     // MARK: - instrument.listSoundBankPrograms
 
     // 2.
@@ -430,7 +490,8 @@ struct SoundBankCommandTests {
         // design-au-parameter-surface) took it 139 -> 141. m21-d's
         // clip.fitToContent took it 141 -> 142. m21-e's clip.analyzeAudio
         // took it 142 -> 143. m22-c's mixer.liveLoudness took it 143 -> 144.
-        #expect(CommandRouter.allCommands.count == 186)   // 159 -> 161 at m23-n3b -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w -> 166 at m23-af -> 168 at m20-j -> 169 at m23-br-1 -> 171 at m23-aj-2 -> 173 at m23-dl -> 174 at m23-di-2a -> 175 at m25-d -> 176 at m25-z -> 177 at m23-ap-3 -> 178 (clip.getNotes) -> 179 (m26-i instrument.describeSampler) -> 180 (edit.pasteClips) -> 181 (m27 leg D clip.applyBreathContour, placed next to its controller-lane siblings, NOT at the tail) -> 182 (breath pad P1 clip.applyEffortShape, placed next to clip.applyBreathContour, NOT at the tail) -> 183 (breath pad P6 pad.previewEffort, placed next to note.audition — the other 'sounds now, outside the timeline, not an edit' verb — NOT at the tail) -> 186 (m28-knob midi.getControlMap/setControlMap/learnControl, placed next to midi.listInputs — their only sibling on this surface — and BEFORE transport.record, NOT at the tail)
+        #expect(CommandRouter.allCommands.count == 187)   // 159 -> 161 at m23-n3b -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w -> 166 at m23-af -> 168 at m20-j -> 169 at m23-br-1 -> 171 at m23-aj-2 -> 173 at m23-dl -> 174 at m23-di-2a -> 175 at m25-d -> 176 at m25-z -> 177 at m23-ap-3 -> 178 (clip.getNotes) -> 179 (m26-i instrument.describeSampler) -> 180 (edit.pasteClips) -> 181 (m27 leg D clip.applyBreathContour, placed next to its controller-lane siblings, NOT at the tail) -> 182 (breath pad P1 clip.applyEffortShape, placed next to clip.applyBreathContour, NOT at the tail) -> 183 (breath pad P6 pad.previewEffort, placed next to note.audition — the other 'sounds now, outside the timeline, not an edit' verb — NOT at the tail) -> 186 (m28-knob midi.getControlMap/setControlMap/learnControl, placed next to midi.listInputs — their only sibling on this surface — and BEFORE transport.record, NOT at the tail)
+        // -> 187 (m31-f instrument.probeLiveness, placed next to instrument.describeSampler — its read-only instrument.* sibling — NOT at the tail)
         #expect(CommandRouter.allCommands.contains("instrument.listSoundBanks"))
         #expect(CommandRouter.allCommands.contains("instrument.listSoundBankPrograms"))
         #expect(CommandRouter.allCommands.contains("instrument.importSoundBank"))
