@@ -236,7 +236,7 @@ public enum CopilotToolCatalog {
         ),
         CopilotTool(
             command: "transport.setMetronome",
-            description: "Enable or disable the metronome click; countInBars sets how many bars of count-in click play before recording starts.",
+            description: "Enable or disable the metronome click; countInBars sets how many bars of count-in click play before recording starts. New projects default to 1 bar; a project that stored a different value, including 0, keeps it. A count-in does NOT rescue an early note — it DELAYS the take's anchor by that many bars, and anything played during the count-in is discarded; what it gives the player is an audible cue for when the take really starts.",
             schema: schemaObject([
                 ("enabled", booleanSchema("True to enable the metronome click, false to disable it.")),
                 ("countInBars", integerSchema(

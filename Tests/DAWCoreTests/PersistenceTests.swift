@@ -885,3 +885,88 @@ struct PersistenceTests {
         #expect(restored.lanes[1].clip == midiLane.clip)
     }
 }
+
+/// m23-cy — WHAT A DEFAULT CHANGE DOES TO PROJECTS THAT ALREADY EXIST.
+///
+/// The user reported *"the first note after you hit record is dropped"* and
+/// chose a one-bar count-in. The mechanism was already complete; only
+/// `TransportState.init`'s `countInBars` default stood at 0. Moving a DEFAULT
+/// is a behaviour change for everything that reads it, and the interesting
+/// question is not the new project — it is the old one. Three cases, each
+/// pinned here, because the decision was argued in
+/// `TransportDocument.init(from:)` and an argued decision that nothing tests is
+/// a comment.
+///
+/// ⭐ The middle case is the load-bearing one: a STORED 0 must survive. That is
+/// what "do not rewrite stored values — a user who deliberately set 0 means it"
+/// costs, and without this test the conservative half of the ruling is unpinned.
+@MainActor
+@Suite("Count-in default vs. existing projects (m23-cy)")
+struct CountInDefaultMigrationTests {
+
+    /// Decodes a `TransportDocument` from a JSON object literal, so a key can be
+    /// genuinely ABSENT rather than merely defaulted by a Swift initialiser.
+    private func decode(_ json: String) throws -> TransportDocument {
+        try JSONDecoder().decode(TransportDocument.self, from: Data(json.utf8))
+    }
+
+    @Test("a file saved BEFORE count-in existed (key absent) inherits the CURRENT default")
+    func absentKeyInheritsCurrentDefault() throws {
+        let legacy = try decode(#"{"positionBeats":0,"tempoBPM":120}"#)
+        #expect(legacy.countInBars == 1)
+        #expect(legacy.countInBars == TransportState().countInBars)
+        // Not a decode failure and not a zero — the two ways this could go wrong
+        // silently. `tempoBPM` proves the rest of the object really did decode,
+        // so an all-defaults result cannot masquerade as a pass.
+        #expect(legacy.tempoBPM == 120)
+    }
+
+    @Test("a stored 0 SURVIVES — a deliberate 0 is never overridden by the new default")
+    func storedZeroSurvives() throws {
+        let chosen = try decode(#"{"positionBeats":0,"tempoBPM":120,"countInBars":0}"#)
+        #expect(chosen.countInBars == 0)
+        // And it survives the rebuild into a runtime transport, which re-applies
+        // the range clamps and is where an over-eager `max(1, …)` would bite.
+        #expect(chosen.transportState().countInBars == 0)
+    }
+
+    @Test("a stored non-default value round-trips untouched")
+    func storedValueRoundTrips() throws {
+        for bars in TransportState.countInBarsRange {
+            let doc = TransportDocument(from: TransportState(countInBars: bars))
+            let data = try JSONEncoder().encode(doc)
+            let back = try JSONDecoder().decode(TransportDocument.self, from: data)
+            #expect(back.countInBars == bars)
+            #expect(back.transportState().countInBars == bars)
+        }
+    }
+
+    @Test("save → reopen keeps a deliberate 0, and a new project gets the default")
+    func reopenKeepsValueAndNewProjectGetsDefault() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("m23cy-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let store = ProjectStore()
+        #expect(store.transport.countInBars == 1)   // the default, on a fresh store
+
+        // Deliberately choose 0 — the user this ruling protects.
+        try store.setMetronome(enabled: false, countInBars: 0)
+        #expect(store.transport.countInBars == 0)
+
+        // The REAL persistence path, not a hand-built document: the ruling is
+        // about what happens to a file on disk.
+        let path = dir.appendingPathComponent("Count-in Zero").path
+        try store.saveProject(to: path)
+
+        let reopened = ProjectStore()
+        try reopened.openProject(at: path)
+        #expect(reopened.transport.countInBars == 0)
+
+        // A NEW project in the same session goes back to the default: the
+        // ruling is "new projects only", and this is the "new projects" half.
+        try reopened.newProject(discardChanges: true)
+        #expect(reopened.transport.countInBars == 1)
+    }
+}

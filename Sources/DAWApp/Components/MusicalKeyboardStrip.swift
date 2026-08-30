@@ -53,6 +53,23 @@ struct MusicalKeyboardStrip: View {
     /// class of defect, where a gate is green on a path no human takes. The app
     /// hands both the same closure; the default keeps a bare preview playable.
     var onPointerPress: (Int) -> Void = { _ in }
+    /// A CHORD CELL was pressed with the mouse — the chord row's half of
+    /// `onPointerPress`, carrying a cell index rather than a pitch.
+    ///
+    /// ⛔ **SAME REASON, SAME SHAPE.** The app hands both this and `onPointerPress`
+    /// the closures that refresh the target state first, so the mouse and
+    /// `debug.musicalTyping` drive one path. A view that called
+    /// `controller.pointerDown(cellIndex:)` directly would be the m23-an defect in
+    /// a new mode.
+    var onChordCellPress: (Int) -> Void = { _ in }
+    /// Turns chord mode on and off.
+    var onSetPlayMode: (MusicalTypingPlayMode) -> Void = { _ in }
+    /// Sets the tonic (pitch class) and, optionally, the scale.
+    var onSetKey: (Int, KeyMode?) -> Void = { _, _ in }
+    /// Sets the instrument voicing style.
+    var onSetVoicingPreset: (VoicingPresetKind) -> Void = { _ in }
+    /// Lights a named progression, or clears the lights with nil.
+    var onSetProgression: (ChordProgressionPreset?) -> Void = { _ in }
 
     /// Keyboard height. Tall enough for a black key (62 %) to be a comfortable
     /// mouse target and for the letter legend to sit under it without crowding.
@@ -68,10 +85,30 @@ struct MusicalKeyboardStrip: View {
         alpha: 1.0,
         backdrop: SRGBColor(hex: DAWTheme.keyWhiteHex))
 
+    /// Chord-row height. Four stacked labels (key letter, chord name, Roman
+    /// numeral, order badge) need more room than a piano key's single legend.
+    private static let chordRowHeight: CGFloat = 76
+
+    private var isChordMode: Bool { controller.playMode == .chords }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             header
-            keyboard
+            // ⭐ **ONE SURFACE, TWO FACES — AND THE PIANO IS NOT RELABELLED, IT IS
+            // REPLACED.** In chord mode a key no longer names a pitch: which
+            // pitches it sounds depends on the scale, the preset and the voicing
+            // before it. Drawing a piano and writing chord names on it would be a
+            // picture that lies about what a click does — the ivory C would sound
+            // a four-note chord that is not, in general, a C. So chord mode gets
+            // its own row of cells, drawn by the same Canvas with the same theme
+            // tokens and the same legend-drawing shape.
+            if isChordMode {
+                chordPickers
+                progressionRow
+                chordRow
+            } else {
+                keyboard
+            }
             legend
         }
         .padding(.horizontal, 14)
@@ -118,6 +155,17 @@ struct MusicalKeyboardStrip: View {
                 .lineLimit(1)
 
             Spacer(minLength: 12)
+
+            // ⭐ THE MODE SWITCH. Two chips rather than a toggle, so the state is
+            // readable at a glance instead of inferred from a switch position —
+            // the same "explicit, never ambient" law the mode lamp obeys.
+            HStack(spacing: 0) {
+                modeChip("KEYS", isOn: !isChordMode) { onSetPlayMode(.notes) }
+                modeChip("CHORDS", isOn: isChordMode) { onSetPlayMode(.chords) }
+            }
+            .background(DAWTheme.panelRaised)
+            .clipShape(RoundedRectangle(cornerRadius: 5))
+            .overlay(RoundedRectangle(cornerRadius: 5).stroke(DAWTheme.hairline, lineWidth: 1))
 
             // SF Mono for every numeric readout (docs/DESIGN-LANGUAGE.md
             // "Foundations"). OCTAVE reads as the note the `A` key sounds rather
@@ -261,6 +309,137 @@ struct MusicalKeyboardStrip: View {
         .gesture(keyPress)
     }
 
+    // MARK: - The chord row
+
+    /// 17 cells, one per layout key, in the physical left-to-right order the keys
+    /// sit in. Same `Canvas`, same `@Sendable` contract, same theme tokens as the
+    /// piano above it — everything is snapshotted into values BEFORE the closure.
+    ///
+    /// ⭐ **THREE STATES, ONE HUE, THREE INTENSITIES**, which is the research's own
+    /// instruction (§7.4: *"reusing the strip's existing held/lit visual language
+    /// at a lower intensity"*) and keeps the palette semantic:
+    ///
+    ///   * **Sounding** — solid `playback` + glow. Identical to a held piano key,
+    ///     because it means the same thing.
+    ///   * **Lit by the preset** — a `playback` outline and a faint wash, plus the
+    ///     order number. Visibly suggested, audibly nothing.
+    ///   * **Dim** — `panelRaised`. **Fully playable**, and the legend under the
+    ///     row says so in words.
+    private var chordRow: some View {
+        let cells = controller.chordCells
+        let sounding = controller.soundingChordKeyCodes
+        let heldInk = Self.heldInkIsDark ? DAWTheme.noteInkOnLight : DAWTheme.noteInkOnDark
+        return Canvas { @Sendable context, size in
+            guard !cells.isEmpty else { return }
+            let width = size.width / CGFloat(cells.count)
+            for (index, cell) in cells.enumerated() {
+                let rect = CGRect(x: CGFloat(index) * width + 1, y: 0,
+                                  width: max(1, width - 2), height: size.height)
+                Self.drawChordCell(&context, rect: rect, cell: cell,
+                                   isSounding: sounding.contains(cell.keyCode),
+                                   heldInk: heldInk)
+            }
+        }
+        .frame(height: Self.chordRowHeight)
+        .background(
+            GeometryReader { geo in
+                Color.clear
+                    .onAppear { keyboardWidth = geo.size.width }
+                    .onChange(of: geo.size.width) { _, width in keyboardWidth = width }
+            }
+        )
+        .contentShape(Rectangle())
+        .gesture(chordCellPress(cellCount: cells.count))
+    }
+
+    /// One cell. Kept `nonisolated static` for the same reason `drawLegend` is:
+    /// the `Canvas` renderer is `@Sendable`.
+    private nonisolated static func drawChordCell(_ context: inout GraphicsContext,
+                                                  rect: CGRect,
+                                                  cell: MusicalTypingChordCell,
+                                                  isSounding: Bool,
+                                                  heldInk: Color) {
+        let shape = Path(roundedRect: rect, cornerRadius: 4)
+        if isSounding {
+            context.fill(shape, with: .color(DAWTheme.playback))
+        } else {
+            // A COLOUR key (the accidental row) is drawn recessed, the way a black
+            // key is — it is the secondary row on the physical keyboard too.
+            context.fill(shape, with: .color(cell.addsColour
+                                             ? DAWTheme.panel : DAWTheme.panelRaised))
+            if cell.isLit {
+                context.fill(shape, with: .color(DAWTheme.playback.opacity(0.14)))
+                context.stroke(shape, with: .color(DAWTheme.playback.opacity(0.75)),
+                               lineWidth: 1.5)
+            } else {
+                context.stroke(shape, with: .color(DAWTheme.hairline), lineWidth: 1)
+            }
+        }
+
+        let primary: Color = isSounding ? heldInk
+            : (cell.isLit ? DAWTheme.textPrimary : DAWTheme.textSecondary)
+        let secondary: Color = isSounding ? heldInk
+            : (cell.isLit ? DAWTheme.textSecondary : DAWTheme.textDim)
+
+        // The key to press — the one thing this surface exists to answer.
+        context.draw(
+            Text(cell.keyLabel)
+                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                .foregroundColor(secondary),
+            at: CGPoint(x: rect.midX, y: rect.minY + 10), anchor: .center)
+        // What it is called.
+        context.draw(
+            Text(cell.chordName)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(primary),
+            at: CGPoint(x: rect.midX, y: rect.minY + 28), anchor: .center)
+        // What it IS — the Roman numeral, which is the part that teaches.
+        context.draw(
+            Text(cell.romanNumeral)
+                .font(.system(size: 9, weight: .medium, design: .monospaced))
+                .foregroundColor(secondary),
+            at: CGPoint(x: rect.midX, y: rect.minY + 44), anchor: .center)
+        // The order to play them in, on lit cells only — the `1 … 4 2 3` row of
+        // the user's mock-up.
+        // ⚠️ THE BADGE IS NARROWER THAN THE LIGHT. `isLit` paints the outline on
+        // every cell whose degree the preset uses; the numbered badge lands on
+        // one cell per step. See `MusicalTypingChordCell.progressionOrder` for
+        // the screenshot that forced the split.
+        if let order = cell.progressionOrder {
+            let badge = CGRect(x: rect.midX - 8, y: rect.maxY - 22, width: 16, height: 16)
+            context.fill(Path(ellipseIn: badge),
+                         with: .color(isSounding ? heldInk.opacity(0.25)
+                                      : DAWTheme.playback.opacity(0.9)))
+            context.draw(
+                Text(String(order))
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .foregroundColor(isSounding ? heldInk : DAWTheme.noteInkOnDark),
+                at: CGPoint(x: badge.midX, y: badge.midY), anchor: .center)
+        } else if cell.octaveShift > 0 {
+            // The second run of degrees, marked so a user can tell it from the
+            // first rather than wondering why two keys say the same thing.
+            context.draw(
+                Text("+8va")
+                    .font(.system(size: 8, weight: .medium, design: .monospaced))
+                    .foregroundColor(isSounding ? heldInk.opacity(0.7) : DAWTheme.textFaint),
+                at: CGPoint(x: rect.midX, y: rect.maxY - 12), anchor: .center)
+        }
+    }
+
+    /// Press-and-hold on the chord row, `keyPress`'s contract exactly: a plain
+    /// click sounds immediately and sliding across cells moves the chord, because
+    /// the controller diffs.
+    private func chordCellPress(cellCount: Int) -> some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                guard cellCount > 0, keyboardWidth > 0 else { return }
+                let index = Int(value.location.x / (keyboardWidth / CGFloat(cellCount)))
+                guard index >= 0, index < cellCount else { return }
+                onChordCellPress(index)
+            }
+            .onEnded { _ in controller.pointerUp() }
+    }
+
     /// The letter to type, and — on a C — the note's name.
     ///
     /// DUAL INK, per key, exactly as the gutter does it: the polarity comes from
@@ -323,13 +502,136 @@ struct MusicalKeyboardStrip: View {
 
     private var legend: some View {
         HStack(spacing: 14) {
-            legendChip("Z / X", "octave")
+            legendChip("Z / X", isChordMode ? "higher / lower" : "octave")
             legendChip("C / V", "louder / quieter")
+            if isChordMode {
+                // Rule 6: say what the row above actually means, in the words a
+                // beginner would use, rather than assuming the lights explain
+                // themselves.
+                Text("Lit keys are the preset, in order. The dim ones play too.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(DAWTheme.textDim)
+            }
             Spacer(minLength: 0)
             Text("Space still plays and stops. ⌘ shortcuts still work.")
                 .font(.system(size: 10))
                 .foregroundStyle(DAWTheme.textFaint)
         }
+    }
+
+    // MARK: - Chord mode chrome
+
+    private func modeChip(_ title: String, isOn: Bool, action: @escaping () -> Void)
+        -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .tracking(0.6)
+                .foregroundStyle(isOn ? DAWTheme.noteInkOnDark : DAWTheme.textDim)
+                .frame(height: 20)
+                .padding(.horizontal, 9)
+                .background(isOn ? DAWTheme.playback.opacity(0.85) : Color.clear)
+        }
+        .buttonStyle(.plain)
+        .help(title == "CHORDS"
+              ? "One key plays a whole chord in the key you pick."
+              : "One key plays one note.")
+    }
+
+    /// PICK A KEY + PRESET — the two pickers the user's mock-up puts on its first
+    /// line, in the order it puts them.
+    private var chordPickers: some View {
+        HStack(spacing: 14) {
+            pickerLabel("PICK A KEY")
+            Menu {
+                ForEach(KeyMode.allCases, id: \.self) { mode in
+                    Section(mode.displayName.uppercased()) {
+                        ForEach(0..<12, id: \.self) { pitchClass in
+                            Button(Self.keyName(pitchClass, mode)) {
+                                onSetKey(pitchClass, mode)
+                            }
+                        }
+                    }
+                }
+            } label: {
+                Text(Self.keyName(controller.chordKey, controller.chordKeyMode))
+                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(DAWTheme.playback)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help("Which key the chords belong to. Everything stays in this key.")
+
+            pickerLabel("PLAYED LIKE")
+            Menu {
+                ForEach(VoicingPresetKind.allCases, id: \.self) { kind in
+                    Button(kind.displayName) { onSetVoicingPreset(kind) }
+                }
+            } label: {
+                Text(controller.voicingPreset.displayName)
+                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(DAWTheme.playback)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help(controller.voicingPreset.summary)
+
+            Text(controller.voicingPreset.summary)
+                .font(.system(size: 10))
+                .foregroundStyle(DAWTheme.textFaint)
+                .lineLimit(1)
+
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func pickerLabel(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 9, weight: .bold, design: .monospaced))
+            .tracking(0.9)
+            .foregroundStyle(DAWTheme.textDim)
+    }
+
+    private static func keyName(_ pitchClass: Int, _ mode: KeyMode) -> String {
+        // The repo's SOLE pitch-class-name array, read rather than copied.
+        let names = KeyEstimate.pitchClassesSharp
+        let index = ((pitchClass % names.count) + names.count) % names.count
+        return names[index] + " " + mode.displayName
+    }
+
+    /// ⭐ **THE PROGRESSION ROW — A HIGHLIGHT OVERLAY, NEVER A MODE.** Selecting
+    /// one lights and numbers four or five of the SAME keys the scale already
+    /// plays; the rest stay dim and fully playable. That is the user's own choice,
+    /// verbatim: *"Follow the lights, or ignore them. Same keys either way."*
+    private var progressionRow: some View {
+        HStack(spacing: 6) {
+            pickerLabel("PRESET")
+            progressionChip(nil, title: "None",
+                            help: "No lights — every chord in the key, equally.")
+            ForEach(ChordProgressionLibrary.all) { preset in
+                progressionChip(preset, title: preset.name,
+                                help: preset.blurb + "  " + preset.numeralLine())
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func progressionChip(_ preset: ChordProgressionPreset?,
+                                 title: String, help: String) -> some View {
+        let isOn = controller.progression?.id == preset?.id
+        return Button { onSetProgression(preset) } label: {
+            Text(title)
+                .font(.system(size: 10, weight: isOn ? .bold : .regular))
+                .foregroundStyle(isOn ? DAWTheme.noteInkOnDark : DAWTheme.textSecondary)
+                .frame(height: 20)
+                .padding(.horizontal, 8)
+                .background(isOn ? DAWTheme.playback.opacity(0.85) : DAWTheme.panelRaised)
+                .clipShape(RoundedRectangle(cornerRadius: 5))
+                .overlay(RoundedRectangle(cornerRadius: 5)
+                    .stroke(isOn ? Color.clear : DAWTheme.hairline, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .help(help)
     }
 
     private func legendChip(_ keys: String, _ meaning: String) -> some View {

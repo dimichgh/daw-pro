@@ -135,6 +135,81 @@ public struct MusicalTypingKeyCap: Equatable, Sendable, Identifiable {
     }
 }
 
+/// What ONE key press produces (m23-cv).
+///
+/// ⭐ **ADDITIVE BY CONSTRUCTION.** `.notes` is the shipped behaviour, byte for
+/// byte, and it is the default everywhere — a fresh launch, a fresh controller,
+/// and every existing test. `.chords` changes only what the press COMPUTES; the
+/// key table, the guards, the held ledger, the seam and the capture path are the
+/// same objects doing the same work.
+public enum MusicalTypingPlayMode: String, Equatable, Sendable, CaseIterable {
+    /// One key, one note — m23-ct.
+    case notes
+    /// One key, one correctly-voiced diatonic chord — m23-cv.
+    case chords
+}
+
+/// One cell of the on-screen CHORD ROW: which key plays it, what it is called,
+/// and whether the lit progression uses it.
+///
+/// ⭐ **A LABEL CARRIER, DELIBERATELY CARRYING NO PITCHES.** What a cell sounds
+/// depends on what was sounding before it (nearest-tone voice leading), so a cell
+/// that carried a pitch array would be stale the moment anything was played and
+/// the strip would draw a chord the keys do not produce. The view draws THIS; the
+/// controller computes the pitches at press time.
+public struct MusicalTypingChordCell: Equatable, Sendable, Identifiable {
+    /// The physical key. `id` for the view, and the seam's handle on the cell.
+    public let keyCode: UInt16
+    /// The US-ANSI legend printed on that key — display only, never matched.
+    public let keyLabel: String
+    /// 1-based scale degree: 1 = the tonic's chord.
+    public let degree: Int
+    /// How many octaves above the base run this cell sits (0 or 1).
+    public let octaveShift: Int
+    /// Whether this is an ACCIDENTAL key, which flips its degree between a plain
+    /// triad and its seventh chord. See `MusicalTypingRouting.chordDegree`.
+    public let addsColour: Bool
+    /// `"C"`, `"Am"`, `"G7"` — what the user reads.
+    public let chordName: String
+    /// `"I"`, `"vi"`, `"V7"` — what the user learns.
+    public let romanNumeral: String
+    /// This cell's step number in the lit progression, 1-based — **and only on
+    /// the ONE cell a beginner should press for that step.**
+    ///
+    /// ⚠️ **NUMBERED IS NARROWER THAN LIT, AND THAT IS A LOOKING-AT-IT FIX.** The
+    /// first version numbered every cell carrying a lit DEGREE, which is
+    /// arithmetically correct and visually wrong: the colour keys and the second
+    /// octave run share their degree, so "Four Chords" painted TEN badges and the
+    /// row showed four different cells all labelled `1`. A screenshot of the live
+    /// app is the only instrument that could see that — no assertion in this tree
+    /// looks at a pixel. The number now lands on the base-octave natural key
+    /// alone, which is the `1 … 4 2 3` row of the user's own mock-up; the other
+    /// cells of the same degree stay LIT, so "any lit key plays this chord" is
+    /// still true and readable.
+    public let progressionOrder: Int?
+
+    /// Whether the current progression uses this cell's degree. **Lit is PAINT
+    /// AND NOTHING ELSE** — no code on the sounding path reads it, so a dim key
+    /// cannot fail to play.
+    public let isLit: Bool
+
+    public var id: UInt16 { keyCode }
+
+    public init(keyCode: UInt16, keyLabel: String, degree: Int, octaveShift: Int,
+                addsColour: Bool, chordName: String, romanNumeral: String,
+                isLit: Bool, progressionOrder: Int?) {
+        self.keyCode = keyCode
+        self.keyLabel = keyLabel
+        self.degree = degree
+        self.octaveShift = octaveShift
+        self.addsColour = addsColour
+        self.chordName = chordName
+        self.romanNumeral = romanNumeral
+        self.isLit = isLit
+        self.progressionOrder = progressionOrder
+    }
+}
+
 /// The pure decisions behind Musical Typing's key monitor (m23-ct).
 ///
 /// Deliberately reuses `TransportKeyModifiers` / `TransportKeyResponder` /
@@ -355,6 +430,86 @@ public enum MusicalTypingRouting {
         guard AuditionPitchBounds.contains(value) else { return nil }
         return value
     }
+
+    // MARK: - Chord mode's key → scale-degree map (m23-cv)
+
+    /// **Where a key lands when CHORD MODE is on.**
+    ///
+    /// In note mode a key's `semitone` is an offset above the base note. In chord
+    /// mode the same number is read as a POSITION IN THE SCALE instead: key 0 is
+    /// the tonic's chord, key 1 the second degree's, and so on past the seventh
+    /// into the next run. The physical layout is unchanged and the table above is
+    /// still the only place key codes live — this is a second READING of the same
+    /// number, not a second table.
+    ///
+    /// ⭐ **THE TONIC IS ANCHORED TO THE `A` KEY, WHICH IS WHY EVERY KEY IS IN
+    /// KEY.** Picking D major does not move the chords onto different physical
+    /// keys; it changes what the same keys sound. That is what makes the
+    /// Roman-numeral legend meaningful (`A` is always `I`) and it is the model
+    /// every scale-locked product in `docs/research/spike-chord-buttons.md` §3
+    /// uses — NI's Harmonizer, Push's In-Key grid, Launchkey's Chord Map.
+    ///
+    /// ⭐⭐ **THE DEGREES SIT ON THE NATURAL KEYS — THE HOME ROW — AND THAT IS
+    /// ERGONOMIC, NOT COSMETIC.** The user's chosen mock-up reads
+    /// `A S D F G H J` → `I ii iii IV V vi vii`, and the first implementation of
+    /// this function did the obvious thing instead: it numbered the 17 keys by
+    /// pitch order, which puts the seven degrees on **`A W S E D F T`** — three
+    /// of them on the accidental row. That is not the same feature. It makes a
+    /// plain diatonic progression a two-row hand dance, in a mode whose entire
+    /// promise is *one finger*. Caught by
+    /// `MusicalTypingChordModeTests.homeRowIsTheDiatonicSeven`, which is exactly
+    /// the mock-up keyed in.
+    ///
+    /// So: the **ten natural keys** (`A S D F G H J K L ;`) carry the ten chord
+    /// degrees — the seven of the scale, then the first three again an octave up.
+    ///
+    /// ⭐ **AND THE SEVEN ACCIDENTAL KEYS ARE NOT DEAD: EACH ONE COLOURS THE
+    /// NATURAL BELOW IT**, flipping that degree between a plain triad and its
+    /// seventh chord. `W` beside `A` turns `C` into `Cmaj7`; on a preset that
+    /// already voices sevenths it turns `Cmaj7` back into `C`. One sentence to
+    /// explain, never ambiguous, and it is precisely the move §2.2's
+    /// lo-fi / neo-soul / deep-house row is made of — *"the same progressions
+    /// re-voiced with 7ths and 9ths"*. The alternative was seven silent keys in
+    /// the middle of a performance surface.
+    ///
+    /// ⚠️ **DEGREES 3 AND 7 HAVE NO COLOUR KEY, AND THAT IS THE PIANO'S FAULT,
+    /// NOT A BUG.** There is no black key between E and F or between B and C, so
+    /// `D` (iii) and `J` (vii°) have no accidental above them. Said here rather
+    /// than discovered: it is the layout being honest about a real keyboard.
+    ///
+    /// ⚠️ **THE OCTAVE RUN IS CAPPED AT ONE, AND THAT IS MEASURED RATHER THAN
+    /// TIDY.** An uncapped run would put the last keys two octaves up — which on
+    /// the piano preset's own register window starts the chord body at G6 and
+    /// produced `[64, 88, 91, 95]` for `iii` when it was printed during
+    /// development. That is not a register any of these presets was written for.
+    public static func chordDegree(semitone: Int)
+        -> (degree: Int, octaveShift: Int, addsColour: Bool) {
+        let index = max(0, semitone)
+        // Walk the layout from the bottom, counting naturals. An accidental
+        // inherits the degree of the natural below it — which is the key
+        // physically to its lower-left on every piano ever built.
+        var degreeCount = 0
+        var lastNatural = (degree: 1, octaveShift: 0)
+        for semitone in 0...index {
+            guard isNaturalSemitone(semitone) else { continue }
+            lastNatural = (degree: degreeCount % 7 + 1,
+                           octaveShift: min(maxChordOctaveShift, degreeCount / 7))
+            degreeCount += 1
+        }
+        return (degree: lastNatural.degree, octaveShift: lastNatural.octaveShift,
+                addsColour: !isNaturalSemitone(index))
+    }
+
+    /// Whether this layout offset lands on a WHITE key of the strip's piano — the
+    /// same seven pitch classes `MusicalKeyboardGeometry.isBlackKey` uses, read
+    /// from the other side so the two cannot disagree about which key is which.
+    public static func isNaturalSemitone(_ semitone: Int) -> Bool {
+        let pitchClass = ((semitone % 12) + 12) % 12
+        return [0, 2, 4, 5, 7, 9, 11].contains(pitchClass)
+    }
+
+    /// How far the chord layout may climb above the base run. See `chordDegree`.
+    public static let maxChordOctaveShift = 1
 
     // MARK: - Velocity
 

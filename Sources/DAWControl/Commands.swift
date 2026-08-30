@@ -457,6 +457,18 @@ public final class CommandRouter {
         // exactly note.audition + 1. NOTE: no quoted string in this comment,
         // deliberately (the m25-d rule).
         "note.play",
+        // m23-cv: the voicing engine as a READ-ONLY computation — key + Roman
+        // numerals in, well-voiced pitch arrays out. Nothing sounds and nothing
+        // is edited; it exists so an agent writing MIDI into a clip reaches the
+        // same nearest-tone voice leading the human one-finger chord button uses
+        // instead of hand-rolling root-position stacks. Placed NEXT TO note.play
+        // and NOT at the tail (the additive-at-end law is deliberately not used
+        // here: a tail append reddened 19 end-relative assertions across 7 files
+        // at m23-ct, and note.play's own neighbourhood is pinned by
+        // LivePlayCommandTests to pad.previewEffort + 1, which an insertion
+        // BEFORE it would break). NOTE: no quoted string in this comment,
+        // deliberately (the m25-d rule).
+        "chord.voice",
         // m23-h: the ONE track-ordering verb (arrange headers drag onto it;
         // the mixer follows in m23-z). Additive at the END (the same law).
         "track.reorder",
@@ -5420,6 +5432,176 @@ public final class CommandRouter {
             }
             return .success(request.id, .object(playPayload))
 
+        case "chord.voice":
+            // m23-cv — ONE-FINGER CHORDS' wire half, and it is DELIBERATELY the
+            // small half.
+            //
+            // ⛔⛔ **THIS IS NOT THE FEATURE. THE BUTTON IS.** The user was shown
+            // the "an agent can already do this over the wire" argument for this
+            // exact composition cluster and ruled against it — "add it anyway",
+            // recorded as a ruling against the RATIONALE, not merely a request
+            // (docs/ROADMAP.md:1049). So this verb is scoped so it cannot become
+            // a substitute: it is PURE and READ-ONLY. It touches no store, sounds
+            // nothing, edits nothing, and holds nothing. There is no live-trigger
+            // verb here because there does not need to be — note.play already
+            // takes up to 8 pitches and is already capturable.
+            //
+            // What it earns its place with: an agent authoring MIDI through
+            // clip.setNotes / clip.addMIDI currently stacks root-position triads,
+            // and this hands it the same nearest-tone voice leading and the same
+            // low-interval floors the on-screen chord row uses. Same engine, one
+            // home, no second opinion about what a chord should look like.
+            //
+            // ⭐ **A SEQUENCE IN ONE CALL, BECAUSE VOICE LEADING IS SEQUENTIAL.**
+            // Each chord is voiced against the one before it. A one-chord-at-a-
+            // time API would force the caller to thread previousVoicing by hand
+            // on every step, which is exactly the bookkeeping a caller gets wrong
+            // and the reason the result would look no better than a naive stack.
+            try params.rejectUnknownKeys(
+                ["key", "mode", "degrees", "chords", "preset", "density",
+                 "previousVoicing", "octaveShift"],
+                verb: "chord.voice",
+                hint: "give a key plus 'degrees' (scale degrees 1-7, e.g. [1,5,6,4] "
+                    + "for the four chords of pop) OR 'chords' (explicit symbols, "
+                    + "e.g. [\"C\",\"G\",\"Am\",\"F\"])")
+
+            let voicingKey = try Self.chordVoicingKey(params["key"])
+            let voicingMode: KeyMode
+            if let raw = params["mode"]?.stringValue {
+                guard let parsed = KeyMode(rawValue: raw) else {
+                    throw ControlError("'mode' must be one of "
+                        + KeyMode.allCases.map(\.rawValue).joined(separator: ", "))
+                }
+                voicingMode = parsed
+            } else {
+                voicingMode = .major
+            }
+            let voicingKind: VoicingPresetKind
+            if let raw = params["preset"]?.stringValue {
+                guard let parsed = VoicingPresetKind(rawValue: raw) else {
+                    throw ControlError("'preset' must be one of "
+                        + VoicingPresetKind.allCases.map(\.rawValue).joined(separator: ", ")
+                        + " — bass plays the root only, which is deliberate")
+                }
+                voicingKind = parsed
+            } else {
+                voicingKind = .piano
+            }
+            var voicingPreset = InstrumentVoicingPreset.preset(for: voicingKind)
+            if let raw = params["density"]?.stringValue {
+                guard let parsed = ChordDensity(rawValue: raw) else {
+                    throw ControlError("'density' must be one of "
+                        + ChordDensity.allCases.map(\.rawValue).joined(separator: ", "))
+                }
+                voicingPreset.density = parsed
+            }
+            let voicingShift = try Self.optionalInteger(params["octaveShift"],
+                                                        "'octaveShift'") ?? 0
+            guard (-4...4).contains(voicingShift) else {
+                throw ControlError("'octaveShift' must be between -4 and 4")
+            }
+            var voicingPrevious: [Int]?
+            if let entry = params["previousVoicing"] {
+                guard case .array(let raw) = entry else {
+                    throw ControlError("'previousVoicing' must be an array of MIDI "
+                                       + "note numbers (0-127) — the chord that was "
+                                       + "sounding before this one")
+                }
+                var pitches: [Int] = []
+                for value in raw {
+                    guard let number = value.doubleValue, Self.isInteger(number),
+                          (0...127).contains(Int(number)) else {
+                        throw ControlError("every entry in 'previousVoicing' must be "
+                                           + "an integer 0-127")
+                    }
+                    pitches.append(Int(number))
+                }
+                voicingPrevious = pitches
+            }
+
+            // ── WHAT TO VOICE: degrees OR explicit symbols, exactly one. ──
+            var voicingSymbols: [(symbol: ChordSymbol, degree: Int?)] = []
+            let hasDegrees = params["degrees"] != nil
+            let hasChords = params["chords"] != nil
+            guard hasDegrees != hasChords else {
+                throw ControlError("give exactly one of 'degrees' (scale degrees 1-7, "
+                    + "e.g. [1,5,6,4]) or 'chords' (explicit symbols, e.g. "
+                    + "[\"C\",\"G\",\"Am\",\"F\"]) — not both, and not neither")
+            }
+            if hasDegrees {
+                guard case .some(.array(let raw)) = params["degrees"], !raw.isEmpty else {
+                    throw ControlError("'degrees' must be a non-empty array of scale "
+                                       + "degrees, each 1-7 (1 is the key's own chord)")
+                }
+                for value in raw {
+                    guard let number = value.doubleValue, Self.isInteger(number),
+                          (1...7).contains(Int(number)) else {
+                        throw ControlError("every entry in 'degrees' must be an integer "
+                                           + "1-7 — 1 is the key's own chord, 5 is the "
+                                           + "one that wants to resolve back to it")
+                    }
+                    let degree = Int(number)
+                    voicingSymbols.append((ChordVoicing.diatonicChord(
+                        degree: degree, key: voicingKey, mode: voicingMode,
+                        density: voicingPreset.density), degree))
+                }
+            } else {
+                guard case .some(.array(let raw)) = params["chords"], !raw.isEmpty else {
+                    throw ControlError("'chords' must be a non-empty array of chord "
+                                       + "symbols such as C, Am, F#m7, G7, Bdim, Csus4")
+                }
+                for value in raw {
+                    guard let text = value.stringValue else {
+                        throw ControlError("every entry in 'chords' must be a chord "
+                                           + "symbol string such as C, Am, F#m7, G7")
+                    }
+                    guard let symbol = ChordSymbol.parse(text) else {
+                        throw ControlError("could not read the chord '\(text)' — write a "
+                            + "root then a quality, one of: (nothing) m dim aug maj7 m7 "
+                            + "7 m7b5 sus4. For example C, Am, F#m7, G7, Bdim, Csus4")
+                    }
+                    voicingSymbols.append((symbol, nil))
+                }
+            }
+            guard voicingSymbols.count <= 64 else {
+                throw ControlError("'chord.voice' takes at most 64 chords in one call")
+            }
+
+            // ── THE COMPUTATION. Pure: no store, no engine, no clock. ──
+            var voicedChords: [JSONValue] = []
+            var runningVoicing = voicingPrevious
+            for entry in voicingSymbols {
+                let pitches = ChordVoicing.voice(entry.symbol, previous: runningVoicing,
+                                                 preset: voicingPreset,
+                                                 octaveShift: voicingShift)
+                runningVoicing = pitches
+                var chordPayload: [String: JSONValue] = [
+                    "symbol": .string(entry.symbol.name),
+                    "quality": .string(entry.symbol.quality.rawValue),
+                    "pitches": .array(pitches.map { .number(Double($0)) }),
+                    // Names beside numbers, from the repo's ONE naming home, so a
+                    // reply can be read by a human without a MIDI table.
+                    "noteNames": .array(pitches.map {
+                        .string(Fundamental.noteName(midiNote: $0))
+                    }),
+                ]
+                if let degree = entry.degree {
+                    chordPayload["degree"] = .number(Double(degree))
+                    chordPayload["numeral"] = .string(ChordVoicing.romanNumeral(
+                        degree: degree, mode: voicingMode,
+                        density: voicingPreset.density))
+                }
+                voicedChords.append(.object(chordPayload))
+            }
+            return .success(request.id, .object([
+                "key": .string(KeyEstimate.pitchClassesSharp[voicingKey]),
+                "keyPitchClass": .number(Double(voicingKey)),
+                "mode": .string(voicingMode.rawValue),
+                "preset": .string(voicingKind.rawValue),
+                "density": .string(voicingPreset.density.rawValue),
+                "chords": .array(voicedChords),
+            ]))
+
         case "pad.previewEffort":
             // Breath pad P6 — the LIVE DRAG PREVIEW. Streams one effort value
             // (0…1) to the track's instrument as a controller, right now,
@@ -9010,6 +9192,35 @@ public final class CommandRouter {
 
     /// True when `value` is a finite whole number (no fractional part) — the
     /// integer check for pitch and velocity, since JSON carries them as doubles.
+    /// Reads `chord.voice`'s `key` — a pitch class 0-11, or a note name.
+    ///
+    /// ⭐ **BOTH SPELLINGS, BECAUSE BOTH CALLERS ARE REAL.** A gate writes `0`; a
+    /// language model writes `"C"` or `"F#"` or `"Bb"`, and refusing those would
+    /// make the verb feel broken for exactly the caller it was added for. Missing
+    /// defaults to C, which is the picker's default too — one home for that
+    /// choice, not two.
+    private static func chordVoicingKey(_ value: JSONValue?) throws -> Int {
+        guard let value else { return 0 }
+        if let number = value.doubleValue, isInteger(number) {
+            guard (0...11).contains(Int(number)) else {
+                throw ControlError("'key' as a number must be a pitch class 0-11 "
+                                   + "(0 is C) — or write the note name, e.g. F#")
+            }
+            return Int(number)
+        }
+        if let text = value.stringValue {
+            // Parsed through the SAME reader chord symbols use, so "F#" cannot
+            // mean one thing here and another there.
+            guard let symbol = ChordSymbol.parse(text) else {
+                throw ControlError("could not read the key '\(text)' — write a note "
+                                   + "name such as C, F#, Bb, or a pitch class 0-11")
+            }
+            return symbol.rootPitchClass
+        }
+        throw ControlError("'key' must be a note name such as C or F#, or a pitch "
+                           + "class 0-11")
+    }
+
     private static func isInteger(_ value: Double) -> Bool {
         value.isFinite && value.rounded() == value
     }

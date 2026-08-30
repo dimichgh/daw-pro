@@ -55,6 +55,13 @@ struct LivePlayCaptureTests {
         engine.tracksDidChange([track])
         var transport = TransportState()
         transport.positionBeats = 0
+        // ⚠️ EXPLICIT, not inherited (m23-cy): the project default is now ONE
+        // bar of count-in, which delays the take anchor by 2.0 s at 120 BPM —
+        // six times `settlePastAnchor`'s 300 ms wait, so every note in this
+        // suite would land pre-anchor and be dropped. This suite is about the
+        // ~70 ms hardware lead, NOT about count-in, so it says 0 out loud
+        // rather than depending on a default that just moved under it.
+        transport.countInBars = 0
         let box = TakeBox()
         try engine.startTake(transport, audioURL: nil, captureMIDI: true) { box.result = $0 }
         return (engine, track, box)

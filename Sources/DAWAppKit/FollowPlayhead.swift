@@ -231,6 +231,23 @@ public final class FollowPlayheadModel {
         externalScrollNonce += 1
     }
 
+    /// Stands follow down on this surface WITHOUT touching the persisted enable
+    /// (m23-cu-1) — the same state a manual scroll produces, reached by an
+    /// explicit request instead of by a detected divergence.
+    ///
+    /// Its one caller is the FOLLOW chip while the arrange is following only
+    /// because a take is rolling: there the persisted preference is OFF, so a
+    /// press cannot be expressed as a toggle of it without meaning the opposite
+    /// of what was pressed. ⭐ It reuses `isSuspended` deliberately rather than
+    /// adding a second "follow is off right now" flag — two of those on one
+    /// surface is the m25-r shape, and `rearm()` already clears this one on the
+    /// next transport start, which is exactly the lifetime a per-take stand-down
+    /// wants.
+    public func standDown() {
+        isSuspended = true
+        issueInFlight = false
+    }
+
     /// Re-arms follow: the transport started, or the user clicked the chip back on.
     ///
     /// The baseline is KEPT, not cleared. Re-arming means "follow may drive this

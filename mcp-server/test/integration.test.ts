@@ -443,7 +443,19 @@ test("tools/list returns exactly the audit-enforced tool count", { skip: SKIP_RE
   // name-capturing regexes: **36 direct + 163 wrapper = 199**, 0 duplicates,
   // 0 names in both sets, and a bogus-name negative control (`"zzz_not_a_tool"`)
   // that returned 0.
-  assert.equal(result.tools.length, 199);
+  //
+  // 199 -> 200 at m23-cv (`chord_voice` — work out well-voiced chord notes:
+  // key + Roman-numeral degrees in, voice-led MIDI pitch arrays out. READ-ONLY
+  // and silent, and deliberately so: the DELIVERABLE of m23-cv is the on-screen
+  // one-key chord button, and this tool exists to make agent-authored clips
+  // better voiced, never to stand in for the button. It takes only optional
+  // parameters and still rides the strict-schema wrapper). Command<->tool
+  // bijection stays mechanical (`chord.voice` -> `chord_voice`), no
+  // exception-table entry needed. RE-MEASURED, not derived, by the same two
+  // name-capturing regexes: **36 direct + 164 wrapper = 200**, 0 duplicates in
+  // either set, 0 names in both sets, and the same bogus-name negative control
+  // (`"zzz_not_a_tool"`) returning 0.
+  assert.equal(result.tools.length, 200);
 });
 
 // ---------------------------------------------------------------------------

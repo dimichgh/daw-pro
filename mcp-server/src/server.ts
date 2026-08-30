@@ -624,6 +624,15 @@ registerTool(
       "count-in clicks play immediately before recording starts (0 = no " +
       "count-in). Count-in clicks always sound, even if the metronome itself " +
       "is disabled — and the recorded take never includes the count-in audio. " +
+      "NEW PROJECTS DEFAULT TO 1 BAR (m23-cy); a project that stored a " +
+      "different value, including 0, keeps it. " +
+      "IMPORTANT — a count-in does NOT make an early note survive: it DELAYS " +
+      "the take's anchor by that many bars, and notes played BEFORE the anchor " +
+      "(i.e. during the count-in) are discarded, exactly like notes played in " +
+      "the first instants of a take with no count-in. What it buys you is an " +
+      "audible cue for when the take actually starts. Measured at 120 BPM 4/4: " +
+      "with countInBars 1, a note struck 2321 ms after transport.record landed " +
+      "at beat 0.488, while one struck at 428 ms recorded nothing. " +
       "Cannot be changed while recording is in progress. Returns the updated " +
       "transport state.",
     inputSchema: {
@@ -2280,6 +2289,139 @@ registerTool(
     pitches: number[];
     velocity?: number;
   }) => toToolResult(() => bridge.send("note.play", { trackId, pitches, velocity }))
+);
+
+registerTool(
+  "chord_voice",
+  {
+    title: "Work out well-voiced chord notes (read-only, sounds nothing)",
+    description:
+      "You do not have to do the music theory. Give a key and Roman-numeral " +
+      "scale degrees and get back real, well-spaced MIDI pitch arrays you can " +
+      "hand straight to clip_set_notes, clip_add_midi or note_play. " +
+      "READ-ONLY AND SILENT: this computes and returns pitches. It plays " +
+      "nothing, records nothing, edits no clip, and needs no track — it is " +
+      "pure arithmetic over the arguments. " +
+      "WHY USE IT INSTEAD OF STACKING THIRDS YOURSELF: it does the two things " +
+      "that decide whether a chord part sounds like music or like a beginner. " +
+      "(1) NEAREST-TONE VOICE LEADING — each chord is voiced to move the " +
+      "smallest possible distance from the one before it, so a progression " +
+      "holds its common tones instead of jumping around the keyboard. Pass " +
+      "the whole progression in ONE call and this is done for you; that is " +
+      "the main reason `degrees` is an array. (2) LOW-INTERVAL LIMITS — close " +
+      "intervals are kept out of the bass register where they turn to mud. " +
+      "`degrees` are 1-7 scale degrees: 1 is the key's own chord, 4 and 5 are " +
+      "the two that surround it, 6 is its relative minor. [1,5,6,4] is the " +
+      "four chords of pop; [1,6,4,5] is the '50s doo-wop turnaround; [2,5,1] " +
+      "is the jazz cadence. Or pass `chords` with explicit symbols instead " +
+      "(C, Am, F#m7, G7, Bdim, Csus4) when you already know what you want. " +
+      "Give exactly one of the two. " +
+      "PICK THE PRESET TO MATCH THE INSTRUMENT — it changes register, note " +
+      "count and spacing, and it matters more than it sounds like it does. " +
+      "`piano` puts a bass note low and a close triad in the middle. `pad` " +
+      "and `strings` spread wide with 7ths. `guitar` stays in root position " +
+      "in a guitar's range. `bass` RETURNS A SINGLE ROOT NOTE PER CHORD, and " +
+      "that is deliberate, not a limitation: handing a bass part a full " +
+      "stacked chord is the most common way an auto-harmonised arrangement " +
+      "sounds wrong. " +
+      "TO CONTINUE A PHRASE ACROSS CALLS, pass the previous call's last " +
+      "`pitches` array as `previousVoicing`, or the voice leading restarts " +
+      "from a home position and you get an audible jump. " +
+      "This is the same engine behind the app's one-key chord mode, so what " +
+      "you author here matches what the user plays by hand.",
+    inputSchema: {
+      key: z
+        .union([z.string(), z.number().int().min(0).max(11)])
+        .optional()
+        .describe(
+          "The key's tonic: a note name (C, F#, Bb) or a pitch class 0-11 " +
+            "where 0 is C. Defaults to C."
+        ),
+      mode: z
+        .enum(["major", "minor"])
+        .optional()
+        .describe(
+          "major or natural minor. Defaults to major. In minor, degree 1 is " +
+            "the minor tonic and [1,6,3,7] is the minor-key four-chord loop."
+        ),
+      degrees: z
+        .array(z.number().int().min(1).max(7))
+        .optional()
+        .describe(
+          "Scale degrees to voice, in playing order, e.g. [1,5,6,4]. Each " +
+            "chord is voice-led from the one before it. Give this OR `chords`."
+        ),
+      chords: z
+        .array(z.string())
+        .optional()
+        .describe(
+          'Explicit chord symbols in playing order, e.g. ["C","Am","F","G7"]. ' +
+            "Root then quality, one of: (nothing) m dim aug maj7 m7 7 m7b5 " +
+            "sus4. Flats are accepted; replies always spell with sharps. " +
+            "Give this OR `degrees`."
+        ),
+      preset: z
+        .enum(["piano", "pad", "guitar", "bass", "strings"])
+        .optional()
+        .describe(
+          "Which instrument the voicing is for. Defaults to piano. `bass` " +
+            "returns ONE note per chord — the root."
+        ),
+      density: z
+        .enum(["triad", "seventh"])
+        .optional()
+        .describe(
+          "Override the preset's chord size. `seventh` is the lo-fi / " +
+            "neo-soul / deep-house move: the same progression, richer chords."
+        ),
+      previousVoicing: z
+        .array(z.number().int().min(0).max(127))
+        .optional()
+        .describe(
+          "The pitches that were sounding just before the first chord here, " +
+            "so voice leading continues smoothly across calls. Usually the " +
+            "`pitches` of the last chord your previous call returned."
+        ),
+      octaveShift: z
+        .number()
+        .int()
+        .min(-4)
+        .max(4)
+        .optional()
+        .describe("Move the whole result by whole octaves. Defaults to 0."),
+    },
+  },
+  async ({
+    key,
+    mode,
+    degrees,
+    chords,
+    preset,
+    density,
+    previousVoicing,
+    octaveShift,
+  }: {
+    key?: string | number;
+    mode?: "major" | "minor";
+    degrees?: number[];
+    chords?: string[];
+    preset?: "piano" | "pad" | "guitar" | "bass" | "strings";
+    density?: "triad" | "seventh";
+    previousVoicing?: number[];
+    octaveShift?: number;
+  }) =>
+    toToolResult(() =>
+      bridge.send("chord.voice", {
+        key,
+        mode,
+        degrees,
+        chords,
+        preset,
+        density,
+        previousVoicing,
+        octaveShift,
+      })
+    )
 );
 
 registerTool(

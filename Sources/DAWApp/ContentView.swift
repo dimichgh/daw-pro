@@ -1377,6 +1377,14 @@ struct ContentView: View {
         if model.isFollowSuspended {
             return "Following paused — you scrolled. Click to resume, or press play again"
         }
+        // m23-cu-1: while a take is rolling the arrange follows even with the
+        // preference off, so the chip is LIT and must say why — and say what a
+        // press will do, which here is "hold still for the rest of this take",
+        // not "turn following off for good".
+        if model.followAutoEngagedByTake {
+            return "Following while you record — the view keeps up with the take. "
+                + "Click to hold it still for this take"
+        }
         return model.isFollowingPlayhead
             ? "Following the playhead — the view keeps it in frame while you play"
             : "Keep the playhead in frame while you play"
@@ -1703,7 +1711,15 @@ struct ContentView: View {
             MusicalKeyboardStrip(
                 controller: model.musicalTyping,
                 onClose: { model.setMusicalTypingEnabled(false) },
-                onPointerPress: { model.musicalTypingPointerDown(pitch: $0) }
+                onPointerPress: { model.musicalTypingPointerDown(pitch: $0) },
+                // m23-cv — chord mode. Every one of these goes through an
+                // `AppModel` funnel rather than touching the controller directly,
+                // so the mouse, the chips and `debug.musicalTyping` drive ONE path.
+                onChordCellPress: { model.musicalTypingChordCellDown(cellIndex: $0) },
+                onSetPlayMode: { model.setMusicalTypingPlayMode($0) },
+                onSetKey: { model.musicalTyping.setChordKey($0, mode: $1) },
+                onSetVoicingPreset: { model.musicalTyping.setVoicingPreset($0) },
+                onSetProgression: { model.musicalTyping.setProgression($0) }
             )
             .onAppear { model.refreshMusicalTypingTarget() }
             // ⚠️ RELEASES ON BOTH EDGES, AND THAT IS A DECISION, NOT AN

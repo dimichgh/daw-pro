@@ -2293,6 +2293,30 @@ public struct TransportState: Codable, Sendable, Equatable {
     /// Bars of count-in clicks before a `record()` take begins, clamped to
     /// `countInBarsRange`. Count-in implies clicks: they sound even when the
     /// metronome itself is disabled.
+    ///
+    /// ⭐⭐ **DEFAULTS TO 1 (m23-cy), AND THAT DEFAULT IS THE WHOLE FEATURE.**
+    /// The mechanism shipped complete long ago — model, engine, wire verb and a
+    /// transport-bar stepper — behind a default of 0, so the user who needed it
+    /// had no reason to know it existed and reported the symptom it prevents:
+    /// *"the first note after you hit record is dropped."* It is dropped
+    /// because a take's `PlaybackAnchor` is scheduled slightly AHEAD of
+    /// `startTake` and `MIDICaptureSession` discards every pre-anchor note-on
+    /// (`MIDICaptureSession.swift:12`). A count-in does not rescue that note —
+    /// see below — it gives the player an AUDIBLE bar of clicks so they are
+    /// never playing before the anchor exists.
+    ///
+    /// ⚠️⚠️ **COUNT-IN DOES NOT MAKE AN EARLY NOTE SURVIVE; IT MOVES THE
+    /// ANCHOR LATER AND MARKS THE WAIT.** Measured live on staging 2026-08-30,
+    /// three arms, 120 BPM 4/4: with `countInBars: 1` a note struck 2321 ms
+    /// after `transport.record` landed at beat **0.488** (so the take EXCLUDES
+    /// the count-in); a note struck 428 ms after record — i.e. *during* the
+    /// count-in — recorded **nothing**; and with `countInBars: 0` a note struck
+    /// 13 ms after record also recorded **nothing**. Anything that reads this
+    /// field as "early notes are now safe" is wrong.
+    ///
+    /// ⛔ **A pre-anchor note is never rescued by synthesising a note-on at the
+    /// anchor** — a partial note is a lie, and that refusal is recorded in
+    /// m23-ct and in `ProjectStore.record()`.
     public var countInBars: Int
 
     /// The project's TEMPO MAP when it is non-trivial (m12-d) — nil for a
@@ -2352,7 +2376,12 @@ public struct TransportState: Codable, Sendable, Equatable {
         punchInBeat: Double = 0,
         punchOutBeat: Double = 4,
         isMetronomeEnabled: Bool = false,
-        countInBars: Int = 0
+        // ⭐ m23-cy: ONE home for the count-in default. This single literal is
+        // what `newProject()`, the store's own init and `TransportDocument`'s
+        // absent-key fallback all resolve to — see `countInBars`' doc above for
+        // why it is 1 and `TransportDocument.init(from:)` for what that means
+        // for a project file saved before this field existed.
+        countInBars: Int = 1
     ) {
         self.isPlaying = isPlaying
         self.isRecording = isRecording

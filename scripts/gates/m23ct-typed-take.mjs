@@ -111,6 +111,15 @@ ck("armed track has an id", typeof armedTrack === "string" && armedTrack.length 
 r = await cmd("track.setArm", { trackId: armedTrack, armed: true });
 ck("track.setArm true", r.ok, r.error);
 
+// ⚠️ EXPLICIT COUNT-IN 0, not inherited (m23-cy). The project default is now
+// ONE bar, which delays the take anchor by 2.0 s at 120 BPM — four times the
+// 500 ms `playTwoNotes` waits, so both notes would land pre-anchor and this
+// gate would redden for a reason that has nothing to do with typed capture.
+// This gate is about whether a PLAYED note reaches a take; count-in has its own
+// gate (`m23cy-count-in-default.mjs`).
+r = await cmd("transport.setMetronome", { enabled: false, countInBars: 0 });
+ck("count-in pinned to 0 for this gate", r.ok && r.result?.countInBars === 0, r.result);
+
 r = await cmd("transport.record", {});
 ck("transport.record started", r.ok, r.error);
 
@@ -195,6 +204,12 @@ const bystanderTrack = r.result?.id;
 ck("track.add armed bystander", r.ok && !!bystanderTrack, r.error);
 r = await cmd("track.setArm", { trackId: bystanderTrack, armed: true });
 ck("bystander armed (record needs one)", r.ok, r.error);
+
+// Same explicit 0 as arm 1 — and here it matters MORE, not less: with a
+// count-in the negative arm would record nothing because everything was
+// pre-anchor, so its zero would stop being evidence about ARMING at all.
+r = await cmd("transport.setMetronome", { enabled: false, countInBars: 0 });
+ck("count-in pinned to 0 for this gate (arm 2)", r.ok && r.result?.countInBars === 0, r.result);
 
 r = await cmd("transport.record", {});
 ck("transport.record started (arm 2)", r.ok, r.error);

@@ -201,6 +201,11 @@ try {
   await cmd("track.setArm", { trackId: armedID, armed: true });
   await cmd("debug.arrangeSelection", { act: "clickTrack", trackId: armedID });
   await cmd("debug.musicalTyping", { enable: true });
+  // ⚠️ EXPLICIT COUNT-IN 0, not inherited (m23-cy). The project default is now
+  // ONE bar = 2.0 s at 120 BPM, four times the 500 ms wait below, so every
+  // typed note would land pre-anchor and this smoke would report the typing
+  // seam broken when it is not.
+  await cmd("transport.setMetronome", { enabled: false, countInBars: 0 });
   await cmd("transport.record", {});
   // ⚠️ 500 ms BEFORE THE FIRST NOTE, AND IT IS NOT PADDING. A take's
   // PlaybackAnchor is scheduled slightly ahead of startTake and every
@@ -262,6 +267,7 @@ try {
   // read as a pass, and the footgun the indicator exists to name would be
   // invisible to this gate.
   await cmd("debug.arrangeSelection", { act: "clickTrack", trackId: idleID });
+  await cmd("transport.setMetronome", { enabled: false, countInBars: 0 });  // m23-cy, see arm 1
   await cmd("transport.record", {});
   await sleep(500);
   s = body(await cmd("debug.musicalTyping", { press: "G" }));   // G4 = 67

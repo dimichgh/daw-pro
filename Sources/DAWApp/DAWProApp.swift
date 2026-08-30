@@ -5373,8 +5373,17 @@ final class AppModel {
             ])
         }
         return .object([
+            // The PERSISTED preference — unchanged meaning, so every gate
+            // written against it still reads what it always read.
             "enabled": .bool(panelLayout.followPlayhead),
+            // m23-cu-1, ADDITIVE: what the ARRANGE actually runs on, and
+            // whether a rolling take is the only reason it is true. Without
+            // these a gate cannot tell "follow is on" from "follow is on
+            // because we are recording", which is the entire sub-item.
+            "enabledEffective": .bool(arrangeFollowEnabled),
+            "autoEngagedByTake": .bool(followAutoEngagedByTake),
             "isPlaying": .bool(store.transport.isPlaying),
+            "isRecording": .bool(store.transport.isRecording),
             "arrange": surface(arrangeFollow, contentWidth: arrangeContentWidth,
                                viewportWidth: arrangeViewportWidth),
             "pianoRoll": surface(pianoRollFollow),
@@ -5775,13 +5784,72 @@ final class AppModel {
 
     // MARK: - Follow the playhead (m23-c2)
 
-    /// The ONE opt-in flag both following surfaces read.
-    var isFollowingPlayhead: Bool { panelLayout.followPlayhead }
+    /// ⭐⭐ **THE FLAG THE ARRANGE ACTUALLY FOLLOWS ON (m23-cu-1): the persisted
+    /// preference OR a rolling take.**
+    ///
+    /// The user's report was *"it would be good to autoposition on the area
+    /// where the notes are placed and progress as user keeps playing"* — and
+    /// follow ALREADY worked during a take, end to end (measured live on
+    /// staging: with the preference on, a 6 s take issued a page scroll and
+    /// moved the arrange from offset 0 to 934.5; with it off, zero scrolls).
+    /// The only thing between the user and the behaviour they asked for was
+    /// `PanelLayoutModel.defaultFollowPlayhead == false`.
+    ///
+    /// ⚠️ **This is an OR, deliberately, NOT a flip of that default and NOT a
+    /// state machine.** Flipping the default would start every existing
+    /// session scrolling, which is the surprise m23-c2 made this setting
+    /// opt-in to avoid. Saving/restoring the preference around a take would
+    /// mean WRITING a user preference the user never touched — forbidden by
+    /// two standing precedents in this tree (`PianoRollMinimap.swift:202` and
+    /// the m25-f-3 record, both of which deliberately leave
+    /// `layout.followPlayhead` alone) — and a crash mid-take would strand the
+    /// override permanently. An OR needs no restore: the extra term simply
+    /// stops being true when `isRecording` clears.
+    ///
+    /// ⛔⛔ **IT MUST BE READ AT *BOTH* ARRANGE SITES — `followArrangeTick`
+    /// (the issuer) AND `reportArrangeHScroll` (the manual-scroll detector).**
+    /// If the two ever disagree, the detector judges scrolls the issuer made
+    /// while believing follow is off, blames the user for them, and suspends;
+    /// that disagreement, not the scrolling, is the m25-r "two owners of one
+    /// scroll" failure. `ArrangeFollowEnableSiteTests` pins both call sites.
+    ///
+    /// The piano roll is NOT included: it reads `layout.followPlayhead`
+    /// directly (`PianoRollView.swift:1084`) and is left exactly as it was.
+    /// Vertical follow to the armed track's row is m23-cu-3 and is not this.
+    var arrangeFollowEnabled: Bool {
+        panelLayout.followPlayhead || store.transport.isRecording
+    }
+
+    /// True when the arrange is following ONLY because a take is rolling — the
+    /// state the FOLLOW chip needs to distinguish, because a click on it there
+    /// means something different (see `toggleFollowPlayhead`).
+    var followAutoEngagedByTake: Bool {
+        !panelLayout.followPlayhead && store.transport.isRecording
+    }
+
+    /// What the FOLLOW chip's LIT face reports.
+    ///
+    /// ⚠️ **It reads the EFFECTIVE flag, not the persisted one, and that is the
+    /// chip's own law applied in the other direction.** `followChip` documents
+    /// three faces "because two would lie", on the grounds that a chip glowing
+    /// while the view sits still claims to follow and does not. A chip sitting
+    /// DARK while a take drags the view across the timeline is the same lie
+    /// inverted — it claims the view is still and it is moving. So during a
+    /// take the chip lights, and `toggleFollowPlayhead` gives that lit face an
+    /// action that means what pressing it looks like it means.
+    var isFollowingPlayhead: Bool { arrangeFollowEnabled }
 
     /// Whichever follow surface is currently suspended by a manual scroll — what
     /// the FOLLOW chip's paused face reports.
+    ///
+    /// Split per surface (m23-cu-1) rather than gated on one flag: the arrange
+    /// counts whenever the ARRANGE is following (preference or take), the roll
+    /// only under the preference, because the roll is never auto-engaged. A
+    /// single `panelLayout.followPlayhead &&` guard would have hidden a
+    /// take-time arrange suspension behind the roll's rule.
     var isFollowSuspended: Bool {
-        panelLayout.followPlayhead && (arrangeFollow.isSuspended || pianoRollFollow.isSuspended)
+        (arrangeFollowEnabled && arrangeFollow.isSuspended)
+            || (panelLayout.followPlayhead && pianoRollFollow.isSuspended)
     }
 
     /// The FOLLOW chip's action. While follow is PAUSED (the user scrolled during
@@ -5791,6 +5859,18 @@ final class AppModel {
     func toggleFollowPlayhead() {
         if isFollowSuspended {
             rearmFollow()
+        } else if followAutoEngagedByTake {
+            // ⛔⛔ **LIT BY THE TAKE, NOT BY THE PREFERENCE — SO THE PRESS MUST
+            // NOT WRITE THE PREFERENCE (m23-cu-1).** `setFollowPlayhead(!false)`
+            // here would turn following permanently ON at the exact moment the
+            // user pressed a lit chip to make the view HOLD STILL: the opposite
+            // of the press, and sticky. Instead it stands the arrange down for
+            // the rest of this take, through the SAME `isSuspended` state a
+            // manual scroll sets — reusing the one who-owns-the-scroll policy
+            // rather than adding a second. `rearmFollow()` on the next
+            // transport start clears it, so the stand-down never outlives the
+            // take, and the persisted preference is exactly what it was.
+            arrangeFollow.standDown()
         } else {
             setFollowPlayhead(!panelLayout.followPlayhead)
         }
@@ -5824,7 +5904,10 @@ final class AppModel {
     func followArrangeTick() {
         guard workspaceMode == .arrange else { return }
         guard let target = arrangeFollow.target(
-            isEnabled: panelLayout.followPlayhead,
+            // m23-cu-1: the EFFECTIVE flag (preference OR rolling take). MUST
+            // stay identical to `reportArrangeHScroll`'s — see
+            // `arrangeFollowEnabled` for what a disagreement costs.
+            isEnabled: arrangeFollowEnabled,
             isPlaying: store.transport.isPlaying,
             playheadX: CGFloat(store.transport.positionBeats) * arrangePPB,
             viewportWidth: arrangeViewportWidth,
@@ -5840,7 +5923,13 @@ final class AppModel {
         arrangeHScroll = offset
         arrangeHScrollReported = offset
         arrangeFollow.reportOffset(offset,
-                                   isEnabled: panelLayout.followPlayhead,
+                                   // m23-cu-1: same EFFECTIVE flag the issuer
+                                   // reads, for the reason on
+                                   // `arrangeFollowEnabled`. Not `panelLayout.
+                                   // followPlayhead` — that would make the
+                                   // detector blame the user for follow's own
+                                   // take-time scrolls.
+                                   isEnabled: arrangeFollowEnabled,
                                    isPlaying: store.transport.isPlaying,
                                    contentWidth: arrangeContentWidth,
                                    viewportWidth: arrangeViewportWidth)

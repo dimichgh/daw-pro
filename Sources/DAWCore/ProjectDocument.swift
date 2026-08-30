@@ -499,6 +499,29 @@ public struct TransportDocument: Codable, Sendable, Equatable {
         punchInBeat = try c.decodeIfPresent(Double.self, forKey: .punchInBeat) ?? d.punchInBeat
         punchOutBeat = try c.decodeIfPresent(Double.self, forKey: .punchOutBeat) ?? d.punchOutBeat
         isMetronomeEnabled = try c.decodeIfPresent(Bool.self, forKey: .isMetronomeEnabled) ?? d.isMetronomeEnabled
+        // ⭐⭐ m23-cy — THE DEFAULT CHANGE'S ONE INTERESTING EDGE, DECIDED AND
+        // WRITTEN DOWN RATHER THAN INHERITED BY ACCIDENT.
+        //
+        // `d` is a fresh `TransportState()`, so the count-in default now
+        // resolves to 1 here as well as for a new project. That means:
+        //
+        //   • A project file WITH the key keeps its stored value, always —
+        //     including a stored 0. A user who set 0 on purpose is not
+        //     overridden, and neither is one who merely saved under the old
+        //     default. Both are indistinguishable from here and both are left
+        //     alone; this is the conservative half and it is the important one.
+        //   • A project file WITHOUT the key — only possible for a file saved
+        //     before `countInBars` existed, since every save since writes every
+        //     CodingKey — decodes to the NEW default, 1.
+        //
+        // The second case is deliberate, not an oversight. An absent key is the
+        // one state that means "this user never had the setting to choose", and
+        // giving them the current default is exactly what `decodeIfPresent ??
+        // default` is for; the alternative (pinning a literal 0 here so old
+        // files stay at the old default forever) would freeze a migration
+        // decision into the decoder and quietly disagree with `newProject()`.
+        // `CountInDefaultMigrationTests` (Tests/DAWCoreTests/PersistenceTests.swift)
+        // pins BOTH cases.
         countInBars = try c.decodeIfPresent(Int.self, forKey: .countInBars) ?? d.countInBars
     }
 

@@ -1,5 +1,44 @@
 # Changelog
 
+## 2026-08-30 — One key, one chord: play real harmony without knowing how to voice one
+
+Musical Typing gave you one key, one note. That is enough to pick out a melody
+and not much else — if you cannot voice a chord, you still cannot play a song.
+
+Turn on **CHORDS** in the keyboard strip and every key becomes a whole chord in
+a key you pick. `A` is the key's home chord, `S` is the second, `F` and `G` are
+the two that surround it, `H` is its sad relative. The letters are printed on
+the keys, the chord names are printed under them, and the Roman numerals are
+printed under those — so you can learn what you are playing while you play it.
+
+**Pick a named progression and the keys light up in order.** Four Chords, '50s
+Doo-Wop, Pop-Punk, the jazz ii-V-I, a 12-bar blues, minor rock. Press 1, then 2,
+then 3, then 4, and you have played a song's worth of harmony with four
+keystrokes. **The unlit keys still work.** Nothing is disabled, nothing is
+locked; the lights are a suggestion you can walk away from mid-bar, and the
+moment you do, the rest of the key is right there.
+
+**The chords are voiced, not stacked.** This is the part that decides whether it
+sounds like music or like someone leaning on a keyboard. Each chord is placed to
+move as little as possible from the one before it, so shared notes simply keep
+ringing instead of being re-struck, and nothing leaps an octave between changes.
+A bass note sits low, separate from the chord above it, the way two hands sit on
+a piano. Close intervals are kept out of the bottom of the range where they stop
+sounding like harmony and start sounding like mud.
+
+**And it changes with the instrument.** Piano splits a low bass note from a
+compact chord. Pad and Strings spread wide and add sevenths. Guitar stays in
+root position where a guitar actually lives. **Bass plays one note — the root —
+and that is on purpose:** handing a bass part a whole stacked chord is the most
+common way an auto-harmonised arrangement goes wrong.
+
+Everything you play this way is recorded exactly as before. Arm an instrument
+track, hit record, follow the lights, and the take is a real MIDI clip you own.
+
+For agents: `chord_voice` returns the same voicings as a pitch array, so
+AI-authored chord parts get the same voice leading the button does. It is
+read-only — it works out notes, it does not play them.
+
 ## 2026-08-29 — You can play the DAW without owning a keyboard, and it records
 
 Until now, playing a note in real time required a hardware MIDI controller. If

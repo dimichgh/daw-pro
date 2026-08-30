@@ -162,6 +162,30 @@ extension AppModel {
         musicalTyping.pointerDown(pitch: pitch)
     }
 
+    /// A CELL on the on-screen CHORD ROW was pressed with the mouse (m23-cv).
+    ///
+    /// ⛔ **THE SAME ONE-HOME RULE AS `musicalTypingPointerDown`, for the same
+    /// measured reason.** `MusicalKeyboardStrip` takes this as `onChordCellPress`
+    /// and `debug.musicalTyping {chordCell:}` calls it directly, so a gate and a
+    /// human press the same two lines. The refresh is not optional: a click can be
+    /// the first thing that happens after the user changed tracks.
+    func musicalTypingChordCellDown(cellIndex: Int) {
+        refreshMusicalTypingTarget()
+        musicalTyping.pointerDown(cellIndex: cellIndex)
+    }
+
+    /// Switches between one-key-one-note and one-key-one-chord — THE one funnel,
+    /// so the header chips, the strip and `debug.musicalTyping {playMode:}` cannot
+    /// disagree.
+    func setMusicalTypingPlayMode(_ mode: MusicalTypingPlayMode) {
+        musicalTyping.setPlayMode(mode)
+        refreshMusicalTypingTarget()
+        // The controller has already pushed an empty set; this also clears
+        // anything the piano roll's own audition left behind, exactly as
+        // `setMusicalTypingEnabled` does on the way out.
+        store.stopAllAudition()
+    }
+
     /// Recomputes whether a key press can currently make a sound, from the pure
     /// resolver. Cheap (one track lookup) and called on every press plus whenever
     /// the strip is on screen and the transport changes.
@@ -228,6 +252,12 @@ extension AppModel {
     ///   - `{releaseAll:true}` — the panic path.
     ///   - `{pointerPitch:60}` / `{pointerUp:true}` — the ON-SCREEN keyboard's
     ///     press path, so a gate can prove BOTH surfaces write ONE held ledger.
+    ///   - **m23-cv** `{playMode:"chords"|"notes"}`, `{chordKey:7, chordMode:"minor"}`,
+    ///     `{voicingPreset:"pad"}`, `{progression:"four-chords"}` (`""` clears the
+    ///     lights), `{chordCell:0}` — chord mode's pickers and its on-screen row,
+    ///     each through the same app-tier funnel the UI drives. The echo carries
+    ///     `chordCells`, the app's OWN projection of what every key says and
+    ///     whether it is sounding.
     ///   - `{press:…, post:true}` — post through the REAL queue instead
     ///     (`NSApp.postEvent`), so a passed-through key genuinely reaches the
     ///     responder chain. Asynchronous — settle, then read `{}`.
@@ -262,6 +292,51 @@ extension AppModel {
         }
         if let raw = params["pointerPitch"]?.doubleValue {
             musicalTypingPointerDown(pitch: Int(raw))
+            return musicalTypingStateResponse()
+        }
+        // ── m23-cv: chord mode's controls, all through the app-tier funnels. ──
+        if let raw = params["playMode"]?.stringValue {
+            guard let mode = MusicalTypingPlayMode(rawValue: raw) else {
+                throw DebugError("'\(raw)' is not a play mode — one of "
+                    + MusicalTypingPlayMode.allCases.map(\.rawValue).joined(separator: " "))
+            }
+            setMusicalTypingPlayMode(mode)
+            return musicalTypingStateResponse()
+        }
+        if params["chordKey"] != nil || params["chordMode"] != nil {
+            var keyMode: KeyMode?
+            if let raw = params["chordMode"]?.stringValue {
+                guard let parsed = KeyMode(rawValue: raw) else {
+                    throw DebugError("'\(raw)' is not a scale — one of "
+                        + KeyMode.allCases.map(\.rawValue).joined(separator: " "))
+                }
+                keyMode = parsed
+            }
+            let pitchClass = params["chordKey"]?.doubleValue.map { Int($0) }
+                ?? musicalTyping.chordKey
+            musicalTyping.setChordKey(pitchClass, mode: keyMode)
+            return musicalTypingStateResponse()
+        }
+        if let raw = params["voicingPreset"]?.stringValue {
+            guard let kind = VoicingPresetKind(rawValue: raw) else {
+                throw DebugError("'\(raw)' is not a voicing preset — one of "
+                    + VoicingPresetKind.allCases.map(\.rawValue).joined(separator: " "))
+            }
+            musicalTyping.setVoicingPreset(kind)
+            return musicalTypingStateResponse()
+        }
+        if let raw = params["progression"]?.stringValue {
+            // "" clears the lights, which is a real state and not a missing one.
+            guard raw.isEmpty || ChordProgressionLibrary.preset(id: raw) != nil else {
+                throw DebugError("'\(raw)' is not a progression — one of "
+                    + ChordProgressionLibrary.all.map(\.id).joined(separator: " "))
+            }
+            musicalTyping.setProgression(raw.isEmpty
+                                         ? nil : ChordProgressionLibrary.preset(id: raw))
+            return musicalTypingStateResponse()
+        }
+        if let raw = params["chordCell"]?.doubleValue {
+            musicalTypingChordCellDown(cellIndex: Int(raw))
             return musicalTypingStateResponse()
         }
         if let label = params["release"]?.stringValue {
@@ -401,6 +476,28 @@ extension AppModel {
             // ladder rule).
             "keyLabels": .array(MusicalTypingRouting.allCaps.map { .string($0.label) }),
             "noteKeyCount": .number(Double(MusicalTypingRouting.noteCaps.count)),
+            // ── m23-cv: chord mode, and the CELLS as the surface derives them,
+            // so a gate reads the app's own projection instead of re-deriving the
+            // harmony from a second copy of the table.
+            "playMode": .string(musicalTyping.playMode.rawValue),
+            "chordKey": .number(Double(musicalTyping.chordKey)),
+            "chordMode": .string(musicalTyping.chordKeyMode.rawValue),
+            "voicingPreset": .string(musicalTyping.voicingPreset.rawValue),
+            "progression": musicalTyping.progression.map { .string($0.id) } ?? .null,
+            "chordCells": .array(musicalTyping.chordCells.map { cell in
+                .object([
+                    "key": .string(cell.keyLabel),
+                    "degree": .number(Double(cell.degree)),
+                    "octaveShift": .number(Double(cell.octaveShift)),
+                    "addsColour": .bool(cell.addsColour),
+                    "chord": .string(cell.chordName),
+                    "numeral": .string(cell.romanNumeral),
+                    "lit": .bool(cell.isLit),
+                    "order": cell.progressionOrder.map { .number(Double($0)) } ?? .null,
+                    "sounding": .bool(
+                        musicalTyping.soundingChordKeyCodes.contains(cell.keyCode)),
+                ])
+            }),
             "auditionEnabled": .bool(panelLayout.auditionEnabled),
             "isRecording": .bool(store.transport.isRecording),
             "reportSeq": .number(Double(musicalTyping.reportSeq)),

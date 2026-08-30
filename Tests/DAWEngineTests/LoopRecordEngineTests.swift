@@ -123,6 +123,9 @@ struct LoopRecordEngineTests {
         transport.loopStartBeat = 0
         transport.loopEndBeat = 2      // 1.0 s per cycle at 120 BPM
         transport.positionBeats = 0    // the store's §3 seek, mirrored
+        transport.countInBars = 0      // m23-cy: explicit — this test times
+                                       // loop cycles, not a count-in (the
+                                       // count-in case is the third test below)
 
         let box = TakeBox()
         try engine.startTake(transport, audioURL: nil, captureMIDI: true) { result in
@@ -181,6 +184,9 @@ struct LoopRecordEngineTests {
 
         var transport = TransportState()
         transport.isLoopEnabled = false
+        transport.countInBars = 0      // m23-cy: explicit — this test asserts
+                                       // `metronomeElapsedOffsetForTesting == 0`,
+                                       // which a count-in deliberately moves
         let box = TakeBox()
         try engine.startTake(transport, audioURL: nil, captureMIDI: false) { result in
             box.result = result

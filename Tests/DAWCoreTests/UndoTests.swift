@@ -70,7 +70,11 @@ struct UndoRoundTripTests {
         #expect(store.undoLabel == "Change Metronome")
         try store.undo()
         #expect(!store.transport.isMetronomeEnabled)
-        #expect(store.transport.countInBars == 0)
+        // Undo restores the PRE-EDIT value, which for a fresh store is the
+        // project default — moved 0 → 1 by m23-cy. Written as the default
+        // rather than as a literal so this test keeps asserting "undo went
+        // back", not "undo went to zero".
+        #expect(store.transport.countInBars == TransportState().countInBars)
         try store.redo()
         #expect(store.transport.isMetronomeEnabled)
         #expect(store.transport.countInBars == 2)

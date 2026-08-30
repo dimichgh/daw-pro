@@ -37,7 +37,7 @@ command, `track.setInstrument`, under a friendlier name/shape
 which is a known liar on this file and previously anchored this paragraph at a
 stale 194) and
 `Sources/DAWControl/Commands.swift`
-(**194 commands** — the `CommandRouter.allCommands.count == 193` pin in
+(**195 commands** — the `CommandRouter.allCommands.count == 193` pin in
 `Tests/DAWControlTests/RenderCommandTests.swift`)
 in the DAW Pro repo — not memory, and not the app's own in-app Copilot
 catalog (`Sources/DAWControl/CopilotCatalog.swift`), which is a **different,

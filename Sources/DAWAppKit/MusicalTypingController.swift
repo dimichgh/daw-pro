@@ -73,6 +73,113 @@ public final class MusicalTypingController {
     /// already ringing, which is what a real keyboard does.
     public private(set) var velocity = AuditionController.defaultVelocity
 
+    // MARK: - Chord mode (m23-cv)
+
+    /// What ONE key press produces.
+    ///
+    /// ⭐ **ADDITIVE. `.notes` IS EXACTLY WHAT SHIPPED**, and every note-mode test
+    /// in `MusicalTypingControllerTests` passes unmodified against it — that was
+    /// checked before any chord behaviour was written, because a "mode" that
+    /// quietly changed single-note typing would be a regression wearing a feature's
+    /// clothes.
+    public private(set) var playMode: MusicalTypingPlayMode = .notes
+
+    /// The tonic of the chosen key, as a pitch class (0 = C).
+    public private(set) var chordKey = 0
+
+    /// Major or natural minor.
+    public private(set) var chordKeyMode: KeyMode = .major
+
+    /// Which instrument style the chords are voiced for.
+    public private(set) var voicingPreset: VoicingPresetKind = .piano
+
+    /// The named progression currently HIGHLIGHTED, or nil for none.
+    ///
+    /// ⛔⛔ **A PRESET LIGHTS KEYS. IT NEVER GATES THEM.** This is the whole shape
+    /// of the feature the user chose — *"Both — presets highlight the scale"* —
+    /// and it is enforced structurally rather than by discipline: this property is
+    /// read by `chordCells` (which produces LABELS) and by nothing on the sounding
+    /// path. `perform` and `pointerPress` never look at it, so there is no code in
+    /// which a dim key could fail to play.
+    public private(set) var progression: ChordProgressionPreset?
+
+    /// The pitches the last chord was voiced at — the input nearest-tone voice
+    /// leading measures the next chord against.
+    ///
+    /// ⚠️ **SESSION STATE, CLEARED ON THE SAME BOUNDARIES THE MODE IS** (mode off,
+    /// play-mode change, preset change), matching the "session-only, never
+    /// persisted" law that governs every other piece of Musical Typing state. It
+    /// is deliberately NOT cleared when the key or the scale changes: a modulation
+    /// is exactly the moment smooth voice leading is worth the most.
+    @ObservationIgnored private var lastVoicing: [Int]?
+
+    /// The 17 chord cells the strip draws, left to right — key legend, chord name,
+    /// Roman numeral, and whether the current progression lights this one.
+    ///
+    /// ⭐ **DERIVED, NEVER STORED.** The view, the staging seam and any future
+    /// gate read this ONE projection, so "what the keys say" and "what the keys
+    /// play" cannot disagree — the divergence `MusicalKeyboardStrip`'s letter
+    /// legend already spends a paragraph preventing for note names.
+    public var chordCells: [MusicalTypingChordCell] {
+        MusicalTypingRouting.noteCaps.compactMap { cap in
+            guard let semitone = cap.semitone else { return nil }
+            let layout = MusicalTypingRouting.chordDegree(semitone: semitone)
+            let density = Self.density(for: voicingPreset, addsColour: layout.addsColour)
+            let chord = ChordVoicing.diatonicChord(degree: layout.degree, key: chordKey,
+                                                   mode: chordKeyMode, density: density)
+            return MusicalTypingChordCell(
+                keyCode: cap.keyCode,
+                keyLabel: cap.label,
+                degree: layout.degree,
+                octaveShift: layout.octaveShift,
+                addsColour: layout.addsColour,
+                chordName: chord.name,
+                romanNumeral: ChordVoicing.romanNumeral(degree: layout.degree,
+                                                        mode: chordKeyMode, density: density),
+                isLit: progression?.litDegrees.contains(layout.degree) == true,
+                // ⚠️ THE NUMBER LANDS ON ONE CELL PER STEP — the base-octave
+                // NATURAL key. See `MusicalTypingChordCell.progressionOrder`:
+                // numbering every cell that shares the degree painted ten badges
+                // for a four-chord preset, which only a screenshot could see.
+                progressionOrder: (layout.octaveShift == 0 && !layout.addsColour)
+                    ? progression?.order(ofDegree: layout.degree) : nil)
+        }
+    }
+
+    /// The pitches a chord cell would sound RIGHT NOW, given what is sounding.
+    ///
+    /// **Pure with respect to this object** — it reads `lastVoicing` and writes
+    /// nothing, so a view or a seam may call it to display a chord without
+    /// disturbing the voice leading of the performance in progress. The write
+    /// happens in `soundChord`, on the one path that actually makes sound.
+    public func chordPitches(forKeyIndex index: Int) -> [Int] {
+        let layout = MusicalTypingRouting.chordDegree(semitone: index)
+        let preset = InstrumentVoicingPreset.preset(for: voicingPreset)
+        let density = Self.density(for: voicingPreset, addsColour: layout.addsColour)
+        let chord = ChordVoicing.diatonicChord(degree: layout.degree, key: chordKey,
+                                               mode: chordKeyMode, density: density)
+        // ⚠️ THE OCTAVE CHIP MOVES CHORDS TOO, and it has to: `baseOctave` is the
+        // only register control this surface has, and in chord mode the preset's
+        // own window is what it must move. Z/X therefore shift the whole voicing
+        // by the same number of octaves they shift the note layout by.
+        let octaveOffset = baseOctave - MusicalTypingRouting.defaultBaseOctave
+        return ChordVoicing.voice(chord, previous: lastVoicing, preset: preset,
+                                  octaveShift: layout.octaveShift + octaveOffset)
+    }
+
+    /// The chord density a key produces: the preset's own, or its OPPOSITE on an
+    /// accidental key.
+    ///
+    /// ⭐ **ONE HOME FOR THE FLIP, read by both `chordCells` (which names the
+    /// chord) and `chordPitches` (which sounds it).** A second copy is how the
+    /// legend would come to say `Cmaj7` over a key that played a bare `C`.
+    private static func density(for preset: VoicingPresetKind,
+                                addsColour: Bool) -> ChordDensity {
+        let base = InstrumentVoicingPreset.preset(for: preset).density
+        guard addsColour else { return base }
+        return base == .triad ? .seventh : .triad
+    }
+
     /// Whether a key press can actually make a sound right now, and if not, why.
     ///
     /// ⭐ Written by the app from `MusicalTypingRouting.targetState(...)` — the
@@ -123,21 +230,50 @@ public final class MusicalTypingController {
     /// EVENTS, not a key pressed a few hundred times an hour, and they keep the
     /// unconditional push for the reason `releaseAll` documents.
     public var holdsAnything: Bool {
-        !soundingPitches.isEmpty || !keyPitches.isEmpty || pointerPitch != nil
+        !soundingPitches.isEmpty || !keyPitches.isEmpty || !pointerPitches.isEmpty
     }
 
-    /// keyCode → the pitch that key sounded when it went down.
+    /// keyCode → the pitches that key sounded when it went down.
     ///
-    /// ⚠️ **THE PITCH IS REMEMBERED, NOT RE-DERIVED ON RELEASE.** Shift the octave
-    /// while a key is held and its release must still stop the note it started —
-    /// re-deriving from the CURRENT base octave would release a pitch that was
-    /// never sounding and strand the one that is. Same for the velocity ladder.
-    @ObservationIgnored private var keyPitches: [UInt16: Int] = [:]
+    /// ⚠️ **THE PITCHES ARE REMEMBERED, NOT RE-DERIVED ON RELEASE.** Shift the
+    /// octave while a key is held and its release must still stop the notes it
+    /// started — re-deriving from the CURRENT base octave would release a pitch
+    /// that was never sounding and strand the one that is. Same for the velocity
+    /// ladder, and the same for chord mode's key/scale/preset pickers, which move
+    /// while keys are down.
+    ///
+    /// ⭐ **A GROUP, NOT A PITCH (m23-cv), AND NOTE MODE IS THE DEGENERATE CASE.**
+    /// One key holds one pitch in note mode and a whole voiced chord in chord
+    /// mode. Storing a group is what lets a chord's release stop exactly its own
+    /// notes: two held chords routinely SHARE a pitch, and a per-pitch ledger
+    /// would let the first key up steal a note the second key is still holding.
+    /// Every note-mode behaviour is unchanged — a one-element group behaves
+    /// exactly as the old scalar did, which `MusicalTypingControllerTests` was run
+    /// UNMODIFIED to prove before chord mode was added on top.
+    @ObservationIgnored private var keyPitches: [UInt16: [Int]] = [:]
 
-    /// The pitch the on-screen keyboard's pointer is holding, if any. ONE pointer
-    /// is ONE note — polyphony on that surface comes from chording a click on top
-    /// of typed keys, and from the typed keys themselves.
-    @ObservationIgnored private var pointerPitch: Int?
+    /// The pitches the on-screen keyboard's pointer is holding, empty if none.
+    /// ONE pointer is ONE note in note mode and ONE chord in chord mode —
+    /// polyphony on that surface comes from chording a click on top of typed
+    /// keys, and from the typed keys themselves.
+    @ObservationIgnored private var pointerPitches: [Int] = []
+
+    /// What the pointer is currently anchored on, so a drag across the surface can
+    /// tell "still the same key" from "moved to the next one" in BOTH modes: a
+    /// MIDI pitch on the piano, a scale degree on the chord row.
+    @ObservationIgnored private var pointerAnchor: PointerAnchor?
+
+    /// The pointer's anchor — see `pointerAnchor`.
+    private enum PointerAnchor: Equatable {
+        /// A MIDI pitch on the piano strip (note mode).
+        case pitch(Int)
+        /// An index into `MusicalTypingRouting.noteCaps` — a cell of the chord
+        /// row (chord mode). ⚠️ **A CELL, NOT A DEGREE**: two cells can carry the
+        /// same degree (the second octave run, and the colour keys), so a
+        /// degree-shaped anchor could not tell them apart and a drag between them
+        /// would look like no movement at all.
+        case cell(Int)
+    }
 
     /// Bumped on every state change the seam can observe (the m23-e echo-seam
     /// law): a gate that pressed a key needs proof the change has been THROUGH,
@@ -196,10 +332,78 @@ public final class MusicalTypingController {
     public func setEnabled(_ enabled: Bool) {
         guard enabled != isEnabled else { return }
         isEnabled = enabled
-        if !enabled { releaseAll() } else { bump() }
+        if !enabled {
+            // ⚠️ THE VOICE-LEADING ANCHOR IS SESSION STATE AND DIES WITH THE
+            // SESSION (§5.5 step 2). Keeping it would make the first chord of the
+            // NEXT session lead from a voicing nobody can hear any more — a
+            // hidden input to a visible result.
+            lastVoicing = nil
+            releaseAll()
+        } else {
+            bump()
+        }
     }
 
     public func toggle() { setEnabled(!isEnabled) }
+
+    // MARK: - Chord-mode controls
+
+    /// Switches between one-key-one-note and one-key-one-chord.
+    ///
+    /// ⚠️ **RELEASES EVERYTHING, for the same reason `setEnabled` does.** A key
+    /// physically down when the mode flips is holding pitches computed under the
+    /// OLD rule; its key-up would still find and release them (`releaseKey` takes
+    /// no guards and remembers the group), but the user has just changed what the
+    /// instrument IS, and leaving the previous rule's chord ringing over the new
+    /// one is the surprise a mode switch must not have.
+    public func setPlayMode(_ mode: MusicalTypingPlayMode) {
+        guard mode != playMode else { return }
+        playMode = mode
+        lastVoicing = nil
+        releaseAll()
+    }
+
+    /// Sets the tonic (pitch class, 0 = C) and the scale.
+    ///
+    /// ⛔ **HELD NOTES ARE LEFT ALONE**, exactly as `shiftOctave` leaves them: the
+    /// ledger remembers what each key sounded, so a key change mid-chord re-aims
+    /// the NEXT press and the ringing one still releases correctly. Voice leading
+    /// is deliberately NOT reset — a modulation is when smooth leading is worth
+    /// the most.
+    public func setChordKey(_ pitchClass: Int, mode: KeyMode? = nil) {
+        let normalised = ((pitchClass % 12) + 12) % 12
+        let nextMode = mode ?? chordKeyMode
+        guard normalised != chordKey || nextMode != chordKeyMode else { return }
+        chordKey = normalised
+        chordKeyMode = nextMode
+        bump()
+    }
+
+    /// Sets the instrument voicing style. Resets the voice-leading memory: the new
+    /// preset has a different register window, so leading the first chord of a
+    /// piano voicing from the last chord of a bass line would drag it out of the
+    /// register the preset exists to define.
+    public func setVoicingPreset(_ kind: VoicingPresetKind) {
+        guard kind != voicingPreset else { return }
+        voicingPreset = kind
+        lastVoicing = nil
+        bump()
+    }
+
+    /// Lights a named progression, or clears the lights with `nil`.
+    ///
+    /// ⭐ **SELECTING ONE SWITCHES THE SCALE TO THE PROGRESSION'S MODE AND KEEPS
+    /// THE USER'S TONIC.** Picking "Minor Rock" in C major gives C minor, not
+    /// A minor: the tonic is the thing the user chose deliberately, the mode is
+    /// the thing the progression is written in. Nothing else changes, and no key
+    /// becomes unplayable.
+    public func setProgression(_ preset: ChordProgressionPreset?) {
+        progression = preset
+        if let preset, preset.mode != chordKeyMode {
+            chordKeyMode = preset.mode
+        }
+        bump()
+    }
 
     // MARK: - Key events
 
@@ -256,22 +460,27 @@ public final class MusicalTypingController {
     ///   through** rather than eating a key-up that belongs to something else.
     @discardableResult
     public func releaseKey(keyCode: UInt16) -> Bool {
-        guard let pitch = keyPitches.removeValue(forKey: keyCode) else { return false }
-        guard soundingPitches.contains(pitch) else {
-            // The key was ours and is now released, but its note is not sounding
-            // — voice-stolen, or never sounded because the target was not ready.
-            // Nothing to stop, and nothing to swallow.
+        guard let group = keyPitches.removeValue(forKey: keyCode) else { return false }
+        // The pitches this key was holding that are ACTUALLY sounding. The rest
+        // were voice-stolen, replaced by a later chord, or never sounded because
+        // the target was not ready — there is nothing to stop for those.
+        let ringing = group.filter { soundingPitches.contains($0) }
+        guard !ringing.isEmpty else {
             bump()
             return false
         }
-        // Another holder may still want this exact pitch: two keyCodes can name
-        // one pitch after an octave shift mid-hold (hold A at C4, shift down an
-        // octave, press K — also C4), and the pointer can be on it too.
-        guard !isStillHeldElsewhere(pitch) else {
+        // ⛔ **ANOTHER HOLDER MAY STILL WANT THESE EXACT PITCHES**, and in chord
+        // mode that is the COMMON case rather than the corner one: C major and
+        // A minor share two tones, so letting go of one while the other is held
+        // must not silence them. Two keyCodes can also name one pitch after an
+        // octave shift mid-hold (hold A at C4, shift down an octave, press K —
+        // also C4), and the pointer can be on it too.
+        let releasable = ringing.filter { !isStillHeldElsewhere($0) }
+        guard !releasable.isEmpty else {
             bump()
             return true
         }
-        soundingPitches.removeAll { $0 == pitch }
+        soundingPitches.removeAll { releasable.contains($0) }
         push()
         return true
     }
@@ -286,7 +495,8 @@ public final class MusicalTypingController {
     /// engine has already stopped).
     public func releaseAll() {
         keyPitches.removeAll()
-        pointerPitch = nil
+        pointerPitches.removeAll()
+        pointerAnchor = nil
         soundingPitches.removeAll()
         // ⚠️ PUSHED UNCONDITIONALLY, even when nothing was held. `[]` is the
         // honest statement, the sink is idempotent, and `ProjectStore.stopAllAudition`
@@ -306,6 +516,62 @@ public final class MusicalTypingController {
     /// controller below diffs. Typed keys held at the same time keep sounding —
     /// that is where this surface's polyphony comes from.
     public func pointerDown(pitch: Int) {
+        guard AuditionPitchBounds.contains(pitch) else { return }
+        pointerPress(anchor: .pitch(pitch), group: [pitch])
+    }
+
+    /// The pointer pressed (or slid onto) a CHORD CELL on the on-screen chord row
+    /// — chord mode's half of `pointerDown`.
+    ///
+    /// ⚠️ **A DEGREE, NOT A PITCH, AND THAT IS NOT AN ALTERNATIVE SPELLING.** In
+    /// chord mode the strip no longer draws a piano whose cells ARE pitches; it
+    /// draws one cell per layout key, and which pitches that cell sounds depends
+    /// on the key, the scale, the preset and the voicing that came before it. The
+    /// view must therefore name the CELL and let this object do the harmony —
+    /// exactly as the typed keys do, through the same `chordVoicing(forDegree:)`,
+    /// so the mouse and the keyboard cannot voice the same chord differently.
+    public func pointerDown(cellIndex: Int) {
+        guard cellIndex >= 0, cellIndex < MusicalTypingRouting.noteCaps.count else { return }
+        pointerPress(anchor: .cell(cellIndex),
+                     group: chordPitches(forKeyIndex: cellIndex))
+    }
+
+    /// The keys whose chord is ACTUALLY SOUNDING right now — what the chord row
+    /// lights.
+    ///
+    /// ⚠️ **NAMED FOR WHAT IS SOUNDING, NOT FOR WHAT IS PRESSED**, exactly as
+    /// `soundingPitches` is. A key whose chord was replaced by a later one is
+    /// still physically down and is deliberately NOT in here, so a lit cell always
+    /// means audible harmony.
+    public var soundingChordKeyCodes: Set<UInt16> {
+        var codes = Set<UInt16>()
+        let ringing = Set(soundingPitches)
+        for (keyCode, group) in keyPitches where !ringing.isDisjoint(with: group) {
+            codes.insert(keyCode)
+        }
+        if case .cell(let index) = pointerAnchor,
+           !ringing.isDisjoint(with: pointerPitches),
+           index < MusicalTypingRouting.noteCaps.count {
+            codes.insert(MusicalTypingRouting.noteCaps[index].keyCode)
+        }
+        return codes
+    }
+
+    /// The pointer let go.
+    public func pointerUp() {
+        guard !pointerPitches.isEmpty || pointerAnchor != nil else { return }
+        let held = pointerPitches
+        pointerPitches = []
+        pointerAnchor = nil
+        let releasable = held.filter { !isStillHeldElsewhere($0) }
+        soundingPitches.removeAll { releasable.contains($0) }
+        push()
+    }
+
+    /// The shared body of both `pointerDown` overloads. ONE gate, ONE glissando
+    /// rule, ONE sounding path — a second copy for chord mode is how the two
+    /// surfaces would drift.
+    private func pointerPress(anchor: PointerAnchor, group: [Int]) {
         // ⛔ `.canSound`, NOT `== .ready` — both recording states SOUND. See
         // `TargetState.canSound`; a `.ready`-only gate here would kill the keys
         // at the exact moment the user is recording with them.
@@ -314,27 +580,25 @@ public final class MusicalTypingController {
             bump()
             return
         }
-        guard AuditionPitchBounds.contains(pitch) else { return }
-        guard pointerPitch != pitch else { return }
-        if let previous = pointerPitch {
-            pointerPitch = nil
-            if !isStillHeldElsewhere(previous) {
-                soundingPitches.removeAll { $0 == previous }
-            }
+        guard !group.isEmpty else { return }
+        guard pointerAnchor != anchor else { return }
+        let previous = pointerPitches
+        pointerPitches = []
+        pointerAnchor = anchor
+        if playMode == .chords {
+            // ONE replace policy for both surfaces. A chord clicked on the row
+            // and a chord typed on the keyboard must behave identically, or the
+            // two surfaces stop being one instrument.
+            pointerPitches = group
+            lastSilencedBy = nil
+            soundChord(group)
+            return
         }
-        pointerPitch = pitch
+        let dropped = previous.filter { !isStillHeldElsewhere($0) && !group.contains($0) }
+        soundingPitches.removeAll { dropped.contains($0) }
+        pointerPitches = group
         lastSilencedBy = nil
-        sound(pitch)
-    }
-
-    /// The pointer let go.
-    public func pointerUp() {
-        guard let pitch = pointerPitch else { return }
-        pointerPitch = nil
-        if !isStillHeldElsewhere(pitch) {
-            soundingPitches.removeAll { $0 == pitch }
-        }
-        push()
+        sound(group)
     }
 
     // MARK: - Layout controls (also reachable without a key, for the seam)
@@ -382,42 +646,100 @@ public final class MusicalTypingController {
                 bump()
                 return
             }
+            if playMode == .chords {
+                // ── CHORD MODE. The SAME key, the SAME ledger, the SAME seam
+                // below — only what the press computes has changed. That is what
+                // makes this additive rather than a second input surface.
+                let group = chordPitches(forKeyIndex: semitone)
+                guard !group.isEmpty else { bump(); return }
+                lastSilencedBy = nil
+                keyPitches[keyCode] = group
+                soundChord(group)
+                return
+            }
             guard let pitch = MusicalTypingRouting.pitch(semitone: semitone,
                                                          baseOctave: baseOctave) else {
                 bump()
                 return
             }
             lastSilencedBy = nil
-            keyPitches[keyCode] = pitch
-            sound(pitch)
+            keyPitches[keyCode] = [pitch]
+            sound([pitch])
         }
     }
 
-    /// Adds a pitch to the sounding set, stealing the oldest voice if the set is
-    /// full, then pushes.
-    private func sound(_ pitch: Int) {
-        guard !soundingPitches.contains(pitch) else {
-            // Already ringing (two keys can name one pitch after an octave
-            // shift). Re-pushing the identical set is a documented no-op at the
-            // sink, so this still refreshes the hold and costs nothing.
-            push()
-            return
+    /// Sounds a chord, REPLACING whatever chord was sounding.
+    ///
+    /// ⭐ **NEW CHORD REPLACES OLD — the research's §7.2 default, and the reason
+    /// is arithmetic as much as taste.** A hand moving from one chord to the next
+    /// does not keep the first one down, and four-note voicings stack up against
+    /// the 8-voice ceiling after only two chords: without a replace, the third
+    /// chord would arrive to find the voice-stealer chewing a ragged hole in the
+    /// first two rather than cleanly ending them.
+    ///
+    /// ⚠️ **THE COST, SAID PLAINLY: LAYERING TWO DIFFERENT CHORDS AT ONCE IS NOT
+    /// POSSIBLE IN CHORD MODE.** It still is in note mode, which is untouched.
+    /// §7.2's own text says both "new-chord-replaces-old, by default" and
+    /// "holding two different keys stays possible"; those two cannot both be true
+    /// of one key press, and this picks the first, because the user this feature
+    /// was built for follows lit keys in sequence and would meet the ragged
+    /// voice-stealing case long before they meant to layer anything.
+    ///
+    /// ⭐ **COMMON TONES ARE NOT RE-STRUCK, FOR FREE.** The seam below is
+    /// set-shaped and diffs, so a tone shared by the old chord and the new one
+    /// simply keeps sounding — which is what nearest-tone voice leading is FOR,
+    /// and which no extra code here produces.
+    private func soundChord(_ group: [Int]) {
+        soundingPitches.removeAll { !group.contains($0) }
+        sound(group)
+        // ⚠️ WRITTEN HERE, ON THE SOUNDING PATH ONLY. A chord that was refused
+        // (no track, preview off) must not move the voice-leading anchor — the
+        // next chord has to lead from what is actually RINGING, not from
+        // something the user never heard.
+        lastVoicing = group
+    }
+
+    /// Adds a GROUP of pitches to the sounding set, stealing the oldest voices if
+    /// the set overflows, then pushes ONCE.
+    ///
+    /// ⛔⛔ **THE GROUP IS ADDED ATOMICALLY, AND THAT IS A CORRECTNESS
+    /// REQUIREMENT, NOT TIDINESS.** Sounding a four-note chord as four separate
+    /// one-note calls would let the voice-stealer eat the chord's OWN earlier
+    /// notes on the way in: press a chord while five notes are already ringing
+    /// and notes 1 and 2 of the chord would be stolen by notes 3 and 4 of the
+    /// same chord. Appending the whole group first and trimming from the front
+    /// once means the arriving chord always survives intact, which is what
+    /// last-note priority actually means.
+    ///
+    /// ⚠️ A group larger than `maxVoices` is clamped to its TOP voices before
+    /// anything else — with `ChordVoicing.maxVoicedNotes` at 5 this is
+    /// unreachable today, and it is here rather than assumed because the guard
+    /// costs one line and the failure it prevents is a silently truncated chord.
+    private func sound(_ group: [Int]) {
+        let arriving = Array(group.suffix(Self.maxVoices))
+        guard !arriving.isEmpty else { return }
+        var next = soundingPitches
+        for pitch in arriving where !next.contains(pitch) {
+            // Already ringing pitches are left exactly where they are in the
+            // order: re-appending one would make it look NEWER than it is and
+            // hand the voice-stealer the wrong victim next time.
+            next.append(pitch)
         }
-        if soundingPitches.count >= Self.maxVoices {
-            // LAST-NOTE PRIORITY: the oldest ringing note loses its voice. Its
-            // key stays in `keyPitches` so the eventual key-up is still
+        if next.count > Self.maxVoices {
+            // LAST-NOTE PRIORITY: the oldest ringing notes lose their voices.
+            // Their keys stay in `keyPitches` so the eventual key-up is still
             // recognised — it simply finds nothing to stop. Stolen notes do NOT
             // come back when a voice frees up; no synth does that, and a note
             // that restarted itself seconds later would be a ghost.
-            soundingPitches.removeFirst()
+            next.removeFirst(next.count - Self.maxVoices)
         }
-        soundingPitches.append(pitch)
+        soundingPitches = next
         push()
     }
 
     /// Is this pitch still wanted by some other holder?
     private func isStillHeldElsewhere(_ pitch: Int) -> Bool {
-        pointerPitch == pitch || keyPitches.values.contains(pitch)
+        pointerPitches.contains(pitch) || keyPitches.values.contains { $0.contains(pitch) }
     }
 
     /// Hands the current set across the seam and bumps the report counter.

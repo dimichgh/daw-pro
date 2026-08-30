@@ -1556,6 +1556,11 @@ struct CommandRouterTests {
             // would release it anyway.
             "note.play": ["trackId": .string(instTrackID),
                           "pitches": .array([.number(60)])],
+            // m23-cv: a pure computation, but it deliberately REFUSES an empty
+            // call rather than defaulting to some chord nobody asked for — so
+            // the bare loop has to say what to voice. `[1, 5]` is the smallest
+            // input that also exercises the voice-leading step.
+            "chord.voice": ["degrees": .array([.number(1), .number(5)])],
             "midi.setControlMap": ["bindings": .array([])],
             "midi.learnControl": ["cancel": .bool(true)],
             "transport.seek": ["beats": .number(0)],
