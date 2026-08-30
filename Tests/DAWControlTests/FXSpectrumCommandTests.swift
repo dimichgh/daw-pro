@@ -238,7 +238,7 @@ struct FXSpectrumCommandTests {
         #expect(refusal.error?.contains("release") == true,
                 "the refusal must teach how to free a slot")
         #expect(engine.taps.count == 8, "the refused arm must not have recorded a 9th tap")
-        #expect(CommandRouter.allCommands.count == 190, "a cap-full refusal must not have touched allCommands")
+        #expect(CommandRouter.allCommands.count == 194, "a cap-full refusal must not have touched allCommands")
     }
 
     // MARK: - L4a/L4b: lease expiry — reporting vs cap-slot, deliberately split
@@ -439,29 +439,33 @@ struct FXSpectrumCommandTests {
         // (clip.getNotes and m26-i's instrument.describeSampler landed
         // elsewhere in the array, next to their siblings, not at the tail —
         // this chain is unaffected by either.)
-        #expect(CommandRouter.allCommands.dropLast(13).last == "fx.spectrum")
-        #expect(CommandRouter.allCommands.dropLast(12).last == "frequency.reference")
-        #expect(CommandRouter.allCommands.dropLast(11).last == "clip.removeMany")
-        #expect(CommandRouter.allCommands.dropLast(10).last == "clip.moveMany")
+        #expect(CommandRouter.allCommands.dropLast(15).last == "fx.spectrum")
+        #expect(CommandRouter.allCommands.dropLast(14).last == "frequency.reference")
+        #expect(CommandRouter.allCommands.dropLast(13).last == "clip.removeMany")
+        #expect(CommandRouter.allCommands.dropLast(12).last == "clip.moveMany")
         // m23-af appended `transport.panic` after the m23-w pair.
-        #expect(CommandRouter.allCommands.dropLast(9).last == "transport.panic")
+        #expect(CommandRouter.allCommands.dropLast(11).last == "transport.panic")
         // m23-aj-2 appended clip.moveManyByTracks/clip.moveManyToTrack after that.
-        #expect(CommandRouter.allCommands.dropLast(8).last == "clip.moveManyByTracks")
-        #expect(CommandRouter.allCommands.dropLast(7).last == "clip.moveManyToTrack")
+        #expect(CommandRouter.allCommands.dropLast(10).last == "clip.moveManyByTracks")
+        #expect(CommandRouter.allCommands.dropLast(9).last == "clip.moveManyToTrack")
         // m23-dl appended the model-lifecycle pair after THAT.
-        #expect(CommandRouter.allCommands.dropLast(6).last == "ai.modelResidency")
-        #expect(CommandRouter.allCommands.dropLast(5).last == "ai.modelUnload")
+        #expect(CommandRouter.allCommands.dropLast(8).last == "ai.modelResidency")
+        #expect(CommandRouter.allCommands.dropLast(7).last == "ai.modelUnload")
         // m23-di-2a appended vc.importVoiceModel after THAT.
-        #expect(CommandRouter.allCommands.dropLast(4).last == "vc.importVoiceModel")
+        #expect(CommandRouter.allCommands.dropLast(6).last == "vc.importVoiceModel")
         // m25-d appended transport.setStopAtContentEnd at the END (same law).
-        #expect(CommandRouter.allCommands.dropLast(3).last == "transport.setStopAtContentEnd")
+        #expect(CommandRouter.allCommands.dropLast(5).last == "transport.setStopAtContentEnd")
         // m25-z appended audio.profileFile at the END (same law).
-        #expect(CommandRouter.allCommands.dropLast(2).last == "audio.profileFile")
+        #expect(CommandRouter.allCommands.dropLast(4).last == "audio.profileFile")
         // m23-ap-3 appended clip.detectPitch at the END (same law).
-        #expect(CommandRouter.allCommands.dropLast().last == "clip.detectPitch")
+        #expect(CommandRouter.allCommands.dropLast(3).last == "clip.detectPitch")
         // m26-k appended edit.pasteClips at the END (same law).
-        #expect(CommandRouter.allCommands.last == "edit.pasteClips")
-        #expect(CommandRouter.allCommands.count == 190)   // 166 at m23-af -> 168 at m20-j -> 169 at m23-br-1 -> 171 at m23-aj-2 -> 173 at m23-dl -> 174 at m23-di-2a -> 175 at m25-d -> 176 at m25-z -> 177 at m23-ap-3 -> 178 (clip.getNotes) -> 179 (m26-i instrument.describeSampler) -> 180 (edit.pasteClips) -> 181 (m27 leg D clip.applyBreathContour, placed next to its controller-lane siblings, NOT at the tail) -> 182 (breath pad P1 clip.applyEffortShape, placed next to clip.applyBreathContour, NOT at the tail) -> 183 (breath pad P6 pad.previewEffort, placed next to note.audition — the other 'sounds now, outside the timeline, not an edit' verb — NOT at the tail) -> 186 (m28-knob midi.getControlMap/setControlMap/learnControl, placed next to midi.listInputs — their only sibling on this surface — and BEFORE transport.record, NOT at the tail) -> 187 (m31-f instrument.probeLiveness) -> 188 (m31-c clip.repeatNotes, placed next to clip.setNotes/clip.getNotes, NOT at the tail) -> 189 (m26-a/m27-n clip.patchNotes, placed next to clip.repeatNotes, NOT at the tail) -> 190 (m32-b2 clip.sliceToSampler, placed next to clip.detectTransients/clip.quantizeAudio, NOT at the tail)
+        #expect(CommandRouter.allCommands.dropLast(2).last == "edit.pasteClips")
+        // m24-n appended project.embeddedVoices then vc.installEmbeddedVoice
+        // at the END (same law).
+        #expect(CommandRouter.allCommands.dropLast().last == "project.embeddedVoices")
+        #expect(CommandRouter.allCommands.last == "vc.installEmbeddedVoice")
+        #expect(CommandRouter.allCommands.count == 194)   // 166 at m23-af -> 168 at m20-j -> 169 at m23-br-1 -> 171 at m23-aj-2 -> 173 at m23-dl -> 174 at m23-di-2a -> 175 at m25-d -> 176 at m25-z -> 177 at m23-ap-3 -> 178 (clip.getNotes) -> 179 (m26-i instrument.describeSampler) -> 180 (edit.pasteClips) -> 181 (m27 leg D clip.applyBreathContour, placed next to its controller-lane siblings, NOT at the tail) -> 182 (breath pad P1 clip.applyEffortShape, placed next to clip.applyBreathContour, NOT at the tail) -> 183 (breath pad P6 pad.previewEffort, placed next to note.audition — the other 'sounds now, outside the timeline, not an edit' verb — NOT at the tail) -> 186 (m28-knob midi.getControlMap/setControlMap/learnControl, placed next to midi.listInputs — their only sibling on this surface — and BEFORE transport.record, NOT at the tail) -> 187 (m31-f instrument.probeLiveness) -> 188 (m31-c clip.repeatNotes, placed next to clip.setNotes/clip.getNotes, NOT at the tail) -> 189 (m26-a/m27-n clip.patchNotes, placed next to clip.repeatNotes, NOT at the tail) -> 190 (m32-b2 clip.sliceToSampler, placed next to clip.detectTransients/clip.quantizeAudio, NOT at the tail) -> 191 (m24-m leg A vc.convertClips, placed next to vc.convertVocals — its single-clip sibling — NOT at the tail) -> 193 (m24-n project.embeddedVoices next to project.snapshot/project.open, and vc.installEmbeddedVoice next to vc.importVoiceModel, both at the tail per the additive-at-end law) -> 194 (m23-ct note.play, placed next to note.audition/pad.previewEffort — the other 'sounds now, outside the timeline' verbs — NOT at the tail; a tail append reddened 19 end-relative assertions across 7 files on this item's first run)
         // -> 187 (m31-f instrument.probeLiveness, placed next to instrument.describeSampler — its read-only instrument.* sibling — NOT at the tail)
     }
 

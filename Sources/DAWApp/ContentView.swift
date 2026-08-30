@@ -90,6 +90,20 @@ struct ContentView: View {
                 }
                 .frame(maxHeight: .infinity)
 
+                // ⭐ MUSICAL TYPING (m23-ct) — the on-screen playable keyboard.
+                // Between the workspace and the transport bar: it belongs to the
+                // PERFORMANCE, so it sits next to the transport, and it spans the
+                // window rather than living inside one editor (the piano roll's
+                // gutter is reachable only from the piano roll, which is half of
+                // what this item was filed about).
+                //
+                // Mounted only while the mode is on — a hidden strip would be
+                // chrome for a feature nobody has asked for, and the toggle in the
+                // transport bar is one click away. Extracted to a computed
+                // property, not inlined: this body chain sits AT the type-checker's
+                // limit (see `pickerOverlays`).
+                musicalKeyboardStrip
+
                 TransportBar(engine: engine, densityStore: model.panelDensity)
             }
             .padding(12)
@@ -164,17 +178,17 @@ struct ContentView: View {
                 )
             }
         }
-        // "Convert to Voice…" sheet (m10-p-5): a centered dark-glass modal over a
-        // scrim (the Quantize idiom) — rendered INSIDE the window so
+        // "Convert Voice…" panel (m24-m leg B): a centered dark-glass modal over
+        // a scrim (the Quantize idiom) — rendered INSIDE the window so
         // `debug.captureUI` can snapshot it. Opened by an audio clip's context
-        // menu and `debug.voicePanel`; the convert rides the SAME client/store
-        // seams as the wire's `vc.convertVocals` clipId-form (one undoable edit).
+        // menu, by Edit ▸ Convert, and by `debug.voicePanel`; the convert rides
+        // the SAME store seam as the wire's `vc.convertClips` (one undoable
+        // edit, one new violet track carrying the whole set).
         .overlay {
-            if let clipID = model.voiceConvertClipID {
-                VoiceConvertSheet(
+            if let clipIDs = model.voiceConvertClipIDs {
+                VoiceConvertClipsSheet(
                     model: model.voicePanel,
-                    clipID: clipID,
-                    clipName: voiceConvertClipName(clipID),
+                    targets: voiceConvertTargets(clipIDs),
                     onClose: { withAnimation(.easeOut(duration: 0.15)) { model.closeVoiceConvert() } }
                 )
             }
@@ -1027,7 +1041,7 @@ struct ContentView: View {
             // Humanize (m25-c): the arrange clip context menu opens the SAME
             // panel the piano roll does. MIDI clips only — the menu hides the
             // entry on audio rather than offering a throw (the sibling
-            // "Quantize…" / "Convert to Voice…" rule).
+            // "Quantize…" / "Convert Voice…" rule).
             onOpenHumanize: { clip in model.openHumanizePanel(clipID: clip.id) },
             // Breath pad (m28-p7, Pro clip menu, MIDI only): the same centered
             // panel the piano-roll BREATH chip opens.
@@ -1035,9 +1049,14 @@ struct ContentView: View {
             onExtractGroove: { clip in
                 model.openQuantizePanel(clipID: clip.id, startExtract: true)
             },
-            // Convert to voice (m10-p-5, Pro clip menu): opens the sheet, which
-            // rides the SAME seams as the wire's vc.convertVocals.
-            onConvertToVoice: { clip in model.openVoiceConvert(clipID: clip.id) },
+            // Convert Voice… (m24-m leg B, Pro clip menu): opens the panel on
+            // the ids the menu's own title named, which ride the SAME store
+            // seam as the wire's vc.convertClips.
+            onConvertToVoice: { command in model.convertClipsFromContextMenu(command) },
+            // ONE producer for the audio subset of the selection (AppModel), so
+            // the context menu's count, the Edit item's count and the panel's
+            // list can never disagree.
+            selectedAudioClipIDs: model.selectedAudioClipIDs,
             // Crossfade two adjacent/overlapping audio clips (m11-d, Pro clip menu).
             onCrossfadeClips: { trackID, clipID, otherClipID, length in
                 _ = try? store.crossfadeClips(trackId: trackID, clipId: clipID,
@@ -1660,6 +1679,62 @@ struct ContentView: View {
         selectedClipID = id
     }
 
+    /// **MUSICAL TYPING's on-screen keyboard (m23-ct)**, mounted only while the
+    /// mode is on.
+    ///
+    /// ⚠️ **THE TWO `.onChange`s ARE STUCK-NOTE SAFETY, NOT BOOKKEEPING.**
+    ///
+    ///  * **`isRecording`** — `ProjectStore.record()` releases every audition
+    ///    voice engine-side as a take begins (m23-d: "a take starts SILENT"). If
+    ///    the controller did not mirror that, the strip would keep lighting keys
+    ///    the engine had already stopped, and the `.recording` indicator would be
+    ///    contradicted by the pixels beside it.
+    ///  * **`activeTrackID`** — clicking another track re-points the sink mid-hold.
+    ///    Without this the held notes would keep ringing on the track the user
+    ///    LEFT (`AuditionController.set` silences the previous track only when it
+    ///    is handed a non-empty set for a new one), so releasing them would try to
+    ///    stop voices on a track that no longer owns them.
+    ///
+    /// Both call the same `refreshMusicalTypingTarget()` the key path calls, so the
+    /// indicator can never be stale relative to the note-on gate.
+    @ViewBuilder
+    private var musicalKeyboardStrip: some View {
+        if model.musicalTyping.isEnabled {
+            MusicalKeyboardStrip(
+                controller: model.musicalTyping,
+                onClose: { model.setMusicalTypingEnabled(false) },
+                onPointerPress: { model.musicalTypingPointerDown(pitch: $0) }
+            )
+            .onAppear { model.refreshMusicalTypingTarget() }
+            // ⚠️ RELEASES ON BOTH EDGES, AND THAT IS A DECISION, NOT AN
+            // OVERSIGHT. Record-START must release (a note held across the
+            // boundary would open in one world and close in another). Record-STOP
+            // releasing means a key still physically down goes quiet when the
+            // take ends — slightly abrupt, but it guarantees the take's notes are
+            // closed by the app rather than clamped to the take's end by the
+            // engine, and it leaves nothing stuck. Kept deliberately: "gate the
+            // ons, never gate the offs" cuts this way too.
+            .onChange(of: store.transport.isRecording) { _, _ in
+                model.musicalTyping.releaseAll()
+                model.refreshMusicalTypingTarget()
+            }
+            // ⛔ ARMING IS A TARGET-STATE INPUT, SO IT NEEDS ITS OWN REFRESH.
+            // The user arms the track WHILE the strip is up and a take is
+            // rolling — that is the fix the `recordingUnarmed` line tells them to
+            // make, so the indicator has to notice it. ⚠️ NO `releaseAll()` here:
+            // arming is not a boundary, and cutting a held note as a reward for
+            // fixing the problem would be its own defect.
+            .onChange(of: store.tracks.first { $0.id == model.activeTrackID }?.isArmed) { _, _ in
+                model.refreshMusicalTypingTarget()
+            }
+            .onChange(of: model.activeTrackID) { _, _ in
+                model.musicalTyping.releaseAll()
+                model.refreshMusicalTypingTarget()
+            }
+            .transition(.move(edge: .bottom).combined(with: .opacity))
+        }
+    }
+
     private var header: some View {
         HStack(spacing: 10) {
             Text("DAW PRO")
@@ -1841,15 +1916,29 @@ struct ContentView: View {
         .help("Open the Voice panel — build a voice of your own and convert vocals to it")
     }
 
-    /// The convert sheet's header clip name, resolved against the live store
-    /// (falls back to the track name for an unnamed clip).
-    private func voiceConvertClipName(_ id: UUID) -> String {
+    /// The Convert Voice… panel's clip list, resolved against the LIVE store —
+    /// plain value inputs, so the panel neither reads the store nor knows what a
+    /// `Track` is (the reusable-component rule).
+    ///
+    /// ⚠️ Resolved in the ORDER `clipIDs` carries (start-beat order, set by
+    /// `AppModel.selectedAudioClipIDs`), not in track order: the panel's list,
+    /// the store's per-clip conversion order and the result's `clips` array must
+    /// all read the same way. An id that no longer resolves is DROPPED here
+    /// rather than shown as a placeholder — leg A refuses an unknown id with its
+    /// own teaching message, and the list must not promise a clip that is gone.
+    private func voiceConvertTargets(_ clipIDs: [UUID]) -> [VoiceConvertTarget] {
+        var byID: [UUID: VoiceConvertTarget] = [:]
         for track in store.tracks {
-            if let clip = track.clips.first(where: { $0.id == id }) {
-                return clip.name.isEmpty ? track.name : clip.name
+            for clip in track.clips where clipIDs.contains(clip.id) {
+                byID[clip.id] = VoiceConvertTarget(
+                    id: clip.id,
+                    name: clip.name.isEmpty ? track.name : clip.name,
+                    trackName: track.name,
+                    startBeat: clip.startBeat,
+                    lengthBeats: clip.lengthBeats)
             }
         }
-        return "Audio Clip"
+        return clipIDs.compactMap { byID[$0] }
     }
 
     /// Settings gear chip: opens the glass Settings overlay (API keys). Neutral

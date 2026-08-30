@@ -453,6 +453,24 @@ public final class ProjectStore {
     @ObservationIgnored public var referenceImportsDirectory =
         ProjectStore.referenceImportsDefault()
 
+    /// This machine's RVC voice store (m24-n) — the directory a save READS to
+    /// embed the voices a track's `voiceProvenance` names, and that
+    /// `installEmbeddedVoice` writes a project's embedded copy back into.
+    ///
+    /// Production: exactly `VoiceStore.directory`, the same
+    /// `<Application Support>/DAWPro/VoiceModels/` that `vc.importVoiceModel`
+    /// writes and that the RVC sidecar is pointed at via `RVC_VOICES_DIR`. One
+    /// home, one computation — a second expression here is the shape that
+    /// embeds from a directory the converter never scans.
+    ///
+    /// Under a detected Swift test process the default redirects to a
+    /// per-process temp root (`voiceStoreDefault()`), so a test that never
+    /// mentions this property still cannot read — or, via
+    /// `installEmbeddedVoice`, WRITE — the user's real voice models. Remains a
+    /// public seam so tests can point it at a fixture.
+    @ObservationIgnored public var voiceStoreDirectory =
+        ProjectStore.voiceStoreDefault()
+
     /// In-flight AI clip fixes, jobId-keyed (M6 v-b). In-memory only: cleared by
     /// project.open/new, not persisted (a pending fix does not survive relaunch
     /// — re-run ai.fixClipRegion). Observed so the future UI can badge it; the
@@ -1036,6 +1054,22 @@ public final class ProjectStore {
         // take is starting and the engine is necessarily running; the order is
         // matched anyway so the two sites cannot teach opposite lessons.
         padPreview.stop(engine: engine)
+        // m23-ct: a live-played note held across record start is not merely
+        // hygiene, it is a CORRECTNESS requirement. A take starts silent and
+        // `MIDICaptureSession` DROPS every pre-anchor note-on, so a key still
+        // down when the take opens would be heard and never captured — exactly
+        // the lie audition's release exists to prevent. It is RELEASED, never
+        // rescued with a synthesised note-on at the anchor: the session's own
+        // doc calls a partial note a lie. The user re-presses.
+        // m23-ct: `LivePlayController` is a SECOND heartbeating ledger, and
+        // §6's law is already paid for — an engine-side flush with a surviving
+        // DAWCore ledger RESURRECTS the note within one heartbeat (measured red
+        // at -17.65 LUFS two heartbeats after a panic, m23-af). It runs BEFORE
+        // `audition.stopAll` because that call's `engine.stopAllAudition()`
+        // wipes `auditionVoices` wholesale: run it first and the live-play
+        // release below diffs against an empty ledger, ingests zero note-offs,
+        // and every open note clamps to the end of the take.
+        livePlay.stopAll(engine: engine)
         audition.stopAll(engine: engine)
         transport.isRecording = true
         transport.isPlaying = true
@@ -1611,6 +1645,11 @@ public final class ProjectStore {
     /// key press and the `note.audition` wire verb all run through it.
     @ObservationIgnored public let audition = AuditionController()
 
+    /// THE live-play policy home (m23-ct) — musical typing, the on-screen
+    /// keyboard and the `note.play` wire verb all run through it. Sibling of
+    /// `audition`, NOT a mode of it: see `LivePlayController` for why.
+    @ObservationIgnored public let livePlay = LivePlayController()
+
     /// THE CC→target mapping home (m28-knob) — one table, one engine
     /// subscription, the `audition` idiom. Engine-free; handed the engine per
     /// call. See `ProjectStore+MIDIControl.swift`.
@@ -1641,7 +1680,73 @@ public final class ProjectStore {
             throw ProjectError.transportBusy("cannot audition while recording — stop the take first")
         }
         try validateAuditionTarget(trackID: trackID, pitches: pitches, velocity: velocity)
+        // m23-ct arbitration mirror: one live-note owner at a time. Both
+        // controllers write the SAME engine-side `auditionVoices` ledger, so a
+        // held typed note and a piano-roll drag would ping-pong over it at
+        // 500 ms. Placed AFTER validation so a rejected call changes nothing.
+        if livePlay.isHolding { livePlay.stop(engine: engine) }
         return audition.set(trackID: trackID, pitches: pitches, velocity: velocity, engine: engine)
+    }
+
+    /// LIVE PLAY (m23-ct): sounds exactly `pitches` on `trackID` right now AND,
+    /// when a take is rolling on that armed instrument track, records them into
+    /// it. SET semantics: `[]` releases. Held until the caller says otherwise
+    /// (or the render side's 3 s watchdog / the controller's 30 s ceiling cuts
+    /// it), so a typing surface calls this on every key edge and the controller
+    /// diffs.
+    ///
+    /// ⭐⭐ **DELIBERATELY NOT REFUSED WHILE RECORDING — THAT SINGLE DIFFERENCE
+    /// IS THE WHOLE REASON THIS METHOD EXISTS BESIDE `auditionPitches`.**
+    /// Audition's `transportBusy` refusal is documented as *"Policy, not
+    /// mechanism (the audition ring is structurally unreachable from the
+    /// capture ring)"*: it refuses because audition is heard-but-not-captured,
+    /// and sounding something during a take that the take will not contain is
+    /// a lie. **This path IS captured**, so the assumption that refusal protects
+    /// is TRUE here rather than false.
+    ///
+    /// ⛔ **DO NOT "HARMONISE" THE TWO.** Adding a recording guard here makes
+    /// `MIDICaptureSession`, `transport.record`, punch and take comping
+    /// permanently unreachable for a user with no hardware controller — which
+    /// is this user, verbatim: *"no physical keyboard."* And relaxing
+    /// audition's guard is worse in the other direction: a piano-roll DRAG
+    /// would become capturable, silently fabricating notes into a take the
+    /// user never played.
+    ///
+    /// The `captureIntoTake` verdict is computed HERE because this is the only
+    /// layer that knows arm state. The engine narrows it (is a take actually
+    /// capturing MIDI, does a session exist) but never widens it.
+    @discardableResult
+    public func playLiveNotes(trackID: UUID, pitches: [Int],
+                              velocity: Int = AuditionController.defaultVelocity) throws
+        -> LivePlayResult {
+        // Computed for the RELEASE path too, never hardcoded false: an empty
+        // set is what closes the take's open notes, and a release that skipped
+        // the take would leave a note to clamp at the end of the recording.
+        let captureIntoTake = transport.isRecording
+            && tracks.first(where: { $0.id == trackID })
+                .map { $0.isArmed && $0.kind == .instrument } == true
+
+        // Stopping is ALWAYS allowed, and always unvalidated: a refusal here
+        // would strand a voice whose track was deleted or re-kinded mid-hold.
+        if pitches.isEmpty {
+            let outcome = livePlay.set(trackID: trackID, pitches: [], velocity: 0,
+                                       captureIntoTake: captureIntoTake, engine: engine)
+            return LivePlayResult(trackID: trackID, pitches: [], velocity: 0, outcome: outcome)
+        }
+        // The SAME validation audition runs, unchanged — one home for "is this
+        // a legal thing to sound on this track".
+        try validateAuditionTarget(trackID: trackID, pitches: pitches, velocity: velocity)
+        // Arbitration: one live-note owner at a time (see `auditionPitches`).
+        // After validation, so a rejected call changes nothing.
+        if audition.isHolding { audition.stop(engine: engine) }
+        let outcome = livePlay.set(trackID: trackID, pitches: pitches, velocity: velocity,
+                                   captureIntoTake: captureIntoTake, engine: engine)
+        return LivePlayResult(trackID: trackID,
+                              pitches: LivePlayController.clampPitches(pitches),
+                              velocity: min(LivePlayController.velocityRange.upperBound,
+                                            max(LivePlayController.velocityRange.lowerBound,
+                                                velocity)),
+                              outcome: outcome)
     }
 
     /// One-shot audition that releases itself after `durationMs` — the wire's
@@ -1661,6 +1766,9 @@ public final class ProjectStore {
                 "durationMs must be \(AuditionController.durationRangeMs.lowerBound)…"
                 + "\(AuditionController.durationRangeMs.upperBound) ms — got \(durationMs)")
         }
+        // m23-ct arbitration: a one-shot ALSO opens an audition hold, so it must
+        // take the live-note ledger the same way `auditionPitches` does.
+        if livePlay.isHolding { livePlay.stop(engine: engine) }
         return audition.oneShot(trackID: trackID, pitches: pitches, velocity: velocity,
                                 durationMs: durationMs, engine: engine)
     }
@@ -1679,6 +1787,15 @@ public final class ProjectStore {
         // A pad gesture left open across a project boundary would park a
         // controller on a strip nobody is looking at any more (breath pad P6).
         padPreview.stop(engine: engine)
+        // m23-ct: `LivePlayController` is a SECOND heartbeating ledger, and
+        // §6's law is already paid for — an engine-side flush with a surviving
+        // DAWCore ledger RESURRECTS the note within one heartbeat (measured red
+        // at -17.65 LUFS two heartbeats after a panic, m23-af). It runs BEFORE
+        // `audition.stopAll` because that call's `engine.stopAllAudition()`
+        // wipes `auditionVoices` wholesale: run it first and the live-play
+        // release below diffs against an empty ledger, ingests zero note-offs,
+        // and every open note clamps to the end of the take.
+        livePlay.stopAll(engine: engine)
         audition.stopAll(engine: engine)
     }
 
@@ -1749,6 +1866,15 @@ public final class ProjectStore {
     /// verb exists for. Panicking mid-take must also keep the take rolling.
     @discardableResult
     public func panic() -> Int {
+        // m23-ct: `LivePlayController` is a SECOND heartbeating ledger, and
+        // §6's law is already paid for — an engine-side flush with a surviving
+        // DAWCore ledger RESURRECTS the note within one heartbeat (measured red
+        // at -17.65 LUFS two heartbeats after a panic, m23-af). It runs BEFORE
+        // `audition.stopAll` because that call's `engine.stopAllAudition()`
+        // wipes `auditionVoices` wholesale: run it first and the live-play
+        // release below diffs against an empty ledger, ingests zero note-offs,
+        // and every open note clamps to the end of the take.
+        livePlay.stopAll(engine: engine)
         audition.stopAll(engine: engine)
         return engine?.allNotesOff() ?? 0
     }
@@ -3461,8 +3587,54 @@ public final class ProjectStore {
     /// Imports an on-disk audio file as a clip on the given track. The file's
     /// duration is converted to beats at the current tempo; the clip lands at
     /// `atBeat` if given, otherwise appended after the last existing clip.
+    ///
+    /// REFUSES rather than overwriting: see the `overwrite:` twin below, which
+    /// this delegates to with `overwrite: false`. Kept at its original
+    /// signature and return type so every existing call site compiles
+    /// unchanged; only the OVERLAP outcome moved (m33-j).
     @discardableResult
     public func importAudio(url: URL, toTrack id: UUID, atBeat: Double? = nil) throws -> Clip {
+        try importAudio(url: url, toTrack: id, atBeat: atBeat, overwrite: false).clip
+    }
+
+    /// Imports an on-disk audio file as a clip on the given track, choosing what
+    /// happens when the placement collides with an ordinary same-track resident.
+    ///
+    /// ⛔ **`overwrite: false` (the default everywhere) REFUSES the collision**
+    /// with `ProjectError.clipImportWouldOverlap`, naming the resident, BEFORE
+    /// any mutation — nothing is journaled, no clip is touched, and the caller
+    /// gets a beat it can safely append at. m33-j: this verb used to run the
+    /// overlap policy and DISCARD its report, so two imports at `atBeat: 0` left
+    /// ONE clip, the first id dead, both calls returning a normal success.
+    /// Measured 2026-08-29 through the live `clip.addAudio` router.
+    ///
+    /// WHY REFUSE HERE WHEN `moveClip` TRIMS. Two reasons, and the second is the
+    /// deciding one:
+    ///  1. The collision is MANUFACTURED by this call — the
+    ///     `clipsWouldOverlapOnDestination` rationale (m23-aj §18): a verb that
+    ///     creates a collision the project did not have refuses rather than
+    ///     picking which of the user's own clips dies.
+    ///  2. **The caller cannot know this import's footprint.** A move's
+    ///     footprint is a clip already on screen; an import's length is the
+    ///     FILE's duration converted at the current tempo, so `atBeat` alone
+    ///     never told the caller what it was about to cover. A trim nobody could
+    ///     have predicted is not a trim anybody consented to.
+    ///
+    /// `overwrite: true` restores the trim/remove — the same m11-d/m13-b policy,
+    /// through the same `resolvingOverlaps` choke point — and RETURNS what it
+    /// did in `trimmedClipIDs`/`removedClipIDs` (the `clip.moveMany` receipt).
+    /// It is the `vc.importVoiceModel` / `vc.installEmbeddedVoice` `overwrite`
+    /// precedent: refuse a destructive replace by default, honour it on request.
+    ///
+    /// TAKE STACKS ARE UNAFFECTED, BY CONSTRUCTION. The refusal's oracle is
+    /// `resolvingOverlaps` itself, not a geometric intersection test, so
+    /// take/comp members (`takeGroupID != nil`, which STACK legally and are
+    /// exempt from trimming) never appear in the trimmed/removed lists and so
+    /// never trigger a refusal. An import landing over a take stack succeeds
+    /// exactly as it did before m33-j.
+    @discardableResult
+    public func importAudio(url: URL, toTrack id: UUID, atBeat: Double?,
+                            overwrite: Bool) throws -> ClipImportResult {
         guard let media else { throw ProjectError.mediaServiceUnavailable }
         guard let index = tracks.firstIndex(where: { $0.id == id }) else {
             throw ProjectError.trackNotFound(id)
@@ -3496,18 +3668,36 @@ public final class ProjectStore {
             lengthBeats: lengthBeats,
             audioFileURL: url
         )
+        // Landing over an occupied region resolves through the ONE
+        // no-silent-overlap choke point (m13-b) — the same trim rule the ⌘I
+        // import batch and clip.move use. Run OUTSIDE the edit body (the
+        // `importAudioBatch` / `setTrackArm` "validate before you journal"
+        // precedent) so the refusal below can throw without leaving an undo
+        // entry, and so the resolved array is computed exactly once.
+        let resolved = Self.resolvingOverlaps(
+            in: tracks[index].clips + [clip], activeIDs: [clip.id],
+            start: startBeat, end: startBeat + lengthBeats,
+            tempoMap: transport.tempoMap)
+
+        if !overwrite {
+            // The offender is chosen by TRACK-ARRAY ORDER, not by which list it
+            // landed in: `removeClips` picks its one named offender
+            // deterministically too, and "the first resident in the way" is a
+            // stable answer that does not change when a trim becomes a removal.
+            let touched = Set(resolved.trimmedIDs + resolved.removedIDs)
+            if let victim = tracks[index].clips.first(where: { touched.contains($0.id) }) {
+                throw ProjectError.clipImportWouldOverlap(
+                    existingID: victim.id, existingName: victim.name,
+                    appendBeat: appendPosition)
+            }
+        }
+
         performEdit("Import '\(clip.name)'") {
-            tracks[index].clips.append(clip)
-            // Landing over an occupied region resolves through the ONE
-            // no-silent-overlap choke point (m13-b) — the same trim rule the
-            // ⌘I import batch and clip.move use — folded into this one edit.
-            tracks[index].clips = Self.resolvingOverlaps(
-                in: tracks[index].clips, activeIDs: [clip.id],
-                start: startBeat, end: startBeat + lengthBeats,
-                tempoMap: transport.tempoMap).clips
+            tracks[index].clips = resolved.clips
             engine?.tracksDidChange(tracks)
         }
-        return clip
+        return ClipImportResult(clip: clip, trimmedClipIDs: resolved.trimmedIDs,
+                                removedClipIDs: resolved.removedIDs)
     }
 
     // MARK: - MIDI clips
@@ -6715,6 +6905,30 @@ public final class ProjectStore {
         }
         let plan = ProjectBundle.planMedia(
             tracks: persistedTracks, reference: reference, bundleURL: bundleURL)
+        // Embedded voice models (m24-n — the user's "Embed a copy of the
+        // voice"). Driven ENTIRELY by the voiceProvenance the conversion wrote
+        // on each generated track: no project with no converted tracks pays
+        // anything, and nothing here consults, validates against, or re-runs a
+        // conversion. `openBundleURL` is the bundle this session is open FROM,
+        // so a Save As of a project whose voice is not on THIS machine copies
+        // that project's own embedded copy forward instead of losing it.
+        let voiceNamed = persistedTracks.contains { $0.voiceProvenance != nil }
+        let voicePlan = ProjectBundle.planVoices(
+            tracks: persistedTracks, bundleURL: bundleURL,
+            voiceStoreURL: voiceStoreDirectory,
+            openBundleURL: projectPath.map { URL(fileURLWithPath: $0).standardizedFileURL })
+        // Loud EXACTLY WHEN THE DISK COST IS PAID, and silent afterwards: an
+        // idempotent re-save copies zero bytes and says nothing, so this is one
+        // line per voice per project rather than a nag on every save. A silent
+        // 240 MB is the support question this exists to prevent.
+        if voicePlan.copiedBytes > 0 {
+            stateWarnings.append(
+                "embedded \(voicePlan.voices.filter { $0.copiedByteCount > 0 }.count) voice "
+                + "model(s) into this project (\(Self.megabytes(voicePlan.copiedBytes)) MB) so it "
+                + "stays re-convertible on another machine — project.embeddedVoices lists what "
+                + "it carries")
+        }
+        stateWarnings.append(contentsOf: voicePlan.warnings)
         let effectiveName = adoptName
             ? bundleURL.deletingPathExtension().lastPathComponent
             : projectName
@@ -6746,7 +6960,8 @@ public final class ProjectStore {
             reference: reference
         )
         do {
-            try ProjectBundle.write(document: document, plan: plan, to: bundleURL)
+            try ProjectBundle.write(
+                document: document, plan: plan, voices: voicePlan, to: bundleURL)
         } catch {
             throw ProjectError.saveFailed(Self.reason(error))
         }
@@ -6814,8 +7029,20 @@ public final class ProjectStore {
         return ProjectSaveResult(
             path: bundleURL.path,
             mediaFilesCopied: plan.copies.count,
-            warnings: plan.warnings + stateWarnings
+            warnings: plan.warnings + stateWarnings,
+            // Absent (keys omitted) when the project names no voice at all, so
+            // every save response for a project with no converted tracks stays
+            // byte-identical to its pre-m24-n shape.
+            voicesEmbedded: voiceNamed ? voicePlan.voices.count : nil,
+            voiceBytes: voiceNamed ? voicePlan.totalBytes : nil,
+            voiceBytesCopied: voiceNamed ? voicePlan.copiedBytes : nil
         )
+    }
+
+    /// Bytes → a one-decimal MB string for the save warning. Local to the save
+    /// path (the numbers it formats are only ever spoken there).
+    static func megabytes(_ bytes: Int) -> String {
+        String(format: "%.1f", Double(bytes) / (1024 * 1024))
     }
 
     /// Soft cap on inlined Audio Unit state (8 MiB): larger states still save,
@@ -6962,6 +7189,15 @@ public final class ProjectStore {
         // m23-d: a project boundary destroys every renderer, so held audition
         // voices are released HERE, while the objects that own them are still
         // reachable and the controller's timers can still be cancelled.
+        // m23-ct: `LivePlayController` is a SECOND heartbeating ledger, and
+        // §6's law is already paid for — an engine-side flush with a surviving
+        // DAWCore ledger RESURRECTS the note within one heartbeat (measured red
+        // at -17.65 LUFS two heartbeats after a panic, m23-af). It runs BEFORE
+        // `audition.stopAll` because that call's `engine.stopAllAudition()`
+        // wipes `auditionVoices` wholesale: run it first and the live-play
+        // release below diffs against an empty ledger, ingests zero note-offs,
+        // and every open note clamps to the end of the take.
+        livePlay.stopAll(engine: engine)
         audition.stopAll(engine: engine)
         // m13-a (A1): a project boundary retires the engine's whole graph —
         // a once-rendered engine rebuilds from the new (empty) model inside
@@ -7041,6 +7277,15 @@ public final class ProjectStore {
         // m23-d: a project boundary destroys every renderer, so held audition
         // voices are released HERE, while the objects that own them are still
         // reachable and the controller's timers can still be cancelled.
+        // m23-ct: `LivePlayController` is a SECOND heartbeating ledger, and
+        // §6's law is already paid for — an engine-side flush with a surviving
+        // DAWCore ledger RESURRECTS the note within one heartbeat (measured red
+        // at -17.65 LUFS two heartbeats after a panic, m23-af). It runs BEFORE
+        // `audition.stopAll` because that call's `engine.stopAllAudition()`
+        // wipes `auditionVoices` wholesale: run it first and the live-play
+        // release below diffs against an empty ledger, ingests zero note-offs,
+        // and every open note clamps to the end of the take.
+        livePlay.stopAll(engine: engine)
         audition.stopAll(engine: engine)
         // m13-a (A1): a project boundary retires the engine's whole graph —
         // a once-rendered engine rebuilds from the opened model inside the
@@ -7723,6 +7968,22 @@ public final class ProjectStore {
     /// Per-PROCESS redirected home for `referenceImportsDefault()`. See
     /// `testGenerationImportsRoot`.
     private static let testReferenceImportsRoot: URL? = testMediaImportsRoot(.references)
+
+    /// Per-PROCESS redirected home for `voiceStoreDefault()` (m24-n). Shares
+    /// `testMediaImportsBase` for the same reason the other two do: under
+    /// production these categories are SIBLINGS under one `DAWPro/`, and two
+    /// independent bases would silently break that relationship under test.
+    private static let testVoiceStoreRoot: URL? = testMediaImportsRoot(.voiceModels)
+
+    /// The default value for `voiceStoreDirectory` (m24-n) — the
+    /// `generationImportsDefault()` shape. Production: exactly
+    /// `VoiceStore.directory`. Under a detected Swift test process: a
+    /// redirected temp root, so no test can read or overwrite the user's real
+    /// voice models — which, unlike a scratch autosave, are large user assets
+    /// that took a training run to produce.
+    static func voiceStoreDefault() -> URL {
+        testVoiceStoreRoot ?? VoiceStore.directory
+    }
 
     /// The default value for `generationImportsDirectory` (the m23-aa
     /// `autosaveRecoveryDefault()` / m23-aq `outputDirDefault()` shape). Production:

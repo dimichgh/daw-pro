@@ -293,6 +293,183 @@ public enum ProjectBundle {
         return MediaPlan(copies: copies, refs: refs, warnings: warnings)
     }
 
+    // MARK: - Embedded voices (m24-n)
+
+    /// One voice as it will exist inside the bundle after `write`.
+    public struct EmbeddedVoiceRecord: Sendable, Equatable {
+        public var voiceId: String
+        /// Whitelisted file names present, in `VoiceStore.embeddableFileNames`
+        /// order.
+        public var files: [String]
+        /// Total bytes the voice occupies in the bundle after this save.
+        public var byteCount: Int
+        /// Bytes this save actually COPIES. Zero on an idempotent re-save —
+        /// which is what makes "warn when bytes were paid" fire exactly once
+        /// per voice per project rather than on every ⌘S.
+        public var copiedByteCount: Int
+
+        public init(voiceId: String, files: [String],
+                    byteCount: Int, copiedByteCount: Int) {
+            self.voiceId = voiceId
+            self.files = files
+            self.byteCount = byteCount
+            self.copiedByteCount = copiedByteCount
+        }
+    }
+
+    /// A resolved plan for embedding voice models into `bundleURL/voices/`
+    /// (m24-n) — the `MediaPlan` shape, deliberately: plan without touching the
+    /// filesystem, then let `write` perform it.
+    public struct VoicePlan: Sendable {
+        public var copies: [(source: URL, destination: URL)]
+        public var voices: [EmbeddedVoiceRecord]
+        public var warnings: [String]
+
+        public init(copies: [(source: URL, destination: URL)] = [],
+                    voices: [EmbeddedVoiceRecord] = [],
+                    warnings: [String] = []) {
+            self.copies = copies
+            self.voices = voices
+            self.warnings = warnings
+        }
+
+        /// The plan that embeds nothing. ⭐ The DEFAULT for `write`, which is
+        /// why the recovery bundle, the crash-recovery autosave and the
+        /// diagnostics/feedback bundle carry no voice weights BY CONSTRUCTION
+        /// rather than by anyone remembering to exclude them. For the feedback
+        /// bundle that is a privacy and size property, not an accident: a
+        /// support bundle must never ship 240 MB of the user's voice models.
+        public static let empty = VoicePlan()
+
+        public var totalBytes: Int { voices.reduce(0) { $0 + $1.byteCount } }
+        public var copiedBytes: Int { voices.reduce(0) { $0 + $1.copiedByteCount } }
+    }
+
+    /// Plans the voice-model embed for `tracks` into `bundleURL/voices/`
+    /// (m24-n — the user's *"Embed a copy of the voice"*).
+    ///
+    /// **What decides which voices.** Exactly the distinct `voiceId`s named by
+    /// some track's `voiceProvenance`, in session order. That record is a fact
+    /// about where audio came from; reading it here is the ONLY thing in the
+    /// app that acts on it, and it acts once, at save time.
+    ///
+    /// **Which files travel** is `VoiceStore.embeddableFileNames` — notably NOT
+    /// `model.pth`; see that whitelist's doc for the measurement.
+    ///
+    /// **Where they come from, in order.**
+    ///  1. This machine's voice store (`voiceStoreURL/<voiceId>/`) — authoritative.
+    ///  2. Failing that, the bundle the session is currently open FROM
+    ///     (`openBundleURL`). This is the case that makes a project portable in
+    ///     BOTH directions: open a project from another machine whose voice you
+    ///     do not have, Save As, and the embedded copy survives instead of
+    ///     evaporating because the store could not supply it.
+    ///  3. Neither ⇒ a WARNING naming the voice and the tracks, and nothing is
+    ///     embedded for it. Not an error: the converted audio plays regardless
+    ///     (§ `VoiceProvenance`), only re-conversion is unavailable.
+    ///
+    /// **Idempotent re-save.** A destination file that already matches its
+    /// source in BOTH size and modification date is not re-copied — so ⌘S on an
+    /// unchanged project copies zero voice bytes. Size alone is not enough: two
+    /// different RVC voices produce `model.npz` files of IDENTICAL size (55 114
+    /// 342 B for both voices measured on this machine), and a retrained model
+    /// would collide the same way. The residual gap is a replacement written
+    /// with a preserved mtime, which nothing in this app does.
+    ///
+    /// Saving IN PLACE resolves source and destination to the same file, which
+    /// necessarily matches, so a save-in-place plans zero copies by the same
+    /// rule rather than by a special case.
+    public static func planVoices(
+        tracks: [Track],
+        bundleURL: URL,
+        voiceStoreURL: URL,
+        openBundleURL: URL? = nil,
+        fileManager fm: FileManager = .default
+    ) -> VoicePlan {
+        // Distinct voice ids in session order; first provenance wins the name.
+        var order: [String] = []
+        var trackNames: [String: [String]] = [:]
+        for track in tracks {
+            guard let provenance = track.voiceProvenance else { continue }
+            if trackNames[provenance.voiceId] == nil {
+                order.append(provenance.voiceId)
+                trackNames[provenance.voiceId] = []
+            }
+            trackNames[provenance.voiceId]?.append(track.name)
+        }
+        guard !order.isEmpty else { return .empty }
+
+        var plan = VoicePlan()
+        for voiceId in order {
+            let users = (trackNames[voiceId] ?? []).map { "'\($0)'" }.joined(separator: ", ")
+            // The builtin smoke target is not in the store and never can be —
+            // the facade resolves it from its own checkout. Skipped SILENTLY:
+            // it ships with the app, so a project converted against it is
+            // already as portable as it will ever be, and a warning here would
+            // teach a fix ("install the voice") that is neither possible nor
+            // needed. It is still recorded as provenance, which is the fact.
+            if voiceId == VoiceStore.reservedVoiceId { continue }
+            guard let destinationDir = VoiceStore.embeddedDirectory(
+                voiceId: voiceId, bundleURL: bundleURL) else {
+                plan.warnings.append(
+                    "voice id '\(voiceId)' (recorded on \(users)) is not a usable folder name — "
+                    + "the voice was not embedded; the converted audio is unaffected")
+                continue
+            }
+            // Source resolution, in the documented order.
+            var sourceDir: URL?
+            let fromStore = voiceStoreURL.appendingPathComponent(voiceId, isDirectory: true)
+            if VoiceStore.isUsableVoiceDirectory(fromStore, fileManager: fm) {
+                sourceDir = fromStore
+            } else if let openBundleURL,
+                      let carried = VoiceStore.embeddedDirectory(
+                        voiceId: voiceId, bundleURL: openBundleURL),
+                      VoiceStore.isUsableVoiceDirectory(carried, fileManager: fm) {
+                sourceDir = carried
+            }
+            guard let sourceDir else {
+                plan.warnings.append(
+                    "voice '\(voiceId)' (used by \(users)) is not in this machine's voice store, "
+                    + "so no copy of it could be embedded — the converted audio still plays; "
+                    + "re-converting with this voice needs it installed first "
+                    + "(vc.importVoiceModel)")
+                continue
+            }
+
+            var files: [String] = []
+            var bytes = 0
+            var copiedBytes = 0
+            for file in VoiceStore.embeddableFiles(in: sourceDir, fileManager: fm) {
+                let destination = destinationDir.appendingPathComponent(file.name)
+                files.append(file.name)
+                bytes += file.byteCount
+                if unchangedCopy(source: file.url, destination: destination, fileManager: fm) {
+                    continue
+                }
+                plan.copies.append((source: file.url, destination: destination))
+                copiedBytes += file.byteCount
+            }
+            plan.voices.append(EmbeddedVoiceRecord(
+                voiceId: voiceId, files: files,
+                byteCount: bytes, copiedByteCount: copiedBytes))
+        }
+        return plan
+    }
+
+    /// True when `destination` already holds what `source` would copy there —
+    /// same byte size AND same modification date. See `planVoices`' idempotency
+    /// note for why size alone is not enough.
+    static func unchangedCopy(
+        source: URL, destination: URL, fileManager fm: FileManager = .default
+    ) -> Bool {
+        guard let a = try? fm.attributesOfItem(atPath: source.path),
+              let b = try? fm.attributesOfItem(atPath: destination.path) else { return false }
+        guard let sizeA = a[.size] as? Int, let sizeB = b[.size] as? Int,
+              sizeA == sizeB else { return false }
+        let dateA = a[.modificationDate] as? Date
+        let dateB = b[.modificationDate] as? Date
+        return dateA == dateB
+    }
+
     /// Returns `basename` if free, else `<stem>-2.<ext>`, `<stem>-3.<ext>`, … —
     /// the first candidate not already in `taken`.
     static func uniqueName(for basename: String, taken: Set<String>) -> String {
@@ -312,7 +489,10 @@ public enum ProjectBundle {
     /// planned media copies, then writes `project.json` ATOMICALLY LAST so a
     /// crash mid-write never leaves a half-updated document. No media is deleted
     /// (no GC) — see `ProjectStore` for the undo-resurrection rationale.
-    public static func write(document: ProjectDocument, plan: MediaPlan, to bundleURL: URL) throws {
+    public static func write(
+        document: ProjectDocument, plan: MediaPlan,
+        voices: VoicePlan = .empty, to bundleURL: URL
+    ) throws {
         let fm = FileManager.default
         let mediaDir = bundleURL.appendingPathComponent("media", isDirectory: true)
         try fm.createDirectory(at: mediaDir, withIntermediateDirectories: true)
@@ -321,6 +501,23 @@ public enum ProjectBundle {
         // cross-volume destination falls back to a full byte copy that can stall
         // the caller's actor for large takes. Acceptable for v0.
         for copy in plan.copies {
+            try fm.copyItem(at: copy.source, to: copy.destination)
+        }
+
+        // Embedded voice models (m24-n) ride the SAME plan-then-copy pass, with
+        // two differences forced by the layout: each voice owns a SUBDIRECTORY
+        // (so its parent must be made — `copyItem` never creates one), and a
+        // destination that survived from an earlier save is REPLACED rather
+        // than skipped (`copyItem` refuses to overwrite; `planVoices` already
+        // dropped every destination that matched, so anything still here
+        // differs and the newer file is the right one).
+        for copy in voices.copies {
+            try fm.createDirectory(
+                at: copy.destination.deletingLastPathComponent(),
+                withIntermediateDirectories: true)
+            if fm.fileExists(atPath: copy.destination.path) {
+                try fm.removeItem(at: copy.destination)
+            }
             try fm.copyItem(at: copy.source, to: copy.destination)
         }
 

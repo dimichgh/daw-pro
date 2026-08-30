@@ -1,5 +1,111 @@
 # Changelog
 
+## 2026-08-29 — You can play the DAW without owning a keyboard, and it records
+
+Until now, playing a note in real time required a hardware MIDI controller. If
+you did not own one, the entire live path was closed to you: a full CoreMIDI
+input stack shipped inside the app — a real-time-safe thru ring, a capture
+session, punch, count-in, take comping — and there was no door into any of it.
+Recording a performance was not slow or awkward. It was unreachable.
+
+There is a door now, and it is your computer keyboard. Turn on Musical Typing
+and the middle two rows of the keyboard become a piano: the home row is the
+white keys, the row above it the black ones, `Z` and `X` move an octave, `C` and
+`V` change how hard you are playing. There is an on-screen keyboard too, and it
+is polyphonic — it lights up for what you play, whichever way you played it. The
+layout is the one Logic and Ableton share, so if you have used either, you
+already know it. Keys are matched by physical position rather than by letter, so
+the shape stays correct on a keyboard that is not American.
+
+It is a mode you switch on and off, never an ambient grab at your keystrokes.
+While it is on, typing into a rename field still types. Releasing a note is
+allowed unconditionally, even mid-refusal — the one asymmetry that guarantees a
+key can never get stuck down.
+
+And what you play is recorded. Arm a track, hit record, play, and the notes are
+in the take, in a clip, with real lengths — through the same capture session
+hardware MIDI has always used, so count-in, punch and take numbering all work
+without knowing anything new happened. A held note during a bounce is no longer
+a thing you have to think about.
+
+The one thing to know: a note played in the first fraction of a second after you
+press record does not make it in. A take's anchor is scheduled slightly ahead of
+the button, and notes struck before it are discarded — the same rule that makes
+count-in work. Hit record, take a breath, then play. A proper count-in cue for
+this is still to come.
+
+Separately, and found on the way: a note held in the piano roll's keyboard
+gutter used to keep ringing forever if you switched to another app. The app's
+own code claimed it silenced audition when it lost focus. It never had. It does
+now.
+
+Honest limit, stated plainly: no automated check in this project can press a key
+or look at a screen, so the parts of this that were proven are the routing, the
+note bookkeeping, and — end to end, against a real running app — that a played
+note lands in a take and that an un-armed track records nothing. Whether it
+*feels* right to play has not been tested by anyone, because nobody involved in
+building it has hands.
+
+## 2026-08-29 — Importing a file no longer deletes the one it lands on
+
+Bringing an audio file onto a track that already has a clip at that beat used to
+delete the clip that was there. Not trim it, not warn about it, not ask — delete
+it, and hand you back a new id as though nothing had happened. Two imports at
+beat 0 left one clip. Both calls reported success.
+
+It mattered most exactly where you would hit it. Sampling your own output is
+central to flipping a record: print a section, import the print, chop the print,
+print again. Importing pass after pass onto one track is the workflow, and the
+natural way to write it — reuse `atBeat: 0` each time — quietly destroyed the
+previous pass. The skill that teaches the loop had to carry a warning telling you
+to count your clips afterwards.
+
+An import now refuses to land on top of something. It names the clip that is in
+the way, and it tells you a beat that is free — nothing is trimmed, nothing is
+deleted, nothing is journaled, so the refusal costs you nothing to ignore. The
+cheapest way past it is to leave `atBeat` out entirely, which appends after
+everything on the track and can never collide.
+
+If you did mean to replace what was there, `overwrite: true` still does the old
+thing: clips underneath are trimmed, and ones your file covers completely are
+removed. What is new is that it says so. `trimmedClipIDs` and `removedClipIDs`
+come back naming exactly what went, and those two arrays are in every import
+response, empty on the ordinary path — so a caller checking what happened never
+has to tell an absent field from an empty one.
+
+**What this does and does not cover.** It is the import agents and the control
+protocol use — `clip_add_audio` / `clip.addAudio`. Importing from inside the app
+takes a different path: File - Import Audio always makes new tracks, so it never
+had this problem, but *dropping* a file onto a lane region that already has a
+clip there still resolves the overlap silently, and that is filed separately
+rather than quietly folded in here.
+
+Two details worth stating, because both are the kind of thing that gets
+"simplified" later. The refusal asks the overlap policy itself what a placement
+would cost rather than testing whether the rectangles intersect: take stacks
+legally overlap and lose nothing to an import, so an intersection test would have
+started refusing calls that were never destroying anything. And this is
+deliberately not what dragging a clip does — a drag still trims what it lands on,
+because a drag's footprint is a clip you can see, while an import's length comes
+from the file's duration at the current tempo. `atBeat` alone never told you what
+it was about to cover, so it was never something you could have consented to.
+
+## 2026-08-29 — Convert the clips you picked, and stop converting the takes you trimmed away
+
+Voice conversion now works on a **selection**. Pick the clips you want, convert, and you get a new track carrying a converted counterpart of each one, sitting at exactly the beats the originals sat at. Not one merged render — the same set of clips, so the arrangement you built survives the conversion. It is a plain audio track when it lands: no insert to add, none to remove, nothing wired back to the voice model. Every conversion makes its own new track, and one undo removes the whole set.
+
+**And the thing it was quietly getting wrong.** Converting a clip used to send the voice engine that clip's *entire backing recording*. For the flow it was built for — a freshly imported full-length stem — that was the same thing, so nobody noticed. For the flow people actually have, it was not: comp a vocal, trim it to the four bars you want, convert, and the engine received the whole untrimmed take and handed back a clip of it, landed at your clip's start beat. Not an error, not a crash, not a missing feature. A plausible-looking answer that was the wrong audio.
+
+Converting each clip separately dissolves that rather than patching it. What the engine now receives is an offline render of that one clip over exactly its own window — so the trim, the offset into the recording, the time-stretch and the pitch shift are all honoured because the render *is* the playback path. If you can hear it, that is what gets converted.
+
+One judgment call worth stating, because it is the kind of thing someone will want to change later without knowing why it is the way it is. Time is baked; level is not. The trim, offset, stretch and pitch shift are rendered in, because they decide *which* audio the engine hears. Clip gain, fades and the gain envelope are deliberately left out of the render and carried onto the converted clip instead. Partly so the result stays editable — a fade you can still drag — and partly because a fade-in baked into the source hands a pitch estimator a few hundred milliseconds of silence to find a voice in, and a clip pulled 12 dB down hands it something close to nothing.
+
+The refusals are as deliberate as the behaviour. If two clips you selected overlap in beats, it says so and names both, because one track cannot hold them both at their own beats and silently trimming one would break the only promise the feature makes. If conversion fails part-way through a set of eight, nothing lands at all — no half-arrangement, no track that looks finished and is not. Everything is checked before the first render, so a refusal costs nothing.
+
+Agents get `vc_convert_clips` for the set and keep `vc_convert_vocals` for a single clip, unchanged in name and shape — though the single-clip form now converts the clip's own window too, since that defect was never specific to sets. The bridge budgets one conversion's worth of time per clip you passed, rather than guessing a number that would time out a legitimate ten-clip run.
+
+The proof is in three places, and the one that matters most is a real render: a ramp file with known values at known frames, a clip trimmed half a second in, and an assertion that the extracted audio matches the source **bit for bit at the offset position** — alongside a control asserting it is *not* the head of the file, which is exactly what the old behaviour produced. Zeroing the offset in the extraction flips both together, which is how we know the test is looking at the right thing.
+
 ## 2026-08-29 — Sixty-four pads out of one record, and the 23 milliseconds nobody could hear were missing
 
 Two fixes underneath the sampler. Neither is a feature, and both had to land before chopping a whole record onto pads was something you could actually do rather than something the tool would let you attempt.

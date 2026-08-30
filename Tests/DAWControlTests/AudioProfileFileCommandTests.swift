@@ -111,9 +111,13 @@ struct AudioProfileFileCommandTests {
         // its controller-lane siblings 116 elements from the end, the
         // clip.getNotes / instrument.describeSampler precedent, so every
         // end-relative assertion here is untouched by it.)
-        #expect(CommandRouter.allCommands.last == "edit.pasteClips")
-        #expect(CommandRouter.allCommands.dropLast(2).last == "audio.profileFile")
-        #expect(CommandRouter.allCommands.dropLast(3).last == "transport.setStopAtContentEnd")
+        #expect(CommandRouter.allCommands.dropLast(2).last == "edit.pasteClips")
+        // m24-n appended project.embeddedVoices then vc.installEmbeddedVoice
+        // at the END (same law).
+        #expect(CommandRouter.allCommands.dropLast().last == "project.embeddedVoices")
+        #expect(CommandRouter.allCommands.last == "vc.installEmbeddedVoice")
+        #expect(CommandRouter.allCommands.dropLast(4).last == "audio.profileFile")
+        #expect(CommandRouter.allCommands.dropLast(5).last == "transport.setStopAtContentEnd")
     }
 
     // MARK: - Happy path: params forwarded, response shape verbatim

@@ -68,8 +68,12 @@ public enum VoiceModelImport {
     /// `.voiceModels` category. Handed to the RVC sidecar as `RVC_VOICES_DIR`
     /// at spawn; an import lands exactly where the facade's `_scan_voices()`
     /// looks.
+    /// m24-n: DELEGATES to `DAWCore.VoiceStore.directory`. Same value, same
+    /// category — but the save-time embed in DAWCore reads the store too, and
+    /// DAWCore cannot import AIServices, so the computation moved down rather
+    /// than being written twice.
     public static var voicesDirectory: URL {
-        AppDirectories.applicationSupport(.voiceModels)
+        VoiceStore.directory
     }
 
     /// Reserved — collides with the smoke-test target `vc.convertVocals`/
@@ -78,7 +82,11 @@ public enum VoiceModelImport {
     /// gatekeeping: a `base.pth` import would otherwise produce TWO
     /// `"base"`-id descriptors (the builtin smoke target and the imported
     /// voice) and make `voiceId: "base"` on `vc.convertVocals` ambiguous.
-    public static let reservedVoiceId = "base"
+    /// m24-n: DELEGATES to `DAWCore.VoiceStore.reservedVoiceId`, which is the
+    /// one home now that the embed path also has to recognise the builtin. The
+    /// VALUE is unchanged ("base") and this name stays, so every caller and
+    /// test that pins it is untouched.
+    public static let reservedVoiceId = VoiceStore.reservedVoiceId
 
     public enum ImportError: LocalizedError, Equatable {
         case sourceNotFound(String)

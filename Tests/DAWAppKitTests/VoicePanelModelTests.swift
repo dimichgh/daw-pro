@@ -7,10 +7,12 @@ import AIServices
 /// Headless coverage for the Voice panel model (m10-p-5): dataset CRUD with
 /// the copy-never-move import law, the add-clip-as-sample resolution (+ MIDI
 /// rejection verbatim), the sidecar-state → USER-copy banner mapping (never
-/// wire-speak — the m10-q law), the honest train-501 state, and the
-/// convert-clip action's counting-fake proofs that it rides the SAME
-/// client/store seams as the wire's `vc.convertVocals` clipId-form. All
-/// against injected fakes — no sidecar, no UI, no real app-support dir.
+/// wire-speak — the m10-q law), the honest train-501 state, and — since m24-m
+/// leg B — the Convert Voice… action's counting-fake proofs that it rides the
+/// SAME store seam as the wire's `vc.convertClips`, that its progress names
+/// which clip of how many while the run is live, and that a store refusal
+/// reaches the panel VERBATIM. All against injected fakes — no sidecar, no UI,
+/// no real app-support dir.
 
 /// Actor fake for the `@Sendable` async providers (the `FakeStatus`
 /// precedent in `ClipFixModelTests`): records calls, returns scripted
@@ -33,6 +35,10 @@ actor VoiceFakes {
     private(set) var voicesCalls = 0
     private(set) var trainCalls: [VoiceTrainRequest] = []
     private(set) var convertCalls: [VoiceConvertRequest] = []
+    /// Scripted per-call results (m24-m leg B): a multi-clip run makes N
+    /// converter calls, and a mixed real/not-real set is the only way to prove
+    /// the outcome's honesty rule. Empty = every call gets `convertResult`.
+    private var convertSequence: [Result<VoiceConvertResult, Error>] = []
 
     func status() async -> VoiceConversionStatus { statusCalls += 1; return statusResult }
     func start() async throws -> VoiceConversionStatus { startCalls += 1; return try startResult.get() }
@@ -43,6 +49,7 @@ actor VoiceFakes {
     }
     func convert(_ request: VoiceConvertRequest) async throws -> VoiceConvertResult {
         convertCalls.append(request)
+        if !convertSequence.isEmpty { return try convertSequence.removeFirst().get() }
         return try convertResult.get()
     }
 
@@ -51,27 +58,90 @@ actor VoiceFakes {
     func setVoices(_ result: Result<[VoiceDescriptor], Error>) { voicesResult = result }
     func setTrain(_ result: Result<Data, Error>) { trainResult = result }
     func setConvert(_ result: Result<VoiceConvertResult, Error>) { convertResult = result }
+    func setConvertSequence(_ results: [Result<VoiceConvertResult, Error>]) {
+        convertSequence = results
+    }
 }
 
-/// MainActor recorder for the two store seams (`voiceConversionSource` /
-/// `importConvertedVoice`) — the `SubmitRecorder`/`ImportRecorder` precedent.
+/// MainActor recorder for the two store seams the model holds:
+/// `voiceConversionSource` (DATASET samples — a training sample is a file to
+/// copy, so it wants the backing recording) and `convertClipsToVoice` (the
+/// m24-m leg A action, which does its own per-clip extraction) — the
+/// `SubmitRecorder`/`ImportRecorder` precedent.
 @MainActor final class VoiceStoreRecorder {
     var sourceResult: Result<(url: URL, startBeat: Double), Error> =
         .success((url: URL(fileURLWithPath: "/tmp/source.wav"), startBeat: 0))
-    var importError: Error?
+    /// The leg-A store seam's answer. `.failure` is how a test plays a store
+    /// REFUSAL (empty set, MIDI clip, overlapping pair) — the same
+    /// `ProjectError` the wire returns.
+    var convertClipsResult: Result<ClipVoiceConversionResult, Error>?
+    /// A per-clip fixture the stubbed `convertClipsToVoice` feeds to the
+    /// injected converter, so a test can watch the model's progress advance.
+    var convertClipsSources: [ClipConversionSource] = []
 
     private(set) var sourceCalls: [UUID] = []
-    private(set) var importCalls: [(url: URL, trackName: String, atBeat: Double)] = []
+    /// m24-n: `provenance` is recorded too, so a test can pin that the UI route
+    /// composes and forwards it. A route that omitted it would convert
+    /// perfectly and record nothing.
+    private(set) var convertClipsCalls:
+        [(clipIDs: [UUID], trackName: String, provenance: VoiceProvenance?)] = []
+    /// Progress snapshots taken around the converter closure, one pair per clip
+    /// — the only place a test can see the live state the panel renders.
+    /// BEFORE the call the model has not yet entered that clip (so it still
+    /// reads the PREVIOUS clip's `.preparing` state); AFTER it, the clip is
+    /// finished. Both faces are load-bearing and neither can be derived from
+    /// the other.
+    private(set) var progressDuringConvert: [VoiceClipsConvertProgress] = []
+    private(set) var progressAfterConvert: [VoiceClipsConvertProgress] = []
+
+    static func stubConversionSource(url: URL, startBeat: Double,
+                                     clipID: UUID = UUID(),
+                                     name: String = "take") -> ClipConversionSource {
+        ClipConversionSource(
+            clipId: clipID, trackId: UUID(), url: url,
+            startBeat: startBeat, lengthBeats: 4, seconds: 2,
+            gainDb: 0, fadeInBeats: 0, fadeOutBeats: 0,
+            fadeInCurve: .linear, fadeOutCurve: .linear,
+            gainEnvelope: [], name: name)
+    }
 
     func source(_ clipID: UUID) throws -> (url: URL, startBeat: Double) {
         sourceCalls.append(clipID)
         return try sourceResult.get()
     }
 
-    func importConverted(_ url: URL, _ name: String, _ beat: Double) throws -> (trackID: UUID, clipID: UUID) {
-        if let importError { throw importError }
-        importCalls.append((url: url, trackName: name, atBeat: beat))
-        return (trackID: UUID(), clipID: UUID())
+    /// Stands in for `ProjectStore.convertClipsToVoice`: calls the injected
+    /// converter once per fixture source (leg A's own per-clip order), snapshots
+    /// the model's progress at each call, and returns the seeded result.
+    func convertClips(
+        _ clipIDs: [UUID], _ trackName: String, _ provenance: VoiceProvenance?,
+        _ convert: ClipVoiceConverting,
+        observing model: @autoclosure () -> VoicePanelModel?
+    ) async throws -> ClipVoiceConversionResult {
+        convertClipsCalls.append(
+            (clipIDs: clipIDs, trackName: trackName, provenance: provenance))
+        guard let seeded = convertClipsResult else {
+            throw ProjectError.invalidClipEdit("no convertClipsResult seeded")
+        }
+        switch seeded {
+        case .failure(let error):
+            throw error
+        case .success(let result):
+            let sources = convertClipsSources.isEmpty
+                ? clipIDs.map { VoiceStoreRecorder.stubConversionSource(
+                    url: URL(fileURLWithPath: "/tmp/extracted.wav"), startBeat: 0, clipID: $0) }
+                : convertClipsSources
+            for source in sources {
+                if let progress = model()?.clipsConvertProgress {
+                    progressDuringConvert.append(progress)
+                }
+                _ = try await convert(source.clipId, source)
+                if let progress = model()?.clipsConvertProgress {
+                    progressAfterConvert.append(progress)
+                }
+            }
+            return result
+        }
     }
 }
 
@@ -90,7 +160,8 @@ struct VoicePanelModelTests {
     private func makeModel(
         root: URL, fakes: VoiceFakes = VoiceFakes(), store: VoiceStoreRecorder = VoiceStoreRecorder()
     ) -> VoicePanelModel {
-        VoicePanelModel(
+        let box = ModelBox()
+        let model = VoicePanelModel(
             datasetsRoot: root,
             sidecarStatus: { await fakes.status() },
             startSidecar: { try await fakes.start() },
@@ -98,8 +169,22 @@ struct VoicePanelModelTests {
             train: { try await fakes.train($0) },
             convert: { try await fakes.convert($0) },
             clipSource: { try store.source($0) },
-            importConverted: { try store.importConverted($0, $1, $2) })
+            // `box` is captured STRONGLY on purpose: it is a local, so a weak
+            // capture dies the moment `makeModel` returns (measured — every
+            // progress snapshot came back empty). No cycle: model → closure →
+            // box → WEAK model.
+            convertClips: { ids, name, provenance, convert in
+                try await store.convertClips(
+                    ids, name, provenance, convert, observing: box.model)
+            })
+        box.model = model
+        return model
     }
+
+    /// Lets the stubbed store seam observe the very model it is driving — the
+    /// only way to snapshot the live progress the panel renders, since the model
+    /// does not exist yet when its own dependencies are built.
+    @MainActor private final class ModelBox { weak var model: VoicePanelModel? }
 
     /// A tiny real file (contents irrelevant — the model checks existence/
     /// extension, never decodes audio).
@@ -464,116 +549,335 @@ struct VoicePanelModelTests {
         #expect(model.trainState(forVoice: "V") == .idle)
     }
 
-    // MARK: - Convert to voice (the clip action — same seams as the wire)
+    // MARK: - Convert Voice (the selection-driven action, m24-m leg B)
 
-    @Test("convertClip rides the SAME seams: source → convert → import at the clip's own beat, default name")
-    func convertHappyPath() async throws {
+    /// Two clips' worth of fixture: distinct names so the progress detail line
+    /// is attributable to a specific clip.
+    private func twoSources(_ a: UUID, _ b: UUID) -> [ClipConversionSource] {
+        [VoiceStoreRecorder.stubConversionSource(
+            url: URL(fileURLWithPath: "/tmp/verse.wav"), startBeat: 0, clipID: a, name: "Verse"),
+         VoiceStoreRecorder.stubConversionSource(
+            url: URL(fileURLWithPath: "/tmp/chorus.wav"), startBeat: 8, clipID: b, name: "Chorus")]
+    }
+
+    private func seededResult(trackName: String, clipCount: Int,
+                              warnings: [String] = []) -> ClipVoiceConversionResult {
+        ClipVoiceConversionResult(
+            trackId: UUID(), trackName: trackName,
+            clips: (0..<clipCount).map { index in
+                ConvertedClipReport(
+                    sourceClipId: UUID(), sourceTrackId: UUID(), clipId: UUID(),
+                    startBeat: Double(index * 8), lengthBeats: 8,
+                    extractedPath: "/tmp/x.wav", file: "/tmp/y.wav",
+                    sourceSeconds: 16, convertedSeconds: 16)
+            },
+            warnings: warnings)
+    }
+
+    @Test("convertClips rides the leg-A store seam: every clip converted once, default track name")
+    func convertClipsHappyPath() async throws {
         let fakes = VoiceFakes()
         let store = VoiceStoreRecorder()
-        let backing = try writeSample("vocal.wav")
-        store.sourceResult = .success((url: backing, startBeat: 8))
-        let converted = try writeSample("out.wav")
+        let a = UUID(), b = UUID()
+        store.convertClipsSources = twoSources(a, b)
+        store.convertClipsResult = .success(seededResult(trackName: "Voice: base", clipCount: 2))
         await fakes.setConvert(.success(VoiceConvertResult(
-            outputPath: converted.path, voiceId: "base", inputSeconds: 5, engineLoadSeconds: 0.5,
+            outputPath: "/tmp/out.wav", voiceId: "base", inputSeconds: 5, engineLoadSeconds: 0.5,
             inferSeconds: 0.135, rtf: 37.0, sampleRate: 40000, realConversion: false,
             note: "base is the untrained generic target")))
         let model = makeModel(root: try makeTempRoot(), fakes: fakes, store: store)
 
-        let clipID = UUID()
-        let landed = await model.convertClip(clipID: clipID, voiceID: "base", pitchSemitones: 2)
+        let landed = await model.convertClips(clipIDs: [a, b], voiceID: "base", pitchSemitones: 2)
         #expect(landed)
-        #expect(model.convertError == nil)
-        #expect(model.isConverting == false)
+        #expect(model.clipsConvertError == nil)
+        #expect(model.isConvertingClips == false, "the busy flag clears on the way out")
 
-        // Counting-fake proofs: exactly one convert, exactly one import — the
-        // same two calls the wire's vc.convertVocals clipId-form makes.
+        // ONE store call carrying BOTH ids — never two single-clip calls (that
+        // would land two tracks, which is the whole thing leg A prevents).
+        #expect(store.convertClipsCalls.count == 1)
+        #expect(store.convertClipsCalls.first?.clipIDs == [a, b])
+        #expect(store.convertClipsCalls.first?.trackName == "Voice: base")   // the wire's rule
+        // The extraction is what the converter hears, one call per clip.
         let convertCalls = await fakes.convertCalls
-        #expect(convertCalls.count == 1)
+        #expect(convertCalls.count == 2)
         #expect(convertCalls.first == VoiceConvertRequest(
-            inputPath: backing.path, voiceId: "base", pitchSemitones: 2))
-        #expect(store.sourceCalls == [clipID])
-        #expect(store.importCalls.count == 1)
-        #expect(store.importCalls.first?.url.path == converted.path)
-        #expect(store.importCalls.first?.trackName == "Voice: base")   // the wire's default rule
-        #expect(store.importCalls.first?.atBeat == 8)                  // the clip's own beat
+            inputPath: "/tmp/verse.wav", voiceId: "base", pitchSemitones: 2))
+        #expect(convertCalls.last?.inputPath == "/tmp/chorus.wav")
+        // The backing-recording seam belongs to TRAINING samples and must stay
+        // untouched by a conversion (m24-o).
+        #expect(store.sourceCalls.isEmpty)
 
-        // The honest outcome for "base": realConversion false + note, kept
-        // for the sheet's result state.
-        let outcome = try #require(model.lastConversion)
+        let outcome = try #require(model.lastClipsConversion)
+        #expect(outcome.result.trackName == "Voice: base")
+        #expect(outcome.result.clips.count == 2)
         #expect(outcome.realConversion == false)
         #expect(outcome.note == "base is the untrained generic target")
-        #expect(outcome.trackName == "Voice: base")
+    }
+
+    @Test("progress names WHICH CLIP OF HOW MANY while the run is live — never a bare busy flag")
+    func convertClipsProgressIsLegible() async throws {
+        let fakes = VoiceFakes()
+        let store = VoiceStoreRecorder()
+        let a = UUID(), b = UUID()
+        store.convertClipsSources = twoSources(a, b)
+        store.convertClipsResult = .success(seededResult(trackName: "Voice: mine", clipCount: 2))
+        await fakes.setConvert(.success(VoiceConvertResult(
+            outputPath: "/tmp/out.wav", voiceId: "mine", inputSeconds: 5, engineLoadSeconds: 0,
+            inferSeconds: 0.2, sampleRate: 40000, realConversion: true)))
+        let model = makeModel(root: try makeTempRoot(), fakes: fakes, store: store)
+
+        _ = await model.convertClips(clipIDs: [a, b], voiceID: "mine")
+
+        // Snapshots taken INSIDE the converter, one per clip.
+        #expect(store.progressDuringConvert.count == 2)
+        let first = try #require(store.progressDuringConvert.first)
+        #expect(first.total == 2)
+        #expect(first.completed == 0)
+        #expect(first.stepText == "CLIP 1/2")
+        #expect(first.fraction == 0)
+        let second = try #require(store.progressDuringConvert.last)
+        #expect(second.completed == 1, "clip one FINISHED before clip two started")
+        #expect(second.stepText == "CLIP 2/2")
+        #expect(second.fraction == 0.5)
+        // Between clips the line is honest about WHAT it is doing — rendering
+        // the next clip's audio — and names the one just finished rather than
+        // claiming to be converting something it has not started.
+        #expect(second.phase == .preparing)
+        #expect(second.detailText == "Preparing the clip after \u{201C}Verse\u{201D}…")
+
+        // AFTER each converter call: the model really did call
+        // `beginConverting` with THAT clip's name, and the count advanced.
+        #expect(store.progressAfterConvert.count == 2)
+        #expect(store.progressAfterConvert.first?.currentClipName == "Verse")
+        #expect(store.progressAfterConvert.first?.completed == 1)
+        #expect(store.progressAfterConvert.last?.currentClipName == "Chorus")
+        #expect(store.progressAfterConvert.last?.completed == 2)
+        #expect(store.progressAfterConvert.last?.phase == .landing)
+        // And it clears on the way out: progress belongs to a live run.
+        #expect(model.clipsConvertProgress == nil)
+    }
+
+    @Test("progress phases are honest: preparing → converting → landing, and the fraction never guesses")
+    func progressPhasesAreHonest() {
+        var progress = VoiceClipsConvertProgress(
+            total: 2, completed: 0, currentClipName: nil,
+            phase: .preparing, startedAt: Date(timeIntervalSince1970: 100))
+        #expect(progress.detailText == "Preparing the first clip…")
+        #expect(progress.fraction == 0)
+
+        progress.beginConverting(clipNamed: "Verse")
+        #expect(progress.phase == .converting)
+        #expect(progress.detailText.contains("Verse"))
+        #expect(progress.fraction == 0, "a clip in flight is NOT completed work")
+
+        progress.finishOne()
+        #expect(progress.phase == .preparing)
+        #expect(progress.fraction == 0.5)
+        #expect(progress.stepText == "CLIP 2/2")
+
+        progress.beginConverting(clipNamed: "Chorus")
+        progress.finishOne()
+        #expect(progress.phase == .landing, "every clip done → the track is landing")
+        #expect(progress.fraction == 1)
+        #expect(progress.detailText == "Adding the new track…")
+        #expect(progress.stepText == "CLIP 2/2", "never \"clip 3 of 2\"")
+
+        // The elapsed readout is the "still alive" signal — whole seconds,
+        // never negative.
+        #expect(progress.elapsedSeconds(at: Date(timeIntervalSince1970: 137)) == 37)
+        #expect(progress.elapsedSeconds(at: Date(timeIntervalSince1970: 90)) == 0)
     }
 
     @Test("a custom track name passes through instead of the default")
-    func convertCustomTrackName() async throws {
+    func convertClipsCustomTrackName() async throws {
         let fakes = VoiceFakes()
         let store = VoiceStoreRecorder()
-        let converted = try writeSample("out.wav")
+        let a = UUID()
+        store.convertClipsSources = [VoiceStoreRecorder.stubConversionSource(
+            url: URL(fileURLWithPath: "/tmp/a.wav"), startBeat: 0, clipID: a)]
+        store.convertClipsResult = .success(seededResult(trackName: "Lead Vox (base)", clipCount: 1))
         await fakes.setConvert(.success(VoiceConvertResult(
-            outputPath: converted.path, voiceId: "base", inputSeconds: 1, engineLoadSeconds: 0,
+            outputPath: "/tmp/out.wav", voiceId: "base", inputSeconds: 1, engineLoadSeconds: 0,
             inferSeconds: 0.1, sampleRate: 40000, realConversion: false)))
         let model = makeModel(root: try makeTempRoot(), fakes: fakes, store: store)
 
-        _ = await model.convertClip(clipID: UUID(), voiceID: "base", trackName: "Lead Vox (base)")
-        #expect(store.importCalls.first?.trackName == "Lead Vox (base)")
+        _ = await model.convertClips(clipIDs: [a], voiceID: "base", trackName: "Lead Vox (base)")
+        #expect(store.convertClipsCalls.first?.trackName == "Lead Vox (base)")
     }
 
-    @Test("a MIDI clip short-circuits: store error verbatim, converter and importer NEVER called")
-    func convertRejectsMIDI() async throws {
+    @Test("a store refusal (MIDI clip) surfaces VERBATIM and the converter is NEVER called")
+    func convertClipsRefusalVerbatim() async throws {
         let fakes = VoiceFakes()
         let store = VoiceStoreRecorder()
         let clipID = UUID()
         let storeError = ProjectError.voiceConversionRequiresAudioClip(clipID)
-        store.sourceResult = .failure(storeError)
+        store.convertClipsResult = .failure(storeError)
         let model = makeModel(root: try makeTempRoot(), fakes: fakes, store: store)
 
-        let landed = await model.convertClip(clipID: clipID, voiceID: "base")
+        let landed = await model.convertClips(clipIDs: [clipID], voiceID: "base")
         #expect(!landed)
-        #expect(model.convertError == storeError.errorDescription)
+        // The refusal-bubble law: the store's own words, character for
+        // character — the same string an agent gets from vc.convertClips.
+        #expect(model.clipsConvertError == storeError.errorDescription)
         let convertCalls = await fakes.convertCalls
-        #expect(convertCalls.isEmpty, "a MIDI clip must never reach the converter")
-        #expect(store.importCalls.isEmpty)
+        #expect(convertCalls.isEmpty, "a refused selection must never reach the voice engine")
+        #expect(model.lastClipsConversion == nil)
+        #expect(model.clipsConvertProgress == nil, "a refusal leaves no phantom progress")
     }
 
-    @Test("a facade teaching error surfaces verbatim and nothing is imported")
-    func convertFacadeError() async throws {
+    @Test("the OVERLAP refusal reaches the panel verbatim, naming both clips")
+    func convertClipsOverlapRefusalVerbatim() async throws {
         let fakes = VoiceFakes()
         let store = VoiceStoreRecorder()
-        await fakes.setConvert(.failure(VoiceConversionError.requestFailed(
-            status: 404, code: "unknownVoice", message: "no voice with id 'nope'")))
+        // Leg A's own wording — a pin that fails loudly if the store's teaching
+        // message is ever re-phrased on the way to the panel.
+        let storeError = ProjectError.invalidClipEdit(
+            "\"Verse\" (beats 0.0–8.0) and \"Chorus\" (beats 4.0–12.0) overlap, so one track "
+            + "cannot hold both at their own beats")
+        store.convertClipsResult = .failure(storeError)
         let model = makeModel(root: try makeTempRoot(), fakes: fakes, store: store)
 
-        let landed = await model.convertClip(clipID: UUID(), voiceID: "nope")
-        #expect(!landed)
-        #expect(model.convertError?.contains("unknownVoice") == true)
-        #expect(model.convertError?.contains("no voice with id 'nope'") == true)
-        #expect(store.importCalls.isEmpty)
-        #expect(model.isConverting == false, "the busy flag resets on failure")
-        #expect(model.lastConversion == nil)
+        _ = await model.convertClips(clipIDs: [UUID(), UUID()], voiceID: "base")
+        let message = try #require(model.clipsConvertError)
+        #expect(message == storeError.errorDescription)
+        #expect(message.contains("Verse") && message.contains("Chorus"))
     }
 
-    @Test("unreachable sidecar during convert → the press-Start user copy")
-    func convertUnreachable() async throws {
+    @Test("leg A's non-fatal warnings ride the outcome — a warning is not a failure")
+    func convertClipsWarningsAreNonFatal() async throws {
         let fakes = VoiceFakes()
-        await fakes.setConvert(.failure(VoiceConversionError.sidecarUnreachable("refused")))
-        let model = makeModel(root: try makeTempRoot(), fakes: fakes)
+        let store = VoiceStoreRecorder()
+        let a = UUID()
+        store.convertClipsSources = [VoiceStoreRecorder.stubConversionSource(
+            url: URL(fileURLWithPath: "/tmp/a.wav"), startBeat: 0, clipID: a)]
+        store.convertClipsResult = .success(seededResult(
+            trackName: "Voice: mine", clipCount: 1,
+            warnings: ["the converted audio for \"take\" is 16.4 s but the clip presents 16 s"]))
+        await fakes.setConvert(.success(VoiceConvertResult(
+            outputPath: "/tmp/out.wav", voiceId: "mine", inputSeconds: 16, engineLoadSeconds: 0,
+            inferSeconds: 0.4, sampleRate: 40000, realConversion: true)))
+        let model = makeModel(root: try makeTempRoot(), fakes: fakes, store: store)
 
-        _ = await model.convertClip(clipID: UUID(), voiceID: "base")
-        #expect(model.convertError?.contains("press Start") == true)
-        #expect(model.convertError?.contains("vc.sidecarStart") == false)
+        let landed = await model.convertClips(clipIDs: [a], voiceID: "mine")
+        #expect(landed, "a warning does not fail the run")
+        #expect(model.clipsConvertError == nil, "a warning is NEVER an error strip")
+        let outcome = try #require(model.lastClipsConversion)
+        #expect(outcome.result.warnings.count == 1)
+        #expect(outcome.result.warnings[0].contains("16.4 s"))
+        #expect(outcome.realConversion == true)
     }
 
-    @Test("resetConvertState clears the sheet's transient state")
-    func resetConvertState() async throws {
+    @Test("ONE not-real conversion makes the whole set not-real — never a majority vote")
+    func convertClipsMixedRealityIsHonest() async throws {
         let fakes = VoiceFakes()
+        let store = VoiceStoreRecorder()
+        let a = UUID(), b = UUID()
+        store.convertClipsSources = twoSources(a, b)
+        store.convertClipsResult = .success(seededResult(trackName: "Voice: base", clipCount: 2))
+        // First clip converts for real, second falls back to the smoke target.
+        await fakes.setConvertSequence([
+            .success(VoiceConvertResult(
+                outputPath: "/tmp/1.wav", voiceId: "mine", inputSeconds: 4, engineLoadSeconds: 0,
+                inferSeconds: 0.2, sampleRate: 40000, realConversion: true)),
+            .success(VoiceConvertResult(
+                outputPath: "/tmp/2.wav", voiceId: "base", inputSeconds: 4, engineLoadSeconds: 0,
+                inferSeconds: 0.3, sampleRate: 40000, realConversion: false,
+                note: "base is the untrained generic target")),
+        ])
+        let model = makeModel(root: try makeTempRoot(), fakes: fakes, store: store)
+
+        _ = await model.convertClips(clipIDs: [a, b], voiceID: "base")
+        let outcome = try #require(model.lastClipsConversion)
+        #expect(outcome.realConversion == false)
+        #expect(outcome.note == "base is the untrained generic target")
+        // The engine total is the SUM, never one clip's number wearing the
+        // whole set's label.
+        #expect(abs(outcome.totalInferSeconds - 0.5) < 1e-9)
+    }
+
+    @Test("unreachable sidecar during convert → the press-Start user copy, never wire-speak")
+    func convertClipsUnreachable() async throws {
+        let fakes = VoiceFakes()
+        let store = VoiceStoreRecorder()
+        let a = UUID()
+        store.convertClipsSources = [VoiceStoreRecorder.stubConversionSource(
+            url: URL(fileURLWithPath: "/tmp/a.wav"), startBeat: 0, clipID: a)]
+        store.convertClipsResult = .success(seededResult(trackName: "Voice: base", clipCount: 1))
         await fakes.setConvert(.failure(VoiceConversionError.sidecarUnreachable("refused")))
-        let model = makeModel(root: try makeTempRoot(), fakes: fakes)
-        _ = await model.convertClip(clipID: UUID(), voiceID: "base")
-        #expect(model.convertError != nil)
-        model.resetConvertState()
-        #expect(model.convertError == nil)
-        #expect(model.lastConversion == nil)
+        let model = makeModel(root: try makeTempRoot(), fakes: fakes, store: store)
+
+        _ = await model.convertClips(clipIDs: [a], voiceID: "base")
+        #expect(model.clipsConvertError?.contains("press Start") == true)
+        #expect(model.clipsConvertError?.contains("vc.sidecarStart") == false)
+        #expect(model.clipsConvertProgress == nil)
+    }
+
+    @Test("resetClipsConvertState clears the panel's transient state")
+    func resetClipsConvertStateClears() async throws {
+        let fakes = VoiceFakes()
+        let store = VoiceStoreRecorder()
+        store.convertClipsResult = .failure(ProjectError.invalidClipEdit("nope"))
+        let model = makeModel(root: try makeTempRoot(), fakes: fakes, store: store)
+        _ = await model.convertClips(clipIDs: [UUID()], voiceID: "base")
+        #expect(model.clipsConvertError != nil)
+        model.resetClipsConvertState()
+        #expect(model.clipsConvertError == nil)
+        #expect(model.lastClipsConversion == nil)
+    }
+
+    @Test("the picked voice and pitch live on the MODEL, and a fresh open clears them")
+    func convertChoiceLivesOnTheModel() throws {
+        let model = makeModel(root: try makeTempRoot())
+        #expect(model.selectedConvertVoiceID == nil, "nothing picked disarms the primary")
+        #expect(model.convertPitchSemitones == 0)
+
+        model.selectedConvertVoiceID = "dmitry"
+        model.convertPitchSemitones = 2
+
+        // The panel's `.task` runs on EVERY appearance and must not wipe a pick.
+        model.resetClipsConvertState()
+        #expect(model.selectedConvertVoiceID == "dmitry")
+        #expect(model.convertPitchSemitones == 2)
+
+        // Opening on a new set of clips does clear it — a fresh run never
+        // inherits the last one's parameters.
+        model.resetConvertChoice()
+        #expect(model.selectedConvertVoiceID == nil)
+        #expect(model.convertPitchSemitones == 0)
+    }
+
+    @Test("an EMPTY staged refusal clears the strip — never a blank warning")
+    func emptyStagedRefusalClears() throws {
+        let model = makeModel(root: try makeTempRoot())
+        model.setClipsConvertErrorForCapture("something real")
+        #expect(model.clipsConvertError == "something real")
+        // Measured on staging: an empty string drew a warning triangle with no
+        // words — a claim that something went wrong, and a refusal to say what.
+        model.setClipsConvertErrorForCapture("")
+        #expect(model.clipsConvertError == nil)
+    }
+
+    @Test("capture staging plants the converting and result faces without a sidecar")
+    func captureStagingPlantsBothFaces() throws {
+        let model = makeModel(root: try makeTempRoot())
+        model.setClipsConvertProgressForCapture(VoiceClipsConvertProgress(
+            total: 5, completed: 1, currentClipName: "Verse 2",
+            phase: .converting, startedAt: Date()))
+        #expect(model.isConvertingClips)
+        #expect(model.clipsConvertProgress?.stepText == "CLIP 2/5")
+
+        model.setClipsConvertProgressForCapture(nil)
+        #expect(!model.isConvertingClips)
+
+        model.setClipsConversionForCapture(VoiceClipsConvertOutcome(
+            voiceID: "base",
+            result: seededResult(trackName: "Voice: base", clipCount: 3,
+                                 warnings: ["one thing worth knowing"]),
+            realConversion: false, note: "not a real voice", totalInferSeconds: 2.1))
+        #expect(model.lastClipsConversion?.result.warnings.count == 1)
+
+        model.setClipsConvertErrorForCapture("a refusal, staged")
+        #expect(model.clipsConvertError == "a refusal, staged")
     }
 
     // MARK: - Small pure helpers

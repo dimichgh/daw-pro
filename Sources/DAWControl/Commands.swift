@@ -405,6 +405,7 @@ public final class CommandRouter {
         "vc.sidecarStart",
         "vc.sidecarStop",
         "vc.convertVocals",
+        "vc.convertClips",
         "vc.trainVoice",
         "vc.listVoices",
         "au.describeParams",
@@ -439,6 +440,23 @@ public final class CommandRouter {
         // `all.count == N`. NOTE: no quoted string in this comment,
         // deliberately (the m25-d rule).
         "pad.previewEffort",
+        // m23-ct: LIVE PLAY — the HELD sibling of note.audition, and the ONLY
+        // path by which something played live can be recorded into a take. The
+        // user has no hardware MIDI controller, so without it
+        // MIDICaptureSession, transport.record, punch and take comping are
+        // unreachable for them entirely.
+        //
+        // ⚠️ PLACED HERE, NOT AT THE TAIL, AND THE PLACEMENT IS MEASURED, NOT
+        // STYLISTIC. Appending it at the end reddened 19 end-relative
+        // assertions across 7 files on the first run of this item (dropLast(n)
+        // and suffix(k).prefix(2) reads) — the same shape that broke 80
+        // assertions across 22 tests at m27 leg D. An insertion this far from
+        // the END leaves every one of them true by construction, so only the
+        // explicit count pins move. It goes AFTER pad.previewEffort rather than
+        // between the two, because PadPreviewCommandTests pins that verb at
+        // exactly note.audition + 1. NOTE: no quoted string in this comment,
+        // deliberately (the m25-d rule).
+        "note.play",
         // m23-h: the ONE track-ordering verb (arrange headers drag onto it;
         // the mixer follows in m23-z). Additive at the END (the same law).
         "track.reorder",
@@ -541,6 +559,21 @@ public final class CommandRouter {
         // string in this comment, deliberately (the m25-d rule). STRICTLY
         // ADDITIVE, appended at the end per the additive-at-end law.
         "edit.pasteClips",
+        // m24-n: what voice models this project carries, what they cost, and
+        // whether each is usable here. READ-ONLY and fully DERIVED from the
+        // live model plus the filesystem — there is no manifest to go stale.
+        // The user's answer to "why is my project 240 MB". NOTE: no quoted
+        // string in this comment, deliberately (the m25-d rule). STRICTLY
+        // ADDITIVE, appended at the end per the additive-at-end law.
+        "project.embeddedVoices",
+        // m24-n: promote this project's embedded copy of a voice into THIS
+        // machine's voice store, which is the only directory the RVC sidecar
+        // scans. Without it the embedded bytes are inert and re-convertible
+        // elsewhere is decorative. Refuses an existing voice unless overwrite,
+        // the import precedent. NOTE: no quoted string in this comment,
+        // deliberately (the m25-d rule). STRICTLY ADDITIVE, appended at the
+        // end per the additive-at-end law.
+        "vc.installEmbeddedVoice",
     ]
 
     public init(
@@ -591,6 +624,15 @@ public final class CommandRouter {
         // the pre-m17-h behavior byte-identical.
         store.generationSource = SongGenerationImportSource(
             generator: importGenerator ?? songGenerator)
+        // m24-n: ONE voice store per router. `voiceModelImportDirectory` is
+        // already "the app-owned voice store" for the IMPORT direction; the
+        // save-time embed and `vc.installEmbeddedVoice` READ and WRITE the same
+        // store from DAWCore, so they are pointed at the same URL here rather
+        // than each resolving their own default. Without this a test that
+        // imports a voice into a scratch directory would then be told by
+        // project.embeddedVoices that the voice is not installed — two rules
+        // that can disagree, about the same directory.
+        store.voiceStoreDirectory = voiceModelImportDirectory
     }
 
     /// Async because `render.mixdown` awaits offline Audio Unit preparation;
@@ -2749,16 +2791,60 @@ public final class CommandRouter {
             return .success(request.id, .object(["lane": try JSONValue(encoding: enabledLane)]))
 
         case "clip.addAudio":
+            // params: trackId (required, must be an audio track), path
+            // (required), atBeat? (omitted = append after the track's last
+            // clip), overwrite? (default false — m33-j).
+            //
+            // OVERLAP POLICY (m33-j) — REFUSE, not the silent trim/delete this
+            // verb shipped with. An `atBeat` that would land the file on top of
+            // an ordinary same-track resident throws
+            // ProjectError.clipImportWouldOverlap (surfaced VERBATIM by the
+            // blanket LocalizedError arm; the wording is contract) naming the
+            // resident and the beat an atBeat-less import would append at.
+            // Nothing is mutated and no undo entry is journaled.
+            //
+            // ⚠️ THIS IS A DELIBERATE BEHAVIOUR CHANGE TO A LIVE VERB, on the
+            // m24-o terms: the previous behaviour was filed as DATA LOSS (two
+            // imports at atBeat 0 left ONE clip, the first id dead, both calls
+            // returning a normal success), so the calls that stop succeeding
+            // are exactly the calls that were destroying the caller's work.
+            // Every in-tree caller was checked one by one: the app's own ⌘I /
+            // drag-drop import and debug.importAudio go through
+            // store.importAudioBatch and never reach here; ai.importGeneration
+            // always builds a NEW track and cannot collide; all six gate scripts
+            // that call clip.addAudio import one clip per freshly-created track
+            // (or, in _m24m-convert-voice-probe.mjs, three clips at beats
+            // 0/8/16 that its own comment calls "NON-OVERLAPPING on purpose").
+            //
+            // The refusal is cheap to satisfy: OMITTING atBeat appends after
+            // everything on the track, which by construction cannot collide.
+            // `overwrite: true` restores the old trim/remove — the same m11-d
+            // choke point — but is no longer silent about it.
+            //
+            // Response: the created clip's fields (top level, unchanged — every
+            // caller reading `id`/`startBeat`/`lengthBeats` is untouched) PLUS
+            // additive `trimmedClipIDs`/`removedClipIDs` arrays, the
+            // clip.moveMany spelling. ALWAYS PRESENT, empty on the ordinary
+            // path: a caller told to "check what happened" should not have to
+            // tell an absent key from an empty one. (They can only be non-empty
+            // when the caller passed overwrite: true.)
             try params.rejectUnknownKeys(
-                ["trackId", "path", "atBeat"], verb: "clip.addAudio")
+                ["trackId", "path", "atBeat", "overwrite"], verb: "clip.addAudio")
             let id = try params.requireTrackID()
             let rawPath = try params.require("path", \.stringValue)
             let path = (rawPath as NSString).expandingTildeInPath
             let atBeat = params["atBeat"]?.doubleValue
-            let clip = try store.importAudio(
-                url: URL(fileURLWithPath: path), toTrack: id, atBeat: atBeat
+            let importOverwrite = params["overwrite"]?.boolValue ?? false
+            let importResult = try store.importAudio(
+                url: URL(fileURLWithPath: path), toTrack: id, atBeat: atBeat,
+                overwrite: importOverwrite
             )
-            return .success(request.id, try JSONValue(encoding: clip))
+            var importObject = try JSONValue(encoding: importResult.clip).objectValue ?? [:]
+            importObject["trimmedClipIDs"] = .array(
+                importResult.trimmedClipIDs.map { .string($0.uuidString) })
+            importObject["removedClipIDs"] = .array(
+                importResult.removedClipIDs.map { .string($0.uuidString) })
+            return .success(request.id, .object(importObject))
 
         case "clip.addMIDI":
             // params: trackId (required, must be an instrument track), name?,
@@ -5277,6 +5363,63 @@ public final class CommandRouter {
             }
             return .success(request.id, .object(auditionPayload))
 
+        case "note.play":
+            // m23-ct LIVE PLAY. The HELD sibling of note.audition, and the one
+            // difference is the whole point: this path is CAPTURED, so it is
+            // NOT refused while a take is recording.
+            //
+            // SET SEMANTICS, and `pitches: []` releases — which is why this verb
+            // IS holdable where note.audition deliberately is not. That comment
+            // says there is no note.auditionStop because a stuck agent note had
+            // no purpose one-shot could not serve. Here there IS one: a held
+            // note is the only way to make "a typed take can be recorded"
+            // machine-verifiable, because no gate in this tree can press a key.
+            // Four backstops make the hold safe: the controller's 30 s ceiling,
+            // the render side's 3 s liveness watchdog, transport.panic, and the
+            // empty set.
+            //
+            // `recording` in the reply is the HONESTY LIGHT: false means the
+            // notes sounded and went into NO take.
+            try params.rejectUnknownKeys(
+                ["trackId", "pitches", "velocity"], verb: "note.play",
+                hint: "'pitches' is an array of MIDI note numbers (0…8 of them, each 0…127) — "
+                    + "an EMPTY array releases everything held")
+            let playTrackID = try params.requireTrackID()
+            guard case .some(.array(let rawPlayPitches)) = params["pitches"] else {
+                throw ControlError("'pitches' must be an array of MIDI note numbers (0…127) — "
+                                   + "pass an empty array to release")
+            }
+            var playPitches: [Int] = []
+            for entry in rawPlayPitches {
+                guard let number = entry.doubleValue, Self.isInteger(number) else {
+                    throw ControlError("every entry in 'pitches' must be an integer 0…127")
+                }
+                playPitches.append(Int(number))
+            }
+            let playVelocity = try Self.optionalInteger(params["velocity"], "'velocity'")
+                ?? AuditionController.defaultVelocity
+            let playResult = try store.playLiveNotes(
+                trackID: playTrackID, pitches: playPitches, velocity: playVelocity)
+            var playPayload: [String: JSONValue] = [
+                "trackId": .string(playResult.trackID.uuidString),
+                "pitches": .array(playResult.pitches.map { .number(Double($0)) }),
+                "velocity": .number(Double(playResult.velocity)),
+                "holding": .bool(!playResult.pitches.isEmpty),
+                "audible": .bool(playResult.isAudible),
+                "recording": .bool(playResult.isRecording),
+                "capturedEdges": .number(Double(playResult.capturedEdges)),
+            ]
+            if let reason = Self.auditionReason(playResult.outcome.audition) {
+                // A real answer, not an error — the same contract note.audition
+                // carries: the events WERE delivered in every inaudible* case.
+                playPayload["reason"] = .string(reason)
+            }
+            if let playKind = store.tracks.first(where: { $0.id == playTrackID })?
+                .instrument?.kind, playKind == .audioUnit || playKind == .soundBank {
+                playPayload["instrumentStatus"] = .string(instrumentStatusString(playTrackID))
+            }
+            return .success(request.id, .object(playPayload))
+
         case "pad.previewEffort":
             // Breath pad P6 — the LIVE DRAG PREVIEW. Streams one effort value
             // (0…1) to the track's instrument as a controller, right now,
@@ -5395,6 +5538,32 @@ public final class CommandRouter {
                 saveResult["discardedRecovery"] = discarded
             }
             return .success(request.id, .object(saveResult))
+
+        case "project.embeddedVoices":
+            // No params (m24-n). What voice models this project carries, what
+            // they cost, and whether each is usable HERE — the answer to "why
+            // is my project 240 MB", which a silent embed would otherwise turn
+            // into a support question.
+            //
+            // Returns {projectPath, embeddedBytes, orphanedVoiceIds, voices:
+            // [{voiceId, voiceName, tracks, embeddedInProject, embeddedBytes,
+            // installedLocally, note}]}. One row per distinct voice named by
+            // some track's provenance, PLUS any voice still in the bundle that
+            // no track names any more (a save never deletes media, and that
+            // rule holds for voices, so a deleted converted track leaves its
+            // voice behind — named rather than mysterious).
+            //
+            // ⭐ Fully DERIVED from the live model plus the filesystem at call
+            // time. There is deliberately no embedded-voice manifest in
+            // project.json: a record of what a directory contains is a record
+            // that can disagree with the directory.
+            //
+            // ⚠️ Nothing here is a failure. A voice named by provenance that
+            // exists nowhere is a NORMAL state — the converted audio is
+            // ordinary audio and still plays; only re-conversion is
+            // unavailable, and the per-voice note says exactly that.
+            try params.rejectUnknownKeys([], verb: "project.embeddedVoices")
+            return .success(request.id, try JSONValue(encoding: store.embeddedVoicesReport()))
 
         case "project.open":
             // path required. discardChanges (default false) abandons unsaved
@@ -6806,11 +6975,22 @@ public final class CommandRouter {
             // (config.convertTimeoutSeconds, default 300s) — health/list/
             // status/train stay on the fast default.
             //
-            // params: EXACTLY ONE of clipId (an existing AUDIO clip — its
-            // FULL backing recording is what gets converted; clip trims/
-            // stretch are NOT applied to the source audio fed to the
-            // converter, only to how the RESULT is later placed) or path
-            // (absolute or ~-expanded local audio file). voiceId (required —
+            // params: EXACTLY ONE of clipId (an existing AUDIO clip — what
+            // gets converted is EXACTLY THE AUDIO THAT CLIP PRESENTS: its
+            // trim, its startOffsetSeconds, its stretchRatio and its pitch
+            // shift are all honoured, because the source is an offline render
+            // of that one clip over its own window, not its backing file.
+            // ⚠️ m24-o CHANGED THIS: it used to hand over the clip's FULL
+            // BACKING RECORDING, so a comped/trimmed take converted its whole
+            // untrimmed source and landed at the clip's beat — silently wrong
+            // output. Level shaping (clip gain, fades, gain envelope) is NOT
+            // baked: it stays on the source clip and is not applied to the
+            // converted result either, which lands dry. Requires the engine —
+            // a headless store answers engineUnavailable) or path
+            // (absolute or ~-expanded local audio file, converted verbatim).
+            // ⭐ To convert SEVERAL clips and keep the arrangement, use
+            // vc.convertClips instead — this verb always lands ONE clip.
+            // voiceId (required —
             // a trained voice's id, or the reserved "base" smoke target,
             // which exercises the full pipeline honestly WITHOUT a real
             // trained voice — its result always carries realConversion:false
@@ -6852,7 +7032,8 @@ public final class CommandRouter {
                 guard let vcClipId = UUID(uuidString: vcClipIdRaw) else {
                     throw ControlError("'clipId' is not a valid UUID: \(vcClipIdRaw)")
                 }
-                let vcSource = try store.voiceConversionSource(clipId: vcClipId)
+                // m24-o: the clip's OWN audio, not its backing recording.
+                let vcSource = try await store.extractClipAudioForConversion(clipId: vcClipId)
                 vcInputPath = vcSource.url.path
                 vcDefaultAtBeat = vcSource.startBeat
             } else if let vcPathRaw {
@@ -6888,6 +7069,140 @@ public final class CommandRouter {
                 if let rtf = vcResult.rtf { vcResponse["rtf"] = .number(rtf) }
                 if let note = vcResult.note { vcResponse["note"] = .string(note) }
                 return .success(request.id, .object(vcResponse))
+            } catch {
+                throw await translateVoiceConversionError(error)
+            }
+
+        case "vc.convertClips":
+            // PER-CLIP voice conversion over a SELECTED SET (m24-m leg A) —
+            // the selection-driven action the user ratified 2026-08-13:
+            // "we should produce same separate set of clips, conversion
+            // applied to each separately, and probably we should be able to
+            // select clips we want to convert". Each clip converts on its
+            // OWN, and the whole set lands on ONE new AI-flagged (violet)
+            // audio track at the SAME beats, in ONE undoable "Convert Voice"
+            // edit. The arrangement survives the conversion.
+            //
+            // BLOCKING, and N TIMES vc.convertVocals' cost: the facade's
+            // POST /v1/voice/convert is synchronous (~37x real time plus a
+            // cold-engine load) and this calls it once per clip, so a set of
+            // eight verses is minutes. Same class as render.mixdown; there is
+            // no job registry here either.
+            //
+            // params: clipIds (REQUIRED, non-empty array of AUDIO clip ids —
+            // ids are unique project-wide, so no trackId is needed; order is
+            // irrelevant, the result comes back in timeline order). voiceId
+            // (required — a trained voice's id, or the reserved "base" smoke
+            // target, exactly as vc.convertVocals). pitchSemitones (optional
+            // int, -24..24 — NOT re-validated here; the facade's own
+            // pitchOutOfRange teaching error surfaces verbatim). trackName
+            // (optional — defaults to "Voice: <voiceId>").
+            //
+            // ⭐ ALWAYS A NEW TRACK, never a cache and never a binding (the
+            // user's ruling: "whenever we convert we would just create a new
+            // track with newly generated vocals"). The result is a PLAIN
+            // audio track with no live dependency on the converter — there is
+            // no insert to add and none to remove.
+            //
+            // Each conversion sees EXACTLY the audio its clip presents: trim,
+            // startOffsetSeconds, stretchRatio and pitch shift are honoured
+            // (m24-o), because the source handed to the converter is an
+            // offline render of that one clip over its own window. Clip gain,
+            // fades and the gain envelope are NOT baked — they are carried
+            // onto the converted clip, so it still sounds and edits like the
+            // one it replaced.
+            //
+            // ALL-OR-NOTHING. Every id is resolved, type-checked and
+            // overlap-checked BEFORE the first render, and a failure at clip
+            // k of N lands NOTHING. Refuses: an empty clipIds, a duplicated
+            // id, an unknown id (clipNotFound), a MIDI clip
+            // (voiceConversionRequiresAudioClip), and two SELECTED clips that
+            // OVERLAP in beats — one track cannot hold both at their own
+            // beats, so it says so and suggests two passes rather than
+            // silently trimming one.
+            //
+            // Response: {trackId, trackName, warnings: [...], clips: [{
+            // sourceClipId, sourceTrackId, clipId, startBeat, lengthBeats,
+            // extractedPath, file, sourceSeconds, convertedSeconds,
+            // realConversion, inputSeconds, inferSeconds, rtf?, sampleRate,
+            // note?}, ...]} — the store's own per-clip report with THIS
+            // clip's converter metadata merged onto it.
+            try params.rejectUnknownKeys(
+                ["clipIds", "voiceId", "pitchSemitones", "trackName"],
+                verb: "vc.convertClips")
+            let vccVoiceId = try params.require("voiceId", \.stringValue)
+            guard let vccRawIds = params["clipIds"]?.arrayValue else {
+                throw ControlError(
+                    "vc.convertClips: 'clipIds' must be an array of audio clip ids — the "
+                        + "clips you selected. To convert a single clip, one id is fine.")
+            }
+            var vccClipIds: [UUID] = []
+            for entry in vccRawIds {
+                guard let text = entry.stringValue else {
+                    throw ControlError("'clipIds' must contain clip id strings")
+                }
+                guard let id = UUID(uuidString: text) else {
+                    throw ControlError("'clipIds' entry is not a valid UUID: \(text)")
+                }
+                vccClipIds.append(id)
+            }
+            let vccPitchSemitones = params["pitchSemitones"]?.doubleValue.map { Int($0) } ?? 0
+            let vccTrackNameRaw = params["trackName"]?.stringValue
+            // The wire's default-track-name rule, shared verbatim with
+            // vc.convertVocals — the STORE never invents a name.
+            let vccTrackName = (vccTrackNameRaw?.isEmpty == false)
+                ? vccTrackNameRaw! : "Voice: \(vccVoiceId)"
+            // The converter's own metadata, keyed by SOURCE clip id: DAWCore
+            // hands back file paths and geometry and knows nothing about
+            // voices, so the router keeps this and merges it below.
+            var vccMeta: [UUID: VoiceConvertResult] = [:]
+            // m24-n provenance: WHICH voice made this track, recorded on it as
+            // a fact. The display name is resolved from the voice list when the
+            // sidecar can supply it and falls back to the id otherwise — a
+            // listing failure must never block a conversion, and the id alone
+            // is still a true record. Composed BEFORE the conversion so the
+            // timestamp is when the run started.
+            var vccVoiceName = vccVoiceId
+            if let vccDescriptors = try? await voiceConverting.availableVoiceTargets(),
+               let match = vccDescriptors.first(where: { $0.id == vccVoiceId }) {
+                vccVoiceName = match.name
+            }
+            let vccProvenance = VoiceProvenance(
+                voiceId: vccVoiceId, voiceName: vccVoiceName,
+                pitchSemitones: vccPitchSemitones)
+            do {
+                let vccResult = try await store.convertClipsToVoice(
+                    clipIds: vccClipIds, trackName: vccTrackName,
+                    provenance: vccProvenance
+                ) { sourceClipID, source in
+                    let converted = try await voiceConverting.convert(VoiceConvertRequest(
+                        inputPath: source.url.path, voiceId: vccVoiceId,
+                        pitchSemitones: vccPitchSemitones))
+                    vccMeta[sourceClipID] = converted
+                    return URL(fileURLWithPath: converted.outputPath)
+                }
+                var vccClipsJSON: [JSONValue] = []
+                for report in vccResult.clips {
+                    guard var entry = try JSONValue(encoding: report).objectValue else {
+                        // Unreachable: ConvertedClipReport encodes to an object.
+                        throw ControlError("vc.convertClips: could not encode the clip report")
+                    }
+                    if let meta = vccMeta[report.sourceClipId] {
+                        entry["realConversion"] = .bool(meta.realConversion)
+                        entry["inputSeconds"] = .number(meta.inputSeconds)
+                        entry["inferSeconds"] = .number(meta.inferSeconds)
+                        entry["sampleRate"] = .number(Double(meta.sampleRate))
+                        if let rtf = meta.rtf { entry["rtf"] = .number(rtf) }
+                        if let note = meta.note { entry["note"] = .string(note) }
+                    }
+                    vccClipsJSON.append(.object(entry))
+                }
+                return .success(request.id, .object([
+                    "trackId": .string(vccResult.trackId.uuidString),
+                    "trackName": .string(vccResult.trackName),
+                    "clips": .array(vccClipsJSON),
+                    "warnings": .array(vccResult.warnings.map { .string($0) }),
+                ]))
             } catch {
                 throw await translateVoiceConversionError(error)
             }
@@ -7029,6 +7344,33 @@ public final class CommandRouter {
                 "state": .string("needsConversion"),
                 "directoryPath": .string(vimResult.directoryPath),
             ]))
+
+        case "vc.installEmbeddedVoice":
+            // m24-n. Promotes THIS PROJECT's embedded copy of a voice into this
+            // machine's voice store — the one directory the RVC sidecar scans
+            // (RVC_VOICES_DIR). It is what makes "the project is re-convertible
+            // on another machine" true rather than decorative: a project
+            // carries the weights, and this is the step that makes them
+            // reachable by the converter.
+            //
+            // params: voiceId (required — as recorded in track provenance and
+            // listed by project.embeddedVoices). overwrite (default false —
+            // an already-installed voice of the same id is REFUSED rather than
+            // silently replaced, the vc.importVoiceModel precedent).
+            //
+            // Local filesystem copy only; no sidecar HTTP call, no model load.
+            // Touches neither the project nor the undo journal and never marks
+            // the session dirty — installing a voice is not an edit.
+            //
+            // Deliberately NOT automatic on project.open: that would write up
+            // to ~84 MB per voice into Application Support unasked and could
+            // shadow a voice of the same id the user already had.
+            try params.rejectUnknownKeys(["voiceId", "overwrite"], verb: "vc.installEmbeddedVoice")
+            let ievVoiceId = try params.require("voiceId", \.stringValue)
+            let ievResult = try store.installEmbeddedVoice(
+                voiceId: ievVoiceId,
+                overwrite: params["overwrite"]?.boolValue ?? false)
+            return .success(request.id, try JSONValue(encoding: ievResult))
 
         case "clip.transcribe":
             // BLOCKING (m23-n2b) — the render.mixdown-class precedent stated

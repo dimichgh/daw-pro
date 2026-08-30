@@ -1530,7 +1530,7 @@ public final class AudioEngine: AudioEngineControlling {
     @discardableResult
     public func setAuditionPitches(trackID: UUID, pitches: [UInt8],
                                    velocity: UInt8) -> AuditionOutcome {
-        let wanted = Set(pitches.filter { $0 <= 127 })
+        let wanted = Self.auditionWantedSet(pitches)
         let held = auditionVoices[trackID]
 
         // Silencing a track we hold: release on the REMEMBERED renderer (which
@@ -1594,6 +1594,100 @@ public final class AudioEngine: AudioEngineControlling {
         auditionVoices[trackID] = AuditionVoices(renderer: renderer, pitches: wanted)
 
         return auditionAudibility(trackID: trackID)
+    }
+
+    /// THE one home for "which pitches does this call ask to be sounding".
+    /// Both the audition ring's diff and live play's CAPTURE diff read it, so
+    /// the two can never be derived from subtly different rules — this tree's
+    /// characteristic failure mode is two records of the same fact that nobody
+    /// compares.
+    private static func auditionWantedSet(_ pitches: [UInt8]) -> Set<UInt8> {
+        Set(pitches.filter { $0 <= 127 })
+    }
+
+    /// The `LiveMIDIEvent.source` stamped on every edge live play ingests.
+    /// `Int32.min` is not a reachable CoreMIDI `kMIDIPropertyUniqueID`, so a
+    /// synthetic edge is always distinguishable from a hardware one. Nothing on
+    /// this path reads it today (the CC observer feeds off the capture RING,
+    /// which live play bypasses) — it exists so a future reader cannot mistake
+    /// a typed note for an endpoint that does not exist.
+    static let livePlayEventSource: Int32 = .min
+
+    /// LIVE PLAY (m23-ct): sound `pitches` on `trackID` now AND put the note
+    /// edges this call implies into the rolling take.
+    ///
+    /// ⭐ **ONE DIFF, READ FROM THE LEDGER, BEFORE THE AUDIBLE HALF MUTATES IT.**
+    /// The capture edges are `auditionVoices[trackID].pitches` → `wanted`, taken
+    /// before `setAuditionPitches` runs. They are NOT read back from the ring
+    /// pushes, and that distinction is load-bearing:
+    ///
+    /// ⚠️⚠️ **`setAuditionPitches` RELEASES AND RE-TRIGGERS THE WHOLE HELD SET
+    /// WHEN THE RENDERER IDENTITY CHANGES** (a node rebuild mid-hold). Those
+    /// extra pushes are a GRAPH REBUILD, NOT A PERFORMANCE — the user did not
+    /// lift and re-press the key — so they must never appear in the take. The
+    /// ledger diff is empty across a rebuild, which is exactly right, and
+    /// `LivePlayCaptureTests` pins it.
+    ///
+    /// ⚠️ **THE OFF GATE IS DELIBERATELY WIDER THAN THE ON GATE.** Note-ONs need
+    /// `captureIntoTake` (the domain's `isRecording && isArmed && instrument`
+    /// verdict); note-OFFs ride on the take existing at all. Otherwise a track
+    /// DISARMED mid-hold would never close its note, and
+    /// `MIDICaptureSession.finish` would clamp it to the end of the take — a
+    /// duration the user never played, landing on every other armed instrument
+    /// track. An off can only ever CLOSE a note: the session drops orphan offs,
+    /// so a wider off gate cannot fabricate anything. Same asymmetry the store
+    /// already runs for audition ("stopping is ALWAYS allowed") and the pad
+    /// ("`.end` is always allowed").
+    @discardableResult
+    public func setLivePlayPitches(trackID: UUID, pitches: [UInt8], velocity: UInt8,
+                                   captureIntoTake: Bool) -> LivePlayOutcome {
+        // ONE timestamp for every edge of one call: they are one gesture, and
+        // taking it BEFORE the audible half keeps the take's clock as close to
+        // the user's actual press as this actor can observe.
+        let hostTime = mach_absolute_time()
+        // THE ledger read. Must happen before setAuditionPitches mutates it.
+        let before = auditionVoices[trackID]?.pitches ?? []
+        let wanted = Self.auditionWantedSet(pitches)
+
+        let audition = setAuditionPitches(trackID: trackID, pitches: pitches,
+                                          velocity: velocity)
+
+        // A take must be rolling AND capturing MIDI AND own a session. Any of
+        // those missing means the notes sounded and went into no take, which is
+        // exactly what `recording: false` tells the caller.
+        guard activeTake?.capturingMIDI == true,
+              let session = midiInput?.captureSession else {
+            return LivePlayOutcome(audition: audition, capturedEdges: 0, recording: false)
+        }
+
+        // Nothing was delivered: the audible half released EVERYTHING it held on
+        // the remembered renderer and dropped the ledger entry, so the take must
+        // see the same release — and must NOT see an on that never sounded and
+        // that no later off could close (the ledger those offs come from is now
+        // empty).
+        let delivered = audition != .noRenderer && audition != .unsupported
+        let released = delivered ? before.subtracting(wanted) : before
+        let pressed = delivered && captureIntoTake ? wanted.subtracting(before) : []
+
+        // Offs before ons. The two sets are disjoint by construction, so the
+        // order cannot change the session's pairing — it is kept because it is
+        // the convention every other MIDI path here follows.
+        for pitch in released.sorted() {
+            session.ingest(LiveMIDIEvent(hostTime: hostTime, source: Self.livePlayEventSource,
+                                         kind: ScheduledMIDIEvent.noteOff,
+                                         pitch: pitch, velocity: 0, channel: 0))
+        }
+        for pitch in pressed.sorted() {
+            session.ingest(LiveMIDIEvent(hostTime: hostTime, source: Self.livePlayEventSource,
+                                         kind: ScheduledMIDIEvent.noteOn, pitch: pitch,
+                                         velocity: max(1, min(127, velocity)), channel: 0))
+        }
+        // The honesty light is OFF whenever this call put nothing of the user's
+        // playing into a take — including the `noRenderer` blip, where neither
+        // the speakers nor the take received anything.
+        return LivePlayOutcome(audition: audition,
+                               capturedEdges: released.count + pressed.count,
+                               recording: captureIntoTake && delivered)
     }
 
     /// Sends ONE controller value to `trackID`'s instrument right now (breath

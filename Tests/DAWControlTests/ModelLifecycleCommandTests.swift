@@ -144,18 +144,22 @@ struct ModelLifecycleCommandTests {
     @Test("both verbs are registered at the END of allCommands; count 171 -> 173 -> 174")
     func commandsRegisteredAtTheEnd() {
         let all = CommandRouter.allCommands
-        #expect(all.count == 190)   // 173 at m23-dl -> 174 at m23-di-2a -> 175 at m25-d -> 176 at m25-z -> 177 at m23-ap-3 (vc.importVoiceModel, transport.setStopAtContentEnd, audio.profileFile, clip.detectPitch, appended after) -> 178 (clip.getNotes) -> 179 (m26-i instrument.describeSampler) -> 180 (edit.pasteClips) -> 181 (m27 leg D clip.applyBreathContour, placed next to its controller-lane siblings, NOT at the tail) -> 182 (breath pad P1 clip.applyEffortShape, placed next to clip.applyBreathContour, NOT at the tail) -> 183 (breath pad P6 pad.previewEffort, placed next to note.audition — the other 'sounds now, outside the timeline, not an edit' verb — NOT at the tail) -> 186 (m28-knob midi.getControlMap/setControlMap/learnControl, placed next to midi.listInputs — their only sibling on this surface — and BEFORE transport.record, NOT at the tail) -> 187 (m31-f instrument.probeLiveness) -> 188 (m31-c clip.repeatNotes) -> 189 (m26-a/m27-n clip.patchNotes) -> 190 (m32-b2 clip.sliceToSampler, placed next to clip.detectTransients/clip.quantizeAudio, NOT at the tail)
-        #expect(all.dropLast(6).last == "ai.modelResidency")
-        #expect(all.dropLast(5).last == "ai.modelUnload")
-        #expect(all.dropLast(4).last == "vc.importVoiceModel")
+        #expect(all.count == 194)   // 173 at m23-dl -> 174 at m23-di-2a -> 175 at m25-d -> 176 at m25-z -> 177 at m23-ap-3 (vc.importVoiceModel, transport.setStopAtContentEnd, audio.profileFile, clip.detectPitch, appended after) -> 178 (clip.getNotes) -> 179 (m26-i instrument.describeSampler) -> 180 (edit.pasteClips) -> 181 (m27 leg D clip.applyBreathContour, placed next to its controller-lane siblings, NOT at the tail) -> 182 (breath pad P1 clip.applyEffortShape, placed next to clip.applyBreathContour, NOT at the tail) -> 183 (breath pad P6 pad.previewEffort, placed next to note.audition — the other 'sounds now, outside the timeline, not an edit' verb — NOT at the tail) -> 186 (m28-knob midi.getControlMap/setControlMap/learnControl, placed next to midi.listInputs — their only sibling on this surface — and BEFORE transport.record, NOT at the tail) -> 187 (m31-f instrument.probeLiveness) -> 188 (m31-c clip.repeatNotes) -> 189 (m26-a/m27-n clip.patchNotes) -> 190 (m32-b2 clip.sliceToSampler, placed next to clip.detectTransients/clip.quantizeAudio, NOT at the tail) -> 191 (m24-m leg A vc.convertClips, placed next to vc.convertVocals — its single-clip sibling — NOT at the tail) -> 193 (m24-n project.embeddedVoices next to project.snapshot/project.open, and vc.installEmbeddedVoice next to vc.importVoiceModel, both at the tail per the additive-at-end law) -> 194 (m23-ct note.play, placed next to note.audition/pad.previewEffort — the other 'sounds now, outside the timeline' verbs — NOT at the tail; a tail append reddened 19 end-relative assertions across 7 files on this item's first run)
+        #expect(all.dropLast(8).last == "ai.modelResidency")
+        #expect(all.dropLast(7).last == "ai.modelUnload")
+        #expect(all.dropLast(6).last == "vc.importVoiceModel")
         // m25-d appended transport.setStopAtContentEnd at the END (same law).
-        #expect(all.dropLast(3).last == "transport.setStopAtContentEnd")
+        #expect(all.dropLast(5).last == "transport.setStopAtContentEnd")
         // m25-z appended audio.profileFile at the END (same law).
-        #expect(all.dropLast(2).last == "audio.profileFile")
+        #expect(all.dropLast(4).last == "audio.profileFile")
         // m23-ap-3 appended clip.detectPitch at the END (same law).
-        #expect(all.dropLast().last == "clip.detectPitch")
+        #expect(all.dropLast(3).last == "clip.detectPitch")
         // m26-k appended edit.pasteClips at the END (same law).
-        #expect(all.last == "edit.pasteClips")
+        #expect(all.dropLast(2).last == "edit.pasteClips")
+        // m24-n appended project.embeddedVoices then vc.installEmbeddedVoice
+        // at the END (same law).
+        #expect(all.dropLast().last == "project.embeddedVoices")
+        #expect(all.last == "vc.installEmbeddedVoice")
         // Additive: every neighbouring lifecycle verb is untouched, in place.
         for name in ["ai.sidecarStatus", "ai.sidecarStart", "ai.sidecarStop",
                      "vc.sidecarStatus", "vc.sidecarStart", "vc.sidecarStop"] {

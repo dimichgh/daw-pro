@@ -23,7 +23,7 @@ import DAWAppKit
 ///
 /// **The NAMED in-window pattern** — a centered dark-glass card over a dimmed
 /// scrim (Settings / Instrument Picker / Quantize / Undo History / Effect
-/// Editor / VoiceConvertSheet), never a popover or a child window, so
+/// Editor / VoiceConvertClipsSheet), never a popover or a child window, so
 /// `debug.captureUI` snapshots the same instance a user sees. Its state lives
 /// on `AppModel.exportDialog`, not in this view's `@State`, for the same
 /// reason.

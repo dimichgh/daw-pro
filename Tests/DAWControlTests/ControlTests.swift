@@ -1543,6 +1543,19 @@ struct CommandRouterTests {
             // bring the CoreMIDI client up and connect to the user's real MIDI
             // sources, which a unit test must never do. (Arming IS covered, in
             // MIDIControlTests, against a fake engine.)
+            // m23-ct: note.play is DRIVEN, not excluded — and driving it here is
+            // the point. It is note.audition's neighbour in allCommands but its
+            // OPPOSITE on the one axis that matters: it is deliberately NOT
+            // refused while a take is rolling, because this path IS captured.
+            // So it is the only note verb this loop can exercise with a REAL
+            // pitch at the point where transport.record has left a take open —
+            // genuine route coverage, not the degenerate no-op branch the
+            // pad.previewEffort exclusion below warns about. A held note is
+            // harmless: the store is discarded at the end of the test, and both
+            // the controller's 30 s ceiling and the render side's 3 s watchdog
+            // would release it anyway.
+            "note.play": ["trackId": .string(instTrackID),
+                          "pitches": .array([.number(60)])],
             "midi.setControlMap": ["bindings": .array([])],
             "midi.learnControl": ["cancel": .bool(true)],
             "transport.seek": ["beats": .number(0)],
@@ -2003,6 +2016,22 @@ struct CommandRouterTests {
                 // AIServicesTests/VoiceConversionClientTests (convert/train
                 // against a stub facade).
                 "vc.convertVocals", "vc.trainVoice",
+                // vc.convertClips (m24-m leg A) is the SET form of
+                // vc.convertVocals and is excluded for the same three reasons
+                // verbatim: a REAL VoiceConversionClient against a REAL
+                // (not-running) sidecar, a required voiceId this loop cannot
+                // supply, and a required non-empty clipIds. It additionally
+                // needs a live ENGINE — the m24-o extraction renders the
+                // clip's own window before converting — which this bare
+                // router does not have. Proven by dedicated tests:
+                // DAWCoreTests/ClipVoiceConversionTests (the store contract:
+                // arrangement preservation, one undoable edit, all-or-nothing,
+                // every refusal), DAWControlTests/VoiceConvertClipsCommandTests
+                // (routing/param-shape/response-encoding via a fake
+                // VoiceConverting and a fake render engine), and
+                // DAWEngineTests/ClipVoiceConversionRenderTests (the audio
+                // itself, sample-exact, through a REAL AudioEngine).
+                "vc.convertClips",
                 // vc.listVoices (m10-p-5) likewise hits the REAL
                 // VoiceConversionClient talking to a REAL (almost certainly
                 // not-running-in-CI, and stopped again by the vc.sidecarStop
@@ -2131,7 +2160,20 @@ struct CommandRouterTests {
                 // bare loop doesn't stage. Proven with injected temp dirs by
                 // VoiceModelImportCommandTests and AIServicesTests/
                 // VoiceModelImportTests.
-                "vc.importVoiceModel"].contains(command) {
+                "vc.importVoiceModel",
+                // vc.installEmbeddedVoice (m24-n) is the SAME exclusion class,
+                // twice over: it REQUIRES a `voiceId` this params-free loop
+                // cannot supply, and on success it copies a real voice model
+                // into the app-owned voice store. It also needs a SAVED project
+                // bundle that actually carries an embedded voice — a fixture
+                // this bare loop does not stage. Proven end-to-end, with an
+                // injected temp voice store and a real save/reopen round trip,
+                // by EmbeddedVoiceCommandTests and DAWCoreTests/
+                // VoiceProvenanceEmbeddingTests.
+                // ⚠️ Its READ sibling `project.embeddedVoices` stays IN the
+                // loop: it takes no params, writes nothing, and answers
+                // honestly on an empty project.
+                "vc.installEmbeddedVoice"].contains(command) {
                 continue
             }
             let response = await router.handle(ControlRequest(

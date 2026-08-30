@@ -415,7 +415,35 @@ test("tools/list returns exactly the audit-enforced tool count", { skip: SKIP_RE
   // Command<->tool bijection stays mechanical (`clip.sliceToSampler` ->
   // `clip_slice_to_sampler`), no exception-table entry needed: **35 direct +
   // 160 wrapper = 195**.
-  assert.equal(result.tools.length, 195);
+  //
+  // 195 -> 196 at m24-m leg A (`vc_convert_clips` — PER-CLIP voice conversion
+  // over a SELECTED SET: N chosen audio clips convert separately and land at
+  // the same beats on ONE new track, so the arrangement survives; it takes a
+  // required `clipIds` array and rides the strict-schema wrapper, so it
+  // joined the wrapper count). Command<->tool bijection stays mechanical
+  // (`vc.convertClips` -> `vc_convert_clips`), no exception-table entry
+  // needed: **35 direct + 161 wrapper = 196**.
+  //
+  // 196 -> 198 at m24-n (`project_embedded_voices` — a pure READ of which
+  // voice models the project carries, what they cost, and whether each is
+  // usable here; no params, so it joins the DIRECT read-only count — and
+  // `vc_install_embedded_voice`, which copies a carried voice into this
+  // machine's voice store and takes a required `voiceId`, so it rides the
+  // strict-schema wrapper). Command<->tool bijection stays mechanical
+  // (`project.embeddedVoices` -> `project_embedded_voices`,
+  // `vc.installEmbeddedVoice` -> `vc_install_embedded_voice`), no
+  // exception-table entry needed: **36 direct + 162 wrapper = 198**.
+  //
+  // 198 -> 199 at m23-ct (`note_play` — play notes live and HOLD them, the
+  // musical-typing path and the ONE note tool whose sound can be RECORDED
+  // into a take; it takes a required `trackId`/`pitches` and rides the
+  // strict-schema wrapper, so it joined the wrapper count). Command<->tool
+  // bijection stays mechanical (`note.play` -> `note_play`), no
+  // exception-table entry needed. RE-MEASURED, not derived, by the same two
+  // name-capturing regexes: **36 direct + 163 wrapper = 199**, 0 duplicates,
+  // 0 names in both sets, and a bogus-name negative control (`"zzz_not_a_tool"`)
+  // that returned 0.
+  assert.equal(result.tools.length, 199);
 });
 
 // ---------------------------------------------------------------------------

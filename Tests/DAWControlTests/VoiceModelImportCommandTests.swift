@@ -41,16 +41,20 @@ struct VoiceModelImportCommandTests {
     @Test("vc.importVoiceModel is in the canonical command list, additive at the end; count 173 -> 174")
     func commandIsCanonical() {
         #expect(CommandRouter.allCommands.contains("vc.importVoiceModel"))
-        #expect(CommandRouter.allCommands.dropLast(4).last == "vc.importVoiceModel")
+        #expect(CommandRouter.allCommands.dropLast(6).last == "vc.importVoiceModel")
         // m25-d appended transport.setStopAtContentEnd at the END (same law).
-        #expect(CommandRouter.allCommands.dropLast(3).last == "transport.setStopAtContentEnd")
+        #expect(CommandRouter.allCommands.dropLast(5).last == "transport.setStopAtContentEnd")
         // m25-z appended audio.profileFile at the END (same law).
-        #expect(CommandRouter.allCommands.dropLast(2).last == "audio.profileFile")
+        #expect(CommandRouter.allCommands.dropLast(4).last == "audio.profileFile")
         // m23-ap-3 appended clip.detectPitch at the END (same law).
-        #expect(CommandRouter.allCommands.dropLast().last == "clip.detectPitch")
+        #expect(CommandRouter.allCommands.dropLast(3).last == "clip.detectPitch")
         // m26-k appended edit.pasteClips at the END (same law).
-        #expect(CommandRouter.allCommands.last == "edit.pasteClips")
-        #expect(CommandRouter.allCommands.count == 190)   // 177 at m23-ap-3 -> 178 (clip.getNotes) -> 179 (m26-i instrument.describeSampler) -> 180 (edit.pasteClips) -> 181 (m27 leg D clip.applyBreathContour, placed next to its controller-lane siblings, NOT at the tail) -> 182 (breath pad P1 clip.applyEffortShape, placed next to clip.applyBreathContour, NOT at the tail) -> 183 (breath pad P6 pad.previewEffort, placed next to note.audition — the other 'sounds now, outside the timeline, not an edit' verb — NOT at the tail) -> 186 (m28-knob midi.getControlMap/setControlMap/learnControl, placed next to midi.listInputs — their only sibling on this surface — and BEFORE transport.record, NOT at the tail) -> 187 (m31-f instrument.probeLiveness) -> 188 (m31-c clip.repeatNotes, placed next to clip.setNotes/clip.getNotes, NOT at the tail) -> 189 (m26-a/m27-n clip.patchNotes, placed next to clip.repeatNotes, NOT at the tail) -> 190 (m32-b2 clip.sliceToSampler, placed next to clip.detectTransients/clip.quantizeAudio, NOT at the tail)
+        #expect(CommandRouter.allCommands.dropLast(2).last == "edit.pasteClips")
+        // m24-n appended project.embeddedVoices then vc.installEmbeddedVoice
+        // at the END (same law).
+        #expect(CommandRouter.allCommands.dropLast().last == "project.embeddedVoices")
+        #expect(CommandRouter.allCommands.last == "vc.installEmbeddedVoice")
+        #expect(CommandRouter.allCommands.count == 194)   // 177 at m23-ap-3 -> 178 (clip.getNotes) -> 179 (m26-i instrument.describeSampler) -> 180 (edit.pasteClips) -> 181 (m27 leg D clip.applyBreathContour, placed next to its controller-lane siblings, NOT at the tail) -> 182 (breath pad P1 clip.applyEffortShape, placed next to clip.applyBreathContour, NOT at the tail) -> 183 (breath pad P6 pad.previewEffort, placed next to note.audition — the other 'sounds now, outside the timeline, not an edit' verb — NOT at the tail) -> 186 (m28-knob midi.getControlMap/setControlMap/learnControl, placed next to midi.listInputs — their only sibling on this surface — and BEFORE transport.record, NOT at the tail) -> 187 (m31-f instrument.probeLiveness) -> 188 (m31-c clip.repeatNotes, placed next to clip.setNotes/clip.getNotes, NOT at the tail) -> 189 (m26-a/m27-n clip.patchNotes, placed next to clip.repeatNotes, NOT at the tail) -> 190 (m32-b2 clip.sliceToSampler, placed next to clip.detectTransients/clip.quantizeAudio, NOT at the tail) -> 191 (m24-m leg A vc.convertClips, placed next to vc.convertVocals — its single-clip sibling — NOT at the tail) -> 193 (m24-n project.embeddedVoices next to project.snapshot/project.open, and vc.installEmbeddedVoice next to vc.importVoiceModel, both at the tail per the additive-at-end law) -> 194 (m23-ct note.play, placed next to note.audition/pad.previewEffort — the other 'sounds now, outside the timeline' verbs — NOT at the tail; a tail append reddened 19 end-relative assertions across 7 files on this item's first run)
         // -> 187 (m31-f instrument.probeLiveness, placed next to instrument.describeSampler — its read-only instrument.* sibling — NOT at the tail)
         // Additive: the rest of the vc.* family is untouched.
         for name in ["vc.sidecarStatus", "vc.sidecarStart", "vc.sidecarStop",

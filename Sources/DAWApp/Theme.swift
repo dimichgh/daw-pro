@@ -15,14 +15,32 @@ enum DAWTheme {
     /// timeline / piano-roll / keyboard grids emphasize at the same strength.
     static let gridEmphasis = Color.white.opacity(0.14)
 
-    // Piano-roll keyboard-gutter key rows (no raw hex in views — Theme owns color).
-    // The gutter is the app's ONE light surface (m23-b): `keyWhite` is a real
-    // ivory key, so it is also the one place where the house light-on-dark chrome
-    // tokens invert. Everything drawn ON a key takes its polarity from that key —
-    // black rows keep `hairline`/`gridEmphasis`, ivory rows take the three
-    // `…OnWhite` inks below. Ratios are measured against `keyWhite` #D9D5CA.
+    // Piano-key rows (no raw hex in views — Theme owns color).
+    //
+    // ⭐ **TWO SURFACES SINCE m23-ct, AND THE RULE IS UNCHANGED.** These tokens
+    // used to be described as "the app's ONE light surface (m23-b)" — the
+    // piano-roll gutter. Musical Typing's on-screen keyboard
+    // (`Components/MusicalKeyboardStrip`) is the second, and it reuses these
+    // verbatim rather than inventing a palette. What m23-b actually established
+    // was never a count: it was **a light surface earns its own measured ink and
+    // never borrows the dark hierarchy**. An ivory piano key is the one object in
+    // a DAW that is ivory in the world, so a second one obeys the rule rather
+    // than bending it. ⚠️ A THIRD light surface that is not a piano key is still
+    // the thing to argue about, not to add.
+    //
+    // Everything drawn ON a key takes its polarity from that key — black rows
+    // keep `hairline`/`gridEmphasis`, ivory rows take the three `…OnWhite` inks
+    // below, and a LIT key (cyan, on the typing keyboard) takes the measured
+    // `NotePillInk` answer for its own composited luminance. Ratios are measured
+    // against `keyWhite` #D9D5CA.
     static let keyBlack = Color(hex: 0x11141C)   // black-key row
-    static let keyWhite = Color(hex: 0xD9D5CA)   // white-key row — ivory (12.6:1 vs keyBlack)
+    /// ONE literal (m23-ct), the `panelHex` / `playbackHex` precedent one block
+    /// down: an ivory key is now also a surface things get drawn ON while it is
+    /// LIT, and the ink that can be read on the lit form is derived from a
+    /// luminance. Fill and ink math therefore read the same number — deriving the
+    /// ink from a second copy of the hex is the drift this shape prevents.
+    static let keyWhiteHex: UInt32 = 0xD9D5CA
+    static let keyWhite = Color(hex: Self.keyWhiteHex)   // white-key row — ivory (12.6:1 vs keyBlack)
     /// Row separator on an ivory key — `hairline`'s dark twin (1.7:1). Between two
     /// adjacent white keys (the E|F and B|C gaps) this line is the ONLY thing that
     /// makes them read as two keys, so it is a real key gap, not a whisper.

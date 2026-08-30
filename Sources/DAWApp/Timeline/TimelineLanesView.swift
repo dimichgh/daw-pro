@@ -222,10 +222,16 @@ struct TimelineLanesView: View {
     var onOpenBreathPad: (_ clip: Clip) -> Void = { _ in }
     /// Opens the Quantize panel focused on the extract affordance (both kinds).
     var onExtractGroove: (_ clip: Clip) -> Void = { _ in }
-    /// Opens the "Convert to Voice…" sheet for an AUDIO clip (m10-p-5, Pro clip
-    /// menu; sp-c). UI-only — routes to `openVoiceConvert`, whose sheet rides
-    /// the SAME client/store seams as the wire's `vc.convertVocals`.
-    var onConvertToVoice: (_ clip: Clip) -> Void = { _ in }
+    /// Opens the **Convert Voice…** panel (m24-m leg B, Pro clip menu; sp-c).
+    /// UI-only — routes to `openVoiceConvert(clipIDs:)`, whose panel rides the
+    /// SAME store seam as the wire's `vc.convertClips`. The COMMAND (title +
+    /// resolved ids) travels with the call so the panel can never open on a
+    /// different set from the one the menu named.
+    var onConvertToVoice: (_ command: VoiceConvertCommand) -> Void = { _ in }
+    /// Every AUDIO clip in the arrange selection, ordered by start beat — read
+    /// from `AppModel.selectedAudioClipIDs`, the ONE producer, rather than
+    /// re-derived here from `selection` + `tracks`.
+    var selectedAudioClipIDs: [UUID] = []
     /// Crossfades two adjacent/overlapping audio clips (m11-d, Pro clip menu),
     /// wired to `ProjectStore.crossfadeClips`.
     var onCrossfadeClips: (_ trackID: UUID, _ clipID: UUID, _ otherClipID: UUID,
@@ -1265,7 +1271,12 @@ struct TimelineLanesView: View {
                     onOpenHumanize: { onOpenHumanize(clip) },
                     onOpenBreathPad: { onOpenBreathPad(clip) },
                     onExtractGroove: { onExtractGroove(clip) },
-                    onConvertToVoice: { onConvertToVoice(clip) },
+                    voiceConvertCommand: VoiceConvertMenuPolicy.clipContextCommand(
+                        clickedClipID: clip.id,
+                        clickedClipIsAudio: !clip.isMIDI && clip.audioFileURL != nil,
+                        clickedClipIsSelected: selection.contains(clip.id),
+                        selectedAudioClipIDs: selectedAudioClipIDs),
+                    onConvertToVoice: onConvertToVoice,
                     crossfadeNextClipID: isPro ? crossfadeNeighbor(for: clip, in: track) : nil,
                     onCrossfadeWithNext: { length in
                         if let other = crossfadeNeighbor(for: clip, in: track) {
@@ -2901,10 +2912,14 @@ private struct ClipBlock: View {
 
     // MARK: Convert to voice (m10-p-5)
 
-    /// "Convert to Voice…" (audio clips only, Pro menu — sp-c): opens the
-    /// convert sheet, which rides the SAME client/store seams as the wire's
-    /// `vc.convertVocals` clipId-form.
-    var onConvertToVoice: () -> Void = {}
+    /// What this block's *Convert Voice…* entry says and targets (m24-m leg B),
+    /// or nil when the entry must not exist at all (a MIDI clip has no
+    /// recording to convert — hidden, never offered-then-errored). Resolved by
+    /// `VoiceConvertMenuPolicy`, ONE producer for the label and the ids.
+    var voiceConvertCommand: VoiceConvertCommand?
+    /// Opens the Convert Voice… panel on `voiceConvertCommand`'s clips. The
+    /// command is handed back rather than recomputed, the `onDelete` law.
+    var onConvertToVoice: (VoiceConvertCommand) -> Void = { _ in }
 
     // MARK: Crossfade (m11-d)
 
@@ -3964,7 +3979,7 @@ private struct ClipBlock: View {
                 // Humanize (m25-c) — quantize's inverse, and MIDI-only for the
                 // same reason: `humanizeClipNotes` throws `notAMIDIClip` on an
                 // audio clip, so the entry simply does not exist there (hidden,
-                // never offered-then-errored — the "Convert to Voice…" rule two
+                // never offered-then-errored — the "Convert Voice…" rule two
                 // entries down, and the sibling "Quantize…" above).
                 //
                 // ⛔ DO NOT ADD `clip.takeGroupID == nil` HERE (m25-c-2). Both
@@ -3986,13 +4001,20 @@ private struct ClipBlock: View {
                 Button("Breath Pad…") { onOpenBreathPad() }
             }
             Button("Extract Groove…") { onExtractGroove() }
-            // Convert to voice (m10-p-5): AUDIO clips only — a MIDI clip has no
-            // recording to convert (the store's voiceConversionSource law), so
-            // the item simply doesn't exist there (hidden, never
-            // offered-then-errored). Pro-only like every clip-menu entry (sp-c).
-            if !clip.isMIDI {
+            // CONVERT VOICE… (m24-m leg B): AUDIO clips only — a MIDI clip has
+            // no recording to convert, so the item simply doesn't exist there
+            // (hidden, never offered-then-errored). Pro-only like every
+            // clip-menu entry (sp-c).
+            //
+            // ⭐ THE TITLE NAMES THE BLAST RADIUS (the m23-cf rule): right-click
+            // a clip that IS in the selection and it reads "Convert 3 Clips to
+            // Voice…" and converts three; right-click one that is NOT and it
+            // reads "Convert Clip to Voice…", converts that one, and leaves the
+            // selection alone. Both come out of `VoiceConvertMenuPolicy` with
+            // the ids attached, so the words and the action cannot disagree.
+            if let command = voiceConvertCommand {
                 Divider()
-                Button("Convert to Voice…") { onConvertToVoice() }
+                Button(command.title) { onConvertToVoice(command) }
             }
         }
     }

@@ -1027,14 +1027,67 @@ struct MainActorOccupancySiteTests {
 
     // MARK: - Leg C — THE REVIEW CADENCE
 
-    /// `@MainActor`-isolated suite count <= 349 (measured 332, m31-i 2026-08-28).
+    /// `@MainActor`-isolated suite count <= 369 (measured 351, m24-n 2026-08-29).
     /// NOT a physical threshold — `ds/dN` is unmeasured and (per design §4.3)
     /// unmeasurable from existing data; this exists only to force a periodic
     /// re-measurement. Bumping it requires pasting a fresh gate result, same
     /// obligation as Leg B step 3 — raising it without running the gate is
     /// the same act as raising the horizon.
     ///
-    /// ══ CAMPAIGN RESULT PASTED FOR THIS BUMP (m31-i, 2026-08-28) ═════════
+    /// ══ CAMPAIGN RESULT PASTED FOR THIS BUMP (m24-n, 2026-08-29) ═════════
+    /// VERBATIM output of `node scripts/gates/m23aw-prepare-headroom.mjs`
+    /// (5 fresh sequential `./scripts/test.sh` runs, 7138 tests / 662 suites,
+    /// 0 `✘` each), 2026-08-29. ⭐ Only the SECOND passing campaign this gate
+    /// has ever produced.
+    ///
+    ///     ✔ PASS: worst-of-5 T1 = 1.711s <= 35s (0.049x of limit, 20.460x
+    ///       cushion). Horizon confirmed 60s in both channels, every run.
+    ///       Median campaign wall 237.3s (validity limit 248s).
+    ///
+    ///       channel                          n   min      max      mean     spread
+    ///       T1 GM prepare (THIS campaign)    5   1.498   1.711   1.588   1.142x
+    ///         rows: 1.583  1.603  1.711  1.498  1.545
+    ///
+    ///       m19-e `max` column — RECORDED, NEVER ASSERTED (design §1.3/§5.3.6):
+    ///         n=5  min 24.698  max 31.436  mean 28.523  spread 1.273x
+    ///         rows: 24.698  31.436  30.542  25.567  30.370
+    ///
+    ///     GATE PASSED.
+    ///     VERDICT: 1/1 check(s) passed.
+    ///
+    /// Run walls: 236.245 284.287 281.918 237.287 230.768 s — median 237.3 s,
+    /// under the 248 s validity limit but by only 10.7 s, and TWO runs were
+    /// 280+ s. Reading it plainly: this campaign is at the edge of validity on
+    /// this machine, and the next one may not clear it.
+    ///
+    /// ⚠️ THE BUMP WAS WRITTEN BEFORE THE CAMPAIGN ON PURPOSE, and it is not a
+    /// shortcut: the gate refuses any campaign containing a `✘`, and this
+    /// bound's own failure IS that `✘`. Running the gate first would have
+    /// self-rejected every run forever. If you inherit this comment mid-bump
+    /// with no result pasted, the bump is UNJUSTIFIED — re-run the gate or
+    /// restore the previous bound.
+    ///
+    /// ⚠️⚠️ THE FIRST ATTEMPT WAS REFUSED, AND THE REASON IS RECORDED BECAUSE
+    /// A CLEAN SECOND RUN IS NOT EVIDENCE THE FIRST DID NOT HAPPEN. Campaign 1
+    /// (same tree, ~40 min earlier) exited 1 on leg RED_RUN: run 1 of 5 carried
+    /// one `✘` — `AIServicesTests/ModelMemoryLiveTests` "A touched 2 GiB
+    /// anonymous allocation moves availableBytes, and releasing it moves it
+    /// back", which reported `usedBytes rose 0.1 GB, availableBytes fell
+    /// 0.1 GB, residual after munmap -2.1 GB` after 4 attempts. That is a LIVE
+    /// MACHINE-MEMORY positive control, not a DAW assertion: measured at the
+    /// time, swap was 17042/18432 MB used with ~2.9 GB of pages free, so a
+    /// 2 GiB touched hold could not move the metric out of concurrent-reclaim
+    /// noise. It is NOT one of the tree's documented load flakes
+    /// (`SoundBankHostingTests` T1, `EQCurveEditorModelTests:753`,
+    /// `ReferenceLaneTransparencyTests:390/425`, `InsertSpectrumTapTests`,
+    /// `OutputDeviceTests`/BlackHole) — FIRST OBSERVATION, filed here rather
+    /// than silently dropped. Campaign 1's other four runs were green, its
+    /// worst T1 was 5.473 s (still 6.4x under the 35 s limit) and its median
+    /// wall was 247.866 s — inside the 248 s validity limit by 0.134 s. The
+    /// design's wholesale-refusal rule (§7.3) did exactly its job: the bad run
+    /// was NOT dropped and the survivors were NOT scored.
+    ///
+    /// ══ CAMPAIGN RESULT FOR THE PREVIOUS BUMP (m31-i, 2026-08-28) ═════════
     /// VERBATIM output of `node scripts/gates/m23aw-prepare-headroom.mjs
     /// --from-logs <5 green full-suite runs>`, 2026-08-28. ⭐ This is the FIRST
     /// PASSING CAMPAIGN THIS GATE HAS EVER PRODUCED — m23-aw-4 recorded that
@@ -1084,13 +1137,33 @@ struct MainActorOccupancySiteTests {
     /// campaign discharges m23-aw-4's own idle-machine requirement is the
     /// user's call, not an agent's, and that item is left open.
     ///
-    /// ══ HOW 349 WAS DERIVED — THE CADENCE IS THE INVARIANT, NOT "+10 %" ══
+    /// ══ HOW 369 WAS DERIVED — THE CADENCE IS THE INVARIANT, NOT "+10 %" ══
     /// Design §6.3 fixes the JOB ("force a periodic re-measurement") and the
     /// CADENCE ("roughly weekly"); `298 + ~10 %` was only how that cadence
     /// was spelled at the then-current growth rate of 5.2 suites/day. Re-spelt
     /// at today's measured rate:
     ///
-    ///   349 = 332 (measured census today) + 17 (= ceil(7 days x 2.44/day))
+    ///   369 = 351 (measured census today) + 18 (= ceil(7 days x 2.44/day)
+    ///                                                 = ceil(17.08))
+    ///
+    /// ⚠️ THE m31-i ROW SPELLED THE SAME EXPRESSION `17`. `ceil(17.08)` is 18,
+    /// so this row uses 18 and records the 1-suite difference rather than
+    /// inheriting it silently; the RATE is unchanged and the cadence is still
+    /// seven days. Nothing about the previous bound is retro-corrected — 349
+    /// was the bound that was in force and it fired exactly as designed.
+    ///
+    /// ⚠️⚠️ THE CENSUS MOVED 332 -> 351 IN ONE DAY — +19, roughly 8x the rate
+    /// this cadence is spelt at, and the fastest single-day move in the table.
+    /// That is NOT used to widen the cap: this comment's own closing rule says
+    /// "do not widen the cap because it fired quickly", a one-day two-point
+    /// sample is not an admissible rate estimate, and the 2026-08-17 -> 08-24
+    /// episode below proves this instrument reads a CAPPED window as a flat
+    /// one. It is recorded here as the OBSERVATION the next re-derivation must
+    /// account for: if the +19/day shape is real rather than the suppressed
+    /// demand of 08-17..08-24 discharging at once (M32's eight items and
+    /// m24-m/m24-n all landed inside it), 369 buys ~1 day, not ~7, and the
+    /// next bump should re-derive the rate from a fresh unsuppressed window
+    /// rather than re-spelling 2.44.
     ///
     /// ⚠️ THE RATE IS NOT §1.6's 5.2/day, AND NOT A NAIVE TWO-POINT LINE.
     /// Census re-measured at 12 revisions with ONE instrument — this file's own
@@ -1105,6 +1178,7 @@ struct MainActorOccupancySiteTests {
     ///     2026-08-13 129353c  322      2026-08-23 06dca3d  330
     ///     2026-08-14 9da47b4  322      2026-08-24 223b06f  330
     ///     2026-08-17 e01e751  330      2026-08-28 bc9bde9  332
+    ///     2026-08-29 (m24-n working tree, uncommitted)  351
     ///     2026-08-18 cd6bc64  330
     ///
     /// ⭐⭐ THE LAST SEVEN DAYS ARE NOT AN ADMISSIBLE RATE SAMPLE — THE BOUND
@@ -1130,9 +1204,9 @@ struct MainActorOccupancySiteTests {
               + "prepare/prepareEffect-like sites \(counts.prepareLikeSites) (PRINTED ONLY — design §4.3 "
               + "rejects this as a ratchet channel; it is a proxy for the channel measured NOT to drift), "
               + "files \(counts.files)")
-        #expect(counts.mainActorSuites <= 349, """
-            @MainActor-isolated suite count is \(counts.mainActorSuites), over the 349 cadence limit \
-            (measured 332 at m31-i). This is a REVIEW CADENCE, not a physical threshold — ds/dN is \
+        #expect(counts.mainActorSuites <= 369, """
+            @MainActor-isolated suite count is \(counts.mainActorSuites), over the 369 cadence limit \
+            (measured 351 at m24-n). This is a REVIEW CADENCE, not a physical threshold — ds/dN is \
             unmeasured. Bumping this number requires pasting a fresh \
             scripts/gates/m23aw-prepare-headroom.mjs campaign result into the comment above this bound \
             first; raising it without running the gate is the same act as raising the horizon.

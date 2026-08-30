@@ -59,6 +59,18 @@ struct TransportBar: View {
 
             Spacer()
 
+            // ⭐ MUSICAL TYPING (m23-ct) — THE ONLY REAL-TIME NOTE INPUT THIS USER
+            // CAN HAVE (they own no hardware controller). Shows in BOTH densities,
+            // NOT gated on `isPro`: by Rule 6 a beginner needs a way to play a note
+            // more than a pro does, and hiding the only performance surface behind
+            // a mode chip would be the same "a fully-built subsystem with no door"
+            // the item was filed about.
+            //
+            // Right-region, past the Spacer, so it never touches the 340 pt readout
+            // anchor — Position/Time stay put (the export button's rule).
+            musicalTypingToggle
+                .explainable(.musicalTyping)
+
             // EXPORT: bounce the whole mix to a file. A core beginner action, so it
             // shows in BOTH densities. Right-region, past the Spacer — it never
             // touches the 340 pt readout anchor on the left (Position/Time stay put).
@@ -401,6 +413,48 @@ struct TransportBar: View {
         }
         .buttonStyle(.plain)
         .help("Export your song to an audio file")
+    }
+
+    /// **THE MODE TOGGLE AND ITS INDICATOR — one control, m23-ct.**
+    ///
+    /// ⚠️ **THE MODE MUST BE EXPLICIT AND VISIBLY INDICATED, NEVER AMBIENT
+    /// CAPTURE.** This project has been bitten by key routing three times (m17-d,
+    /// m23-g1, m23-cf) and this mode claims 21 letter keys while it is on. So the
+    /// lit state is not decoration: cyan fill + the glow recipe is the app's
+    /// "active state" grammar (Rule 3 — an accent is earned by state), and the
+    /// piano glyph says WHICH state without needing the word.
+    ///
+    /// The label stays "KEYS" rather than "MUSICAL TYPING" because the chip row is
+    /// a fixed-width neighbourhood; the tooltip and the strip's own header carry
+    /// the full name, and the strip appears the instant this is on, so the chip
+    /// never has to explain itself alone.
+    private var musicalTypingToggle: some View {
+        let on = appModel.musicalTyping.isEnabled
+        return Button { appModel.setMusicalTypingEnabled(!on) } label: {
+            HStack(spacing: 5) {
+                Image(systemName: "pianokeys")
+                    .font(.system(size: 11, weight: .semibold))
+                Text("KEYS")
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .tracking(0.6)
+            }
+            .foregroundStyle(on ? DAWTheme.playback : DAWTheme.textDim)
+            .padding(.horizontal, 9)
+            .frame(height: 26)
+            .background(on ? DAWTheme.playback.opacity(0.18) : DAWTheme.panelRaised)
+            .clipShape(RoundedRectangle(cornerRadius: 5))
+            .overlay(
+                RoundedRectangle(cornerRadius: 5)
+                    .stroke(on ? DAWTheme.playback.opacity(0.55) : DAWTheme.hairline,
+                            lineWidth: 1)
+            )
+            // Glow ONLY while on — earned by state, never static chrome.
+            .glow(DAWTheme.playback, radius: on ? 7 : 0, intensity: on ? 0.45 : 0)
+        }
+        .buttonStyle(.plain)
+        .help(on
+              ? "Musical Typing is ON — letter keys play notes. Click to turn it off."
+              : "Musical Typing: play notes with your computer keyboard and an on-screen piano.")
     }
 
     private var testToneButton: some View {

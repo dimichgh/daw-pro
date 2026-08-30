@@ -976,6 +976,37 @@ public protocol AudioEngineControlling: AnyObject {
     @discardableResult
     func previewController(trackID: UUID, controller: UInt8, value: UInt8) -> AuditionOutcome
 
+    /// LIVE PLAY (m23-ct): sounds exactly `pitches` on `trackID` right now AND,
+    /// when `captureIntoTake` is true and a take is rolling, puts the note
+    /// EDGES this call implies into that take. SET semantics, diffed against
+    /// what the track already holds, exactly like `setAuditionPitches`.
+    ///
+    /// ⭐ **THE ONE THING THAT MAKES A TYPED PERFORMANCE RECORDABLE.** Route C
+    /// (spike 2026-08-29): ONE main-actor note edge fans to BOTH pipes, entering
+    /// each at its MAIN-ACTOR end — the audible half rides the existing
+    /// per-renderer audition ring (`setAuditionPitches`, unchanged), and the
+    /// capture half is a direct main-actor call into the take's
+    /// `MIDICaptureSession`, bypassing the capture ring entirely.
+    ///
+    /// ⭐⭐ **NET: ZERO RINGS GAIN A PRODUCER, which is the whole RT-safety
+    /// argument.** The CoreMIDI receive thread stays the sole producer of every
+    /// thru ring and of the capture ring; the main actor stays the sole
+    /// producer of every audition ring. `LiveEventRing.push` is a non-atomic
+    /// load(head) → write slot → store(head), so a second producer on any ring
+    /// would silently lose or duplicate events; nothing here goes near one.
+    ///
+    /// ⚠️ **`captureIntoTake` IS A DOMAIN VERDICT, NOT AN ENGINE ONE.** Only
+    /// `ProjectStore` knows arm state, so it computes
+    /// `isRecording && isArmed && kind == .instrument` and hands the answer
+    /// down. The engine narrows it further (is a take actually capturing MIDI,
+    /// does a session exist) but never widens it.
+    ///
+    /// Never throws; the outcome reports what was heard, how many edges went
+    /// into the take, and whether a take received them at all.
+    @discardableResult
+    func setLivePlayPitches(trackID: UUID, pitches: [UInt8], velocity: UInt8,
+                            captureIntoTake: Bool) -> LivePlayOutcome
+
     /// Releases every audition voice on every track and requests an
     /// all-notes-off on each renderer that held one. Called at engine
     /// shutdown, project boundary, and app resign-active — the paths where the
@@ -1150,6 +1181,23 @@ extension AudioEngineControlling {
     /// precedent, applied to a method whose default is a silent no-sound).
     public func previewController(trackID: UUID, controller: UInt8,
                                   value: UInt8) -> AuditionOutcome { .unsupported }
+
+    /// Live play is optional capability (m23-ct, the `setAuditionPitches`
+    /// precedent): fakes and headless engines have neither instrument renderers
+    /// nor a MIDI capture session, so the default sounds nothing and captures
+    /// nothing.
+    ///
+    /// ⚠️ **THE SAME VACUITY RISK `previewController` DOCUMENTS, and here it is
+    /// worse than silence — it is a SILENTLY UNRECORDED PERFORMANCE.** An
+    /// `AudioEngine` that forgot to override this would report
+    /// `.unsupported` / `recording:false` forever, every typed note would go
+    /// into no take, and every model-layer test would still pass because
+    /// `LivePlayController` is written to keep working against an engine that
+    /// cannot capture. `Tests/DAWEngineTests/LivePlayCaptureTests.swift` closes
+    /// that hole by driving the REAL `AudioEngine` with a rolling take and
+    /// counting the edges that reach `midiCaptureSessionForTesting`.
+    public func setLivePlayPitches(trackID: UUID, pitches: [UInt8], velocity: UInt8,
+                                   captureIntoTake: Bool) -> LivePlayOutcome { .unsupported }
 
     /// The audition all-stop is optional capability (m23-d): an engine with no
     /// audition support holds no voices, so the default is a no-op.

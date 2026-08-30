@@ -458,6 +458,21 @@ public enum CopilotToolCatalog {
                     minimum: 10, maximum: 5_000)),
             ], required: ["trackId", "pitches"])
         ),
+        // ⚠️ m23-ct's `note.play` is DELIBERATELY NOT HERE, and this is a
+        // decision rather than an oversight. It is the HELD sibling of
+        // `note.audition` above: it does not release itself, and a forgotten
+        // release lands the note in the take with the wrong length. The in-app
+        // Copilot is a conversational agent with no gesture to end, and it has
+        // no reason to record BY PLAYING — it composes with `clip.addMIDI` /
+        // `clip.setNotes`, which are already here. `note.audition` (self-
+        // releasing) already covers "let me hear this" on this surface.
+        // ⚠️ It is NOT in `neverInclude` either: that set means "structurally
+        // must never be exposed" (project lifecycle, destructive edits, the
+        // Copilot's own session verbs), which this is not. If a future cycle
+        // teaches this surface release discipline, adding it is legitimate —
+        // `transport.panic` is already in this catalog, so a stuck note is
+        // recoverable from here. Adding it moves the `v1.count` pin in
+        // `CopilotCatalogTests`.
         CopilotTool(
             command: "clip.setNotes",
             description: "Replace a MIDI clip's ENTIRE note array — the only note-editing primitive. Pass an empty array to clear the clip.",

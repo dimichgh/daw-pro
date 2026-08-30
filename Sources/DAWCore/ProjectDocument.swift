@@ -324,7 +324,13 @@ public struct ProjectDocument: Codable, Sendable, Equatable {
                 // dropped effect/send is inert — harmless, and healed by the
                 // store's live cascades on the next edit).
                 automation: td.automation ?? [],
-                takeGroups: takeGroups
+                takeGroups: takeGroups,
+                // m24-n: a fact about the past, restored verbatim. It is NOT
+                // validated against the voice store on load — a voice that is
+                // gone is a normal state, and blanking the record here would
+                // destroy the only thing that can still say what the audio was
+                // made from.
+                voiceProvenance: td.voiceProvenance
             )
         }
         // Attach the non-trivial tempo/meter maps (m12-d) onto the runtime
@@ -562,10 +568,22 @@ public struct TrackDocument: Codable, Sendable, Equatable {
     /// Lane payloads persist as `TakeLaneDocument` so their media rides as a
     /// bundle-relative `media/…` ref (the clip/sampler-zone precedent).
     public var takeGroups: [TakeGroupDocument]?
+    /// Voice-conversion provenance (m24-n). Additive and optional; nil (key
+    /// omitted on encode) on every track that was not made by a conversion, so
+    /// a pre-provenance project stays byte-identical — the `sends` rule.
+    ///
+    /// `VoiceProvenance` is reused directly rather than mirrored into a
+    /// `…Document` type (the `automation` / `ClipDocument.notes` precedent): it
+    /// carries no URLs and no media, so its `Codable` IS the disk shape. The
+    /// voice FILES it implies are not referenced from here at all — they are
+    /// found by id under the bundle's `voices/` folder, deliberately DERIVED
+    /// rather than recorded, so no manifest can disagree with the directory.
+    public var voiceProvenance: VoiceProvenance?
 
     private enum CodingKeys: String, CodingKey {
         case id, name, kind, volume, pan, isMuted, isSoloed, isArmed, isAIGenerated, clips, instrument
         case outputBusId, sends, effects, automation, takeGroups
+        case voiceProvenance
     }
 
     init(from track: Track, mediaRefs: [UUID: String?]) {
@@ -597,6 +615,9 @@ public struct TrackDocument: Codable, Sendable, Equatable {
         takeGroups = track.takeGroups.isEmpty
             ? nil
             : track.takeGroups.map { TakeGroupDocument(from: $0, mediaRefs: mediaRefs) }
+        // m24-n: rides verbatim; nil on a track no conversion produced, so the
+        // synthesized encodeIfPresent omits the key entirely.
+        voiceProvenance = track.voiceProvenance
     }
 
     public init(from decoder: any Decoder) throws {
@@ -622,6 +643,8 @@ public struct TrackDocument: Codable, Sendable, Equatable {
         automation = try c.decodeIfPresent([AutomationLane].self, forKey: .automation)
         // Additive optional (M5 iii-a): a pre-take track has no key.
         takeGroups = try c.decodeIfPresent([TakeGroupDocument].self, forKey: .takeGroups)
+        // Additive optional (m24-n): a pre-provenance track has no key.
+        voiceProvenance = try c.decodeIfPresent(VoiceProvenance.self, forKey: .voiceProvenance)
     }
 }
 

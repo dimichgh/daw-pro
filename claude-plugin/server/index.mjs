@@ -33252,6 +33252,12 @@ var LONG_RUNNING_COMMANDS = /* @__PURE__ */ new Set([
 ]);
 var VOICE_CONVERT_TIMEOUT_MS = 33e4;
 var VOICE_CONVERT_COMMANDS = /* @__PURE__ */ new Set(["vc.convertVocals"]);
+function voiceConvertClipsTimeoutMs(params) {
+  const ids = params["clipIds"];
+  const count = Array.isArray(ids) ? ids.length : 1;
+  return VOICE_CONVERT_TIMEOUT_MS * Math.max(1, count);
+}
+var VOICE_CONVERT_CLIPS_COMMANDS = /* @__PURE__ */ new Set(["vc.convertClips"]);
 var CLIP_TRANSCRIBE_TIMEOUT_MS = 3e5;
 var CLIP_TRANSCRIBE_COMMANDS = /* @__PURE__ */ new Set(["clip.transcribe"]);
 var CLIP_DETECT_PITCH_TIMEOUT_MS = 6e4;
@@ -33282,7 +33288,7 @@ var DawBridge = class {
   async send(command, params = {}) {
     const socket = await this.ensureConnected();
     const id = `mcp-${this.nextId++}-${Date.now()}`;
-    const timeoutMs = VOICE_CONVERT_COMMANDS.has(command) ? VOICE_CONVERT_TIMEOUT_MS : CLIP_TRANSCRIBE_COMMANDS.has(command) ? CLIP_TRANSCRIBE_TIMEOUT_MS : CLIP_DETECT_PITCH_COMMANDS.has(command) ? CLIP_DETECT_PITCH_TIMEOUT_MS : LONG_RUNNING_COMMANDS.has(command) ? LONG_RUNNING_TIMEOUT_MS : REQUEST_TIMEOUT_MS;
+    const timeoutMs = VOICE_CONVERT_CLIPS_COMMANDS.has(command) ? voiceConvertClipsTimeoutMs(params) : VOICE_CONVERT_COMMANDS.has(command) ? VOICE_CONVERT_TIMEOUT_MS : CLIP_TRANSCRIBE_COMMANDS.has(command) ? CLIP_TRANSCRIBE_TIMEOUT_MS : CLIP_DETECT_PITCH_COMMANDS.has(command) ? CLIP_DETECT_PITCH_TIMEOUT_MS : LONG_RUNNING_COMMANDS.has(command) ? LONG_RUNNING_TIMEOUT_MS : REQUEST_TIMEOUT_MS;
     return new Promise((resolve5, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
@@ -45438,6 +45444,27 @@ registerTool(
   )
 );
 registerTool(
+  "note_play",
+  {
+    title: "Play notes live and HOLD them (recordable into a take)",
+    description: "Play notes live on an instrument track and HOLD them until you say otherwise. This is the musical-typing / on-screen-keyboard path, and it is the ONE note tool whose sound can be RECORDED: unlike note_audition, it is NOT refused while a take is rolling, because what you play here goes into the take. SET SEMANTICS, and this is the part to get right: each call says 'exactly these notes should be sounding NOW'. Send `pitches:[60]` to press middle C, `pitches:[60,64,67]` to add two more fingers without re-striking the first, and `pitches:[]` to LIFT EVERYTHING. Repeating the same set is a no-op that keeps the notes alive \u2014 it never re-triggers them and never adds anything to the take. ALWAYS SEND `pitches:[]` WHEN YOU ARE DONE. Nothing releases the notes for you (there is no durationMs here \u2014 that is what note_audition is for). Three backstops exist so a forgotten release cannot wedge the app \u2014 a 30-second hold ceiling, a 3-second liveness watchdog in the audio engine, and transport_panic \u2014 but relying on them means the notes land in the take with the wrong length. TO RECORD A PERFORMANCE: track_set_arm the instrument track, transport_record, then note_play the notes with real waits between them, then note_play with `pitches:[]`, then transport_stop. The take lands as a MIDI clip you can read back with clip_get_notes. \u26A0\uFE0F WAIT ~300 ms AFTER transport_record BEFORE THE FIRST NOTE. A take's anchor is scheduled slightly ahead of the record call and every note struck before it is DROPPED (the same rule that makes count-in work) \u2014 so a note played instantly after transport_record can be heard and still be missing from the clip. READ `recording` IN THE REPLY \u2014 IT IS THE HONESTY LIGHT. `true` means these notes are going into the rolling take. `false` means they SOUNDED AND WENT INTO NO TAKE: the transport is not recording, the track is not armed, or MIDI capture is unavailable. Never tell the user you recorded something when `recording` was false. `capturedEdges` is how many note-ons/offs THIS call put into the take (0 on a repeat, by design). `audible:false` with a `reason` (`trackMuted`, `instrumentNotReady`, `engineStopped`, `engineRebuilding`) is a REAL ANSWER, not an error, exactly as note_audition reports it \u2014 and note that `audible` is a signal-PATH check, not a measurement: it confirms no measured level and no timbre.",
+    inputSchema: {
+      trackId: external_exports.string().describe(
+        "Id of the INSTRUMENT track to play on (from project_snapshot). Audio and bus tracks carry no instrument and are refused."
+      ),
+      pitches: external_exports.array(external_exports.number().int().min(0).max(127)).max(8).describe(
+        "MIDI note numbers that should be sounding RIGHT NOW, 0-8 of them (60 = middle C). This is the whole held set, not a delta. An EMPTY array releases everything \u2014 always allowed, never refused. Above 8, the most recently pressed 8 win."
+      ),
+      velocity: external_exports.number().int().min(1).max(127).optional().describe("How hard the notes are struck, 1-127. Defaults to 100.")
+    }
+  },
+  async ({
+    trackId,
+    pitches,
+    velocity
+  }) => toToolResult(() => bridge.send("note.play", { trackId, pitches, velocity }))
+);
+registerTool(
   "pad_preview_effort",
   {
     title: "Breath pad: stream an effort value live (preview, not an edit)",
@@ -45941,16 +45968,19 @@ registerTool(
   "clip_add_audio",
   {
     title: "Import an audio file as a clip",
-    description: "Import an audio file (wav, aiff, mp3, or m4a) as a new clip on an audio track. The clip's length is computed automatically from the file's duration at the current project tempo \u2014 you don't need to pass a length. Instrument and bus tracks reject audio clips; use track_add or project_snapshot to find/create an `audio` track first. Returns the created clip (id, name, startBeat, lengthBeats).",
+    description: "Import an audio file (wav, aiff, mp3, or m4a) as a new clip on an audio track. The clip's length is computed automatically from the file's duration at the current project tempo \u2014 you don't need to pass a length. Instrument and bus tracks reject audio clips; use track_add or project_snapshot to find/create an `audio` track first. Returns the created clip (id, name, startBeat, lengthBeats) plus trimmedClipIDs and removedClipIDs (both empty unless you passed overwrite). \u26D4 IT WILL NOT OVERWRITE A CLIP THAT IS ALREADY THERE: an atBeat that would land this file on top of an existing clip is REFUSED with an error naming that clip and a beat you can safely append at \u2014 nothing is deleted or trimmed. This matters most in the resample loop (bounce, re-import, chop the print, repeat): re-using atBeat: 0 for every pass is the natural mistake, and it used to destroy the previous import silently. OMIT atBeat to append after everything on the track (never refused), or import each print onto its own track.",
     inputSchema: {
       trackId: external_exports.string().min(1).describe("Id of the audio track to add the clip to, from project_snapshot or track_add."),
       path: external_exports.string().min(1).describe("Absolute path to an audio file on this Mac (wav, aiff, mp3, or m4a)."),
       atBeat: external_exports.number().min(0).optional().describe(
-        "Timeline position in beats (quarter notes) to place the clip's start. Must be >= 0. Omit to append the clip after the track's existing clips."
+        "Timeline position in beats (quarter notes) to place the clip's start. Must be >= 0. Omit to append the clip after the track's existing clips \u2014 the one placement that can never collide with a clip already there."
+      ),
+      overwrite: external_exports.boolean().optional().describe(
+        "Default false. Leave it out and an import that would land on top of an existing clip is refused, changing nothing. Pass true only when you MEAN to replace what is there: the clips underneath are trimmed, or deleted outright where this file covers them completely, and their ids come back in trimmedClipIDs / removedClipIDs so you can see what went."
       )
     }
   },
-  async ({ trackId, path: path6, atBeat }) => toToolResult(() => bridge.send("clip.addAudio", { trackId, path: path6, atBeat }))
+  async ({ trackId, path: path6, atBeat, overwrite }) => toToolResult(() => bridge.send("clip.addAudio", { trackId, path: path6, atBeat, overwrite }))
 );
 registerTool(
   "clip_add_midi",
@@ -47769,7 +47799,7 @@ registerTool(
   "project_save",
   {
     title: "Save the session as a .dawproj bundle",
-    description: "Save the current session as a self-contained .dawproj bundle: a project.json file plus copies of every referenced audio file under media/. `.dawproj` is appended to `path` automatically if missing. Omit `path` to save in place (to the project's current file); if the project has never been saved, omitting `path` errors with guidance to supply one. Re-saving is incremental \u2014 media already copied into the bundle is not re-copied. Returns `{path, mediaFilesCopied, warnings, discardedRecovery?}` \u2014 `discardedRecovery` (m16-e) appears ONLY when this save just cleared a pending crash-recovery offer (see project_recovery_status): saving supersedes it, since the work is now safely on disk. Cannot save while recording.",
+    description: "Save the current session as a self-contained .dawproj bundle: a project.json file plus copies of every referenced audio file under media/. `.dawproj` is appended to `path` automatically if missing. Omit `path` to save in place (to the project's current file); if the project has never been saved, omitting `path` errors with guidance to supply one. Re-saving is incremental \u2014 media already copied into the bundle is not re-copied. Returns `{path, mediaFilesCopied, warnings, discardedRecovery?}` \u2014 `discardedRecovery` (m16-e) appears ONLY when this save just cleared a pending crash-recovery offer (see project_recovery_status): saving supersedes it, since the work is now safely on disk. If the project has any voice-converted tracks, the response also carries `voicesEmbedded`, `voiceBytes` and `voiceBytesCopied`: a save embeds a copy of each voice those tracks were made with (about 80 MB each) so the project stays re-convertible on another machine. `voiceBytesCopied` is what THIS save actually wrote \u2014 0 on a re-save, since the copies are already there. Those keys are absent entirely for a project with no converted tracks. See project_embedded_voices for the full picture. Cannot save while recording.",
     inputSchema: {
       path: external_exports.string().min(1).optional().describe(
         `Absolute path (or a path starting with ~ for the home directory) to save the .dawproj bundle to; ".dawproj" is appended if missing. Omit to save in place, to the project's current file.`
@@ -47895,6 +47925,14 @@ server.registerTool(
   async () => toToolResult(() => bridge.send("project.overview"))
 );
 server.registerTool(
+  "project_embedded_voices",
+  {
+    title: "See which voice models this project carries",
+    description: 'Report the voice-conversion models this project carries, what they cost on disk, and whether each one is usable on THIS machine. No params. This is the answer to "why is my project 240 MB": a converted vocal track records WHICH VOICE made it, and every save embeds a copy of exactly those voices (about 80 MB each) inside the .dawproj bundle so the project stays self-contained and re-convertible on another machine. Returns `{projectPath, embeddedBytes, orphanedVoiceIds, voices: [{voiceId, voiceName, tracks, embeddedInProject, embeddedBytes, installedLocally, note}]}`. `installedLocally` is the one to read before converting again: it means a copy is in this machine\'s voice store, where the conversion engine looks. `orphanedVoiceIds` names voices still in the bundle that no track uses any more (a save never deletes media, so deleting a converted track leaves its voice behind) \u2014 that is where unexplained size usually comes from. NOTHING HERE IS AN ERROR: a voice that exists nowhere is a normal state \u2014 the converted audio is ordinary audio and still plays; only converting AGAIN with that voice is unavailable, and the per-voice `note` says so in plain words you can pass straight to the user. Everything is read live from the project and the filesystem, so it can never be stale. To make a carried voice usable here, call vc_install_embedded_voice.'
+  },
+  async () => toToolResult(() => bridge.send("project.embeddedVoices"))
+);
+server.registerTool(
   "ai_sidecar_status",
   {
     title: "Check the local ACE-Step song-generation sidecar",
@@ -47989,10 +48027,10 @@ registerTool(
   "vc_convert_vocals",
   {
     title: "Convert vocals to a voice",
-    description: `Convert an existing vocal recording to a target voice with the local RVC voice-conversion sidecar. BLOCKS until the conversion finishes (no separate poll/import step \u2014 unlike generate_song, this is a render_mixdown-class call, not an async job) and lands the result as a NEW AI-flagged audio track + clip in the project automatically, in one undoable edit (edit_undo removes it). Call vc_sidecar_start first if vc_sidecar_status isn't healthy. TYPICAL FLOW for "turn this vocal into voice X": generate or import a song, extract_stems with trackNames:["vocals"] (or import an existing a cappella recording), then convert_vocals the resulting vocal clip/file to the target voice. RIGHTS-RESPONSIBILITY POLICY: voiceId may be a voice trained from the user's own recordings (vc_train_voice) OR a user-supplied third-party voice model; the USER is responsible for having the rights to it. The reserved id "base" is a legitimate SMOKE-TEST target: it exercises the full pipeline honestly WITHOUT a real trained voice, and its result always carries realConversion:false plus a note explaining why \u2014 use it to prove the pipeline works end-to-end before any real voice exists. Pass EXACTLY ONE of clipId or path to name the source audio: clipId converts an EXISTING audio clip's FULL backing recording (clip trims/ time-stretch are NOT applied to what gets converted, only to how the RESULT is later placed) and defaults atBeat to that clip's own start beat; path converts a local audio file directly (absolute or ~-expanded) and defaults atBeat to 0. Returns {trackId, clipId, outputPath, realConversion, inputSeconds, inferSeconds, rtf?, sampleRate, note?} \u2014 realConversion is false only for the "base" smoke target, true for a real trained voice.`,
+    description: `Convert an existing vocal recording to a target voice with the local RVC voice-conversion sidecar. BLOCKS until the conversion finishes (no separate poll/import step \u2014 unlike generate_song, this is a render_mixdown-class call, not an async job) and lands the result as a NEW AI-flagged audio track + clip in the project automatically, in one undoable edit (edit_undo removes it). Call vc_sidecar_start first if vc_sidecar_status isn't healthy. TYPICAL FLOW for "turn this vocal into voice X": generate or import a song, extract_stems with trackNames:["vocals"] (or import an existing a cappella recording), then convert_vocals the resulting vocal clip/file to the target voice. RIGHTS-RESPONSIBILITY POLICY: voiceId may be a voice trained from the user's own recordings (vc_train_voice) OR a user-supplied third-party voice model; the USER is responsible for having the rights to it. The reserved id "base" is a legitimate SMOKE-TEST target: it exercises the full pipeline honestly WITHOUT a real trained voice, and its result always carries realConversion:false plus a note explaining why \u2014 use it to prove the pipeline works end-to-end before any real voice exists. Pass EXACTLY ONE of clipId or path to name the source audio: clipId converts EXACTLY THE AUDIO THAT CLIP PRESENTS \u2014 its trim, its offset into the recording, its time-stretch and its pitch shift are all honoured, so a comped or trimmed take converts the region you can hear and nothing else \u2014 and defaults atBeat to that clip's own start beat; path converts a local audio file directly (absolute or ~-expanded) and defaults atBeat to 0. To convert SEVERAL clips and keep the arrangement, use vc_convert_clips instead: this tool always lands ONE clip. Returns {trackId, clipId, outputPath, realConversion, inputSeconds, inferSeconds, rtf?, sampleRate, note?} \u2014 realConversion is false only for the "base" smoke target, true for a real trained voice.`,
     inputSchema: {
       clipId: external_exports.string().optional().describe(
-        "Id of an existing AUDIO clip whose FULL backing recording gets converted (from project_snapshot or a prior clip_add_audio/import result). Pass EXACTLY ONE of clipId or path \u2014 passing both, or neither, is rejected. A MIDI clip's id is rejected (no audio to convert)."
+        "Id of an existing AUDIO clip; what gets converted is exactly the audio that clip presents \u2014 trim, offset into the recording, time-stretch and pitch shift all honoured (from project_snapshot or a prior clip_add_audio/import result). Pass EXACTLY ONE of clipId or path \u2014 passing both, or neither, is rejected. A MIDI clip's id is rejected (no audio to convert)."
       ),
       path: external_exports.string().optional().describe(
         "Absolute or ~-expanded local path to an audio file to convert directly. Pass EXACTLY ONE of clipId or path \u2014 passing both, or neither, is rejected."
@@ -48011,6 +48049,30 @@ registerTool(
   },
   async ({ clipId, path: path6, voiceId, pitchSemitones, trackName, atBeat }) => toToolResult(
     () => bridge.send("vc.convertVocals", { clipId, path: path6, voiceId, pitchSemitones, trackName, atBeat })
+  )
+);
+registerTool(
+  "vc_convert_clips",
+  {
+    title: "Convert several clips to a voice, keeping the arrangement",
+    description: `Convert a SET of selected vocal clips to a target voice with the local RVC voice-conversion sidecar, each clip converted SEPARATELY, and land the whole set at the SAME beats on ONE new AI-flagged audio track \u2014 so the arrangement survives the conversion. THIS IS THE TOOL FOR MORE THAN ONE CLIP: vc_convert_vocals lands a single clip, and calling it N times would make N tracks and N undo steps. BLOCKS until every conversion finishes (no separate poll/import step) and lands the result in ONE undoable edit \u2014 a single edit_undo removes the whole converted set. Call vc_sidecar_start first if vc_sidecar_status isn't healthy. Each conversion is fed exactly the audio its clip presents: trim, offset into the recording, time-stretch and pitch shift are honoured, so comped and trimmed takes convert the region you can actually hear. Clip gain, fades and the gain envelope are NOT baked into what the voice engine hears \u2014 they are carried onto the converted clip, which keeps it editable and keeps a fade-to-silence head out of the pitch estimator. ALWAYS A NEW TRACK: there is no cache and no binding back to the voice model, and the result is a plain audio track you can edit freely. ALL-OR-NOTHING: every clip id is checked before the first conversion, and a failure part-way lands nothing. Two SELECTED clips that overlap in beats are refused (one track cannot hold both at their own beats) \u2014 convert them in two passes. RIGHTS-RESPONSIBILITY POLICY: voiceId may be a voice trained from the user's own recordings (vc_train_voice) OR a user-supplied third-party voice model; the USER is responsible for having the rights to it. The reserved id "base" is a legitimate SMOKE-TEST target that exercises the pipeline without a real trained voice; its results always carry realConversion:false plus a note explaining why. Returns {trackId, trackName, warnings:[...], clips:[{sourceClipId, sourceTrackId, clipId, startBeat, lengthBeats, extractedPath, file, sourceSeconds, convertedSeconds, realConversion, inputSeconds, inferSeconds, rtf?, sampleRate, note?}]} \u2014 one entry per converted clip, in timeline order.`,
+    inputSchema: {
+      clipIds: external_exports.array(external_exports.string()).min(1).describe(
+        "Ids of the AUDIO clips to convert \u2014 the user's selection (from project_snapshot or a prior import result). Order does not matter; the result comes back in timeline order. Each clip converts on its own and lands at its own beat. A MIDI clip's id, an unknown id, a repeated id, or two clips that overlap in beats are all rejected before any conversion runs."
+      ),
+      voiceId: external_exports.string().min(1).describe(
+        `The target voice's id: either a real voice the user trained or supplied (vc_train_voice, or an imported third-party model \u2014 the user is responsible for the rights to it), or the reserved smoke-test id "base" (untrained generic synthesizer \u2014 proves the pipeline runs, NOT a real voice conversion; its results always carry realConversion:false plus an explanatory note).`
+      ),
+      pitchSemitones: external_exports.number().int().min(-24).max(24).optional().describe(
+        "Pitch shift applied during every conversion in this set, in semitones (+12 = up an octave). Integer, -24..24. Omit for no shift (0)."
+      ),
+      trackName: external_exports.string().optional().describe(
+        `Name for the new track carrying the converted set. Omit for a default like "Voice: <voiceId>". The converted CLIPS keep their source clips' own names.`
+      )
+    }
+  },
+  async ({ clipIds, voiceId, pitchSemitones, trackName }) => toToolResult(
+    () => bridge.send("vc.convertClips", { clipIds, voiceId, pitchSemitones, trackName })
   )
 );
 registerTool(
@@ -48062,6 +48124,22 @@ registerTool(
   async ({ modelPath, indexPath, voiceId, name, overwrite }) => toToolResult(
     () => bridge.send("vc.importVoiceModel", { modelPath, indexPath, voiceId, name, overwrite })
   )
+);
+registerTool(
+  "vc_install_embedded_voice",
+  {
+    title: "Install a voice the project carries into this machine",
+    description: "Copy a voice model that THIS PROJECT carries into this machine's voice store, so the conversion engine can find it and you can convert with it again. Use this when project_embedded_voices shows a voice with `embeddedInProject: true` but `installedLocally: false` \u2014 the usual case for a project made on someone else's machine. A PURE LOCAL FILE COPY: no sidecar call, so it works even while vc_sidecar_status isn't healthy, and it is NOT a project edit (nothing to undo, the session does not become unsaved). `voiceId` (required) is the id from project_embedded_voices. `overwrite` (optional, default false) replaces a voice already installed under that id; without it an existing voice is REFUSED rather than silently replaced, because the local one may be a newer or retrained version the user would not want overwritten \u2014 ASK before passing true. Returns `{voiceId, voiceName, directoryPath, files, byteCount, replacedExisting}`. Requires the project to have been SAVED (voices are embedded on save) and to actually carry that voice; both refusals name project_embedded_voices as the way to see what is there. RIGHTS-RESPONSIBILITY POLICY: the voice may be one the user trained or a third-party model they supplied; the user is responsible for having the rights to it.",
+    inputSchema: {
+      voiceId: external_exports.string().min(1).describe(
+        "The voice id to install, exactly as project_embedded_voices lists it."
+      ),
+      overwrite: external_exports.boolean().optional().describe(
+        "true: replace a voice already installed under this id (ask the user first \u2014 theirs may be newer). Omit or false (default): refuse instead, naming the conflict."
+      )
+    }
+  },
+  async ({ voiceId, overwrite }) => toToolResult(() => bridge.send("vc.installEmbeddedVoice", { voiceId, overwrite }))
 );
 server.registerTool(
   "ai_provider_status",

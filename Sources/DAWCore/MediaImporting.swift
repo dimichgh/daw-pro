@@ -250,6 +250,23 @@ public enum ProjectError: Error, LocalizedError {
     // while `errorDescription` can reach no store to look one up.
     case clipsWouldOverlapOnDestination(firstID: UUID, firstName: String,
                                         secondID: UUID, secondName: String)
+    // clip.addAudio (m33-j): the requested `atBeat` would land the imported
+    // file on top of an ordinary same-track resident, and the m11-d/m13-b
+    // overlap policy would TRIM or DELETE that resident to make room. Refused,
+    // for the same reason clipsWouldOverlapOnDestination is: the collision is
+    // MANUFACTURED by this call and the verb would otherwise pick which of the
+    // user's own clips dies. What makes the refusal (rather than moveClip's
+    // trim-and-report) correct HERE is that an import's footprint is not
+    // knowable to the caller — the clip's length comes from the FILE's duration
+    // converted at the current tempo, so `atBeat` alone never told the caller
+    // what it was about to cover. `overwrite: true` accepts the trim explicitly
+    // and gets trimmedClipIDs/removedClipIDs back. Carries the resident's id AND
+    // name on the clipsWouldOverlapOnDestination precedent (clip names are not
+    // unique — two prints of the same bounce are routinely both `flip-pass`),
+    // plus the beat an `atBeat`-less import would have appended at, because that
+    // is the one placement guaranteed to be free.
+    case clipImportWouldOverlap(existingID: UUID, existingName: String,
+                                appendBeat: Double)
     // audio.profileFile (m25-z): the `path` param names no file on disk.
     // Deliberately its OWN case rather than reusing `.importFailed` (whose
     // wording is import-specific, "Audio import failed: …") or
@@ -263,6 +280,17 @@ public enum ProjectError: Error, LocalizedError {
     // no backing file) has none to analyze. Same shape as
     // transcriptionRequiresAudioClip/analysisRequiresAudioClip.
     case pitchDetectionRequiresAudioClip(UUID)
+    // Embedded voice models (m24-n, vc.installEmbeddedVoice). Message built at
+    // THROW time (the `clipFixStale` shape) because the three ways this fails —
+    // the project was never saved, the project carries no such voice, the
+    // embedded copy is missing its weights — need three different sentences and
+    // all three are "here is what to do", never "something broke".
+    case embeddedVoiceUnavailable(String)
+    // A voice of this id is ALREADY in this machine's store; installing would
+    // replace it. Refused unless `overwrite` — the vc.importVoiceModel
+    // `alreadyExists` precedent, so the two paths that write the voice store
+    // refuse on the same terms.
+    case embeddedVoiceAlreadyInstalled(String)
 
     public var errorDescription: String? {
         switch self {
@@ -642,6 +670,16 @@ public enum ProjectError: Error, LocalizedError {
                 + " (\(secondID.uuidString)) would overlap on the destination track — moving several tracks'"
                 + " clips onto one track needs them at different beats (move them one at a time, or use"
                 + " clip.moveManyByTracks to keep them on separate tracks)"
+        case .clipImportWouldOverlap(let existingID, let existingName, let appendBeat):
+            // m33-j. Exact wording is contract (control protocol + MCP surface
+            // it verbatim), pinned byte-exact by ClipAddAudioOverlapCommandTests.
+            return "clip '\(existingName)' (\(existingID.uuidString)) is already on that track where"
+                + " this import would land — importing here would trim or delete it, so clip.addAudio"
+                + " refuses rather than silently overwriting your clip (an import's length comes from"
+                + " the file, so 'atBeat' alone could not tell you what it would cover). Omit 'atBeat'"
+                + " to append after everything already on the track (beat \(formatImportBeat(appendBeat))),"
+                + " choose a free beat, import onto another track, or pass 'overwrite: true' to accept"
+                + " the trim and read back trimmedClipIDs/removedClipIDs"
         case .audioFileNotFound(let path):
             // Exact wording is contract (control protocol + MCP surface it verbatim).
             return "no audio file at \(path) — check the path (audio.profileFile reads "
@@ -652,6 +690,12 @@ public enum ProjectError: Error, LocalizedError {
             // to detect.
             return "clip \(id.uuidString) is a MIDI clip — clip.detectPitch applies only to "
                 + "audio clips (MIDI notes already carry a definite pitch — read them directly)"
+        case .embeddedVoiceUnavailable(let message):
+            return message
+        case .embeddedVoiceAlreadyInstalled(let voiceId):
+            return "voice '\(voiceId)' is already in this machine's voice store — pass "
+                + "'overwrite: true' to replace it with this project's embedded copy, or "
+                + "convert with the voice you already have"
         }
     }
 
@@ -674,8 +718,25 @@ public enum ProjectError: Error, LocalizedError {
         switch self {
         case .clipInTakeGroup(_, let clipID):
             return clipID
+        case .clipImportWouldOverlap(let existingID, _, _):
+            // m33-j: the RESIDENT the import refused to overwrite — a clip that
+            // is by definition still in the project (that is the whole reason
+            // the refusal exists), so a block IS drawn for it and the amber
+            // bubble lands on the clip the user must move, free, or overwrite.
+            return existingID
         default:
             return nil
         }
     }
+}
+
+/// Formats a beat for a refusal message without a trailing `.0` on whole beats
+/// (the `StandardMIDIFileMapper.formatBeat` / `ProjectMIDIExportMapper`
+/// precedent — both keep their own file-private copy rather than sharing one,
+/// because their messages are byte-exact contract and a shared helper would put
+/// three pinned wordings behind one edit).
+private func formatImportBeat(_ beat: Double) -> String {
+    beat == beat.rounded() && abs(beat) < 1e15
+        ? String(Int(beat.rounded()))
+        : String(format: "%g", beat)
 }

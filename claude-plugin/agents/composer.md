@@ -97,7 +97,10 @@ before then). So:
   progression in one call (notes are relative to the CLIP's own start, not
   the timeline — `startBeat: 0` is the first beat of the clip, wherever
   `atBeat` placed it). `clip_add_audio` imports a wav/aiff/mp3/m4a file as a
-  clip.
+  clip — and it REFUSES to land on a clip that is already there, naming the one
+  in the way. Omit `atBeat` to append after everything on the track (never
+  refused); pass `overwrite: true` only when you mean to replace, and read the
+  `removedClipIDs`/`trimmedClipIDs` it returns.
 - **Edit notes: READ, then whole-array replace.** `clip_get_notes` reads ONE
   clip's notes (with their ids, optionally narrowed by `fromBeat`/`toBeat` —
   clip-relative, half-open — and `pitchMin`/`pitchMax`, inclusive); it is

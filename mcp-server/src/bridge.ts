@@ -46,6 +46,22 @@ const LONG_RUNNING_COMMANDS: ReadonlySet<string> = new Set([
  * 400/501 fast, by design. */
 const VOICE_CONVERT_TIMEOUT_MS = 330000;
 const VOICE_CONVERT_COMMANDS: ReadonlySet<string> = new Set(["vc.convertVocals"]);
+/** vc.convertClips (m24-m leg A) converts EACH selected clip SEPARATELY, so
+ * its cost is N times vc.convertVocals'. No FIXED budget can cover an
+ * unbounded N — a number picked for "a few clips" silently times out a
+ * legitimate ten-clip set — so this tier is DERIVED FROM THE REQUEST: one
+ * VOICE_CONVERT_TIMEOUT_MS per clip id, which is exactly the app-side budget
+ * per conversion (VoiceConversionClient.Configuration.convertTimeoutSeconds
+ * applies per convert call, not per wire command). ⚠️ A timeout here does NOT
+ * cancel the app-side work: the store completes the set and lands the track
+ * regardless, so an agent that sees a timeout should re-read
+ * project_snapshot before retrying, or it will convert twice. */
+function voiceConvertClipsTimeoutMs(params: Record<string, unknown>): number {
+  const ids = params["clipIds"];
+  const count = Array.isArray(ids) ? ids.length : 1;
+  return VOICE_CONVERT_TIMEOUT_MS * Math.max(1, count);
+}
+const VOICE_CONVERT_CLIPS_COMMANDS: ReadonlySet<string> = new Set(["vc.convertClips"]);
 /** clip.transcribe (m23-n2b) runs on-device WhisperKit (Sources/AIServices/
  * WhisperTranscriber.swift). The FIRST call on any machine pays a one-time
  * CoreML ANE compile the OS then caches — measured 2026-07-27, identical
@@ -129,7 +145,9 @@ export class DawBridge {
   async send(command: string, params: Record<string, unknown> = {}): Promise<unknown> {
     const socket = await this.ensureConnected();
     const id = `mcp-${this.nextId++}-${Date.now()}`;
-    const timeoutMs = VOICE_CONVERT_COMMANDS.has(command)
+    const timeoutMs = VOICE_CONVERT_CLIPS_COMMANDS.has(command)
+      ? voiceConvertClipsTimeoutMs(params)
+      : VOICE_CONVERT_COMMANDS.has(command)
       ? VOICE_CONVERT_TIMEOUT_MS
       : CLIP_TRANSCRIBE_COMMANDS.has(command)
         ? CLIP_TRANSCRIBE_TIMEOUT_MS

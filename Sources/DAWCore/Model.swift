@@ -984,6 +984,33 @@ public struct ClipMoveResult: Sendable, Equatable {
     }
 }
 
+/// Outcome of `ProjectStore.importAudio(url:toTrack:atBeat:overwrite:)` (m33-j):
+/// the imported clip plus the ids of ordinary same-track residents the import's
+/// overlap policy TRIMMED (edge-trimmed, id preserved) or REMOVED (fully
+/// covered / a sub-minimum sliver) — the same two meanings `ClipMoveResult`
+/// gives them, deliberately spelled the same way so a caller reading one has
+/// read both.
+///
+/// ⭐ BOTH ARRAYS ARE EMPTY UNLESS THE CALLER PASSED `overwrite: true`. The
+/// default import REFUSES a placement that would touch a resident
+/// (`ProjectError.clipImportWouldOverlap`) rather than choosing which of the
+/// user's clips dies, so a non-empty array here is always something the caller
+/// explicitly asked for. This is NOT `ClipMoveResult`'s bargain, and the
+/// difference is the point: a move's footprint is the clip the caller can
+/// already see, while an import's footprint is the FILE's duration converted at
+/// the current tempo — unknowable before the call, so not consentable to.
+public struct ClipImportResult: Sendable, Equatable {
+    public var clip: Clip
+    public var trimmedClipIDs: [UUID]
+    public var removedClipIDs: [UUID]
+
+    public init(clip: Clip, trimmedClipIDs: [UUID] = [], removedClipIDs: [UUID] = []) {
+        self.clip = clip
+        self.trimmedClipIDs = trimmedClipIDs
+        self.removedClipIDs = removedClipIDs
+    }
+}
+
 /// Outcome of `ProjectStore.moveClips(ids:byBeats:)` (m23-g2) — the group-move
 /// twin of `ClipMoveResult`.
 ///
@@ -1204,6 +1231,16 @@ public struct Track: Identifiable, Codable, Sendable, Equatable {
     /// Empty on a track with no takes; additive like `automation`.
     public var takeGroups: [TakeGroup]
 
+    /// Where this track's audio came from, when a voice conversion made it
+    /// (m24-n). nil on every ordinary track — see `VoiceProvenance` for why
+    /// this is a FACT and not a binding, a cache key, or a rights record.
+    ///
+    /// Two things read it and nothing else may: the save path, which embeds
+    /// exactly the voices named here, and the "what is this project carrying"
+    /// report. Playback, rendering, and every clip edit ignore it completely —
+    /// a converted track is a plain audio track.
+    public var voiceProvenance: VoiceProvenance?
+
     /// Whether this track can be written out as a Standard MIDI File (m23-m3b).
     ///
     /// **The ONE home for MIDI-export eligibility.** Three places ask this same
@@ -1336,7 +1373,8 @@ public struct Track: Identifiable, Codable, Sendable, Equatable {
         sends: [Send] = [],
         effects: [EffectDescriptor] = [],
         automation: [AutomationLane] = [],
-        takeGroups: [TakeGroup] = []
+        takeGroups: [TakeGroup] = [],
+        voiceProvenance: VoiceProvenance? = nil
     ) {
         self.id = id
         self.name = name
@@ -1354,6 +1392,7 @@ public struct Track: Identifiable, Codable, Sendable, Equatable {
         self.effects = effects
         self.automation = automation
         self.takeGroups = takeGroups
+        self.voiceProvenance = voiceProvenance
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -1361,6 +1400,8 @@ public struct Track: Identifiable, Codable, Sendable, Equatable {
         case isAIGenerated, clips, instrument
         case outputBusID = "outputBusId"
         case sends, effects, automation, takeGroups
+        // m24-n. Same key on the wire, in the snapshot and on disk.
+        case voiceProvenance
     }
 
     /// Routing/FX fields tolerate absence so pre-M4 payloads still decode;
@@ -1383,7 +1424,10 @@ public struct Track: Identifiable, Codable, Sendable, Equatable {
             sends: try c.decodeIfPresent([Send].self, forKey: .sends) ?? [],
             effects: try c.decodeIfPresent([EffectDescriptor].self, forKey: .effects) ?? [],
             automation: try c.decodeIfPresent([AutomationLane].self, forKey: .automation) ?? [],
-            takeGroups: try c.decodeIfPresent([TakeGroup].self, forKey: .takeGroups) ?? []
+            takeGroups: try c.decodeIfPresent([TakeGroup].self, forKey: .takeGroups) ?? [],
+            // Additive optional (m24-n): a pre-provenance payload has no key.
+            voiceProvenance: try c.decodeIfPresent(
+                VoiceProvenance.self, forKey: .voiceProvenance)
         )
     }
 
@@ -1413,6 +1457,10 @@ public struct Track: Identifiable, Codable, Sendable, Equatable {
         // Omitted when empty (unlike automation) so a pre-take snapshot/wire
         // payload stays byte-identical — the `outputBusId`/`instrument` rule.
         if !takeGroups.isEmpty { try c.encode(takeGroups, forKey: .takeGroups) }
+        // Omitted when nil (the takeGroups/instrument rule) so every snapshot
+        // and wire payload for a track that was never voice-converted stays
+        // byte-identical to its pre-m24-n shape.
+        try c.encodeIfPresent(voiceProvenance, forKey: .voiceProvenance)
     }
 }
 
@@ -2538,11 +2586,29 @@ public struct ProjectSaveResult: Codable, Sendable, Equatable {
     public var path: String
     public var mediaFilesCopied: Int
     public var warnings: [String]
+    /// How many voice models the bundle now carries (m24-n). nil — key omitted
+    /// — when the project names no voice at all, so every save response for a
+    /// project with no converted tracks stays byte-identical to its pre-m24-n
+    /// shape. Present and possibly 0 once provenance exists (0 meaning: the
+    /// track names a voice this machine does not have).
+    public var voicesEmbedded: Int?
+    /// Total bytes those voices occupy inside the bundle. Same absence rule.
+    public var voiceBytes: Int?
+    /// Bytes THIS save actually copied — 0 on an idempotent re-save. Same
+    /// absence rule. Reported separately from `voiceBytes` because "the project
+    /// carries 240 MB" and "this ⌘S just wrote 240 MB" are different facts and
+    /// a user chasing a slow save needs the second one.
+    public var voiceBytesCopied: Int?
 
-    public init(path: String, mediaFilesCopied: Int, warnings: [String]) {
+    public init(path: String, mediaFilesCopied: Int, warnings: [String],
+                voicesEmbedded: Int? = nil, voiceBytes: Int? = nil,
+                voiceBytesCopied: Int? = nil) {
         self.path = path
         self.mediaFilesCopied = mediaFilesCopied
         self.warnings = warnings
+        self.voicesEmbedded = voicesEmbedded
+        self.voiceBytes = voiceBytes
+        self.voiceBytesCopied = voiceBytesCopied
     }
 }
 

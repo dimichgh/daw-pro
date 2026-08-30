@@ -22,21 +22,22 @@ alone over-counts — see the method below), so a real count needs a
 derivation you can state and defend, not a bare `grep -c`.
 
 It reflects the tool surface enumerated from
-`mcp-server/src/server.ts` (**195 tools**, re-derived 2026-08-29 at the
+`mcp-server/src/server.ts` (**196 tools**, re-derived 2026-08-29 at the
+m24-m leg A close, which added `vc_convert_clips`; previously 195 at the
 m32-b2 close: the MCP tool↔command bijection test,
 `mcp-server/test/audit-tools.test.ts`, defines
-`tool count = commands + |exception table B| + |exception table C|` — 190
+`tool count = commands + |exception table B| + |exception table C|` — 191
 commands (below) + 3 Table-B tools with no backing command at all
 (`generate_image`, `generate_lyrics`, `generate_song_suno` — they call a
 generation provider directly) + 2 Table-C tools that bridge to an EXISTING
 command, `track.setInstrument`, under a friendlier name/shape
-(`instrument_set_sampler_param`, `instrument_set_sampler_zones`) = 195.
+(`instrument_set_sampler_param`, `instrument_set_sampler_zones`) = 196.
 ⚠️ The authoritative pin is `mcp-server/test/integration.test.ts`'s
-`assert.equal(result.tools.length, 195)` — **NOT** a `grep -c 'registerTool('`,
+`assert.equal(result.tools.length, 196)` — **NOT** a `grep -c 'registerTool('`,
 which is a known liar on this file and previously anchored this paragraph at a
 stale 194) and
 `Sources/DAWControl/Commands.swift`
-(**190 commands** — the `CommandRouter.allCommands.count == 190` pin in
+(**194 commands** — the `CommandRouter.allCommands.count == 193` pin in
 `Tests/DAWControlTests/RenderCommandTests.swift`)
 in the DAW Pro repo — not memory, and not the app's own in-app Copilot
 catalog (`Sources/DAWControl/CopilotCatalog.swift`), which is a **different,
@@ -119,7 +120,11 @@ calling it.
 ## Return shapes worth remembering
 
 - `track_add` / `clip_add_midi` / `clip_add_audio` / `fx_add`: return the
-  created model with an `id` field — capture it.
+  created model with an `id` field — capture it. `clip_add_audio` adds
+  `trimmedClipIDs` / `removedClipIDs` (always present, empty on the ordinary
+  path): it **refuses** an `atBeat` that would land on an existing clip unless
+  you pass `overwrite: true`, and those two arrays are what `overwrite` cost
+  you. Omit `atBeat` to append, which can never collide.
 - `project_new` takes **only** `discardChanges` (boolean, default false) —
   there is no `name`/`template`/other param.
 - `clip_set_notes` / `automation_set_points` / `clip_set_controller_lane` /
@@ -470,6 +475,40 @@ The reply also carries `instrumentStatus` for those two kinds
 `"pending"` means the path is clear but the patch you just set may not have
 been what sounded** — retry before trusting it.
 
+### `note_play` is the HELD one, and the only one that records (m23-ct)
+
+`note_audition` releases itself after `durationMs`. `note_play` does not — it
+holds until you send `pitches: []`, and it is the ONE note tool that is **not
+refused while a take is recording**, because what you play through it goes
+INTO the take. That is the whole reason it exists: the user has no hardware
+MIDI keyboard, so this is the only path by which a live performance can be
+captured at all.
+
+Set semantics, not deltas: each call names the notes that should be sounding
+NOW. `[60]` presses middle C, `[60,64,67]` adds two fingers without
+re-striking the first, `[]` lifts everything. Repeating a set is a no-op that
+keeps the notes alive — it adds nothing to the take.
+
+Three things lose a take, all of them silent:
+
+1. **Forgetting `pitches: []`.** A 30-second hold ceiling, a 3-second engine
+   watchdog and `transport_panic` all exist as backstops, but every one of
+   them lands the note in the clip with the wrong length.
+2. **Playing too soon after `transport_record`.** A take's anchor is
+   scheduled slightly ahead of the record call and every note struck before
+   it is DROPPED — the same rule that makes count-in work. **Wait ~300 ms.**
+   MEASURED: a chord struck at t≈0 vanished entirely while a note struck
+   120 ms later landed at beat 0.103.
+3. **Not reading `recording` in the reply.** It is the honesty light.
+   `false` means the notes SOUNDED AND WENT INTO NO TAKE — not recording,
+   not armed, or no MIDI capture. Never report a performance as recorded
+   when it came back `false`. `capturedEdges` says how many note-ons/offs
+   that call actually put into the take (0 on a repeat, by design).
+
+The recording recipe, in order: `track_set_arm` → `transport_record` → wait
+→ `note_play` with real waits between the notes → `note_play {pitches: []}`
+→ `transport_stop` → `clip_get_notes` on the clip that landed.
+
 ## Etiquette (every agent follows this)
 
 1. **Orient before mutating.** Call `app_connection_info` if you're unsure
@@ -508,8 +547,9 @@ been what sounded** — retry before trusting it.
 ## Policy: voice-conversion tools are intentionally not exposed
 
 `vc_sidecar_status` / `vc_sidecar_start` / `vc_sidecar_stop` /
-`vc_convert_vocals` / `vc_train_voice` / `vc_list_voices` /
-`vc_import_voice_model` exist on the MCP surface but are **not** granted to
+`vc_convert_vocals` / `vc_convert_clips` / `vc_train_voice` /
+`vc_list_voices` / `vc_import_voice_model` exist on the MCP surface but are
+**not** granted to
 any agent in this plugin, to keep the roster tight and avoid any ambiguity
 around voice content. If a future
 version of this plugin adds them (only to `sound-designer`, per the DAW Pro

@@ -107,6 +107,27 @@ struct EditCommands: Commands {
             let item = model.deleteMenuItem
             Button(item.title, role: .destructive) { model.performMenuDelete() }
                 .disabled(!item.isEnabled)
+
+            // CONVERT VOICE… (m24-m leg B) — the SECOND, non-pointer route to
+            // the selection-driven voice-conversion action the user ratified
+            // 2026-08-13. The context menu is the first; both call
+            // `openVoiceConvert(clipIDs:)` with ids resolved by the SAME
+            // `VoiceConvertMenuPolicy`, so the label and the blast radius come
+            // out of one producer.
+            //
+            // ⚠️ NO `.keyboardShortcut`, deliberately. It is not a destructive
+            // item, so `role:` is omitted — conversion only ever APPENDS a track
+            // and one undo removes it — but the m17-d hazard is about the
+            // SHORTCUT, not the role: a menu key equivalent is checked before
+            // text insertion, and this leg has no keystroke to offer anyway.
+            //
+            // ⚠️ AND IT IS SHOWN WHEN INERT (the m23-cf rule): greyed it reads
+            // "Convert Clips to Voice…" with no count, teaching that the
+            // operation exists and wants a selection of audio clips.
+            Divider()
+            let convert = model.voiceConvertMenuItem
+            Button(convert.title) { model.performMenuVoiceConvert() }
+                .disabled(!convert.isEnabled)
         }
     }
 

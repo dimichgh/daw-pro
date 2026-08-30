@@ -126,21 +126,76 @@ final class AppModel {
 
     /// The Voice panel's headless model (m10-p-5): local voice DATASETS under
     /// app support, the voice-engine banner (user copy), the facade voice
-    /// list, the honest Train state machine, and the convert-clip action.
+    /// list, the honest Train state machine, and the Convert Voice… action.
     /// Owned here (like `clipFix`) so `debug.voicePanel` can drive it and
     /// `debug.captureUI` renders the same instance the live panel shows.
-    /// Convert rides the SAME store/client seams as the wire's
-    /// `vc.convertVocals` (no parallel mutation path).
+    /// Convert rides the SAME store seam as the wire's `vc.convertClips`
+    /// (no parallel mutation path).
     let voicePanel: VoicePanelModel
 
     /// Whether the Voice panel is open in the Arrange workspace. Driven by the
     /// header VOICE chip and `debug.voicePanel`.
     var showVoicePanel = false
 
-    /// The audio clip the "Convert to Voice…" sheet is open for (nil =
-    /// closed). Set by the clip context menu and `debug.voicePanel`; the sheet
-    /// renders as a centered overlay (the named in-window modal pattern).
-    var voiceConvertClipID: UUID?
+    /// The audio clips the **Convert Voice…** panel is open for (nil = closed;
+    /// m24-m leg B). Set by the clip context menu, Edit ▸ Convert and
+    /// `debug.voicePanel`; the panel renders as a centered overlay (the named
+    /// in-window modal pattern).
+    ///
+    /// ⚠️ **A LIST, NOT AN ID** — the ratified action is selection-driven, and
+    /// the single-clip case is just `count == 1`. The order is the order the
+    /// panel lists them in (by start beat, matching
+    /// `ClipVoiceConversionResult.clips`).
+    var voiceConvertClipIDs: [UUID]?
+
+    /// The track header a dragged voice model is currently over, and the verdict
+    /// that row is showing (nil = no voice drag is over any header) — m24-m
+    /// **leg C**.
+    ///
+    /// ⭐ **MODEL STATE, NOT VIEW `@State`, for the `selectedConvertVoiceID`
+    /// reason**: a hover held in a row's `@State` is unreachable from a debug
+    /// seam, which makes the drop affordance unphotographable — and "a UI phase
+    /// is not done until someone has looked at it" is not satisfiable for a
+    /// state no capture can stage.
+    var voiceModelDropHover: VoiceModelDropHover?
+
+    /// Which row actually PAINTED the drop chip, reported by the chip itself.
+    ///
+    /// ⚠️ **GROUND TRUTH FROM THE VIEW, never an echo of the input** — the
+    /// `trackHeaderDrag` `indicatorY` rule: "non-null mid-drag is the only
+    /// positive proof the affordance exists; *gone after* alone passes
+    /// vacuously against an implementation that never drew one". A build that
+    /// kept `voiceModelDropHover` and drew nothing would pass every check that
+    /// reads only the hover.
+    private(set) var voiceDropPaintedTrackID: UUID?
+    /// The face that row painted — true = the violet accept chip, false = the
+    /// amber refusal. Reported alongside the id so a capture-less gate can still
+    /// distinguish the two.
+    private(set) var voiceDropPaintedAccepts: Bool?
+    /// Bumped on every paint/unpaint, so a seam can wait (bounded) for the row
+    /// to confirm it re-rendered before a capture is taken (the m23-e echo-seam
+    /// law: a shot taken straight after the echo can frame the PREVIOUS state,
+    /// which does not merely fail a gate — it can stale-GREEN one).
+    private(set) var voiceDropRenderSeq = 0
+
+    /// The drop chip appeared on `trackID`.
+    func noteVoiceDropChipRendered(trackID: UUID, accepts: Bool) {
+        voiceDropPaintedTrackID = trackID
+        voiceDropPaintedAccepts = accepts
+        voiceDropRenderSeq &+= 1
+    }
+
+    /// The drop chip on `trackID` went away.
+    ///
+    /// **Guarded on identity** because SwiftUI does not order one row's
+    /// `onDisappear` against another's `onAppear`: when a drag slides from row A
+    /// to row B, A's teardown must not erase B's paint.
+    func noteVoiceDropChipRemoved(trackID: UUID) {
+        guard voiceDropPaintedTrackID == trackID else { return }
+        voiceDropPaintedTrackID = nil
+        voiceDropPaintedAccepts = nil
+        voiceDropRenderSeq &+= 1
+    }
 
     /// The instrument picker's headless model (m10-n-3): the three-section browser
     /// + GM program browser + Simple "Instrument Sets" + `InstrumentChoice`
@@ -2209,7 +2264,7 @@ final class AppModel {
             || quantizePanelClipID != nil
             || humanizePanelClipID != nil
             || breathPadClipID != nil
-            || voiceConvertClipID != nil
+            || voiceConvertClipIDs != nil
             || showExportSheet
             || showUndoHistory
             || showSettings
@@ -3011,7 +3066,7 @@ final class AppModel {
     /// next reader misses a whole feature. ONE monitor, not two — the key codes
     /// are disjoint, so a second monitor would buy nothing and add an
     /// installation order nobody controls.
-    @ObservationIgnored private var keyDownMonitor: Any?
+    @ObservationIgnored var keyDownMonitor: Any?
 
     /// The ONE content window (the WindowGroup window hosting ContentView),
     /// captured when `applyWindowFloor()` runs on its appearance. The space
@@ -3041,10 +3096,32 @@ final class AppModel {
     /// `handleKeyDownEvent` so the `debug.keySpace` seam runs the SAME code
     /// path with a synthesized event (real key injection needs Accessibility
     /// the staging binary lacks — measured law).
+    /// ⭐⭐ **THREE EVENT TYPES SINCE m23-ct, AND THE TWO NEW ONES EXIST ONLY SO A
+    /// NOTE CANNOT GET STUCK.** Space and ⌫ are one-shot commands and never needed
+    /// a key-UP; a playable keyboard needs note-off on release, needs to hear
+    /// about a ⌘ chord engaging (macOS is *asserted* — not verified here — to
+    /// withhold key-up while ⌘ is down), and must survive the window going
+    /// inactive mid-hold.
+    ///
+    /// ⚠️⚠️ **BRANCH ON `event.type` BEFORE TOUCHING ANYTHING ELSE.**
+    /// `NSEvent.characters`, `.charactersIgnoringModifiers` and `.isARepeat`
+    /// **raise** on a `.flagsChanged` event — reading one before the switch would
+    /// turn every ⇧ press in the app into a crash. `.keyCode` and `.modifierFlags`
+    /// are the only two safe on all three.
+    ///
+    /// ONE monitor still, not three: the m23-cf-3 argument is unchanged — a second
+    /// monitor would buy nothing and add an installation order nobody controls.
     private func installSpaceKeyMonitor() {
-        keyDownMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+        keyDownMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.keyDown, .keyUp, .flagsChanged]
+        ) { [weak self] event in
             guard let self else { return event }
-            return self.handleKeyDownEvent(event)
+            switch event.type {
+            case .keyDown: return self.handleKeyDownEvent(event)
+            case .keyUp: return self.handleKeyUpEvent(event)
+            case .flagsChanged: return self.handleFlagsChangedEvent(event)
+            default: return event
+            }
         }
     }
 
@@ -3092,9 +3169,17 @@ final class AppModel {
             isRepeat: event.isARepeat,
             responder: Self.transportKeyResponder(event.window?.firstResponder),
             window: transportKeyWindow(event.window))
-        guard decision == .toggleTransport else { return event }
-        toggleTransportFromSpaceKey()
-        return nil
+        if decision == .toggleTransport {
+            toggleTransportFromSpaceKey()
+            return nil
+        }
+        // ⭐ MUSICAL TYPING (m23-ct) — LAST, and the ordering is documentation
+        // rather than arbitration: the three key sets are DISJOINT. Space (49) and
+        // ⌫/⌦ (51/117) are not in `MusicalTypingRouting.allCaps`, and none of the
+        // 21 layout keys is a transport or delete key. So the space bar still
+        // starts playback and ⌫ still deletes WHILE the mode is on — which is the
+        // point: you play along with the transport.
+        return handleMusicalTypingKeyDown(event)
     }
 
     /// The granted toggle: the play/pause button's EXACT funnel
@@ -3113,7 +3198,7 @@ final class AppModel {
     /// option set. Only command/option/control/shift block the toggle — caps
     /// lock, fn, and numeric-pad flags deliberately don't (caps lock being on
     /// must not kill the space bar).
-    private static func transportKeyModifiers(_ flags: NSEvent.ModifierFlags) -> TransportKeyModifiers {
+    static func transportKeyModifiers(_ flags: NSEvent.ModifierFlags) -> TransportKeyModifiers {
         let device = flags.intersection(.deviceIndependentFlagsMask)
         var mods: TransportKeyModifiers = []
         if device.contains(.command) { mods.insert(.command) }
@@ -3133,7 +3218,7 @@ final class AppModel {
     /// (`AppKitWindow`), which conforms to neither → `.none`; a focused rename
     /// TextField puts `_SystemTextFieldFieldEditor` (an `NSTextView`) first →
     /// `.textEditing` via the `NSText` branch.
-    private static func transportKeyResponder(_ responder: NSResponder?) -> TransportKeyResponder {
+    static func transportKeyResponder(_ responder: NSResponder?) -> TransportKeyResponder {
         guard let responder else { return .none }
         if responder is NSText { return .textEditing }
         if responder is any NSTextInputClient { return .textEditing }
@@ -3142,7 +3227,7 @@ final class AppModel {
 
     /// Main-window-only guard: only events aimed at THE content window toggle.
     /// nil window (an unresolvable synthesized window number) is `.secondary`.
-    private func transportKeyWindow(_ window: NSWindow?) -> TransportKeyWindow {
+    func transportKeyWindow(_ window: NSWindow?) -> TransportKeyWindow {
         guard let window, window === contentWindow else { return .secondary }
         return .main
     }
@@ -3199,6 +3284,23 @@ final class AppModel {
     /// path the header chips drive. Deliberately NOT a `panelLayout` dimension:
     /// session state, never persisted, never project data — see the type's doc.
     let stepSequencer = StepSequencerBridge()
+
+    /// ⭐ **MUSICAL TYPING (m23-ct) — the ONLY real-time note input this user can
+    /// have.** They own no hardware MIDI controller, so every one of
+    /// `Sources/DAWEngine/MIDIInput/`'s doors is shut for them. This object is the
+    /// mode flag, the octave/velocity state, and THE one ledger of what is
+    /// sounding; the computer keyboard writes it through `handleKeyDownEvent`, the
+    /// on-screen `MusicalKeyboardStrip` writes it through the pointer, and the
+    /// strip renders from it — so the two surfaces cannot disagree about what is
+    /// held.
+    ///
+    /// ⚠️ **SESSION STATE, NEVER PERSISTED**, and unlike `panelLayout` that is not
+    /// merely house style: a mode that silently re-claims 21 letter keys on the
+    /// next launch is the single worst thing to restore without being asked.
+    ///
+    /// The sink is wired in `init` (it needs `store` and `self`), which is why
+    /// this is a `var` with a default rather than a `let`.
+    var musicalTyping = MusicalTypingController()
 
     /// The in-app control-server port SETTING (beta m10-l). Like `panelLayout` it's
     /// an app-side sticky PREFERENCE (never project data) — the UserDefaults backing
@@ -3280,6 +3382,13 @@ final class AppModel {
     /// Retains the `NSApplication.willTerminateNotification` observer so the
     /// clean-exit lock removal (crash-b) stays live for the app's lifetime.
     @ObservationIgnored private var terminationObserver: (any NSObjectProtocol)?
+
+    /// Retains the `NSApplication.didResignActiveNotification` observer that
+    /// releases held Musical Typing notes (m23-ct). ⚠️ NOT `private`: it is
+    /// installed from `MusicalTypingStaging.swift`, where the rest of that
+    /// feature's app-tier wiring lives (the m23-cq-1 shape — this file is ~10.4k
+    /// lines and agents have died to a watchdog reading it).
+    @ObservationIgnored var musicalTypingResignObserver: (any NSObjectProtocol)?
 
     /// A synthetic master-analysis snapshot the session vibe meter prefers over the
     /// live engine poll (M8 vm-b). nil in normal use (the meter reads
@@ -3945,10 +4054,12 @@ final class AppModel {
         // (recordings are app-side data; trained MODELS stay facade-owned in
         // scripts/rvc/runtime/voices/ — never duplicated here), sidecar
         // status/start through the shared manager, voices/train/convert
-        // through the shared client, and the clip-source + import seams
-        // through the SAME two store methods the wire's vc.convertVocals
-        // calls (`voiceConversionSource` / `importConvertedVoice`) — the
-        // m10-n-3 "one command surface" law.
+        // through the shared client, and — since m24-m leg B — the whole
+        // Convert Voice… action through `ProjectStore.convertClipsToVoice`,
+        // the SAME store method the wire's `vc.convertClips` calls (the
+        // m10-n-3 "one command surface" law). `voiceConversionSource` stays
+        // wired for DATASET samples only: a training sample is a file to copy,
+        // so it wants the backing recording.
         self.voicePanel = VoicePanelModel(
             datasetsRoot: VoicePanelModel.defaultDatasetsRoot(),
             sidecarStatus: { [voiceConversionManager] in await voiceConversionManager.status() },
@@ -3964,10 +4075,21 @@ final class AppModel {
                 guard let store else { throw DebugError("project store unavailable") }
                 return try store.voiceConversionSource(clipId: clipID)
             },
-            importConverted: { [weak store] url, trackName, atBeat in
+            // m24-m leg A: the whole action in ONE store call — every selected
+            // clip extracted over its own window (m24-o), converted through the
+            // injected closure, and landed on ONE new violet track at the same
+            // beats in ONE undoable edit, all-or-nothing. The UI passes the
+            // client's convert exactly as `CommandRouter` does for
+            // `vc.convertClips`, so there is no parallel mutation path.
+            // m24-n: `provenance` rides straight through — the panel model
+            // composes it (it knows the voice's display name from the list the
+            // picker showed) and the store attaches it to the track it makes.
+            // Nothing in between interprets it.
+            convertClips: { [weak store] clipIDs, trackName, provenance, convert in
                 guard let store else { throw DebugError("project store unavailable") }
-                return try store.importConvertedVoice(
-                    fileURL: url, trackName: trackName, atBeat: atBeat)
+                return try await store.convertClipsToVoice(
+                    clipIds: clipIDs, trackName: trackName,
+                    provenance: provenance, convert: convert)
             })
 
         // The REFERENCE panel model (m22-g P3). Constructed bare here (its
@@ -4455,6 +4577,10 @@ final class AppModel {
         // it reads store state only through the toggle funnel, no init order
         // dependency, but keeping bootstrap side effects at the tail is house style.
         installSpaceKeyMonitor()
+        // Musical Typing (m23-ct): hand the controller its sink and its
+        // stuck-note safety net. AFTER `installSpaceKeyMonitor` because the note
+        // keys ride the very monitor it installs.
+        installMusicalTyping()
         // edit.pasteClips (m26-k): AppModel conforms to EditPasteControlling
         // directly (EditPasteWireSurface.swift) — no separate owned object is
         // needed, since AppModel already IS the paste's one home
@@ -4815,6 +4941,13 @@ final class AppModel {
                 return self.pianoRollBarOpsDebug(params)
             case "debug.stepSequencer":
                 return try self.stepSequencerDebug(params)
+            // m23-ct — MUSICAL TYPING, both surfaces. Handler in
+            // `MusicalTypingStaging.swift` (the m23-cq-1 shape: debug tier, off
+            // allCommands/MCP, kept out of this file). ⭐ It injects BELOW
+            // `NSEvent` — a seam that needed a real keystroke would test nothing
+            // in an unbundled staging binary (the m23-g1 law).
+            case "debug.musicalTyping":
+                return try self.musicalTypingDebug(params)
             case "debug.grSeed":
                 return try self.setGRSeed(params)
             case "debug.referenceSeed":
@@ -4855,6 +4988,8 @@ final class AppModel {
                 return self.clipFixStateResponse()
             case "debug.voicePanel":
                 return try self.voicePanelDebug(params)
+            case "debug.voiceModelDrop":
+                return try self.voiceModelDropDebug(params)
             case "debug.instrumentPicker":
                 return self.instrumentPickerDebug(params)
             case "debug.quantizePanel":
@@ -8690,18 +8825,152 @@ final class AppModel {
         }
     }
 
-    /// Opens the "Convert to Voice…" sheet on an audio clip (the clip context
-    /// menu / `debug.voicePanel`). Fresh transient state each open.
-    func openVoiceConvert(clipID: UUID) {
-        voicePanel.resetConvertState()
+    /// Opens the **Convert Voice…** panel on a set of audio clips (the clip
+    /// context menu, Edit ▸ Convert, `debug.voicePanel`). Fresh transient state
+    /// each open. An empty set is a no-op rather than an empty modal — every
+    /// caller resolves its targets from `selectedAudioClipIDs` or from the
+    /// clicked clip, both of which are non-empty by construction.
+    /// - Parameter preselectedVoiceID: the voice the user DRAGGED (m24-m leg C).
+    ///   Applied AFTER `resetConvertChoice`, through the same
+    ///   `selectedConvertVoiceID` the picker's rows write, so a dragged voice
+    ///   arms the panel exactly as a click on its row would — including the
+    ///   panel's own honesty treatment for the untrained smoke target, which a
+    ///   drag must not be able to bypass. nil for the menu routes, which name no
+    ///   voice.
+    func openVoiceConvert(clipIDs: [UUID], preselectedVoiceID: String? = nil) {
+        guard !clipIDs.isEmpty else { return }
+        voicePanel.resetClipsConvertState()
+        // A fresh run never inherits the last one's voice or pitch. Done HERE
+        // and not in the view's `.task`, which re-runs on every appearance and
+        // would wipe a pick the user (or a capture) had just made.
+        voicePanel.resetConvertChoice()
+        // ⭐ AFTER the reset, never before — the reset is what makes "a fresh
+        // run" true, and the dragged voice is this run's first parameter, not
+        // the previous run's leftover. Dragging a SPECIFIC model and landing on
+        // an unarmed panel would make the choice the user just expressed
+        // meaningless.
+        if let preselectedVoiceID { voicePanel.selectedConvertVoiceID = preselectedVoiceID }
         workspaceMode = .arrange
-        voiceConvertClipID = clipID
+        voiceConvertClipIDs = clipIDs
     }
 
-    /// Closes the convert sheet and clears its transient state.
+    /// Closes the panel and clears its transient state.
+    ///
+    /// ⚠️ Does NOT abort a conversion — nothing can (leg A has no abort), which
+    /// is exactly why the panel's ✕ and scrim are inert while one runs.
     func closeVoiceConvert() {
-        voiceConvertClipID = nil
-        voicePanel.resetConvertState()
+        voiceConvertClipIDs = nil
+        voicePanel.resetClipsConvertState()
+    }
+
+    // MARK: - Convert Voice… menu routes (m24-m leg B)
+
+    /// Every AUDIO clip in the arrange selection, ordered by start beat — the
+    /// ONE producer both the menu titles and the action read.
+    ///
+    /// ⭐ **AUDIO-ONLY, AND FILTERED RATHER THAN REFUSED.** A MIDI clip has no
+    /// recording to convert, and leg A would refuse the whole call for one; a
+    /// marquee that swept a MIDI lane must not turn a legal conversion into an
+    /// error message. The count the menu shows is the count that will convert.
+    ///
+    /// **Ordered by start beat** so the panel's list, the store's per-clip
+    /// order and `ClipVoiceConversionResult.clips` all read the same way.
+    var selectedAudioClipIDs: [UUID] {
+        var found: [(id: UUID, startBeat: Double)] = []
+        for track in store.tracks {
+            // ⭐ ONE predicate, shared with the track-header drop route (leg C):
+            // `VoiceConvertMenuPolicy.isConvertible`. The conjunction used to
+            // live inline here, and a second copy on the drop path is exactly
+            // the two-rules-that-can-disagree defect this tree keeps finding.
+            for clip in track.clips
+            where arrangeSelection.contains(clip.id) && VoiceConvertMenuPolicy.isConvertible(clip) {
+                found.append((clip.id, clip.startBeat))
+            }
+        }
+        return found.sorted { $0.startBeat < $1.startBeat }.map(\.id)
+    }
+
+    /// Edit ▸ Convert … to Voice — title + enabled state, from observable state
+    /// only (the m23-cf law: a `Commands` body re-evaluates on `@Observable`
+    /// changes, not when the menu opens).
+    var voiceConvertMenuItem: VoiceConvertMenuItem {
+        VoiceConvertMenuPolicy.editMenuItem(
+            arrangeWorkspace: workspaceMode == .arrange,
+            isModalPresented: isModalPresented,
+            selectedAudioClipCount: selectedAudioClipIDs.count)
+    }
+
+    /// Edit ▸ Convert fired. RE-RESOLVED at click time from the same property
+    /// the title counted, so what the user was offered and what runs cannot
+    /// diverge.
+    @discardableResult
+    func performMenuVoiceConvert() -> Bool {
+        guard voiceConvertMenuItem.isEnabled else { return false }
+        openVoiceConvert(clipIDs: selectedAudioClipIDs)
+        return true
+    }
+
+    /// A clip's context-menu *Convert Voice…* fired. The command is passed back
+    /// in rather than recomputed, so the panel can never open on a different set
+    /// from the one the label named (the `deleteClipFromContextMenu` law).
+    ///
+    /// Deliberately does NOT touch `arrangeSelection`: right-clicking a clip the
+    /// user had not selected converts that clip alone and leaves their selection
+    /// theirs.
+    func convertClipsFromContextMenu(_ command: VoiceConvertCommand) {
+        openVoiceConvert(clipIDs: command.clipIDs)
+    }
+
+    // MARK: - Dragging a voice model onto a track header (m24-m leg C)
+
+    /// What track `trackID` would do with a dropped voice model — resolved from
+    /// the LIVE store through `VoiceConvertMenuPolicy`, never cached.
+    ///
+    /// An unknown id refuses rather than crashing: a drag can outlive the track
+    /// it started over (an agent can delete a track mid-gesture over the wire).
+    func voiceModelDropVerdict(trackID: UUID) -> VoiceConvertDropVerdict {
+        guard let track = store.tracks.first(where: { $0.id == trackID }) else {
+            return .refuses(VoiceConvertDropRefusal.busTrack)
+        }
+        return VoiceConvertMenuPolicy.trackDropVerdict(
+            trackKind: track.kind,
+            audioClipIDs: VoiceConvertMenuPolicy.convertibleAudioClipIDs(in: track))
+    }
+
+    /// A voice model entered / left a track header. `nil` = the drag left.
+    ///
+    /// Re-resolves on EVERY enter rather than trusting a stored verdict: between
+    /// two hovers the project can have gained or lost clips, and a stale "3
+    /// CLIPS" chip would promise a blast radius that no longer exists.
+    func voiceModelDropHoverChanged(trackID: UUID?) {
+        guard let trackID else {
+            voiceModelDropHover = nil
+            return
+        }
+        voiceModelDropHover = VoiceModelDropHover(
+            trackID: trackID, verdict: voiceModelDropVerdict(trackID: trackID))
+    }
+
+    /// A voice model was RELEASED on a track header. Returns whether the drop
+    /// was taken (false → SwiftUI rejects it, and nothing opens).
+    ///
+    /// ⭐⭐ **THE WHOLE LEG IS THESE FOUR LINES, and that is the design.** It
+    /// resolves the same verdict the row was showing and hands the resulting
+    /// `VoiceConvertCommand`'s ids to `openVoiceConvert` — the SAME funnel the
+    /// clip context menu and Edit ▸ Convert use, opening the SAME panel over the
+    /// SAME `ProjectStore.convertClipsToVoice` seam. There is no drag-specific
+    /// conversion path to drift out of step, because there is no drag-specific
+    /// conversion path.
+    ///
+    /// The panel then LISTS those clips before the user commits, which is what
+    /// makes a track-sized blast radius safe to offer from a one-second gesture.
+    @discardableResult
+    func performVoiceModelDrop(trackID: UUID, voiceID: String) -> Bool {
+        let verdict = voiceModelDropVerdict(trackID: trackID)
+        voiceModelDropHover = nil
+        guard let command = verdict.command else { return false }
+        openVoiceConvert(clipIDs: command.clipIDs, preselectedVoiceID: voiceID)
+        return true
     }
 
     // MARK: - Voice panel debug command (m10-p-5, capture support)
@@ -8709,13 +8978,24 @@ final class AppModel {
     /// `debug.voicePanel {open?, close?, sidecarState?, sidecarMessage?,
     /// startingForSeconds?, sidecarClear?, seedVoices?, refreshVoices?,
     /// rescan?, createVoice?, sampleVoice?+samplePath?/sampleClip?, train?,
-    /// convertSheet?, convertGo?+convertVoiceId?+convertPitch?, closeSheet?}`
-    /// — stages the Voice panel + convert sheet for captures/E2E (app-level,
-    /// debug tier — off `allCommands`/MCP, the `debug.instrumentPicker`
-    /// precedent). Async paths (`refreshVoices`/`train`/`convertGo`) kick a
-    /// Task through the SAME model methods the live UI calls and echo state —
-    /// the caller sleeps/re-reads (the `debug.sketchpadGenerate` cadence). A
-    /// bare call is READ-ONLY (echoes state, never re-opens — the m11-a law).
+    /// convertSheet?/convertClips?, convertGo?+convertVoiceId?+convertPitch?,
+    /// convertSelection?, seedProgress?+progressTotal?+progressCompleted?+
+    /// progressPhase?+progressClip?, seedResult?+resultTrackName?+
+    /// resultClips?+resultWarnings?+resultRealConversion?+resultNote?,
+    /// seedConvertError?, closeSheet?}` — stages the Voice panel + the Convert
+    /// Voice… panel for captures/E2E (app-level, debug tier — off
+    /// `allCommands`/MCP, the `debug.instrumentPicker` precedent). Async paths
+    /// (`refreshVoices`/`train`/`convertGo`) kick a Task through the SAME model
+    /// methods the live UI calls and echo state — the caller sleeps/re-reads
+    /// (the `debug.sketchpadGenerate` cadence). A bare call is READ-ONLY
+    /// (echoes state, never re-opens — the m11-a law).
+    ///
+    /// ⚠️ `convertSheet` is KEPT as the single-clip alias for the multi-clip
+    /// `convertClips` (m24-m leg B): it names one clip id and opens the panel on
+    /// exactly that clip, which is what every existing caller meant. The seed
+    /// params exist because a REAL conversion is minutes-class — a capture must
+    /// be able to photograph the converting and result faces without a sidecar
+    /// (the `setVoicesForCapture` precedent).
     private func voicePanelDebug(_ params: [String: JSONValue]) throws -> JSONValue {
         if params["open"]?.boolValue == true {
             workspaceMode = .arrange
@@ -8750,6 +9030,27 @@ final class AppModel {
                 trained: false,
                 note: "pipeline smoke target — proves conversion runs, not a real voice")])
         }
+        // A RICHER seeded list (m24-m leg B): the convert picker shows the
+        // facade's state chips, so a capture must be able to stage a voice that
+        // is READY beside one that NEEDS PREP — the whole point of reusing the
+        // Voice panel's vocabulary is lost if only one face is ever rendered.
+        if let seeded = params["seedVoiceList"]?.arrayValue {
+            var descriptors: [VoiceDescriptor] = []
+            for entry in seeded {
+                guard let object = entry.objectValue,
+                      let id = object["id"]?.stringValue else {
+                    throw DebugError("seedVoiceList entries need at least {id}")
+                }
+                descriptors.append(VoiceDescriptor(
+                    id: id,
+                    name: object["name"]?.stringValue ?? id,
+                    state: object["state"]?.stringValue ?? "ready",
+                    kind: object["kind"]?.stringValue,
+                    trained: object["trained"]?.boolValue,
+                    note: object["note"]?.stringValue))
+            }
+            voicePanel.setVoicesForCapture(descriptors)
+        }
         if params["refreshVoices"]?.boolValue == true {
             Task { await self.voicePanel.refreshVoices() }
         }
@@ -8775,28 +9076,108 @@ final class AppModel {
             Task { await self.voicePanel.train(voiceNamed: trainName) }
         }
 
-        // Convert sheet: open on a clip; convertGo drives the SAME
-        // model.convertClip the sheet's button calls (the UI path seam the
-        // live gate exercises).
+        // Convert Voice… panel: open on one clip (`convertSheet`, the kept
+        // single-clip alias), on a list (`convertClips`), or on whatever the
+        // arrange selection holds (`convertSelection`, the Edit-menu route).
         if let sheetRaw = params["convertSheet"]?.stringValue {
             guard let clipID = UUID(uuidString: sheetRaw) else {
                 throw DebugError("convertSheet is not a valid UUID: \(sheetRaw)")
             }
-            openVoiceConvert(clipID: clipID)
+            openVoiceConvert(clipIDs: [clipID])
+        }
+        if let listRaw = params["convertClips"]?.arrayValue {
+            var ids: [UUID] = []
+            for entry in listRaw {
+                guard let raw = entry.stringValue, let id = UUID(uuidString: raw) else {
+                    throw DebugError("convertClips entries must be clip UUID strings")
+                }
+                ids.append(id)
+            }
+            guard !ids.isEmpty else { throw DebugError("convertClips needs at least one clip id") }
+            openVoiceConvert(clipIDs: ids)
+        }
+        if params["convertSelection"]?.boolValue == true {
+            // The literal Edit ▸ Convert funnel, enabled-check included — the
+            // `debug.effectEditor {add}` "drive the real UI path" rule.
+            guard performMenuVoiceConvert() else {
+                throw DebugError(
+                    "debug.voicePanel convertSelection is inert: \(voiceConvertMenuItem.title)")
+            }
         }
         if params["convertGo"]?.boolValue == true {
-            guard let clipID = voiceConvertClipID else {
-                throw DebugError("debug.voicePanel convertGo needs the convert sheet open (pass convertSheet first)")
+            guard let clipIDs = voiceConvertClipIDs else {
+                throw DebugError(
+                    "debug.voicePanel convertGo needs the Convert Voice… panel open (pass convertSheet/convertClips first)")
             }
             guard let voiceID = params["convertVoiceId"]?.stringValue else {
                 throw DebugError("debug.voicePanel convertGo requires convertVoiceId")
             }
             let pitch = params["convertPitch"]?.doubleValue.map { Int($0) } ?? 0
             Task {
-                _ = await self.voicePanel.convertClip(
-                    clipID: clipID, voiceID: voiceID, pitchSemitones: pitch)
+                _ = await self.voicePanel.convertClips(
+                    clipIDs: clipIDs, voiceID: voiceID, pitchSemitones: pitch)
             }
         }
+
+        // Capture seeding for the two faces a real run would cost minutes to
+        // reach. These plant MODEL state only — no sidecar is contacted, no
+        // track is created, and the engine is never touched (the `debug.vibeSeed`
+        // rule).
+        if params["seedProgress"]?.boolValue == true {
+            let total = params["progressTotal"]?.doubleValue.map { Int($0) } ?? 3
+            let done = params["progressCompleted"]?.doubleValue.map { Int($0) } ?? 1
+            let phaseRaw = params["progressPhase"]?.stringValue ?? "converting"
+            let phase: VoiceClipsConvertProgress.Phase = switch phaseRaw {
+            case "preparing": .preparing
+            case "landing": .landing
+            case "converting": .converting
+            default: throw DebugError(
+                "debug.voicePanel progressPhase must be preparing|converting|landing")
+            }
+            let elapsed = params["progressElapsedSeconds"]?.doubleValue ?? 0
+            voicePanel.setClipsConvertProgressForCapture(VoiceClipsConvertProgress(
+                total: max(1, total), completed: max(0, min(done, max(1, total))),
+                currentClipName: params["progressClip"]?.stringValue,
+                phase: phase, startedAt: Date().addingTimeInterval(-elapsed)))
+        } else if params["clearProgress"]?.boolValue == true {
+            voicePanel.setClipsConvertProgressForCapture(nil)
+        }
+        if params["seedResult"]?.boolValue == true {
+            let trackName = params["resultTrackName"]?.stringValue ?? "Voice: base"
+            let count = params["resultClips"]?.doubleValue.map { Int($0) } ?? 2
+            let warnings = (params["resultWarnings"]?.arrayValue ?? []).compactMap(\.stringValue)
+            let reports = (0..<max(0, count)).map { index in
+                ConvertedClipReport(
+                    sourceClipId: UUID(), sourceTrackId: UUID(), clipId: UUID(),
+                    startBeat: Double(index * 8), lengthBeats: 8,
+                    extractedPath: "/tmp/DAWPro/voice-source-seed\(index).wav",
+                    file: "/tmp/DAWPro/voice-seed\(index).wav",
+                    sourceSeconds: 16, convertedSeconds: 16)
+            }
+            voicePanel.setClipsConversionForCapture(VoiceClipsConvertOutcome(
+                voiceID: params["convertVoiceId"]?.stringValue ?? "base",
+                result: ClipVoiceConversionResult(
+                    trackId: UUID(), trackName: trackName,
+                    clips: reports, warnings: warnings),
+                realConversion: params["resultRealConversion"]?.boolValue ?? false,
+                note: params["resultNote"]?.stringValue,
+                totalInferSeconds: params["resultInferSeconds"]?.doubleValue ?? 1.4))
+        } else if params["clearResult"]?.boolValue == true {
+            voicePanel.setClipsConversionForCapture(nil)
+        }
+        if let seeded = params["seedConvertError"]?.stringValue {
+            voicePanel.setClipsConvertErrorForCapture(seeded)
+        }
+        // Pick a voice / set the pitch through the model — the ARMED primary
+        // button exists only once a voice is picked, and a capture must be able
+        // to reach it (see `VoicePanelModel.selectedConvertVoiceID`).
+        if let picked = params["pickVoice"]?.stringValue {
+            voicePanel.selectedConvertVoiceID = picked.isEmpty ? nil : picked
+        }
+        if let pitch = params["convertPitch"]?.doubleValue, params["convertGo"] == nil {
+            voicePanel.convertPitchSemitones = Int(pitch)
+        }
+
         if params["closeSheet"]?.boolValue == true { closeVoiceConvert() }
 
         return voicePanelStateResponse()
@@ -8827,19 +9208,42 @@ final class AppModel {
                 ])
             }),
             "trainStates": .object(trainStates),
-            "isConverting": .bool(voicePanel.isConverting),
+            "isConverting": .bool(voicePanel.isConvertingClips),
             "datasetsRoot": .string(voicePanel.datasetsRoot.path),
         ]
-        if let clipID = voiceConvertClipID {
-            response["convertSheetClipId"] = .string(clipID.uuidString)
+        if let clipIDs = voiceConvertClipIDs {
+            response["convertClipIds"] = .array(clipIDs.map { .string($0.uuidString) })
+            // KEPT: every existing caller of this echo reads one id.
+            if let first = clipIDs.first {
+                response["convertSheetClipId"] = .string(first.uuidString)
+            }
         }
-        if let error = voicePanel.convertError { response["convertError"] = .string(error) }
+        // The Edit ▸ Convert item's live title/enabled state — what a gate reads
+        // to prove the menu route agrees with the selection (m23-cf idiom).
+        let menuItem = voiceConvertMenuItem
+        response["convertMenuTitle"] = .string(menuItem.title)
+        response["convertMenuEnabled"] = .bool(menuItem.isEnabled)
+        response["selectedAudioClips"] = .number(Double(menuItem.clipCount))
+        response["pickedVoice"] = voicePanel.selectedConvertVoiceID.map { .string($0) } ?? .null
+        response["convertPitch"] = .number(Double(voicePanel.convertPitchSemitones))
+        if let progress = voicePanel.clipsConvertProgress {
+            response["convertProgress"] = .object([
+                "total": .number(Double(progress.total)),
+                "completed": .number(Double(progress.completed)),
+                "step": .string(progress.stepText),
+                "detail": .string(progress.detailText),
+                "phase": .string(String(describing: progress.phase)),
+            ])
+        }
+        if let error = voicePanel.clipsConvertError { response["convertError"] = .string(error) }
         if let error = voicePanel.datasetError { response["datasetError"] = .string(error) }
         if let error = voicePanel.voicesError { response["voicesError"] = .string(error) }
-        if let outcome = voicePanel.lastConversion {
+        if let outcome = voicePanel.lastClipsConversion {
             response["lastConversion"] = .object([
                 "voiceId": .string(outcome.voiceID),
-                "trackName": .string(outcome.trackName),
+                "trackName": .string(outcome.result.trackName),
+                "clips": .number(Double(outcome.result.clips.count)),
+                "warnings": .array(outcome.result.warnings.map { .string($0) }),
                 "realConversion": .bool(outcome.realConversion),
                 "note": outcome.note.map { .string($0) } ?? .null,
             ])
@@ -10013,6 +10417,141 @@ final class AppModel {
                                        status: store.audioUnitStatus(forTrack: trackID))
     }
 
+    /// Bounded wait for a TRACK ROW to confirm it re-rendered its voice-drop
+    /// affordance (the `awaitTrackReorderApplied` twin, m23-e echo-seam law).
+    ///
+    /// Without it a `debug.captureUI` taken straight after the echo can frame
+    /// the PREVIOUS hover — which does not merely fail a gate, it can
+    /// stale-GREEN one. Bounded twice over: it stops the instant a row reports,
+    /// and hard-stops at the deadline when no row will report at all (an `exit`
+    /// while nothing was painted, or the Mix workspace).
+    private func awaitVoiceDropRendered(after reportsBefore: Int) {
+        let deadline = Date().addingTimeInterval(0.30)
+        while voiceDropRenderSeq == reportsBefore, Date() < deadline {
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.005))
+        }
+    }
+
+    /// `debug.voiceModelDrop {act?, trackId?, voiceId?}` — the m24-m **leg C**
+    /// staging seam for dragging a voice model onto a track header. App-level,
+    /// debug tier ONLY (off `allCommands`/MCP — **ZERO wire growth**: the drop's
+    /// only effect is to open a panel over `ProjectStore.convertClipsToVoice`,
+    /// and that store method is already agent-invokable as `vc.convertClips`, so
+    /// a second agent-facing verb here would be a duplicate conversion
+    /// authority — the `debug.trackHeaderDrag` rule verbatim).
+    ///
+    /// ⚠️ **A REAL OS DRAG CANNOT BE DRIVEN OVER THE CONTROL PORT**, for the two
+    /// reasons already written up on `arrangeDropDebug`: SwiftUI's drop callbacks
+    /// arrive from an AppKit dragging session there is no public way to
+    /// construct, and the unbundled staging binary has no Accessibility grant to
+    /// synthesize one (m17-b, −1712). So this seam calls
+    /// `voiceModelDropHoverChanged` / `performVoiceModelDrop` — **the very
+    /// functions `TrackRow`'s `.dropDestination` calls**, with no branch between
+    /// them. The staged path and the real path are one function rather than two
+    /// that agree (the `applyPointerStage` precedent). What remains unproven
+    /// headlessly is the SOURCE gesture — that `.draggable` on the Voice panel's
+    /// row actually vends the payload — and that is stated rather than papered
+    /// over.
+    ///
+    ///   - `{}` — READ-ONLY (the m11-a bare-read law). Answers the VERDICT
+    ///     LADDER: every track, its kind, its convertible clip count and what it
+    ///     would say. A caller MUST build its fixture from this rather than
+    ///     assume which rows accept.
+    ///   - `{act:"enter", trackId}` — the drag arrived over that header.
+    ///   - `{act:"exit"}` — it left.
+    ///   - `{act:"drop", trackId, voiceId}` — released. On an accepting row this
+    ///     opens the Convert Voice… panel on that track's audio clips with
+    ///     `voiceId` already picked; on a refusing row it returns
+    ///     `dropAccepted:false` and opens nothing.
+    ///
+    /// ⚠️ **NO x/y** — unlike `debug.arrangeDrop`. The destination is attached to
+    /// the row that owns it, so there is no coordinate to get wrong on either
+    /// path; asking a caller for one would invent a ladder read the live gesture
+    /// does not have.
+    ///
+    /// Echoes GROUND TRUTH: `paintedTrackId`/`paintedAccepts` are reported by the
+    /// CHIP ITSELF (the `indicatorY` rule — "gone after" alone passes vacuously
+    /// against an implementation that never drew one), and `convertClipIds` /
+    /// `pickedVoice` are read off the same properties `debug.voicePanel` reads,
+    /// so the two seams cannot describe the same panel differently.
+    private func voiceModelDropDebug(_ params: [String: JSONValue]) throws -> JSONValue {
+        var dropAccepted: Bool?
+        if let act = params["act"]?.stringValue {
+            let reportsBefore = voiceDropRenderSeq
+            workspaceMode = .arrange
+            switch act {
+            case "enter", "drop":
+                guard let raw = params["trackId"]?.stringValue else {
+                    throw DebugError("act \"\(act)\" needs a 'trackId' — which header the voice is over")
+                }
+                guard let trackID = UUID(uuidString: raw) else {
+                    throw DebugError("'trackId' is not a valid UUID: \(raw)")
+                }
+                guard store.tracks.contains(where: { $0.id == trackID }) else {
+                    throw DebugError("no track with id \(raw)")
+                }
+                if act == "enter" {
+                    voiceModelDropHoverChanged(trackID: trackID)
+                } else {
+                    guard let voiceID = params["voiceId"]?.stringValue, !voiceID.isEmpty else {
+                        throw DebugError(
+                            "act \"drop\" needs a 'voiceId' — a drop with no voice is not a "
+                            + "gesture the UI can make (the payload carries the model)")
+                    }
+                    dropAccepted = performVoiceModelDrop(trackID: trackID, voiceID: voiceID)
+                }
+            case "exit":
+                voiceModelDropHoverChanged(trackID: nil)
+            default:
+                throw DebugError(
+                    "unknown act \"\(act)\" — expected \"enter\", \"exit\", or \"drop\"")
+            }
+            awaitVoiceDropRendered(after: reportsBefore)
+        } else if params["trackId"] != nil || params["voiceId"] != nil {
+            throw DebugError("debug.voiceModelDrop 'trackId'/'voiceId' need an 'act'")
+        }
+
+        let hover = voiceModelDropHover
+        var response: [String: JSONValue] = [
+            // The LADDER — the ground truth a fixture must be computed FROM.
+            "tracks": .array(store.tracks.map { track in
+                let verdict = voiceModelDropVerdict(trackID: track.id)
+                return .object([
+                    "id": .string(track.id.uuidString),
+                    "name": .string(track.name),
+                    "kind": .string(track.kind.rawValue),
+                    "audioClips": .number(Double(
+                        VoiceConvertMenuPolicy.convertibleAudioClipIDs(in: track).count)),
+                    "accepts": .bool(verdict.accepted),
+                    "reason": verdict.refusal.map { .string($0) } ?? .null,
+                    "title": verdict.command.map { .string($0.title) } ?? .null,
+                ])
+            }),
+            // The hover the MODEL holds.
+            "hoverVisible": .bool(hover != nil),
+            "hoverTrackId": hover.map { .string($0.trackID.uuidString) } ?? .null,
+            "hoverAccepts": hover.map { .bool($0.verdict.accepted) } ?? .null,
+            "hoverReason": hover?.verdict.refusal.map { .string($0) } ?? .null,
+            "hoverClipIds": .array((hover?.verdict.command?.clipIDs ?? [])
+                .map { .string($0.uuidString) }),
+            // What the ROW actually painted — the only positive proof the
+            // affordance exists.
+            "paintedTrackId": voiceDropPaintedTrackID.map { .string($0.uuidString) } ?? .null,
+            "paintedAccepts": voiceDropPaintedAccepts.map { .bool($0) } ?? .null,
+            "renderSeq": .number(Double(voiceDropRenderSeq)),
+            // The PANEL the drop is supposed to have opened — the same
+            // properties `debug.voicePanel` reads, so "the same panel, the same
+            // code path" is checkable in one round trip.
+            "convertClipIds": voiceConvertClipIDs.map { ids in
+                .array(ids.map { .string($0.uuidString) })
+            } ?? .null,
+            "pickedVoice": voicePanel.selectedConvertVoiceID.map { .string($0) } ?? .null,
+            "voicePanelOpen": .bool(showVoicePanel),
+        ]
+        if let dropAccepted { response["dropAccepted"] = .bool(dropAccepted) }
+        return .object(response)
+    }
+
     /// `debug.instrumentPicker {trackId?, mode?, search?, bank?}` — stages the
     /// picker for a capture that the wire alone can't reach (the picker is UI
     /// chrome, off `allCommands`/MCP — the `debug.clipFixSeed` precedent). Opens
@@ -10095,7 +10634,7 @@ final class AppModel {
     /// Opens the Humanize panel for a clip: seeds the model with the clip's name +
     /// kind and shows the centered card. Called by the piano-roll header chip and
     /// the arrange clip context menu (MIDI clips only — the entry is HIDDEN on an
-    /// audio clip, the "Convert to Voice…" rule, so this is never reached with one).
+    /// audio clip, the "Convert Voice…" rule, so this is never reached with one).
     ///
     /// The amounts are NOT reset here: they are sticky across opens on purpose,
     /// which is what makes ⌘Z + reopen the cheap re-roll this panel offers

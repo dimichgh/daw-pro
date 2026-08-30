@@ -28,11 +28,20 @@ import AIServices
 /// and never touch the source.
 ///
 /// ## Convert law (the m10-n-3 `applyInstrumentChoice` law)
-/// `convertClip` rides the SAME two seams the wire's `vc.convertVocals`
-/// clipId-form uses — `ProjectStore.voiceConversionSource` → the client's
-/// `convert` → `ProjectStore.importConvertedVoice` — through injected
-/// closures; there is no parallel mutation path, so UI and wire land
-/// byte-identical results (one undoable edit, violet AI track).
+/// `convertClips` rides the SAME store seam the wire's `vc.convertClips` uses —
+/// `ProjectStore.convertClipsToVoice(clipIds:trackName:convert:)` with the
+/// client's `convert` as the injected per-clip converter. There is no parallel
+/// mutation path, so UI and wire land byte-identical results: ONE undoable
+/// `performEdit("Convert Voice")`, one new violet AI track carrying a converted
+/// counterpart of every selected clip at the same beats, all-or-nothing.
+///
+/// ⚠️ **The single-clip `convertClip` was RETIRED at m24-m leg B** and must not
+/// come back. It landed geometry from the CONVERTED file's on-disk duration
+/// (`importConvertedVoice`'s rule) rather than from the source clip, and it did
+/// not carry the clip's level-domain shaping across — so the two routes would
+/// have produced measurably different clips from the same menu, which is the
+/// "two instruments disagreeing" failure this tree keeps closing. One action,
+/// one seam; `N = 1` is just the small case of it.
 ///
 /// ## Copy register
 /// The panel speaks USER copy, never wire-speak (the m10-q fold-in law):
@@ -448,73 +457,178 @@ public final class VoicePanelModel {
         }
     }
 
-    // MARK: - Convert to voice (the clip action)
+    // MARK: - Convert Voice (the selection-driven clip action, m24-m leg B)
 
-    /// True while a blocking convert is in flight — conversion is
-    /// seconds-class (m10-p-2: ~37x real time), so this is a brief busy
-    /// state, NOT the generation-status job machinery (the settled m10-p-5
-    /// difference from `ClipFixModel`).
-    public private(set) var isConverting = false
+    /// Live progress of a conversion in flight — nil when idle. **It is also the
+    /// busy flag** (`isConvertingClips`), on purpose: one truth, so a staged
+    /// capture state and the live state can never disagree about whether the
+    /// panel is working.
+    public private(set) var clipsConvertProgress: VoiceClipsConvertProgress?
     /// User-copy error from the last convert attempt (nil on success/idle).
-    public private(set) var convertError: String?
-    /// The last successful conversion — the sheet's honest result state,
-    /// including the `realConversion:false` + note truth for "base".
-    public private(set) var lastConversion: VoiceConvertOutcome?
+    /// **Store refusals arrive here VERBATIM** — `ProjectError`'s messages are
+    /// already written for a human, and the refusal-bubble law says the words an
+    /// agent gets over the wire are the words the user gets.
+    public private(set) var clipsConvertError: String?
+    /// The last successful conversion — the panel's honest result state,
+    /// carrying leg A's non-fatal `warnings` and the `realConversion:false` +
+    /// note truth for the "base" smoke target.
+    public private(set) var lastClipsConversion: VoiceClipsConvertOutcome?
+
+    /// True while a conversion is running. Conversion is MINUTES-class for a
+    /// real RVC model over N clips (leg A converts them serially), which is why
+    /// this leg ships a legible progress block rather than the single-clip
+    /// sheet's brief busy label.
+    public var isConvertingClips: Bool { clipsConvertProgress != nil }
+
+    /// The picked voice (nil = nothing picked, so the primary is disarmed) and
+    /// the pitch shift the run will use.
+    ///
+    /// ⭐ **MODEL STATE, NOT VIEW `@State`, AND THAT IS DELIBERATE.** The ARMED
+    /// primary button — violet, glowing, the single most important pixel in the
+    /// panel — exists only once a voice is picked, and a `@State` selection is
+    /// unreachable from `debug.voicePanel`, which makes that state
+    /// unphotographable. "A UI phase is not done until someone has looked at
+    /// it" is not satisfiable for a state no capture can stage. It is also the
+    /// honest home: which voice to convert with is a parameter of the action,
+    /// not a presentation detail.
+    public var selectedConvertVoiceID: String?
+    /// The facade's own bounds are ±24 semitones (`VoiceConvertRequest`); the
+    /// view clamps to them, and this holds whatever it was given.
+    public var convertPitchSemitones: Int = 0
+
+    /// Per-clip converter results, accumulated across one `convertClips` run so
+    /// the outcome can report the facade's honesty fields. Reset at each start;
+    /// a property rather than a local because the accumulation happens inside an
+    /// escaping closure the store owns.
+    private var clipsConvertResults: [VoiceConvertResult] = []
 
     /// The wire's default-track-name rule, shared verbatim
-    /// (`vc.convertVocals`: `"Voice: <voiceId>"`).
+    /// (`vc.convertVocals` / `vc.convertClips`: `"Voice: <voiceId>"`).
     public static func defaultTrackName(voiceID: String) -> String {
         "Voice: \(voiceID)"
     }
 
-    /// Converts an audio clip to `voiceID` and lands the result at the
-    /// clip's own beat as a new violet AI track — the EXACT semantics of the
-    /// wire's `vc.convertVocals` clipId-form, through the same two seams
-    /// (`clipSource` = `voiceConversionSource`, then `converter` +
-    /// `importer` = client.convert + `importConvertedVoice`), one undoable
-    /// edit. Returns true when the track landed.
+    /// Converts EVERY clip in `clipIDs` to `voiceID` and lands the matching set
+    /// on ONE new violet AI track at the same beats — the m24-m action the user
+    /// ratified 2026-08-13, through `ProjectStore.convertClipsToVoice` (leg A).
+    /// Returns true when the track landed.
+    ///
+    /// ⭐ **THE UI GOES THROUGH THE SAME STORE SEAM AS THE WIRE** (the m10-n-3
+    /// law): `vc.convertClips` and this method both call
+    /// `convertClipsToVoice(clipIds:trackName:convert:)` with a converter
+    /// closure, so there is no parallel mutation path and the two land
+    /// byte-identical results — ONE `performEdit("Convert Voice")`, all-or-
+    /// nothing, geometry taken from the SOURCE clips.
+    ///
+    /// **Progress is reported from inside the converter closure**, which is the
+    /// only place that knows which clip is being worked on. The store's per-clip
+    /// order is extract → convert → land, so entering the closure for clip *k*
+    /// means clip *k*'s extraction is done; returning from it means clip *k* is
+    /// finished. Between the two the phase reads `.preparing`, which is the
+    /// truth (the next clip is being rendered) rather than a frozen bar.
+    ///
+    /// **Nothing here re-validates the selection.** Empty sets, duplicate ids,
+    /// unknown ids, MIDI clips and overlapping pairs are refused by leg A before
+    /// any expensive work, each with a teaching message that lands in
+    /// `clipsConvertError` verbatim.
+    ///
+    /// - Parameters:
+    ///   - clipIDs: the selected clips. Order is irrelevant — the result is
+    ///     ordered by start beat.
+    ///   - trackName: nil/empty resolves to `defaultTrackName(voiceID:)` HERE,
+    ///     because the store takes the name verbatim (an empty string would land
+    ///     as an empty string).
+    ///   - startedAt: injected so a test can pin the elapsed readout without
+    ///     sleeping.
     @discardableResult
-    public func convertClip(
-        clipID: UUID, voiceID: String, pitchSemitones: Int = 0, trackName: String? = nil
+    public func convertClips(
+        clipIDs: [UUID], voiceID: String, pitchSemitones: Int = 0,
+        trackName: String? = nil, startedAt: Date = Date()
     ) async -> Bool {
-        guard !isConverting else { return false }
-        convertError = nil
-        lastConversion = nil
+        guard clipsConvertProgress == nil else { return false }
+        clipsConvertError = nil
+        lastClipsConversion = nil
+        clipsConvertResults = []
 
-        // Resolve the source FIRST — a MIDI clip must never reach the
-        // converter (the store's teaching error surfaces verbatim).
-        let source: (url: URL, startBeat: Double)
-        do {
-            source = try clipSource(clipID)
-        } catch {
-            convertError = Self.userCopy(for: error)
-            return false
-        }
+        let resolvedName = (trackName?.isEmpty == false)
+            ? trackName! : Self.defaultTrackName(voiceID: voiceID)
+        clipsConvertProgress = VoiceClipsConvertProgress(
+            total: clipIDs.count, completed: 0, currentClipName: nil,
+            phase: .preparing, startedAt: startedAt)
+        defer { clipsConvertProgress = nil }
 
-        isConverting = true
-        defer { isConverting = false }
         do {
-            let result = try await converter(VoiceConvertRequest(
-                inputPath: source.url.path, voiceId: voiceID, pitchSemitones: pitchSemitones))
-            let resolvedName = (trackName?.isEmpty == false)
-                ? trackName! : Self.defaultTrackName(voiceID: voiceID)
-            _ = try importer(
-                URL(fileURLWithPath: result.outputPath), resolvedName, source.startBeat)
-            lastConversion = VoiceConvertOutcome(
-                voiceID: result.voiceId, trackName: resolvedName,
-                realConversion: result.realConversion, note: result.note,
-                inputSeconds: result.inputSeconds, inferSeconds: result.inferSeconds)
+            // m24-n: the display name comes from the loaded voice list — the
+            // same list the picker row showed — falling back to the id when the
+            // list has not loaded. Recorded at conversion time so it survives
+            // the voice's deletion.
+            let provenance = VoiceProvenance(
+                voiceId: voiceID,
+                voiceName: voices.first { $0.id == voiceID }?.name ?? voiceID,
+                pitchSemitones: pitchSemitones,
+                convertedAt: startedAt)
+            let result = try await clipsConverter(clipIDs, resolvedName, provenance) { _, source in
+                self.clipsConvertProgress?.beginConverting(clipNamed: source.name)
+                let converted = try await self.converter(VoiceConvertRequest(
+                    inputPath: source.url.path, voiceId: voiceID,
+                    pitchSemitones: pitchSemitones))
+                self.clipsConvertResults.append(converted)
+                self.clipsConvertProgress?.finishOne()
+                return URL(fileURLWithPath: converted.outputPath)
+            }
+            lastClipsConversion = VoiceClipsConvertOutcome(
+                voiceID: voiceID, result: result,
+                // ONE not-real conversion makes the whole set not-real: the
+                // honesty strip must not be hidden by a majority vote.
+                realConversion: clipsConvertResults.allSatisfy(\.realConversion),
+                note: clipsConvertResults.compactMap(\.note).first,
+                totalInferSeconds: clipsConvertResults.reduce(0) { $0 + $1.inferSeconds })
             return true
         } catch {
-            convertError = Self.userCopy(for: error)
+            clipsConvertError = Self.userCopy(for: error)
             return false
         }
     }
 
-    /// Clears the convert sheet's transient state (open/close reset).
-    public func resetConvertState() {
-        convertError = nil
-        lastConversion = nil
+    /// Clears the panel's transient convert state (open/close reset).
+    /// Deliberately does NOT clear a run in flight — the progress belongs to the
+    /// work, not to the presentation — and does NOT clear the picked voice,
+    /// which `resetConvertChoice` owns: the view's `.task` calls this on every
+    /// appearance, so folding the choice in here would wipe a staged (or a
+    /// user's) pick on the next body evaluation.
+    public func resetClipsConvertState() {
+        clipsConvertError = nil
+        lastClipsConversion = nil
+    }
+
+    /// Clears the picked voice and pitch — called ONCE when the panel is opened
+    /// on a new set of clips, so a fresh run never inherits the last one's
+    /// parameters.
+    public func resetConvertChoice() {
+        selectedConvertVoiceID = nil
+        convertPitchSemitones = 0
+    }
+
+    /// Capture staging (`setVoicesForCapture` precedent): plants a progress
+    /// state so a shot can show the converting face without a live sidecar and
+    /// without waiting minutes for a real conversion. `nil` clears it.
+    public func setClipsConvertProgressForCapture(_ progress: VoiceClipsConvertProgress?) {
+        clipsConvertProgress = progress
+    }
+
+    /// Capture staging: plants a finished outcome (warnings included) so the
+    /// result face can be photographed.
+    public func setClipsConversionForCapture(_ outcome: VoiceClipsConvertOutcome?) {
+        lastClipsConversion = outcome
+        if outcome != nil { clipsConvertError = nil }
+    }
+
+    /// Capture staging: plants a refusal so the error face can be photographed
+    /// with the store's own words. An EMPTY string clears it rather than
+    /// planting a blank one — a refusal strip with no words in it is a claim
+    /// that something went wrong and a refusal to say what.
+    public func setClipsConvertErrorForCapture(_ message: String?) {
+        clipsConvertError = (message?.isEmpty == true) ? nil : message
     }
 
     // MARK: - Error → user copy
@@ -545,10 +659,22 @@ public final class VoicePanelModel {
     private let trainer: @Sendable (VoiceTrainRequest) async throws -> Data
     private let converter: @Sendable (VoiceConvertRequest) async throws -> VoiceConvertResult
     /// `ProjectStore.voiceConversionSource(clipId:)` — @MainActor (store).
+    /// ⚠️ DATASET material only (`addClipAsSample`): it resolves a clip to its
+    /// BACKING recording, which is the right thing to copy into a training
+    /// set and the WRONG thing to feed a converter (m24-o). Conversion goes
+    /// through `clipsConverter`, which extracts per clip inside the store.
     private let clipSource: @MainActor (UUID) throws -> (url: URL, startBeat: Double)
-    /// `ProjectStore.importConvertedVoice(fileURL:trackName:atBeat:)` —
-    /// @MainActor (store). Returns the new (trackID, clipID).
-    private let importer: @MainActor (URL, String, Double) throws -> (trackID: UUID, clipID: UUID)
+    /// `ProjectStore.convertClipsToVoice(clipIds:trackName:provenance:convert:)`
+    /// — the m24-m leg A action, injected so DAWAppKit never learns what an
+    /// engine or a media service is. This is the SAME method `CommandRouter`
+    /// calls for `vc.convertClips`; a test passes a stub.
+    ///
+    /// ⚠️ The third element is the m24-n `VoiceProvenance`. It is threaded
+    /// through THIS route as well as the wire's on purpose: a UI route that
+    /// omitted it would convert perfectly, look perfectly correct, and silently
+    /// produce tracks whose voice is never embedded — a valid-looking answer
+    /// that is wrong, which is this tree's characteristic failure mode.
+    private let clipsConverter: @MainActor ([UUID], String, VoiceProvenance?, ClipVoiceConverting) async throws -> ClipVoiceConversionResult
 
     public init(
         datasetsRoot: URL,
@@ -558,7 +684,7 @@ public final class VoicePanelModel {
         train: @escaping @Sendable (VoiceTrainRequest) async throws -> Data,
         convert: @escaping @Sendable (VoiceConvertRequest) async throws -> VoiceConvertResult,
         clipSource: @escaping @MainActor (UUID) throws -> (url: URL, startBeat: Double),
-        importConverted: @escaping @MainActor (URL, String, Double) throws -> (trackID: UUID, clipID: UUID)
+        convertClips: @escaping @MainActor ([UUID], String, VoiceProvenance?, ClipVoiceConverting) async throws -> ClipVoiceConversionResult
     ) {
         self.datasetsRoot = datasetsRoot
         self.sidecarStatusProvider = sidecarStatus
@@ -567,7 +693,7 @@ public final class VoicePanelModel {
         self.trainer = train
         self.converter = convert
         self.clipSource = clipSource
-        self.importer = importConverted
+        self.clipsConverter = convertClips
         rescanDatasets()
     }
 
@@ -626,26 +752,130 @@ public struct VoiceSample: Identifiable, Equatable, Sendable {
     }
 }
 
-/// The honest result of a finished conversion — what the convert sheet shows
-/// after the violet track lands, including the `realConversion:false` truth
-/// (+ the facade's note) for the "base" smoke target.
-public struct VoiceConvertOutcome: Equatable, Sendable {
-    public var voiceID: String
-    public var trackName: String
-    public var realConversion: Bool
-    public var note: String?
-    public var inputSeconds: Double
-    public var inferSeconds: Double
+/// The per-clip converter seam leg A takes: given a source clip id and the
+/// audio that clip presents, hand back the converted file.
+public typealias ClipVoiceConverting =
+    @MainActor (UUID, ClipConversionSource) async throws -> URL
 
-    public init(
-        voiceID: String, trackName: String, realConversion: Bool, note: String? = nil,
-        inputSeconds: Double, inferSeconds: Double
-    ) {
+/// How far a multi-clip conversion has got — the panel's progress block.
+///
+/// ⭐ **A SPINNER IS NOT PROGRESS.** A real RVC conversion is seconds-to-minutes
+/// PER CLIP and leg A converts them serially, so a bare spinner would leave the
+/// user unable to tell a working conversion from a hung one for minutes at a
+/// time. Every field here exists to answer one of the two questions that
+/// actually get asked: *which clip of how many* (`completed`/`total`/
+/// `currentClipName`) and *is it still alive* (`phase` moves, and `startedAt`
+/// drives a ticking elapsed readout).
+///
+/// ⚠️ **THE FRACTION IS COMPLETED WORK ONLY, NEVER AN ESTIMATE.** It steps at
+/// clip boundaries because that is the only place this path has a fact; a smooth
+/// bar interpolated over an unknown per-clip duration would be an invented
+/// number, which is the same failure the Voice panel's TRAIN slot refuses (fake
+/// progress is structurally impossible there, and it is here too).
+public struct VoiceClipsConvertProgress: Equatable, Sendable {
+
+    /// Where the run is inside one clip's cycle. Leg A's per-clip order is
+    /// extract → convert → copy, then ONE edit at the end.
+    public enum Phase: Equatable, Sendable {
+        /// Rendering the next clip's own audio (leg A's offline extraction).
+        case preparing
+        /// The voice engine is working on `currentClipName`.
+        case converting
+        /// Every clip is converted; the new track is being added.
+        case landing
+    }
+
+    public var total: Int
+    /// Clips whose conversion has RETURNED. Never optimistic.
+    public var completed: Int
+    /// The clip the engine is on (nil before the first one starts).
+    public var currentClipName: String?
+    public var phase: Phase
+    /// When the run began — the view derives the ticking elapsed readout from
+    /// this, so the model holds no timer and allocates nothing per second.
+    public var startedAt: Date
+
+    public init(total: Int, completed: Int, currentClipName: String?,
+                phase: Phase, startedAt: Date) {
+        self.total = total
+        self.completed = completed
+        self.currentClipName = currentClipName
+        self.phase = phase
+        self.startedAt = startedAt
+    }
+
+    /// 1-based index of the clip being worked on, clamped so the readout never
+    /// says "clip 6 of 5" during the landing phase.
+    public var currentIndex: Int { min(completed + 1, max(total, 1)) }
+
+    /// Completed work as a 0…1 fraction. Reaches 1 only when every clip is done.
+    public var fraction: Double {
+        total > 0 ? Double(completed) / Double(total) : 0
+    }
+
+    /// The SF Mono step readout: `CLIP 2/5`.
+    public var stepText: String { "CLIP \(currentIndex)/\(total)" }
+
+    /// One plain-language line naming what is happening right now (Rule 6 —
+    /// beginner-readable, no wire-speak).
+    public var detailText: String {
+        switch phase {
+        case .landing:
+            return "Adding the new track…"
+        case .converting:
+            guard let name = currentClipName else { return "Converting…" }
+            return "Converting \u{201C}\(name)\u{201D}…"
+        case .preparing:
+            guard let name = currentClipName else { return "Preparing the first clip…" }
+            return "Preparing the clip after \u{201C}\(name)\u{201D}…"
+        }
+    }
+
+    /// Elapsed whole seconds at `now` — the "it is still alive" signal (the
+    /// M10-b truthful-starting-state idiom).
+    public func elapsedSeconds(at now: Date) -> Int {
+        max(0, Int(now.timeIntervalSince(startedAt)))
+    }
+
+    /// The engine has picked up `name`.
+    mutating func beginConverting(clipNamed name: String) {
+        currentClipName = name
+        phase = .converting
+    }
+
+    /// One clip finished; the next one's extraction starts (or, at the end, the
+    /// track lands).
+    mutating func finishOne() {
+        completed = min(completed + 1, total)
+        phase = completed >= total ? .landing : .preparing
+    }
+}
+
+/// The honest result of a finished multi-clip conversion — what the panel shows
+/// after the violet track lands: leg A's own report (track, per-clip landings,
+/// non-fatal warnings) plus the facade's `realConversion:false` truth and note
+/// for the "base" smoke target.
+public struct VoiceClipsConvertOutcome: Equatable, Sendable {
+    public var voiceID: String
+    /// Leg A's report, verbatim. `warnings` is NON-fatal — the conversion
+    /// happened; something is worth knowing.
+    public var result: ClipVoiceConversionResult
+    /// False when ANY clip's conversion was not a real one. One not-real
+    /// conversion makes the whole set not-real; the honesty strip is never
+    /// hidden by a majority vote.
+    public var realConversion: Bool
+    /// The facade's own note, verbatim (present for "base").
+    public var note: String?
+    /// Total engine time across the set — an SF Mono readout, never a claim
+    /// about wall-clock.
+    public var totalInferSeconds: Double
+
+    public init(voiceID: String, result: ClipVoiceConversionResult,
+                realConversion: Bool, note: String? = nil, totalInferSeconds: Double) {
         self.voiceID = voiceID
-        self.trackName = trackName
+        self.result = result
         self.realConversion = realConversion
         self.note = note
-        self.inputSeconds = inputSeconds
-        self.inferSeconds = inferSeconds
+        self.totalInferSeconds = totalInferSeconds
     }
 }

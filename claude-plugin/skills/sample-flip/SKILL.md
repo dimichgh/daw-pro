@@ -442,17 +442,23 @@ render_bounce {path, fromBeat, durationSeconds}     -> delegate to finisher
 clip_add_audio {trackId, path, atBeat}              -> composer imports it back
 ```
 
-⛔⛔ **`clip_add_audio` SILENTLY DELETES ANY CLIP IT OVERLAPS. It does not
-refuse, warn, or trim — the overlapped clip is simply gone, and the call returns
-a normal success with a new id.** Measured 2026-08-29 with a positive control:
-two imports at `atBeat: 0` on one track left **one** clip and killed the first
-id; a third at beat 40 left two. **This lands directly on the loop below**,
-where you import print after print onto the same track — the obvious mistake
-(reuse `atBeat: 0` each pass) destroys the previous import without saying so.
+⛔ **`clip_add_audio` REFUSES to land on top of a clip that is already there.**
+It names the resident clip and gives you a beat you can safely append at;
+nothing is deleted, trimmed, or changed. That refusal is aimed squarely at this
+loop: importing print after print onto one track is the workflow, and the
+obvious form of it — reuse `atBeat: 0` every pass — used to destroy the previous
+import silently (measured 2026-08-29: two imports at `atBeat: 0` left **one**
+clip and killed the first id; fixed in m33-j).
 
-**Import each print to its own track, or to a beat past everything already
-there**, and check the track's clip count afterwards rather than trusting the
-returned id.
+**The cheapest way to stay out of its way is to OMIT `atBeat`** — that appends
+after everything on the track and can never collide. Otherwise import each print
+to its own track, or pass a beat past the last clip's end.
+
+If you genuinely mean to replace what is there, pass `overwrite: true`. It does
+the old thing — trims the clips underneath, deletes the ones this file covers
+completely — but it is no longer silent: `trimmedClipIDs` and `removedClipIDs`
+come back in the response naming exactly what went. Those two arrays are in
+EVERY `clip_add_audio` response and are empty on the ordinary path.
 
 ```
 ```
