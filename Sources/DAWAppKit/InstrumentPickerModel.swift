@@ -1,6 +1,12 @@
 import Foundation
 import Observation
 import DAWCore
+// m34-c: the one-click SoundFont download lives in AIServices (the
+// external-services module — network clients live there, per Package.swift).
+// DAWAppKit already depends on it; the model only ever holds CLOSURES over the
+// shared coordinator, never constructs one, so a test drives this surface with
+// no network and no actor.
+import AIServices
 
 /// Headless state machine for the instrument picker (m10-n-3): the three-section
 /// browser (Built-in / Sound Banks / Audio Units), the GM program browser with
@@ -36,6 +42,25 @@ public final class InstrumentPickerModel {
     /// into one on the way in (m31-h; wired to
     /// `ProjectStore.importSoundBank`); throws in the MediaImporting tone.
     private let bankImporter: (URL) throws -> SoundBankInfo
+
+    // MARK: Download providers (m34-c) — all optional
+
+    /// The downloadable-bank catalogue with per-bank "already installed"
+    /// (wired to `SoundBankDownloadCoordinator.offerings`).
+    ///
+    /// ⚠️ ALL FOUR download providers default to nil, and nil means the
+    /// download affordance is simply ABSENT rather than broken. That keeps
+    /// every existing construction of this model — and every test that
+    /// predates m34-c — compiling and behaving exactly as before, which is
+    /// the additive rule applied to an initializer.
+    private let downloadableBanksProvider: (() -> [SoundBankOffering])?
+    /// Starts a download and returns the accepted status (wired to the SHARED
+    /// `SoundBankDownloadCoordinator.start`, the same actor the wire uses).
+    private let startDownloadProvider: ((String) async throws -> SoundBankDownloadStatus)?
+    /// Reads the current status (wired to the same actor's `status`).
+    private let downloadStatusProvider: (() async -> SoundBankDownloadStatus)?
+    /// Requests a cancel (wired to the same actor's `cancel`).
+    private let cancelDownloadProvider: (() async throws -> SoundBankDownloadStatus)?
 
     // MARK: - Loaded data (refreshed from the providers)
 
@@ -102,12 +127,20 @@ public final class InstrumentPickerModel {
         soundBanks: @escaping () -> [SoundBankInfo],
         programs: @escaping (SoundBankSource) -> (programs: [SoundBankProgram], namesParsed: Bool),
         audioUnits: @escaping () -> [AudioUnitComponentInfo],
-        importer: @escaping (URL) throws -> SoundBankInfo
+        importer: @escaping (URL) throws -> SoundBankInfo,
+        downloadableBanks: (() -> [SoundBankOffering])? = nil,
+        startDownload: ((String) async throws -> SoundBankDownloadStatus)? = nil,
+        downloadStatus: (() async -> SoundBankDownloadStatus)? = nil,
+        cancelDownload: (() async throws -> SoundBankDownloadStatus)? = nil
     ) {
         self.soundBanksProvider = soundBanks
         self.programsProvider = programs
         self.audioUnitsProvider = audioUnits
         self.bankImporter = importer
+        self.downloadableBanksProvider = downloadableBanks
+        self.startDownloadProvider = startDownload
+        self.downloadStatusProvider = downloadStatus
+        self.cancelDownloadProvider = cancelDownload
     }
 
     // MARK: - Lifecycle
@@ -117,6 +150,14 @@ public final class InstrumentPickerModel {
     public func refresh() {
         banks = soundBanksProvider()
         audioUnits = audioUnitsProvider()
+    }
+
+    /// `refresh()` plus the download catalogue — what `prepare` calls. Kept
+    /// separate from `refresh()` itself because `pollUntilTerminal` calls both
+    /// deliberately and a self-call would be circular.
+    private func refreshAll() {
+        refresh()
+        refreshDownloadableBanks()
     }
 
     /// Points the picker at a track: records its current instrument (for the
@@ -136,7 +177,12 @@ public final class InstrumentPickerModel {
         collapsedCategories = []
         importError = nil
         importNotice = nil
-        refresh()
+        downloadRequestError = nil
+        refreshAll()
+        // A download may already be running — started from the wire, or from a
+        // previous visit to this panel — and one may START while this panel is
+        // open, so this WATCHES rather than reads once.
+        beginWatchingDownloads()
     }
 
     /// Updates ONLY the current-instrument highlight + status after a selection
@@ -291,6 +337,188 @@ public final class InstrumentPickerModel {
 
     /// Clears the inline sample-library notice.
     public func clearImportNotice() { importNotice = nil }
+
+    // MARK: - Downloadable banks (m34-c)
+
+    /// True when this build was given the download providers at all. The view
+    /// hides the whole affordance when false rather than showing a button that
+    /// cannot work.
+    public var canDownloadBanks: Bool { downloadableBanksProvider != nil }
+
+    /// Banks that are NOT already in the library — the only ones worth
+    /// offering. An installed one would be refused by the installer, so
+    /// offering it would be an invitation to a refusal.
+    public var downloadableBanks: [SoundBankOffering] {
+        downloadOfferings.filter { !$0.isInstalled }
+    }
+
+    /// The live download status, nil before anything has ever been read.
+    public private(set) var downloadStatus: SoundBankDownloadStatus?
+
+    /// Set when `startDownload`/`cancelDownload` itself is REFUSED (an unknown
+    /// id, a second download while one runs, nothing to cancel). Distinct from
+    /// a FAILED download, which arrives through `downloadStatus.errorMessage`
+    /// — the first never started, the second stopped partway, and telling a
+    /// user the wrong one wastes their time.
+    public private(set) var downloadRequestError: String?
+
+    /// The bank currently being downloaded, if any — for the row's own label.
+    public var downloadingBank: SoundBankOffering? {
+        guard let id = downloadStatus?.bankID,
+              downloadStatus?.state == .downloading else { return nil }
+        return downloadOfferings.first { $0.id == id }
+    }
+
+    /// One beginner-readable sentence for the current download state, or nil
+    /// when there is nothing to say. ⭐ Plain language, never a percentage on
+    /// its own: "Downloading 88 MB of 206 MB" tells a beginner what is
+    /// happening; "43%" tells them a number.
+    public var downloadStatusLine: String? {
+        guard let status = downloadStatus else { return nil }
+        let name = status.bankName ?? "the sound bank"
+        switch status.state {
+        case .idle:
+            return nil
+        case .downloading:
+            if status.cancelRequested { return "Stopping…" }
+            guard let progress = status.progress else { return "Starting…" }
+            switch progress.phase {
+            case .preparing:
+                return "Getting ready…"
+            case .downloading:
+                let done = Self.megabytes(progress.completedBytes)
+                let total = Self.megabytes(progress.totalBytes)
+                return "Downloading \(done) of \(total)…"
+            case .verifying:
+                return "Checking the download…"
+            case .installing:
+                return "Adding \(name) to your instruments…"
+            case .finished:
+                return "Finishing up…"
+            }
+        case .succeeded:
+            return "\(name) is ready — pick a sound below."
+        case .failed:
+            return status.errorMessage
+        case .cancelled:
+            return "Download stopped. Nothing was added."
+        }
+    }
+
+    /// 0…1 for a progress bar, or nil when there is no measurable transfer to
+    /// draw. Deliberately the TRANSFER's fraction only: the verify and install
+    /// phases have no honest fraction, and inventing one is how a progress bar
+    /// starts lying.
+    public var downloadFraction: Double? {
+        guard downloadStatus?.state == .downloading,
+              let progress = downloadStatus?.progress,
+              progress.phase == .downloading,
+              progress.totalBytes > 0 else { return nil }
+        return min(1, max(0, Double(progress.completedBytes) / Double(progress.totalBytes)))
+    }
+
+    /// THE size arithmetic, shared with the catalogue's own `sizeDescription`
+    /// and every installer error — see
+    /// `DownloadableSoundBank.formattedMegabytes`. Do not re-derive it here: a
+    /// local copy is exactly how the offer row came to say "206 MB" while the
+    /// progress line counted toward "216 MB".
+    static func megabytes(_ bytes: Int64) -> String {
+        DownloadableSoundBank.formattedMegabytes(bytes)
+    }
+
+    /// Reload the catalogue (cheap: a compile-time list plus one directory
+    /// scan). Called by `prepare`/`refresh` and after a download finishes.
+    public func refreshDownloadableBanks() {
+        downloadOfferings = downloadableBanksProvider?() ?? []
+    }
+
+    /// Start downloading `id`. Returns immediately; `pollDownload` keeps
+    /// `downloadStatus` current until the job reaches a terminal state.
+    public func startDownload(id: String) {
+        guard let start = startDownloadProvider else { return }
+        downloadRequestError = nil
+        Task { [weak self] in
+            do {
+                let accepted = try await start(id)
+                self?.downloadStatus = accepted
+                // The watcher takes it from here — and is (re)started rather
+                // than assumed, so a Download press works even if the panel
+                // somehow opened without one running.
+                self?.beginWatchingDownloads()
+            } catch {
+                self?.downloadRequestError = Self.message(from: error)
+            }
+        }
+    }
+
+    /// Ask the running download to stop. ⚠️ Does NOT claim it stopped — the
+    /// status keeps reporting `.downloading` with `cancelRequested` until the
+    /// job unwinds and its partial file is gone, and the UI says "Stopping…"
+    /// for exactly that window.
+    public func cancelDownload() {
+        guard let cancel = cancelDownloadProvider else { return }
+        Task { [weak self] in
+            do {
+                let status = try await cancel()
+                self?.downloadStatus = status
+            } catch {
+                self?.downloadRequestError = Self.message(from: error)
+            }
+        }
+    }
+
+    /// Clears an inline download-request refusal.
+    public func clearDownloadRequestError() { downloadRequestError = nil }
+
+    /// Watch the shared download slot for as long as this panel is open.
+    ///
+    /// ⚠️ This started life as a ONE-SHOT read called at `prepare` — and that
+    /// was wrong in a way only a screenshot could show. The coordinator is
+    /// SHARED with the control protocol, so a download can begin while the
+    /// picker is already open (an agent calls `instrument.downloadSoundBank`).
+    /// A one-shot read taken before that saw `.idle`, stopped, and the picker
+    /// went on showing an idle Download button while 28 MB streamed in behind
+    /// it — MEASURED on the live wire, invisible to every assertion here.
+    /// Polling an in-process actor three times a second costs nothing next to
+    /// what it is watching.
+    ///
+    /// Idempotent: calling it again replaces the running watcher.
+    public func beginWatchingDownloads() {
+        guard let read = downloadStatusProvider else { return }
+        downloadPollTask?.cancel()
+        downloadPollTask = Task { [weak self] in
+            var previous: SoundBankDownloadState?
+            while !Task.isCancelled {
+                let status = await read()
+                guard let self else { return }
+                self.downloadStatus = status
+                // Refresh ONLY on the transition out of `.downloading` — the
+                // downloaded bank has to APPEAR in the list for the feature to
+                // have done anything, but a directory scan three times a
+                // second would be absurd.
+                if previous == .downloading && status.state != .downloading {
+                    self.refresh()
+                    self.refreshDownloadableBanks()
+                }
+                previous = status.state
+                try? await Task.sleep(nanoseconds: Self.downloadPollIntervalNanoseconds)
+            }
+        }
+    }
+
+    /// Stop watching — the panel closed. Leaves any running download alone;
+    /// this only stops LOOKING at it.
+    public func endWatchingDownloads() {
+        downloadPollTask?.cancel()
+        downloadPollTask = nil
+    }
+
+    /// 300 ms: fast enough that a progress bar moves smoothly, slow enough
+    /// that polling an actor costs nothing next to a 206 MB transfer.
+    static let downloadPollIntervalNanoseconds: UInt64 = 300_000_000
+
+    private var downloadOfferings: [SoundBankOffering] = []
+    @ObservationIgnored private var downloadPollTask: Task<Void, Never>?
 
     // MARK: - Choice construction
 

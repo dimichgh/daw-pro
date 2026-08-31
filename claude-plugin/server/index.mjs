@@ -44888,6 +44888,112 @@ registerTool(
   async () => toToolResult(() => bridge.send("transport.record"))
 );
 registerTool(
+  "transport_record_layer",
+  {
+    title: "Record the next layer without stopping",
+    description: "LIVE LOOPING. Start recording the NEXT layer onto all armed tracks while the music KEEPS PLAYING \u2014 nothing stops, nothing restarts, and nothing already sounding is interrupted. This is how you build a song by stacking parts in real time: record a chord layer, finish it with transport_finish_layer, switch the armed track, and record the next part on top, all without the transport ever stopping. \u26A0\uFE0F THIS IS THE MIRROR IMAGE OF transport_record, NOT A REPLACEMENT: transport_record requires a STOPPED transport and starts playback itself; transport_record_layer requires the transport to ALREADY be PLAYING and joins it. Use transport_record for the first layer (or transport_play first), then this for every layer after. No params. Arm at least one track with track_set_arm first, or nothing is captured. Finish with transport_finish_layer (lands the layer, keeps playing) or transport_stop (lands it and stops everything). COUNT-IN DOES NOT APPLY to a layer \u2014 the music already playing is the count, which is what every hardware and software looper does; the count-in setting is ignored here rather than delaying the layer. \u26D4 REFUSED WHILE THE LOOP IS ENABLED, and the reason matters: transport_set_loop + transport_record records ALTERNATE TAKES of ONE part for comping (several attempts, pick the best), which is the OPPOSITE of layering (several different parts, keep them all). Recording INTO a loop region is overdub, which is not supported yet \u2014 disable the loop first. Also refused with a punch window enabled, when nothing is playing, when a layer is already recording, and when no track is armed. After finishing, check project_snapshot's `lastRecordingError`: null means the layer landed.",
+    inputSchema: {}
+  },
+  async () => toToolResult(() => bridge.send("transport.recordLayer"))
+);
+registerTool(
+  "transport_finish_layer",
+  {
+    title: "Finish the layer, keep playing",
+    description: "LIVE LOOPING. Close the take that is currently recording, land it as clips on the armed tracks, and LEAVE THE TRANSPORT PLAYING. This is the difference between live looping and ordinary recording: transport_stop would end the take AND stop the music, so a performer could never finish one layer and keep the song running underneath. Works on any rolling take, whether it was started with transport_record or transport_record_layer. No params. The response shows isPlaying:true and isRecording:false. \u26A0\uFE0F THE CLIP IS NOT ON THE TIMELINE THE MOMENT THIS RETURNS. The take finalizes asynchronously (the capture file closes on its own queue), exactly as it does after transport_stop \u2014 poll project_snapshot until the clip appears rather than assuming it is there. It lands as ONE undo step named 'Record Take N', so undoing a bad layer costs exactly one undo. Refused when nothing is recording.",
+    inputSchema: {}
+  },
+  async () => toToolResult(() => bridge.send("transport.finishLayer"))
+);
+registerTool(
+  "looper_begin",
+  {
+    title: "Open a live-looping session (the loop deck)",
+    description: "LIVE LOOPING \u2014 open a loop-deck session and build a song by stacking layers in real time, the way a hardware loop station works. Record a chord loop, then WITHOUT STOPPING arm a different track, switch instrument, and play a bass line over it; each layer is a track and each layer repeats forever. \u26D4 THE TRANSPORT DOES NOT LOOP, AND THAT IS THE DESIGN. The deck runs the timeline LINEARLY and repeats each layer by TILING its clip forward, so what you build is a real arrangement that bounces, exports and edits like any other project. transport_set_loop is a DIFFERENT feature \u2014 loop-cycle TAKE recording, i.e. several attempts at ONE part for comping \u2014 and this tool refuses while it is enabled. \u2B50 HOW THE LOOP LENGTH IS SET, the decision everything else follows from: pass `bars` for FIXED-BAR mode (the default and the safe one \u2014 you cannot pick a bad length because you never pick a length, only a bar count), or OMIT `bars` for PRESS-TO-END, where looper_finish_layer on the FIRST layer decides the length, rounded to the nearest whole bar so an off-grid loop is impossible. Every later layer inherits it. Cycle 0 is the FIRST layer's launch boundary, not this call \u2014 waiting a few bars before playing costs nothing. Then: looper_arm_layer to record each layer, looper_finish_layer to close it, looper_undo_layer to take back a bad one, looper_status to read the lamps, looper_end to close the session (the layers stay). \u26A0\uFE0F v1 records MIDI/instrument layers only.",
+    inputSchema: {
+      bars: external_exports.number().int().min(1).max(64).optional().describe(
+        "Loop length in bars. Present = fixed-bar mode (recommended, and the default shape). OMITTED = press-to-end: the first layer's own length becomes the loop, rounded to the nearest whole bar."
+      ),
+      quantize: external_exports.enum(["cycle", "bar", "instant"]).optional().describe(
+        "The grid a layer's capture window opens on. 'cycle' (default) waits for the next loop boundary, 'bar' for the next bar line, 'instant' opens at the call. \u26A0\uFE0F Quantization is about COMPREHENSIBILITY, not placement: notes always land at their position WITHIN the cycle regardless of when you called, so a layer recorded four cycles later still lines up."
+      ),
+      mode: external_exports.enum(["overdub", "replace"]).optional().describe(
+        "What recording again on a track that already has a layer means. 'overdub' (default) adds to what is there; 'replace' throws the old cycle away. Overridable per layer on looper_arm_layer."
+      ),
+      horizonCycles: external_exports.number().int().min(2).max(256).optional().describe(
+        "How many cycles of material are materialised ahead of the playhead (default 16). The runway extends itself as the playhead advances, so the music never runs off the end. Larger = fewer extensions, longer clips."
+      )
+    }
+  },
+  async ({ bars, quantize, mode, horizonCycles }) => toToolResult(() => bridge.send("looper.begin", { bars, quantize, mode, horizonCycles }))
+);
+registerTool(
+  "looper_arm_layer",
+  {
+    title: "Arm the next loop layer on a track",
+    description: "LIVE LOOPING \u2014 arm the next layer on an INSTRUMENT track. \u2B50 THE CALL DOES NOT START THE RECORDING; THE QUANTIZE BOUNDARY DOES. The response's `pendingLaunchBeat` is the beat the capture window opens on and `pendingPhase` reads 'queued' until then \u2014 the take itself is armed a beat EARLY so the engine's capture is provably rolling before the window opens, and anything played during that pre-roll is discarded rather than folded into the loop. \u2B50 PLACEMENT DOES NOT DEPEND ON YOUR TIMING: every captured note lands at its position WITHIN the cycle, so a layer recorded four cycles after the first still lines up with it exactly. \u26A0\uFE0F This arms EXACTLY this track and disarms every other, in one undo step \u2014 transport_record_layer captures onto EVERY armed instrument track, so a stale arm elsewhere would silently double the layer. Recording again on a track that already has a layer OVERDUBS by default; pass mode:'replace' for the variant. \u26A0\uFE0F v1 IS MIDI/INSTRUMENT LAYERS ONLY \u2014 an audio track is refused rather than landing a one-shot that never repeats. Requires an open session (looper_begin) and a PLAYING transport (transport_play).",
+    inputSchema: {
+      trackId: external_exports.string().describe("UUID of the instrument track this layer records onto."),
+      mode: external_exports.enum(["overdub", "replace"]).optional().describe(
+        "Overrides the session default for this pass only. 'overdub' adds to the layer's existing cycle, 'replace' discards it and keeps only this pass."
+      )
+    }
+  },
+  async ({ trackId, mode }) => toToolResult(() => bridge.send("looper.armLayer", { trackId, mode }))
+);
+registerTool(
+  "looper_finish_layer",
+  {
+    title: "End the rolling loop layer",
+    description: "LIVE LOOPING \u2014 end the layer that is currently recording, WITHOUT stopping the music. Quantized like the launch: the pass closes at the next cycle boundary so it is a whole number of cycles long. In PRESS-TO-END mode (looper_begin called without `bars`) this is the call that DECIDES THE LOOP LENGTH for the whole session, rounded to the nearest whole bar. \u26A0\uFE0F THE LAYER IS NOT ON THE TIMELINE THE MOMENT THIS RETURNS \u2014 the take finalizes asynchronously. Poll looper_status or clip_get_notes rather than assuming. Pass immediate:true to close at the call instead of at the boundary.",
+    inputSchema: {
+      immediate: external_exports.boolean().optional().describe(
+        "Close at the call instead of at the next cycle boundary (default false). Useful when the pass has gone wrong and you are about to looper_undo_layer it anyway."
+      )
+    }
+  },
+  async ({ immediate }) => toToolResult(() => bridge.send("looper.finishLayer", { immediate }))
+);
+registerTool(
+  "looper_undo_layer",
+  {
+    title: "Peel off the last loop layer",
+    description: "LIVE LOOPING \u2014 \u2B50\u2B50 THE MOST-USED CONTROL ON ANY LOOPER, AND IT DOES NOT STOP THE MUSIC. Takes back the most recent landed pass: a pass that created its layer removes the layer and its clip; a pass that overdubbed restores the cycle as it stood before. Repeatable \u2014 three bad passes take three calls. \u26D4 THIS IS NOT edit_undo. The general undo journal is refused mid-take, carries every other edit in the session, and would reverse whatever happened last \u2014 a fader move, a rename. This is scoped to ONE layer. The response says whether the whole layer went (`removedLayer`) or an overdub was rolled back, and how many notes remain. No params.",
+    inputSchema: {}
+  },
+  async () => toToolResult(() => bridge.send("looper.undoLayer"))
+);
+registerTool(
+  "looper_set_layer_muted",
+  {
+    title: "Silence or restore one loop layer",
+    description: "LIVE LOOPING \u2014 drop a layer out of the mix (or bring it back) without losing its material: the 'no drums in the verse' control. The layer's cycle is kept, so unmuting restores it exactly. Get `layerId` from looper_status's `lamps`.",
+    inputSchema: {
+      layerId: external_exports.string().describe("UUID of the layer, from looper_status's lamps[].layerId."),
+      muted: external_exports.boolean().describe("true silences the layer, false brings it back.")
+    }
+  },
+  async ({ layerId, muted }) => toToolResult(() => bridge.send("looper.setLayerMuted", { layerId, muted }))
+);
+registerTool(
+  "looper_status",
+  {
+    title: "Read the loop deck",
+    description: "LIVE LOOPING \u2014 the deck as it stands, or null when no session is open. `lamps` is the light language a performer reads without looking away from their hands: each layer's `state` is queued (waiting for its boundary) / recording / closing / playing / muted. `cycleBeats` is the loop length, `currentCycle` and `cyclePhase` say where the playhead is in the loop, `spanCycles` how far ahead material is materialised, and `canPeel` whether looper_undo_layer has anything to take back. \u26A0\uFE0F THIS REPORTS THE DECK, NOT THE TIMELINE. It is not proof material landed \u2014 read clip_get_notes for that. No params.",
+    inputSchema: {}
+  },
+  async () => toToolResult(() => bridge.send("looper.status"))
+);
+registerTool(
+  "looper_end",
+  {
+    title: "Close the live-looping session",
+    description: "LIVE LOOPING \u2014 close the session. THE LAYERS STAY: they are ordinary clips on ordinary tracks, which is the whole point of building the loop on the real timeline \u2014 the result bounces, exports and edits like anything else. A layer that was queued but never opened is cancelled. Also re-arms the stop-at-content-end bound the session suspended. No params.",
+    inputSchema: {}
+  },
+  async () => toToolResult(() => bridge.send("looper.end"))
+);
+registerTool(
   "transport_set_loop",
   {
     title: "Enable or disable loop playback",
@@ -45182,6 +45288,12 @@ var samplerSchema = external_exports.object({
   attack: external_exports.number().optional().describe(
     "Sampler amplitude envelope attack time in seconds \u2014 how long a triggered note takes to reach full volume. Defaults to 0.001 (near-instant)."
   ),
+  decay: external_exports.number().min(0).max(8).optional().describe(
+    "Sampler amplitude envelope DECAY time in seconds \u2014 how long a note takes to fall from full level to `sustain` AFTER its attack, WHILE THE KEY IS STILL DOWN. Set this together with `sustain` below 1 to make notes fade the way a piano does: a piano's note dies away even with the sustain pedal held, because the pedal only stops the damper falling \u2014 it does not keep feeding the string. Omit to keep the legacy 0 (no decay stage, so the note holds at full level until note-off). A zone's own `decay` overrides this for that zone."
+  ),
+  sustain: external_exports.number().min(0).max(1).optional().describe(
+    "The level a note settles at after its `decay`, 0-1, held until note-off. Omit to keep the legacy 1 = hold at FULL level, which is CORRECT for organs, pads and bowed strings \u2014 those really do sustain indefinitely and must not be made to fade. Use 0 with a `decay` of a few seconds for piano-like instruments, which fade to silence on their own. THE INSTRUMENT DECIDES: do not set this globally on a patch that should hold. A zone's own `sustain` overrides this for that zone."
+  ),
   release: external_exports.number().optional().describe(
     "Sampler amplitude envelope release time in seconds \u2014 how long the sample fades to silence after note-off. Ignored when `oneShot` is true. Defaults to 0.05."
   ),
@@ -45202,6 +45314,9 @@ var samplerSchema = external_exports.object({
   ),
   voiceMode: external_exports.enum(["poly", "mono"]).optional().describe(
     "How many notes the Sampler lets sound at once. Omitted = `poly` (the existing behaviour, 64 voices). `mono` is LAST-NOTE PRIORITY: a new note always takes over from the one sounding, because a wind line is one airstream and the newest note is the one being played. Use it for sax/flute/trumpet/solo-lead parts. Under the slight note OVERLAPS that legato writing needs, mono retriggers to the newest pitch \u2014 the overlap becomes the slur. A note-off for a note that has already been superseded is discarded: releasing an older still-held key does NOT fall back to it, because on a wind instrument that note ended when the player moved."
+  ),
+  pedalHoldLimit: external_exports.number().int().min(1).max(128).optional().describe(
+    "How many notes the SUSTAIN PEDAL (CC 64) keeps ringing on the built-in Sampler. OMITTED = unlimited, which is what it has always done \u2014 every note played while the pedal is down rings until the pedal comes up. That is correct for a piano, and it is what makes an organ or pad patch turn into a wall of sound: the pedal latches note after note and nothing ever stops. Set a cap and the OLDEST pedal-held note is RELEASED when a new note would exceed it \u2014 released, not cut, so it fades out through the patch's own `release` and you hear a chord hand over rather than a click. \u26A0\uFE0F A key you are STILL HOLDING DOWN is never taken: the cap only ever reclaims notes whose keys are already up and which the pedal alone is keeping alive, so with a cap of 2 you can still hold a five-note chord with your hands. The cap is applied when the NEXT note starts, not the instant it is set, so setting it mid-passage never yanks anything already sounding. Any value above the 64-voice pool is unreachable and therefore means unlimited. Try 4-8 for an organ or pad that should breathe; leave it off for piano."
   )
 }).strict().describe(
   "Sampler configuration, used only when `kind` is (or already is) `sampler`. Every field here is independently a PARTIAL update \u2014 omit a field and it keeps its current value \u2014 with ONE exception: a PRESENT `zones` array replaces the whole keyzone map at once (see `zones`'s own description for what 'replaces' means for zone ids). Omit `sampler` entirely to leave the track's current sampler configuration untouched (e.g. when this call only changes `kind` or is switching a different track's instrument). Has no effect on `testTone`/`polySynth`. For narrower, harder-to-misuse edits, prefer instrument_set_sampler_param (one global) or instrument_set_sampler_zones (merge zones by id) over building this object by hand."
@@ -45269,6 +45384,9 @@ registerTool(
       gain: external_exports.number().optional().describe(
         "polySynth output level, 0-1 \u2014 the instrument's own gain, separate from the track fader (track_set_volume). Clamped to 0-1. Omit to keep the current value."
       ),
+      pedalHoldLimit: external_exports.number().int().min(1).max(128).optional().describe(
+        "polySynth SUSTAIN PEDAL hold limit \u2014 how many notes CC 64 keeps ringing. Omitted = unlimited (what it has always done): every note played while the pedal is down rings until the pedal comes up, which is right for a piano and is what turns an organ or pad patch into a wall of sound. Set a cap and the OLDEST pedal-held note is RELEASED \u2014 through this patch's own `release`, so it fades rather than clicking \u2014 when a new note would exceed it. \u26A0\uFE0F A key you are still HOLDING is never taken; only notes the pedal alone is keeping alive can be reclaimed. Applied at the next note-on, so setting it never yanks a note already sounding. Any value above the 16-voice pool means unlimited. REFUSED (not clamped) outside 1-128, so a typo cannot land as a silently-different setting. The Sampler has its own, under `sampler`."
+      ),
       sampler: samplerSchema.optional(),
       audioUnit: audioUnitSchema.optional(),
       soundBank: soundBankSchema.optional()
@@ -45285,6 +45403,7 @@ registerTool(
     cutoffHz,
     resonance,
     gain,
+    pedalHoldLimit,
     sampler,
     audioUnit,
     soundBank
@@ -45300,6 +45419,7 @@ registerTool(
       cutoffHz,
       resonance,
       gain,
+      pedalHoldLimit,
       sampler,
       audioUnit,
       soundBank
@@ -45444,6 +45564,22 @@ registerTool(
   )
 );
 registerTool(
+  "play_sustain",
+  {
+    title: "Sustain (damper) pedal \u2014 hold notes after their keys are released",
+    description: "Press or lift the SUSTAIN PEDAL (MIDI CC 64) on an instrument track. This is the answer to 'why does the sound stop the moment I lift the key' \u2014 it is exactly what the right-hand pedal on a real piano does. A piano's dampers fall onto the strings when the key comes up; the pedal holds them off, so notes keep ringing while you play the next ones and chords blend into each other. SEMANTICS, and this is what makes it a pedal rather than a switch: with `down:true`, releasing a note with note_play KEEPS IT SOUNDING. Sending `down:false` releases every note the PEDAL was holding, while notes whose keys are still down (still in your note_play set) keep sounding. Pressing a key again while the pedal is held plays a fresh note \u2014 it is never refused. ALWAYS LIFT IT WHEN YOU ARE DONE (`down:false`). A pedal left down is a drone with no visible cause. Lifting is never refused, on any track, in any state. The app lifts it for you on a panic, at the start of a take, at the end of a take, and when a project closes \u2014 so it can never outlive the take it was pressed in. TO RECORD PEDALLING: track_set_arm the instrument track, transport_record, then interleave play_sustain with note_play. The pedal moves land in the take as a CC 64 controller lane, which you can read back with clip_get_notes and which re-sustains the notes on playback. READ `recording` IN THE REPLY \u2014 IT IS THE HONESTY LIGHT: `false` means the pedal moved and went into NO take. MEASURED SUPPORT: the built-in poly synth, the built-in sampler and the hosted sound-bank (SoundFont/DLS) instruments all honour CC 64. Hosted Audio Units receive it too and honour it if the plugin does. `down` in the reply is the state AFTER the call, not an echo of your request \u2014 a press onto a track whose instrument is not loaded comes back `false`. `pushed:false` means the pedal was already in that state and nothing was sent, which is an honest no-op. The human keyboard shortcut for the same pedal is Tab, while Musical Typing is on.",
+    inputSchema: {
+      trackId: external_exports.string().describe(
+        "Id of the INSTRUMENT track to pedal (from project_snapshot). Audio and bus tracks carry no instrument and are refused \u2014 but only when pressing; lifting is always allowed."
+      ),
+      down: external_exports.boolean().describe(
+        "true presses the pedal (CC 64 = 127) so notes ring on after their keys are released; false lifts it and releases everything the pedal was holding."
+      )
+    }
+  },
+  async ({ trackId, down }) => toToolResult(() => bridge.send("play.sustain", { trackId, down }))
+);
+registerTool(
   "note_play",
   {
     title: "Play notes live and HOLD them (recordable into a take)",
@@ -45517,6 +45653,49 @@ registerTool(
   )
 );
 registerTool(
+  "playbox_generate",
+  {
+    title: "Playbox: pre-generate chord lights for a human to play (read-only)",
+    description: "PLAYBOX (m34-g). Produce a chord progression, as scale degrees, that a HUMAN then plays on the app's on-screen Musical Typing keyboard. THIS INVERTS THE USUAL RELATIONSHIP AND THAT IS THE POINT: you produce the INVITATION, the user produces the PERFORMANCE. The take is theirs, played on the keys and captured through the ordinary live-record path. Do not follow this with clip_set_notes to 'play it for them' unless they asked you to \u2014 that deletes the entire value of the feature. READ-ONLY AND SILENT: it returns degrees. It lights nothing, sounds nothing, records nothing, edits no clip and needs no track. IT RESPECTS THE PROJECT: tempo defaults to the transport's and the section defaults to the marker at or before the playhead, so a Playbox sequence fits the arrangement macro_song_skeleton already established. IT WORKS WITHOUT AN API KEY, and it tells you when it did: `source` is `ai` when a configured Anthropic/OpenAI model wrote it and `local` when the built-in progression library did instead (no key configured, a provider error, or an answer that was not a usable diatonic progression). `detail` names the provider or the library progression; `reason` says why the local path ran. Report which one produced the chords rather than crediting the AI for a stock progression. CHORDS ONLY \u2014 melody generation needs a different light grammar and is deliberately out of scope. TO SHOW THE LIGHTS the user opens Musical Typing, switches it to CHORDS and presses PLAYBOX; the app calls this same generator behind that button. Returned `degrees` are 1-7 scale degrees: [1,5,6,4] is the four chords of pop, [1,6,4,5] the '50s doo-wop turnaround, [2,5,1] the jazz cadence. Hand them to chord_voice if you want the actual pitches.",
+    inputSchema: {
+      keyTonic: external_exports.number().int().optional().describe(
+        "Tonic as a pitch class, 0 = C, 7 = G. Defaults to 0. Values outside 0-11 wrap."
+      ),
+      keyMode: external_exports.enum(["major", "minor"]).optional().describe(
+        "The scale. Defaults to major. The answer is constrained to it, so asking for minor here is what keeps the app from switching the user's scale out from under them."
+      ),
+      bars: external_exports.number().int().min(2).max(16).optional().describe("How many chords, one per bar. Defaults to 4."),
+      tempoBPM: external_exports.number().optional().describe("Overrides the project's own tempo, which is the default."),
+      section: external_exports.string().optional().describe(
+        "Overrides the section name, which otherwise comes from the marker at or before the playhead (e.g. Chorus)."
+      ),
+      style: external_exports.string().optional().describe("Free-text style hint, e.g. dreamy indie, 90s pop-punk."),
+      preferLocal: external_exports.boolean().optional().describe(
+        "Skip the AI leg and use the built-in library directly. Use it when you want a fast, offline, reproducible answer rather than a model call. Defaults to false."
+      )
+    }
+  },
+  async ({
+    keyTonic,
+    keyMode,
+    bars,
+    tempoBPM,
+    section,
+    style,
+    preferLocal
+  }) => toToolResult(
+    () => bridge.send("playbox.generate", {
+      keyTonic,
+      keyMode,
+      bars,
+      tempoBPM,
+      section,
+      style,
+      preferLocal
+    })
+  )
+);
+registerTool(
   "pad_preview_effort",
   {
     title: "Breath pad: stream an effort value live (preview, not an edit)",
@@ -45543,6 +45722,35 @@ registerTool(
     expressionCC
   }) => toToolResult(
     () => bridge.send("pad.previewEffort", { trackId, gesture, value, expressionCC })
+  )
+);
+registerTool(
+  "pad_play_effort",
+  {
+    title: "Breath pad: PERFORM an effort value live, and record it into the take",
+    description: "Stream ONE breath-pad effort value (0-1, 'how hard is the player blowing right now') to an instrument track as a live MIDI controller AND, when a take is rolling on that ARMED instrument track, record it into the take's controller lane. THIS IS THE PERFORMANCE VERB. Its only difference from pad_preview_effort is that it is NOT refused while recording and its values are KEPT: what you shape during a take is in the take, and therefore in the bounce. Use pad_preview_effort to audition a shape without leaving a trace; use this one when the gesture IS the performance. WHEN IT RECORDS, EXACTLY: the transport must be recording, the target track must be ARMED, and it must be an instrument track. Otherwise the value simply sounds and is kept nowhere, which the reply says out loud \u2014 `recording` is the ENGINE's own answer to 'is this being kept', not a prediction, and `capturedPoints` counts what THIS call put in the take (0 when the 30 Hz rate cap or the unchanged-value filter coalesced the call away, which is normal during a fast drag). GESTURE-SCOPED, AND THE SCOPING IS THE POINT: send `gesture:\"begin\"` once, then `gesture:\"move\"` as the value changes, then `gesture:\"end\"` exactly once, naming THE SAME trackId. A `move` or `end` with no `begin` open \u2014 or naming a different track than the open gesture \u2014 is REFUSED. `end` DOES NOT LEAVE YOUR LAST VALUE ON THE STRIP: it restores the controller to its neutral default (127 for CC 11, expression), and when the gesture was being recorded that neutral is recorded too \u2014 so the take contains what you actually heard rather than staying stuck at the last value you performed. If you start a gesture, ALWAYS end it. A take that is started WHILE a gesture is open releases that gesture first, so a performance always begins from a known strip. WHAT THIS DOES AND DOES NOT MOVE: effort rides CC 11 (expression). On the built-in sampler that moves loudness always, and brightness only when the track's sampler `expressionFilterDepth` is above 0. On a hosted Audio Unit or sound bank \u2014 where a GM sax lives \u2014 CC 11 was MEASURED to be exactly a gain and NOT a filter, so do not promise a timbre change there. Refused on audio or bus tracks. Read the result back with project_snapshot: the clip's `controllerLanes` will carry a `cc` lane for controller 11.",
+    inputSchema: {
+      trackId: external_exports.string().describe(
+        "Id of the INSTRUMENT track to perform on (from project_snapshot). Audio and bus tracks carry no instrument and are refused. It must be ARMED, and the transport recording, for the values to be kept."
+      ),
+      gesture: external_exports.enum(["begin", "move", "end"]).describe(
+        "Where this call sits in the gesture. 'begin' opens streaming, 'move' updates the value, 'end' closes it and restores the controller to neutral. A 'move' with no 'begin' open is refused."
+      ),
+      value: external_exports.number().min(0).max(1).optional().describe(
+        "Effort, 0-1: 0 is barely blowing, 1 is full pressure. Required for 'begin' and 'move'; ignored for 'end', which always restores neutral."
+      ),
+      expressionCC: external_exports.number().int().min(0).max(127).optional().describe(
+        "Which CC carries the performance. Defaults to 11 (expression) \u2014 the same default clip_apply_effort_shape writes, so a performed lane and a committed shape land on one lane."
+      )
+    }
+  },
+  async ({
+    trackId,
+    gesture,
+    value,
+    expressionCC
+  }) => toToolResult(
+    () => bridge.send("pad.playEffort", { trackId, gesture, value, expressionCC })
   )
 );
 server.registerTool(
@@ -45587,6 +45795,44 @@ registerTool(
   },
   async ({ path: path6 }) => toToolResult(() => bridge.send("instrument.importSoundBank", { path: path6 }))
 );
+server.registerTool(
+  "instrument_list_downloadable_sound_banks",
+  {
+    title: "List sound banks DAW Pro can download for the user",
+    description: 'List the sound banks DAW Pro can fetch in one click, with their licence terms. No params, no network \u2014 this is a built-in catalogue plus one directory scan, so it is safe offline and cheap to poll. USE THIS when the user asks for a sound the built-in General MIDI bank does not have: stock macOS ships exactly ONE drum kit, so a brief asking for brushes, marching percussion, or a second kit of any kind cannot be honoured until a bigger bank is installed. Each entry has: `id` (pass to instrument_download_sound_bank); `name`; `summary` (one plain sentence on what the user gets); `sizeBytes` and `sizeDescription` (e.g. "206 MB" \u2014 say the size out loud before starting a download this large); `licence` and `attribution` (the terms the bank is offered under and the copyright line to credit \u2014 quote these verbatim, never paraphrase a licence); `url`; `fileName`; `sha256`; `installed` (true when it is already in the library, in which case a download would be REFUSED) and `installedPath` when it is. \u26A0\uFE0F `sha256` is an INTEGRITY pin against corruption and truncation, SELF-COMPUTED by this project from its own download \u2014 it is NOT a publisher signature and does NOT establish authenticity or provenance. Do not describe it to the user as verifying where the file came from.'
+  },
+  async () => toToolResult(() => bridge.send("instrument.listDownloadableSoundBanks"))
+);
+registerTool(
+  "instrument_download_sound_bank",
+  {
+    title: "Start downloading a sound bank",
+    description: 'Start downloading one of the banks from instrument_list_downloadable_sound_banks and install it into the user\'s sound-bank library. RETURNS IMMEDIATELY \u2014 this does NOT wait for the (roughly 216 MB) transfer. Poll `instrument_sound_bank_download_status` for progress and the terminal outcome, and `instrument_cancel_sound_bank_download` to stop it. \u26A0\uFE0F A successful response from THIS tool means the request was ACCEPTED, never that a bank is installed \u2014 only `state: "succeeded"` from the status tool means that, and only then should you tell the user the sounds are available. An unknown `id` is refused right here; every OTHER failure (no disk space, the bank is already installed, a truncated transfer, a checksum mismatch, a file that installs but cannot be read as a SoundFont) is discoverable ONLY by polling. ONE download runs at a time across the whole app, INCLUDING one the user started from the instrument picker: a second call while one is in flight is REFUSED, never queued and never merged. Tell the user the size and the licence (from instrument_list_downloadable_sound_banks) BEFORE starting: this is their bandwidth and their disk. Response is the same shape the status tool returns.',
+    inputSchema: {
+      id: external_exports.string().min(1).describe(
+        'The catalogue id to download, exactly as returned by instrument_list_downloadable_sound_banks (e.g. "musescore-general").'
+      )
+    }
+  },
+  async ({ id }) => toToolResult(() => bridge.send("instrument.downloadSoundBank", { id }))
+);
+server.registerTool(
+  "instrument_sound_bank_download_status",
+  {
+    title: "Poll the current or most recent sound-bank download",
+    description: 'Poll the sound-bank download started by `instrument_download_sound_bank` (or by the user in the instrument picker \u2014 they share one slot, so there is nothing to name and this tool takes no parameters). Response: {state: "idle"|"downloading"|"succeeded"|"failed"|"cancelled", bankID?, bankName?, cancelRequested (true once a cancel has been asked for and the job has not yet stopped \u2014 say "cancelling", not "cancelled", while this is true), progress?: {phase: "preparing"|"downloading"|"verifying"|"installing"|"finished", bankID, phaseFraction, completedBytes, totalBytes}, bank?: {source, name, path, format, builtin, sizeBytes}, errorMessage?}. `phaseFraction` is 0-1 WITHIN the current phase, NOT overall progress \u2014 report the phase name alongside it rather than presenting it as a whole-job percentage. `progress` may be ABSENT even while downloading if nothing has ticked yet, so a missing `progress` is not a hang. `bank` appears only on "succeeded" and is an ordinary sound bank entry: pass its `source` straight to instrument_list_sound_bank_programs or track_set_instrument. `errorMessage` on "failed" is a complete, user-readable sentence \u2014 relay it as written rather than summarising it, and note that a failed or cancelled download leaves NOTHING in the library (no partial file is ever kept).'
+  },
+  async () => toToolResult(() => bridge.send("instrument.soundBankDownloadStatus"))
+);
+registerTool(
+  "instrument_cancel_sound_bank_download",
+  {
+    title: "Cancel the sound-bank download in progress",
+    description: 'Ask the running sound-bank download to stop. No params \u2014 there is one download slot for the whole app. Refused when nothing is running, rather than quietly succeeding. \u26A0\uFE0F THE RESPONSE STILL SAYS `state: "downloading"`, ON PURPOSE, with `cancelRequested: true`: cancellation is REQUESTED here and OBSERVED by polling `instrument_sound_bank_download_status`. The partial file is not gone until the job unwinds, so do not tell the user it stopped until the state reads "cancelled" \u2014 that is the moment nothing is left on disk.',
+    inputSchema: {}
+  },
+  async () => toToolResult(() => bridge.send("instrument.cancelSoundBankDownload"))
+);
 registerTool(
   "instrument_import_sample_library",
   {
@@ -45618,7 +45864,7 @@ registerTool(
   "instrument_describe_sampler",
   {
     title: "Read a track's Sampler configuration (read-only)",
-    description: "Read the built-in Sampler's configuration on an instrument track \u2014 the ANSWER to 'which library is loaded and how is it mapped' without paying for project_snapshot's whole-project cost (measured 296,809 bytes on a real song). Mirrors au_describe_params: a cheap describe you call BEFORE editing, so instrument_set_sampler_param/instrument_set_sampler_zones don't have to guess a track's current state. Works even when the track's ACTIVE instrument is something else right now \u2014 sampler configuration is carried across kind switches (like soundBank/audioUnit), so you can inspect a previously-built sampler map before switching back to it; the response's own `kind` field tells you whether `sampler` is actually the SOUNDING instrument or just preserved state. Refuses readably for an audio/bus track (only instrument tracks carry an instrument), an unknown trackId, or an instrument track that has never had a sampler configured at all (use instrument_import_sample_library or track_set_instrument {kind:\"sampler\", sampler:{zones:[...]}} first; with no sample library of your own, mount the bundled one-shot \u2014 {path: \"builtin:test-tone-a4\", rootPitch: 69} \u2014 and you have a sound) \u2014 but a sampler that IS configured with zero zones (the deliberate `zones: []` clear) is a legal answer, not a refusal: you get `zoneSummary.count: 0` back. Returns {trackId, kind, oneShot, attack, release, gain, sourcePath?, displayName?, zoneSummary, effectiveGlobals?, warnings?}. \u26A0\uFE0F READ `effectiveGlobals` BEFORE TRUSTING top-level `release`/`attack`/`oneShot`. Those three are the STORED globals, and a zone that sets its own value WINS over them \u2014 so on an imported library they are routinely numbers the engine never reads. ANY per-zone value can do this, whichever way the sampler was built: a hand-authored zone over the wire, a `.dspreset` region (whose `attack`/`release` attributes carry no special prefix), or an SFZ region/group/global (whose native opcode names are `ampeg_attack`/`ampeg_release`) \u2014 SFZ is not the only way in. (Field report 2026-08-20: this verb answered `release: 3.4465` for an instrument that audibly released in 0.5 s, because the imported SFZ authored `ampeg_release` in its `<global>` block and every region inherited it. The engine was right; the answer was not.) `effectiveGlobals` is {release, attack, oneShot}, each {global, zonesOverriding, zonesInheriting, globalIsInert, effectiveValues, effectiveMin?, effectiveMax?, effectiveValuesTruncated?, note?}. `globalIsInert: true` means NO zone inherits that global: writing it with instrument_set_sampler_param will be accepted and change nothing you can hear \u2014 change the per-zone values instead (instrument_set_sampler_zones, patching `release` / `attack` / `oneShot` per zone). `note` (present only when `globalIsInert`) says so in prose and, for `release`/`attack`, names the SFZ opcode (`ampeg_release`/`ampeg_attack`) ONLY when `sourcePath` actually ends in `.sfz` \u2014 never for a hand-built sampler or a `.dspreset` import, which would make the opcode name meaningless. Top-level `warnings` (a string array, present only when at least one global is inert) restates the same fact with BOTH the stored and the actually-applied number inline, so it is impossible to miss even for a caller that only reads the top level and never descends into `effectiveGlobals` at all. `effectiveValues` is the list of values the engine will actually apply across the zones, ascending, and is the number to quote to a user; it is meaningful in the MIXED case too (some zones overriding, some still tracking the global), which no single boolean can describe. It caps at 8 distinct values with `effectiveValuesTruncated: true`, but `effectiveMin`/`effectiveMax` stay exact. `oneShot` additionally reports `zonesWithLoopMode` when any zone loops: a looping voice is never one-shot regardless of the flag, provided its loop bounds are valid for the loaded sample (which only the engine can confirm, so it is reported rather than folded into the counts). `effectiveGlobals` is omitted entirely for a zero-zone sampler \u2014 there is no inheritance to describe, and such a sampler is silent for an unrelated reason. `sourcePath`/`displayName` (provenance from an import; `displayName` is a file STEM and therefore NOT unique \u2014 two different folders can both hold a \"Bass.sfz\", so `sourcePath` is what actually disambiguates them) appear only when set \u2014 a hand-built sampler has neither. `zoneSummary` is {count, pitchCoverage?, velocityCoverage?, groupCount, distinctSampleFiles}: `pitchCoverage`/`velocityCoverage` are each {min, max, gaps?} \u2014 the UNION of every zone's range, not a naive min/max, so a keymap with a hole in the middle is visible as a `gaps` entry INSIDE the envelope instead of silently reading as full 0-127 coverage (this is exactly the bug class the field report hit twice: a bass silent below MIDI 35, a library silent above 45). Both are omitted entirely when the sampler has zero zones. `groupCount` counts distinct layering groups (an unset zone group counts as group 0, the classic first-match default) and `distinctSampleFiles` counts unique sample audio files across all zones. The zone list itself is a SEPARATE, opt-in page: omit both `offset` and `limit` and the response has no `zones` key at all (just the summary); pass either one and you get a paged `zones` array (the exact shape track_set_instrument echoes back, ids included) plus `offset`, `limit`, `returnedZones`, and `truncated` so you know whether to page further.",
+    description: "Read the built-in Sampler's configuration on an instrument track \u2014 the ANSWER to 'which library is loaded and how is it mapped' without paying for project_snapshot's whole-project cost (measured 296,809 bytes on a real song). Mirrors au_describe_params: a cheap describe you call BEFORE editing, so instrument_set_sampler_param/instrument_set_sampler_zones don't have to guess a track's current state. Works even when the track's ACTIVE instrument is something else right now \u2014 sampler configuration is carried across kind switches (like soundBank/audioUnit), so you can inspect a previously-built sampler map before switching back to it; the response's own `kind` field tells you whether `sampler` is actually the SOUNDING instrument or just preserved state. Refuses readably for an audio/bus track (only instrument tracks carry an instrument), an unknown trackId, or an instrument track that has never had a sampler configured at all (use instrument_import_sample_library or track_set_instrument {kind:\"sampler\", sampler:{zones:[...]}} first; with no sample library of your own, mount the bundled one-shot \u2014 {path: \"builtin:test-tone-a4\", rootPitch: 69} \u2014 and you have a sound) \u2014 but a sampler that IS configured with zero zones (the deliberate `zones: []` clear) is a legal answer, not a refusal: you get `zoneSummary.count: 0` back. Returns {trackId, kind, oneShot, attack, release, gain, sourcePath?, displayName?, zoneSummary, effectiveGlobals?, warnings?}, plus whichever of the ONLY-WHEN-SET globals this sampler has actually been given: expressionModDepth?, expressionFilterDepth?, expressionFilterCC?, bendRangeSemitones?, voiceMode?, pedalHoldLimit?. An absent key there means UNSET (i.e. that global's default), not zero. \u26A0\uFE0F READ `effectiveGlobals` BEFORE TRUSTING top-level `release`/`attack`/`oneShot`. Those three are the STORED globals, and a zone that sets its own value WINS over them \u2014 so on an imported library they are routinely numbers the engine never reads. ANY per-zone value can do this, whichever way the sampler was built: a hand-authored zone over the wire, a `.dspreset` region (whose `attack`/`release` attributes carry no special prefix), or an SFZ region/group/global (whose native opcode names are `ampeg_attack`/`ampeg_release`) \u2014 SFZ is not the only way in. (Field report 2026-08-20: this verb answered `release: 3.4465` for an instrument that audibly released in 0.5 s, because the imported SFZ authored `ampeg_release` in its `<global>` block and every region inherited it. The engine was right; the answer was not.) `effectiveGlobals` is {release, attack, oneShot}, each {global, zonesOverriding, zonesInheriting, globalIsInert, effectiveValues, effectiveMin?, effectiveMax?, effectiveValuesTruncated?, note?}. `globalIsInert: true` means NO zone inherits that global: writing it with instrument_set_sampler_param will be accepted and change nothing you can hear \u2014 change the per-zone values instead (instrument_set_sampler_zones, patching `release` / `attack` / `oneShot` per zone). `note` (present only when `globalIsInert`) says so in prose and, for `release`/`attack`, names the SFZ opcode (`ampeg_release`/`ampeg_attack`) ONLY when `sourcePath` actually ends in `.sfz` \u2014 never for a hand-built sampler or a `.dspreset` import, which would make the opcode name meaningless. Top-level `warnings` (a string array, present only when at least one global is inert) restates the same fact with BOTH the stored and the actually-applied number inline, so it is impossible to miss even for a caller that only reads the top level and never descends into `effectiveGlobals` at all. `effectiveValues` is the list of values the engine will actually apply across the zones, ascending, and is the number to quote to a user; it is meaningful in the MIXED case too (some zones overriding, some still tracking the global), which no single boolean can describe. It caps at 8 distinct values with `effectiveValuesTruncated: true`, but `effectiveMin`/`effectiveMax` stay exact. `oneShot` additionally reports `zonesWithLoopMode` when any zone loops: a looping voice is never one-shot regardless of the flag, provided its loop bounds are valid for the loaded sample (which only the engine can confirm, so it is reported rather than folded into the counts). `effectiveGlobals` is omitted entirely for a zero-zone sampler \u2014 there is no inheritance to describe, and such a sampler is silent for an unrelated reason. `sourcePath`/`displayName` (provenance from an import; `displayName` is a file STEM and therefore NOT unique \u2014 two different folders can both hold a \"Bass.sfz\", so `sourcePath` is what actually disambiguates them) appear only when set \u2014 a hand-built sampler has neither. `zoneSummary` is {count, pitchCoverage?, velocityCoverage?, groupCount, distinctSampleFiles}: `pitchCoverage`/`velocityCoverage` are each {min, max, gaps?} \u2014 the UNION of every zone's range, not a naive min/max, so a keymap with a hole in the middle is visible as a `gaps` entry INSIDE the envelope instead of silently reading as full 0-127 coverage (this is exactly the bug class the field report hit twice: a bass silent below MIDI 35, a library silent above 45). Both are omitted entirely when the sampler has zero zones. `groupCount` counts distinct layering groups (an unset zone group counts as group 0, the classic first-match default) and `distinctSampleFiles` counts unique sample audio files across all zones. The zone list itself is a SEPARATE, opt-in page: omit both `offset` and `limit` and the response has no `zones` key at all (just the summary); pass either one and you get a paged `zones` array (the exact shape track_set_instrument echoes back, ids included) plus `offset`, `limit`, `returnedZones`, and `truncated` so you know whether to page further.",
     inputSchema: {
       trackId: external_exports.string().min(1).describe("Id of the instrument track to describe, from project_snapshot."),
       offset: external_exports.number().int().min(0).optional().describe(
@@ -45661,26 +45907,29 @@ registerTool(
 var samplerGlobalParamSchema = external_exports.enum([
   "oneShot",
   "attack",
+  "decay",
+  "sustain",
   "release",
   "gain",
   "expressionModDepth",
   "expressionFilterDepth",
   "expressionFilterCC",
   "bendRangeSemitones",
-  "voiceMode"
+  "voiceMode",
+  "pedalHoldLimit"
 ]).describe(
-  "Which Sampler GLOBAL to set \u2014 exactly one per call, matching one of the nine fields track_set_instrument's own `sampler` object carries at this level (everything else there, i.e. `zones`, is per-zone and out of reach of this narrower tool). `oneShot` (boolean): true = every triggered sample always plays to completion regardless of note-off (drum hits and other percussive one-shots); false = the sample follows note-off, fading out over `release` seconds, like a sustained instrument. `attack` (seconds, number, clamps 0-1): how long a triggered note takes to reach full volume. `release` (seconds, number, clamps 0.001-8): how long the sample fades to silence after note-off \u2014 ignored while `oneShot` is true. `gain` (0-1, number): the sampler's overall output level, separate from each zone's own `gain` and from the track fader (track_set_volume). `expressionModDepth` (0-1, number): how far CC 1 (mod wheel) / CC 2 (breath) attenuate loudness \u2014 NIL/0 IS OFF (the attenuator is skipped, not run at neutral), so a CC1/CC2 controller lane does nothing audible on this track's Sampler until this is set above 0. `expressionFilterDepth` (0-1, number): how far the expression controller sweeps a per-voice brightness (low-pass) filter \u2014 NIL/0 IS OFF, the filter branch is skipped entirely, not run at unity. `expressionFilterCC` (integer 0-127): which CC drives that filter sweep; omitted/nil = 11 (expression, the same controller that already drives loudness) \u2014 set it to 1 or 2 to drive brightness from mod wheel/breath instead. `bendRangeSemitones` (number 0-48): how many semitones a full pitch-bend deflection moves the note; omitted/nil = 2 (the General MIDI default, and what every already-authored bend lane assumes) \u2014 6 is the measured saturation point for expressive wind writing. `voiceMode` (STRING, \"poly\" or \"mono\" \u2014 the one param here that takes a string): `mono` is last-note priority, for sax/flute/solo-lead lines. See track_set_instrument's `sampler` object for the full field-by-field description of each."
+  "Which Sampler GLOBAL to set \u2014 exactly one per call, matching one of the twelve fields track_set_instrument's own `sampler` object carries at this level (everything else there, i.e. `zones`, is per-zone and out of reach of this narrower tool). `oneShot` (boolean): true = every triggered sample always plays to completion regardless of note-off (drum hits and other percussive one-shots); false = the sample follows note-off, fading out over `release` seconds, like a sustained instrument. `attack` (seconds, number, clamps 0-1): how long a triggered note takes to reach full volume. `decay` (seconds, number, 0-8) and `sustain` (0-1) TOGETHER decide whether a HELD note fades: `decay` is how long it falls from full level to `sustain` while the key is still down; `sustain` is the level it settles at. The defaults 0 and 1 mean NO decay stage \u2014 hold at full level \u2014 which is CORRECT for organs and pads and WRONG for pianos. A piano fades even under the sustain pedal (the pedal only stops the damper falling; it does not feed the string), so give a piano-like patch a decay of a few seconds and a sustain near 0. THE INSTRUMENT DECIDES. `release` (seconds, number, clamps 0.001-8): how long the sample fades to silence after note-off \u2014 ignored while `oneShot` is true. `gain` (0-1, number): the sampler's overall output level, separate from each zone's own `gain` and from the track fader (track_set_volume). `expressionModDepth` (0-1, number): how far CC 1 (mod wheel) / CC 2 (breath) attenuate loudness \u2014 NIL/0 IS OFF (the attenuator is skipped, not run at neutral), so a CC1/CC2 controller lane does nothing audible on this track's Sampler until this is set above 0. `expressionFilterDepth` (0-1, number): how far the expression controller sweeps a per-voice brightness (low-pass) filter \u2014 NIL/0 IS OFF, the filter branch is skipped entirely, not run at unity. `expressionFilterCC` (integer 0-127): which CC drives that filter sweep; omitted/nil = 11 (expression, the same controller that already drives loudness) \u2014 set it to 1 or 2 to drive brightness from mod wheel/breath instead. `bendRangeSemitones` (number 0-48): how many semitones a full pitch-bend deflection moves the note; omitted/nil = 2 (the General MIDI default, and what every already-authored bend lane assumes) \u2014 6 is the measured saturation point for expressive wind writing. `voiceMode` (STRING, \"poly\" or \"mono\" \u2014 the one param here that takes a string): `mono` is last-note priority, for sax/flute/solo-lead lines. `pedalHoldLimit` (INTEGER 1-128): how many notes the SUSTAIN PEDAL (CC 64) keeps ringing; omitted/nil = unlimited, today's behaviour \u2014 the reason an organ or pad patch under a latched pedal becomes a wall of sound. With a cap set, the OLDEST PEDAL-HELD note is RELEASED (fades through `release`, never cut) when a new note would exceed it, and a key you are still holding is NEVER taken. Applied at the next note-on. Any value above the 64-voice pool means unlimited; 4-8 suits an organ or pad. See track_set_instrument's `sampler` object for the full field-by-field description of each."
 );
 registerTool(
   "instrument_set_sampler_param",
   {
-    title: "Set one Sampler global (oneShot/attack/release/gain/expression*/bend range/voice mode)",
-    description: "Set exactly ONE global knob on a track's built-in Sampler \u2014 `oneShot`, `attack`, `release`, `gain`, `expressionModDepth`, `expressionFilterDepth`, `expressionFilterCC`, `bendRangeSemitones` or `voiceMode` \u2014 without touching anything else on the sampler. This is a thin, narrower wrapper around track_set_instrument {sampler: {<param>: value}}: the whole reason it exists is so you don't have to know that a partial sampler update is safe (added m26-g/h) \u2014 this call is GUARANTEED to leave the track's zones, `sourcePath`, and `displayName` exactly as they were, no matter which global you set or what an imported library's zone count is (tuning `release` on a 309-zone library through this tool can never touch a single zone). Has no audible effect unless the track's active instrument kind is `sampler` (see instrument_describe_sampler's `kind` field), though the value is still stored and takes effect the next time it is. Sending a boolean for a numeric param (or vice versa) is a readable error naming the mismatch. Out-of-range numbers clamp silently for the six original numeric params, through the same ranges track_set_instrument uses; `bendRangeSemitones` and `voiceMode` instead REFUSE an out-of-range number / unrecognised mode with a readable error, so a typo cannot land as a silently-different setting (see `param`'s own description for each range). Returns the full resolved instrument object, same shape as track_set_instrument.",
+    title: "Set one Sampler global (oneShot/attack/release/gain/expression*/bend range/voice mode/pedal hold limit)",
+    description: "Set exactly ONE global knob on a track's built-in Sampler \u2014 `oneShot`, `attack`, `release`, `gain`, `expressionModDepth`, `expressionFilterDepth`, `expressionFilterCC`, `bendRangeSemitones`, `voiceMode` or `pedalHoldLimit` \u2014 without touching anything else on the sampler. This is a thin, narrower wrapper around track_set_instrument {sampler: {<param>: value}}: the whole reason it exists is so you don't have to know that a partial sampler update is safe (added m26-g/h) \u2014 this call is GUARANTEED to leave the track's zones, `sourcePath`, and `displayName` exactly as they were, no matter which global you set or what an imported library's zone count is (tuning `release` on a 309-zone library through this tool can never touch a single zone). Has no audible effect unless the track's active instrument kind is `sampler` (see instrument_describe_sampler's `kind` field), though the value is still stored and takes effect the next time it is. Sending a boolean for a numeric param (or vice versa) is a readable error naming the mismatch. Out-of-range numbers clamp silently for the six original numeric params, through the same ranges track_set_instrument uses; `bendRangeSemitones`, `voiceMode` and `pedalHoldLimit` instead REFUSE an out-of-range number / unrecognised mode with a readable error, so a typo cannot land as a silently-different setting (see `param`'s own description for each range). Returns the full resolved instrument object, same shape as track_set_instrument.",
     inputSchema: {
       trackId: external_exports.string().min(1).describe("Id of the instrument track, from project_snapshot."),
       param: samplerGlobalParamSchema,
       value: external_exports.union([external_exports.number(), external_exports.boolean(), external_exports.string()]).describe(
-        'The new value: a boolean for `param: "oneShot"`, the string "poly" or "mono" for `param: "voiceMode"`, and a number for every other `param` (seconds for `attack`/`release`, a 0-1 level for `gain`/`expressionModDepth`/`expressionFilterDepth`, an integer CC 0-127 for `expressionFilterCC`, semitones 0-48 for `bendRangeSemitones`). See `param`\'s description for which type and range applies.'
+        'The new value: a boolean for `param: "oneShot"`, the string "poly" or "mono" for `param: "voiceMode"`, and a number for every other `param` (seconds for `attack`/`release`, a 0-1 level for `gain`/`expressionModDepth`/`expressionFilterDepth`, an integer CC 0-127 for `expressionFilterCC`, semitones 0-48 for `bendRangeSemitones`, a note count 1-128 for `pedalHoldLimit`). See `param`\'s description for which type and range applies.'
       )
     }
   },

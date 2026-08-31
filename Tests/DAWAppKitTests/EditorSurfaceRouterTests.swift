@@ -165,6 +165,125 @@ struct EditorSurfaceRouterTests {
         }
     }
 
+    // MARK: - openSurface — the OPEN-ness verdict (m34-d)
+
+    /// ⭐ **THE SECOND VERDICT, AND WHY IT EXISTS.** The user ruled on ⌘A
+    /// 2026-08-30, verbatim: ***"Make it work whenever the editor is open."***
+    /// `resolve` answers "which surface is the user WORKING IN"; this answers
+    /// "which surface is OPEN IN FRONT OF THEM", and the two deliberately
+    /// disagree in exactly the state the user reported as a bug.
+    @Test("openSurface sweeps its full 2×2 table, asserting BOTH the surface and the reason")
+    func openSurfaceTruthTable() {
+        let rows: [(workspaceIsArrange: Bool, rollOpen: Bool,
+                    surface: EditorSurface, reason: OpenEditorSurface.Reason)] = [
+            // The MIX CONSOLE first — the term `EditorSurfaceRouter` calls the
+            // easiest thing to drop, and the one a bare `openEditorClip != nil`
+            // silently loses.
+            (false, false, .arrange, .notArrangeWorkspace),
+            (false, true, .arrange, .notArrangeWorkspace),
+            // Arrange workspace, nothing open.
+            (true, false, .arrange, .noRollOpen),
+            // ⭐ THE m34-d ROW: open is open, with no engagement asked for.
+            (true, true, .pianoRoll, .rollOpen),
+        ]
+        #expect(rows.count == 4)
+        let keys = Set(rows.map { "\($0.workspaceIsArrange)/\($0.rollOpen)" })
+        #expect(keys.count == 4, "the table must cover each input pair exactly once")
+
+        for row in rows {
+            let got = EditorSurfaceRouter.openSurface(
+                workspaceIsArrange: row.workspaceIsArrange, rollOpen: row.rollOpen)
+            let label = "workspaceIsArrange=\(row.workspaceIsArrange) rollOpen=\(row.rollOpen)"
+            // Field-by-field, for `fullTruthTable`'s reason: `OpenEditorSurface`'s
+            // init is `fileprivate` and widening it to make `==` convenient would
+            // destroy the mechanism keeping a divergent verdict unrepresentable.
+            #expect(got.surface == row.surface, "surface — \(label)")
+            #expect(got.reason == row.reason, "reason — \(label)")
+        }
+    }
+
+    /// ⭐⭐ **THE DISAGREEMENT IS THE FEATURE, AND IT IS PINNED IN BOTH
+    /// DIRECTIONS.** In exactly one state — arrange workspace, roll open, arrange
+    /// most recently engaged — the two verdicts must differ: that is the first
+    /// press the user reported. In every other state they must AGREE, because a
+    /// second point of divergence would be a bug nobody ruled on.
+    @Test("openSurface and resolve differ in EXACTLY the m34-d state, and nowhere else")
+    func theTwoVerdictsDivergeOnlyOnTheFirstPress() {
+        var divergences: [String] = []
+        for workspace in [true, false] {
+            for open in [true, false] {
+                for engaged in EditorSurface.allCases {
+                    let active = EditorSurfaceRouter.resolve(
+                        workspaceIsArrange: workspace, rollOpen: open, lastEngaged: engaged)
+                    let mounted = EditorSurfaceRouter.openSurface(
+                        workspaceIsArrange: workspace, rollOpen: open)
+                    if active.surface != mounted.surface {
+                        divergences.append("\(workspace)/\(open)/\(engaged)")
+                    }
+                }
+            }
+        }
+        // ⚠️ ANTI-VACUITY: a `openSurface` hardwired to `.arrange` would produce
+        // ZERO divergences and pass a "they never disagree" test. Requiring the
+        // exact row makes that mutant red.
+        #expect(divergences == ["true/true/arrange"],
+                "expected divergence in exactly the first-press state; got \(divergences)")
+    }
+
+    @Test("every openSurface Reason is reachable — no term is dead")
+    func everyOpenReasonIsReachable() {
+        var seen: Set<OpenEditorSurface.Reason> = []
+        for workspace in [true, false] {
+            for open in [true, false] {
+                seen.insert(EditorSurfaceRouter.openSurface(
+                    workspaceIsArrange: workspace, rollOpen: open).reason)
+            }
+        }
+        #expect(seen == Set(OpenEditorSurface.Reason.allCases))
+    }
+
+    @Test("openSurface's reason is never inconsistent with the surface it accompanies")
+    func openReasonAndSurfaceAgree() {
+        for workspace in [true, false] {
+            for open in [true, false] {
+                let got = EditorSurfaceRouter.openSurface(
+                    workspaceIsArrange: workspace, rollOpen: open)
+                switch got.reason {
+                case .rollOpen: #expect(got.surface == .pianoRoll)
+                case .notArrangeWorkspace, .noRollOpen: #expect(got.surface == .arrange)
+                }
+            }
+        }
+    }
+
+    /// ⭐ **`resolve` IS IMPLEMENTED ON TOP OF `openSurface`, AND THIS IS THE
+    /// BEHAVIOURAL PIN ON THAT REFACTOR** — the two share their first two terms
+    /// by construction, so a change to either must move both. Stated as an
+    /// invariant rather than as a source-shape check: what matters is that the
+    /// answers cannot drift, not how the file is spelled.
+    @Test("the two verdicts agree on the shared terms — one computation, two questions")
+    func theSharedTermsCannotDrift() {
+        for workspace in [true, false] {
+            for open in [true, false] {
+                let mounted = EditorSurfaceRouter.openSurface(
+                    workspaceIsArrange: workspace, rollOpen: open)
+                for engaged in EditorSurface.allCases {
+                    let active = EditorSurfaceRouter.resolve(
+                        workspaceIsArrange: workspace, rollOpen: open, lastEngaged: engaged)
+                    switch mounted.reason {
+                    case .notArrangeWorkspace:
+                        #expect(active.reason == .notArrangeWorkspace)
+                    case .noRollOpen:
+                        #expect(active.reason == .noRollOpen)
+                    case .rollOpen:
+                        // Only here may the latch speak at all.
+                        #expect(active.reason == .engagedArrange || active.reason == .engagedRoll)
+                    }
+                }
+            }
+        }
+    }
+
     // MARK: - The wire contract
 
     @Test("EditorSurface round-trips its rawValue — the wire depends on it")
@@ -187,6 +306,25 @@ struct EditorSurfaceRouterTests {
         #expect(ActiveEditorSurface.Reason.engagedArrange.rawValue == "engagedArrange")
         #expect(ActiveEditorSurface.Reason.engagedRoll.rawValue == "engagedRoll")
         #expect(ActiveEditorSurface.Reason.allCases.count == 4)
+    }
+
+    /// ⚠️ **NOT ON THE WIRE TODAY, AND PINNED ANYWAY (m34-d).** Nothing echoes
+    /// `OpenEditorSurface.Reason` yet — this item added ZERO wire commands and no
+    /// new echo field. The spellings are pinned so that the day a seam does
+    /// publish them, the strings are already contract rather than whatever a
+    /// later rename left behind; the two shared with `ActiveEditorSurface.Reason`
+    /// are deliberately IDENTICAL so a reader can line the two verdicts up.
+    @Test("openSurface Reason rawValues are stable, and share the two names they mean to")
+    func openReasonRawValues() {
+        #expect(OpenEditorSurface.Reason.notArrangeWorkspace.rawValue == "notArrangeWorkspace")
+        #expect(OpenEditorSurface.Reason.noRollOpen.rawValue == "noRollOpen")
+        #expect(OpenEditorSurface.Reason.rollOpen.rawValue == "rollOpen")
+        #expect(OpenEditorSurface.Reason.allCases.count == 3)
+        // The shared pair really is shared, spelling for spelling.
+        #expect(OpenEditorSurface.Reason.notArrangeWorkspace.rawValue
+                == ActiveEditorSurface.Reason.notArrangeWorkspace.rawValue)
+        #expect(OpenEditorSurface.Reason.noRollOpen.rawValue
+                == ActiveEditorSurface.Reason.noRollOpen.rawValue)
     }
 
     // MARK: - The latch

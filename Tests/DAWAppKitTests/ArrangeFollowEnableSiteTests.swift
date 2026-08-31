@@ -18,6 +18,15 @@ import DAWAppKit
 ///   1. `followArrangeTick()`     → `arrangeFollow.target(isEnabled:…)`   (the ISSUER)
 ///   2. `reportArrangeHScroll(_:)` → `arrangeFollow.reportOffset(_:isEnabled:…)` (the DETECTOR)
 ///
+/// ⭐⭐ **m34-a-3 ADDED A SECOND PAIR WITH THE IDENTICAL SHAPE**, on the arrange's
+/// VERTICAL axis, and it is pinned here rather than in a new file precisely
+/// because it is the same failure:
+///
+///   3. `followArrangeVerticalTick()` → `arrangeVFollow.rowRevealTarget(isEnabled:…)` (ISSUER)
+///   4. `reportArrangeVScroll(_:contentHeight:)` → `arrangeVFollow.reportOffset(_:isEnabled:…)` (DETECTOR)
+///
+/// on `arrangeVerticalFollowEnabled` (`arrangeFollowEnabled && isRecording`).
+///
 /// ⛔⛔ **A DISAGREEMENT BETWEEN THEM IS A SILENT, SELF-INFLICTED SUSPENSION.**
 /// `reportOffset`'s manual-scroll detector treats an offset it did not expect as
 /// the user's doing. Leave the detector on the persisted preference while the
@@ -258,5 +267,114 @@ struct ArrangeFollowEnableSiteTests {
                 """)
         #expect(body.contains("standDown()"),
                 "the take-time branch must stand the arrange down, not write the preference.")
+        // m34-a-3: BOTH axes stand down. A chip that stilled the horizontal
+        // while the vertical kept revealing rows would do half of what it says.
+        #expect(body.contains("arrangeVFollow.standDown()"),
+                "the take-time press must stand the VERTICAL axis down too — otherwise the view keeps moving under a press that meant 'hold still'.")
+    }
+
+    // MARK: - m34-a-3: the VERTICAL pair, same trap
+
+    /// ⭐ **THE VERTICAL TWIN OF THE DRIFT TEST.** Same failure, same cost: a
+    /// vertical detector on a different flag from its vertical issuer judges
+    /// follow's own reveals as the user's, blames them, and stands the axis down
+    /// on the FIRST reveal of every take.
+    @Test("both VERTICAL call sites read arrangeVerticalFollowEnabled, and neither reads another flag")
+    func bothVerticalSitesReadTheEffectiveFlag() {
+        let code = Self.codeOnly(Self.text(Self.appPath))
+
+        // NEGATIVE CONTROL FIRST — the needles must be findable.
+        let tick = Self.functionBody(code, named: "followArrangeVerticalTick")
+        let report = Self.functionBody(code, named: "reportArrangeVScroll")
+        #expect(tick != nil, "followArrangeVerticalTick() not found in \(Self.appPath) — renamed? Update this suite deliberately.")
+        #expect(report != nil, "reportArrangeVScroll(_:contentHeight:) not found in \(Self.appPath) — renamed? Update this suite deliberately.")
+        guard let tick, let report else { return }
+
+        // And prove the extractor really extracts: each body must contain the
+        // FollowPlayheadModel call it exists to make.
+        #expect(tick.contains("arrangeVFollow.rowRevealTarget("),
+                "followArrangeVerticalTick() no longer calls arrangeVFollow.rowRevealTarget( — extractor or call site moved.")
+        #expect(report.contains("arrangeVFollow.reportOffset("),
+                "reportArrangeVScroll() no longer calls arrangeVFollow.reportOffset( — extractor or call site moved.")
+
+        #expect(tick.contains("isEnabled: arrangeVerticalFollowEnabled"),
+                """
+                followArrangeVerticalTick() does not pass `isEnabled: arrangeVerticalFollowEnabled`. \
+                The ISSUER and the DETECTOR must read the same flag; see this suite's header.
+                """)
+        #expect(report.contains("isEnabled: arrangeVerticalFollowEnabled"),
+                """
+                reportArrangeVScroll() does not pass `isEnabled: arrangeVerticalFollowEnabled`. \
+                A detector on a different flag blames the user for follow's own reveals \
+                and stands the vertical axis down mid-take.
+                """)
+
+        // ⛔ AND NEITHER MAY BE ON THE HORIZONTAL FLAG OR THE RAW PREFERENCE.
+        // `arrangeFollowEnabled` is true during plain playback whenever the
+        // preference is on — a vertical site reading it would scroll to the
+        // armed row while nothing is being recorded.
+        #expect(!tick.contains("isEnabled: arrangeFollowEnabled"),
+                "followArrangeVerticalTick() is on the HORIZONTAL flag — it would reveal rows during ordinary playback.")
+        #expect(!report.contains("isEnabled: arrangeFollowEnabled"),
+                "reportArrangeVScroll() is on the HORIZONTAL flag — issuer/detector drift.")
+        #expect(!tick.contains("isEnabled: panelLayout.followPlayhead"),
+                "followArrangeVerticalTick() is on the raw preference.")
+        #expect(!report.contains("isEnabled: panelLayout.followPlayhead"),
+                "reportArrangeVScroll() is on the raw preference.")
+    }
+
+    /// The vertical flag itself, at its ONE home — pinned separately so a
+    /// failure says WHICH half broke.
+    @Test("arrangeVerticalFollowEnabled is the horizontal flag AND a rolling take")
+    func theVerticalFlagRequiresARollingTake() {
+        let code = Self.codeOnly(Self.text(Self.appPath))
+        guard let tail = Self.computedBody(code, named: "arrangeVerticalFollowEnabled") else {
+            Issue.record("`arrangeVerticalFollowEnabled` not found in \(Self.appPath) — renamed? Update this suite deliberately.")
+            return
+        }
+        // ⛔ SCOPE CONTROL — the m34-a-1 lesson, applied in advance rather than
+        // after a mutation caught it. `arrangeVerticalFollowRow` is the very next
+        // declaration; if the extractor over-reads, every assertion below could
+        // pass on a neighbour's source.
+        #expect(!tail.contains("arrangeVerticalFollowRow"),
+                "the extractor over-read past arrangeVerticalFollowEnabled's closing brace — assertions below would be vacuous.")
+        #expect(tail.count < 200,
+                "arrangeVerticalFollowEnabled's extracted body is \(tail.count) chars — far larger than a one-line AND, so the extractor is over-reading.")
+
+        #expect(tail.contains("arrangeFollowEnabled"),
+                "arrangeVerticalFollowEnabled no longer builds on the horizontal effective flag.")
+        #expect(tail.contains("&&"),
+                "arrangeVerticalFollowEnabled is no longer a conjunction — it would follow vertically during plain playback.")
+        #expect(tail.contains("store.transport.isRecording"),
+                """
+                arrangeVerticalFollowEnabled no longer requires a rolling take. There is \
+                nothing to follow vertically except a take: the armed row is where a take \
+                LANDS, and scrolling to it during playback moves the view for no reason \
+                the user could name.
+                """)
+        #expect(!tail.contains("setFollowPlayhead("),
+                "arrangeVerticalFollowEnabled must not WRITE the preference.")
+    }
+
+    /// `rearmFollow()` must re-arm the vertical runtime too, or a mid-take
+    /// vertical stand-down outlives its take.
+    @Test("rearmFollow re-arms the vertical axis as well")
+    func rearmCoversTheVerticalAxis() {
+        let code = Self.codeOnly(Self.text(Self.appPath))
+        guard let body = Self.functionBody(code, named: "rearmFollow") else {
+            Issue.record("rearmFollow() not found — renamed? Update this suite deliberately.")
+            return
+        }
+        // Extractor control: the pre-existing surfaces must still be in there.
+        #expect(body.contains("arrangeFollow.rearm()"),
+                "rearmFollow() no longer re-arms the arrange — extractor or call site moved.")
+        #expect(body.contains("pianoRollFollow.rearm()"),
+                "rearmFollow() no longer re-arms the piano roll — extractor or call site moved.")
+
+        #expect(body.contains("arrangeVFollow.rearm()"), """
+            rearmFollow() does not re-arm the VERTICAL axis. A manual vertical scroll \
+            during one take would then keep the axis stood down for every take after it, \
+            with no user action able to explain why.
+            """)
     }
 }

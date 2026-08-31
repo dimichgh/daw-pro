@@ -18,7 +18,45 @@ import Foundation
 /// the day somebody wants one it is a product decision with a `SelectAllSurface`
 /// case to add — not a silent widening of a keystroke.
 ///
-/// ═══ WHY THIS READS `EditorSurface` AND ITS TWO SIBLINGS DO NOT ═══
+/// ═══ ⭐⭐ OVERRULED BY THE USER AT m34-d (2026-08-30) — OPEN, NOT ENGAGED ═══
+///
+/// **THIS POLICY SHIPPED ON THE ENGAGEMENT VERDICT AND THE USER REPORTED IT AS A
+/// BUG:** *"⌘A does nothing on the first press."* Opening a clip shows the roll
+/// but did not yet count as being *in* it; one click inside and ⌘A worked every
+/// time. They were shown the choice and ruled, **verbatim:**
+///
+/// > ***"Make it work whenever the editor is open."***
+///
+/// So the first guard now reads `EditorSurfaceRouter.openSurface` — "is the roll
+/// ON SCREEN" — and no longer `resolve` — "did the user last ENGAGE the roll".
+/// ⚠️ **THE PARAGRAPH THAT USED TO STAND HERE CALLED THAT BEHAVIOUR AN ACCEPTED
+/// CONSEQUENCE**, citing Logic's active-area model and "one answer, one place".
+/// It was a defensible design and it was wrong in the user's hands; it is
+/// recorded here rather than deleted so nobody re-derives it from first
+/// principles and quietly re-lands it.
+///
+/// ⭐ **WHAT MADE ⌘A SAFE TO WIDEN, WHERE ⌘+ AND ⌫ ARE NOT.** Acting on OPEN-ness
+/// means acting on a surface the user has not touched yet, so the act must be one
+/// that cannot be mistaken for an act on the *other* surface:
+///
+///   • ⌘A **has no other meaning anywhere in this app.** m25-s deliberately did
+///     not invent an arrange-wide select-all (see the scope note below, still
+///     live), so with the roll open there is nothing else ⌘A could have meant —
+///     acting immediately steals from nothing and destroys nothing.
+///   • ⌘+ / ⌘− / ⌘0 **both surfaces zoom**, so "open" would zoom the one the user
+///     is not working in. They keep `resolve`.
+///   • ⌫ **is destructive AND both surfaces claim it.** It keeps a third term
+///     again (`pianoRollWouldConsumeKey`), and m34-d deliberately did NOT change
+///     it — see the sibling section below.
+///
+/// ⚠️ **AND THE FIX IS NOT IN `resolve`.** `EditorSurfaceRouter`'s banner offers
+/// "drop the `lastEngaged` term" as the one-line overrule, and taking that line
+/// would have re-routed ⌘+/⌘−/⌘0 too, on a ruling that named one keystroke. The
+/// router grew a SECOND verdict instead, implemented on top of the first so the
+/// shared terms cannot drift. This policy still takes a VERDICT, never its terms:
+/// no `openEditorClip`, no workspace flag, no focus, no second arbitration.
+///
+/// ═══ WHY THIS READS A ROUTER VERDICT AND ITS TWO SIBLINGS DO NOT ═══
 ///
 /// `DeleteMenuPolicy` and `ClipboardMenuPolicy` route on
 /// `AppModel.pianoRollWouldConsumeKey` — "the roll is on screen AND HOLDS A NOTE
@@ -30,17 +68,18 @@ import Foundation
 /// ⭐⭐ **THAT TERM IS UNUSABLE HERE, AND THE REASON IS THE WHOLE POINT OF ⌘A: A
 /// SELECT-ALL EXISTS TO BE PRESSED WHEN NOTHING IS SELECTED.** Gating it on
 /// "already holds a note selection" would make the feature reachable only once it
-/// was unnecessary. So the discriminator has to be the OTHER question — which
-/// surface is the user working in — and this tree already has exactly one home
-/// for it (`EditorSurfaceRouter.resolve`, consumed via
-/// `AppModel.activeEditorSurface`). This policy takes its VERDICT, never its
-/// terms: no `openEditorClip`, no workspace flag, no focus, no second arbitration.
+/// was unnecessary. m34-d is the same argument one notch further out: gating it
+/// on "the user already clicked in here" made it reachable only after the gesture
+/// that would have told them where they were.
 ///
-/// The accepted consequence is `EditorSurfaceRouter`'s own, stated there and
-/// unchanged here: clicking a MIDI clip in the arrange OPENS the roll but leaves
-/// the ARRANGE engaged, so ⌘A does nothing until the user clicks into the roll.
-/// That is "most recently engaged", it matches Logic's active-area model, and it
-/// is the same gesture that already decides ⌘+ and DELETE. One answer, one place.
+/// ⚠️ **SO ⌫ IS NOT A CANDIDATE FOR THIS TERM AND WAS NOT GIVEN IT.** The
+/// roadmap notes that splitting the two is a real architectural choice; it is
+/// made HERE, on purpose, and the asymmetry is the answer rather than a
+/// leftover. Delete asks "would this surface CONSUME the key", which needs a live
+/// note selection; select-all asks "is this surface IN FRONT OF THE USER", which
+/// must not. Unifying them would either make ⌫ destroy notes in a roll the user
+/// has not touched, or put select-all back behind a selection that does not exist
+/// yet. Three items, three questions, three terms.
 ///
 /// ═══ WHERE THE TEXT-FIELD OBJECTION WENT ═══
 ///
@@ -88,11 +127,12 @@ public enum SelectAllMenuPolicy {
     ///
     /// ═══ THE GUARD STACK, IN ORDER ═══
     ///
-    ///   1. THE ROLL MUST BE THE ACTIVE SURFACE. Anything else — the arrange, the
-    ///      Mix console, no clip open — refuses. `EditorSurface` already folds the
-    ///      workspace and roll-open terms in (`EditorSurfaceRouter.resolve`), so
-    ///      re-deriving either here would be the second computation this tree has
-    ///      a census to prevent.
+    ///   1. THE ROLL MUST BE **OPEN** (m34-d — was "must be the ACTIVE surface").
+    ///      The Mix console and "no clip open" still refuse, each under its own
+    ///      name. `OpenEditorSurface` already folds the workspace and roll-open
+    ///      terms in (`EditorSurfaceRouter.openSurface`), so re-deriving either
+    ///      here would be the second computation this tree has a census to
+    ///      prevent.
     ///   2. `!isModalPresented` — `DeleteMenuPolicy`'s second guard, kept for the
     ///      same reason and not a weaker one: acting on the user's music behind a
     ///      scrimmed panel they are looking at is a change they did not see. It is
@@ -105,8 +145,17 @@ public enum SelectAllMenuPolicy {
     ///      (`DeleteMenuRefusal.emptySelection`, `ClipboardRefusal.noTracks`).
     ///
     /// - Parameters:
-    ///   - activeSurface: `AppModel.activeEditorSurface.surface` — the VERDICT of
-    ///     the tree's one arbitration, never a re-derivation of its terms.
+    ///   - openSurface: `AppModel.openEditorSurface` — the VERDICT of the tree's
+    ///     one arbitration, never a re-derivation of its terms.
+    ///
+    ///     ⚠️ **THE WHOLE VERDICT, NOT ITS `.surface`, AND THAT IS WHAT BUYS THE
+    ///     TWO NAMED REFUSALS BELOW.** A bare `EditorSurface` (what this
+    ///     parameter used to be) collapses "the Mix console is up" and "no clip
+    ///     is open" into one `.arrange` — two different bugs with two different
+    ///     fixes, and `SelectAllRefusal`'s own doc is why that collapse is not
+    ///     acceptable in a refusal. The `.reason` is switched on rather than the
+    ///     `.surface` for exactly that reason; the two agree by construction
+    ///     (`.rollOpen` is the only reason that carries `.pianoRoll`).
     ///   - isModalPresented: a blocking modal is on screen (`AppModel.isModalPresented`).
     ///   - rollNoteCount: how many notes the open clip holds.
     ///
@@ -126,12 +175,17 @@ public enum SelectAllMenuPolicy {
     ///     `awaitPianoRollMarqueeApplied`), so reading it would trade a
     ///     theoretical staleness for a measured one.
     public static func editMenuItem(
-        activeSurface: EditorSurface,
+        openSurface: OpenEditorSurface,
         isModalPresented: Bool,
         rollNoteCount: Int
     ) -> SelectAllMenuItem {
-        guard activeSurface == .pianoRoll else {
-            return SelectAllMenuItem(refusedBy: .notPianoRoll)
+        switch openSurface.reason {
+        case .notArrangeWorkspace:
+            return SelectAllMenuItem(refusedBy: .notArrangeWorkspace)
+        case .noRollOpen:
+            return SelectAllMenuItem(refusedBy: .noRollOpen)
+        case .rollOpen:
+            break
         }
         guard !isModalPresented else { return SelectAllMenuItem(refusedBy: .modal) }
         guard rollNoteCount > 0 else { return SelectAllMenuItem(refusedBy: .emptyRoll) }
@@ -158,15 +212,30 @@ public enum SelectAllSurface: String, Sendable, CaseIterable, Equatable {
 /// from one whose roll had quietly emptied, which is how a dead policy passes a
 /// refusal-only suite.
 public enum SelectAllRefusal: String, Sendable, Equatable, CaseIterable {
-    /// The user is working in the arrange, or in the Mix console, or has no clip
-    /// open — `EditorSurfaceRouter`'s verdict was `.arrange`.
+    /// The **Mix console** is up, so no `PianoRollView` is mounted at all —
+    /// `EditorSurfaceRouter.openSurface`'s `.notArrangeWorkspace`.
+    ///
+    /// ⚠️ SEPARATE FROM `noRollOpen` SINCE m34-d, and the split is the point
+    /// rather than tidiness. The two used to share one `.notPianoRoll`, which was
+    /// tolerable while the guard was `activeSurface == .pianoRoll` (one term, one
+    /// answer). Now that the guard IS the openness verdict, a single refusal
+    /// would tell a red test "the roll was not open" for a fixture whose real
+    /// problem is that it left the app in the mixer — the "three different bugs"
+    /// argument `ActiveEditorSurface.Reason` makes, applied to the refusal side.
+    case notArrangeWorkspace = "not-arrange-workspace"
+    /// The arrange workspace is live but **no MIDI clip is open** — there is no
+    /// roll on screen to select notes in.
     ///
     /// ⚠️ THE COMMONEST STATE IN THE APP, AND IT IS NOT A BUG. m25-s deliberately
     /// does not invent an arrange-wide select-all; here ⌘A greys out, exactly as
     /// it did before this feature existed (MEASURED: with nothing claiming
     /// `selectAll:`, `NSApp.target(forAction:)` answers nil and the native item is
     /// already disabled).
-    case notPianoRoll = "not-piano-roll"
+    ///
+    /// ⭐ **AND THE STATE THAT USED TO REACH THIS REFUSAL AND NO LONGER DOES IS
+    /// THE WHOLE OF m34-d:** roll open, arrange engaged. That refused before the
+    /// user ruled on it; it is now the LIVE case.
+    case noRollOpen = "no-roll-open"
     case modal
     /// The roll is active but its clip holds no notes — nothing to select.
     case emptyRoll = "empty-roll"

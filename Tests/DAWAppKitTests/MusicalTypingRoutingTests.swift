@@ -53,13 +53,17 @@ struct MusicalTypingRoutingTests {
         }
     }
 
-    @Test("the four control keys are Z / X / C / V, and they are NOT notes")
+    // ⚠️ RENAMED AT m34-l: FOUR CONTROL KEYS BECAME FIVE. Tab (`kVK_Tab`, 0x30)
+    // joined as the SUSTAIN PEDAL, so the label list and the count both moved.
+    // The rest of this test is untouched, including the half that matters.
+    @Test("the five control keys are Z / X / C / V / Tab, and they are NOT notes")
     func controlKeysArePinned() {
-        #expect(MusicalTypingRouting.controlCaps.map(\.label) == ["Z", "X", "C", "V"])
+        #expect(MusicalTypingRouting.controlCaps.map(\.label) == ["Z", "X", "C", "V", "⇥"])
         #expect(MusicalTypingRouting.octaveDownKeyCode == 0x06)
         #expect(MusicalTypingRouting.octaveUpKeyCode == 0x07)
         #expect(MusicalTypingRouting.velocityDownKeyCode == 0x08)
         #expect(MusicalTypingRouting.velocityUpKeyCode == 0x09)
+        #expect(MusicalTypingRouting.sustainKeyCode == 0x30)
         // The half that matters: none of them can also be a note. A control key
         // that was silently also a note would sound something on every octave
         // shift, and no other assertion here would notice.
@@ -82,7 +86,10 @@ struct MusicalTypingRoutingTests {
     func keyCodesAreUnique() {
         let codes = MusicalTypingRouting.allCaps.map(\.keyCode)
         #expect(Set(codes).count == codes.count)
-        #expect(MusicalTypingRouting.allCaps.count == 21)
+        // 21 -> 22 at m34-l (Tab, the sustain pedal). The number is quoted in
+        // `allCaps`' doc and in the `unmapped` refusal's doc; this is the pin
+        // that keeps all three honest.
+        #expect(MusicalTypingRouting.allCaps.count == 22)
     }
 
     @Test("the layout claims neither the space bar nor either delete key")

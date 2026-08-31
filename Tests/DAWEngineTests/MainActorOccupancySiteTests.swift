@@ -1196,6 +1196,55 @@ struct MainActorOccupancySiteTests {
     /// fires in ~3 days rather than ~7. That is the bound WORKING. Re-measure
     /// with the table above (one instrument, uniformly applied); do not widen
     /// the cap because it fired quickly.
+    /// ⭐⭐ **BUMPED 369 -> 375 AT m34-l (2026-08-31), CAMPAIGN RUN AND PASTED
+    /// VERBATIM BELOW (`m23aw-prepare-headroom.mjs`, 5 runs, EXIT 0):**
+    ///
+    /// ```
+    /// ✔ PASS: worst-of-5 T1 = 1.994s <= 35s (0.057x of limit, 17.551x cushion).
+    ///   Horizon confirmed 60s in both channels, every run.
+    ///   Median campaign wall 228.7s (validity limit 248s).
+    ///
+    ///   channel                          n   min      max      mean     spread
+    ///   T1 GM prepare (THIS campaign)    5   1.365   1.994   1.748   1.461x
+    ///     rows: 1.989  1.860  1.365  1.994  1.530
+    ///
+    ///   m19-e `max` column — RECORDED, NEVER ASSERTED (design §1.3/§5.3.6):
+    ///     n=5  min 23.182  max 41.823  mean 30.987  spread 1.804x
+    ///     rows: 27.666  28.566  33.698  41.823  23.182
+    ///
+    /// GATE PASSED.  VERDICT: 1/1 check(s) passed.  EXIT=0
+    /// ```
+    ///
+    /// All five runs: `✔ Test run with 7699 tests in 701 suites passed`
+    /// (227.3 / 229.1 / 227.4 / 229.6 / 228.7 s). ⭐ **READ THE CUSHION, NOT
+    /// JUST THE PASS: 17.55x. The thing this cadence exists to watch — main-actor
+    /// contention during AU `prepare` — is nowhere near its limit, so the +6
+    /// below is not spending measured headroom.**
+    ///
+    /// ⚠️ **THE TRUE ORDER IS RECORDED RATHER THAN TIDIED: the bump went in
+    /// BEFORE the campaign, not after, and it had to.**
+    /// This bound's rule says paste a fresh campaign result first — but the gate
+    /// rejects any campaign in which a run contains a `✘`, and until this bound
+    /// is raised THIS TEST IS THAT `✘`. The requirement is circular as written;
+    /// the honest resolution is to bump provisionally, run, and paste, which is
+    /// what happened. A future bumper should expect the same circularity rather
+    /// than rediscover it. The census stood at EXACTLY 369, the cap, before
+    /// m34-l added four `@MainActor` suites (`AuditionPedalSustainTests`,
+    /// `LiveSustainPedalTests`, `MusicalTypingSustainTests`,
+    /// `SustainPedalCommandTests`) -> 373. The cadence therefore fired on
+    /// schedule and on an unrelated feature, which is the design working: the
+    /// review is due, not the feature at fault.
+    ///
+    /// ⚠️ **+6 AND NOT +19, DELIBERATELY, AND THE REASON IS THE PARAGRAPH
+    /// DIRECTLY ABOVE.** The previous bump's own note says the +19 step may
+    /// have bought ~1 day rather than ~7 and that the next bump *"should
+    /// re-derive the rate from a fresh unsuppressed window rather than
+    /// re-spelling 2.44"*. That re-derivation has NOT been done here — this
+    /// item is a sustain pedal, not a headroom campaign — so the honest move is
+    /// the SMALLEST bump that clears the observed census (373) plus one
+    /// suite of slack, which keeps the cadence firing soon rather than
+    /// silencing it for a week on an unverified rate. **Do not read 375 as a
+    /// derived number. It is 373 + 2, chosen to keep the review frequent.**
     @Test("Leg C — THE REVIEW CADENCE: @MainActor-isolated suite count stays inside the cadence")
     func mainActorSuiteCountStaysInsideCadence() {
         let counts = Self.structuralCounts()
@@ -1204,9 +1253,9 @@ struct MainActorOccupancySiteTests {
               + "prepare/prepareEffect-like sites \(counts.prepareLikeSites) (PRINTED ONLY — design §4.3 "
               + "rejects this as a ratchet channel; it is a proxy for the channel measured NOT to drift), "
               + "files \(counts.files)")
-        #expect(counts.mainActorSuites <= 369, """
-            @MainActor-isolated suite count is \(counts.mainActorSuites), over the 369 cadence limit \
-            (measured 351 at m24-n). This is a REVIEW CADENCE, not a physical threshold — ds/dN is \
+        #expect(counts.mainActorSuites <= 375, """
+            @MainActor-isolated suite count is \(counts.mainActorSuites), over the 375 cadence limit \
+            (measured 373 at m34-l). This is a REVIEW CADENCE, not a physical threshold — ds/dN is \
             unmeasured. Bumping this number requires pasting a fresh \
             scripts/gates/m23aw-prepare-headroom.mjs campaign result into the comment above this bound \
             first; raising it without running the gate is the same act as raising the horizon.

@@ -504,6 +504,379 @@ struct PadPreviewControllerTests {
                 "the pad's neutral must go out while the engine still knows it is a release")
     }
 
+    // MARK: - m34-f step ② — the LIVE-EXPRESSION seam
+    //
+    // ⚠️ `PreviewSpy` above deliberately does NOT override `setLiveExpression`,
+    // so every test that uses it is ALSO a live pin on the protocol default
+    // forwarding to `previewController`. That default is what keeps ~a dozen
+    // fakes across this tree working unchanged, and it would rot silently
+    // otherwise.
+
+    /// The capture-aware spy: overrides `setLiveExpression` and records the
+    /// verdict it was handed, per push, in order.
+    @MainActor
+    private final class CapturingSpy: AudioEngineControlling {
+        var meteringHandler: ((MeterFrame) -> Void)?
+        var trackMeteringHandler: ((UUID, MeterFrame) -> Void)?
+        var playheadHandler: ((Double) -> Void)?
+        var isRunning = true
+
+        private(set) var pushes: [(controller: UInt8, value: UInt8, capture: Bool)] = []
+        /// Stands in for the engine's own narrowing ("is a take actually
+        /// capturing"). When false, a `captureIntoTake: true` push still sounds
+        /// and still reports `capturedPoints: 0` — the case the store cannot see.
+        var takeIsRolling = true
+        var outcome: AuditionOutcome = .sounded
+
+        func clear() { pushes.removeAll() }
+
+        func previewController(trackID: UUID, controller: UInt8,
+                               value: UInt8) -> AuditionOutcome { outcome }
+
+        func setLiveExpression(trackID: UUID, controller: UInt8, value: UInt8,
+                               captureIntoTake: Bool) -> LiveExpressionOutcome {
+            pushes.append((controller, value, captureIntoTake))
+            let delivered = outcome != .noRenderer && outcome != .unsupported
+            let captured = captureIntoTake && delivered && takeIsRolling
+            return LiveExpressionOutcome(audition: outcome,
+                                         capturedPoints: captured ? 1 : 0,
+                                         recording: captured)
+        }
+
+        func stopAllAudition() {}
+        func prepare() throws {}
+        func shutdown() {}
+        func tracksDidChange(_ tracks: [Track]) {}
+        func startPlayback(_ transport: TransportState) {}
+        func stopPlayback() {}
+        func seek(_ transport: TransportState) {}
+        func setTempo(_ transport: TransportState) {}
+        func loopChanged(_ transport: TransportState) {}
+        func masterVolumeChanged(_ volume: Double) {}
+        func renderMixdown(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
+                           masterEffects: [EffectDescriptor],
+                           masterAutomation: [AutomationLane],
+                           fromBeat: Double, durationSeconds: Double,
+                           to url: URL) async throws -> AudioFileInfo {
+            throw ProjectError.engineUnavailable
+        }
+        var recordPermission: RecordPermission { .granted }
+        func requestRecordPermission(_ completion: @escaping @MainActor (Bool) -> Void) {
+            completion(true)
+        }
+        func availableInputDevices() -> [AudioInputDevice] { [] }
+        func setInputDevice(uid: String?) throws {}
+        func startRecording(_ transport: TransportState, to url: URL,
+                            completion: @escaping @MainActor (Result<RecordingResult, Error>) -> Void) throws {
+            throw ProjectError.engineUnavailable
+        }
+        func startTake(_ transport: TransportState, audioURL: URL?, captureMIDI: Bool,
+                       completion: @escaping @MainActor (Result<TakeResult, Error>) -> Void) throws {}
+        func stopRecording() {}
+    }
+
+    @Test("an engine that only knows previewController still SOUNDS the pad, and captures nothing")
+    @MainActor
+    func theProtocolDefaultForwardsToTheOldMethod() throws {
+        // ⭐ The compatibility pin. Every fake in this tree implements the
+        // preview and none of them implement the capture; a default that
+        // answered `.unsupported` instead of forwarding would silence all of
+        // them at once, which is why the default is a forward and why that
+        // choice is pinned rather than assumed.
+        let (pad, spy, track, _) = Self.fixture()
+        let begun = try pad.preview(trackID: track, effort: 0.5, phase: .begin,
+                                    captureIntoTake: true, engine: spy)
+        #expect(spy.pushes.count == 1, "the value must still reach the strip")
+        #expect(begun.delivered)
+        #expect(begun.capturedPoints == 0, "an engine that cannot capture must SAY it captured nothing")
+        #expect(begun.recording == false)
+    }
+
+    @Test("captureIntoTake is threaded to the engine on begin and move, and is fixed at BEGIN")
+    @MainActor
+    func theCaptureVerdictIsFixedAtBegin() throws {
+        let clock = ManualClock()
+        let pad = PadPreviewController()
+        pad.clock = { clock.now }
+        let spy = CapturingSpy()
+        let track = UUID()
+
+        try pad.preview(trackID: track, effort: 0.2, phase: .begin,
+                        captureIntoTake: true, engine: spy)
+        clock.advance(.milliseconds(50))
+        // ⛔ A LATER CALL PASSES `false` AND IS IGNORED, ON PURPOSE. A gesture is
+        // one continuous act; re-deciding mid-drag whether it is being recorded
+        // would make half a swell land in the take and half not, with nothing on
+        // screen marking the seam. `LivePlayController.heldCaptureIntoTake` runs
+        // the identical rule for notes.
+        try pad.preview(trackID: track, effort: 0.9, phase: .move,
+                        captureIntoTake: false, engine: spy)
+
+        #expect(spy.pushes.count == 2)
+        #expect(spy.pushes.allSatisfy { $0.capture },
+                "the verdict in force at begin governs the whole gesture")
+        #expect(pad.gestureCaptureIntoTake)
+    }
+
+    @Test("the END neutral is captured too — the monitor and the take must not diverge")
+    @MainActor
+    func theReleaseNeutralIsRecorded() throws {
+        // ⛔⛔ GATE THE ONS, NEVER GATE THE OFFS. The strip audibly returns to
+        // 127 on release. A take whose lane ended at the gesture's last value
+        // would play back QUIETER than what the user heard, forever, with
+        // nothing on screen explaining it.
+        let clock = ManualClock()
+        let pad = PadPreviewController()
+        pad.clock = { clock.now }
+        let spy = CapturingSpy()
+        let track = UUID()
+
+        try pad.preview(trackID: track, effort: 0.1, phase: .begin,
+                        captureIntoTake: true, engine: spy)
+        let ended = try pad.preview(trackID: track, effort: 0, phase: .end, engine: spy)
+
+        #expect(spy.pushes.count == 2)
+        let neutral = MIDIControllerType.cc(controller: 11).neutralDefault
+        #expect(spy.pushes.last?.value == UInt8(neutral))
+        #expect(spy.pushes.last?.capture == true, "the release must reach the take")
+        #expect(ended.capturedPoints == 1)
+        #expect(ended.recording)
+    }
+
+    @Test("a gesture that captured NOTHING does not fabricate a lane point on release")
+    @MainActor
+    func theOrphanNeutralGuardHolds() throws {
+        // ⛔ THE ORPHAN GUARD, and it has no note-side equivalent: a note-off
+        // that closes nothing is DROPPED by the capture session, so live play's
+        // wider off-gate cannot invent anything. A controller point has no
+        // pairing to be orphaned by — it is simply appended — so an
+        // unconditional neutral would write a one-point CC 11 lane into
+        // somebody else's take every time the user brushed the pad while
+        // unarmed.
+        let clock = ManualClock()
+        let pad = PadPreviewController()
+        pad.clock = { clock.now }
+        let spy = CapturingSpy()
+        let track = UUID()
+
+        try pad.preview(trackID: track, effort: 0.4, phase: .begin,
+                        captureIntoTake: false, engine: spy)
+        let ended = try pad.preview(trackID: track, effort: 0, phase: .end, engine: spy)
+
+        #expect(spy.pushes.count == 2, "the neutral still SOUNDS — only the capture is withheld")
+        #expect(spy.pushes.last?.capture == false)
+        #expect(ended.capturedPoints == 0)
+        #expect(ended.recording == false)
+    }
+
+    @Test("a gesture whose pushes never reached a rolling take does not capture its neutral either")
+    @MainActor
+    func aVerdictOfTrueIsNotEnoughOnItsOwn() throws {
+        // The store says "recording and armed" but the ENGINE knows no take is
+        // capturing. The verdict may only NARROW downward, never widen, so the
+        // release must follow the engine's answer rather than the store's.
+        let clock = ManualClock()
+        let pad = PadPreviewController()
+        pad.clock = { clock.now }
+        let spy = CapturingSpy()
+        spy.takeIsRolling = false
+        let track = UUID()
+
+        try pad.preview(trackID: track, effort: 0.4, phase: .begin,
+                        captureIntoTake: true, engine: spy)
+        let ended = try pad.preview(trackID: track, effort: 0, phase: .end, engine: spy)
+
+        #expect(spy.pushes.last?.capture == false,
+                "gestureDidCapture is false, so the release does not claim to be recorded")
+        #expect(ended.capturedPoints == 0)
+    }
+
+    @Test("the capture state is cleared by a release, so the NEXT gesture starts uncommitted")
+    @MainActor
+    func captureStateDoesNotLeakAcrossGestures() throws {
+        let clock = ManualClock()
+        let pad = PadPreviewController()
+        pad.clock = { clock.now }
+        let spy = CapturingSpy()
+        let track = UUID()
+
+        try pad.preview(trackID: track, effort: 0.4, phase: .begin,
+                        captureIntoTake: true, engine: spy)
+        try pad.preview(trackID: track, effort: 0, phase: .end, engine: spy)
+        #expect(!pad.gestureCaptureIntoTake)
+        #expect(!pad.gestureDidCapture)
+
+        spy.clear()
+        try pad.preview(trackID: track, effort: 0.4, phase: .begin,
+                        captureIntoTake: false, engine: spy)
+        #expect(spy.pushes.first?.capture == false,
+                "a stale true here would record a performance nobody armed")
+    }
+
+    @Test("pad.previewEffort's contract is unchanged: it never captures, on any phase")
+    @MainActor
+    func thePreviewVerbStillRecordsNothing() throws {
+        // ⛔ THE OLD VERB'S PROMISE IS LOAD-BEARING FOR EVERY AGENT ALREADY
+        // USING IT. `captureIntoTake` defaults to false, so a caller that has
+        // never heard of m34-f gets exactly the behaviour it had.
+        let clock = ManualClock()
+        let pad = PadPreviewController()
+        pad.clock = { clock.now }
+        let spy = CapturingSpy()
+        let track = UUID()
+
+        try pad.preview(trackID: track, effort: 0.4, phase: .begin, engine: spy)
+        clock.advance(.milliseconds(50))
+        try pad.preview(trackID: track, effort: 0.8, phase: .move, engine: spy)
+        try pad.preview(trackID: track, effort: 0, phase: .end, engine: spy)
+
+        #expect(spy.pushes.count == 3)
+        #expect(spy.pushes.allSatisfy { !$0.capture })
+    }
+
+    // MARK: - m34-f step ② — the STORE's two entry policies
+
+    /// A store with one armed instrument track and a rolling take, plus the spy
+    /// under it. `record()` is used rather than poking `transport.isRecording`
+    /// so the fixture exercises the SAME path the app does — including the
+    /// pad-release `record()` performs, which several assertions below depend on.
+    @MainActor
+    private static func recordingStore(kind: TrackKind = .instrument,
+                                       armed: Bool = true) throws
+        -> (ProjectStore, CapturingSpy, UUID) {
+        let spy = CapturingSpy()
+        let store = ProjectStore()
+        store.engine = spy
+        let track = store.addTrack(name: "Sax", kind: kind)
+        if kind != .bus { _ = try store.setTrackArm(id: track.id, armed: armed) }
+        if !armed {
+            // ⚠️ `record()` REFUSES with `.noArmedTracks` when nothing is armed,
+            // so the unarmed case needs a DECOY armed track for the take to roll
+            // at all. That is the honest shape of the scenario anyway: the user
+            // is recording something else and brushes the pad on a track that is
+            // not part of the take.
+            let decoy = store.addTrack(name: "Decoy", kind: .instrument)
+            _ = try store.setTrackArm(id: decoy.id, armed: true)
+        }
+        try store.record()
+        spy.clear()
+        return (store, spy, track.id)
+    }
+
+    @Test("⛔ previewEffort is STILL refused while recording — the old verb's contract is untouched")
+    @MainActor
+    func theOldVerbStillRefusesMidTake() throws {
+        // ⛔ THE MOST IMPORTANT REGRESSION GUARD OF STEP ②. It would have been
+        // easy — and wrong — to "harmonise" the two by relaxing this refusal.
+        // An agent auditioning a shape mid-take must not silently write
+        // expression the user never performed.
+        let (store, spy, track) = try Self.recordingStore()
+        #expect(store.transport.isRecording)
+
+        #expect(throws: ProjectError.self) {
+            try store.previewEffort(trackID: track, value: 0.6, phase: .begin)
+        }
+        #expect(spy.pushes.isEmpty)
+    }
+
+    @Test("playLiveExpression is NOT refused while recording — that one difference IS the feature")
+    @MainActor
+    func theNewVerbPerformsThroughATake() throws {
+        let (store, spy, track) = try Self.recordingStore()
+
+        let result = try store.playLiveExpression(trackID: track, value: 0.6, phase: .begin)
+        #expect(result.streaming)
+        #expect(spy.pushes.count == 1, "the value must reach the strip mid-take")
+        #expect(spy.pushes[0].capture, "and it must be offered to the take")
+    }
+
+    @Test("the capture verdict is isRecording AND isArmed AND instrument — all three, one at a time")
+    @MainActor
+    func theCaptureVerdictNeedsAllThree() throws {
+        // Each leg flips exactly ONE of the three conditions, so a verdict that
+        // ignored any one of them reddens here and nowhere else.
+        let (recordingArmed, armedSpy, armedTrack) = try Self.recordingStore()
+        _ = try recordingArmed.playLiveExpression(trackID: armedTrack, value: 0.6, phase: .begin)
+        #expect(armedSpy.pushes.first?.capture == true)
+
+        let (recordingUnarmed, unarmedSpy, unarmedTrack) =
+            try Self.recordingStore(armed: false)
+        _ = try recordingUnarmed.playLiveExpression(trackID: unarmedTrack, value: 0.6,
+                                                    phase: .begin)
+        #expect(unarmedSpy.pushes.first?.capture == false,
+                "an UNARMED track hears the pad and keeps none of it")
+
+        // Not recording at all: same track, same arm, no take.
+        let idleSpy = CapturingSpy()
+        let idle = ProjectStore()
+        idle.engine = idleSpy
+        let idleTrack = idle.addTrack(name: "Sax", kind: .instrument)
+        _ = try idle.setTrackArm(id: idleTrack.id, armed: true)
+        _ = try idle.playLiveExpression(trackID: idleTrack.id, value: 0.6, phase: .begin)
+        #expect(idleSpy.pushes.first?.capture == false,
+                "with no take rolling there is nothing to capture into")
+    }
+
+    @Test("playLiveExpression still refuses a non-instrument track and an unknown track")
+    @MainActor
+    func theNewVerbKeepsTheTargetValidation() throws {
+        let spy = CapturingSpy()
+        let store = ProjectStore()
+        store.engine = spy
+        let audio = store.addTrack(name: "Vox", kind: .audio)
+
+        #expect(throws: ProjectError.self) {
+            try store.playLiveExpression(trackID: audio.id, value: 0.6, phase: .begin)
+        }
+        #expect(throws: ProjectError.self) {
+            try store.playLiveExpression(trackID: UUID(), value: 0.6, phase: .begin)
+        }
+        #expect(spy.pushes.isEmpty, "a refused call must never have moved a controller")
+    }
+
+    @Test("⭐ an END is allowed on a track that has since been DELETED — releases are never gated")
+    @MainActor
+    func anEndIsNeverRefusedByTargetValidation() throws {
+        // The pad-side twin of live play's wider off-gate: a release must reach
+        // the strip even when the target has stopped being a legal one, or the
+        // preview value stays parked with nothing able to take it back. The
+        // `.end` branch skips target validation entirely, which is why deleting
+        // the track does not turn the release into a `trackNotFound` throw.
+        let spy = CapturingSpy()
+        let store = ProjectStore()
+        store.engine = spy
+        let track = store.addTrack(name: "Sax", kind: .instrument)
+        _ = try store.playLiveExpression(trackID: track.id, value: 0.6, phase: .begin)
+        _ = try store.removeTrack(id: track.id)
+        spy.clear()
+
+        let ended = try store.playLiveExpression(trackID: track.id, value: 0, phase: .end)
+        #expect(ended.streaming == false)
+        #expect(spy.pushes.count == 1, "the neutral must still go out")
+    }
+
+    @Test("record START releases an open pad gesture, so a captured gesture always begins at BEGIN")
+    @MainActor
+    func recordStartReleasesAnOpenGesture() throws {
+        // ⭐ MEASURED PRECONDITION, not an assumption: because `record()`
+        // releases the pad, every gesture that is ever captured begins with a
+        // `.begin` INSIDE the take — and `.begin` always delivers, bypassing the
+        // rate cap. That is what makes "the take's lane starts at the value the
+        // gesture opened on" true by construction rather than by luck.
+        let spy = CapturingSpy()
+        let store = ProjectStore()
+        store.engine = spy
+        let track = store.addTrack(name: "Sax", kind: .instrument)
+        _ = try store.setTrackArm(id: track.id, armed: true)
+        _ = try store.playLiveExpression(trackID: track.id, value: 0.6, phase: .begin)
+        #expect(store.padPreview.isStreaming)
+
+        try store.record()
+
+        #expect(!store.padPreview.isStreaming,
+                "a take must not inherit a gesture opened before it started")
+    }
+
     @Test("the 30 Hz cap is the number the design's ring arithmetic depends on")
     @MainActor
     func theCapIsTheDocumentedNumber() {

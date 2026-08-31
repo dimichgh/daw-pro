@@ -46,7 +46,7 @@ import Foundation
 // — but it is a real, visible limitation, not a hypothetical one.
 
 /// What a mapped key does. Note keys carry their offset ABOVE the current base
-/// note; the four control keys carry no payload.
+/// note; the five control keys carry no payload.
 public enum MusicalTypingKeyRole: Equatable, Sendable {
     /// A note key: `semitone` semitones above the base note (0…16).
     case note(semitone: Int)
@@ -58,6 +58,10 @@ public enum MusicalTypingKeyRole: Equatable, Sendable {
     case velocityDown
     /// Louder — one step up the velocity ladder.
     case velocityUp
+    /// **THE SUSTAIN PEDAL (m34-l), Tab.** TOGGLES the damper pedal: press once
+    /// for down, again for up. See `MusicalTypingController.toggleSustain` for
+    /// why a latch rather than a hold.
+    case sustainToggle
 }
 
 /// Why a key press did NOT become a note.
@@ -73,7 +77,7 @@ public enum MusicalTypingRefusal: String, Equatable, Sendable, CaseIterable {
     case modeOff = "mode-off"
     /// The mode is on, but this key is not part of the layout — Q, arrows, the
     /// space bar, ⌫. Passing these through is what keeps the mode from being a
-    /// land grab: only the 21 keys in `allCaps` are ever swallowed.
+    /// land grab: only the 22 keys in `allCaps` are ever swallowed.
     case unmapped
     /// A ⌘/⌥/⌃/⇧ chord. ⌘Z is undo, ⌘C is copy, ⌘S is save — and Z/C/S are all
     /// layout keys, so this guard is what makes the mode safe to leave on.
@@ -176,17 +180,63 @@ public struct MusicalTypingChordCell: Equatable, Sendable, Identifiable {
     /// This cell's step number in the lit progression, 1-based — **and only on
     /// the ONE cell a beginner should press for that step.**
     ///
-    /// ⚠️ **NUMBERED IS NARROWER THAN LIT, AND THAT IS A LOOKING-AT-IT FIX.** The
-    /// first version numbered every cell carrying a lit DEGREE, which is
-    /// arithmetically correct and visually wrong: the colour keys and the second
-    /// octave run share their degree, so "Four Chords" painted TEN badges and the
-    /// row showed four different cells all labelled `1`. A screenshot of the live
-    /// app is the only instrument that could see that — no assertion in this tree
-    /// looks at a pixel. The number now lands on the base-octave natural key
-    /// alone, which is the `1 … 4 2 3` row of the user's own mock-up; the other
-    /// cells of the same degree stay LIT, so "any lit key plays this chord" is
-    /// still true and readable.
+    /// ⛔⛔ **NOT DRAWN ANY MORE — RETRACTED IN PLACE AT m34-i, NOT DELETED.** This
+    /// used to be a numeric badge on the key. The user played it and reported the
+    /// badges were *"hard to read"*, and the same pass found the deeper defect the
+    /// badges were papering over (see `ChordSequencePlayer`). **State is shown by
+    /// LIGHT, never by text — a performer cannot read while playing** — so the
+    /// badge is gone and `isNextInProgression` below is what the surface paints.
+    /// The number survives as **seam data**: it is what lets a gate say *which*
+    /// step the border is on without re-deriving the progression from a second
+    /// copy of the degrees. ⚠️ If you are about to draw it again, you are undoing
+    /// m34-i.
+    ///
+    /// ⚠️ **NUMBERED IS NARROWER THAN LIT, AND THAT IS A LOOKING-AT-IT FIX** —
+    /// kept because `isNextInProgression` inherits exactly the same narrowing and
+    /// would re-earn the same bug without it. The first version numbered every
+    /// cell carrying a lit DEGREE, which is arithmetically correct and visually
+    /// wrong: the colour keys and the second octave run share their degree, so
+    /// "Four Chords" painted TEN badges and the row showed four different cells
+    /// all labelled `1`. A screenshot of the live app is the only instrument that
+    /// could see that — no assertion in this tree looks at a pixel. The number
+    /// lands on the base-octave natural key alone; the other cells of the same
+    /// degree stay LIT, so "any lit key plays this chord" is still true.
     public let progressionOrder: Int?
+
+    /// **THE BORDER: is this the chord to play NEXT?** The moving cue that
+    /// replaced the numeric badges (m34-i), driven by
+    /// `ChordSequencePlayer.nextDegree`.
+    ///
+    /// ⛔ **EXACTLY ONE CELL CARRIES THIS while a preset is lit, and zero when
+    /// none is** — it inherits `progressionOrder`'s narrowing (base-octave
+    /// natural keys only) for the reason that comment records, and both counts
+    /// are pinned by test and by the live smoke.
+    ///
+    /// ⛔ **IT IS A CUE, NEVER A GATE.** Playing some other chord neither moves it
+    /// nor is refused; nothing on the sounding path reads this.
+    public let isNextInProgression: Bool
+
+    /// **THE LOOK-AHEAD QUEUE (m34-g): HOW SOON THIS CHORD COMES UP.** `1` is the
+    /// one after the cue, `2` the one after that, up to
+    /// `MusicalTypingController.queueDepth`. `nil` means "not in the queue" —
+    /// **including the cued cell itself**, which wears the border instead, so no
+    /// cell is ever both bordered and queued.
+    ///
+    /// ⭐⭐ **THIS IS WHAT FINALLY TELLS THE PRESETS APART AT REST**, and m34-i
+    /// recorded the gap in its own close: Four Chords `[1,5,6,4]` and Doo-Wop
+    /// `[1,6,4,5]` light the same four degrees AND both open on I, so with only a
+    /// cue they are identical until the first chord is played. With a queue they
+    /// are the same four cells in two different orders of brightness, before a
+    /// note is struck.
+    ///
+    /// ⛔ **DRAWN AS LIGHT, NEVER AS A NUMBER.** The value is an ordinal, but the
+    /// row paints it as a shrinking bar of the accent hue — the badge this
+    /// replaced is exactly what m34-i deleted. If you are about to draw this
+    /// integer, read `progressionOrder`'s doc first.
+    ///
+    /// ⚠️ Same narrowing as the border (base-octave natural keys only), so a
+    /// degree marks ONE cell and not the four that share it.
+    public let queueRank: Int?
 
     /// Whether the current progression uses this cell's degree. **Lit is PAINT
     /// AND NOTHING ELSE** — no code on the sounding path reads it, so a dim key
@@ -197,7 +247,9 @@ public struct MusicalTypingChordCell: Equatable, Sendable, Identifiable {
 
     public init(keyCode: UInt16, keyLabel: String, degree: Int, octaveShift: Int,
                 addsColour: Bool, chordName: String, romanNumeral: String,
-                isLit: Bool, progressionOrder: Int?) {
+                isLit: Bool, progressionOrder: Int?,
+                isNextInProgression: Bool = false,
+                queueRank: Int? = nil) {
         self.keyCode = keyCode
         self.keyLabel = keyLabel
         self.degree = degree
@@ -207,6 +259,8 @@ public struct MusicalTypingChordCell: Equatable, Sendable, Identifiable {
         self.romanNumeral = romanNumeral
         self.isLit = isLit
         self.progressionOrder = progressionOrder
+        self.isNextInProgression = isNextInProgression
+        self.queueRank = queueRank
     }
 }
 
@@ -252,13 +306,53 @@ public enum MusicalTypingRouting {
     // ⌘Z/⌘X/⌘C/⌘V's muscle memory. The chord guard already keeps the ⌘ forms
     // safe; keeping the BARE forms as controls keeps them predictable.
     //
-    // ⚠️ **WHAT LOGIC HAS THAT THIS DELIBERATELY DOES NOT (v1 scope, stated so a
-    // later reader knows it was considered):** Tab = sustain pedal, 1/2 =
-    // modulation, 4/5 = pitch bend. All three are CONTINUOUS CONTROLLERS, and the
-    // v1 emit target (`ProjectStore.auditionPitches`) carries pitch + velocity
-    // and nothing else — there is no controller lane on the audition path to send
-    // them down. Adding key bindings that reach nothing would be four more keys
-    // claimed for no sound.
+    // ⭐⭐ **TAB = SUSTAIN PEDAL SHIPPED AT m34-l. THE PARAGRAPH THAT USED TO
+    // STAND HERE IS RETRACTED IN PLACE, NOT DELETED, BECAUSE ITS REASON DIED.**
+    // It said: *"Tab = sustain pedal, 1/2 = modulation, 4/5 = pitch bend. All
+    // three are CONTINUOUS CONTROLLERS, and the v1 emit target
+    // (`ProjectStore.auditionPitches`) carries pitch + velocity and nothing else
+    // — there is no controller lane on the audition path to send them down.
+    // Adding key bindings that reach nothing would be four more keys claimed for
+    // no sound."*
+    //
+    // **That ceiling is GONE.** m34-f step ② built the controller path the
+    // paragraph said did not exist: `ProjectStore` →
+    // `AudioEngine.setLiveExpression` → `MIDICaptureSession.ingest`, which
+    // SOUNDS a CC and puts it in the rolling take. The pedal reaches it through
+    // `ProjectStore.playLiveSustain`. A comment explaining why something is
+    // absent, left standing after its reason dies, is how this tree gets
+    // confidently wrong readers — so the claim is quoted and struck rather than
+    // quietly removed.
+    //
+    // ⚠️ **STILL DELIBERATELY OUT, AND NOW FOR A DIFFERENT REASON THAN "IT
+    // CANNOT BE DONE": 1/2 = modulation and 4/5 = pitch bend.** They *could*
+    // ride the same path today. They are not here because a computer keyboard
+    // key is a BINARY event and those two are continuous: the pedal is honestly
+    // binary (a damper is up or down), while a mod wheel bound to two keys is a
+    // ramp with no position — the user cannot see where it is and cannot put it
+    // back. Bend is worse: `BreathContour.bendRangeSemitones` can disagree with
+    // the sampler's range, so a keyed bend would be a control whose amount
+    // depends on a setting elsewhere. Both want a visible continuous surface;
+    // the breath pad is one and the controller strip is another. Also out and
+    // measured: Logic binds `'` (`kVK_ANSI_Quote`) as +17 — see the layout note
+    // above.
+    //
+    // ⚠️ **TAB IS AppKit's FOCUS-NAVIGATION KEY, AND THE MODE ONLY BORROWS IT.**
+    // `decide` refuses it with the mode off (`modeOff`), inside any text-editing
+    // responder (`textEditing`), under any ⌘/⌥/⌃/⇧ chord (`chord` — which is
+    // what leaves ⇧Tab's reverse focus alone), and in any non-main window
+    // (`secondaryWindow`). In every one of those states the event is handed back
+    // untouched and Tab moves focus exactly as it always has. What the mode
+    // takes is Tab in the main window while Musical Typing is ON and no field
+    // has focus — which is the state in which the user is playing an instrument,
+    // not filling in a form.
+
+    /// `kVK_Tab` — the sustain pedal (m34-l). ⚠️ **A VIRTUAL KEY CODE, like
+    /// every other key here (m23-fi), and for Tab the reason bites hardest:
+    /// `NSEvent.characters` for this key is `"\t"`, which is also what ⌃I
+    /// produces and what a paste of a tab character carries.** The physical key
+    /// is the only unambiguous handle.
+    public static let sustainKeyCode: UInt16 = 0x30
 
     /// `kVK_ANSI_Z` — one octave down.
     public static let octaveDownKeyCode: UInt16 = 0x06
@@ -296,16 +390,25 @@ public enum MusicalTypingRouting {
         MusicalTypingKeyCap(keyCode: 0x29, label: ";", role: .note(semitone: 16)),  // E
     ]
 
-    /// The four control keys, in the order a legend row reads them.
+    /// The five control keys, in the order a legend row reads them.
+    ///
+    /// ⚠️ **Tab is LAST, and that is the legend's reading order rather than a
+    /// ranking**: Z/X/C/V are one contiguous run of physical keys and Tab is
+    /// across the keyboard, so putting it between them would draw a legend the
+    /// hand cannot follow.
     public static let controlCaps: [MusicalTypingKeyCap] = [
         MusicalTypingKeyCap(keyCode: octaveDownKeyCode, label: "Z", role: .octaveDown),
         MusicalTypingKeyCap(keyCode: octaveUpKeyCode, label: "X", role: .octaveUp),
         MusicalTypingKeyCap(keyCode: velocityDownKeyCode, label: "C", role: .velocityDown),
         MusicalTypingKeyCap(keyCode: velocityUpKeyCode, label: "V", role: .velocityUp),
+        MusicalTypingKeyCap(keyCode: sustainKeyCode, label: "⇥", role: .sustainToggle),
     ]
 
     /// Every key the mode claims — and therefore the complete list of keys it can
-    /// take away from anything else. 21.
+    /// take away from anything else. **22 since m34-l** (was 21; Tab is the
+    /// twenty-second). ⚠️ The count is asserted in `MusicalTypingRoutingTests`
+    /// and quoted in the `unmapped` refusal's doc — a table that grew without
+    /// both moving would leave a number nothing checks.
     public static let allCaps: [MusicalTypingKeyCap] = noteCaps + controlCaps
 
     /// The number of semitones the layout spans (17: C … E, an octave + a third).
@@ -334,6 +437,13 @@ public enum MusicalTypingRouting {
     /// instead of the gate hardcoding a second copy of the key codes.
     public static func cap(forLabel label: String) -> MusicalTypingKeyCap? {
         let wanted = label.uppercased()
+        // m34-l: `"tab"` resolves the ⇥ cap. ⚠️ AN ALIAS FOR THE SEAM AND FOR
+        // HUMANS, NOT A SECOND TABLE — it maps onto `sustainKeyCode`, the one
+        // constant, so it cannot drift from the cap. It exists because `"⇥"` is
+        // painful to type into a gate and easy to mangle in a shell, and a gate
+        // that resorted to hardcoding `0x30` would be the second copy of a key
+        // code this function exists to prevent.
+        if wanted == "TAB" { return cap(forKeyCode: sustainKeyCode) }
         return allCaps.first { $0.label == wanted }
     }
 
@@ -349,7 +459,7 @@ public enum MusicalTypingRouting {
     ///      off the honest answer to EVERY key is "the mode is off"; answering
     ///      "unmapped" there would invite the reading that the key was wrong when
     ///      the mode was.
-    ///   2. `unmapped` — is this even one of the 22?
+    ///   2. `unmapped` — is this even one of the 22 (`allCaps`)?
     ///   3. `chord` — about the KEYSTROKE.
     ///   4. `textEditing`, 5. `secondaryWindow` — about the CONTEXT.
     ///

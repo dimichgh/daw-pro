@@ -49,6 +49,12 @@ public enum ExplainID: String, CaseIterable, Sendable {
     /// `exportDialog` / Voice-editor precedent — a card per control would be four
     /// cards saying one thing).
     case musicalTyping
+    /// The LOOPER surface in the transport bar (m34-h-2) — the chip that opens a
+    /// live-looping session, and the lamp strip plus arm/finish/take-back/end
+    /// controls it becomes once one is open. ONE entry for the whole surface (the
+    /// `musicalTyping` precedent): the door and its controls are one workflow, and
+    /// six cards would say one thing six times.
+    case loopDeck
     /// The session vibe meter — the glowing orb near the master cluster (vm-b).
     /// Read-only status chrome, so it shows in both Simple and Pro transport modes.
     case vibeMeter
@@ -424,6 +430,9 @@ public enum ExplainCatalog {
         .musicalTyping: ExplainEntry(
             title: "Musical Typing",
             body: "Turns your computer keyboard into a piano: the letter keys play notes, and an on-screen keyboard appears so you can click them too. Z and X shift to lower or higher notes; C and V play softer or louder. Arm a track first and what you play is recorded."),
+        .loopDeck: ExplainEntry(
+            title: "Looper",
+            body: "Builds a song by stacking short parts that repeat. Press LOOPER, arm a track, and play — what you played joins the loop and keeps going while you switch tracks and add the next part. The lamps show what is recording; the back arrow takes off the last part."),
         .vibeMeter: ExplainEntry(
             title: "Vibe Meter",
             body: "A living glow that shows the feel of your whole mix at a glance. It burns warm and low when the sound is deep and bassy, turns cool and airy when it is bright, and settles to a dim ember when things go quiet."),

@@ -94,10 +94,19 @@ struct ArrangeEmptyLaneHintTests {
     @Test("the rule reads NOTHING but the tracks — no transport in scope")
     func contentKeyedOnly() {
         // A track added while the transport is rolling or recording still has no
-        // clips and still looks inert, so it still gets the hint. This is proven
-        // structurally rather than by a flag sweep: `hints(for:)` takes `[Track]`
-        // and nothing else, so there is no transport state it COULD read. This
-        // test's job is to fail loudly if that signature ever grows one.
+        // clips and still looks inert, so it still gets the hint.
+        //
+        // ⚠️ **SUPERSEDED IN PLACE BY m34-a-2 — READ THIS BEFORE QUOTING THE OLD
+        // CLAIM.** This used to say `hints(for:)` takes `[Track]` and nothing
+        // else, "so there is no transport state it COULD read". That is no
+        // longer true: it now also takes `recordingTrackIDs`, which is derived
+        // from a rolling take. The claim the test actually makes — and the one
+        // worth keeping — is NARROWER and sharper: **arming a track, and the
+        // transport rolling, are still not enough to silence a lane.** Only a
+        // take that has genuinely begun capturing onto it is, and that is a fact
+        // about the LANE (a clip is arriving there), not about the transport.
+        // The `recordingTrackIDs: []` default is what keeps every pre-m34-a-2
+        // caller byte-identical.
         var armedRolling = track("Live", .instrument)
         armedRolling.isArmed = true
         #expect(ArrangeEmptyLaneHints.hints(for: [armedRolling]).count == 1)
@@ -198,5 +207,35 @@ struct ArrangeEmptyLaneHintTests {
         // reordering tracks re-fires the report.
         #expect(hints[0].id == hints[0].trackID)
         #expect(hints[0] != ArrangeEmptyLaneHints.hint(for: lead, laneIndex: 3))
+    }
+
+    /// m34-a-2 — **A LANE WITH A TAKE ROLLING ONTO IT IS NOT EMPTY-AND-WAITING.**
+    ///
+    /// ⭐ Found by LOOKING at a mid-take capture, not by an assertion: the hint
+    /// sat physically underneath the provisional region's "REC n" readout, and
+    /// it was inviting the user to create a clip on the one lane where a clip
+    /// was already being recorded.
+    @Test("a lane carrying a provisional take region shows no empty-lane hint")
+    func aRecordingLaneShowsNoHint() {
+        let lead = track("Lead", .instrument)
+        let pad = track("Pad", .instrument)
+
+        // POSITIVE CONTROL: with no take rolling, BOTH lanes are hinted — so the
+        // suppression below is attributable to the recording set and not to a
+        // fixture that was never going to produce two hints.
+        let idle = ArrangeEmptyLaneHints.hints(for: [lead, pad])
+        #expect(idle.count == 2, "positive control: both empty instrument lanes must hint at rest")
+
+        let recording = ArrangeEmptyLaneHints.hints(for: [lead, pad], recordingTrackIDs: [lead.id])
+        #expect(recording.count == 1, "the recording lane must drop out of the hint set")
+        #expect(recording.first?.trackID == pad.id, "the WRONG lane was suppressed")
+        // ⚠️ The lane index is the LADDER position, not the position in the
+        // filtered array — the view offsets each hint by `laneTop(laneIndex)`, so
+        // a re-indexed hint would draw the surviving text on the wrong row.
+        #expect(recording.first?.laneIndex == 1,
+                "the surviving hint was re-indexed — it would draw on the wrong lane")
+
+        // ADDITIVE: the default argument leaves every existing caller unchanged.
+        #expect(ArrangeEmptyLaneHints.hints(for: [lead, pad], recordingTrackIDs: []) == idle)
     }
 }

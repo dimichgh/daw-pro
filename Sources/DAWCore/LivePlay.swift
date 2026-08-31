@@ -64,6 +64,35 @@ public struct LivePlayResult: Sendable, Equatable, Codable {
     }
 }
 
+/// One sustain-pedal push's answer as the wire sees it (m34-l) — the
+/// `LivePlayResult` shape with the pedal's one bit where the pitches were.
+///
+/// ⭐ **`down` IS READ BACK, NEVER ASSUMED.** It is the state the controller
+/// actually holds after the call, so a surface that lights its pedal lamp from
+/// this can never show a pedal the engine does not have. A setter's return is
+/// not proof it took — unless the setter returns the state rather than an ack.
+public struct LiveSustainResult: Sendable, Equatable, Codable {
+    public var trackID: UUID
+    /// The pedal state AFTER this call.
+    public var down: Bool
+    /// Did this call actually push a CC 64 to the engine? False when the state
+    /// filter coalesced it away — a re-assert of an unchanged pedal on an
+    /// unchanged track is honestly a no-op, not a failure.
+    public var pushed: Bool
+    public var outcome: LiveExpressionOutcome
+
+    public var isAudible: Bool { outcome.isAudible }
+    public var capturedPoints: Int { outcome.capturedPoints }
+    public var isRecording: Bool { outcome.recording }
+
+    public init(trackID: UUID, down: Bool, pushed: Bool, outcome: LiveExpressionOutcome) {
+        self.trackID = trackID
+        self.down = down
+        self.pushed = pushed
+        self.outcome = outcome
+    }
+}
+
 /// THE policy home for LIVE PLAY (m23-ct): the same voice cap / diffing /
 /// heartbeat / hold-ceiling machinery `AuditionController` runs, pointed at the
 /// one engine entry that ALSO feeds the take. UI-free and engine-free (handed
@@ -113,6 +142,129 @@ public final class LivePlayController {
     /// heartbeat re-asserts an UNCHANGED set, an unchanged set has no edges,
     /// and a call with no edges ingests nothing whatever this flag says.
     public private(set) var heldCaptureIntoTake = false
+
+    // MARK: - The sustain pedal (m34-l)
+
+    /// **THE SUSTAIN PEDAL, CC 64.** True while the pedal is DOWN.
+    ///
+    /// ⭐⭐ **IT LIVES HERE RATHER THAN IN `PadPreviewController`, AND THAT WAS A
+    /// MEASURED CHOICE, NOT A FILING PREFERENCE.** m34-f's expression seam
+    /// bottoms out in `PadPreviewController`, which is a GESTURE machine: it
+    /// permits exactly one open gesture (`preview`'s `.begin` calls
+    /// `releaseToNeutral` on any other) and auto-releases it at
+    /// `maxGestureSeconds` (30 s). Both are right for a drag and wrong for a
+    /// LATCH — a pedal held past 30 s would silently lift mid-performance, and a
+    /// breath-pad drag would lift a pedal whose lamp stayed lit, which is this
+    /// tree's characteristic failure twice over. The pedal reuses everything
+    /// BELOW that layer: `AudioEngine.setLiveExpression` is the same funnel, so
+    /// the value sounds and reaches the take by exactly the m34-f path.
+    ///
+    /// ⭐ **AND IT LIVES BESIDE THE NOTES BECAUSE STAND-DOWN COMPLETENESS IS THE
+    /// WHOLE RISK.** A stuck pedal is an infinite drone with no visible cause.
+    /// Every site that stands live play down — `record()`, `recordLayer()`,
+    /// `stopAllAudition()`, `panic()`, `newProject()`, `applyOpenedState()` —
+    /// already calls `stopAll`, so the pedal lifts at all six *structurally*,
+    /// with no per-site pairing for a future site to forget.
+    public private(set) var sustainDown = false
+    /// The track the pedal is down on. One pedal, like one pair of hands.
+    public private(set) var sustainTrackID: UUID?
+    /// The capture verdict in force when the pedal went DOWN, re-used by the
+    /// lift for `stopReleasing`'s reason verbatim: a disarm mid-hold must still
+    /// land the closing CC 64 = 0, or the take's lane ends at 127 and every
+    /// clip after it inherits a pedal nobody pressed (CC 64 is one of the
+    /// controllers `MIDIControllerType.resetsAtClipOnset` deliberately does NOT
+    /// clear at a clip boundary).
+    public private(set) var sustainCaptureIntoTake = false
+
+    /// Presses or lifts the sustain pedal on `trackID`.
+    ///
+    /// ⛔⛔ **GATE THE ONS, NEVER GATE THE OFFS — and the sustain shape of that
+    /// law is specific.** Pressing is a performance act and may be refused
+    /// upstream (`ProjectStore.playLiveSustain` validates the track the way a
+    /// note-on is validated); lifting is never refused by anything, and the lift
+    /// rides the capture verdict from the PRESS rather than a fresh one.
+    ///
+    /// ⚠️ **STATE-FILTERED, unlike the pad's `.move`.** `PadPreviewController`
+    /// deliberately does NOT gate its ingest on its strip filter, because a
+    /// value the strip already holds is still a value the user is *performing at
+    /// that instant*. A latch has no such continuum: re-asserting "down" while
+    /// down is not a second press, it is the same press, and pushing it would
+    /// stack duplicate points into a take and a duplicate CC into the ring on
+    /// every stand-down. `pushed` in the result says honestly when the filter
+    /// coalesced a call away.
+    ///
+    /// A pedal down on ANOTHER track lifts there first: one pedal.
+    @discardableResult
+    public func setSustain(trackID: UUID, down: Bool, captureIntoTake: Bool,
+                           engine: (any AudioEngineControlling)?) -> LiveSustainResult {
+        if sustainDown, let held = sustainTrackID, held != trackID {
+            // Lift the old strip THROUGH the capture path, for `set`'s reason:
+            // a pedal left down on a track the user has walked away from is a
+            // drone, and a take on that track would keep a 127 it never closed.
+            pushSustain(trackID: held, down: false,
+                        captureIntoTake: sustainCaptureIntoTake, engine: engine)
+            sustainDown = false
+            sustainTrackID = nil
+        }
+        guard down != sustainDown || (down && sustainTrackID != trackID) else {
+            return LiveSustainResult(
+                trackID: trackID, down: sustainDown, pushed: false,
+                outcome: LiveExpressionOutcome(audition: .sounded, capturedPoints: 0,
+                                               recording: false))
+        }
+        // The LIFT rides the verdict from the PRESS; the PRESS takes the fresh
+        // one. Same asymmetry `stopReleasing` documents for note-offs.
+        let verdict = down ? captureIntoTake : sustainCaptureIntoTake
+        let outcome = pushSustain(trackID: trackID, down: down,
+                                  captureIntoTake: verdict, engine: engine)
+        // ⚠️ A push that reached NO renderer does not become held state — the
+        // `set` rule: do not remember a pedal on an instrument that does not
+        // exist, or the lift would be filtered away as "already up" later.
+        if down, outcome.audition == .noRenderer || outcome.audition == .unsupported {
+            sustainDown = false
+            sustainTrackID = nil
+            sustainCaptureIntoTake = false
+            return LiveSustainResult(trackID: trackID, down: false, pushed: true,
+                                     outcome: outcome)
+        }
+        sustainDown = down
+        sustainTrackID = down ? trackID : nil
+        sustainCaptureIntoTake = down ? captureIntoTake : false
+        return LiveSustainResult(trackID: trackID, down: down, pushed: true, outcome: outcome)
+    }
+
+    /// Lifts the pedal wherever it is down. Idempotent, never refused, safe with
+    /// no engine — the one call every stand-down site needs.
+    @discardableResult
+    public func liftSustain(engine: (any AudioEngineControlling)?) -> Bool {
+        guard sustainDown, let trackID = sustainTrackID else {
+            sustainDown = false
+            sustainTrackID = nil
+            sustainCaptureIntoTake = false
+            return false
+        }
+        pushSustain(trackID: trackID, down: false,
+                    captureIntoTake: sustainCaptureIntoTake, engine: engine)
+        sustainDown = false
+        sustainTrackID = nil
+        sustainCaptureIntoTake = false
+        return true
+    }
+
+    /// The ONE place a CC 64 leaves this type. `value` is the MIDI standard's,
+    /// not a choice: ≥ 64 is DOWN, < 64 is UP, so 127/0 are the two ends.
+    @discardableResult
+    private func pushSustain(trackID: UUID, down: Bool, captureIntoTake: Bool,
+                             engine: (any AudioEngineControlling)?) -> LiveExpressionOutcome {
+        engine?.setLiveExpression(trackID: trackID, controller: Self.sustainCC,
+                                  value: down ? 127 : 0,
+                                  captureIntoTake: captureIntoTake) ?? .unsupported
+    }
+
+    /// CC 64 — the damper pedal. MIDI 1.0's assignment, mirrored from
+    /// `MIDIControllerRouting.samplerRoutedCCs` / `polySynthRoutedCCs`, which
+    /// are the tables that say both built-ins consume it.
+    public static let sustainCC: UInt8 = 64
 
     private var heartbeatTask: Task<Void, Never>?
     private var holdStarted: ContinuousClock.Instant?
@@ -212,6 +364,18 @@ public final class LivePlayController {
     /// used mid-take by definition.
     public func stopAll(engine: (any AudioEngineControlling)?) {
         stop(engine: engine)
+        // ⛔⛔ **THE PEDAL LIFTS HERE AND *ONLY* HERE — NEVER IN `stopReleasing`
+        // (m34-l).** That path runs on every all-keys-up (`set(pitches: [])`),
+        // and all keys up WITH THE PEDAL DOWN is the feature working, not a
+        // stand-down: it is precisely the moment the pedal is holding the sound
+        // the fingers let go of. Lifting there would make the pedal a no-op that
+        // *looked* implemented — this tree's characteristic failure, and the one
+        // failure mode a pedal has that nothing else would catch.
+        //
+        // ⚠️ ORDER: after the note release, so the take's note-offs are ingested
+        // before the closing CC 64 — the lane then reads "notes ended, then the
+        // pedal came up", which is what happened.
+        liftSustain(engine: engine)
         stopHeartbeat()
         heldTrackID = nil
         heldPitches = []

@@ -55,6 +55,29 @@ struct MIDICaptureTests {
         #expect(!result.droppedEvents)
     }
 
+    @Test("⭐ a pre-anchor note does not move the LIVE EXTENT either — no region, no ghost")
+    func aPreAnchorNoteDoesNotMoveTheLiveExtent() {
+        // m34-a-2: the provisional take region is drawn from `liveExtent`, and
+        // a dropped note must not promise a clip that `finish` will not create.
+        // Fabricated host times, so "before the anchor" is arithmetic — the
+        // wall-clock version of this test was load-fragile and was retired
+        // (see `LiveTakeExtentTests`).
+        let session = makeSession()
+        session.ingest(on(60, atBeat: 7.5))   // half a beat BEFORE the anchor
+        session.ingest(off(60, atBeat: 7.9))
+        let dropped = session.liveExtent
+        #expect(dropped.noteCount == 0, "a dropped note moved the live extent")
+        #expect(dropped.latestEventBeat == nil, "a dropped note set the latest-event beat")
+        #expect(dropped.anchorBeat == Self.anchorBeats)
+
+        // POSITIVE CONTROL: the same session DOES move for an accepted note, so
+        // the zeros above are the pre-anchor rule and not a dead fixture.
+        session.ingest(on(62, atBeat: 9))
+        let accepted = session.liveExtent
+        #expect(accepted.noteCount == 1)
+        #expect(accepted.latestEventBeat == 9.0)
+    }
+
     @Test("a pre-anchor note-on is dropped (count-in), and its off drops with it")
     func preAnchorNoteOnIsDropped() {
         let session = makeSession()

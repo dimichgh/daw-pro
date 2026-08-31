@@ -92,6 +92,21 @@ enum KeyPressProbe {
     // the key-code route is preferred because it needs no modifier and so cannot
     // be confused with the separate question of whether chords should delete.)
     //
+    // ⚠️⚠️ **THE TWO ARROW COUNTERS BELOW STOPPED ANSWERING "DID THE ARROW
+    // WORK?" AT m34-j, EXACTLY AS THE DELETE COUNTERS DID AT m23-cf-3.** The
+    // arrow keys now ride `ArrowNudgeMonitorRouting` through the app's `NSEvent`
+    // monitor, which SWALLOWS an owned key before SwiftUI sees it — so in the
+    // ordinary working case these counters DO NOT MOVE for a real arrow press.
+    // A gate that read them as "the nudge happened" would go GREEN BY GOING
+    // BLIND at the precise moment the feature started working.
+    //
+    // ⭐ WHAT THEY STILL MEASURE, AND IT IS WORTH KEEPING: whether the SwiftUI
+    // MOUNT was reachable. That is how m34-j was diagnosed — the counters read
+    // 12/12 across clip switches (refuting the item's stated premise) and 0/3 in
+    // the state a dismissed text field leaves behind (finding the real one).
+    // Use `arrowNudgeMonitorSeq` / `arrowNudgeMonitorRefusedBy` for the monitor
+    // tier, and CLIP MOVEMENT for whether the user's clip actually moved.
+    //
     /// `ContentView.ArrangeDeleteKey.onKeyPress(keys: [.leftArrow, .rightArrow])`.
     static var arrangeHorizontalArrow = 0
     /// `ContentView.ArrangeDeleteKey.onKeyPress(keys: [.upArrow, .downArrow])`.

@@ -457,6 +457,20 @@ struct TimelineLanesView: View {
     /// (map edits are refused mid-take; the lane greys its handles to match).
     var isRecordingTransport: Bool = false
 
+    /// The PROVISIONAL take region (m34-a-2) — the growing block drawn over the
+    /// destination lane(s) while a take is rolling, nil the rest of the time.
+    ///
+    /// ⛔ **IT ARRIVES AS A VALUE AND LEAVES AS PIXELS. Nothing about it is
+    /// interactive**: it is not in `tracks[…].clips`, so selection, the marquee,
+    /// drag/trim, the clipboard and undo cannot reach it even in principle, and
+    /// the layer that draws it is `.allowsHitTesting(false)` so the empty-lane
+    /// gestures underneath it (double-click to create, right-click to paste)
+    /// keep working exactly as they do with nothing drawn there.
+    ///
+    /// The DECISION about whether to draw is `TakeRegionPreview`'s, in DAWCore,
+    /// where it is headless-testable — this view has no opinion and no fallback.
+    var liveTakeRegion: ProvisionalTakeRegion? = nil
+
     // MARK: - Ruler-block pinning (m13-g)
 
     /// Which slice this instance renders. `.full` (default) keeps the legacy
@@ -896,6 +910,7 @@ struct TimelineLanesView: View {
                 emptyLaneHintLayer
                 loopBand
                 clipBlocks
+                liveTakeRegionBlock
                 crossfadeSeams
                 takeLanes
                 automationLanes
@@ -932,6 +947,7 @@ struct TimelineLanesView: View {
                     // playhead / refusal bubble, which must read over it.
                     emptyLaneHintLayer
                     clipBlocks
+                    liveTakeRegionBlock
                     crossfadeSeams
                     takeLanes
                     automationLanes
@@ -1321,6 +1337,88 @@ struct TimelineLanesView: View {
             }
         }
     }
+
+    // MARK: - The growing take region (m34-a-2)
+
+    /// The PROVISIONAL block that appears on the destination lane the moment a
+    /// take captures its first note and grows, whole beat by whole beat, until
+    /// the real clip replaces it at stop.
+    ///
+    /// ⭐⭐ **IT MUST BE LEGIBLE AS *NOT YET A CLIP*, AT A GLANCE, WITHOUT
+    /// READING ANYTHING** — a performer looking at the screen mid-take has no
+    /// attention to spend. Three cues, all pulling the same way:
+    ///
+    /// • **Amber** (`DAWTheme.record`), which in this app means record/warning
+    ///   and NOTHING else. No clip is ever amber: audio clips are green-ish
+    ///   tints, MIDI clips violet/cyan, AI clips violet. So the colour alone
+    ///   already says "this is the recording, not your material".
+    /// • **A dashed outline.** Every real clip in this timeline is drawn with a
+    ///   SOLID edge; a dashed one is not a shape the arrange otherwise contains,
+    ///   which is what makes it read as provisional rather than as a variant.
+    /// • **A translucent fill (0.10)**, so the grid and any clip underneath show
+    ///   THROUGH it. A solid block would claim to have replaced what is under
+    ///   it; this is honest about being an overlay on ground that still belongs
+    ///   to whatever is already there.
+    ///
+    /// The corner radius matches a real clip's (5), deliberately: the shape is
+    /// the same *kind* of object, and making it a different shape as well as a
+    /// different colour and edge would read as an unrelated piece of chrome.
+    ///
+    /// ⚠️ **THE READOUT IS SF MONO AND SAYS THE NOTE COUNT** — the numeric-
+    /// readout rule, and the one fact that distinguishes "the take is running
+    /// and capturing" from "the view is stuck". It is suppressed below 46 pt of
+    /// width rather than truncated (the `showGain` idiom): a clipped word is
+    /// worse than no word.
+    @ViewBuilder
+    private var liveTakeRegionBlock: some View {
+        if let region = liveTakeRegion {
+            let width = max(3, CGFloat(region.lengthBeats) * pixelsPerBeat)
+            let originX = CGFloat(region.startBeat) * pixelsPerBeat
+            ZStack(alignment: .topLeading) {
+                // One block per destination lane. A multi-armed take lands one
+                // clip PER instrument track, so previewing one lane would be a
+                // half-truth about what stop is going to create.
+                ForEach(takeRegionRows(region), id: \.self) { index in
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(DAWTheme.record.opacity(0.10))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 5)
+                                .strokeBorder(DAWTheme.record.opacity(0.85),
+                                              style: StrokeStyle(lineWidth: 1.5, dash: [5, 3]))
+                        )
+                        .overlay(alignment: .topLeading) {
+                            if width >= Self.takeRegionLabelMinWidth {
+                                Text("REC \(region.noteCount)")
+                                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                                    .foregroundStyle(DAWTheme.record)
+                                    .lineLimit(1)
+                                    .fixedSize()
+                                    .padding(.leading, 5)
+                                    .padding(.top, 3)
+                            }
+                        }
+                        .shadow(color: DAWTheme.record.opacity(0.35), radius: 6)
+                        .frame(width: width, height: rowHeight)
+                        .offset(x: originX, y: laneTop(index))
+                }
+            }
+            // ⛔ THE NON-NEGOTIABLE LINE. Without it a half-recorded region would
+            // swallow the empty-lane double-click and the lane's right-click
+            // menu for the whole take, and a future edit could give it a gesture
+            // — the data-loss shape this feature must never grow.
+            .allowsHitTesting(false)
+        }
+    }
+
+    /// Row indices for a region's destination tracks, in track order. A
+    /// destination that no longer exists (deleted mid-take) simply drops out —
+    /// the same tolerance `finishTake` shows when it lands.
+    private func takeRegionRows(_ region: ProvisionalTakeRegion) -> [Int] {
+        tracks.indices.filter { region.trackIDs.contains(tracks[$0].id) }
+    }
+
+    /// Below this width the "REC n" readout is suppressed rather than clipped.
+    private static let takeRegionLabelMinWidth: CGFloat = 46
 
     // MARK: - Crossfade seams (m11-d)
 
@@ -2186,7 +2284,10 @@ struct TimelineLanesView: View {
     /// takes no transport, so "a track added mid-playback still shows the hint"
     /// is structural rather than promised).
     private var emptyLaneHints: [ArrangeEmptyLaneHint] {
-        ArrangeEmptyLaneHints.hints(for: tracks)
+        // m34-a-2: a lane with a take rolling onto it is not empty-and-waiting.
+        // See `ArrangeEmptyLaneHints.hint` for what the screenshot showed.
+        ArrangeEmptyLaneHints.hints(for: tracks,
+                                    recordingTrackIDs: liveTakeRegion?.trackIDs ?? [])
     }
 
     /// The hover ghost line (m17-c #2): a faint NEUTRAL hairline at the

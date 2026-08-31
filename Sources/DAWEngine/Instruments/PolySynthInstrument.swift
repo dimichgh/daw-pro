@@ -94,6 +94,11 @@ final class PolySynthInstrument: InstrumentRendering, @unchecked Sendable {
     private var bendFactor = 1.0
     private var pedalDown = false
     private static let bendRangeSemitones = 2.0
+    /// m34-q: how many notes the CC 64 pedal may keep ringing. `Int.max` is the
+    /// resolved form of the model's nil — "unlimited" — and it is deliberately
+    /// a value the note-on guard below can never satisfy, so an instrument
+    /// without a cap executes no extra work at all.
+    private var pedalHoldLimit = Int.max
     // Coefficients derived from the adopted snapshot — recomputed per
     // GENERATION change, never per sample.
     private var waveformCode: UInt8 = 0            // 0 saw · 1 square · 2 triangle · 3 sine
@@ -313,6 +318,13 @@ final class PolySynthInstrument: InstrumentRendering, @unchecked Sendable {
         sustainLevel = Float(params.sustain)
         releaseSlope = Float(1.0 / (params.release * sampleRate))
         outputGain = Float(params.gain)
+        // m34-q: resolved to a plain Int here, once per snapshot — the render
+        // thread never sees an Optional. A lowered cap takes effect at the NEXT
+        // note-on rather than instantly, the same rule the Sampler's voice mode
+        // follows and for the same reason: trimming already-sounding notes at a
+        // snapshot boundary would be a fade the user never played, for a knob
+        // they turned between notes anyway.
+        pedalHoldLimit = params.effectivePedalHoldLimit
         let cutoff = min(params.cutoffHz, sampleRate * 0.45)  // tan() stability guard
         let g = Float(tan(.pi * cutoff / sampleRate))
         let q = 0.5 + params.resonance * 9.5
@@ -339,10 +351,112 @@ final class PolySynthInstrument: InstrumentRendering, @unchecked Sendable {
         return 0.0
     }
 
+    // MARK: - Pedal hold limit (m34-q, render thread)
+
+    /// THE PEDAL-UP SWEEP BODY, for ONE voice — factored out so the sweep and
+    /// the m34-q hold-limit eviction cannot drift into sounding different.
+    /// There is exactly ONE way a pedal-held note stops in this instrument and
+    /// this is it: the deferred note-off, delivered now, into the patch's own
+    /// release ramp.
+    ///
+    /// ⛔ CALLERS MUST HAVE ESTABLISHED `active && sustained`. It deliberately
+    /// does not re-check, because the one thing this must never do is release a
+    /// voice whose KEY IS STILL DOWN (`sustained == false`) — that would cut a
+    /// note under the player's finger — and a caller forced to filter is a
+    /// caller that had to think about it.
+    @inline(__always)
+    private func releaseSustainedVoice(at index: Int) {
+        voices[index].sustained = false
+        if voices[index].level <= 0 {
+            voices[index] = Voice()  // off before the first audible sample
+        } else {
+            voices[index].stage = Stage.release
+            voices[index].releaseFrom = voices[index].level
+        }
+    }
+
+    /// How many distinct NOTES the pedal is holding — notes, not voices. Here
+    /// they are the same number (one note-on allocates one voice), and the
+    /// shape is still written note-wise so this instrument and the Sampler,
+    /// where one note-on CAN sound several layered voices, answer the user's
+    /// question ("how many notes to hold") identically.
+    ///
+    /// O(voices²) worst case at EVENT rate, and only while a cap is set: 16
+    /// voices, so at most 120 integer compares, on a path that already walks
+    /// all 16 slots to find one. Nothing allocates, locks or logs.
+    private func sustainedNoteCount() -> Int {
+        var count = 0
+        for index in 0..<Self.voiceCount
+        where voices[index].active && voices[index].sustained {
+            var isFirstVoiceOfNote = true
+            for other in 0..<index
+            where voices[other].active && voices[other].sustained
+                && voices[other].noteID == voices[index].noteID {
+                isFirstVoiceOfNote = false
+                break
+            }
+            if isFirstVoiceOfNote { count &+= 1 }
+        }
+        return count
+    }
+
+    /// Releases every voice of the OLDEST pedal-held note — lowest serial, the
+    /// same "oldest" this instrument's voice stealing already means. Returns
+    /// false when the pedal is holding nothing, which is what terminates the
+    /// eviction loop; a trusted counter would not.
+    private func releaseOldestSustainedNote() -> Bool {
+        var oldestSerial: UInt64 = 0
+        var oldestNoteID: UInt64 = 0
+        var found = false
+        for index in 0..<Self.voiceCount
+        where voices[index].active && voices[index].sustained {
+            if !found || voices[index].serial < oldestSerial {
+                oldestSerial = voices[index].serial
+                oldestNoteID = voices[index].noteID
+                found = true
+            }
+        }
+        guard found else { return false }
+        // EVERY voice of that note, not merely the lowest-serial one — a
+        // layered note releasing one layer at a time would half-stop.
+        for index in 0..<Self.voiceCount
+        where voices[index].active && voices[index].sustained
+            && voices[index].noteID == oldestNoteID {
+            releaseSustainedVoice(at: index)
+        }
+        return true
+    }
+
+    /// m34-q enforcement, from the note-on path with the pedal down. Counts
+    /// ONCE and then evicts a known number of notes: each eviction removes
+    /// exactly one distinct note, so recounting per round would only buy an
+    /// O(n³) worst case.
+    ///
+    /// `>=`, not `>`: the note being struck right now becomes the cap-th
+    /// pedal-held note the moment its key is released, so the room has to be
+    /// made here.
+    private func enforcePedalHoldLimit() {
+        var held = sustainedNoteCount()
+        while held >= pedalHoldLimit {
+            guard releaseOldestSustainedNote() else { return }
+            held -= 1
+        }
+    }
+
     // MARK: - Voice allocation (render thread)
 
     private func apply(_ event: ScheduledMIDIEvent) {
         if event.kind == ScheduledMIDIEvent.noteOn {
+            // m34-q: the hold limit binds HERE, at the note-on — the moment the
+            // ear can hear the trade being made, and the same moment a player
+            // lifting a key early would have made it. `Int.max` (the nil
+            // default) can never be <= the voice count, so an instrument with
+            // no cap runs not one extra instruction and renders byte-identically
+            // to the pre-m34-q engine. A cap ABOVE the pool is likewise
+            // unreachable and therefore means unlimited.
+            if pedalDown, pedalHoldLimit <= Self.voiceCount {
+                enforcePedalHoldLimit()
+            }
             var slot = -1
             var oldestSerial = UInt64.max
             var oldestIndex = 0
@@ -393,13 +507,7 @@ final class PolySynthInstrument: InstrumentRendering, @unchecked Sendable {
                     // noteOffs, delivered now.
                     for index in 0..<Self.voiceCount
                     where voices[index].active && voices[index].sustained {
-                        voices[index].sustained = false
-                        if voices[index].level <= 0 {
-                            voices[index] = Voice()
-                        } else {
-                            voices[index].stage = Stage.release
-                            voices[index].releaseFrom = voices[index].level
-                        }
+                        releaseSustainedVoice(at: index)  // m34-q: the ONE body
                     }
                 }
                 pedalDown = down

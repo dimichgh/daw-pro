@@ -152,6 +152,19 @@ final class InstrumentRenderer: @unchecked Sendable {
     /// Live sustain-pedal state (CC64), render-thread-only — the SECOND term 6d's
     /// re-arm needs, and deliberately NOT folded into `openLiveCount` (m23-ae).
     ///
+    /// ⭐⭐ **WRITTEN BY BOTH LIVE RINGS SINCE m34-l, AND THE SECOND WRITER WAS A
+    /// MEASURED BUG, NOT A TIDY-UP.** 6b (thru) latched it and 6c (audition) did
+    /// not, so Musical Typing's Tab pedal — which rides the audition ring —
+    /// reached the instrument and set its CC64 while leaving THIS mirror false.
+    /// The tail then aged out and cut the sustaining voice at `liveTailSeconds`
+    /// on a stopped transport. Measured on staging at OFF+9 s across all three
+    /// instrument paths; both latch sites now carry the same three-line guard.
+    ///
+    /// ⚠️ **ONE Bool, LAST WRITER WINS ACROSS THE TWO RINGS.** That mirrors the
+    /// instrument, which also holds one CC64 state per channel written by both
+    /// producers. A per-ring pedal would be a SECOND record of the instrument's
+    /// one pedal, and the two could disagree.
+    ///
     /// `openLiveCount` counts KEYS HELD. Both built-in instruments DEFER the
     /// release while the pedal is down (`PolySynthInstrument.swift:377`,
     /// `SamplerInstrument.swift:190`), so a key can be released — slot cleared,
@@ -801,6 +814,45 @@ final class InstrumentRenderer: @unchecked Sendable {
                     // controller they route reaches `instrument.apply` intact,
                     // with `kind`, `pitch` (= controller number) and `velocity`
                     // (= value) unchanged.
+                    //
+                    // ⭐⭐ SUSTAIN-PEDAL LATCH, THE AUDITION TWIN OF 6b's (m34-l).
+                    // MEASURED GAP, not a symmetry tidy-up: 6b latched
+                    // `livePedalDown` and 6c did not, so a pedal pressed on the
+                    // AUDITION ring set the INSTRUMENT's pedal (the event
+                    // reaches `instrument.apply` right below) while leaving 6d's
+                    // re-arm with no term for it. Key-up then cleared
+                    // `pitchToAuditionID`, `openAuditionCount` fell to 0, and on
+                    // a stopped transport (`schedule == nil`, step 7's ORDINARY
+                    // path) the tail aged out and cut the sustaining voice at
+                    // `liveTailSeconds`. Reproduced on staging before the fix,
+                    // on all three instrument paths, by holding CC64 and
+                    // releasing the key: full level at OFF+5 s, SILENT at
+                    // OFF+9 s — polySynth −16.54 → null, sampler −13.94 → null,
+                    // GM sound bank −23.05 → null. That is m23-ae's bug exactly,
+                    // re-acquired on the other ring.
+                    //
+                    // ⚠️ ONE Bool FOR BOTH RINGS, LAST WRITER WINS — and that is
+                    // right rather than sloppy: the INSTRUMENT holds one CC64
+                    // state per channel and it is last-writer-wins across both
+                    // rings too (`SamplerInstrument.apply`, `PolySynth-
+                    // Instrument.apply`). This field's own doc calls itself a
+                    // MIRROR of that state, so mirroring it from both producers
+                    // makes it more accurate, not less.
+                    //
+                    // ⚠️ THE `kind ==` TEST IS NOT REDUNDANT WITH `pitch == 64`,
+                    // for 6b's reason verbatim: in this branch `pitch` is the
+                    // controller number only for kind 2 — for `pitchBend` (3) it
+                    // is the LSB and for `channelPressure` (4) the value, so a
+                    // bare `pitch == 64` latches the pedal on an ordinary fine
+                    // bend and the node never sleeps again.
+                    //
+                    // C11 IS INTACT: one Bool, no pitch map, no extra ID, and it
+                    // emits nothing — 6c's `emitBound` arithmetic still sees
+                    // exactly one event per pop.
+                    if event.kind == ScheduledMIDIEvent.controlChange,
+                       event.pitch == 64 {
+                        livePedalDown = event.velocity >= 64
+                    }
                     let id = nextLiveNoteID
                     nextLiveNoteID &+= 1
                     liveScratch[liveCount] = ScheduledMIDIEvent(

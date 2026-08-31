@@ -36,6 +36,15 @@ extension AppModel {
         musicalTyping.sink = LivePlayNoteSink(store: store) { [weak self] in
             self?.activeTrackID
         }
+        // ⭐ **THE SUSTAIN PEDAL'S SEAM (m34-l) — THE SAME CLASS THE BREATH PAD
+        // PUSHES THROUGH**, with the SAME per-call track resolution the note
+        // sink above uses and for the same reason: the active track moves while
+        // the mode is on. `LivePlayExpressionSink` conforms to both
+        // `LiveExpressionSink` (the pad's phased shape) and `LiveSustainSink`
+        // (the pedal's edge shape); beneath both is m34-f's one funnel.
+        musicalTyping.sustainSink = LivePlayExpressionSink(store: store) { [weak self] in
+            self?.activeTrackID
+        }
         installMusicalTypingSafetyNet()
     }
 
@@ -174,16 +183,103 @@ extension AppModel {
         musicalTyping.pointerDown(cellIndex: cellIndex)
     }
 
+    /// **THE SUSTAIN PEDAL toggled from the MOUSE (m34-l)** — the pedal pill's
+    /// half of `musicalTypingPointerDown`, and the same one-home rule.
+    ///
+    /// The refresh is not optional and the reason is the pedal's own: a click on
+    /// the pill can be the first thing that happens after the user selects a
+    /// different track, and `setSustain`'s press gate reads `targetState`. Judge
+    /// it against the previous track's state and the pedal latches onto an
+    /// instrument the user has walked away from.
+    func musicalTypingToggleSustain() {
+        refreshMusicalTypingTarget()
+        musicalTyping.toggleSustain()
+    }
+
     /// Switches between one-key-one-note and one-key-one-chord — THE one funnel,
     /// so the header chips, the strip and `debug.musicalTyping {playMode:}` cannot
     /// disagree.
     func setMusicalTypingPlayMode(_ mode: MusicalTypingPlayMode) {
         musicalTyping.setPlayMode(mode)
+        // m34-g: there is no cue to move in note mode, so leaving chord mode
+        // tears the on-the-beat poll down rather than leaving it spinning.
+        updateMusicalTypingBeatTimer()
         refreshMusicalTypingTarget()
         // The controller has already pushed an empty set; this also clears
         // anything the piano roll's own audition left behind, exactly as
         // `setMusicalTypingEnabled` does on the way out.
         store.stopAllAudition()
+    }
+
+    /// **PLAYBOX (m34-g): when the outline moves.** THE one funnel — the chip
+    /// row and `debug.musicalTyping {advanceMode:}` cannot disagree.
+    ///
+    /// ⚠️ It also resets the beat driver's phase, so switching INTO on-the-beat
+    /// mid-playback starts counting bars from where you are rather than
+    /// inheriting a stale one and firing immediately.
+    func setMusicalTypingAdvanceMode(_ mode: ChordSequenceAdvanceMode) {
+        musicalTyping.setAdvanceMode(mode)
+        musicalTypingBeatDriver.reset()
+        updateMusicalTypingBeatTimer()
+    }
+
+    /// Starts the on-the-beat poll when — and only when — it can do anything.
+    ///
+    /// The three conditions are the three that make a tick meaningful: the mode
+    /// is on, it is in CHORD mode (there is no cue to move in note mode), and
+    /// the user has chosen on-the-beat. Anything else tears the timer down and
+    /// forgets the phase, so wait-for-you and lights-run-ahead cost nothing at
+    /// all.
+    func updateMusicalTypingBeatTimer() {
+        let wanted = musicalTyping.isEnabled
+            && musicalTyping.playMode == .chords
+            && musicalTyping.advanceMode == .onBeat
+        guard wanted else {
+            musicalTypingBeatTimer?.invalidate()
+            musicalTypingBeatTimer = nil
+            musicalTypingBeatDriver.reset()
+            return
+        }
+        guard musicalTypingBeatTimer == nil else { return }
+        // 30 Hz: the same rate the store's own playhead loop advances at, so a
+        // downbeat is never missed by more than one sample (11 ms at 120 BPM).
+        musicalTypingBeatTimer = Timer.scheduledTimer(
+            withTimeInterval: 1.0 / 30.0, repeats: true
+        ) { [weak self] _ in
+            Task { @MainActor in self?.sampleMusicalTypingBeat() }
+        }
+    }
+
+    /// **PLAYBOX: ask for a fresh set of lights.**
+    ///
+    /// ⛔⛔ **IT LIGHTS KEYS AND PLAYS NOTHING.** `PlayboxModel.generate` ends in
+    /// `MusicalTypingController.applyPlaybox`, which sets the lit-key overlay and
+    /// arms the sequence cursor. Nothing on this path sounds a note, writes a
+    /// clip or touches the transport — the performance is the user's.
+    ///
+    /// Fire-and-forget: the button reads `playbox.isBusy` and dims itself, and
+    /// the model has no failure state to surface (a missing key or a bad answer
+    /// resolves to the local library path and says so in the provenance line).
+    func generatePlaybox() {
+        guard !playbox.isBusy else { return }
+        Task { @MainActor in
+            _ = await self.playbox.generate()
+        }
+    }
+
+    /// **PLAYBOX: the on-the-beat tick, sampled from the transport.**
+    ///
+    /// ⚠️ **POLLED, NOT WRITTEN FROM A `TimelineView` CLOSURE** — the hazard
+    /// `DAWProApp.swift` records by name. Every musical decision (one chord per
+    /// BAR, silence during count-in, one tick on a loop wrap) lives in
+    /// `MusicalTypingBeatDriver`, where a unit test can see it; this is the
+    /// plumbing and nothing else.
+    func sampleMusicalTypingBeat() {
+        let ticks = musicalTypingBeatDriver.downbeats(
+            atBeat: store.transport.positionBeats,
+            beatsPerBar: store.transport.timeSignature.beatsPerBar,
+            isRunning: store.transport.isPlaying || store.transport.isRecording)
+        for _ in 0..<ticks { musicalTyping.beat() }
     }
 
     /// Recomputes whether a key press can currently make a sound, from the pure
@@ -211,6 +307,17 @@ extension AppModel {
             // when it does, `TargetState.previewOff` puts it on screen instead of
             // leaving the keys silently dead.
             auditionEnabled: panelLayout.auditionEnabled)
+        // ⛔⛔ **THE PEDAL LAMP IS RECONCILED FROM THE STORE HERE, NOT ASSUMED
+        // (m34-l).** Six DAWCore sites lift the pedal without asking the
+        // controller — `record()`, `recordLayer()`, `stopAllAudition()`,
+        // `panic()`, `newProject()`, `applyOpenedState()`, all through
+        // `LivePlayController.stopAll` — and `stop()` lifts it at take end.
+        // Without this line, latching Tab and then hitting record would leave
+        // the lamp lit over an engine that had already let go: a light that
+        // lies, which is worse than no light. This runs on every key press and
+        // on every refresh the indicator already does, so the lamp can be wrong
+        // for at most one event. `syncSustain` adopts and never pushes.
+        musicalTyping.syncSustain(down: store.livePlay.sustainDown)
     }
 
     /// Turns the mode on or off — THE one funnel. The transport-bar chip, the
@@ -218,6 +325,10 @@ extension AppModel {
     /// this, so no surface can light while another believes otherwise.
     func setMusicalTypingEnabled(_ enabled: Bool) {
         musicalTyping.setEnabled(enabled)
+        // m34-g: turning the mode off tears the on-the-beat poll down. A timer
+        // left spinning against a hidden surface is the leak this one line
+        // exists to prevent.
+        updateMusicalTypingBeatTimer()
         refreshMusicalTypingTarget()
         if !enabled {
             // Belt and braces across the seam: the controller has already pushed
@@ -250,6 +361,12 @@ extension AppModel {
     ///     `repeat` / `noWindow` overrides for matrix probing.
     ///   - `{release:"a"}` — the key-up, through the same handler.
     ///   - `{releaseAll:true}` — the panic path.
+    ///   - **m34-l** `{sustain:true|false}` — the DAMPER PEDAL, set absolutely,
+    ///     through the same `setSustain` the Tab key calls. `{press:"⇥"}` (or
+    ///     `{press:"tab"}`) exercises the KEY path and its toggle. The echo
+    ///     gains `sustainDown` (the lamp), `storeSustainDown` +
+    ///     `storeSustainTrackId` (what `LivePlayController` holds — the second
+    ///     instrument) and `sustainRefusal`.
     ///   - `{pointerPitch:60}` / `{pointerUp:true}` — the ON-SCREEN keyboard's
     ///     press path, so a gate can prove BOTH surfaces write ONE held ledger.
     ///   - **m23-cv** `{playMode:"chords"|"notes"}`, `{chordKey:7, chordMode:"minor"}`,
@@ -258,6 +375,31 @@ extension AppModel {
     ///     each through the same app-tier funnel the UI drives. The echo carries
     ///     `chordCells`, the app's OWN projection of what every key says and
     ///     whether it is sounding.
+    ///   - **m34-g** `{advanceMode:"onMatch"|"onBeat"|"free"}` — the visible
+    ///     switch, through the SAME funnel the chips drive. `{beat:true}`
+    ///     synthesizes a DOWNBEAT (the `{press:}` idiom: it calls the same
+    ///     `beat()` the transport poll calls) and the echo adds
+    ///     `beatMovedCursor`. `{playbox:"local"|"ai"}` generates a fresh
+    ///     sequence — ⛔⛔ **a gate must use `"local"`**, which takes the
+    ///     built-in library path with NO network call; `"ai"` would spend a real
+    ///     API call on every run AND branch differently on a machine with no
+    ///     key. Asynchronous, like `post:true`: settle, then read `{}` and check
+    ///     `playboxBusy`. The echo gains `advanceModeSetting` (the controller's
+    ///     choice, never null — `advanceMode` above is the player's and is null
+    ///     with no preset), `queueDepth`, `playboxSource`/`playboxDetail`/
+    ///     `playboxSummary`, and `queue` per cell (the LOOK-AHEAD RANK, 1 being
+    ///     the chord after the cue; null on the cue itself, which wears the
+    ///     border instead), plus `transportBeats`/`transportPlaying` — ⭐ so a
+    ///     gate can drive the REAL tick chain (roll the transport and watch the
+    ///     cue move by itself) and still distinguish a broken chain from a
+    ///     transport that never rolled. `{beat:true}` deliberately BYPASSES that
+    ///     chain, so it can never be the only evidence for it.
+    ///   - **m34-i** the echo also carries the SEQUENCE CURSOR —
+    ///     `sequenceStep` / `sequenceLength` / `sequenceDegree` / `advanceMode`,
+    ///     plus `next` on each cell, which is the **next-chord border**. Nothing
+    ///     new is settable: the cursor is driven by playing chords, exactly as
+    ///     the user drives it, so a gate that wants to move the border has to
+    ///     press a key.
     ///   - `{press:…, post:true}` — post through the REAL queue instead
     ///     (`NSApp.postEvent`), so a passed-through key genuinely reaches the
     ///     responder chain. Asynchronous — settle, then read `{}`.
@@ -337,6 +479,72 @@ extension AppModel {
         }
         if let raw = params["chordCell"]?.doubleValue {
             musicalTypingChordCellDown(cellIndex: Int(raw))
+            return musicalTypingStateResponse()
+        }
+        // ── m34-l: THE SUSTAIN PEDAL, set ABSOLUTELY rather than toggled.
+        // ⚠️ Deliberately not a `{sustainToggle:true}`: a gate that toggled
+        // would have to know the current state to predict the next one, and a
+        // dropped call would invert every assertion after it. The TOGGLE is
+        // still exercised — `{press:"tab"}` goes through the real key path and
+        // the real `toggleSustain` — so this verb tests the SETTER and the key
+        // tests the KEY, rather than one of them standing in for the other.
+        if let down = params["sustain"]?.boolValue {
+            refreshMusicalTypingTarget()
+            musicalTyping.setSustain(down)
+            return musicalTypingStateResponse()
+        }
+        // ── m34-g: PLAYBOX.
+        if let raw = params["advanceMode"]?.stringValue {
+            guard let mode = ChordSequenceAdvanceMode(rawValue: raw) else {
+                throw DebugError("'\(raw)' is not an advance mode — one of "
+                    + ChordSequenceAdvanceMode.allCases.map(\.rawValue).joined(separator: " "))
+            }
+            // THE SAME FUNNEL THE CHIP DRIVES, so the switch and the seam cannot
+            // disagree about what the mode is or about the beat timer's phase.
+            setMusicalTypingAdvanceMode(mode)
+            return musicalTypingStateResponse()
+        }
+        if params["beat"]?.boolValue == true {
+            // ⭐ SYNTHESIZES A DOWNBEAT, exactly as `{press:"a"}` synthesizes a
+            // key event and for the same measured reason: an unbundled staging
+            // binary cannot be relied on to have a rolling transport at the
+            // instant a gate wants a tick. It calls the SAME `beat()` the
+            // transport poll calls, so it can only be right or wrong in the way
+            // the real path is.
+            //
+            // ⚠️ It bypasses `MusicalTypingBeatDriver` deliberately — the driver
+            // is what turns a PLAYHEAD into ticks, and this is handing over a
+            // tick directly. The driver's own musical decisions are pinned in
+            // `MusicalTypingBeatDriverTests`, headlessly, where they belong.
+            let moved = musicalTyping.beat()
+            var response = musicalTypingStateResponse()
+            if case .object(var payload) = response {
+                payload["beatMovedCursor"] = .bool(moved)
+                response = .object(payload)
+            }
+            return response
+        }
+        if let raw = params["playbox"]?.stringValue {
+            // {playbox:"local"} — the library path, deliberately, with NO network
+            // call. {playbox:"ai"} runs the real button.
+            //
+            // ⛔⛔ A GATE MUST USE "local". A staging app inherits this machine's
+            // environment, so driving the AI path would spend a real API call on
+            // every run AND would take a different branch on a machine with no
+            // key — the worst property a gate can have.
+            //
+            // ⚠️ ASYNCHRONOUS, like {press:…, post:true}: this STARTS the
+            // generation and returns the state as it is now. Settle, then read
+            // {} — `playboxBusy` says whether it is still running.
+            guard raw == "local" || raw == "ai" else {
+                throw DebugError("'\(raw)' is not a playbox path — one of local ai")
+            }
+            // ⭐ SET PER CALL, never once at setup: `generate()` CONSUMES the
+            // flag (a sticky one could reconfigure the shipping app's button
+            // from a debug call), so a gate that generates locally twice must
+            // pass {playbox:"local"} twice. This line already does that.
+            playbox.preferLocal = (raw == "local")
+            generatePlaybox()
             return musicalTypingStateResponse()
         }
         if let label = params["release"]?.stringValue {
@@ -439,6 +647,20 @@ extension AppModel {
             "velocity": .number(Double(musicalTyping.velocity)),
             "targetState": .string(musicalTyping.targetState.rawValue),
             "targetTrackId": activeTrackID.map { .string($0.uuidString) } ?? .null,
+            // ── m34-l: THE SUSTAIN PEDAL, ON TWO INSTRUMENTS.
+            // `sustainDown` is what the LAMP draws (the controller's ledger);
+            // `storeSustainDown` is what `LivePlayController` actually holds and
+            // is therefore what the engine was told. ⭐ They are separate fields
+            // ON PURPOSE: the six DAWCore stand-down sites can move the second
+            // without the first, and `refreshMusicalTypingTarget` reconciles
+            // them — so a gate that read only one could not tell a working
+            // reconcile from a lamp that never updates.
+            "sustainDown": .bool(musicalTyping.isSustainDown),
+            "storeSustainDown": .bool(store.livePlay.sustainDown),
+            "storeSustainTrackId": store.livePlay.sustainTrackID.map {
+                .string($0.uuidString)
+            } ?? .null,
+            "sustainRefusal": musicalTyping.lastSustainRefusal.map { .string($0) } ?? .null,
             // WHAT THE VIEW DRAWS.
             "sounding": .array(musicalTyping.soundingPitches.map { .number(Double($0)) }),
             "soundingNames": .array(musicalTyping.soundingPitches.map {
@@ -484,6 +706,51 @@ extension AppModel {
             "chordMode": .string(musicalTyping.chordKeyMode.rawValue),
             "voicingPreset": .string(musicalTyping.voicingPreset.rawValue),
             "progression": musicalTyping.progression.map { .string($0.id) } ?? .null,
+            // ── m34-i: WHERE THE NEXT-CHORD BORDER IS. No new wire command — the
+            // sequence player is read-only state on an existing debug echo. A
+            // gate reads the app's OWN cursor rather than counting borders it
+            // cannot see, and cross-checks it against the `next` flag on the
+            // cells below: if those two ever disagree, the border is drawn
+            // somewhere the model does not think it is.
+            "sequenceStep": musicalTyping.chordSequence?.nextStep
+                .map { .number(Double($0)) } ?? .null,
+            "sequenceLength": musicalTyping.chordSequence
+                .map { .number(Double($0.count)) } ?? .null,
+            "sequenceDegree": musicalTyping.chordSequence?.nextDegree
+                .map { .number(Double($0)) } ?? .null,
+            "advanceMode": musicalTyping.chordSequence
+                .map { .string($0.advanceMode.rawValue) } ?? .null,
+            // ── m34-g: PLAYBOX.
+            //
+            // `advanceModeSetting` is the CONTROLLER's choice — what the visible
+            // switch shows — and is never null; `advanceMode` above is the live
+            // player's and is null with no preset. They are two instruments on
+            // one question and a gate should read both: if the switch says
+            // on-the-beat while the player says wait-for-you, the chip is lying.
+            "advanceModeSetting": .string(musicalTyping.advanceMode.rawValue),
+            // ⭐ THE PLAYHEAD, so a gate that watches the ON-THE-BEAT cue move on
+            // a REAL rolling transport can tell "the tick chain is broken" from
+            // "the transport never rolled". Without these two a failed tick leg
+            // is ambiguous evidence, which is worse than none.
+            "transportBeats": .number(store.transport.positionBeats),
+            "transportPlaying": .bool(store.transport.isPlaying),
+            // THE SEQUENCE ITSELF, in degrees. A Playbox sequence is GENERATED,
+            // so a gate cannot hardcode what it holds — without this it would
+            // have to guess the queue's mark count and would guess wrong on any
+            // sequence with a repeated degree.
+            "sequenceDegrees": musicalTyping.chordSequence
+                .map { .array($0.steps.map { .number(Double($0)) }) } ?? .null,
+            "queueDepth": .number(Double(MusicalTypingController.queueDepth)),
+            // ⛔ WHO WROTE THE LIGHTS. "The AI wrote this" and "we picked a
+            // stock progression" are different claims; the surface says which,
+            // and so does this.
+            "playboxSource": musicalTyping.playboxProvenance
+                .map { .string($0.kind.rawValue) } ?? .null,
+            "playboxDetail": musicalTyping.playboxProvenance
+                .map { .string($0.detail) } ?? .null,
+            "playboxSummary": musicalTyping.playboxProvenance
+                .map { .string($0.summary) } ?? .null,
+            "playboxBusy": .bool(playbox.isBusy),
             "chordCells": .array(musicalTyping.chordCells.map { cell in
                 .object([
                     "key": .string(cell.keyLabel),
@@ -493,7 +760,17 @@ extension AppModel {
                     "chord": .string(cell.chordName),
                     "numeral": .string(cell.romanNumeral),
                     "lit": .bool(cell.isLit),
+                    // ⚠️ `order` IS NO LONGER DRAWN (m34-i) — it is the step
+                    // index, kept so a gate can name which step the border is
+                    // on. `next` is the thing on screen.
                     "order": cell.progressionOrder.map { .number(Double($0)) } ?? .null,
+                    "next": .bool(cell.isNextInProgression),
+                    // m34-g — the LOOK-AHEAD QUEUE's rank on this cell, 1 being
+                    // the chord after the cue. Null on the cue itself (it wears
+                    // the border) and on every cell outside the queue, so a
+                    // gate can pin BOTH counts independently — which is what
+                    // catches a count bug no assertion can see.
+                    "queue": cell.queueRank.map { .number(Double($0)) } ?? .null,
                     "sounding": .bool(
                         musicalTyping.soundingChordKeyCodes.contains(cell.keyCode)),
                 ])

@@ -1767,9 +1767,94 @@ public struct SamplerParams: Codable, Sendable, Equatable {
     /// nil = `.poly`, which is byte-identical to the pre-existing engine.
     public var voiceMode: SamplerVoiceMode?
 
+    /// GLOBAL decay/sustain (m34-o) — the instrument-wide half of the envelope
+    /// that, until now, existed ONLY per zone.
+    ///
+    /// ⭐ THE DEFECT THESE END, stated as the user found it: *"when activating
+    /// sustain, the note should still eventually fade… currently it keeps
+    /// playing."* They are right, for a piano. A damper pedal stops the damper
+    /// falling; it does not feed the string energy. The correct model is that
+    /// **the pedal DEFERS THE RELEASE and the instrument's own decay does the
+    /// fading** — so a fading note needs an envelope that decays, and the
+    /// pedal must not invent a fade of its own (a second envelope owner is the
+    /// m25-r two-owners shape this tree has paid for twice).
+    ///
+    /// ⛔ AND HOLDING FOREVER IS CORRECT FOR SOME INSTRUMENTS. An organ, a
+    /// bowed pad, a synth pad genuinely does sustain under the pedal. THE
+    /// INSTRUMENT DECIDES, NOT THE PEDAL — which is exactly why this is a
+    /// per-instrument envelope field and not a property of `play.sustain`.
+    /// A hosted SF2 piano already decays correctly through its own bank
+    /// envelope (measured: GM program 0 "Acoustic Grand Piano" falls to
+    /// silence within 15 s under a held pedal, while program 19 "Church Organ"
+    /// holds flat — both correct).
+    ///
+    /// ⚠️ WHY THEY WERE MISSING AND WHY THAT MATTERED. `attack` and `release`
+    /// have had instrument globals since m19-b, and a zone leaving them nil
+    /// inherits the live global through the engine's `-1` sentinel. `decay`
+    /// and `sustain` had NO global at all: a zone leaving them nil resolved to
+    /// the hardcoded legacy pair (decay 0, sustain 1) — hold at peak forever —
+    /// and there was no instrument-wide knob to say otherwise. A user with a
+    /// 60-zone imported piano therefore had to author decay+sustain on all 60
+    /// zones; there was no one control. THAT is the "fade time configurable"
+    /// the report asks for, and this is where it lives, beside the rest of the
+    /// envelope rather than on the pedal.
+    ///
+    /// ADDITIVE-OPTIONAL on the `bendRangeSemitones` pattern: nil is NOT the
+    /// same wire shape as an explicit legacy value, so a pre-existing project's
+    /// JSON stays byte-identical on a round trip, and nil resolves through
+    /// `effectiveDecay`/`effectiveSustain` to exactly the pair the engine
+    /// hardcoded before — the pre-m34-o render, sample for sample.
+    ///
+    /// Precedence is unchanged and matches SFZ (region over global): a zone's
+    /// OWN `decay`/`sustain` still wins; nil now inherits THIS instead of the
+    /// hardcoded pair. Each half inherits INDEPENDENTLY — a zone may set
+    /// `sustain` and inherit `decay`, or the reverse.
+    public var decay: Double?
+    public var sustain: Double?
+
+    /// m34-q — HOW MANY NOTES THE SUSTAIN PEDAL KEEPS RINGING. nil = unlimited,
+    /// which is what the engine did before this field existed and therefore what
+    /// every project on disk means.
+    ///
+    /// ⭐ THE ASK, VERBATIM: *"can we then specify how many notes to hold and
+    /// fade the oldest ones?"* — asked about an organ patch, which under m34-o's
+    /// ruling correctly holds forever. This is the answer to that, and it is a
+    /// HOLD limit, not a polyphony override: it caps only the notes the PEDAL is
+    /// holding, never the notes whose keys are physically down.
+    ///
+    /// ⛔ AND IT DOES NOT MAKE THE PEDAL A SECOND ENVELOPE OWNER — the
+    /// distinction the m34-o ruling turns on, restated because the two look
+    /// alike from a distance. The cap decides WHEN a note's release begins,
+    /// which is the same thing a player decides by lifting a key early. The
+    /// ENVELOPE still decides what that release SOUNDS like: an evicted note
+    /// fades through the patch's own `release`, fast on an organ and long on a
+    /// piano. A pedal that imposed its own fade SHAPE would be the second owner
+    /// m34-o refuses; a pedal that lets go of a key never was.
+    ///
+    /// ⚠️ THE CAP BINDS AT THE NEXT NOTE-ON, which is when the ear can hear the
+    /// trade being made. Release five keys under the pedal with a cap of 2 and
+    /// then stop playing, and five notes go on ringing until the next note or
+    /// pedal-up; the following note-on trims all the way down in one go. Any
+    /// other timing would start a fade in a silence nobody played into.
+    ///
+    /// ADDITIVE-OPTIONAL on the `bendRangeSemitones` pattern: nil is not the
+    /// same wire shape as an explicit value, so a pre-existing project's JSON
+    /// round-trips byte-identically, and nil resolves through
+    /// `effectivePedalHoldLimit` to a cap no voice pool can reach.
+    public var pedalHoldLimit: Int?
+
     public static let attackRange: ClosedRange<Double> = 0...1
     public static let releaseRange: ClosedRange<Double> = 0.001...8
     public static let gainRange: ClosedRange<Double> = 0...1
+    /// The pair `decay`/`sustain == nil` resolves to: the engine's pre-m34-o
+    /// hardcoded literals. ONE home for the legacy law — the engine, the wire,
+    /// the describe verb and the tests read these rather than re-typing 0 and
+    /// 1, so they cannot drift apart.
+    ///
+    /// sustain 1 with decay 0 is "no decay stage": the level reaches peak and
+    /// stays, which is the hold every pre-m34-o sampler patch performs.
+    public static let defaultDecay: Double = 0
+    public static let defaultSustain: Double = 1
     /// m27: 0 = off (the nil default), 1 = CC1/CC2 attenuate to silence.
     public static let expressionModDepthRange: ClosedRange<Double> = 0...1
     /// m27 leg C: 0 = off (the nil default), 1 = the full low→high sweep.
@@ -1791,6 +1876,18 @@ public struct SamplerParams: Codable, Sendable, Equatable {
     /// `BreathContour.Options` uses, so the authoring and playback figures are
     /// expressible over the same domain.
     public static let bendRangeSemitonesRange: ClosedRange<Double> = 0...48
+    /// m34-q. ONE HOME for the pedal-hold law — `PolySynthParams` aliases THIS
+    /// rather than repeating the literal, because the two built-ins must be
+    /// settable over the same domain or a figure legal on one instrument would
+    /// be refused on the other for no reason a user could see.
+    ///
+    /// The floor is 1, not 0: "the pedal holds nothing" is spelled by not
+    /// pressing the pedal, and a 0 that silently disabled CC 64 would be a
+    /// footgun sitting one keystroke away from the useful values. The ceiling of
+    /// 128 is past BOTH voice pools (16 and 64), so any figure above 64 is
+    /// structurally unreachable and therefore means exactly "unlimited" — the
+    /// value to send when a caller wants to undo a cap they set earlier.
+    public static let pedalHoldLimitRange: ClosedRange<Int> = 1...128
 
     public init(
         zones: [SamplerZone] = [],
@@ -1804,13 +1901,24 @@ public struct SamplerParams: Codable, Sendable, Equatable {
         expressionFilterDepth: Double? = nil,
         expressionFilterCC: Int? = nil,
         bendRangeSemitones: Double? = nil,
-        voiceMode: SamplerVoiceMode? = nil
+        voiceMode: SamplerVoiceMode? = nil,
+        decay: Double? = nil,
+        sustain: Double? = nil,
+        pedalHoldLimit: Int? = nil
     ) {
         self.zones = zones
         self.oneShot = oneShot
         self.attack = attack.clamped(to: Self.attackRange)
         self.release = release.clamped(to: Self.releaseRange)
         self.gain = gain.clamped(to: Self.gainRange)
+        // Clamped to the ZONE's domains deliberately, not to new constants of
+        // their own: a global and a per-zone override must be expressible over
+        // the SAME range or one of them silently cannot say what the other can.
+        // (`SamplerZone.decayRange` is 0...8 with NO minimum floor — a present
+        // 0 stays legal and means "no decay stage".) nil stays nil so an
+        // untouched project's JSON round-trips byte-identically.
+        self.decay = decay.map { $0.clamped(to: SamplerZone.decayRange) }
+        self.sustain = sustain.map { $0.clamped(to: SamplerZone.sustainRange) }
         self.sourcePath = sourcePath
         self.displayName = displayName
         self.expressionModDepth = expressionModDepth.map {
@@ -1832,6 +1940,9 @@ public struct SamplerParams: Codable, Sendable, Equatable {
             $0.clamped(to: Self.bendRangeSemitonesRange)
         }
         self.voiceMode = voiceMode
+        // Clamp rather than reject, matching every other field here; nil stays
+        // nil so an untouched project's JSON round-trips byte-identically.
+        self.pedalHoldLimit = pedalHoldLimit.map { $0.clamped(to: Self.pedalHoldLimitRange) }
     }
 
     /// The figure the ENGINE uses — the stored value, or the GM default. One
@@ -1840,8 +1951,29 @@ public struct SamplerParams: Codable, Sendable, Equatable {
         bendRangeSemitones ?? Self.defaultBendRangeSemitones
     }
 
+    /// The global decay/sustain the ENGINE uses — the stored value, or the
+    /// pre-m34-o hardcoded legacy pair. Same one-accessor discipline as
+    /// `effectiveBendRangeSemitones`: the engine's snapshot, the wire's
+    /// describe verb and `SamplerGlobalUse` all read THESE, so "what does nil
+    /// mean" is answered in exactly one place.
+    ///
+    /// ⚠️ These are the value a zone inherits when its OWN field is nil — they
+    /// are NOT "the value every zone uses". A zone with its own `decay` wins
+    /// (SFZ region-over-global precedence, and this codebase's documented
+    /// design). `SamplerGlobalUse.decay(of:)` / `.sustain(of:)` is how a
+    /// caller finds out whether any zone is actually listening.
+    public var effectiveDecay: Double { decay ?? Self.defaultDecay }
+    public var effectiveSustain: Double { sustain ?? Self.defaultSustain }
+
     /// The mode the ENGINE uses — the stored value, or poly.
     public var effectiveVoiceMode: SamplerVoiceMode { voiceMode ?? .poly }
+
+    /// The pedal-hold cap the ENGINE uses (m34-q). Same one-accessor discipline
+    /// as `effectiveBendRangeSemitones`: "what does nil mean" is answered in
+    /// exactly one place, and `Int.max` is the answer that needs no special
+    /// case downstream — a count of sounding voices can never reach it, so the
+    /// render thread's ordinary comparison IS the unlimited path.
+    public var effectivePedalHoldLimit: Int { pedalHoldLimit ?? Int.max }
 }
 
 /// How many notes the built-in sampler lets sound at once.
@@ -2226,6 +2358,20 @@ public struct PolySynthParams: Codable, Sendable, Equatable {
     /// Output gain, 0...1.
     public var gain: Double
 
+    /// m34-q — HOW MANY NOTES THE SUSTAIN PEDAL KEEPS RINGING. nil = unlimited
+    /// (today's behaviour). The synth's twin of `SamplerParams.pedalHoldLimit`,
+    /// which carries the full rationale; the law is deliberately ONE law across
+    /// both built-ins, so a user who learns it on one instrument has learned it
+    /// on the other.
+    ///
+    /// ⭐ THIS IS THIS TYPE'S FIRST ADDITIVE-OPTIONAL FIELD. Every other member
+    /// is a plain non-optional with a default, so `PolySynthParams` has always
+    /// encoded a fixed key set. Optional + nil keeps that true for projects that
+    /// never set it: synthesised `Codable` omits a nil key on encode and decodes
+    /// an absent one to nil, so an existing project's JSON is unchanged in both
+    /// directions (pinned by `PedalHoldLimitCodableTests`).
+    public var pedalHoldLimit: Int?
+
     public static let attackRange: ClosedRange<Double> = 0.0005...5
     public static let decayRange: ClosedRange<Double> = 0.001...5
     public static let sustainRange: ClosedRange<Double> = 0...1
@@ -2233,6 +2379,10 @@ public struct PolySynthParams: Codable, Sendable, Equatable {
     public static let cutoffRange: ClosedRange<Double> = 40...18_000
     public static let resonanceRange: ClosedRange<Double> = 0...1
     public static let gainRange: ClosedRange<Double> = 0...1
+    /// m34-q — an ALIAS, not a second literal: the pedal-hold domain has ONE
+    /// home, on `SamplerParams`. Re-typing `1...128` here is how the two
+    /// instruments would eventually disagree about what a legal cap is.
+    public static let pedalHoldLimitRange = SamplerParams.pedalHoldLimitRange
 
     public init(
         waveform: Waveform = .saw,
@@ -2242,7 +2392,8 @@ public struct PolySynthParams: Codable, Sendable, Equatable {
         release: Double = 0.15,
         cutoffHz: Double = 8_000,
         resonance: Double = 0.1,
-        gain: Double = 0.8
+        gain: Double = 0.8,
+        pedalHoldLimit: Int? = nil
     ) {
         self.waveform = waveform
         self.attack = attack.clamped(to: Self.attackRange)
@@ -2252,7 +2403,15 @@ public struct PolySynthParams: Codable, Sendable, Equatable {
         self.cutoffHz = cutoffHz.clamped(to: Self.cutoffRange)
         self.resonance = resonance.clamped(to: Self.resonanceRange)
         self.gain = gain.clamped(to: Self.gainRange)
+        // Clamp rather than reject, exactly like the seven scalars above; nil
+        // stays nil, so a project that never set a cap keeps its wire shape.
+        self.pedalHoldLimit = pedalHoldLimit.map { $0.clamped(to: Self.pedalHoldLimitRange) }
     }
+
+    /// The cap the ENGINE uses — the stored value, or `Int.max` for "no cap".
+    /// The twin of `SamplerParams.effectivePedalHoldLimit`, and the ONE place
+    /// this instrument answers "what does nil mean".
+    public var effectivePedalHoldLimit: Int { pedalHoldLimit ?? Int.max }
 }
 
 public struct TimeSignature: Codable, Sendable, Equatable {

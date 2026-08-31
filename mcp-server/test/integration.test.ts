@@ -455,7 +455,21 @@ test("tools/list returns exactly the audit-enforced tool count", { skip: SKIP_RE
   // name-capturing regexes: **36 direct + 164 wrapper = 200**, 0 duplicates in
   // either set, 0 names in both sets, and the same bogus-name negative control
   // (`"zzz_not_a_tool"`) returning 0.
-  assert.equal(result.tools.length, 200);
+  // m34-l: 208 -> 209. `play_sustain` (the damper pedal, CC 64) is registered
+  // through the same wrapper path as every other tool; the bijection stays
+  // mechanical (`play.sustain` -> `play_sustain`), so no exception-table entry
+  // is needed here either.
+  //
+  // 209 -> 216 at m34-h-1 (LIVE LOOPING, the loop deck): `looper_begin`,
+  // `looper_arm_layer`, `looper_finish_layer`, `looper_undo_layer`,
+  // `looper_set_layer_muted`, `looper_status`, `looper_end`. All seven ride
+  // the strict-schema wrapper — including the three that take no params,
+  // because they are registered with `inputSchema: {}` like every other
+  // parameterless verb on that path. The command<->tool bijection stays
+  // mechanical (`looper.begin` -> `looper_begin`,
+  // `looper.setLayerMuted` -> `looper_set_layer_muted`, ...), so no
+  // exception-table entry is needed for any of them.
+  assert.equal(result.tools.length, 216);
 });
 
 // ---------------------------------------------------------------------------

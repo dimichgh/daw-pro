@@ -732,7 +732,12 @@ struct CommandRouterTests {
         // A non-object sampler.
         let notObject = await router.handle(ControlRequest(id: "y", command: "track.setInstrument",
             params: ["trackId": .string(instID), "sampler": .string("nope")]))
-        #expect(notObject.error == "sampler must be an object {zones, oneShot?, attack?, release?, gain?}")
+        // m34-o: `decay?` and `sustain?` joined the accepted-key list when the
+        // sampler gained instrument-level envelope globals. The message is a
+        // KEY LIST, so omitting the two new keys would tell a caller they are
+        // not accepted — which is now false, and worse than saying nothing.
+        #expect(notObject.error
+                == "sampler must be an object {zones, oneShot?, attack?, decay?, sustain?, release?, gain?}")
 
         // A mistyped pitch field.
         let badPitch = await set(.object(["zones": .array([
@@ -1561,6 +1566,14 @@ struct CommandRouterTests {
             // the bare loop has to say what to voice. `[1, 5]` is the smallest
             // input that also exercises the voice-leading step.
             "chord.voice": ["degrees": .array([.number(1), .number(5)])],
+            // m34-l: the pedal. `down` is REQUIRED and deliberately has no
+            // default — "press or lift?" is not a question a verb may guess at,
+            // and a defaulted `false` would make a typo'd call silently lift a
+            // pedal the user is holding. `true` is used here so the loop
+            // exercises the VALIDATED branch rather than the never-refused lift;
+            // the store is discarded at the end of the test, and `stopAll` on
+            // the next project boundary lifts it regardless.
+            "play.sustain": ["trackId": .string(instTrackID), "down": .bool(true)],
             "midi.setControlMap": ["bindings": .array([])],
             "midi.learnControl": ["cancel": .bool(true)],
             "transport.seek": ["beats": .number(0)],
@@ -2110,6 +2123,22 @@ struct CommandRouterTests {
                 // transport by PadPreviewCommandTests — the note.audition
                 // rationale verbatim.
                 "pad.previewEffort",
+                // pad.playEffort (m34-f step ②) shares that verb's handler case
+                // and is excluded for HALF of its reasons — the half that still
+                // applies, and the difference matters enough to write out.
+                //  1. ⛔ NOT for the refuse-while-recording reason. This verb is
+                //     DELIBERATELY not refused mid-take; that single difference
+                //     is the entire feature, and pinning it is
+                //     `PadPreviewCommandTests.theTwoVerbsDifferExactlyHere`,
+                //     which drives BOTH verbs against one rolling take and
+                //     asserts the preview is refused where this one succeeds.
+                //  2. It is excluded because a params-free `begin` has no
+                //     `trackId`, and this loop supplies none. Feeding it
+                //     {gesture:"end"} is the SAME trap `pad.previewEffort`
+                //     documents above: with no gesture open it throws by design,
+                //     and if it ever stopped throwing the loop would be
+                //     exercising a degenerate no-op while looking like coverage.
+                "pad.playEffort",
                 // clip.transcribe (m23-n2b) hits a REAL WhisperTranscriber —
                 // this bare router doesn't inject a fake (there is no
                 // WhisperTranscriber protocol to fake; the actor IS the
@@ -2178,7 +2207,72 @@ struct CommandRouterTests {
                 // ⚠️ Its READ sibling `project.embeddedVoices` stays IN the
                 // loop: it takes no params, writes nothing, and answers
                 // honestly on an empty project.
-                "vc.installEmbeddedVoice"].contains(command) {
+                "vc.installEmbeddedVoice",
+                // m34-h LIVE LOOPING: transport.recordLayer / transport.finishLayer
+                // are excluded for OPPOSITE halves of the same state, and both
+                // reasons are written down because either alone invites the
+                // wrong repair.
+                //  1. This loop is mid-take from transport.record onwards, so
+                //     transport.recordLayer legitimately refuses — a layer needs
+                //     a transport that is playing and NOT already capturing
+                //     ("already recording a layer — finish it with
+                //     transport.finishLayer first"). That refusal is the verb
+                //     working, not failing.
+                //  2. ⛔ Do NOT "fix" this by reordering them BEFORE
+                //     transport.record. The transport is STOPPED there, and
+                //     recordLayer refuses a stopped transport just as firmly
+                //     (that is the whole point — it is the mirror image of
+                //     transport.record, not a relaxation of it). Neither
+                //     position can satisfy both verbs.
+                //  3. transport.finishLayer runs against this bare router's
+                //     FakeEngine, which does not implement the keep-playing
+                //     close, so it answers the AudioEngineControlling default —
+                //     "closed nothing" — which the store deliberately turns into
+                //     a throw rather than a silent success (a false success
+                //     there is a LOST TAKE; see finishLayer's own doc). Feeding
+                //     it a real take would still not help: only the real
+                //     AudioEngine can close one without stopping.
+                // Proven instead by TransportLayerCommandTests (the full wire
+                // taxonomy over a spy engine that DOES implement the close) and
+                // DAWEngineTests/LiveLayerCaptureTests (the real engine, both
+                // layers, playhead advancing across the close).
+                "transport.recordLayer", "transport.finishLayer",
+                // m34-h-1 LIVE LOOPING, the loop deck. Excluded for reasons
+                // that COMPOSE with the two above rather than repeating them,
+                // and each one is a verb WORKING:
+                //  1. looper.begin refuses outright here — this loop is
+                //     mid-take from transport.record onwards, and a deck
+                //     session cannot open over a rolling take.
+                //  2. looper.armLayer / looper.setLayerMuted need a `trackId` /
+                //     `layerId` this params-free loop cannot supply, and a
+                //     layer id only exists after a landed pass.
+                //  3. looper.finishLayer / looper.undoLayer / looper.end
+                //     legitimately refuse with no session open, which is what
+                //     they are for. ⛔ Do NOT "fix" this by opening a session
+                //     in the loop's fixture: the deck's landing path depends on
+                //     the keep-playing close, which this bare router's
+                //     FakeEngine does not implement (see point 3 above).
+                // ⚠️ looper.status is NOT excluded — it takes no params, writes
+                // nothing, and answers null honestly when no deck is open,
+                // which is exactly the shape this loop is good at.
+                "looper.begin", "looper.armLayer", "looper.finishLayer",
+                "looper.undoLayer", "looper.setLayerMuted", "looper.end",
+                // m34-c: excluded for two DIFFERENT reasons, both written down
+                // because either alone invites the wrong repair.
+                //  1. instrument.downloadSoundBank REQUIRES an `id` this
+                //     params-free loop cannot supply — and supplying one would
+                //     be worse: it would start a REAL 216 MB NETWORK TRANSFER
+                //     from every run of the suite. ⛔ Do NOT "fix" this by
+                //     adding it to paramsByCommand.
+                //  2. instrument.cancelSoundBankDownload legitimately REFUSES
+                //     when nothing is running ("there is nothing to cancel"),
+                //     which is the verb working, not failing — a no-op success
+                //     would let a caller believe it cancelled something. The
+                //     loop has nothing in flight by construction.
+                // Both are proven end to end, against an injected fake install
+                // function with no network, by SoundBankDownloadCommandTests.
+                "instrument.downloadSoundBank",
+                "instrument.cancelSoundBankDownload"].contains(command) {
                 continue
             }
             let response = await router.handle(ControlRequest(

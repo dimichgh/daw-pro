@@ -913,7 +913,23 @@ public struct InstrumentDocument: Codable, Sendable, Equatable {
                                  // depth 0 → the pre-m27 amplitude law exactly.
                                  expressionModDepth: s.expressionModDepth,
                                  expressionFilterDepth: s.expressionFilterDepth,
-                                 expressionFilterCC: s.expressionFilterCC)
+                                 expressionFilterCC: s.expressionFilterCC,
+                                 // m34-s: absent (every pre-m34-s project) →
+                                 // nil → the GM default 2.0, exactly what a
+                                 // project that never carried the key means.
+                                 bendRangeSemitones: s.bendRangeSemitones,
+                                 // m34-s: tolerant decode — an unknown
+                                 // voiceMode rawValue resolves to nil (poly)
+                                 // rather than failing the open, the same rule
+                                 // loopMode follows a few lines above.
+                                 voiceMode: s.voiceMode
+                                     .flatMap(SamplerVoiceMode.init(rawValue:)),
+                                 // m34-s: absent → nil → the legacy pair
+                                 // (decay 0, sustain 1), i.e. hold at peak.
+                                 decay: s.decay, sustain: s.sustain,
+                                 // m34-q: absent (every pre-m34-q project) →
+                                 // nil → unlimited, the pre-m34-q behaviour.
+                                 pedalHoldLimit: s.pedalHoldLimit)
         }
         // The AU config round-trips intact even when the component isn't
         // installed on this machine — the engine reports `.missing` and
@@ -954,10 +970,55 @@ public struct SamplerDocument: Codable, Sendable, Equatable {
     public var expressionModDepth: Double?
     public var expressionFilterDepth: Double?
     public var expressionFilterCC: Int?
+    /// m34-s — THE FOUR GLOBALS A SAVE USED TO THROW AWAY. `bendRangeSemitones`
+    /// and `voiceMode` (the sax team's bend work) and `decay`/`sustain` (m34-o's
+    /// global envelope) all shipped as settable, readable, engine-honoured
+    /// fields on `SamplerParams` — and none of them was in these CodingKeys, so
+    /// each was silently reset the next time the project opened.
+    ///
+    /// ⭐ THE USER-FACING COST, because it was worse than a missing field: nil
+    /// `decay`/`sustain` resolve to the legacy pair (0, 1) — hold at peak
+    /// forever — so losing them on save brought back the exact defect m34-o
+    /// closed ("the note keeps playing") after any save and reopen.
+    ///
+    /// Same additive-optional contract as every field above: nil never encodes
+    /// (the synthesized encoder's `encodeIfPresent`), so a sampler that set none
+    /// of them keeps a document shape byte-identical to pre-m34-s, and every
+    /// pre-m34-s project decodes all four as nil = the behaviour it has today.
+    public var bendRangeSemitones: Double?
+    /// ⛔ THE RAW STRING, NOT THE ENUM, RESOLVED WITH `flatMap(init(rawValue:))`
+    /// — following `SamplerZoneDocument.loopMode` (m20-g) rather than the
+    /// `pedalHoldLimit` precedent, because an enum is the one case where they
+    /// differ. A strict `decodeIfPresent(SamplerVoiceMode.self)` THROWS on an
+    /// unknown rawValue, and this decoder sits inside the project open: a third
+    /// voice mode added by a later build would make every project that used it
+    /// UNOPENABLE in this one — the whole document, not just the field.
+    public var voiceMode: String?
+    /// m34-o's instrument-wide envelope halves. Each inherits INDEPENDENTLY at
+    /// the zone level, so they persist as two separate optionals rather than a
+    /// pair — a document that carries one and not the other is meaningful.
+    public var decay: Double?
+    public var sustain: Double?
+
+    /// m34-q pedal hold limit — nil never encodes (the optional
+    /// encodeIfPresent rule above), so a sampler that never set a cap keeps a
+    /// document shape byte-identical to pre-m34-q, and every pre-m34-q project
+    /// decodes it as nil = unlimited.
+    ///
+    /// ⚠️ IT IS HERE BECAUSE A SETTING THAT DOES NOT SURVIVE A SAVE IS NOT A
+    /// SETTING. `SamplerParams` does NOT persist through its own `Codable`:
+    /// this document is the save format, and a global that is absent from these
+    /// CodingKeys is silently reset the next time the project opens.
+    public var pedalHoldLimit: Int?
 
     private enum CodingKeys: String, CodingKey {
         case zones, oneShot, attack, release, gain, sourcePath, displayName
         case expressionModDepth, expressionFilterDepth, expressionFilterCC
+        case pedalHoldLimit
+        // m34-s — four globals that shipped BEFORE pedalHoldLimit and were
+        // never added here. Order is cosmetic (the encoder sorts keys); the
+        // grouping records which item each arrived with.
+        case bendRangeSemitones, voiceMode, decay, sustain
     }
 
     init(from s: SamplerParams, mediaRefs: [UUID: String?]) {
@@ -971,6 +1032,12 @@ public struct SamplerDocument: Codable, Sendable, Equatable {
         expressionModDepth = s.expressionModDepth
         expressionFilterDepth = s.expressionFilterDepth
         expressionFilterCC = s.expressionFilterCC
+        pedalHoldLimit = s.pedalHoldLimit
+        bendRangeSemitones = s.bendRangeSemitones
+        // The enum's rawValue, per the loopMode precedent above.
+        voiceMode = s.voiceMode?.rawValue
+        decay = s.decay
+        sustain = s.sustain
     }
 
     public init(from decoder: any Decoder) throws {
@@ -986,6 +1053,11 @@ public struct SamplerDocument: Codable, Sendable, Equatable {
         expressionModDepth = try c.decodeIfPresent(Double.self, forKey: .expressionModDepth)
         expressionFilterDepth = try c.decodeIfPresent(Double.self, forKey: .expressionFilterDepth)
         expressionFilterCC = try c.decodeIfPresent(Int.self, forKey: .expressionFilterCC)
+        pedalHoldLimit = try c.decodeIfPresent(Int.self, forKey: .pedalHoldLimit)
+        bendRangeSemitones = try c.decodeIfPresent(Double.self, forKey: .bendRangeSemitones)
+        voiceMode = try c.decodeIfPresent(String.self, forKey: .voiceMode)
+        decay = try c.decodeIfPresent(Double.self, forKey: .decay)
+        sustain = try c.decodeIfPresent(Double.self, forKey: .sustain)
     }
 }
 

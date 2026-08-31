@@ -88,14 +88,35 @@ public enum ArrangeEmptyLaneHints {
     ///     content": a lane scrolled away from its only clip is a scroll problem,
     ///     not an empty-state one, and a hint that blinked in and out as you
     ///     scrolled would be worse than none.
-    public static func hint(for track: Track, laneIndex: Int) -> ArrangeEmptyLaneHint? {
-        guard track.canHoldMIDIClips, track.clips.isEmpty else { return nil }
+    ///
+    /// ⭐⭐ **A THIRD CONDITION ARRIVED WITH m34-a-2, AND IT WAS FOUND BY LOOKING
+    /// AT A SCREENSHOT, NOT BY A TEST.** A lane carrying a PROVISIONAL take
+    /// region is not empty-and-waiting: a clip is being recorded onto it right
+    /// now. Leaving the hint up there produced two failures at once in the
+    /// capture that found it — the words *"Double-click to add a clip"* sat
+    /// **underneath the "REC n" readout**, physically overlapping it, and they
+    /// were **telling the user to create a clip on the one lane where a clip was
+    /// already on its way**. The second is the worse of the two: this project
+    /// closes dishonest readouts, and an invitation to act that contradicts what
+    /// the surface is doing is one.
+    ///
+    /// It is a PARAMETER with an empty default rather than a new global fact, so
+    /// every existing caller and every existing test is byte-identical unchanged,
+    /// and the ONE-home rule survives: the lanes still compose this set once,
+    /// draw exactly it, and report exactly it (`ArrangeEmptyLaneHint`).
+    public static func hint(for track: Track, laneIndex: Int,
+                            recordingTrackIDs: [UUID] = []) -> ArrangeEmptyLaneHint? {
+        guard track.canHoldMIDIClips, track.clips.isEmpty,
+              !recordingTrackIDs.contains(track.id) else { return nil }
         return ArrangeEmptyLaneHint(trackID: track.id, laneIndex: laneIndex, text: copy)
     }
 
     /// Every lane's hint, in ladder order — the ONE value the arrange lanes both
     /// DRAW and REPORT (see `ArrangeEmptyLaneHint`).
-    public static func hints(for tracks: [Track]) -> [ArrangeEmptyLaneHint] {
-        tracks.enumerated().compactMap { hint(for: $0.element, laneIndex: $0.offset) }
+    public static func hints(for tracks: [Track],
+                             recordingTrackIDs: [UUID] = []) -> [ArrangeEmptyLaneHint] {
+        tracks.enumerated().compactMap {
+            hint(for: $0.element, laneIndex: $0.offset, recordingTrackIDs: recordingTrackIDs)
+        }
     }
 }

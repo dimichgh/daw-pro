@@ -45,12 +45,30 @@ public struct PadPreviewResult: Sendable, Equatable, Codable {
     /// coalesce it away? A caller that never sees `true` is previewing nothing.
     public var delivered: Bool
     public var outcome: AuditionOutcome
+    /// Controller points THIS call put into the rolling take (m34-f step ②).
+    ///
+    /// ⚠️ **0 on every `pad.previewEffort` call, and that is the point** — the
+    /// preview verb is not a performance and never was. Non-zero only on the
+    /// live-expression path (`ProjectStore.playLiveExpression`), and only while
+    /// a take is actually capturing on an armed instrument track. A call the
+    /// rate cap or the change filter coalesced away contributes 0, exactly like
+    /// live play's heartbeat: nothing was delivered, so nothing was performed.
+    public var capturedPoints: Int
+    /// ⭐ **THE HONESTY LIGHT, the `LivePlayOutcome.recording` twin.** True only
+    /// when this call's value actually reached a live `MIDICaptureSession`.
+    /// False means the strip moved and the take contains none of it: this was a
+    /// preview, the transport is not recording, the track is not armed, it is
+    /// not an instrument track, or the take is not capturing MIDI. A UI that
+    /// shows "recording" off this flag can never tell the user their expression
+    /// is being kept when it is not.
+    public var recording: Bool
 
     public var isAudible: Bool { outcome.isAudible }
 
     public init(trackID: UUID, phase: PadPreviewPhase, controller: Int,
                 controllerValue: Int, effort: Double?, streaming: Bool,
-                delivered: Bool, outcome: AuditionOutcome) {
+                delivered: Bool, outcome: AuditionOutcome,
+                capturedPoints: Int = 0, recording: Bool = false) {
         self.trackID = trackID
         self.phase = phase
         self.controller = controller
@@ -59,7 +77,43 @@ public struct PadPreviewResult: Sendable, Equatable, Codable {
         self.streaming = streaming
         self.delivered = delivered
         self.outcome = outcome
+        self.capturedPoints = capturedPoints
+        self.recording = recording
     }
+}
+
+/// One live-expression push's answer as the ENGINE sees it (m34-f step ②) —
+/// the `LivePlayOutcome` shape, for a continuous controller instead of notes.
+///
+/// The three fields answer three different questions and are deliberately not
+/// collapsed into one: *was it heard* (`audition`), *what went into the take on
+/// THIS call* (`capturedPoints`), and *is a take receiving it at all*
+/// (`recording`).
+public struct LiveExpressionOutcome: Sendable, Equatable, Codable {
+    /// Identical semantics to `previewController`'s answer: the audible half of
+    /// live expression IS a controller preview, on the same per-renderer
+    /// audition ring, so the same reporting vocabulary applies unchanged.
+    public var audition: AuditionOutcome
+    /// Controller points ingested into the rolling take by THIS call — 0 or 1,
+    /// because one push carries one value. It is a COUNT rather than a Bool so
+    /// the wire echo reads the same as live play's `capturedEdges` and a future
+    /// multi-axis push (③'s second assignable axis) needs no new field.
+    public var capturedPoints: Int
+    /// True only when this call's value actually reached a live capture
+    /// session. See `PadPreviewResult.recording`.
+    public var recording: Bool
+
+    public init(audition: AuditionOutcome, capturedPoints: Int, recording: Bool) {
+        self.audition = audition
+        self.capturedPoints = capturedPoints
+        self.recording = recording
+    }
+
+    /// The engine-less / unsupported answer: nothing sounded, nothing captured.
+    public static let unsupported = LiveExpressionOutcome(
+        audition: .unsupported, capturedPoints: 0, recording: false)
+
+    public var isAudible: Bool { audition.isAudible }
 }
 
 /// THE policy home for the breath pad's live drag preview (P6) — the gesture
@@ -151,6 +205,24 @@ public final class PadPreviewController {
     /// The last value handed to the engine on this gesture, for the change
     /// filter. nil before the first delivery.
     public private(set) var lastDeliveredValue: Int?
+    /// ⭐ **m34-f step ② — THE ONE PIECE OF STATE THAT MAKES THE PAD A
+    /// PERFORMANCE SURFACE.** Whether the OPEN gesture's pushes are being
+    /// ingested into a rolling take. Fixed at `begin` from the store's domain
+    /// verdict, exactly like `LivePlayController.heldCaptureIntoTake`, and
+    /// deliberately NOT recomputed mid-gesture: a release closes something
+    /// opened under the verdict in force when it STARTED.
+    public private(set) var gestureCaptureIntoTake = false
+    /// Did this gesture actually put at least one point into a take?
+    ///
+    /// ⛔ **THE ORPHAN-NEUTRAL GUARD, and it has no note-side equivalent.**
+    /// `MIDICaptureSession` drops a note-OFF that closes nothing, so live
+    /// play's wider off-gate cannot fabricate anything. A controller point has
+    /// no pairing to be orphaned BY — it is simply appended — so an `end` that
+    /// ingested its neutral unconditionally would write a one-point CC lane
+    /// into somebody else's take every time the user brushed the pad while
+    /// unarmed. The gate is therefore HERE, on whether this gesture ever
+    /// contributed, and the engine narrows it further.
+    public private(set) var gestureDidCapture = false
 
     private var lastPushAt: ContinuousClock.Instant?
     private var gestureStarted: ContinuousClock.Instant?
@@ -184,9 +256,14 @@ public final class PadPreviewController {
     /// One pad-preview call. Throws `ProjectError.invalidPadPreview` BEFORE
     /// touching the engine for every refusal, so a refused call is guaranteed to
     /// have moved no controller.
+    /// `captureIntoTake` is the DOMAIN's verdict (`isRecording && isArmed &&
+    /// kind == .instrument`), computed by `ProjectStore.playLiveExpression` and
+    /// handed down; `pad.previewEffort` leaves it false, which is what keeps
+    /// that verb's *"nothing is recorded"* contract true by construction.
     @discardableResult
     public func preview(trackID: UUID, effort: Double, phase: PadPreviewPhase,
                         expressionCC: Int = defaultExpressionCC,
+                        captureIntoTake: Bool = false,
                         engine: (any AudioEngineControlling)?) throws -> PadPreviewResult {
         guard Self.controllerRange.contains(expressionCC) else {
             throw ProjectError.invalidPadPreview(
@@ -209,6 +286,8 @@ public final class PadPreviewController {
             gestureStarted = clock()
             lastDeliveredValue = nil
             lastPushAt = nil
+            gestureCaptureIntoTake = captureIntoTake
+            gestureDidCapture = false
             startCeiling(engine: engine)
 
         case .move:
@@ -255,7 +334,9 @@ public final class PadPreviewController {
         if phase == .end {
             let neutral = MIDIControllerType.cc(controller: gestureController).neutralDefault
             let controller = gestureController
-            let outcome = releaseToNeutral(engine: engine)
+            let capturing = gestureCaptureIntoTake && gestureDidCapture
+            let released = releaseToNeutral(engine: engine)
+            let outcome = released.audition
             // ⚠️ `delivered` is computed with `.move`'s predicate VERBATIM, not
             // hardcoded true. A release through a nil engine, or onto a track
             // whose renderer has gone, moves no strip — and reporting it as
@@ -265,7 +346,9 @@ public final class PadPreviewController {
             return PadPreviewResult(
                 trackID: trackID, phase: .end, controller: controller,
                 controllerValue: neutral, effort: nil, streaming: false,
-                delivered: Self.didReachTheStrip(outcome), outcome: outcome)
+                delivered: Self.didReachTheStrip(outcome), outcome: outcome,
+                capturedPoints: released.capturedPoints,
+                recording: capturing && released.recording)
         }
 
         let value = Self.controllerValue(forEffort: effort)
@@ -283,10 +366,23 @@ public final class PadPreviewController {
         }
 
         var outcome = AuditionOutcome.sounded
+        var captured = 0
+        var recording = false
         if deliver {
-            outcome = engine?.previewController(trackID: trackID,
-                                                controller: UInt8(gestureController),
-                                                value: UInt8(value)) ?? .unsupported
+            // ⚠️ **ONE ENGINE ENTRY FOR BOTH PATHS, and the capture flag is the
+            // only thing that differs.** `setLiveExpression`'s protocol default
+            // forwards to `previewController` and captures nothing, so every
+            // fake that only knows the preview method keeps working unchanged
+            // — and the real engine's override is the ONE place a value fans to
+            // both the audition ring and the take.
+            let answer = engine?.setLiveExpression(
+                trackID: trackID, controller: UInt8(gestureController),
+                value: UInt8(value), captureIntoTake: gestureCaptureIntoTake)
+                ?? .unsupported
+            outcome = answer.audition
+            captured = answer.capturedPoints
+            recording = answer.recording
+            if captured > 0 { gestureDidCapture = true }
             // Nothing reached the strip on these two, so remembering the value
             // would suppress the next attempt at it (the `AuditionController`
             // rule).
@@ -300,7 +396,8 @@ public final class PadPreviewController {
         return PadPreviewResult(
             trackID: trackID, phase: phase, controller: gestureController,
             controllerValue: value, effort: min(1, max(0, effort)),
-            streaming: true, delivered: deliver, outcome: outcome)
+            streaming: true, delivered: deliver, outcome: outcome,
+            capturedPoints: captured, recording: recording)
     }
 
     /// Ends whatever gesture is open, restoring the controller to neutral.
@@ -334,7 +431,8 @@ public final class PadPreviewController {
     /// an empty ledger, which reads as a cold-app FIRST touch and starts the
     /// audio hardware — on the path where the app is going away.
     @discardableResult
-    private func releaseToNeutral(engine: (any AudioEngineControlling)?) -> AuditionOutcome {
+    private func releaseToNeutral(engine: (any AudioEngineControlling)?)
+        -> LiveExpressionOutcome {
         ceilingTask?.cancel()
         ceilingTask = nil
         // The skipped-release outcome is chosen so the WIRE's reason string stays
@@ -343,17 +441,32 @@ public final class PadPreviewController {
         // gesture's pushes never found a renderer (a mid-rebuild gap), which is
         // exactly `.noRenderer` → "engineRebuilding". Reporting a running engine
         // as stopped is the small end of this tree's characteristic failure.
-        var outcome: AuditionOutcome = engine == nil ? .unsupported : .noRenderer
+        var outcome = LiveExpressionOutcome(
+            audition: engine == nil ? .unsupported : .noRenderer,
+            capturedPoints: 0, recording: false)
         if let trackID = gestureTrackID, lastDeliveredValue != nil {
             let neutral = MIDIControllerType.cc(controller: gestureController).neutralDefault
-            outcome = engine?.previewController(trackID: trackID,
-                                                controller: UInt8(gestureController),
-                                                value: UInt8(neutral)) ?? .unsupported
+            // ⛔⛔ **GATE THE ONS, NEVER GATE THE OFFS — the live-play asymmetry,
+            // restated for a controller.** The release rides the LAST KNOWN
+            // capture verdict AND the orphan guard, never a fresh verdict: a
+            // disarm mid-gesture must still land the neutral, because the strip
+            // audibly returned to neutral and a take whose lane ends at the
+            // gesture's last value would play back QUIETER than what the user
+            // heard, forever, with nothing on screen explaining it. That is the
+            // monitor and the bounce disagreeing — the exact defect step ②
+            // exists to prevent, arriving through the release instead of the
+            // push.
+            let releaseCaptures = gestureCaptureIntoTake && gestureDidCapture
+            outcome = engine?.setLiveExpression(
+                trackID: trackID, controller: UInt8(gestureController),
+                value: UInt8(neutral), captureIntoTake: releaseCaptures) ?? .unsupported
         }
         gestureTrackID = nil
         gestureStarted = nil
         lastDeliveredValue = nil
         lastPushAt = nil
+        gestureCaptureIntoTake = false
+        gestureDidCapture = false
         return outcome
     }
 

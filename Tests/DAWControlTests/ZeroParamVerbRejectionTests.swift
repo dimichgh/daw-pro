@@ -85,7 +85,9 @@ import DAWCore
 @Suite("Zero-parameter verbs — unknown-key rejection (m23-n2g / m23-n2h)")
 struct ZeroParamVerbRejectionTests {
     /// Every verb (Commands.swift) that calls `rejectUnknownKeys([], verb:)`.
-    /// Exactly 38 as of m23-n2h. `nonisolated` because `@Test(arguments:)`
+    /// MEASURED at 51 as of m34-h-1 (the count in this line has been stale
+    /// before — `doc-count-drift.mjs` derives the same total from source,
+    /// independently). `nonisolated` because `@Test(arguments:)`
     /// evaluates this array outside the main actor, even though the suite
     /// itself is `@MainActor` (for `CommandRouter`/`ProjectStore` access) —
     /// a plain `[String]` is `Sendable`, so isolation buys nothing here.
@@ -94,6 +96,22 @@ struct ZeroParamVerbRejectionTests {
         "transport.play",
         "transport.stop",
         "transport.record",
+        // m34-h LIVE LOOPING. DRIVEN, not excluded: `rejectUnknownKeys([], verb:)`
+        // runs BEFORE `store.recordLayer()` / `store.finishLayer()` in both
+        // handlers, so a bogus-key probe is refused at the parameter layer and
+        // never reaches the transport at all — no take starts, nothing to flake.
+        "transport.recordLayer",
+        "transport.finishLayer",
+        // m34-h-1 LIVE LOOPING, the loop deck's three zero-param verbs. All
+        // DRIVEN, for the same reason as the two above and one more: with no
+        // session open they each refuse (or, for `looper.status`, answer null)
+        // without touching the transport, a device or a sidecar, so the probe
+        // is inert whichever order the routing loop reaches them in.
+        // `looper.begin`/`armLayer`/`finishLayer`/`setLayerMuted` are NOT here
+        // — every one of them takes at least one parameter.
+        "looper.undoLayer",
+        "looper.status",
+        "looper.end",
         // m23-af. `transport.panic` is zero-param like the three above, and
         // `zeroParamVerbsTableMatchesSource` scrapes Commands.swift for every
         // `rejectUnknownKeys([], verb:)` site — so omitting it here reddens
@@ -145,6 +163,16 @@ struct ZeroParamVerbRejectionTests {
         // of `fileExists` calls — no device, no sidecar, no model load — so it
         // cannot flake the way the AudioComponent enumerations can.
         "project.embeddedVoices",
+        // m34-c. All three DRIVEN, not excluded: the catalogue read is a
+        // compile-time list plus one directory scan, the status read touches
+        // an in-memory actor, and cancel refuses when nothing is running —
+        // none of them opens a device, spawns a sidecar or reaches the
+        // network, and `rejectUnknownKeys` fires before any of them executes
+        // anyway. The DOWNLOAD verb itself is absent from this table on
+        // purpose: it REQUIRES `id`.
+        "instrument.listDownloadableSoundBanks",
+        "instrument.soundBankDownloadStatus",
+        "instrument.cancelSoundBankDownload",
     ]
 
     /// AudioComponent enumeration verbs, present in `zeroParamVerbs` (they
@@ -243,7 +271,7 @@ struct ZeroParamVerbRejectionTests {
         let sourceVerbs = try Self.zeroParamVerbsInSource()
         #expect(!sourceVerbs.isEmpty, "the source scan itself must find something, or this test is vacuously green")
         #expect(Set(Self.zeroParamVerbs) == sourceVerbs)
-        #expect(Self.zeroParamVerbs.count == 43)   // 39 at m23-af (transport.panic) -> 40 at m20-j (output.listDevices) -> 41 at m23-br-1 (engine.auPrepareStats) -> 42 at m28-knob (midi.getControlMap) -> 43 at m24-n (project.embeddedVoices)
+        #expect(Self.zeroParamVerbs.count == 51)   // 51 at m34-h-1 (looper.undoLayer + looper.status + looper.end, all DRIVEN; the deck's other four verbs all take params) <- 48 at m34-c (instrument.listDownloadableSoundBanks + instrument.soundBankDownloadStatus + instrument.cancelSoundBankDownload, all DRIVEN; instrument.downloadSoundBank is NOT here — it requires `id`) <- 45 at m34-h <- 39 at m23-af (transport.panic) -> 40 at m20-j (output.listDevices) -> 41 at m23-br-1 (engine.auPrepareStats) -> 42 at m28-knob (midi.getControlMap) -> 43 at m24-n (project.embeddedVoices) -> 45 at m34-h (transport.recordLayer + transport.finishLayer, both DRIVEN)
     }
 
     /// NOTE: this compares against the SOURCE SCRAPE, not `Self.zeroParamVerbs`
@@ -263,7 +291,7 @@ struct ZeroParamVerbRejectionTests {
                 "a typo'd verb name in the exclusion set would silently shrink drivenVerbs without anyone noticing")
         #expect(Set(Self.drivenVerbs).isDisjoint(with: Self.notDrivenForFlakeReasons))
         #expect(Set(Self.drivenVerbs).union(Self.notDrivenForFlakeReasons) == sourceVerbs)
-        #expect(Self.drivenVerbs.count == 41)   // 37 at m23-af (transport.panic) -> 38 at m20-j (output.listDevices) -> 39 at m23-br-1 (engine.auPrepareStats) -> 40 at m28-knob (midi.getControlMap — DRIVEN: reading the map is passive and opens no device) -> 41 at m24-n (project.embeddedVoices — DRIVEN: a model read plus a few fileExists calls, no device and no sidecar)
+        #expect(Self.drivenVerbs.count == 49)   // 49 at m34-h-1 (looper.undoLayer + looper.status + looper.end — DRIVEN: with no deck session open each one refuses or answers null without reaching the transport, a device or a sidecar) <- 46 at m34-c (the three no-param sound-bank download verbs, all DRIVEN — catalogue read, status read and a cancel that refuses when nothing runs) <- 43 at m34-h <- 37 at m23-af (transport.panic) -> 38 at m20-j (output.listDevices) -> 39 at m23-br-1 (engine.auPrepareStats) -> 40 at m28-knob (midi.getControlMap — DRIVEN: reading the map is passive and opens no device) -> 41 at m24-n (project.embeddedVoices — DRIVEN: a model read plus a few fileExists calls, no device and no sidecar) -> 43 at m34-h (transport.recordLayer + transport.finishLayer — DRIVEN: rejectUnknownKeys runs before the store call, so no take can start)
     }
 
     /// m23-n2h durable-win sweep: every one of the 162 `allCommands` reaches
@@ -302,7 +330,7 @@ struct ZeroParamVerbRejectionTests {
         let orphaned = sourceCallSites.subtracting(Set(CommandRouter.allCommands))
         #expect(orphaned.isEmpty,
                 "these verbs have a rejectUnknownKeys call site but are not in allCommands — either renamed/removed (a bug), or an off-surface debug.* verb that was hardened (good; allowlist it above): \(orphaned.sorted())")
-        #expect(CommandRouter.allCommands.count == 195)   // 161 -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w -> 166 at m23-af -> 168 at m20-j -> 169 at m23-br-1 -> 171 at m23-aj-2 -> 173 at m23-dl -> 174 at m23-di-2a -> 175 at m25-d -> 176 at m25-z -> 177 at m23-ap-3 -> 178 (clip.getNotes) -> 179 (m26-i instrument.describeSampler) -> 180 (edit.pasteClips) -> 181 (m27 leg D clip.applyBreathContour, placed next to its controller-lane siblings, NOT at the tail) -> 182 (breath pad P1 clip.applyEffortShape, placed next to clip.applyBreathContour, NOT at the tail) -> 183 (breath pad P6 pad.previewEffort, placed next to note.audition — the other 'sounds now, outside the timeline, not an edit' verb — NOT at the tail) -> 186 (m28-knob midi.getControlMap/setControlMap/learnControl, placed next to midi.listInputs — their only sibling on this surface — and BEFORE transport.record, NOT at the tail) -> 187 (m31-f instrument.probeLiveness) -> 188 (m31-c clip.repeatNotes, placed next to clip.setNotes/clip.getNotes, NOT at the tail) -> 189 (m26-a/m27-n clip.patchNotes, placed next to clip.repeatNotes, NOT at the tail) -> 190 (m32-b2 clip.sliceToSampler, placed next to clip.detectTransients/clip.quantizeAudio, NOT at the tail) -> 191 (m24-m leg A vc.convertClips, placed next to vc.convertVocals — its single-clip sibling — NOT at the tail) -> 193 (m24-n project.embeddedVoices next to project.snapshot/project.open, and vc.installEmbeddedVoice next to vc.importVoiceModel, both at the tail per the additive-at-end law) -> 194 (m23-ct note.play, placed next to note.audition/pad.previewEffort — the other 'sounds now, outside the timeline' verbs — NOT at the tail; a tail append reddened 19 end-relative assertions across 7 files on this item's first run) -> 195 (m23-cv chord.voice, a PURE read-only computation, placed next to note.play and NOT at the tail: LivePlayCommandTests pins note.play to pad.previewEffort + 1, so an insertion BEFORE it would redden that instead)
+        #expect(CommandRouter.allCommands.count == 211)   // 161 -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w -> 166 at m23-af -> 168 at m20-j -> 169 at m23-br-1 -> 171 at m23-aj-2 -> 173 at m23-dl -> 174 at m23-di-2a -> 175 at m25-d -> 176 at m25-z -> 177 at m23-ap-3 -> 178 (clip.getNotes) -> 179 (m26-i instrument.describeSampler) -> 180 (edit.pasteClips) -> 181 (m27 leg D clip.applyBreathContour, placed next to its controller-lane siblings, NOT at the tail) -> 182 (breath pad P1 clip.applyEffortShape, placed next to clip.applyBreathContour, NOT at the tail) -> 183 (breath pad P6 pad.previewEffort, placed next to note.audition — the other 'sounds now, outside the timeline, not an edit' verb — NOT at the tail) -> 186 (m28-knob midi.getControlMap/setControlMap/learnControl, placed next to midi.listInputs — their only sibling on this surface — and BEFORE transport.record, NOT at the tail) -> 187 (m31-f instrument.probeLiveness) -> 188 (m31-c clip.repeatNotes, placed next to clip.setNotes/clip.getNotes, NOT at the tail) -> 189 (m26-a/m27-n clip.patchNotes, placed next to clip.repeatNotes, NOT at the tail) -> 190 (m32-b2 clip.sliceToSampler, placed next to clip.detectTransients/clip.quantizeAudio, NOT at the tail) -> 191 (m24-m leg A vc.convertClips, placed next to vc.convertVocals — its single-clip sibling — NOT at the tail) -> 193 (m24-n project.embeddedVoices next to project.snapshot/project.open, and vc.installEmbeddedVoice next to vc.importVoiceModel, both at the tail per the additive-at-end law) -> 194 (m23-ct note.play, placed next to note.audition/pad.previewEffort — the other 'sounds now, outside the timeline' verbs — NOT at the tail; a tail append reddened 19 end-relative assertions across 7 files on this item's first run) -> 195 (m23-cv chord.voice, a PURE read-only computation, placed next to note.play and NOT at the tail: LivePlayCommandTests pins note.play to pad.previewEffort + 1, so an insertion BEFORE it would redden that instead) -> 202 (m34-c instrument.listDownloadableSoundBanks/downloadSoundBank/soundBankDownloadStatus/cancelSoundBankDownload — the one-click SoundFont download, all four placed next to instrument.importSoundBank — their nearest sibling — and NOT at the tail, so every dropLast(N) window above stays true by construction; a tail placement was tried first and reddened 14 tests) -> 211 (m34-h-1 LIVE LOOPING looper.begin/armLayer/finishLayer/undoLayer/setLayerMuted/status/end, all seven placed immediately after transport.recordLayer/finishLayer — the verbs whose machinery the deck drives — and ~71 entries from the END, NOT at the tail, so every dropLast(N) window and suffix assertion above stays true by construction)
         // -> 187 (m31-f instrument.probeLiveness, placed next to instrument.describeSampler — its read-only instrument.* sibling — NOT at the tail)
     }
 

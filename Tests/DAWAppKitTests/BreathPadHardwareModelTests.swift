@@ -442,7 +442,10 @@ import DAWCore
                                                       angleRadians: angle,
                                                       radius: radius, air: air)
                 },
-                preview: { [self] _, _, phase in previews.append(phase) })
+                // m34-f step ②: the seam now RETURNS the engine's capture verdict.
+                // A recorder has no engine, so it has no answer — `nil` is the
+                // documented third state and deliberately not `false`.
+                preview: { [self] _, _, phase in previews.append(phase); return nil })
             model.prepare(clipID: clipID, trackID: trackID, clipName: "Sax", isMIDI: true)
             return model
         }

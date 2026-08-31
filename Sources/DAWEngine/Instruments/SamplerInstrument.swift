@@ -65,12 +65,49 @@ import Foundation
 /// Envelope (m19-b, design §4.4): per-voice linear 4-stage ADSR — the
 /// `PolySynthInstrument` stage machine — with coefficients computed at
 /// TRIGGER time from the zone's attack/decay/sustain/release, falling back to
-/// the LIVE global coefficients for nil fields. Nil defaults (decay 0,
-/// sustain 1) collapse to the original attack→hold→release law byte-for-byte.
-/// The release ramp reaches EXACTLY 0 after `release` seconds and frees the
-/// voice (true zeros from then on). One-shot (global, or per-zone override —
-/// zone wins, nil inherits the LIVE global at noteOff time) ignores noteOff —
-/// every trigger plays to the zone's end.
+/// the LIVE global coefficients for nil fields. The release ramp reaches
+/// EXACTLY 0 after `release` seconds and frees the voice (true zeros from then
+/// on). One-shot (global, or per-zone override — zone wins, nil inherits the
+/// LIVE global at noteOff time) ignores noteOff — every trigger plays to the
+/// zone's end.
+///
+/// ⭐ m34-o — ALL FOUR envelope stages now have an instrument GLOBAL, and a
+/// nil zone field inherits it. Until m34-o only attack and release did:
+/// `decay`/`sustain` resolved nil to the hardcoded pair (0, 1) — hold at peak
+/// forever — with no instrument-wide knob able to say otherwise, so a sampler
+/// COULD NOT BE MADE TO FADE except by authoring both fields on every zone.
+/// That was the mechanism behind the user's report that a note under the
+/// sustain pedal "keeps playing": the pedal correctly defers the release, and
+/// there was no decay for it to defer INTO.
+///
+/// Nil still collapses to the original attack→hold→release law byte-for-byte —
+/// the resolution simply moved one layer up, into
+/// `SamplerParams.effectiveDecay`/`effectiveSustain`, which return the same
+/// literals 0 and 1.
+///
+/// ⛔ Each half of the pair inherits INDEPENDENTLY, so the decay STEP is formed
+/// at trigger from the RESOLVED (decay, sustain) rather than from a
+/// precomputed global — see `ScalarParams.decaySeconds`.
+///
+/// ⛔ AND SUSTAIN > 0 REMAINS CORRECT. An organ, a bowed pad and a synth pad
+/// genuinely hold under the pedal; a piano does not. THE INSTRUMENT DECIDES,
+/// NOT THE PEDAL — which is why the fade lives here, in the envelope, and not
+/// as a property of CC 64. A pedal that imposed its own fade would be a second
+/// envelope owner and would be audibly WRONG on every sustaining patch.
+///
+/// ⭐ m34-q — THE PEDAL HOLD LIMIT DOES NOT BREAK THAT RULING, and the
+/// distinction is worth stating because from a distance the two look alike.
+/// The ruling above is about the SHAPE of a fade: the envelope owns it, and a
+/// pedal that invented one would be the second owner. A hold limit owns
+/// nothing of the kind — it decides only WHEN a pedal-held note's release
+/// BEGINS, which is precisely the decision a player makes by lifting a key
+/// early, and which CC 64 has always made (the pedal defers every release
+/// until pedal-up; the cap simply says "not this one, not any longer"). What
+/// the evicted note then does is the patch's own `release`: fast on an organ,
+/// long on a piano, silent-already on a one-shot that never marked
+/// `sustained`. Two owners would be two fades; this is one fade, started at a
+/// different moment. The default is nil — unlimited — so an instrument that
+/// correctly holds forever goes on doing so until someone asks otherwise.
 ///
 /// Known accepted semantic shift (design §4.4): because envelope coefficients
 /// are captured per voice at trigger, a GLOBAL attack/release hot-swap now
@@ -166,8 +203,17 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
         // (design §4.4); decay/sustain have constant nil-defaults (0 / 1) and
         // are resolved here.
         var envAttack: Float         // seconds; -1 → global attackStep
-        var envDecay: Float          // seconds; nil → 0 (no decay stage)
-        var envSustain: Float        // level 0...1; nil → 1 (hold at peak)
+        // m34-o: decay/sustain now carry the SAME `-1 = inherit the live
+        // global` sentinel attack/release have always had. Before m34-o these
+        // two resolved nil to the hardcoded literals 0 and 1 right here, so a
+        // zone that did not author them could not be made to fade by ANY
+        // instrument-level setting — there was no global to inherit. The
+        // sentinel is safe on both: a negative decay TIME and a negative
+        // sustain LEVEL are equally unrepresentable in the model
+        // (`SamplerZone.decayRange` 0...8, `sustainRange` 0...1), so -1 cannot
+        // collide with a real authored value.
+        var envDecay: Float          // seconds; -1 → global decaySeconds
+        var envSustain: Float        // level 0...1; -1 → global sustainLevel
         var envRelease: Float        // seconds; -1 → global releaseSlope
         // m20-g loops (§3.2) — all resolved once in init, POD stays POD.
         var loopMode: UInt8          // 0 = none, 1 = sustain, 2 = continuous
@@ -216,17 +262,42 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
         /// `SamplerVoiceMode` flattened to a Bool so the snapshot stays POD and
         /// the render thread branches on a plain load.
         var monoVoiceMode: Bool
+        /// m34-o GLOBAL decay/sustain, carried RAW (seconds / 0…1 level) —
+        /// deliberately NOT as a precomputed `decayStep` the way `attack` and
+        /// `release` become `attackStep`/`releaseSlope` in
+        /// `recomputeCoefficients`.
+        ///
+        /// ⛔ THE REASON, and it is the one subtlety in this whole change: a
+        /// decay STEP is a function of the PAIR (decay, sustain) —
+        /// `(1 − sustain) / (decay × rate)` — while each half inherits
+        /// INDEPENDENTLY. A zone may set `sustain` and leave `decay` nil, or
+        /// the reverse. A single precomputed global step cannot serve a voice
+        /// that mixes one zone-explicit half with one inherited half; it would
+        /// silently apply the global's sustain to the zone's decay. So the
+        /// snapshot carries the two raw numbers and the step is formed at
+        /// TRIGGER time from the resolved pair — two extra compares on a path
+        /// that already does four divides, and no allocation.
+        var decaySeconds: Double
+        var sustainLevel: Double
+        /// m34-q: how many notes the CC 64 pedal may keep ringing. nil in the
+        /// model resolves HERE, once, to `Int.max` — the render thread never
+        /// sees an Optional, and "unlimited" needs no special case downstream
+        /// because a count of sounding voices cannot reach `Int.max`.
+        var pedalHoldLimit: Int
 
         init(_ params: SamplerParams) {
             oneShot = params.oneShot
             attack = params.attack
             release = params.release
             gain = params.gain
+            decaySeconds = params.effectiveDecay
+            sustainLevel = params.effectiveSustain
             expressionModDepth = params.expressionModDepth ?? 0
             expressionFilterDepth = params.expressionFilterDepth ?? 0
             expressionFilterCC = params.expressionFilterCC ?? 11
             bendRangeSemitones = params.effectiveBendRangeSemitones
             monoVoiceMode = params.effectiveVoiceMode == .mono
+            pedalHoldLimit = params.effectivePedalHoldLimit
         }
     }
 
@@ -469,6 +540,18 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
     /// Without the mask the second layer would choke the first, and the user
     /// would hear one of the two sounds they authored.
     private var chokeFiredMask: UInt64 = 0
+    /// m34-q: how many notes the CC 64 pedal may keep ringing. `Int.max` is the
+    /// resolved form of the model's nil — "unlimited" — and it is deliberately
+    /// a value the arm condition can never satisfy, so an instrument without a
+    /// cap does no extra work at all.
+    private var pedalHoldLimit = Int.max
+    /// m34-q, ARMED at note-on and FIRED by the first `trigger` that note-on
+    /// causes — the exact `monoPendingChoke` discipline, for the exact same
+    /// reason. Enforcing in the selection loop would let a note-on that
+    /// ultimately sounds NOTHING (out of every pitch/velocity span, or gated
+    /// out by round-robin) start a fade on a note that is ringing, which is a
+    /// hole nobody played.
+    private var pedalHoldPending = false
     // m19-a RR/RNG runtime state (design §4.3): per-zone round-robin counters
     // and one xorshift64* state var — allocated/seeded in init (main actor),
     // mutated ONLY inside `apply(event:)` on the render thread, the same
@@ -485,6 +568,13 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
     private var attackStep: Float = 0              // level units per sample
     private var releaseSlope: Float = 0            // fraction of releaseFrom per sample
     private var outputGain: Float = 0
+    /// m34-o global decay/sustain, RAW (seconds / 0…1 level) rather than a
+    /// precomputed step — see `ScalarParams.decaySeconds` for why a single
+    /// global step cannot serve a zone that inherits only one half of the pair.
+    /// Initialised to the legacy literals so a voice triggered before the first
+    /// snapshot adoption holds at peak exactly as it always did.
+    private var globalDecaySeconds: Double = SamplerParams.defaultDecay
+    private var globalSustainLevel: Float = Float(SamplerParams.defaultSustain)
 
     // MARK: - m27 continuous expression (render-thread scalars)
 
@@ -575,6 +665,7 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
         // does nothing — see `recomputeCoefficients`.)
         bendRangeSemitones = lastAppliedScalars.bendRangeSemitones
         monoVoiceMode = lastAppliedScalars.monoVoiceMode
+        pedalHoldLimit = lastAppliedScalars.pedalHoldLimit
         // xorshift64* has one degenerate state: 0 sticks at 0. Substitute a
         // fixed odd constant so a (vanishingly unlikely) zero seed still runs.
         var systemGenerator = SystemRandomNumberGenerator()
@@ -771,8 +862,14 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
                         Int32(min(max(0, $0), 63))
                     } ?? -1,
                     envAttack: zone.attack.map { Float($0) } ?? -1,
-                    envDecay: Float(zone.decay ?? 0),
-                    envSustain: Float(zone.sustain ?? 1),
+                    // m34-o: `?? -1` (inherit the live global), where these two
+                    // used to be `?? 0` / `?? 1` (the hardcoded legacy pair).
+                    // Byte-compat is preserved one layer up, not lost here: a
+                    // sampler that never sets the globals resolves them through
+                    // `SamplerParams.effectiveDecay`/`effectiveSustain` to
+                    // exactly those same literals.
+                    envDecay: zone.decay.map { Float($0) } ?? -1,
+                    envSustain: zone.sustain.map { Float($0) } ?? -1,
                     envRelease: zone.release.map { Float($0) } ?? -1,
                     loopMode: loopMode,
                     loopStart: loopStart,
@@ -1005,6 +1102,11 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
         monoStarted = false
         monoPendingChoke = false
         chokeFiredMask = 0
+        // m34-q: the ARM is per-note-on performance state, exactly like
+        // `monoPendingChoke` above — a flush must not leave one primed to fire
+        // on the first note after it. `pedalHoldLimit` itself is configuration
+        // and deliberately SURVIVES, like `monoVoiceMode` and `oneShot`.
+        pedalHoldPending = false
         // m27: controller state neutralises with the voice wipe, exactly like
         // the bend re-centre above. A stale attenuator surviving a stop/seek
         // would quietly duck the next notes; if a lane really is present, the
@@ -1200,6 +1302,10 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
         attackStep = Float(1.0 / max(1.0, params.attack * sampleRate))
         releaseSlope = Float(1.0 / max(1.0, params.release * sampleRate))
         outputGain = Float(params.gain)
+        // m34-o: stored raw, NOT turned into a step here. Both are plain
+        // copies — the arithmetic happens at trigger, on the resolved pair.
+        globalDecaySeconds = params.decaySeconds
+        globalSustainLevel = Float(params.sustainLevel)
         // m27: the ramp coefficient is rate-dependent, so it belongs here (and
         // `prepare()` already forces a re-adopt on a rate change). One `exp`
         // per SNAPSHOT — never per frame, never per event.
@@ -1211,6 +1317,10 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
         // click `expGain` exists to prevent — for a mode change the user made
         // between notes anyway.
         monoVoiceMode = params.monoVoiceMode
+        // m34-q takes effect at the NEXT note-on for the same reason voice mode
+        // does: trimming already-sounding notes at a snapshot boundary would be
+        // a fade the user never played, for a knob they turned between notes.
+        pedalHoldLimit = params.pedalHoldLimit
         // A range change must retune a note that is CURRENTLY deflected, or a
         // held note keeps the old range until the lane's next point. One
         // compare per generation; the sweep is the bend branch's own shape and
@@ -1350,6 +1460,12 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
             // here, so a note that selects no zone leaves the sounding note
             // alone rather than opening a hole.
             monoPendingChoke = monoVoiceMode
+            // m34-q: the THIRD arm, and armed for the same reason as the two
+            // around it. `Int.max` (the nil default) can never be <= the voice
+            // count, so an instrument with no cap never arms and renders
+            // byte-identically to the pre-m34-q engine; a cap ABOVE the pool is
+            // likewise unreachable and therefore means unlimited.
+            pedalHoldPending = pedalDown && pedalHoldLimit <= Self.voiceCount
             // m32-f: ARM here, FIRE in `trigger` — the exact `monoPendingChoke`
             // discipline, for the exact same reason. Choking in this selection
             // loop would let a note-on that ultimately selects NO zone (out of
@@ -1440,16 +1556,7 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
                     // noteOffs, delivered now.
                     for index in 0..<Self.voiceCount
                     where voices[index].active && voices[index].sustained {
-                        voices[index].sustained = false
-                        if voices[index].level <= 0 {
-                            voices[index] = Voice()
-                        } else {
-                            // m20-g: the pedal-up sweep is the OTHER true
-                            // release start — sustain loops disarm here too.
-                            if voices[index].loopMode == 1 { voices[index].looping = false }
-                            voices[index].stage = Stage.release
-                            voices[index].releaseFrom = voices[index].level
-                        }
+                        releaseSustainedVoice(at: index)  // m34-q: the ONE body
                     }
                 }
                 pedalDown = down
@@ -1556,6 +1663,114 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
         }
     }
 
+    // MARK: - Pedal hold limit (m34-q, render thread)
+
+    /// THE PEDAL-UP SWEEP BODY, for ONE voice — factored out so the sweep and
+    /// the m34-q hold-limit eviction cannot drift into sounding different.
+    /// There is exactly ONE way a pedal-held note stops in this instrument and
+    /// this is it: the deferred note-off, delivered now, into the patch's own
+    /// release ramp (m20-g sustain-loop disarm included, because this IS a true
+    /// release start).
+    ///
+    /// ⛔ CALLERS MUST HAVE ESTABLISHED `active && sustained`. It deliberately
+    /// does not re-check, because the one thing this must never do is release a
+    /// voice whose KEY IS STILL DOWN (`sustained == false`) — that would cut a
+    /// note under the player's finger — and a caller forced to filter is a
+    /// caller that had to think about it. One-shot voices never mark
+    /// `sustained`, so they are structurally out of reach here, exactly as they
+    /// are for the pedal-up sweep.
+    @inline(__always)
+    private func releaseSustainedVoice(at index: Int) {
+        voices[index].sustained = false
+        if voices[index].level <= 0 {
+            voices[index] = Voice()
+        } else {
+            // m20-g: a sustain loop disarms at true release start — the voice
+            // plays THROUGH the loop end into the tail.
+            if voices[index].loopMode == 1 { voices[index].looping = false }
+            voices[index].stage = Stage.release
+            voices[index].releaseFrom = voices[index].level
+        }
+    }
+
+    /// How many distinct NOTES the pedal is holding — NOTES, NOT VOICES, and
+    /// that distinction is the whole reason this is not a one-line count.
+    ///
+    /// ⭐ One note-on here can sound SEVERAL voices (m19-a fires one voice per
+    /// `group`, so a layered patch answers a single key with two or three).
+    /// Counting voices would silently halve a two-layer patch's cap, and the
+    /// user asked for "how many notes to hold". `PolySynthInstrument` carries
+    /// the same shape even though notes and voices coincide there, so the two
+    /// built-ins cannot answer the same question differently.
+    ///
+    /// O(voices²) worst case at EVENT rate, and only while a cap is set: the
+    /// inner loop walks only SUSTAINED voices before `index`, so the common
+    /// handful-of-held-notes case is a few compares, and the 64-all-sustained
+    /// pathological case is ~2 016 integer compares — against 64 voices × 48 000
+    /// frames of far heavier per-sample work every second. Nothing allocates,
+    /// locks, or logs.
+    private func sustainedNoteCount() -> Int {
+        var count = 0
+        for index in 0..<Self.voiceCount
+        where voices[index].active && voices[index].sustained {
+            var isFirstVoiceOfNote = true
+            for other in 0..<index
+            where voices[other].active && voices[other].sustained
+                && voices[other].noteID == voices[index].noteID {
+                isFirstVoiceOfNote = false
+                break
+            }
+            if isFirstVoiceOfNote { count &+= 1 }
+        }
+        return count
+    }
+
+    /// Releases every voice of the OLDEST pedal-held note — lowest serial, the
+    /// same "oldest" this instrument's voice stealing already means. Returns
+    /// false when the pedal is holding nothing, which is what terminates the
+    /// eviction loop; a trusted counter would not.
+    private func releaseOldestSustainedNote() -> Bool {
+        var oldestSerial: UInt64 = 0
+        var oldestNoteID: UInt64 = 0
+        var found = false
+        for index in 0..<Self.voiceCount
+        where voices[index].active && voices[index].sustained {
+            if !found || voices[index].serial < oldestSerial {
+                oldestSerial = voices[index].serial
+                oldestNoteID = voices[index].noteID
+                found = true
+            }
+        }
+        guard found else { return false }
+        // EVERY voice of that note, not merely the lowest-serial one — a
+        // layered note releasing one layer at a time would half-stop, which is
+        // audibly a broken sound rather than a quieter one.
+        for index in 0..<Self.voiceCount
+        where voices[index].active && voices[index].sustained
+            && voices[index].noteID == oldestNoteID {
+            releaseSustainedVoice(at: index)
+        }
+        return true
+    }
+
+    /// m34-q enforcement, fired from `trigger` with the pedal down. Counts ONCE
+    /// and then evicts a known number of notes: each eviction removes exactly
+    /// one distinct note, so recounting per round would only buy an O(n³) worst
+    /// case for the same answer.
+    ///
+    /// `>=`, not `>`: the note being struck right now becomes the cap-th
+    /// pedal-held note the moment its key is released, so the room has to be
+    /// made here. The loop (rather than a single eviction) is what lets a cap
+    /// LOWERED live, or a whole chord released under the pedal with no note-on
+    /// in between, catch up in one go.
+    private func enforcePedalHoldLimit() {
+        var held = sustainedNoteCount()
+        while held >= pedalHoldLimit {
+            guard releaseOldestSustainedNote() else { return }
+            held -= 1
+        }
+    }
+
     /// Starts one voice on `zoneIndex` — the same slot-scan/oldest-steal
     /// policy as ever, factored out so the m19-a selection loop can fire one
     /// voice per GROUP on a single note-on. Render thread; no allocation.
@@ -1569,6 +1784,16 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
             monoChoke()
             monoActiveNoteID = event.noteID
             monoStarted = true
+        }
+        // m34-q: the armed hold-limit enforcement fires HERE — after the mono
+        // choke, which may itself have just released pedal-held voices (so a
+        // count taken before it would count notes that are already on their way
+        // out), and BEFORE this voice's slot is written, so a note can never
+        // evict itself. Disarms on the first zone that sounds, so a note-on
+        // firing three layered groups trims the cap ONCE.
+        if pedalHoldPending {
+            pedalHoldPending = false
+            enforcePedalHoldLimit()
         }
         let zone = zones[zoneIndex]
         // m32-f: the per-zone choke, fired HERE — before this voice's slot is
@@ -1657,11 +1882,21 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
             ? attackStep
             : Float(1.0 / max(1.0, Double(zone.envAttack) * sampleRate))
         // Time-accurate decay (the PolySynth law): 1 → sustain in `decay`
-        // seconds. decay 0 / sustain 1 (the nil defaults) yield step 0 with
-        // an immediate decay→sustain transition at level 1 — the legacy hold.
-        voice.decayStep = Float((1.0 - Double(zone.envSustain))
-            / max(1.0, Double(zone.envDecay) * sampleRate))
-        voice.sustainLevel = zone.envSustain
+        // seconds. decay 0 / sustain 1 (what the nil chain still resolves to
+        // by default) yield step 0 with an immediate decay→sustain transition
+        // at level 1 — the legacy hold, unchanged.
+        //
+        // ⛔ m34-o: RESOLVE EACH HALF FIRST, THEN FORM THE STEP. The two
+        // inherit INDEPENDENTLY, so this cannot be a single expression over
+        // `zone.env*` the way it was: a zone that authors `sustain` but leaves
+        // `decay` nil must take the zone's sustain and the GLOBAL's decay, and
+        // a precomputed global step could only ever have carried the global's
+        // sustain. Two compares; the divide was already here.
+        let resolvedDecay = zone.envDecay < 0 ? globalDecaySeconds : Double(zone.envDecay)
+        let resolvedSustain = zone.envSustain < 0 ? globalSustainLevel : zone.envSustain
+        voice.decayStep = Float((1.0 - Double(resolvedSustain))
+            / max(1.0, resolvedDecay * sampleRate))
+        voice.sustainLevel = resolvedSustain
         voice.releaseSlope = zone.envRelease < 0
             ? releaseSlope
             : Float(1.0 / max(1.0, Double(zone.envRelease) * sampleRate))

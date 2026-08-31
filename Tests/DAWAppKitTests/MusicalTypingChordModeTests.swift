@@ -294,7 +294,12 @@ struct MusicalTypingChordModeTests {
         #expect(controller.soundingPitches.count == 4)
     }
 
-    @Test("the Four Chords overlay lights and numbers exactly the mock-up's four keys")
+    /// ⚠️ **RENAMED AND RE-COMMENTED AT m34-i, ASSERTIONS UNCHANGED.** It used to
+    /// say "lights and NUMBERS", which stopped being true of the screen the
+    /// moment the badges were deleted — `progressionOrder` is seam data now, not
+    /// paint. The record is retracted in place rather than left to rot into the
+    /// record-says-X-source-says-Y shape this tree keeps closing.
+    @Test("the Four Chords overlay lights exactly the mock-up's four keys, and steps them 1-4")
     func fourChordsOverlayMatchesTheMockup() {
         let (controller, _) = makeController()
         controller.setProgression(ChordProgressionLibrary.fourChords)
@@ -307,20 +312,513 @@ struct MusicalTypingChordModeTests {
         #expect(byLabel["S"]?.progressionOrder == nil)    // ii — dim, still playable
         #expect(byLabel["D"]?.progressionOrder == nil)    // iii
         #expect(byLabel["J"]?.progressionOrder == nil)    // vii°
-        // ⭐ EXACTLY FOUR BADGES FOR A FOUR-CHORD PRESET. The first version
-        // numbered every cell whose DEGREE was lit, which painted ten — the
-        // colour keys and the second octave run share their degrees, so the row
-        // showed four different cells all labelled `1`. Only a screenshot of the
-        // live app could see it; this pins the fix so it cannot come back.
+        // ⭐ EXACTLY FOUR STEPPED CELLS FOR A FOUR-CHORD PRESET. The first version
+        // numbered every cell whose DEGREE was lit, which painted ten badges —
+        // the colour keys and the second octave run share their degrees, so the
+        // row showed four different cells all labelled `1`. Only a screenshot of
+        // the live app could see it. The badge is gone (m34-i) but the narrowing
+        // is not: `isNextInProgression` inherits it, so this pin is what stops
+        // the same bug being re-earned by the border.
         #expect(controller.chordCells.compactMap(\.progressionOrder).sorted()
             == [1, 2, 3, 4])
-        // …while LIT is wider than NUMBERED, and deliberately: any lit key plays
-        // that chord, the numbered one is just the one to press first.
+        // …while LIT is wider than STEPPED, and deliberately: any lit key plays
+        // that chord, the stepped one is just the one to press first.
         #expect(controller.chordCells.filter(\.isLit).count > 4)
         #expect(byLabel["W"]?.isLit == true, "the colour key of a lit degree is lit")
-        #expect(byLabel["W"]?.progressionOrder == nil, "…but it is not numbered")
+        #expect(byLabel["W"]?.progressionOrder == nil, "…but it carries no step")
         #expect(byLabel["K"]?.isLit == true, "the +8va run of a lit degree is lit")
-        #expect(byLabel["K"]?.progressionOrder == nil, "…but it is not numbered")
+        #expect(byLabel["K"]?.progressionOrder == nil, "…but it carries no step")
+    }
+
+    // MARK: - The next-chord border (m34-i)
+
+    /// The chord cell wearing the border right now, if any.
+    private func nextCell(_ controller: MusicalTypingController)
+        -> MusicalTypingChordCell? {
+        let bordered = controller.chordCells.filter(\.isNextInProgression)
+        // ⛔ THE COUNT IS ASSERTED IN EVERY READ, not once in one test. The bug
+        // this feature replaced was a COUNT bug that no assertion could see —
+        // ten badges where four were meant — and it took a screenshot to find.
+        // Every border read in this suite therefore pays for the count.
+        #expect(bordered.count <= 1, "at most ONE cell may wear the border")
+        return bordered.first
+    }
+
+    @Test("⭐ the border starts on the progression's FIRST chord, on exactly one cell")
+    func borderStartsOnStepOne() {
+        let (controller, _) = makeController()
+        controller.setProgression(ChordProgressionLibrary.fourChords)
+        #expect(controller.chordCells.filter(\.isNextInProgression).count == 1)
+        let next = nextCell(controller)
+        #expect(next?.keyLabel == "A", "Four Chords opens on I")
+        #expect(next?.progressionOrder == 1)
+        #expect(next?.isLit == true, "the bordered cell is always a lit one")
+        #expect(controller.chordSequence?.nextStep == 1)
+        #expect(controller.chordSequence?.count == 4)
+    }
+
+    @Test("⛔ with NO progression there is no border at all")
+    func noProgressionNoBorder() {
+        let (controller, _) = makeController()
+        #expect(controller.chordSequence == nil)
+        #expect(controller.chordCells.filter(\.isNextInProgression).isEmpty)
+        controller.setProgression(ChordProgressionLibrary.fourChords)
+        controller.setProgression(nil)
+        #expect(controller.chordSequence == nil)
+        #expect(controller.chordCells.filter(\.isNextInProgression).isEmpty,
+                "clearing the preset clears the cue with it")
+    }
+
+    /// ⭐⭐ **THE USER'S DEFECT, ASSERTED DIRECTLY.** *"Four chords, 50 doowop,
+    /// pop-punk does not change keyboard presets (lighted keys)"* — and they were
+    /// right: those three light the identical set `{1,4,5,6}` because they are the
+    /// same four chords in three orders. The border is what tells them apart.
+    ///
+    /// ⚠️ **AND THE HONEST LIMIT IS PINNED TOO: Four Chords and Doo-Wop both OPEN
+    /// on I, so at rest two of the three still look alike.** They diverge from the
+    /// SECOND chord onward, which is what this test measures. m34-g's
+    /// lights-run-ahead queue is what would separate them before a note is played;
+    /// inventing it here would preempt a choice the user has already made.
+    @Test("⭐⭐ the three same-set presets light identically and CUE differently")
+    func sameSetPresetsAreToldApartByTheBorder() {
+        let (controller, _) = makeController()
+        let presets = [ChordProgressionLibrary.fourChords,
+                       ChordProgressionLibrary.dooWop,
+                       ChordProgressionLibrary.popPunk]
+        // The premise, measured rather than assumed.
+        #expect(Set(presets.map(\.litDegrees)).count == 1,
+                "all three light the same four degrees — that is the whole defect")
+
+        var openings: [String] = []
+        var seconds: [String] = []
+        for preset in presets {
+            controller.setProgression(preset)
+            openings.append(nextCell(controller)?.keyLabel ?? "-")
+            // Play the chord being cued; the border must move to the next one.
+            press(nextCell(controller)?.keyLabel ?? "", on: controller)
+            seconds.append(nextCell(controller)?.keyLabel ?? "-")
+            controller.releaseAll()
+        }
+        #expect(openings == ["A", "A", "H"],
+                "Four Chords and Doo-Wop both open on I; Pop-Punk opens on vi")
+        #expect(seconds == ["G", "H", "F"],
+                "…and by the SECOND chord all three are distinct: V, vi, IV")
+        #expect(Set(seconds).count == 3)
+    }
+
+    @Test("⭐ playing the cued chord moves the border, and it WRAPS after the last one")
+    func borderFollowsThePerformance() {
+        let (controller, _) = makeController()
+        controller.setProgression(ChordProgressionLibrary.fourChords)
+        var visited: [String] = []
+        for _ in 0..<5 {
+            let label = nextCell(controller)?.keyLabel ?? "-"
+            visited.append(label)
+            press(label, on: controller)
+            release(label, on: controller)
+        }
+        #expect(visited == ["A", "G", "H", "F", "A"],
+                "I V vi IV, then back to the top — a four-chord loop is a loop")
+    }
+
+    /// ⛔⛔ **A CUE, NEVER A GATE.** The border does not advance when you play
+    /// something else, and nothing is refused for it — the whole promise of the
+    /// lit-preset design is that you can wander off it.
+    ///
+    /// ⚠️ **RENAMED AT m34-g AND PINNED TO `.onMatch` EXPLICITLY; THE ASSERTIONS
+    /// ARE UNCHANGED.** It used to inherit the default, and the default moved:
+    /// the user chose all three advance modes as a runtime switch and
+    /// lights-run-ahead leads. *"Does not move the border"* is wait-for-you's
+    /// contract, not chord mode's, so this test now says which mode it is
+    /// speaking for. `offSequenceChordsSoundAndConsumeAStepInFreeMode` is the
+    /// other half — and note what is common to both: **the chord SOUNDS, fully,
+    /// in either mode.** That is the part that is not mode-dependent.
+    @Test("⛔⛔ WAIT-FOR-YOU: a chord that is NOT the cued one sounds fully and does not move the border")
+    func offSequenceChordsSoundAndDoNotAdvance() {
+        let (controller, sink) = makeController()
+        controller.setAdvanceMode(.onMatch)
+        controller.setProgression(ChordProgressionLibrary.fourChords)
+        #expect(nextCell(controller)?.keyLabel == "A")
+        // "S" is ii — DIM, not in the progression at all.
+        let decision = press("s", on: controller)
+        #expect(decision == .perform(.note(semitone: 2)), "a dim key still performs")
+        #expect(controller.soundingPitches.count == 4, "…and sounds a full chord")
+        #expect(sink.last.count == 4, "…which reached the seam")
+        #expect(nextCell(controller)?.keyLabel == "A", "and the cue did not budge")
+        release("s", on: controller)
+        // A LIT chord that is simply not the one being cued: same answer.
+        press("f", on: controller)                       // IV — step 4, not step 1
+        #expect(controller.soundingPitches.count == 4)
+        #expect(nextCell(controller)?.keyLabel == "A")
+        #expect(controller.chordSequence?.nextStep == 1)
+    }
+
+    /// ⭐⭐ **THE OTHER HALF, AND THE ONE THE DEFAULT NOW TAKES (m34-g).** In
+    /// lights-run-ahead you are WRITING: what you played is the take, so the plan
+    /// rolls on to its next suggestion rather than waiting for you to find the
+    /// one it was offering.
+    ///
+    /// ⛔ **STILL A CUE, NEVER A GATE — and that is what this test spends most of
+    /// its assertions on.** The off-plan chord `performs`, sounds a full
+    /// four-note voicing, and reaches the seam. Nothing is refused. The only
+    /// difference from wait-for-you is that the suggestion it passed over is not
+    /// offered twice.
+    @Test("⛔⛔ LIGHTS-RUN-AHEAD: an off-plan chord sounds fully, is refused nothing, and consumes a step")
+    func offSequenceChordsSoundAndConsumeAStepInFreeMode() {
+        let (controller, sink) = makeController()
+        #expect(controller.advanceMode == .free, "the default the user chose")
+        controller.setProgression(ChordProgressionLibrary.fourChords)
+        #expect(nextCell(controller)?.keyLabel == "A")
+        // "S" is ii — DIM, not in the progression at all.
+        let decision = press("s", on: controller)
+        #expect(decision == .perform(.note(semitone: 2)), "⛔ a dim key still performs")
+        #expect(controller.soundingPitches.count == 4, "⛔ …and sounds a full chord")
+        #expect(sink.last.count == 4, "⛔ …which reached the seam")
+        #expect(controller.chordSequence?.nextStep == 2, "…and it consumed a suggestion")
+        #expect(nextCell(controller)?.keyLabel == "G")
+        release("s", on: controller)
+    }
+
+    /// ⛔ **THE SWITCH IS REAL: three positions, three different answers to the
+    /// same press.** A three-position control with two identical positions would
+    /// be a UI that lies, so the difference is asserted rather than assumed.
+    @Test("⛔ the three advance modes give THREE different answers to one off-plan chord")
+    func theThreeModesAreActuallyDifferent() {
+        var results: [ChordSequenceAdvanceMode: Int?] = [:]
+        for mode in ChordSequenceAdvanceMode.allCases {
+            let (controller, _) = makeController()
+            controller.setAdvanceMode(mode)
+            controller.setProgression(ChordProgressionLibrary.fourChords)
+            press("s", on: controller)                   // ii — off-plan
+            release("s", on: controller)
+            press("a", on: controller)                   // I — the cue
+            release("a", on: controller)
+            results[mode] = controller.chordSequence?.nextStep
+        }
+        #expect(results[.onMatch] == 2, "wait-for-you: only the cued chord counted")
+        #expect(results[.free] == 3, "lights-run-ahead: both chords consumed a suggestion")
+        #expect(results[.onBeat] == 1, "on-the-beat: playing does not move the click's cursor")
+        #expect(Set(results.values.map { $0 ?? -1 }).count == 3,
+                "three modes, three distinct outcomes — the switch is not decorative")
+    }
+
+    // MARK: - The advance-mode switch (m34-g)
+
+    @Test("⭐ the default is LIGHTS-RUN-AHEAD, which is what the user was told would lead")
+    func defaultIsLightsRunAhead() {
+        let (controller, _) = makeController()
+        #expect(controller.advanceMode == .free)
+        controller.setProgression(ChordProgressionLibrary.fourChords)
+        #expect(controller.chordSequence?.advanceMode == .free,
+                "…and the player is armed with it, not with a hardcoded mode")
+    }
+
+    @Test("⚠️ changing the advance mode KEEPS your place — it is not a restart")
+    func advanceModeChangeKeepsTheCursor() {
+        let (controller, _) = makeController()
+        controller.setProgression(ChordProgressionLibrary.fourChords)
+        press("a", on: controller)
+        release("a", on: controller)
+        #expect(controller.chordSequence?.nextStep == 2)
+        controller.setAdvanceMode(.onBeat)
+        #expect(controller.chordSequence?.nextStep == 2,
+                "'keep going, but with the click' — not 'start again'")
+        #expect(controller.chordSequence?.advanceMode == .onBeat)
+        controller.setAdvanceMode(.onMatch)
+        #expect(controller.chordSequence?.nextStep == 2)
+    }
+
+    @Test("the advance mode SURVIVES a preset change — it is how you play, not what you play")
+    func advanceModeSurvivesPresetChange() {
+        let (controller, _) = makeController()
+        controller.setAdvanceMode(.onMatch)
+        controller.setProgression(ChordProgressionLibrary.fourChords)
+        controller.setProgression(ChordProgressionLibrary.dooWop)
+        #expect(controller.advanceMode == .onMatch)
+        #expect(controller.chordSequence?.advanceMode == .onMatch)
+    }
+
+    /// ⭐⭐ **ON-THE-BEAT, DRIVEN. m34-i shipped `beat()` with no caller and said
+    /// so; this is the caller's contract at the controller boundary.**
+    @Test("⭐ on-the-beat moves the cue on a DOWNBEAT and on nothing else")
+    func beatMovesTheCueOnlyInOnBeatMode() {
+        let (controller, _) = makeController()
+        controller.setProgression(ChordProgressionLibrary.fourChords)
+        // In the other two modes the click is inert.
+        #expect(controller.beat() == false)
+        #expect(controller.chordSequence?.nextStep == 1)
+        controller.setAdvanceMode(.onMatch)
+        #expect(controller.beat() == false)
+        controller.setAdvanceMode(.onBeat)
+        #expect(controller.beat() == true)
+        #expect(nextCell(controller)?.keyLabel == "G")
+        #expect(controller.beat() == true)
+        #expect(nextCell(controller)?.keyLabel == "H")
+        // …and it wraps like every other mode.
+        _ = controller.beat()
+        _ = controller.beat()
+        #expect(controller.chordSequence?.nextStep == 1)
+    }
+
+    @Test("a beat with NO progression is inert rather than fatal")
+    func beatWithNoSequenceIsInert() {
+        let (controller, _) = makeController()
+        controller.setAdvanceMode(.onBeat)
+        #expect(controller.chordSequence == nil)
+        #expect(controller.beat() == false)
+    }
+
+    // MARK: - The look-ahead queue (m34-g)
+
+    /// ⭐⭐⭐ **THE ASSERTION THIS ITEM EXISTS FOR, AT THE CELL LEVEL.** m34-i's
+    /// own close recorded the limit it could not close: Four Chords and Doo-Wop
+    /// light the same four degrees AND both open on I, so **two of the three
+    /// presets still looked identical at rest**. The queue is what separates
+    /// them before a note is played.
+    @Test("⭐⭐ the QUEUE tells Four Chords from Doo-Wop AT REST — the limit m34-i could only state")
+    func queueSeparatesThePresetsBeforeANoteIsPlayed() {
+        func ranks(_ preset: ChordProgressionPreset) -> [String: Int] {
+            let (controller, _) = makeController()
+            controller.setProgression(preset)
+            var out: [String: Int] = [:]
+            for cell in controller.chordCells {
+                if cell.isNextInProgression { out[cell.keyLabel] = 0 }
+                if let rank = cell.queueRank { out[cell.keyLabel] = rank }
+            }
+            return out
+        }
+        let four = ranks(ChordProgressionLibrary.fourChords)
+        let dooWop = ranks(ChordProgressionLibrary.dooWop)
+        #expect(four == ["A": 0, "G": 1, "H": 2, "F": 3], "I V vi IV")
+        #expect(dooWop == ["A": 0, "H": 1, "F": 2, "G": 3], "I vi IV V")
+        #expect(four != dooWop,
+                "⭐ …and THAT is the difference two identical-looking presets finally have")
+        // The cue alone still cannot tell them apart — the defect, restated.
+        #expect(four.first { $0.value == 0 }?.key == dooWop.first { $0.value == 0 }?.key)
+    }
+
+    /// ⛔ **THE COUNT PINS.** The bug this whole surface keeps re-earning is a
+    /// COUNT bug that no assertion could see — ten badges where four were meant.
+    /// Exactly one border, exactly `queueDepth` queue marks, and no cell wearing
+    /// both.
+    @Test("⛔ exactly ONE border and exactly THREE queue marks, on disjoint cells")
+    func queueAndBorderCountsArePinned() {
+        let (controller, _) = makeController()
+        controller.setProgression(ChordProgressionLibrary.fourChords)
+        let cells = controller.chordCells
+        #expect(cells.filter(\.isNextInProgression).count == 1)
+        #expect(cells.compactMap(\.queueRank).count == MusicalTypingController.queueDepth)
+        #expect(cells.compactMap(\.queueRank).sorted() == [1, 2, 3],
+                "…and they are ranked 1-2-3, not three copies of one rank")
+        #expect(cells.filter { $0.isNextInProgression && $0.queueRank != nil }.isEmpty,
+                "⛔ no cell is both the cue and in the queue — the two counts stay independent")
+        // ⛔ The same narrowing the border has: a degree marks ONE cell, not the
+        // four that share it (the +8va run and the colour keys).
+        #expect(cells.filter { $0.queueRank != nil }.allSatisfy {
+            $0.octaveShift == 0 && !$0.addsColour
+        })
+    }
+
+    @Test("⛔ with NO progression there is no queue at all")
+    func noProgressionNoQueue() {
+        let (controller, _) = makeController()
+        #expect(controller.chordCells.compactMap(\.queueRank).isEmpty)
+        controller.setProgression(ChordProgressionLibrary.fourChords)
+        #expect(!controller.chordCells.compactMap(\.queueRank).isEmpty,
+                "positive control: a preset DOES produce a queue")
+        controller.setProgression(nil)
+        #expect(controller.chordCells.compactMap(\.queueRank).isEmpty)
+    }
+
+    @Test("the queue MOVES with the performance")
+    func queueFollowsThePerformance() {
+        let (controller, _) = makeController()
+        controller.setProgression(ChordProgressionLibrary.fourChords)
+        func rank(_ label: String) -> Int? {
+            controller.chordCells.first { $0.keyLabel == label }?.queueRank
+        }
+        #expect(rank("G") == 1)
+        press("a", on: controller)                       // play the cue
+        release("a", on: controller)
+        #expect(nextCell(controller)?.keyLabel == "G")
+        #expect(rank("G") == nil, "the new cue left the queue and took the border")
+        #expect(rank("H") == 1)
+        #expect(rank("A") == 3, "…and the loop's top is now three away")
+    }
+
+    /// ⚠️ A three-chord loop cannot show three chords AFTER the cue without
+    /// showing the cue again. Pinned rather than glossed.
+    @Test("⚠️ a SHORT progression queues fewer than three, and never re-queues the cue")
+    func shortProgressionQueuesFewer() {
+        let (controller, _) = makeController()
+        controller.setProgression(ChordProgressionLibrary.jazzTwoFiveOne)   // [2,5,1]
+        let cells = controller.chordCells
+        #expect(cells.filter(\.isNextInProgression).count == 1)
+        #expect(cells.compactMap(\.queueRank).sorted() == [1, 2],
+                "three asked for, two available")
+        #expect(cells.filter { $0.isNextInProgression && $0.queueRank != nil }.isEmpty)
+    }
+
+    // MARK: - Playbox (m34-g)
+
+    /// ⭐⭐ **A GENERATED SEQUENCE GOES THROUGH THE SAME `setProgression` THE
+    /// LIBRARY CHIPS USE.** One player, one overlay, one recorder — the lit keys,
+    /// the border, the queue and the rewind rule all apply to it unchanged.
+    @Test("⭐⭐ a generated plan lights keys through the SAME path a preset does")
+    func playboxDrivesTheOnePlayer() {
+        let (controller, _) = makeController()
+        let plan = PlayboxPlan(degrees: [1, 4, 5, 4], name: "Playbox",
+                               provenance: PlayboxProvenance(kind: .ai, detail: "anthropic"))
+        controller.applyPlaybox(plan)
+        #expect(controller.progression?.degrees == [1, 4, 5, 4])
+        #expect(controller.chordSequence?.count == 4)
+        #expect(controller.chordSequence?.nextStep == 1)
+        #expect(nextCell(controller)?.keyLabel == "A", "the cue starts on I")
+        #expect(controller.chordCells.filter(\.isNextInProgression).count == 1)
+        // A repeated degree resolves to its soonest rank — two marks for three
+        // remaining steps, which the player's own suite pins as the honest cost.
+        #expect(controller.chordCells.compactMap(\.queueRank).sorted() == [1, 2])
+        #expect(controller.chordSequence?.advanceMode == .free)
+    }
+
+    /// ⛔⛔ *"The AI wrote this"* and *"we picked a stock progression"* are
+    /// different claims and only one is true at a time.
+    @Test("⛔⛔ provenance follows the lights, and a LIBRARY preset clears it")
+    func provenanceNeverOutlivesItsSequence() {
+        let (controller, _) = makeController()
+        #expect(controller.playboxProvenance == nil)
+        controller.applyPlaybox(PlayboxPlan(
+            degrees: [1, 5, 6, 4], name: "Playbox",
+            provenance: PlayboxProvenance(kind: .ai, detail: "anthropic")))
+        #expect(controller.playboxProvenance?.isAI == true)
+        // Picking a hand-authored preset must not leave "Written by AI" standing.
+        controller.setProgression(ChordProgressionLibrary.dooWop)
+        #expect(controller.playboxProvenance == nil)
+        // …and so must clearing the lights entirely.
+        controller.applyPlaybox(PlayboxPlan(
+            degrees: [1, 5, 6, 4], name: "Playbox",
+            provenance: PlayboxProvenance(kind: .local, detail: "Four Chords")))
+        #expect(controller.playboxProvenance?.kind == .local)
+        controller.setProgression(nil)
+        #expect(controller.playboxProvenance == nil)
+    }
+
+    /// ⛔ **A GENERATED SEQUENCE MUST NEVER YANK THE KEY THE USER CHOSE.**
+    /// `setProgression` switches the scale to a preset's mode; the Playbox
+    /// wrapper is therefore built in the CONTROLLER's mode, and the generator is
+    /// asked for that mode in the first place.
+    @Test("⛔ applying a generated plan does NOT change the user's key or scale")
+    func playboxDoesNotYankTheScale() {
+        let (controller, _) = makeController()
+        controller.setChordKey(5, mode: .minor)          // F minor
+        controller.applyPlaybox(PlayboxPlan(
+            degrees: [1, 6, 3, 7], name: "Playbox",
+            provenance: PlayboxProvenance(kind: .ai, detail: "anthropic")))
+        #expect(controller.chordKey == 5)
+        #expect(controller.chordKeyMode == .minor)
+        #expect(controller.progression?.mode == .minor)
+    }
+
+    /// ⭐ The match is on the DEGREE, which is wider than the border on purpose:
+    /// every cell of a lit degree plays that chord, so every one of them counts as
+    /// following the lights. The border still lands on exactly one cell.
+    @Test("⭐ the +8va run and the colour keys of the cued degree advance it too")
+    func anyCellOfTheCuedDegreeAdvances() {
+        let (controller, _) = makeController()
+        controller.setProgression(ChordProgressionLibrary.fourChords)
+        press("k", on: controller)                       // I, an octave up
+        release("k", on: controller)
+        #expect(nextCell(controller)?.keyLabel == "G", "the +8va I followed the lights")
+        // "Y" is the colour key that flips V between triad and seventh.
+        #expect(controller.chordCells.first { $0.keyLabel == "Y" }?.degree == 5)
+        press("y", on: controller)
+        release("y", on: controller)
+        #expect(nextCell(controller)?.keyLabel == "H", "the seventh of V counted as V")
+    }
+
+    /// ⛔ Mirrors `refusedPressDoesNotMoveTheVoiceLeadingAnchor`: the border says
+    /// *play this next*, so a press that made no sound did not play it.
+    @Test("⛔ a REFUSED chord does not move the border")
+    func refusedChordDoesNotAdvanceTheBorder() {
+        let (controller, _) = makeController()
+        controller.setProgression(ChordProgressionLibrary.fourChords)
+        controller.targetState = .noTrack
+        press("a", on: controller)
+        #expect(controller.soundingPitches.isEmpty, "nothing sounded")
+        #expect(nextCell(controller)?.keyLabel == "A", "so nothing advanced")
+        controller.targetState = .ready
+        press("a", on: controller)
+        #expect(nextCell(controller)?.keyLabel == "G", "…and it still works afterwards")
+    }
+
+    /// ⛔ The m23-an law in a new mode: the mouse and the keyboard are ONE
+    /// instrument, so they must drive ONE sequence.
+    ///
+    /// ⚠️ **PINNED TO `.onMatch` EXPLICITLY AT m34-g, ASSERTIONS UNCHANGED** — its
+    /// last leg is an off-plan press, which is the one thing the three modes
+    /// disagree about. What it is really asserting (mouse and keyboard drive ONE
+    /// sequence) is mode-independent.
+    @Test("⛔ the on-screen chord row advances the border exactly as the keys do")
+    func pointerAdvancesTheBorderToo() {
+        let (controller, _) = makeController()
+        controller.setAdvanceMode(.onMatch)
+        controller.setProgression(ChordProgressionLibrary.fourChords)
+        // Cell index is a SEMITONE offset: 0 is the "A" cell (degree I).
+        controller.pointerDown(cellIndex: 0)
+        #expect(controller.soundingPitches.count == 4)
+        #expect(nextCell(controller)?.keyLabel == "G")
+        controller.pointerUp()
+        controller.pointerDown(cellIndex: 2)             // "S" — ii, off-sequence
+        #expect(nextCell(controller)?.keyLabel == "G", "…and off-sequence still does nothing")
+        controller.pointerUp()
+    }
+
+    // MARK: - What resets the cursor, and what deliberately does not
+
+    @Test("re-picking the SELECTED preset restarts the loop from the top")
+    func rePickingThePresetRestarts() {
+        let (controller, _) = makeController()
+        controller.setProgression(ChordProgressionLibrary.fourChords)
+        press("a", on: controller)
+        release("a", on: controller)
+        #expect(controller.chordSequence?.nextStep == 2)
+        controller.setProgression(ChordProgressionLibrary.fourChords)
+        #expect(controller.chordSequence?.nextStep == 1,
+                "the only gesture on this surface that can mean 'take it from the top'")
+    }
+
+    @Test("a modulation and a voicing change KEEP your place in the progression")
+    func keyAndVoicingChangesKeepTheCursor() {
+        let (controller, _) = makeController()
+        controller.setProgression(ChordProgressionLibrary.fourChords)
+        press("a", on: controller)
+        release("a", on: controller)
+        #expect(controller.chordSequence?.nextStep == 2)
+        controller.setChordKey(7)                        // G major
+        #expect(controller.chordSequence?.nextStep == 2,
+                "a progression is written in DEGREES, so it survives a modulation")
+        controller.setVoicingPreset(.pad)
+        #expect(controller.chordSequence?.nextStep == 2,
+                "how a chord is voiced says nothing about which chord comes next")
+        #expect(nextCell(controller)?.keyLabel == "G")
+    }
+
+    @Test("leaving chord mode, or the mode itself, rewinds the sequence")
+    func modeChangesRewindTheCursor() {
+        let (controller, _) = makeController()
+        controller.setProgression(ChordProgressionLibrary.fourChords)
+        press("a", on: controller)
+        release("a", on: controller)
+        #expect(controller.chordSequence?.nextStep == 2)
+        controller.setPlayMode(.notes)
+        #expect(controller.chordSequence?.nextStep == 1)
+        controller.setPlayMode(.chords)
+        press("a", on: controller)
+        release("a", on: controller)
+        #expect(controller.chordSequence?.nextStep == 2)
+        controller.setEnabled(false)
+        #expect(controller.chordSequence?.nextStep == 1,
+                "session state dies with the session, exactly as lastVoicing does")
     }
 
     @Test("picking a minor progression switches the scale and keeps the user's tonic")

@@ -508,13 +508,31 @@ struct EditorSurfaceOwnershipSiteTests {
         // exists yet, so routing it that way would make the feature reachable
         // only once it was unnecessary. Engagement is the honest discriminator
         // here, and this is the home for it. See `SelectAllMenuPolicy`.
-        let note = "expected 10 code mentions of `activeEditorSurface` in DAWProApp.swift (1 "
+        //
+        // ⭐⭐ 10 → 9 AT m34-d (2026-08-30) — **THE READ ABOVE WAS REMOVED, AND
+        // THE USER IS WHO REMOVED IT.** They reported ⌘A doing nothing on the
+        // first press and ruled, verbatim: ***"Make it work whenever the editor
+        // is open."*** Engagement was the honest discriminator right up until a
+        // human used it: opening a clip is a gesture in the ARRANGE, so
+        // `activeEditorSurface` answered `.arrange` for a roll they were looking
+        // at. `selectAllMenuItem` now reads the SIBLING verdict
+        // (`openEditorSurface` → `EditorSurfaceRouter.openSurface`), which is
+        // pinned by its own census below via `openEditorClip`.
+        //
+        // ⚠️ THIS IS A DECREASE, AND A DECREASE IS EXACTLY AS INTERESTING AS AN
+        // INCREASE HERE. A reader that quietly DISAPPEARS means a surface-scoped
+        // decision started being made somewhere else — which is what happened,
+        // deliberately, and is why the count moved rather than the pin being
+        // loosened to a `>=`. ⭐ THE ⌘ ZOOM ROUTERS DID NOT MOVE: the ruling named
+        // one keystroke, and 3 of these 9 are still the three routers.
+        let note = "expected 9 code mentions of `activeEditorSurface` in DAWProApp.swift (1 "
             + "declaration + 3 routers + 1 debug.viewZoom + 4 from the two echo lines, whose "
-            + "JSON KEYS also contain the token, + 1 for m25-s's `selectAllMenuItem`), found "
-            + "\(hits). A new reader is not automatically wrong — but it IS a new "
-            + "surface-scoped decision, and m23-al-3 is where those are supposed to be "
-            + "considered together rather than one at a time."
-        #expect(hits == 10, "\(note)")
+            + "JSON KEYS also contain the token; m25-s's `selectAllMenuItem` read was REMOVED "
+            + "at m34-d), found \(hits). A new reader is not automatically wrong — but it IS a "
+            + "new surface-scoped decision, and m23-al-3 is where those are supposed to be "
+            + "considered together rather than one at a time. A reader that VANISHED is the "
+            + "same question from the other end: which home took the decision over?"
+        #expect(hits == 9, "\(note)")
         // No OTHER file may read it: the whole point is that one accessor answers.
         for path in ["DAWApp/ContentView.swift"] {
             let other = Self.codeOnly(Self.text(path)).joined(separator: "\n")
@@ -587,11 +605,39 @@ struct EditorSurfaceOwnershipSiteTests {
         // menu can read; `SelectAllMenuPolicy`'s parameter doc names the single
         // state where the two differ and why it is unreachable outside a live
         // gesture.
-        let note = "expected 12 code mentions of `openEditorClip` in DAWProApp.swift, found "
+        // ⭐⭐ 12 → 13 AT m34-d, AND THE ONE ADDED READ IS THE ROUTER-MEDIATED
+        // SHAPE THIS PIN EXISTS TO ASK FOR. `openEditorSurface` — the new sibling
+        // accessor behind ⌘A — passes `rollOpen: openEditorClip != nil` into
+        // `EditorSurfaceRouter.openSurface`, exactly as `activeEditorSurface`
+        // passes it into `.resolve`. It is a raw `!= nil` in the same sense that
+        // one is: a TERM handed to the router, not a verdict computed instead of
+        // it. The failure this census guards against is `if openEditorClip != nil
+        // { zoomPianoRollIn() }` — a boolean that decides something and never
+        // constructs a router type. This one constructs `OpenEditorSurface`,
+        // whose init is `fileprivate` to the router file.
+        //
+        // ⚠️ AND `resolve` IS NOW IMPLEMENTED ON TOP OF `openSurface`, so the two
+        // accessors are two QUESTIONS asked of one computation rather than two
+        // answers to one question. If a future edit makes them diverge, it is
+        // `EditorSurfaceRouterTests.theSharedTermsCannotDrift` that reddens —
+        // this pin only counts tokens.
+        // ⚠️ 13 → 14 AT m34-d TOO, AND THE SECOND ONE IS A CONTENT READ, NOT A
+        // SURFACE DECISION — the same shape this census already accepted from
+        // m25-s. The `selectAllMenuItem` DEBUG ECHO added alongside the fix
+        // reports `openEditorClip?.notes?.count ?? 0` so a gate can see the
+        // policy's third input; "the roll is empty" is a real refusal and the
+        // arrange `count` beside it is CLIPS, not notes. It never spells
+        // `openEditorClip != nil` and decides nothing.
+        //
+        // ⭐ THIS PIN EARNED ITS KEEP ON THIS VERY ITEM: the echo was added AFTER
+        // the fix's own tests were green, and this census is what noticed. It is
+        // the only thing in the tree that would have.
+        let note = "expected 14 code mentions of `openEditorClip` in DAWProApp.swift, found "
             + "\(hits). If the new one is a ZOOM or KEY decision, it must go through "
-            + "`activeEditorSurface` instead — a raw `openEditorClip != nil` is a second "
-            + "computation of 'which surface is active' that also silently drops the WORKSPACE "
-            + "term (in the Mix console this stays non-nil with no roll mounted)."
-        #expect(hits == 12, "\(note)")
+            + "`activeEditorSurface` (engagement) or `openEditorSurface` (mount) instead — a "
+            + "raw `openEditorClip != nil` that DECIDES something is a second computation of "
+            + "'which surface is active' that also silently drops the WORKSPACE term (in the "
+            + "Mix console this stays non-nil with no roll mounted)."
+        #expect(hits == 14, "\(note)")
     }
 }

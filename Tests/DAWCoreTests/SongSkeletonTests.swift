@@ -117,6 +117,85 @@ struct SongSkeletonTests {
         }
     }
 
+    // MARK: - m34-o: per-instrument defaults
+
+    /// ⭐ THE USER'S RULE, PINNED: *"piano decays, organ sustains and so on
+    /// depending on instrument."* Until m34-o a skeleton assigned NO instrument
+    /// at all, so every generated part — the one named "Piano", the one named
+    /// "Organ", the one named "Drums" — came out as the same saw poly synth.
+    ///
+    /// This asserts the ASSIGNMENT is coherent (name matches program), not that
+    /// a note fades: the fading is measured on rendered audio in
+    /// `SamplerGlobalEnvelopeTests` and live on the hosted path. What this
+    /// catches is the drift a listening test never would — a roster entry
+    /// silently pointing at the wrong program byte.
+    @Test("m34-o every skeleton program is a real GM program whose name matches the part")
+    func skeletonProgramsAreCoherent() {
+        var assigned = 0
+        for name in SongSkeletonCatalog.names {
+            let genre = try! #require(SongSkeletonCatalog.genre(named: name))
+            for strip in genre.tracks {
+                guard let program = strip.program else { continue }
+                assigned += 1
+                // ⛔ A PROGRAM ONLY EVER LANDS ON AN INSTRUMENT TRACK. An audio
+                // strip hosts no instrument, so a program on one could only be
+                // silently dropped.
+                #expect(strip.kind == .instrument,
+                        "\(name)/\(strip.name) carries a program but is \(strip.kind.rawValue)-typed")
+                #expect(SoundBankConfig.midiValueRange.contains(program.program))
+                // The name must come FROM the catalog for that exact address —
+                // this is what makes a mislabelled roster entry impossible.
+                if program.bankMSB == GMProgramCatalog.melodicBankMSB {
+                    #expect(program.name == GMProgramCatalog.name(forProgram: program.program),
+                            "\(name)/\(strip.name): name \(program.name) is not GM program \(program.program)")
+                } else {
+                    #expect(program == GMProgramCatalog.standardDrumKit,
+                            "\(name)/\(strip.name): the only non-melodic entry is the drum kit")
+                }
+            }
+        }
+        // ANTI-VACUITY: an empty `program` everywhere would satisfy every
+        // assertion above without testing anything. 40 is a floor under the
+        // 52 assignments the catalog carries, not a restatement of it.
+        #expect(assigned >= 40, "expected the skeleton programs to still exist; saw \(assigned)")
+    }
+
+    /// ⛔⛔ THE CONTROL THAT KEEPS THE FIX HONEST. m34-o must not turn every
+    /// part into something that fades — an organ, a pad and a string ensemble
+    /// hold under the pedal and MUST keep holding. These four assignments are
+    /// the shipped surface of "the instrument decides": two that fade, two that
+    /// do not, pinned by address so a well-meaning retune cannot quietly make
+    /// them all pianos.
+    ///
+    /// ⚠️ DRUMS ARE bankMSB 120, NOT 121. At MSB 121 program 0 is Acoustic
+    /// Grand Piano — so a one-byte slip here turns every drum track in the
+    /// catalog into a piano, which is exactly the kind of silent wrongness a
+    /// name-only assertion would miss.
+    @Test("m34-o the decaying parts and the SUSTAINING parts are both pinned")
+    func skeletonInstrumentFamiliesArePinned() {
+        func program(_ genre: String, _ track: String) -> SoundBankProgram? {
+            SongSkeletonCatalog.genre(named: genre)?.tracks.first { $0.name == track }?.program
+        }
+        // DECAYING — a struck string. Measured live: falls to silence under a
+        // held pedal within 15 s.
+        #expect(program("ballad", "Piano") == GMProgramCatalog.melodic(0))
+        #expect(program("pop", "Keys") == GMProgramCatalog.melodic(0))
+        // SUSTAINING — driven/bowed. Measured live: dead flat across 15 s.
+        // Holding forever is CORRECT here and breaking it would be a worse
+        // defect than the one m34-o fixes.
+        #expect(program("blues", "Organ") == GMProgramCatalog.melodic(16))
+        #expect(program("reggae", "Organ") == GMProgramCatalog.melodic(16))
+        #expect(program("ballad", "Strings") == GMProgramCatalog.melodic(48))
+        #expect(program("r-and-b", "Pads") == GMProgramCatalog.melodic(89))
+        // Percussion rides the PERCUSSION bank, not program 0 of the melodic one.
+        #expect(program("pop", "Drums")?.bankMSB == GMProgramCatalog.percussionBankMSB)
+        #expect(program("folk", "Percussion") == GMProgramCatalog.standardDrumKit)
+        // And the deliberate nils: a synth part being the built-in synth is
+        // instrument-appropriate, not an oversight.
+        #expect(program("pop", "Lead") == nil)
+        #expect(program("house", "Synth") == nil)
+    }
+
     @Test("every mixer-preset reference resolves against MixerPresetCatalog.v1")
     func everyPresetReferenceResolves() {
         var references = 0

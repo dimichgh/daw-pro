@@ -313,6 +313,20 @@ public final class ProjectStore {
             // the engine, so playhead pushes cannot cause feedback loops.
             engine?.playheadHandler = { [weak self] beats in
                 self?.transport.positionBeats = beats
+                // m34-h-1 LIVE LOOPING: the loop deck's quantized launches and
+                // its runway extension ride THIS observation, so they work
+                // headless and on the wire with no view attached — unlike
+                // `refreshLiveTakeRegion`, which is a pure view concern and is
+                // driven from `ContentView`.
+                //
+                // ⚠️ **THE "NEVER CALLS BACK INTO THE ENGINE" INVARIANT ABOVE
+                // STILL HOLDS, AND `refreshLoopDeck` IS BUILT TO KEEP IT.** The
+                // decision it makes here is pure arithmetic over beats; the one
+                // thing that reaches the engine (firing `recordLayer` /
+                // `finishLayer` at a boundary) is dispatched on a hopped
+                // main-actor `Task`, precisely so this closure never re-enters
+                // a `@MainActor` engine that is mid-playhead-tick.
+                self?.refreshLoopDeck()
             }
             // End-of-content stop (m25-d): the engine tells us it reached the
             // pre-computed bound; WE own transport state, so the stop lands on
@@ -547,6 +561,25 @@ public final class ProjectStore {
         /// nil = today's linear take, landed verbatim. `transport.setLoop`
         /// refuses mid-record, so the freeze is exact like the map's.
         let loop: LoopTakeWindow?
+        /// m34-h: the recording-session generation this take belongs to. A
+        /// completion whose generation no longer matches lands NOTHING — the
+        /// project was replaced (open/new/recover) while the take was in
+        /// flight, so its clips would belong to a project that is gone.
+        ///
+        /// ⭐ THIS REPLACED AN IDENTITY CHECK AGAINST THE SHARED
+        /// `pendingTake` SLOT, AND THE DIFFERENCE IS THE WHOLE POINT OF
+        /// LAYERING. Take N's completion is asynchronous (writer queue → main
+        /// actor), so with layers, take N+1 is ALREADY in the slot by the time
+        /// take N lands — comparing against the slot would drop every layer
+        /// but the last. The generation only moves on a project boundary,
+        /// which is the condition actually being tested.
+        let sessionGeneration: Int
+        /// m34-h-1 LIVE LOOPING: non-nil exactly when this take is a loop-deck
+        /// LAYER pass. The linear landing below is bypassed for a fold-and-tile
+        /// landing (`landDeckLayer`) — the same shape `pending.loop` uses to
+        /// reach `finishLoopTake`, and for the same reason: the geometry is
+        /// frozen at record start, so a deck edited mid-take cannot move it.
+        var deck: DeckTakeWindow?
     }
 
     /// The frozen loop window of a loop-cycle take (m15-b). `cycleSeconds` is
@@ -559,7 +592,43 @@ public final class ProjectStore {
         let cycleSeconds: Double
     }
 
+    /// The most recently started take, for diagnostics and for `record()`'s
+    /// own failure path. ⚠️ NOT the authority for landing a take: each take's
+    /// completion carries its OWN `PendingTake` (m34-h), because with live
+    /// layering several takes can be in flight at once.
     @ObservationIgnored private var pendingTake: PendingTake?
+
+    /// The PROVISIONAL take region the arrange draws while a take is rolling
+    /// (m34-a-2) — nil whenever nothing should be drawn, which is most of the
+    /// time. Observed, because the lanes render it.
+    ///
+    /// ⭐ **CACHED HERE RATHER THAN COMPUTED IN THE VIEW BECAUSE COMPUTING IT
+    /// READS THE ENGINE**, and a view that polled the engine mid-`body` would
+    /// be a second engine caller on a path SwiftUI may run any number of times
+    /// per frame. `refreshLiveTakeRegion()` is the ONE writer; the view reads
+    /// this value and decides nothing.
+    ///
+    /// ⛔ It is deliberately NOT part of `Project`: it is never encoded, never
+    /// undone, and never seen by `performEdit`. See `ProvisionalTakeRegion`.
+    public private(set) var liveTakeRegion: ProvisionalTakeRegion?
+
+    /// LIVE LOOPING (m34-h-1) — the open loop-deck session, or nil when the
+    /// app is not live-looping. Observed, because the deck strip's lamps render
+    /// from it and nothing else.
+    ///
+    /// ⛔ **DELIBERATELY NOT PART OF `Project`**, exactly like `liveTakeRegion`:
+    /// it is never encoded, never undone and never seen by `performEdit`. The
+    /// LAYERS it records are ordinary clips that are all three; the SESSION is
+    /// a performance mode, and a saved project that reopened mid-session with a
+    /// half-armed layer pointing at a take that no longer exists would be a
+    /// wedge with no user-visible cause.
+    ///
+    /// ⚠️ Written by `ProjectStore+LoopDeck.swift` only — `internal(set)` for
+    /// that reason, since a Swift extension cannot declare stored state.
+    public internal(set) var loopDeck: LoopDeck?
+    /// Bumped whenever the recording session identity changes (open/new/
+    /// recover). See `PendingTake.sessionGeneration`.
+    @ObservationIgnored private var recordingSessionGeneration = 0
     @ObservationIgnored private var takeCounter = 0
     @ObservationIgnored private var cachedSessionRecordingDir: URL?
 
@@ -582,6 +651,16 @@ public final class ProjectStore {
         cachedSessionRecordingDir = nil
         takeCounter = 0
         pendingTake = nil
+        // m34-h: any take still in flight belongs to the OUTGOING project and
+        // must not land in the incoming one. Bumping here is what its
+        // completion compares against.
+        recordingSessionGeneration &+= 1
+        // m34-h-1: the deck's layers point at track and clip ids in the
+        // OUTGOING project. Carrying it into a new/opened one would leave every
+        // lamp pointing at nothing, and a `looper.undoLayer` would search for a
+        // clip that had never existed here. The session is a performance mode,
+        // not project content — it does not survive a project boundary.
+        loopDeck = nil
     }
 
     public init(
@@ -673,6 +752,23 @@ public final class ProjectStore {
         engine?.setEndStop(beat: armedEndStop)
     }
 
+    /// Re-arms the bound after a change that is NOT project content.
+    ///
+    /// ⚠️ **A LIVE-LOOPING SESSION IS A PERFORMANCE MODE, NOT A DOCUMENT EDIT**
+    /// (m34-h-1). Opening one suspends the content-end bound and closing one
+    /// re-arms it, so the bound must be recomputed at both — but routing that
+    /// through `performEdit` would fire its unconditional `markDirty()` and
+    /// flag an untouched project as unsaved, prompting to save a document
+    /// nobody changed. (It would NOT have polluted the undo stack: `loopDeck`
+    /// is outside `captureEditState`, so the no-op body journals nothing. The
+    /// dirty flag was the only leak, and it was silent.)
+    ///
+    /// The bound itself is still computed in exactly ONE place — this is a
+    /// second door to `refreshEndStop()`, not a second policy.
+    func refreshEndStopAfterModeChange() {
+        refreshEndStop()
+    }
+
     /// Clears the armed bound on BOTH sides. Used where a bound must provably
     /// not survive — stop, and the start of a take.
     private func disarmEndStop() {
@@ -686,7 +782,18 @@ public final class ProjectStore {
         TransportEndStop.bound(
             contentEndBeat: contentEndBeat,
             positionBeats: transport.positionBeats,
-            isEnabled: stopAtContentEnd,
+            // ⭐⭐ m34-h-1 — **AN OPEN LOOP-DECK SESSION SUSPENDS THE
+            // CONTENT-END BOUND, AND THAT IS THE FEATURE, NOT A CONCESSION.**
+            // "The music never stops" is the whole of live looping; a transport
+            // that stopped itself the moment the playhead ran off the end of
+            // the tiled material would end the session with no user action and
+            // no visible cause. The runway extension (`LoopDeckScheduler`)
+            // normally keeps the playhead well inside the material, so this is
+            // the second of two independent guards, not the only one — and it
+            // is expressed through `isEnabled` so `TransportEndStop.bound`'s
+            // signature and every existing caller stay byte-identical.
+            // Re-armed by `endLoopDeck()` and by `stop()`.
+            isEnabled: stopAtContentEnd && loopDeck == nil,
             isRecording: transport.isRecording,
             isLoopActive: TransportEndStop.isLoopActive(transport))
     }
@@ -725,6 +832,14 @@ public final class ProjectStore {
 
     public func stop() {
         guard transport.isPlaying || transport.isRecording else { return }
+        // m34-h-1: a QUEUED deck layer is waiting for a boundary the stopped
+        // transport will never reach, and nothing ticks while stopped — so it
+        // would sit armed forever and refuse every later arm. A layer that is
+        // already ROLLING is left alone on purpose: `stopRecording` below
+        // finalizes it and it lands through `landDeckLayer` like any other.
+        // The SESSION itself survives a stop — the grid is still valid on the
+        // next play, and ending it is `looper.end`'s job.
+        cancelQueuedDeckPass()
         let wasRecording = transport.isRecording
         transport.isPlaying = false
         transport.isRecording = false
@@ -735,6 +850,27 @@ public final class ProjectStore {
         // TAKE) still live.
         disarmEndStop()
         if wasRecording {
+            // ⛔⛔ **A STAND-DOWN MUST NEVER OUTLIVE ITS TAKE — THE PEDAL LIFTS
+            // BEFORE THE TAKE IS FINALIZED (m34-l), AND THE ORDER IS THE WHOLE
+            // POINT.** `stopRecording` runs `MIDICaptureSession.finish`, which
+            // flushes each lane's suppressed tail and closes it. Lift after that
+            // and the closing CC 64 = 0 has no session to reach: the clip's
+            // sustain lane ends at 127, and because CC 64 is one of the types
+            // `MIDIControllerType.resetsAtClipOnset` deliberately does NOT clear
+            // at a clip boundary, every clip that plays after it inherits a
+            // pedal nobody pressed. Lifting here puts the 0 in the lane at the
+            // moment it actually happened.
+            //
+            // ⚠️ DELIBERATELY NOT ON A PLAIN PLAYBACK STOP. Stopping a jam is
+            // not the end of a performance, the latch is the user's explicit
+            // choice, and its lamp is lit — turning it off underneath them would
+            // be a state change with no cause they can see. A take ENDING is
+            // different: it closes a record, and a record must be closed
+            // honestly.
+            //
+            // Structural no-op when the pedal was never pressed: `liftSustain`
+            // returns immediately on `!sustainDown` and pushes nothing.
+            livePlay.liftSustain(engine: engine)
             // stopRecording halts playback internally AND finalizes the take —
             // calling stopPlayback here would tear the transport down twice.
             engine?.stopRecording()
@@ -748,6 +884,11 @@ public final class ProjectStore {
             trackMeters[key] = .silence
         }
         masterMeter = .silence
+        // m34-a-2: the provisional take region dies with the take, on this edge
+        // rather than on the next transport tick — a stopped transport produces
+        // no further position changes, so a tick-only refresh would leave the
+        // last frame's region painted over a lane until something else moved.
+        refreshLiveTakeRegion()
     }
 
     public func seek(toBeats beats: Double) throws {
@@ -1027,7 +1168,8 @@ public final class ProjectStore {
             recordStartBeats: transport.positionBeats,
             tempoMap: transport.tempoMap,
             takeNumber: take,
-            loop: loopWindow
+            loop: loopWindow,
+            sessionGeneration: recordingSessionGeneration
         )
         takeCounter = take
         // MIDI-only takes create no capture file at all.
@@ -1094,7 +1236,10 @@ public final class ProjectStore {
         do {
             try engine.startTake(transport, audioURL: url,
                                  captureMIDI: !armedInstrumentIDs.isEmpty) { [weak self] result in
-                self?.finishTake(result)
+                // m34-h: the take's OWN pending record rides the closure. See
+                // `PendingTake.sessionGeneration` for why reading the shared
+                // slot here is wrong the moment layering exists.
+                self?.finishTake(result, pending: pending)
             }
         } catch {
             transport.isRecording = false
@@ -1113,22 +1258,309 @@ public final class ProjectStore {
         return error
     }
 
+    /// Publishes a recording-path diagnostic without throwing. `recordFailure`'s
+    /// sibling for the paths that DISCARD rather than refuse — an empty deck
+    /// layer, a launch that could not start (m34-h-1) — where the caller is a
+    /// scheduler with nobody to throw to and the message is the only trace the
+    /// performer gets. `lastRecordingError` is `public private(set)`, so the
+    /// loop-deck extension reaches it through here rather than by widening it.
+    func noteRecordingError(_ message: String?) {
+        lastRecordingError = message
+    }
+
+    // MARK: - The growing take region (m34-a-2)
+
+    /// The take in flight, as it was SNAPSHOTTED at record start — nil when no
+    /// take has been started since the last project boundary.
+    ///
+    /// ⚠️ **THIS IS NOT A LIFETIME.** `pendingTake` survives the stop, because
+    /// the writer finalizes asynchronously and the most recent take is kept for
+    /// diagnostics. Callers that want "is a take rolling" must read
+    /// `transport.isRecording`; `TakeRegionPreview.region` takes both for that
+    /// reason.
+    public var pendingTakeInfo: PendingTakeInfo? {
+        pendingTake.map {
+            PendingTakeInfo(instrumentTrackIDs: $0.armedInstrumentTrackIDs,
+                            audioTrackIDs: $0.armedTrackIDs,
+                            startBeat: $0.recordStartBeats,
+                            takeNumber: $0.takeNumber,
+                            isLoopTake: $0.loop != nil)
+        }
+    }
+
+    /// Recomputes `liveTakeRegion` from the take snapshot, the engine's live
+    /// capture extent and the transport. Cheap (one optional engine read plus
+    /// the pure rule) and idempotent, so it is safe to call from the transport
+    /// tick — which is what drives it, at the same ~30 Hz cadence and from the
+    /// same observation path as follow-the-playhead (m34-a-1).
+    ///
+    /// ⚠️ **IT IS ALSO CALLED ON EVERY RECORDING-STATE EDGE**, not only from
+    /// the tick: `stop()` and `finishLayer()` end a take without necessarily
+    /// producing another position change, so a tick-only refresh would leave
+    /// the last frame's region on screen until something else moved. The
+    /// region must be gone the instant the take is.
+    public func refreshLiveTakeRegion() {
+        let next = TakeRegionPreview.region(pending: pendingTakeInfo,
+                                            extent: engine?.liveTakeExtent(),
+                                            playheadBeat: transport.positionBeats,
+                                            isRecording: transport.isRecording)
+        // Guarded so a ~30 Hz poll only publishes an OBSERVED change. Without
+        // this every tick would dirty an `@Observable` property with an equal
+        // value and re-render the whole arrange 30×/second during a take.
+        if next != liveTakeRegion { liveTakeRegion = next }
+    }
+
+    /// LIVE LOOPING (m34-h phase 1) — finish the rolling take and land it,
+    /// WITHOUT stopping the transport. The performer closes a layer and the
+    /// music keeps running; `record()`'s counterpart, `stop()`, tears both down
+    /// together and stays exactly as it was.
+    ///
+    /// The take lands through the SAME `finishTake` completion `record()` uses,
+    /// so a layer is ONE `performEdit("Record Take N")` and ONE undo step. It
+    /// arrives asynchronously (the writer finalizes on its own queue), exactly
+    /// as it does on the stop path — the clip is NOT on the timeline when this
+    /// method returns.
+    ///
+    /// ⚠️ **THE END-STOP BOUND IS DELIBERATELY LEFT DISARMED HERE.** A take
+    /// runs with no content-end bound by law (m25-d), and re-arming it at this
+    /// instant would arm it against the content end as it stands BEFORE the
+    /// layer has landed — i.e. a bound in the past, which would stop the music.
+    /// Stopping the music is the one thing this feature exists to prevent. The
+    /// bound re-arms by itself one step later: `finishTake` lands the clip
+    /// inside `performEdit`, and `performEdit` calls `refreshEndStop()` with
+    /// the new content end. The cost, stated rather than discovered: a take
+    /// that lands nothing (empty capture) leaves playback unbounded until the
+    /// next edit or transport transition.
+    public func finishLayer() throws {
+        guard let engine else {
+            throw recordFailure(.engineUnavailable)
+        }
+        guard transport.isRecording else {
+            throw recordFailure(.transportBusy(
+                "not recording — start a layer with transport.recordLayer (or transport.record) first"
+            ))
+        }
+        // ⚠️ THE RETURN VALUE IS THE CONTRACT, NOT A COURTESY. `false` means
+        // the engine closed NOTHING — it has no such capability, or no take was
+        // actually rolling. Clearing `isRecording` on a `false` would leave the
+        // store believing the layer had landed while the engine kept capturing
+        // into a take nobody would ever collect: a silently lost performance.
+        guard engine.finishTakeKeepingPlayback() else {
+            throw recordFailure(.transportBusy(
+                "this engine cannot finish a take without stopping playback — use transport.stop instead"
+            ))
+        }
+        transport.isRecording = false
+        // m34-a-2: this layer's provisional region ends with this layer. The
+        // transport keeps rolling, so a tick would clear it a frame later
+        // anyway — but a frame of a region belonging to a take that has already
+        // closed is exactly the ghost this feature must not have.
+        refreshLiveTakeRegion()
+        // `transport.isPlaying` is deliberately NOT cleared, `playbackTask` is
+        // deliberately NOT cancelled, and the meters are deliberately NOT
+        // darkened — the three things `stop()` does that would end the music.
+    }
+
+    /// LIVE LOOPING (m34-h phase 1) — start the NEXT layer against playback
+    /// that is already running. `record()`'s sibling for a transport that is
+    /// rolling; `record()` itself is untouched and still refuses unless
+    /// stopped.
+    ///
+    /// ⭐ THIS IS A NEW ENTRY POINT, NOT A RELAXED GUARD. `record()`'s
+    /// `!transport.isPlaying` precondition carries real meaning — an ordinary
+    /// take reschedules the graph from the record position — and weakening it
+    /// would silently change what every existing caller gets. The two paths
+    /// have opposite preconditions and reach different engine primitives.
+    ///
+    /// The layer's capture is aligned onto the ALREADY-RUNNING anchor, so
+    /// nothing currently sounding is stopped, rescheduled or re-anchored.
+    ///
+    /// ⚠️ **COUNT-IN DOES NOT APPLY TO A LAYER, BY DESIGN.** The music already
+    /// playing is the count — this is what every hardware and software looper
+    /// does — and the layer path never reaches the code that implements a
+    /// count-in. Refusing instead would break this method for every user, since
+    /// the project default is one bar (m23-cy). Pinned by test, not left
+    /// emergent.
+    ///
+    /// ⛔ **REFUSED WHILE THE LOOP IS ENABLED (v1).** Recording INTO a loop
+    /// region is overdub, which this app does not model, and the transport's
+    /// beat is modular under a loop while every capture clock is linear — see
+    /// `AudioEngine.startTakeInPlayback`. Refused for punch for the same
+    /// "untested combination" reason the m15-b loop × punch gate uses.
+    public func recordLayer() throws {
+        try startLayerTake(deckWindow: nil)
+    }
+
+    /// `recordLayer()`'s body, with the ONE seam a loop-deck pass needs: the
+    /// frozen `DeckTakeWindow` that turns the landing from "verbatim clip" into
+    /// "fold and tile" (m34-h-1). Every guard, every teaching error and every
+    /// engine call below is `recordLayer()`'s, unchanged — the deck adds a
+    /// field to `PendingTake` and nothing else to this path.
+    func startLayerTake(deckWindow: DeckTakeWindow?) throws {
+        guard let engine else {
+            throw recordFailure(.engineUnavailable)
+        }
+        // The mirror image of `record()`'s guard, and deliberately spelled out
+        // rather than shared: a layer needs a transport that IS rolling and is
+        // NOT already capturing.
+        guard transport.isPlaying else {
+            throw recordFailure(.transportBusy(
+                "nothing is playing — press play first, or use transport.record to record from a stop"
+            ))
+        }
+        guard !transport.isRecording else {
+            throw recordFailure(.transportBusy(
+                "already recording a layer — finish it with transport.finishLayer first"
+            ))
+        }
+        let armedAudioIDs = tracks.filter { $0.kind == .audio && $0.isArmed }.map(\.id)
+        let armedInstrumentIDs = tracks.filter { $0.kind == .instrument && $0.isArmed }.map(\.id)
+        guard !armedAudioIDs.isEmpty || !armedInstrumentIDs.isEmpty else {
+            throw recordFailure(.noArmedTracks)
+        }
+        // Refused store-side as well as engine-side, on purpose: the store's
+        // teaching error is what a user or an agent actually reads, and the
+        // engine's guard is what makes the refusal true even for a caller that
+        // reaches the engine directly.
+        guard !transport.isLoopEnabled else {
+            throw recordFailure(.invalidLoopRange(
+                "cannot record a layer while the loop is enabled — disable the loop first "
+                + "(transport.setLoop). Recording into a loop region is overdub, which is not "
+                + "supported yet; loop-cycle takes (transport.record) record ALTERNATE TAKES of "
+                + "one part, not stacked layers."
+            ))
+        }
+        guard !transport.isPunchEnabled else {
+            throw recordFailure(.invalidPunchRange(
+                "cannot record a layer with a punch window enabled — disable punch first "
+                + "(transport.setPunch)"
+            ))
+        }
+        // Audio-capture gates, verbatim from `record()`: a MIDI-only layer must
+        // never fire the microphone prompt.
+        if !armedAudioIDs.isEmpty {
+            switch engine.recordPermission {
+            case .denied:
+                throw recordFailure(.recordPermissionDenied)
+            case .undetermined:
+                engine.requestRecordPermission { _ in }
+                throw recordFailure(.recordPermissionPending)
+            case .granted:
+                break
+            }
+        }
+
+        let take = takeCounter + 1
+        let pending = PendingTake(
+            armedTrackIDs: armedAudioIDs,
+            armedInstrumentTrackIDs: armedInstrumentIDs,
+            // The live playhead. It is up to one display tick (~33 ms) behind
+            // the engine's own clock; the engine translates it onto the running
+            // anchor and the writer's `startOffsetSeconds` reports the true gap,
+            // so the clip still lands where capture really began. The error
+            // self-corrects and does not accumulate across layers.
+            recordStartBeats: transport.positionBeats,
+            tempoMap: transport.tempoMap,
+            takeNumber: take,
+            // Never a loop-cycle take: the loop is refused above. A layer is
+            // "another part, kept", not "another attempt at one part".
+            loop: nil,
+            sessionGeneration: recordingSessionGeneration,
+            // m34-h-1: frozen here, at the same instant as the tempo map and
+            // the record-start beat, so a deck whose origin or cycle length
+            // changes later cannot move a take that is already rolling.
+            deck: deckWindow
+        )
+        takeCounter = take
+        let url: URL? = armedAudioIDs.isEmpty
+            ? nil
+            : sessionRecordingDir.appendingPathComponent("take-\(take).wav")
+
+        lastRecordingError = nil
+        pendingTake = pending
+        // The silent-start block, verbatim from `record()` and for the SAME
+        // correctness reason, not hygiene: a take starts silent, and
+        // `MIDICaptureSession` drops every pre-anchor note-on, so anything held
+        // when the layer opens would be heard and never captured. Order is
+        // load-bearing — see `record()` for the full argument.
+        padPreview.stop(engine: engine)
+        livePlay.stopAll(engine: engine)
+        audition.stopAll(engine: engine)
+        transport.isRecording = true
+        // m25-d: a rolling take must never stop at content end — recording past
+        // the end of existing material is the entire point. Same explicit
+        // disarm `record()` performs, for the same reason.
+        disarmEndStop()
+        do {
+            try engine.startTakeInPlayback(transport, audioURL: url,
+                                           captureMIDI: !armedInstrumentIDs.isEmpty) { [weak self] result in
+                self?.finishTake(result, pending: pending)
+            }
+        } catch {
+            // Playback is NOT torn down on a failed layer start — it was
+            // running before this call and the caller never asked to stop it.
+            // Only the recording intent is wound back.
+            transport.isRecording = false
+            pendingTake = nil
+            lastRecordingError = (error as? LocalizedError)?.errorDescription
+                ?? error.localizedDescription
+            // The bound was disarmed above for a take that never started;
+            // playback continues, so restore it for the transport as it stands.
+            refreshEndStop()
+            throw error
+        }
+    }
+
     /// Engine completion for one finalized take: turn the capture file into
     /// one clip per (still-existing) armed audio track AND the captured MIDI
     /// into one clip per (still-existing) armed instrument track — all inside
     /// ONE `performEdit("Record Take N")`, so a recorded take is one undo
     /// step. Or surface the failure.
-    private func finishTake(_ result: Result<TakeResult, Error>) {
-        let pending = pendingTake
-        pendingTake = nil
+    private func finishTake(_ result: Result<TakeResult, Error>, pending: PendingTake) {
+        // ⭐ EVERY take ending funnels through here, so the provisional region
+        // (m34-a-2) is retired here rather than at the two USER-initiated edges
+        // alone. `stop()` and `finishLayer()` do not cover the endings the
+        // ENGINE starts by itself — `abortRecordingNoInput` (the dead-input
+        // watchdog) and `endTakeOnFatalConfigurationChange` (device unplug) —
+        // and on those paths playback dies engine-side, so no transport tick
+        // ever fires the refresh either. A region already drawn (notes were
+        // played before the abort) would linger over an empty lane until the
+        // user's next transport action. `defer` because this function has four
+        // exits, INCLUDING the stale-generation guard above the switch: a call
+        // at the closing brace would miss three of them. Idempotent by design —
+        // `refreshLiveTakeRegion` recomputes from current state and publishes
+        // only on a real change, so the m34-h case where take N+1 is already
+        // rolling recomputes N+1's region rather than clearing it.
+        defer { refreshLiveTakeRegion() }
+        // Release the shared slot only if it still holds THIS take. With live
+        // layering (m34-h) take N+1 may already own it, and clearing it would
+        // make the store forget a take that is genuinely still rolling.
+        if pendingTake?.takeNumber == pending.takeNumber { pendingTake = nil }
+        // The project was replaced while this take was in flight: its clips
+        // belong to a session that no longer exists. Drop them — including the
+        // error branch, which would otherwise write a stale
+        // `lastRecordingError` onto the incoming project.
+        guard pending.sessionGeneration == recordingSessionGeneration else { return }
         switch result {
         case .success(let take):
-            guard let pending else { return }  // no take in flight — stale completion
             // Loop-cycle take (m15-b): the ONE linear capture slices into
             // per-cycle lanes — the linear path below stays byte-identical
             // for every non-loop take (the G3 era pin).
             if let loop = pending.loop {
                 finishLoopTake(take, pending: pending, loop: loop)
+                return
+            }
+            // m34-h-1 LIVE LOOPING: a deck LAYER folds into one cycle and tiles
+            // forward, rather than landing verbatim. Placed here, beside the
+            // loop-take branch, because the two are the same kind of exception
+            // to the same linear landing — and BEFORE the geometry below, which
+            // a deck layer never uses.
+            if let window = pending.deck {
+                landDeckLayer(take,
+                              window: window,
+                              instrumentTrackIDs: pending.armedInstrumentTrackIDs,
+                              recordStartBeats: pending.recordStartBeats,
+                              takeNumber: pending.takeNumber)
                 return
             }
             let audio = take.audio
@@ -1204,6 +1636,12 @@ public final class ProjectStore {
         case .failure(let error):
             lastRecordingError = (error as? LocalizedError)?.errorDescription
                 ?? error.localizedDescription
+            // m34-h-1: a deck pass whose take FAILED never reaches
+            // `landDeckLayer`, so its pending slot would stay `.closing`
+            // forever and every later arm would be refused with "a layer is
+            // already armed". The deck must survive a failed pass, not wedge on
+            // one.
+            if pending.deck != nil { abandonDeckPass() }
         }
     }
 
@@ -1749,6 +2187,53 @@ public final class ProjectStore {
                               outcome: outcome)
     }
 
+    /// THE SUSTAIN PEDAL (m34-l): presses or lifts CC 64 on `trackID` right now
+    /// AND, when a take is rolling on that armed instrument track, records the
+    /// edge into the take's controller lane.
+    ///
+    /// ⭐⭐ **THIS IS THE ANSWER TO "WHY DOES THE SOUND STOP WHEN I LIFT MY
+    /// FINGER".** A real piano's dampers fall on key release; the damper pedal
+    /// holds them off. Both built-in instruments and the hosted sound-bank path
+    /// implement exactly that — MEASURED, not read off a doc string: with CC 64
+    /// held, a note's key-up left the voice at full level (polySynth −16.54,
+    /// sampler −13.94, GM sound bank −23.05 momentary LUFS) where the same
+    /// key-up without the pedal read silent.
+    ///
+    /// ⛔ **NOT `playLiveExpression`, AND THE DIVERGENCE IS THE DESIGN.** That
+    /// method's gesture machine (`PadPreviewController`) permits one open
+    /// gesture and auto-releases it at 30 s — correct for a drag, fatal for a
+    /// latch. Everything BELOW it is shared: this reaches
+    /// `AudioEngine.setLiveExpression`, the same m34-f funnel that sounds a
+    /// controller and feeds the rolling take, by the same call.
+    ///
+    /// ⛔ **THE PRESS IS VALIDATED, THE LIFT NEVER IS.** Gate the ons, never
+    /// gate the offs: a lift whose track was deleted or re-kinded mid-hold must
+    /// still reach the engine, or the pedal is stuck with nothing on screen
+    /// explaining it.
+    @discardableResult
+    public func playLiveSustain(trackID: UUID, down: Bool) throws -> LiveSustainResult {
+        // Computed for the LIFT path too, never hardcoded false — the
+        // `playLiveNotes` rule: `LivePlayController` prefers the verdict from
+        // the PRESS on a lift, and can only do that if this layer keeps
+        // supplying one.
+        let captureIntoTake = transport.isRecording
+            && tracks.first(where: { $0.id == trackID })
+                .map { $0.isArmed && $0.kind == .instrument } == true
+        if down {
+            // The SAME target validation a note-on runs, minus the pitch/
+            // velocity clauses a pedal has no equivalent of — one home for "is
+            // this a legal strip to play".
+            guard let track = tracks.first(where: { $0.id == trackID }) else {
+                throw ProjectError.trackNotFound(trackID)
+            }
+            guard track.kind == .instrument else {
+                throw ProjectError.instrumentRequiresInstrumentTrack(track.kind)
+            }
+        }
+        return livePlay.setSustain(trackID: trackID, down: down,
+                                   captureIntoTake: captureIntoTake, engine: engine)
+    }
+
     /// One-shot audition that releases itself after `durationMs` — the wire's
     /// entry, because an agent has no mouse-up. Returns IMMEDIATELY; it never
     /// blocks the control connection for the duration.
@@ -1836,6 +2321,65 @@ public final class ProjectStore {
         }
         return try padPreview.preview(trackID: trackID, effort: value, phase: phase,
                                       expressionCC: expressionCC, engine: engine)
+    }
+
+    /// LIVE EXPRESSION (m34-f step ②): streams one effort value to `trackID`'s
+    /// instrument as a live controller AND, when a take is rolling on that
+    /// armed instrument track, records it into the take's controller lane.
+    ///
+    /// ⭐⭐ **DELIBERATELY NOT REFUSED WHILE RECORDING — THAT SINGLE DIFFERENCE
+    /// IS THE WHOLE REASON THIS METHOD EXISTS BESIDE `previewEffort`.** It is
+    /// the `auditionPitches` / `playLiveNotes` split, verbatim, one axis over.
+    /// `previewEffort`'s `transportBusy` refusal is documented for audition's
+    /// reason exactly — *"anything a user hears during a take is reasonably
+    /// assumed to be IN the take"* — and that assumption is FALSE for a preview
+    /// and TRUE here. This path IS captured, so the thing the refusal protects
+    /// against cannot happen.
+    ///
+    /// ⛔ **DO NOT "HARMONISE" THE TWO.** Adding a recording guard here puts
+    /// the user's own hand-shaped dynamics permanently out of reach of a take —
+    /// which is the entire feature. Relaxing `previewEffort`'s guard is worse in
+    /// the other direction: an agent auditioning a shape mid-take would silently
+    /// write expression the user never performed.
+    ///
+    /// ⭐ **ONE GESTURE STATE MACHINE, TWO ENTRY POLICIES** — and that is the
+    /// deliberate departure from the `AuditionController`/`LivePlayController`
+    /// sibling pattern. Those two hold different mechanism over two engine-side
+    /// ledgers that genuinely fight, so `ProjectStore` arbitrates between them.
+    /// The pad has ONE physical strip and ONE parked-value invariant
+    /// (`PadPreviewController`'s rule 3), whose entire guarantee is that exactly
+    /// one owner knows what is parked. A second controller would exist only to
+    /// need arbitration against the first.
+    ///
+    /// The `captureIntoTake` verdict is computed HERE, the `playLiveNotes` way,
+    /// because this is the only layer that knows arm state. It is fixed at
+    /// `begin` for the life of the gesture; see `PadPreviewController`.
+    @discardableResult
+    public func playLiveExpression(
+        trackID: UUID, value: Double, phase: PadPreviewPhase,
+        expressionCC: Int = PadPreviewController.defaultExpressionCC) throws
+        -> PadPreviewResult {
+        // ⚠️ Computed on EVERY call including `.end`, never hardcoded — but
+        // only CONSULTED at `begin` (`PadPreviewController` fixes it for the
+        // gesture). Computing it here anyway keeps the verdict's ONE definition
+        // beside `playLiveNotes`', where a future reader can compare them.
+        let captureIntoTake = transport.isRecording
+            && tracks.first(where: { $0.id == trackID })
+                .map { $0.isArmed && $0.kind == .instrument } == true
+
+        if phase != .end {
+            // The SAME target validation `previewEffort` runs, minus its
+            // recording refusal — one home for "is this a legal strip to move".
+            guard let track = tracks.first(where: { $0.id == trackID }) else {
+                throw ProjectError.trackNotFound(trackID)
+            }
+            guard track.kind == .instrument else {
+                throw ProjectError.instrumentRequiresInstrumentTrack(track.kind)
+            }
+        }
+        return try padPreview.preview(trackID: trackID, effort: value, phase: phase,
+                                      expressionCC: expressionCC,
+                                      captureIntoTake: captureIntoTake, engine: engine)
     }
 
     /// PANIC (m23-af) — the user's and the agent's way out of a stuck note.
@@ -3249,6 +3793,7 @@ public final class ProjectStore {
         cutoffHz: Double? = nil,
         resonance: Double? = nil,
         gain: Double? = nil,
+        pedalHoldLimit: Int? = nil,
         sampler: SamplerParams? = nil,
         audioUnit: AudioUnitConfig? = nil,
         soundBank: SoundBankConfig? = nil
@@ -3290,7 +3835,11 @@ public final class ProjectStore {
                 release: release ?? p.release,
                 cutoffHz: cutoffHz ?? p.cutoffHz,
                 resonance: resonance ?? p.resonance,
-                gain: gain ?? p.gain
+                gain: gain ?? p.gain,
+                // m34-q: the same overlay rule as the seven above — omitting it
+                // keeps whatever cap the track already had, so tuning one knob
+                // never quietly lifts a limit the user set.
+                pedalHoldLimit: pedalHoldLimit ?? p.pedalHoldLimit
             ),
             sampler: sampler ?? current.sampler,
             audioUnit: audioUnit ?? current.audioUnit,
@@ -8094,6 +8643,11 @@ public final class ProjectStore {
                 // row 19) — advances correctly across future map boundaries.
                 self.transport.positionBeats = self.transport.tempoMap.beat(
                     from: self.transport.positionBeats, elapsedSeconds: seconds)
+                // m34-h-1: the headless twin of the engine playhead handler's
+                // deck refresh. BOTH transports drive the deck, so a headless
+                // test and a live session see the same behaviour rather than
+                // two implementations that agree by luck.
+                self.refreshLoopDeck()
                 // End of content (m25-d): park the playhead EXACTLY on the
                 // content end rather than wherever this tick overshot to, then
                 // stop on the ordinary path. `stop()` cancels this very task

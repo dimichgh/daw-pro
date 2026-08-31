@@ -103,6 +103,65 @@ public final class MusicalTypingController {
     /// which a dim key could fail to play.
     public private(set) var progression: ChordProgressionPreset?
 
+    /// **WHERE YOU ARE IN THE PROGRESSION (m34-i)** — nil when no preset is lit.
+    ///
+    /// ⭐ **THIS IS PLAYBOX'S SEQUENCE PLAYER AT LENGTH 4**, with a hand-authored
+    /// progression instead of a generated one. m34-g becomes "swap the fixed
+    /// preset for a generated sequence and expose the advance modes"; see
+    /// `ChordSequencePlayer` for why it was built as the player rather than as a
+    /// badge tweak.
+    ///
+    /// ⚠️ **OBSERVED, NOT `@ObservationIgnored`.** The chord row's border is
+    /// derived from it, so the cursor moving has to invalidate the view — an
+    /// ignored property would leave the border frozen on step 1 while the sound
+    /// followed the sequence, which is the record-says-X-source-says-Y shape this
+    /// tree keeps closing.
+    public private(set) var chordSequence: ChordSequencePlayer?
+
+    /// **WHEN THE CURSOR MOVES — THE USER'S RUNTIME CHOICE (m34-g).**
+    ///
+    /// ⭐⭐ **ALL THREE SHIP, BECAUSE THEY ARE THREE DIFFERENT USES, NOT THREE
+    /// COMPETING DESIGNS** — the user's own ruling, and a better one than the
+    /// single pick that was proposed to them: wait-for-you is *learning the
+    /// part*, on-the-beat is *performing it*, lights-run-ahead is *writing with
+    /// it*. The same person wants all three on different days.
+    ///
+    /// ⚠️ **DEFAULT `.free`, WHICH CHANGES m34-i's SHIPPED PRESET BEHAVIOUR
+    /// ONLY FOR OFF-CUE PRESSES.** A user following the lights sees exactly what
+    /// they saw before; a user who wanders now finds the plan has moved on
+    /// rather than waiting. That is the mode the user was told would be the
+    /// default, so the presets get it too rather than a quiet second policy.
+    ///
+    /// ⚠️ **SESSION STATE, NOT PERSISTED**, like every other Musical Typing
+    /// setting — but it deliberately SURVIVES a preset change, because it is a
+    /// statement about how you want to play, not about what you are playing.
+    public private(set) var advanceMode: ChordSequenceAdvanceMode = .free
+
+    /// **WHERE THE LIGHTS CAME FROM (m34-g).** `nil` for the hand-authored
+    /// library presets, non-nil once Playbox has generated a sequence.
+    ///
+    /// ⛔⛔ **THE SURFACE MUST SAY WHICH, AND IT DOES.** *"The AI wrote this"* and
+    /// *"we picked a stock progression"* are different claims and only one of
+    /// them is true at a time; a feature that blurred them would be claiming
+    /// credit a local fallback did not earn. The strip paints an AI-authored
+    /// sequence in `DAWTheme.ai` (violet always means AI-generated) and a local
+    /// one in the neutral hierarchy, with the source named in chrome — never on
+    /// a cell.
+    public private(set) var playboxProvenance: PlayboxProvenance?
+
+    /// How many chords the look-ahead queue shows BEYOND the cue.
+    ///
+    /// ⭐ **THREE, WHICH IS ONE FULL FOUR-CHORD LOOP INCLUDING THE CUE.** The
+    /// user asked for *"next series of lights"* and the roadmap's own option ⓒ
+    /// says *"the next 2–4 chords"*; at 3 a four-bar loop is entirely visible at
+    /// rest, which is exactly what makes two rotations of the same four chords
+    /// distinguishable without playing a note.
+    /// nonisolated because the chord row's Canvas renderer is @Sendable and
+    /// reads it to size the queue bars — a main-actor-isolated constant would
+    /// force the view to carry a second copy of the number, which is the one
+    /// thing a shared constant exists to prevent.
+    nonisolated public static let queueDepth = 3
+
     /// The pitches the last chord was voiced at — the input nearest-tone voice
     /// leading measures the next chord against.
     ///
@@ -121,9 +180,22 @@ public final class MusicalTypingController {
     /// play" cannot disagree — the divergence `MusicalKeyboardStrip`'s letter
     /// legend already spends a paragraph preventing for note names.
     public var chordCells: [MusicalTypingChordCell] {
-        MusicalTypingRouting.noteCaps.compactMap { cap in
+        // ⚠️ READ ONCE, OUTSIDE THE LOOP. `nextDegree` is what the border is,
+        // and re-reading it per cell would make "exactly one border" depend on
+        // 17 reads agreeing rather than on one value.
+        let nextDegree = chordSequence?.nextDegree
+        // ⚠️ READ ONCE, OUTSIDE THE LOOP, FOR THE SAME REASON `nextDegree` is:
+        // the queue's shape is ONE fact about the sequence, and seventeen
+        // independent derivations of it is seventeen chances for the row to
+        // disagree with itself.
+        let queueRanks = chordSequence?.rankByDegree(depth: Self.queueDepth) ?? [:]
+        return MusicalTypingRouting.noteCaps.compactMap { cap in
             guard let semitone = cap.semitone else { return nil }
             let layout = MusicalTypingRouting.chordDegree(semitone: semitone)
+            // The ONE cell per degree that carries the step number and the
+            // border — see `MusicalTypingChordCell.progressionOrder` for the
+            // screenshot that forced this narrowing.
+            let isPrimaryCell = layout.octaveShift == 0 && !layout.addsColour
             let density = Self.density(for: voicingPreset, addsColour: layout.addsColour)
             let chord = ChordVoicing.diatonicChord(degree: layout.degree, key: chordKey,
                                                    mode: chordKeyMode, density: density)
@@ -137,12 +209,21 @@ public final class MusicalTypingController {
                 romanNumeral: ChordVoicing.romanNumeral(degree: layout.degree,
                                                         mode: chordKeyMode, density: density),
                 isLit: progression?.litDegrees.contains(layout.degree) == true,
-                // ⚠️ THE NUMBER LANDS ON ONE CELL PER STEP — the base-octave
-                // NATURAL key. See `MusicalTypingChordCell.progressionOrder`:
-                // numbering every cell that shares the degree painted ten badges
-                // for a four-chord preset, which only a screenshot could see.
-                progressionOrder: (layout.octaveShift == 0 && !layout.addsColour)
-                    ? progression?.order(ofDegree: layout.degree) : nil)
+                // ⚠️ SEAM DATA, NOT PAINT, SINCE m34-i — the badge it used to
+                // draw is gone. It lands on one cell per step (the base-octave
+                // NATURAL key) for the reason its own doc records.
+                progressionOrder: isPrimaryCell
+                    ? progression?.order(ofDegree: layout.degree) : nil,
+                // ⭐ THE BORDER. Same narrowing as the number, so exactly one
+                // cell can carry it, and nil `nextDegree` (no preset) gives
+                // exactly zero.
+                isNextInProgression: isPrimaryCell && layout.degree == nextDegree,
+                // ⭐ THE QUEUE. Rank 0 IS the cue, which already has the border,
+                // so it is deliberately excluded here — no cell is ever both
+                // bordered and queued, which is what keeps the two counts
+                // independently pinnable.
+                queueRank: isPrimaryCell
+                    ? queueRanks[layout.degree].flatMap { $0 == 0 ? nil : $0 } : nil)
         }
     }
 
@@ -229,8 +310,18 @@ public final class MusicalTypingController {
     /// real panic paths (mode off, resign-active, record start) — those are rare
     /// EVENTS, not a key pressed a few hundred times an hour, and they keep the
     /// unconditional push for the reason `releaseAll` documents.
+    /// ⚠️ **THE PEDAL COUNTS (m34-l), AND THAT IS THE CONSERVATIVE CHOICE.**
+    /// Including it means a ⌘ chord with the pedal latched and nothing else held
+    /// releases everything and lifts the pedal. The alternative — a latch that
+    /// survives ⌘ — sounds tidier and is worse: the ⌘ branch exists because
+    /// Cocoa is believed to withhold `keyUp` while ⌘ is held, and the pedal is
+    /// the one piece of state here with no key-up to lose in the first place,
+    /// so it is the state most able to outlive the gesture that set it. Erring
+    /// toward "the pedal came up" is erring toward silence, which is the
+    /// recoverable direction.
     public var holdsAnything: Bool {
         !soundingPitches.isEmpty || !keyPitches.isEmpty || !pointerPitches.isEmpty
+            || isSustainDown
     }
 
     /// keyCode → the pitches that key sounded when it went down.
@@ -289,6 +380,121 @@ public final class MusicalTypingController {
     /// was not ours", this one means "the key was ours and we could not sound it".
     public private(set) var lastSilencedBy: MusicalTypingRouting.TargetState?
 
+    // MARK: - The sustain pedal (m34-l)
+
+    /// **IS THE DAMPER PEDAL DOWN?** What the lamp draws, and what Tab toggles.
+    ///
+    /// ⭐⭐ **READ BACK FROM THE STORE, NEVER SET BLIND.** Every write comes from
+    /// a `LiveSustainReport.down` the sink handed back — the state the engine
+    /// actually holds — or from `syncSustain`, which adopts the store's answer.
+    /// A lamp assigned from the request instead would keep glowing over a pedal
+    /// that `ProjectStore.panic()` or `record()` has already lifted, which is
+    /// this tree's characteristic failure: a light saying something no longer
+    /// true, with no second instrument to contradict it.
+    public private(set) var isSustainDown = false
+
+    /// Why the last pedal press made no sound, or nil. Same job as
+    /// `lastSilencedBy` does for notes: a pedal that cannot reach an instrument
+    /// must SAY so rather than latch a lamp over nothing.
+    public private(set) var lastSustainRefusal: String?
+
+    /// Where pedal edges go. Deliberately a SECOND seam beside `sink` and not a
+    /// method on it: `LiveNoteSink` is set-shaped ("exactly these pitches
+    /// sound"), and a pedal has no pitches — folding it in would force every
+    /// note surface to answer a question about dampers.
+    @ObservationIgnored public var sustainSink: (any LiveSustainSink)?
+
+    /// **TAB TOGGLES, IT DOES NOT HOLD — AND THAT IS A DECISION, NOT A DEFAULT.**
+    ///
+    /// A real damper pedal is a HOLD, and this could have been one: the monitor
+    /// gets Tab's key-up as reliably as it gets a note key's. It is a LATCH
+    /// because of the hand:
+    ///
+    ///   * **The ergonomic problem the pedal exists to solve is having no spare
+    ///     finger.** Sustain is what lets a pianist move between chords; a HOLD
+    ///     would pin one finger to Tab for the whole passage, which is the same
+    ///     problem in a new place. On a piano the pedal is under a foot for
+    ///     exactly this reason, and a computer keyboard has no foot.
+    ///   * **Tab is one key away from `Q`, and the layout's home row starts at
+    ///     `A`.** Holding it distorts the left hand's position over the very
+    ///     keys the mode plays.
+    ///   * **A held key auto-repeats at ~15 Hz.** A hold would be fine (repeats
+    ///     are swallowed inert by `MusicalTypingDecision.swallowRepeat`), but a
+    ///     latch has to survive that too — and it does, through the same branch.
+    ///
+    /// ⚠️ **THE COST, SAID PLAINLY: NO HALF-PEDALLING AND NO FAST FLUTTER.** A
+    /// real player re-pedals on every chord change to clear the harmony; doing
+    /// that here is two presses instead of a lift-and-drop, and there is no
+    /// partial position at all. Anyone who wants either wants a real pedal, and
+    /// the hardware path for one already exists (`MIDIInputManager` → the live
+    /// thru ring), which is exactly why this surface can afford to be the coarse
+    /// one.
+    ///
+    /// ⭐ **AND THE STATE IS SHOWN AS LIGHT, NEVER AS TEXT** — a performer cannot
+    /// read while playing. `MusicalKeyboardStrip` lights the `⇥` cap and the
+    /// indicator dot; nothing prints the word "on".
+    @discardableResult
+    public func toggleSustain() -> Bool {
+        setSustain(!isSustainDown)
+    }
+
+    /// Presses or lifts the pedal, pushing the edge across the seam.
+    ///
+    /// ⛔ **THE PRESS IS GATED ON `canSound`, THE LIFT NEVER IS.** Gate the ons,
+    /// never gate the offs — and the pedal's form of that is sharper than the
+    /// notes': latching a lamp on over a track that has no instrument is
+    /// "keys claimed for no sound", the exact thing the retracted v1 comment in
+    /// `MusicalTypingRouting` refused to ship. A lift, by contrast, must go
+    /// through from any state at all, because the state that most needs one is
+    /// the state where something has gone wrong.
+    @discardableResult
+    public func setSustain(_ down: Bool) -> Bool {
+        if down {
+            guard isEnabled, targetState.canSound else {
+                lastSustainRefusal = isEnabled
+                    ? "the pedal has nothing to hold — \(targetState.rawValue)"
+                    : "musical typing is off"
+                bump()
+                return isSustainDown
+            }
+        }
+        guard let sustainSink else {
+            // No seam (a headless test, or before `installMusicalTyping`): the
+            // LEDGER still moves so the surface is drivable, and the refusal
+            // says why nothing sounded. Silently pretending otherwise is what
+            // makes a dead feature look green.
+            isSustainDown = down
+            lastSustainRefusal = down ? "no sustain sink is wired" : nil
+            bump()
+            return isSustainDown
+        }
+        let report = sustainSink.setSustain(down: down)
+        // ⭐ THE ENGINE'S ANSWER WINS. `report.down` is what the store holds
+        // after the call, which is not always what was asked: a press onto a
+        // track whose renderer has gone comes back UP.
+        isSustainDown = report.down
+        lastSustainRefusal = report.refusal
+        bump()
+        return isSustainDown
+    }
+
+    /// Adopts the store's pedal state without pushing anything — the reconcile
+    /// half of "two instruments on one question".
+    ///
+    /// ⛔⛔ **THIS EXISTS BECAUSE SIX DAWCore SITES CAN LIFT THE PEDAL WITHOUT
+    /// ASKING THIS OBJECT.** `ProjectStore.record()`, `recordLayer()`,
+    /// `stopAllAudition()`, `panic()`, `newProject()` and `applyOpenedState()`
+    /// all call `LivePlayController.stopAll`, which lifts. Without a reconcile,
+    /// hitting record with the pedal latched would leave this lamp lit over an
+    /// engine that had already let go — a light that lies, which is worse than
+    /// no light. The app calls this from `refreshMusicalTypingTarget()`, the
+    /// same per-keypress cadence the indicator already refreshes on.
+    public func syncSustain(down: Bool) {
+        guard down != isSustainDown else { return }
+        isSustainDown = down
+        bump()
+    }
+
     // MARK: - The seam below
 
     /// Where held sets go. Weak-free (the app owns both for its lifetime) and
@@ -296,8 +502,10 @@ public final class MusicalTypingController {
     /// still assert on it.
     @ObservationIgnored public var sink: (any LiveNoteSink)?
 
-    public init(sink: (any LiveNoteSink)? = nil) {
+    public init(sink: (any LiveNoteSink)? = nil,
+                sustainSink: (any LiveSustainSink)? = nil) {
         self.sink = sink
+        self.sustainSink = sustainSink
     }
 
     // MARK: - Derived layout
@@ -338,6 +546,10 @@ public final class MusicalTypingController {
             // NEXT session lead from a voicing nobody can hear any more — a
             // hidden input to a visible result.
             lastVoicing = nil
+            // ⚠️ THE CURSOR IS SESSION STATE TOO, and for the same reason: coming
+            // back to the mode part-way through a progression nobody can hear any
+            // more would be a hidden input to a visible cue.
+            chordSequence?.rewind()
             releaseAll()
         } else {
             bump()
@@ -360,6 +572,7 @@ public final class MusicalTypingController {
         guard mode != playMode else { return }
         playMode = mode
         lastVoicing = nil
+        chordSequence?.rewind()
         releaseAll()
     }
 
@@ -370,6 +583,11 @@ public final class MusicalTypingController {
     /// the NEXT press and the ringing one still releases correctly. Voice leading
     /// is deliberately NOT reset — a modulation is when smooth leading is worth
     /// the most.
+    ///
+    /// ⚠️ **AND NEITHER IS THE SEQUENCE CURSOR (m34-i).** A progression is written
+    /// in DEGREES, so it survives a modulation intact — losing your place in the
+    /// loop because you changed key mid-performance would be the surprise this
+    /// method exists not to have.
     public func setChordKey(_ pitchClass: Int, mode: KeyMode? = nil) {
         let normalised = ((pitchClass % 12) + 12) % 12
         let nextMode = mode ?? chordKeyMode
@@ -383,6 +601,10 @@ public final class MusicalTypingController {
     /// preset has a different register window, so leading the first chord of a
     /// piano voicing from the last chord of a bass line would drag it out of the
     /// register the preset exists to define.
+    ///
+    /// ⚠️ **THE SEQUENCE CURSOR IS NOT RESET.** How a chord is voiced has nothing
+    /// to do with which chord comes next; switching from Piano to Pad mid-loop is
+    /// an arrangement decision, not a restart.
     public func setVoicingPreset(_ kind: VoicingPresetKind) {
         guard kind != voicingPreset else { return }
         voicingPreset = kind
@@ -397,12 +619,100 @@ public final class MusicalTypingController {
     /// A minor: the tonic is the thing the user chose deliberately, the mode is
     /// the thing the progression is written in. Nothing else changes, and no key
     /// becomes unplayable.
-    public func setProgression(_ preset: ChordProgressionPreset?) {
+    ///
+    /// ⭐ **m34-i: IT ALSO ARMS THE SEQUENCE PLAYER AT STEP 1** — the border the
+    /// user asked for starts on the progression's first chord and moves from
+    /// there.
+    ///
+    /// ⚠️ **NO IDENTITY GUARD, AND THAT IS A DECISION: RE-CLICKING THE PRESET
+    /// ALREADY SELECTED RESTARTS THE LOOP.** It is the only gesture on the
+    /// surface that could mean "take it from the top", it costs nothing to a user
+    /// who did not mean it (the cue moves, no sound changes, no key is refused),
+    /// and the alternative — a click that visibly does nothing — is the
+    /// do-nothing control this design language forbids.
+    /// ⚠️ **m34-g: THE ADVANCE MODE IS READ FROM THE CONTROLLER, NOT HARDCODED.**
+    /// m34-i pinned `.onMatch` here because it was the only mode driven; the user
+    /// then chose all three as a runtime switch, so the player is armed with
+    /// whichever one they are in. A preset change is not a statement about how
+    /// you want the cursor to move.
+    public func setProgression(_ preset: ChordProgressionPreset?,
+                               provenance: PlayboxProvenance? = nil) {
         progression = preset
+        chordSequence = preset.map {
+            ChordSequencePlayer(steps: $0.degrees, advanceMode: advanceMode)
+        }
+        // ⛔ CLEARED BY DEFAULT. Picking a hand-authored library preset must not
+        // leave "Written by AI" standing over it — that is the one claim this
+        // feature is not allowed to get wrong.
+        playboxProvenance = preset == nil ? nil : provenance
         if let preset, preset.mode != chordKeyMode {
             chordKeyMode = preset.mode
         }
         bump()
+    }
+
+    /// **PLAYBOX (m34-g): LIGHT A GENERATED SEQUENCE.**
+    ///
+    /// ⭐⭐ **IT GOES THROUGH `setProgression`, AND THAT IS THE WHOLE DESIGN.**
+    /// A generated plan is wrapped in a `ChordProgressionPreset` and handed to
+    /// the same method the library chips use, so the lit keys, the border, the
+    /// look-ahead queue, the rewind-on-reselect rule and every m34-i test apply
+    /// to it unchanged. **One player, one overlay, one recorder** — a second
+    /// "generated sequence" path beside the preset path is exactly the drift the
+    /// one-parameter design exists to prevent.
+    ///
+    /// ⛔ **BUILT IN THE USER'S CURRENT MODE, NOT THE PLAN'S.** `setProgression`
+    /// switches the scale to the preset's mode; a generated sequence must never
+    /// yank the key the user chose out from under them, so the wrapper is
+    /// constructed with `chordKeyMode` and the generator is asked for that mode
+    /// in the first place (`PlayboxRequest.keyMode`).
+    ///
+    /// ⛔⛔ **THIS LIGHTS KEYS. IT PLAYS NOTHING.** Nothing here, and nothing it
+    /// calls, sounds or records a note — the invitation is generated, the
+    /// performance is not.
+    public func applyPlaybox(_ plan: PlayboxPlan) {
+        let preset = ChordProgressionPreset(
+            id: "playbox",
+            name: plan.name,
+            mode: chordKeyMode,
+            degrees: plan.degrees,
+            blurb: plan.provenance.summary)
+        setProgression(preset, provenance: plan.provenance)
+    }
+
+    /// **THE MODE SWITCH (m34-g).** Wait-for-you, on-the-beat, or lights-run-
+    /// ahead.
+    ///
+    /// ⚠️ **THE CURSOR IS KEPT, DELIBERATELY** — the `setVoicingPreset`
+    /// precedent. Changing *how* the cue advances is not a "take it from the
+    /// top"; a user who switches to on-the-beat two chords into a loop means
+    /// "keep going, but with the click", not "start again".
+    public func setAdvanceMode(_ mode: ChordSequenceAdvanceMode) {
+        guard mode != advanceMode else { return }
+        advanceMode = mode
+        chordSequence?.advanceMode = mode
+        bump()
+    }
+
+    /// **A DOWNBEAT WENT BY.** Moves the cue in on-the-beat mode and does nothing
+    /// in the other two — the player's own guard, not a branch here.
+    ///
+    /// ⚠️ **"BEAT" IN THE PLAYER MEANS "ONE ADVANCE TICK"; THE APP DECIDES THE
+    /// MUSICAL PERIOD, AND IT IS THE BAR.** A chord per beat is a chord every
+    /// 500 ms at 120 BPM — punishing for the beginner this whole surface exists
+    /// for — and every progression this app ships is written one chord per bar.
+    /// The name stays `beat()` because it is shipped and pinned; the period is
+    /// documented here and driven by `MusicalTypingBeatDriver`.
+    ///
+    /// - Returns: whether the cursor moved, so the driver can tell a real tick
+    ///   from a no-op without re-deriving the mode.
+    @discardableResult
+    public func beat() -> Bool {
+        guard var sequence = chordSequence else { return false }
+        let moved = sequence.beat()
+        chordSequence = sequence
+        if moved { bump() }
+        return moved
     }
 
     // MARK: - Key events
@@ -494,6 +804,20 @@ public final class MusicalTypingController {
     /// mirroring it here would leave the on-screen keyboard lighting notes the
     /// engine has already stopped).
     public func releaseAll() {
+        // ⛔⛔ **THE PEDAL LIFTS ON EVERY PANIC PATH (m34-l), AND IT MUST GO
+        // FIRST.** A stuck pedal is an infinite drone with no visible cause, and
+        // it outlives the thing that caused it: the notes below stop when this
+        // pushes `[]`, but a latched CC 64 keeps the instrument holding whatever
+        // was already sounding under it AND silently sustains the next thing
+        // played. Ordering it ahead of the note release means the CC 64 = 0
+        // reaches the instrument before the note-offs, so the offs land on
+        // voices the pedal is no longer deferring.
+        //
+        // ⚠️ UNCONDITIONAL, like the `push()` below and for the same reason: a
+        // panic path may not assume its own bookkeeping is right, since a
+        // bookkeeping bug is the likeliest reason it was called. `setSustain`
+        // and the store beneath it are both idempotent on an already-up pedal.
+        setSustain(false)
         keyPitches.removeAll()
         pointerPitches.removeAll()
         pointerAnchor = nil
@@ -533,7 +857,12 @@ public final class MusicalTypingController {
     public func pointerDown(cellIndex: Int) {
         guard cellIndex >= 0, cellIndex < MusicalTypingRouting.noteCaps.count else { return }
         pointerPress(anchor: .cell(cellIndex),
-                     group: chordPitches(forKeyIndex: cellIndex))
+                     group: chordPitches(forKeyIndex: cellIndex),
+                     // m34-i: the clicked cell's DEGREE, so the mouse advances the
+                     // next-chord border exactly as the typed keys do. Two
+                     // surfaces, one sequence — the same law `pointerPress`
+                     // already obeys for the replace policy.
+                     chordDegree: MusicalTypingRouting.chordDegree(semitone: cellIndex).degree)
     }
 
     /// The keys whose chord is ACTUALLY SOUNDING right now — what the chord row
@@ -571,7 +900,8 @@ public final class MusicalTypingController {
     /// The shared body of both `pointerDown` overloads. ONE gate, ONE glissando
     /// rule, ONE sounding path — a second copy for chord mode is how the two
     /// surfaces would drift.
-    private func pointerPress(anchor: PointerAnchor, group: [Int]) {
+    private func pointerPress(anchor: PointerAnchor, group: [Int],
+                              chordDegree: Int? = nil) {
         // ⛔ `.canSound`, NOT `== .ready` — both recording states SOUND. See
         // `TargetState.canSound`; a `.ready`-only gate here would kill the keys
         // at the exact moment the user is recording with them.
@@ -591,7 +921,7 @@ public final class MusicalTypingController {
             // two surfaces stop being one instrument.
             pointerPitches = group
             lastSilencedBy = nil
-            soundChord(group)
+            soundChord(group, degree: chordDegree)
             return
         }
         let dropped = previous.filter { !isStillHeldElsewhere($0) && !group.contains($0) }
@@ -632,6 +962,11 @@ public final class MusicalTypingController {
         case .octaveUp: shiftOctave(by: 1)
         case .velocityDown: stepVelocity(by: -1)
         case .velocityUp: stepVelocity(by: 1)
+        // m34-l. Unlike the note branch below, a REFUSED press still swallows
+        // the key: the mode is on, and letting a refused Tab move keyboard
+        // focus out of the instrument the user is playing would be a worse
+        // answer than a lamp that stays dark. `setSustain` records why.
+        case .sustainToggle: toggleSustain()
         case .note(let semitone):
             // ⛔ `.canSound`, NOT `== .ready`: `.recordingArmed` and
             // `.recordingUnarmed` are STATUSES, not refusals. Typing while a
@@ -654,7 +989,8 @@ public final class MusicalTypingController {
                 guard !group.isEmpty else { bump(); return }
                 lastSilencedBy = nil
                 keyPitches[keyCode] = group
-                soundChord(group)
+                soundChord(group,
+                           degree: MusicalTypingRouting.chordDegree(semitone: semitone).degree)
                 return
             }
             guard let pitch = MusicalTypingRouting.pitch(semitone: semitone,
@@ -689,7 +1025,7 @@ public final class MusicalTypingController {
     /// set-shaped and diffs, so a tone shared by the old chord and the new one
     /// simply keeps sounding — which is what nearest-tone voice leading is FOR,
     /// and which no extra code here produces.
-    private func soundChord(_ group: [Int]) {
+    private func soundChord(_ group: [Int], degree: Int?) {
         soundingPitches.removeAll { !group.contains($0) }
         sound(group)
         // ⚠️ WRITTEN HERE, ON THE SOUNDING PATH ONLY. A chord that was refused
@@ -697,6 +1033,13 @@ public final class MusicalTypingController {
         // next chord has to lead from what is actually RINGING, not from
         // something the user never heard.
         lastVoicing = group
+        // ⭐ m34-i: AND THE SEQUENCE CURSOR MOVES ON THE SAME PATH, FOR THE SAME
+        // REASON. The border says "play this next"; a press that made no sound
+        // did not play it, so a refused chord must not tick the cue past a chord
+        // the user never heard. ⛔ A chord that is NOT the cued one advances
+        // nothing and is refused nothing — `played(degree:)` simply returns
+        // false. The lights are a cue, never a gate.
+        if let degree { chordSequence?.played(degree: degree) }
     }
 
     /// Adds a GROUP of pitches to the sounding set, stealing the oldest voices if

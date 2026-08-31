@@ -100,6 +100,40 @@ final class AppModel {
     /// `debug.captureUI` renders the same instance the panel shows.
     let lyricsWorkshop: LyricsWorkshopModel
 
+    /// **PLAYBOX (m34-g): the AI produces the INVITATION, the human produces the
+    /// PERFORMANCE.** Resolves a chord-progression generator from the SAME key
+    /// chain the Settings panel manages, reads the live project's key / tempo /
+    /// section as context, and applies the finished degrees to the Musical
+    /// Typing chord row's lit-key overlay.
+    ///
+    /// ⛔⛔ **IT LIGHTS KEYS AND NOTHING ELSE.** No note is sounded and no clip
+    /// is written on the user's behalf — the take is played, on the keys,
+    /// through the ordinary live capture path. Owned here so
+    /// `debug.musicalTyping` can drive it and `debug.captureUI` renders the same
+    /// instance the strip shows.
+    let playbox: PlayboxModel
+
+    /// Playbox's on-the-beat tick phase (m34-g). Mutated only by
+    /// `sampleMusicalTypingBeat`, on the main actor.
+    ///
+    /// warning: `@ObservationIgnored` — it is sampled ~30 times a second and
+    /// nothing draws it. Observing it would invalidate the window at the poll
+    /// rate to show a number no pixel carries.
+    @ObservationIgnored var musicalTypingBeatDriver = MusicalTypingBeatDriver()
+
+    /// The poll that feeds the driver (m34-g). Runs ONLY while chord mode is on
+    /// AND the user has chosen on-the-beat — the other two modes need no clock,
+    /// so they pay nothing.
+    ///
+    /// warning: a `Timer`, deliberately, and NOT an `onChange` on
+    /// `transport.positionBeats`. `MusicalKeyboardStrip`'s own doc records that
+    /// it *"reads no transport clock and mounts no TimelineView, so a running
+    /// transport does not tick it"* — observing the playhead from that view to
+    /// get a tick would re-evaluate a 17-cell Canvas 30 times a second and
+    /// silently retract a documented property. The `stretchPollTimer`
+    /// precedent, one file over.
+    @ObservationIgnored var musicalTypingBeatTimer: Timer?
+
     /// Whether the WRITE-WITH-AI workshop is expanded inside the Sketchpad panel.
     /// Driven by the panel's disclosure and the `ui.showLyricsWorkshop` command.
     var showLyricsWorkshop = false
@@ -206,6 +240,11 @@ final class AppModel {
     /// one-command surface the wire uses.
     let instrumentPicker: InstrumentPickerModel
 
+    /// m34-c: the ONE sound-bank download coordinator (see its construction in
+    /// `init` for why one instance is load-bearing). Held so it outlives the
+    /// closures the picker and the router hold over it.
+    let soundBankDownloads: SoundBankDownloadCoordinator
+
     /// The track the instrument picker is open for (nil = closed). Set by the
     /// track-header / mixer instrument chip and the `debug.instrumentPicker`
     /// command; the picker renders as a centered overlay over the workspace.
@@ -310,10 +349,18 @@ final class AppModel {
     /// the dot the hand moves between them, the live drag preview and the ONE
     /// commit on release. Owned here (like `humanizeModel`) so `debug.breathPad`
     /// drives the SAME instance `debug.captureUI` renders. Its two closures
-    /// converge on `ProjectStore.applyEffortShape` and `ProjectStore.previewEffort`
-    /// — the SAME methods `clip.applyEffortShape` and `pad.previewEffort` use, so
-    /// this adds NO wire surface (the m10-c/sp-b pure-view rule).
+    /// converge on `ProjectStore.applyEffortShape` and (since m34-f step ②)
+    /// `ProjectStore.playLiveExpression` — the SAME methods
+    /// `clip.applyEffortShape` and `pad.playEffort` use, so this adds NO wire
+    /// surface (the m10-c/sp-b pure-view rule).
     let breathPad: BreathPadModel
+
+    /// m34-f step ② — the live-EXPRESSION seam, the `LiveNoteSink` twin. Held
+    /// here (rather than captured into the pad's closure) so `debug.breathPad`
+    /// can read the ENGINE's own capture verdict back out of the same object the
+    /// pad pushed through, instead of asking the pad what it believes it did.
+    /// Two instruments on one question; them disagreeing is the signal.
+    let liveExpressionSink: LivePlayExpressionSink
 
     /// The breath pad's HARDWARE section (m28-knob-ui): which knob on the user's
     /// desk drives the pad, and what we last heard from it.
@@ -676,6 +723,42 @@ final class AppModel {
     /// `TimelineLanesView.totalBeats`'s padding heuristic into a second source of
     /// truth. `@ObservationIgnored`: nothing renders it, so it must not invalidate.
     @ObservationIgnored var arrangeContentWidth: CGFloat = 0
+
+    // MARK: Vertical follow to the armed row (m34-a-3)
+
+    /// The arrange's VERTICAL follow runtime — its own `FollowPlayheadModel`
+    /// instance, because the arrange's vertical scroller genuinely is a
+    /// different scroller from its horizontal one (`ContentView`'s
+    /// `ScrollView(.vertical)` vs the lanes' `ScrollView(.horizontal)`), which
+    /// is exactly the "one instance per scrolling surface" that class
+    /// documents.
+    ///
+    /// ⚠️ **A SECOND INSTANCE OF ONE POLICY IS NOT A SECOND POLICY.** The
+    /// suspend/rearm rule, the manual-scroll detector and the counters are all
+    /// the shipped ones; only the LANDING rule differs (`rowReveal`, not
+    /// `pageOffset`), and it differs because the vertical axis follows a row
+    /// that does not move — see `FollowPlayhead.rowReveal`.
+    let arrangeVFollow = FollowPlayheadModel()
+    /// The lanes' live VERTICAL offset, reported by the lanes' own geometry in
+    /// the vertical scroller's coordinate space — so it is measured against the
+    /// LANES' own origin and `ArrangeLaneGeometry.laneTops` compare to it
+    /// directly, with no assumption about how the row column and the lane column
+    /// are aligned inside their shared `HStack`.
+    @ObservationIgnored var arrangeVScrollReported: CGFloat = 0
+    /// The vertical scroller's visible height, reported by the workspace.
+    @ObservationIgnored var arrangeVViewportHeight: CGFloat = 0
+    /// The lanes' LAID-OUT content height — the vertical clamp's ceiling
+    /// (m25-b-4's rule: clamp at the top too, against the NEW height). Measured
+    /// from the live layout, never derived from a row count, because the ladder
+    /// is non-uniform the moment a track opens its automation or takes section.
+    @ObservationIgnored var arrangeVContentHeight: CGFloat = 0
+    /// The row a vertical reveal should scroll to, and which edge it lands
+    /// against — applied by the shared `ScrollViewReader` on a nonce bump, the
+    /// `debug.arrangeScroll` mechanism minus its animation (neither a zoom nor a
+    /// follow move may glide).
+    var arrangeVFollowTarget: UUID?
+    var arrangeVFollowAnchorsBottom = false
+    var arrangeVFollowNonce = 0
     // MARK: Piano-roll zoom (m21-c)
 
     /// True while the piano-roll editor holds SwiftUI key focus (reported by the
@@ -1509,23 +1592,36 @@ final class AppModel {
     /// only — no arrange-wide select-all was invented) and the measurement that
     /// answers the rename-field objection.
     ///
-    /// ⚠️⚠️ **THIS IS THE ONE EDIT-MENU ITEM THAT ROUTES ON `activeEditorSurface`,
-    /// AND THE DIVERGENCE FROM ITS TWO SIBLINGS IS DELIBERATE.**
+    /// ⚠️⚠️ **THIS IS THE ONE EDIT-MENU ITEM THAT ROUTES ON `openEditorSurface`,
+    /// AND THE DIVERGENCE FROM ITS TWO SIBLINGS IS DELIBERATE — TWICE OVER.**
     /// `deleteMenuItem` and `clipboardItem` route on `pianoRollWouldConsumeKey`
     /// and this property's own doc explains why they must: engagement comes apart
     /// from "would the roll consume this", and routing DELETE by engagement would
     /// delete clips while notes sat selected. **That term cannot express THIS
     /// question at all** — `pianoRollWouldConsumeKey` requires a note selection to
-    /// already exist, and a select-all is pressed precisely when one does not. So
-    /// this reads the engagement verdict, which is the tree's one home for "which
-    /// surface is the user working in". Three items, three questions, three terms.
+    /// already exist, and a select-all is pressed precisely when one does not.
     ///
-    /// EVERY INPUT IS `@Observable` (`editorEngagement.lastEngaged`,
-    /// `workspaceMode`, `selectedClipID`, `store.tracks`, `isModalPresented`), so
-    /// the item cannot go stale.
+    /// ⭐⭐ **AND IT NO LONGER READS `activeEditorSurface` EITHER (m34-d,
+    /// 2026-08-30) — THE USER OVERRULED THAT, VERBATIM: *"Make it work whenever
+    /// the editor is open."*** ⌘A did nothing on the first press because opening
+    /// a clip is a gesture in the ARRANGE, so the engagement verdict answered
+    /// `.arrange` for a roll the user was looking at. MEASURED end-to-end before
+    /// the fix (`scripts/gates/m34d-select-all-editor-open.mjs`): a REAL posted
+    /// ⌘A reached the real menu and selected nothing, then selected everything
+    /// after one `act:"engage"` — delivery was never the defect.
+    ///
+    /// ⚠️ **⌘+/⌘−/⌘0 DID NOT MOVE WITH IT, AND ⌫ DID NOT EITHER.** The ruling
+    /// named one keystroke; `SelectAllMenuPolicy`'s banner carries why openness is
+    /// safe for a key with no other meaning and unsafe for a key both surfaces
+    /// claim. Three items, three questions, three terms — still.
+    ///
+    /// EVERY INPUT IS `@Observable` (`workspaceMode`, `selectedClipID`,
+    /// `store.tracks`, `isModalPresented`), so the item cannot go stale.
+    /// ⭐ ONE FEWER INPUT THAN BEFORE: `editorEngagement.lastEngaged` is no
+    /// longer read here at all, which is the fix stated as a dependency.
     var selectAllMenuItem: SelectAllMenuItem {
         SelectAllMenuPolicy.editMenuItem(
-            activeSurface: activeEditorSurface.surface,
+            openSurface: openEditorSurface,
             isModalPresented: isModalPresented,
             // ⚠️ STORE TRUTH, NOT THE ROLL'S DRAFT — the policy's parameter doc
             // names the one state where they differ and why it is unreachable
@@ -2388,6 +2484,27 @@ final class AppModel {
     @ObservationIgnored private(set) var deleteKeyMonitorSeq = 0
     @ObservationIgnored private(set) var deleteKeyMonitorRefusedBy: DeleteKeyMonitorRefusal?
 
+    /// m34-j — THE ARROW MONITOR'S TIER, the `deleteKeyMonitorSeq` twin: how many
+    /// ARROW key-downs reached the `NSEvent` monitor, and which guard refused the
+    /// last one.
+    ///
+    /// ⚠️⚠️ **THIS EXISTS BECAUSE THE OLD INSTRUMENT STOPS WORKING THE MOMENT
+    /// THE FIX LANDS.** `KeyPressProbe.arrangeHorizontalArrow` counts entries
+    /// into the SwiftUI mount, and once this monitor swallows an owned arrow
+    /// SwiftUI never sees it, so that counter stops moving for real keys — the
+    /// exact transition ⌫ went through at m23-cf-3 ("A BARE ⌦ CANNOT ANSWER THIS
+    /// ANY MORE"). A gate still written against the mount counters would go
+    /// GREEN BY GOING BLIND. `scripts/gates/m34j-arrow-nudge-delivery.mjs` reads
+    /// CLIP MOVEMENT for every verdict and these two fields only to name a
+    /// refusal.
+    ///
+    /// ⚠️ `.otherKey` NEVER APPEARS HERE, for the delete twin's reason: it means
+    /// "not an arrow key", and those fall through to the other branches without
+    /// touching either field — otherwise every keystroke in the app would bump
+    /// this.
+    @ObservationIgnored private(set) var arrowNudgeMonitorSeq = 0
+    @ObservationIgnored private(set) var arrowNudgeMonitorRefusedBy: ArrowNudgeMonitorRefusal?
+
     /// WHICH SURFACE OWNS A DELETE KEYSTROKE — resolved by `DeleteMenuPolicy`,
     /// never here.
     ///
@@ -3048,6 +3165,32 @@ final class AppModel {
             lastEngaged: editorEngagement.lastEngaged)
     }
 
+    /// WHICH EDITING SURFACE IS **OPEN IN FRONT OF THE USER** (m34-d) — the
+    /// engagement-free sibling of `activeEditorSurface`, and the ONE accessor
+    /// ⌘A is allowed to read.
+    ///
+    /// ⭐ **THE USER'S RULING, VERBATIM (2026-08-30): *"Make it work whenever the
+    /// editor is open."*** ⌘A did nothing on the first press after opening a
+    /// clip, because `activeEditorSurface` answers "which editor did the user
+    /// last ENGAGE" and opening a clip is a gesture in the ARRANGE. Full
+    /// argument, including why ⌘+ and ⌫ deliberately did NOT move with it, in
+    /// `SelectAllMenuPolicy`'s banner.
+    ///
+    /// ⚠️ **THIS IS NOT A SECOND COMPUTATION OF `activeEditorSurface`, WHICH IS
+    /// WHAT THE READER CENSUS EXISTS TO CATCH.** It passes the SAME two raw
+    /// terms to the SAME router file, and `EditorSurfaceRouter.resolve` is itself
+    /// implemented on top of `openSurface` — so there is exactly one computation
+    /// of "is a roll on screen at all" in the tree, and these two accessors are
+    /// two questions asked of it, not two answers to one question. A site that
+    /// wants openness must call THIS, never spell `openEditorClip != nil`
+    /// inline: that boolean never constructs `OpenEditorSurface` and silently
+    /// drops the workspace term.
+    var openEditorSurface: OpenEditorSurface {
+        EditorSurfaceRouter.openSurface(
+            workspaceIsArrange: workspaceMode == .arrange,
+            rollOpen: openEditorClip != nil)
+    }
+
     // MARK: Space-bar transport toggle (m17-d)
 
     /// The app-wide key-down LOCAL monitor behind the space-bar transport
@@ -3139,6 +3282,20 @@ final class AppModel {
     /// therefore the same escape hatch the space bar has always used, and it is
     /// checked FIRST only because reading it first makes the file honest; the
     /// key codes are disjoint, so this is documentation and not arbitration.
+    ///
+    /// ⭐⭐⭐ FOUR KEY CLASSES SINCE m34-j, AND THE FOURTH ONE IS THE LAW THE
+    /// OTHERS WERE MISSING: **WHEN YOU RESCUE ONE KEY FROM A BROKEN ROUTE,
+    /// ENUMERATE EVERY OTHER RIDER ON THAT ROUTE THE SAME DAY.** m23-cf-3 fixed
+    /// ⌫ and left ←/→/↑/↓ and Escape on the focus path it had just declared
+    /// unreliable, because the rescue was framed as "fix delete" rather than
+    /// "fix the class" — and the arrows were still latched dead twenty days
+    /// later. The arrow branch below is that debt paid; ESCAPE IS STILL OWED
+    /// (four mounts: `ContentView`'s maximized-editor backstop, `PianoRollView`,
+    /// `TimelineLanesView`, `TrackListView`).
+    ///
+    /// ⚠️ ALL FOUR KEY SETS ARE DISJOINT — space 49, ⌫/⌦ 51/117, arrows 123–126,
+    /// and none of `MusicalTypingRouting.allCaps`'s 21 layout keys — so the
+    /// order below remains documentation rather than arbitration.
     func handleKeyDownEvent(_ event: NSEvent) -> NSEvent? {
         let deleteDecision = DeleteKeyMonitorRouting.decide(
             keyCode: event.keyCode,
@@ -3162,6 +3319,55 @@ final class AppModel {
             // repaired, an owned key never reaches them, so nothing can
             // double-fire.
             return handleDeleteKey() ? nil : event
+        }
+        // ⭐⭐ THE ARROW NUDGES (m34-j) — THE THIRD KEY RESCUED FROM SwiftUI
+        // FOCUS, AND THE REASON IT NEEDED RESCUING IS NOT THE ONE THE ITEM
+        // PREDICTED. Full measurement in `ArrowNudgeMonitorRouting`'s banner;
+        // the one-line version is that dismissing ANY text field drops
+        // `ArrangeDeleteKey`'s `@FocusState` and never restores it, so every
+        // `.onKeyPress` mount on that view is latched dead until the user clicks
+        // a clip again. ⌫ survives that state (measured, same run) only because
+        // m23-cf-3 put it here.
+        //
+        // ⚠️ SWALLOW ON `handled`, PASS THROUGH OTHERWISE — and `handled` is the
+        // SAME term `.onKeyPress` maps to `.handled`/`.ignored` today, read off
+        // the SAME `handleArrangeNudgeKey`. That is the whole behaviour-
+        // preservation argument, and it is structural rather than a promise:
+        // every pass-through the mounts have (a ⌘/⌃ chord, ⇧/⌥ on the vertical
+        // axis falling through to the lanes' `ScrollView`, an empty selection,
+        // the Mix console, a modal) returns `handled: false` and therefore
+        // returns the event, exactly as `.ignored` does. And every consumption
+        // they have — including the two deliberate refusals that still consume,
+        // `.pianoRollNoteEdit` and `.automationPointEdit` — returns `handled:
+        // true` and is swallowed, exactly as `.handled` is.
+        //
+        // ⚠️ CANNOT DOUBLE-FIRE, by m23-cf-3's argument unchanged: a key this
+        // owns never reaches SwiftUI, and in the states where it passes the
+        // event on, the mount asks this same one decision and gets this same
+        // answer. Unlike the delete mounts, the arrow mounts need NO `phases:`
+        // change for this — they already ask for `[.down, .repeat]`, and a
+        // repeat that gets past this branch got past it by being refused, which
+        // means the mount will refuse it too.
+        let arrowDecision = ArrowNudgeMonitorRouting.decide(
+            keyCode: event.keyCode,
+            responder: Self.transportKeyResponder(event.window?.firstResponder),
+            window: transportKeyWindow(event.window))
+        if arrowDecision.refusedBy != .otherKey {
+            arrowNudgeMonitorSeq += 1
+            arrowNudgeMonitorRefusedBy = arrowDecision.refusedBy
+            if let arrowKey = arrowDecision.key {
+                let axis: ArrangeNudgeAxisKey
+                switch arrowKey {
+                case .horizontal(let direction): axis = .horizontal(direction)
+                case .vertical(let direction): axis = .vertical(direction)
+                }
+                // The chord goes STRAIGHT THROUGH to the policy — this tier has
+                // no opinion about modifiers (see the predicate's banner).
+                let outcome = handleArrangeNudgeKey(
+                    axis, modifiers: Self.transportKeyModifiers(event.modifierFlags))
+                return outcome.handled ? nil : event
+            }
+            return event
         }
         let decision = TransportKeyRouting.decide(
             keyCode: event.keyCode,
@@ -4192,6 +4398,24 @@ final class AppModel {
                 return try await store.importClipFix(jobID: jobID)
             })
 
+        // m34-c: ONE sound-bank download coordinator for the whole app, built
+        // HERE and handed to BOTH the picker (below) and the CommandRouter
+        // (further down). ⚠️ That sharing is load-bearing, not tidiness: two
+        // instances would each hold their own single-flight guard, so a
+        // download the user starts in the picker would be invisible to
+        // `instrument.soundBankDownloadStatus` and an agent could start a
+        // second 206 MB transfer on top of it.
+        //
+        // The install function is bound to THE STORE'S OWN `SoundBankLibrary`,
+        // so a finished download lands in exactly the directory
+        // `store.availableSoundBanks()` scans — the m23-n3a lesson (weights
+        // that download successfully into a layout the catalog cannot see are
+        // a silent failure only a user ever hits).
+        let soundBankDownloads = SoundBankDownloadCoordinator(
+            installFunction: SoundBankDownloadCoordinator.liveInstallFunction(
+                library: store.soundBankLibrary))
+        self.soundBankDownloads = soundBankDownloads
+
         // The instrument picker model (m10-n-3): all data flows in through
         // store-backed providers so the headless model stays off the engine
         // bridge; a missing bank's throw is swallowed to an honest empty listing
@@ -4207,7 +4431,16 @@ final class AppModel {
             importer: { [weak store] url in
                 guard let store else { throw DebugError("project store unavailable") }
                 return try store.importSoundBank(from: url)
-            })
+            },
+            // m34-c. Same shape as the providers above: the model holds
+            // closures, never the actor, so it stays headless and testable.
+            downloadableBanks: { [weak store] in
+                guard let store else { return [] }
+                return SoundBankDownloadCoordinator.offerings(library: store.soundBankLibrary)
+            },
+            startDownload: { id in try await soundBankDownloads.start(bankID: id) },
+            downloadStatus: { await soundBankDownloads.status() },
+            cancelDownload: { try await soundBankDownloads.cancel() })
 
         // The AU-effect picker model (m13-g): the installed AU EFFECTS flow in
         // through a store-backed provider (the SAME `availableAudioUnitEffects`
@@ -4373,6 +4606,14 @@ final class AppModel {
                 return store.compEditRefusal(clipID: clipID)
             })
 
+        // m34-f step ② — the live-EXPRESSION sink, built BEFORE the pad because
+        // the pad's preview closure targets it. ⚠️ A LOCAL FIRST, then stored:
+        // this runs before every stored property is initialised, so READING
+        // `self` here is illegal (the `MusicalTypingController` precedent a few
+        // hundred lines below).
+        let expressionSink = LivePlayExpressionSink(store: store)
+        self.liveExpressionSink = expressionSink
+
         // The BREATH PAD (m28-p7). Two closures, two store methods, and the
         // model owns every rule between them.
         //
@@ -4388,9 +4629,20 @@ final class AppModel {
                                                   angleRadians: angle, radius: radius,
                                                   air: air)
             },
-            preview: { [weak store] trackID, value, phase in
-                guard let store else { return }
-                _ = try store.previewEffort(trackID: trackID, value: value, phase: phase)
+            // m34-f step ② — THE LIVE-EXPRESSION SEAM. The closure targets
+            // `LiveExpressionSink`, not the store directly, for the reason
+            // `LiveNoteSink` exists: ③'s modulation panel and ④'s grid push the
+            // same kind of value and must not each grow their own pipe.
+            //
+            // ⛔ **`playLiveExpression`, NOT `previewEffort`, AND THE SWAP IS
+            // THE ITEM.** The preview verb throws `transportBusy` mid-take by
+            // design and records nothing — correct for auditioning a shape,
+            // and a silent lie for a performance. Both of those remain true of
+            // that method; the pad simply no longer uses it.
+            preview: { [weak expressionSink] trackID, value, phase in
+                guard let expressionSink else { return nil }
+                return try expressionSink.setExpression(trackID: trackID, effort: value,
+                                                        phase: phase)
             })
 
         // The pad's HARDWARE section (m28-knob-ui). Four closures and no store
@@ -4478,6 +4730,42 @@ final class AppModel {
                 sketchpad?.lyrics = lyrics
             })
 
+        // m34-g — PLAYBOX. Same three seams as the workshop above, for the same
+        // reasons: a FACTORY (so a key pasted into Settings works without a
+        // relaunch, and so the no-key case is discovered at press time), a
+        // context provider read FRESH on every press (so a tempo change or a
+        // modulation lands), and an applier so the model never reaches the
+        // controller directly.
+        //
+        // ⚠️ THE KEY AND THE SCALE COME FROM THE CHORD ROW'S OWN PICKERS, not
+        // from a guess: they are what the user chose and what every lit key is
+        // already voiced in. Tempo and section come from the project, because
+        // macro.songSkeleton establishes both and a Playbox sequence that
+        // ignored them would fight the arrangement the user already has.
+        // ⚠️ A LOCAL, NOT `self.musicalTyping` — this runs before every
+        // stored property is initialised, so READING self here is illegal
+        // (writing to it is not). The one controller is created here and
+        // handed to both, which is also what keeps Playbox and the strip
+        // pointed at the same object rather than at two.
+        let typing = MusicalTypingController()
+        self.musicalTyping = typing
+        self.playbox = PlayboxModel(
+            makeGenerator: {
+                try resolveChordProgressionGenerator(
+                    environment: ProcessInfo.processInfo.environment, store: keyStore)
+            },
+            contextProvider: { [weak store] in
+                var request = PlayboxRequest(keyTonic: typing.chordKey,
+                                             keyMode: typing.chordKeyMode)
+                guard let store else { return request }
+                let here = store.transport.positionBeats
+                request.tempoBPM = store.transport.tempoMap.bpm(atBeat: here)
+                let reached = store.markers.filter { $0.beat <= here }
+                request.sectionName = reached.max { $0.beat < $1.beat }?.name
+                return request
+            },
+            applier: { plan in typing.applyPlaybox(plan) })
+
         // Resolve the bind port through the m10-l resolver: env override > the
         // persisted in-app setting > default 17600. With no env AND no setting this
         // is byte-identical to the pre-m10-l inline read (17600). THE ENV OVERRIDE
@@ -4495,7 +4783,11 @@ final class AppModel {
             // agent submits lands on the unified progress card tagged "wire";
             // the import seam gets its own "import"-tagged wrapper. Both wrap
             // the SAME `songGenerator`, so job state stays unified.
-            songGenerator: wireGenerator, keyStore: keyStore,
+            songGenerator: wireGenerator,
+            // m34-c: THE SAME actor the instrument picker drives (constructed
+            // above). See its own doc for why one instance is load-bearing.
+            soundBankDownloads: soundBankDownloads,
+            keyStore: keyStore,
             // Hand the resolved endpoint to the router so `app.connectionInfo` can
             // report it (the server owns the router, so it can't ask back). Value
             // in, no cycle.
@@ -4879,6 +5171,8 @@ final class AppModel {
                 return try self.defaultsDomainDebug(params)
             case "debug.arrangeScroll":
                 return try self.setArrangeScroll(params)
+            case "debug.takeRegion":
+                return self.takeRegionDebug()
             case "debug.arrangeZoom":
                 return try self.arrangeZoomDebug(params)
             case "debug.viewZoom":
@@ -5335,6 +5629,10 @@ final class AppModel {
         if params["rearm"]?.boolValue == true { rearmFollow() }
         if params["resetCounters"]?.boolValue == true {
             arrangeFollow.resetCounters()
+            // m34-a-3: the vertical runtime zeroes with the others, or a gate
+            // measuring "scrolls during this take" would read a total carried
+            // over from the previous one.
+            arrangeVFollow.resetCounters()
             pianoRollFollow.resetCounters()
         }
         // A simulated POINTER scroll (gate seam): moves the named surface's scroller
@@ -5347,10 +5645,19 @@ final class AppModel {
             let surface = params["surface"]?.stringValue ?? "arrange"
             switch surface {
             case "arrange": applyArrangeHScroll(CGFloat(raw))
+            // m34-a-3: the VERTICAL axis' drag seam. It reaches the detector the
+            // same way a real vertical drag does — through `reportOffset` with an
+            // offset follow never asked for — and deliberately does NOT move the
+            // scroller: this app has no offset-precise vertical scroll (m25-b-4),
+            // and what makes a drag a drag as far as the detector can know is the
+            // unexpected REPORT, not the pixels.
+            case "arrangeVertical":
+                reportArrangeVScroll(CGFloat(raw), contentHeight: arrangeVContentHeight)
             case "pianoRoll": pianoRollFollow.scrollExternally(to: CGFloat(raw))
             default:
                 throw DebugError(
-                    "unknown surface \"\(surface)\" — expected \"arrange\" or \"pianoRoll\"")
+                    "unknown surface \"\(surface)\" — expected \"arrange\", "
+                    + "\"arrangeVertical\" or \"pianoRoll\"")
             }
         }
         // Geometry is echoed LIVE where the app owns it. The follow model only
@@ -5386,6 +5693,28 @@ final class AppModel {
             "isRecording": .bool(store.transport.isRecording),
             "arrange": surface(arrangeFollow, contentWidth: arrangeContentWidth,
                                viewportWidth: arrangeViewportWidth),
+            // m34-a-3, ADDITIVE: the arrange's VERTICAL axis. Its own runtime,
+            // its own geometry, and its own enable — a gate cannot otherwise
+            // tell "the view scrolled down to the armed row" from "the view
+            // paged sideways", which is the whole sub-item. Reported under
+            // height-named keys because they ARE heights; the shared `surface`
+            // helper's width names would be a small lie in a debug echo whose
+            // only job is to be believed.
+            "arrangeVertical": .object([
+                "offset": .number(Double(arrangeVFollow.reportedOffset)),
+                "viewportHeight": .number(Double(arrangeVViewportHeight)),
+                "contentHeight": .number(Double(arrangeVContentHeight)),
+                "suspended": .bool(arrangeVFollow.isSuspended),
+                "expectedOffset": arrangeVFollow.expectedOffset.map { JSONValue.number(Double($0)) } ?? .null,
+                "scrolls": .number(Double(arrangeVFollow.scrollCount)),
+                "offsetReports": .number(Double(arrangeVFollow.offsetReportCount)),
+                "enabledEffective": .bool(arrangeVerticalFollowEnabled),
+                "followRowId": arrangeVerticalFollowRow.map { JSONValue.string($0.uuidString) } ?? .null,
+                "rowTop": arrangeVerticalFollowRowTopForDebug.map { JSONValue.number(Double($0)) } ?? .null,
+                "rowHeight": .number(Double(arrangeLaneGeometry.rowHeight)),
+                "nonce": .number(Double(arrangeVFollowNonce)),
+                "anchorsBottom": .bool(arrangeVFollowAnchorsBottom),
+            ]),
             "pianoRoll": surface(pianoRollFollow),
         ])
     }
@@ -5563,6 +5892,52 @@ final class AppModel {
         arrangeScrollTarget = target.id
         arrangeScrollNonce += 1
         return arrangeScrollResponse()
+    }
+
+    /// `debug.takeRegion` — the m34-a-2 seam: what the arrange is drawing over
+    /// the destination lane RIGHT NOW, while a take rolls.
+    ///
+    /// **STRICTLY READ-ONLY, and it takes no parameters at all** — there is
+    /// nothing here to stage. The region is derived state with exactly one
+    /// writer (`ProjectStore.refreshLiveTakeRegion`), so a settable version
+    /// would be a second producer able to agree with the real one by luck; the
+    /// m11-a bare-call-is-read-only law taken to its limit.
+    ///
+    /// ⚠️ **DEBUG TIER ONLY — off `allCommands`/MCP, so ZERO new wire surface**
+    /// (the m10-c/sp-b pure-view rule stated at `debug.followPlayhead`). Drawing
+    /// a preview of a clip that is being recorded is view chrome: it adds no
+    /// operation an agent could not already perform, and the take itself is
+    /// already fully wire-driven through `transport.record` / `transport.stop`.
+    /// A gate needs to SEE what the lanes drew; nobody needs to set it.
+    ///
+    /// It reports `pending` alongside `region` on purpose: without the take
+    /// snapshot, a `region: null` is ambiguous between "no take", "a loop take"
+    /// (refused, by design) and "a take that has not captured a note yet" — and
+    /// those three are exactly what this item's arms have to tell apart.
+    private func takeRegionDebug() -> JSONValue {
+        let region = store.liveTakeRegion
+        let pending = store.pendingTakeInfo
+        return .object([
+            "isRecording": .bool(store.transport.isRecording),
+            "playheadBeat": .number(store.transport.positionBeats),
+            "region": region.map { r in
+                JSONValue.object([
+                    "startBeat": .number(r.startBeat),
+                    "lengthBeats": .number(r.lengthBeats),
+                    "noteCount": .number(Double(r.noteCount)),
+                    "trackIds": .array(r.trackIDs.map { .string($0.uuidString) }),
+                ])
+            } ?? .null,
+            "pending": pending.map { p in
+                JSONValue.object([
+                    "startBeat": .number(p.startBeat),
+                    "takeNumber": .number(Double(p.takeNumber)),
+                    "isLoopTake": .bool(p.isLoopTake),
+                    "instrumentTrackIds": .array(p.instrumentTrackIDs.map { .string($0.uuidString) }),
+                    "audioTrackIds": .array(p.audioTrackIDs.map { .string($0.uuidString) }),
+                ])
+            } ?? .null,
+        ])
     }
 
     private func arrangeScrollResponse() -> JSONValue {
@@ -5827,6 +6202,55 @@ final class AppModel {
         !panelLayout.followPlayhead && store.transport.isRecording
     }
 
+    /// ⭐⭐ **THE FLAG THE ARRANGE FOLLOWS *VERTICALLY* ON (m34-a-3): the
+    /// horizontal effective flag AND a rolling take.**
+    ///
+    /// ⛔⛔ **IT MUST BE READ AT *BOTH* VERTICAL SITES — `followArrangeVerticalTick`
+    /// (the ISSUER) and `reportArrangeVScroll` (the manual-scroll DETECTOR)** —
+    /// for the reason spelled out in full on `arrangeFollowEnabled`: a detector
+    /// running on a different flag from its issuer judges follow's own scrolls
+    /// as the user's, blames them, and suspends mid-take.
+    /// `ArrangeFollowEnableSiteTests` pins all four sites.
+    ///
+    /// ⚠️ **THE `&& isRecording` TERM IS NOT REDUNDANT, EVEN THOUGH IT IS
+    /// CURRENTLY IMPLIED.** `arrangeFollowEnabled` is `preference || isRecording`,
+    /// so today the conjunction reduces to `isRecording` — but the two facts it
+    /// states are different facts, and only one of them is about this axis.
+    /// **There is nothing to follow vertically except a take**: the armed row is
+    /// where a take LANDS, and during ordinary playback scrolling to it would
+    /// move the view toward a track for no reason the user could name. Writing
+    /// the term keeps that true if the horizontal flag's definition ever
+    /// changes, instead of silently enabling vertical follow during playback.
+    var arrangeVerticalFollowEnabled: Bool {
+        arrangeFollowEnabled && store.transport.isRecording
+    }
+
+    /// The row a vertical reveal aims at: the take's FIRST destination track.
+    ///
+    /// ⭐ **THE TAKE'S SNAPSHOT, NOT THE LIVE `isArmed` FLAGS.** Arm toggles
+    /// mid-take deliberately do not move where a take lands
+    /// (`ProjectStore.record()` snapshots its destinations), so following live
+    /// arm state would scroll to a lane the clip is not coming to — the same
+    /// reason `ProvisionalTakeRegion` carries the snapshot. Instrument
+    /// destinations come first because that is where the provisional region is
+    /// drawn; an audio-only take falls back to its own destination, so an audio
+    /// take on a far-off row still gets revealed.
+    var arrangeVerticalFollowRow: UUID? {
+        guard let pending = store.pendingTakeInfo else { return nil }
+        return pending.instrumentTrackIDs.first ?? pending.audioTrackIDs.first
+    }
+
+    /// The reveal row's content-space top, for the `debug.followPlayhead` echo
+    /// only — so a gate can say WHY a reveal did or did not happen instead of
+    /// inferring it. Reads the SAME reported ladder the issuer reads; it is not
+    /// a second computation of a row position (`ArrangeLaneGeometry`'s law).
+    var arrangeVerticalFollowRowTopForDebug: CGFloat? {
+        guard let rowID = arrangeVerticalFollowRow,
+              let index = store.tracks.firstIndex(where: { $0.id == rowID }),
+              arrangeLaneGeometry.laneTops.indices.contains(index) else { return nil }
+        return arrangeLaneGeometry.laneTops[index]
+    }
+
     /// What the FOLLOW chip's LIT face reports.
     ///
     /// ⚠️ **It reads the EFFECTIVE flag, not the persisted one, and that is the
@@ -5849,6 +6273,11 @@ final class AppModel {
     /// take-time arrange suspension behind the roll's rule.
     var isFollowSuspended: Bool {
         (arrangeFollowEnabled && arrangeFollow.isSuspended)
+            // m34-a-3: a vertical stand-down counts too. The chip's PAUSED face
+            // would otherwise lie in the one direction it has never been allowed
+            // to lie in — claiming the view is following while a deliberate
+            // vertical scroll has stood half of it down.
+            || (arrangeVerticalFollowEnabled && arrangeVFollow.isSuspended)
             || (panelLayout.followPlayhead && pianoRollFollow.isSuspended)
     }
 
@@ -5871,6 +6300,10 @@ final class AppModel {
             // transport start clears it, so the stand-down never outlives the
             // take, and the persisted preference is exactly what it was.
             arrangeFollow.standDown()
+            // m34-a-3: BOTH axes. The press means "stop moving the view", and a
+            // chip that stilled the horizontal while the vertical kept revealing
+            // rows would be a control that did half of what it says.
+            arrangeVFollow.standDown()
         } else {
             setFollowPlayhead(!panelLayout.followPlayhead)
         }
@@ -5888,6 +6321,12 @@ final class AppModel {
     /// user expects the view to take charge again.
     func rearmFollow() {
         arrangeFollow.rearm()
+        // m34-a-3: the vertical axis re-arms with the horizontal one. A
+        // stand-down on either must never outlive the take that caused it, and
+        // the transport-start edge is the one moment a user expects the view to
+        // take charge again — on both axes at once, since they are one gesture
+        // as far as the person watching is concerned.
+        arrangeVFollow.rearm()
         pianoRollFollow.rearm()
     }
 
@@ -5914,6 +6353,59 @@ final class AppModel {
             contentWidth: arrangeContentWidth,
             currentOffset: arrangeHScrollReported) else { return }
         applyArrangeHScroll(target)
+    }
+
+    /// One transport tick's VERTICAL follow for the arrange (m34-a-3): reveal
+    /// the row the take is landing on, if and only if it is entirely out of
+    /// view.
+    ///
+    /// ⭐ **THE LANDING IS `ScrollViewProxy.scrollTo(rowID:anchor:)`, NOT AN
+    /// OFFSET WRITE** — the `debug.arrangeScroll` mechanism, which is the only
+    /// vertical scroll this app has ever performed and is therefore the one with
+    /// evidence behind it. m25-b-4 records why an offset-precise vertical scroll
+    /// is fraught here (its target has to land strictly inside a layout-real
+    /// marker or `scrollTo` lands somewhere other than the value asked for). The
+    /// analytic offset is still computed — it is what DECIDES, and what seeds the
+    /// detector's baseline so the proxy's landing is absorbed as our own issue
+    /// rather than blamed on the user.
+    ///
+    /// Driven from the TRANSPORT observation path like `followArrangeTick`, and
+    /// never from a geometry callback, for the m17-b reason stated there.
+    func followArrangeVerticalTick() {
+        guard workspaceMode == .arrange else { return }
+        guard let rowID = arrangeVerticalFollowRow,
+              let index = store.tracks.firstIndex(where: { $0.id == rowID }),
+              arrangeLaneGeometry.laneTops.indices.contains(index) else { return }
+        guard let reveal = arrangeVFollow.rowRevealTarget(
+            // m34-a-3: the EFFECTIVE vertical flag. MUST stay identical to
+            // `reportArrangeVScroll`'s — see `arrangeVerticalFollowEnabled`.
+            isEnabled: arrangeVerticalFollowEnabled,
+            isPlaying: store.transport.isPlaying,
+            rowTop: arrangeLaneGeometry.laneTops[index],
+            rowHeight: arrangeLaneGeometry.rowHeight,
+            viewportHeight: arrangeVViewportHeight,
+            contentHeight: arrangeVContentHeight,
+            currentOffset: arrangeVScrollReported) else { return }
+        arrangeVFollowTarget = rowID
+        arrangeVFollowAnchorsBottom = reveal.anchorsBottom
+        arrangeVFollowNonce += 1
+    }
+
+    /// The lanes' live VERTICAL offset (ground truth from their own geometry):
+    /// drives the reveal decision and follow's manual-scroll detector.
+    func reportArrangeVScroll(_ offset: CGFloat, contentHeight: CGFloat) {
+        arrangeVScrollReported = offset
+        arrangeVContentHeight = contentHeight
+        arrangeVFollow.reportOffset(offset,
+                                    // m34-a-3: the same EFFECTIVE flag the issuer
+                                    // reads, for the reason on
+                                    // `arrangeVerticalFollowEnabled`. A detector on
+                                    // a different flag blames the user for follow's
+                                    // own scrolls and suspends mid-take.
+                                    isEnabled: arrangeVerticalFollowEnabled,
+                                    isPlaying: store.transport.isPlaying,
+                                    contentWidth: contentHeight,
+                                    viewportWidth: arrangeVViewportHeight)
     }
 
     /// The lanes' live horizontal offset (ground truth from their own geometry):
@@ -6949,6 +7441,20 @@ final class AppModel {
             "deleteKeyMonitorSeq": .number(Double(deleteKeyMonitorSeq)),
             "deleteKeyMonitorRefusedBy":
                 deleteKeyMonitorRefusedBy.map { .string($0.rawValue) } ?? .null,
+            // ⭐ m34-j — the ARROW monitor's tier, the two fields above's twin.
+            // Debug tier, echo fields on an existing command: ZERO new wire
+            // commands, off `allCommands`/MCP (the m34-d precedent).
+            //
+            // ⚠️ READ THESE TO NAME A REFUSAL, NEVER TO DECIDE THAT AN ARROW
+            // WORKED. `arrowNudgeMonitorSeq` counts ARRIVALS, so it climbs
+            // identically for a key the policy then declines — the same trap
+            // `deleteKeyFunnelSeq`'s doc names, and the one that cost a cycle at
+            // m23-ft. The only honest verdict for "the nudge happened" is the
+            // CLIP MOVING, which is what `m34j-arrow-nudge-delivery.mjs` asserts
+            // on every leg.
+            "arrowNudgeMonitorSeq": .number(Double(arrowNudgeMonitorSeq)),
+            "arrowNudgeMonitorRefusedBy":
+                arrowNudgeMonitorRefusedBy.map { .string($0.rawValue) } ?? .null,
             // ⭐ m23-fi — PER-MOUNT `.onKeyPress` ENTRY COUNTERS + the three
             // `@FocusState` VALUES they hang off. See `KeyPressProbe`. This is a
             // strictly finer instrument than the two fields above: the monitor
@@ -6988,6 +7494,47 @@ final class AppModel {
             // the leg assumed — focus alone is true for any single selected MIDI
             // clip and is NOT sufficient to refuse (see `handleArrangeNudgeKey`).
             "pianoRollNoteSelection": .bool(pianoRollNoteSelection.hasSelection),
+            // ⭐⭐ m34-d — THE ⌘A REQUEST COUNTER, AND IT ANSWERS A QUESTION
+            // `pianoRollNoteSelection` ALONE CANNOT. That flag is the roll's
+            // REPORT; this is the MENU's ASK. With only the flag, "Edit ▸ Select
+            // All was never invoked" and "it was invoked and the roll did not
+            // act" are the same reading — two different bugs in two different
+            // layers. MEASURED NEED, not decoration: m34-d's gate had a leg that
+            // was red for one of those two reasons and no field in this echo
+            // could say which.
+            //
+            // ⚠️ REQUESTS, NOT SELECTIONS. It counts `requestSelectAll()` calls
+            // (the user's ⌘A route only — the m23-x staging nonce is separate and
+            // deliberately so), so it climbs for a request the roll then ignores.
+            // That is the entire point; a gate that reads it as "notes are
+            // selected" has written a leg that cannot fail.
+            //
+            // Debug tier, an ECHO FIELD on an existing command — ZERO new wire
+            // commands, off `allCommands`/MCP.
+            "pianoRollSelectAllNonce": .number(Double(pianoRollNoteSelection.selectAllNonce)),
+            // ⭐⭐ m34-d — THE ⌘A POLICY'S OWN LIVE VERDICT, NAMED. With the nonce
+            // above this makes the whole route observable in three separable
+            // layers: this says WHAT THE POLICY DECIDES, the nonce says WHETHER
+            // APPKIT ACTUALLY INVOKED IT, and `pianoRollNoteSelection` says
+            // whether the ROLL then acted. A red gate that has only the last one
+            // cannot tell those three apart, and m34-d spent a measurement
+            // learning that the hard way.
+            //
+            // `refusedBy` is carried rather than a bare `enabled:false` for
+            // `SelectAllRefusal`'s own reason: "the Mix console is up", "no clip
+            // is open", "a modal is up" and "the roll is empty" are four
+            // different fixtures, and a bare false reads identically for all of
+            // them. Debug tier, an ECHO FIELD on an existing command — ZERO new
+            // wire commands, off `allCommands`/MCP.
+            "selectAllMenuItem": .object([
+                "enabled": .bool(selectAllMenuItem.isEnabled),
+                "surface": selectAllMenuItem.surface.map { .string($0.rawValue) } ?? .null,
+                "refusedBy": selectAllMenuItem.refusedBy.map { .string($0.rawValue) } ?? .null,
+                // The policy's third input, echoed because it is the ONE term a
+                // gate cannot otherwise see: the arrange `count` beside it is
+                // CLIPS, not notes, and "the roll is empty" is a real refusal.
+                "rollNoteCount": .number(Double(openEditorClip?.notes?.count ?? 0)),
+            ]),
             // m23-ai: the SIXTH guard's live verdict, echoed on EVERY read so a
             // gate can take a baseline with the same call it asserts with.
             // Without it the refusal string is the only witness, and a gate
@@ -10808,7 +11355,7 @@ final class AppModel {
     }
 
     /// `debug.breathPad {clipId?, open?, angleDegrees?, radius?, pattern?,
-    /// gesture?, airEnforced?, apply?, close?}` — stages the pad for a capture the wire
+    /// gesture?, airEnforced?, pressure?, apply?, close?}` — stages the pad for a capture the wire
     /// alone cannot reach (the panel is UI chrome, off `allCommands`/MCP — the
     /// `debug.quantizePanel` precedent, so the wire and MCP counts are unchanged).
     ///
@@ -10853,6 +11400,22 @@ final class AppModel {
                 radius: radius ?? breathPad.dot.radius)
         }
         if let enforced = params["airEnforced"]?.boolValue { breathPad.airEnforced = enforced }
+        // m34-f step ① — THE PRESSURE SEAM.
+        //
+        // ⛔⛔ **THIS IS THE ONLY WAY ANY GATE IN THIS TREE CAN EXERCISE THE
+        // PRESSURE AXIS, AND IT IS A SYNTHETIC PATH BY CONSTRUCTION — nothing
+        // here presses a trackpad.** It drives `pressureChanged` exactly as
+        // `PadPressureNSView.pressureChange(with:)` does, so the MAPPING and the
+        // capability latch are testable; what it can never prove is that a real
+        // `NSEventTypePressure` arrives, that `.primaryGeneric` suppressed the
+        // haptic detent, or that the AppKit coordinate flip is right. Those
+        // three are HAND checks and are recorded as such.
+        //
+        // Placed AFTER the dot params so one call can set the dot and then press
+        // on it — pressure scales whatever effort the dot is currently at.
+        if let pressure = params["pressure"]?.doubleValue {
+            breathPad.pressureChanged(pressure)
+        }
         // ⭐ THE HARDWARE SECTION'S DISCLOSURE (m28-knob-ui). Without this the
         // render probe could not photograph the expanded card at all, and the
         // one lesson this panel has already paid for is that a UI phase is not
@@ -10893,6 +11456,22 @@ final class AppModel {
             "angleDegrees": .number(EffortRing.degrees(fromRadians: breathPad.dot.angle)),
             "radius": .number(breathPad.dot.radius),
             "effort": .number(breathPad.effort),
+            // m34-f step ①/②. ⭐ `effort` is the DOT; `streamedEffort` is what
+            // actually went out. They differ only under pressure, and reporting
+            // BOTH is what lets a gate see the axis do something rather than
+            // take the model's word for it. `pressure` is null when none has
+            // been observed — the documented third state, never folded into 0.
+            "streamedEffort": .number(breathPad.streamedEffort),
+            "pressure": breathPad.pressure.map { JSONValue.number($0) } ?? .null,
+            "pressureObserved": .bool(breathPad.pressureObserved),
+            // The ENGINE's own capture verdict, read back off the seam the pad
+            // pushed through — not the pad's belief about it.
+            "capturingExpression":
+                breathPad.isCapturingExpression.map { JSONValue.bool($0) } ?? .null,
+            "capturedExpressionPoints": .number(Double(breathPad.capturedExpressionPoints)),
+            "sinkIsRecording":
+                liveExpressionSink.lastIsRecording.map { JSONValue.bool($0) } ?? .null,
+            "sinkCapturedPoints": .number(Double(liveExpressionSink.lastCapturedPoints)),
             "streaming": .bool(breathPad.gesture != nil),
             "trailPoints": .number(Double(breathPad.trail.count)),
             "previewRefusal": breathPad.previewRefusal.map { JSONValue.string($0) } ?? .null,

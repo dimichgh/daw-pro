@@ -36,7 +36,10 @@ public struct SamplerGlobalUse: Equatable, Sendable {
     public static let valueCap = 8
 
     /// The stored global — the number `instrument.describeSampler` reports at
-    /// top level and `instrument.setSamplerParam` writes.
+    /// top level and `track.setInstrument`'s `sampler` object writes.
+    /// (This line used to name `instrument.setSamplerParam`, which has never
+    /// existed as a wire command — corrected under m34-o while adding the
+    /// decay/sustain folds below.)
     public var global: Double
     /// Zones carrying their OWN value for this field. The global does not
     /// reach them.
@@ -101,6 +104,30 @@ public struct SamplerGlobalUse: Equatable, Sendable {
     /// an identical hole one field over.
     public static func attack(of params: SamplerParams) -> SamplerGlobalUse {
         fold(global: params.attack, overrides: params.zones.map(\.attack))
+    }
+
+    /// DECAY and SUSTAIN (m34-o) — the other two envelope stages, which only
+    /// became foldable when they GOT globals. Until m34-o a zone leaving these
+    /// nil fell to a hardcoded (0, 1) inside the engine rather than to an
+    /// instrument value, so there was no global whose reach could be reported:
+    /// the question this type answers could not even be asked of them.
+    ///
+    /// ⚠️ `global:` takes the EFFECTIVE value, not the stored optional. A
+    /// sampler that never set these still HAS a reach — every nil zone
+    /// inherits the legacy default — and reporting nothing would repeat, one
+    /// field over, exactly the silence this type exists to end.
+    ///
+    /// ⚠️ These two are read TOGETHER by the ear and separately by the code.
+    /// A patch fades only if decay > 0 AND sustain < 1; either alone is a
+    /// held note. `globalIsInert` is still per-field (it answers "does any
+    /// zone listen to this knob"), so a caller diagnosing "why does nothing
+    /// fade" must look at both folds rather than one.
+    public static func decay(of params: SamplerParams) -> SamplerGlobalUse {
+        fold(global: params.effectiveDecay, overrides: params.zones.map(\.decay))
+    }
+
+    public static func sustain(of params: SamplerParams) -> SamplerGlobalUse {
+        fold(global: params.effectiveSustain, overrides: params.zones.map(\.sustain))
     }
 }
 

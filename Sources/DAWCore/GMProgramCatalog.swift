@@ -134,6 +134,25 @@ public enum GMProgramCatalog {
         return programNames[index]
     }
 
+    /// One melodic GM program (bankMSB 121) by its 0-BASED program byte, with
+    /// its name and category filled in FROM THIS TABLE (m34-o).
+    ///
+    /// ⭐ The point is that no caller hand-types a program name beside a
+    /// number. `SongSkeleton`'s rosters name their parts through this, so a
+    /// roster entry cannot claim "Church Organ" while addressing program 0 —
+    /// the exact class of confident-wrong-label this tree keeps paying for.
+    /// (The `program: 19` in an earlier gate was labelled "GM organ" and IS
+    /// one — 0-based 19 = Church Organ — but nothing in the code proved it;
+    /// the label was a comment.)
+    ///
+    /// Clamped into 0…127 by `name(forProgram:)`/`category(forProgram:)`, so
+    /// an out-of-range byte still yields a coherent entry rather than trapping.
+    public static func melodic(_ program: Int) -> SoundBankProgram {
+        SoundBankProgram(program: program, bankMSB: melodicBankMSB, bankLSB: bankLSB,
+                         name: name(forProgram: program),
+                         category: category(forProgram: program))
+    }
+
     /// The full GM program listing the wire and picker present: the 128
     /// melodic programs (bankMSB 121) with their categories, then the single
     /// v1 percussion entry (bankMSB 120). 129 entries total.

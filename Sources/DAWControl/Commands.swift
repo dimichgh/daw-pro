@@ -135,6 +135,18 @@ public final class CommandRouter {
     /// clock and inject it here.
     private let insertSpectrumLeases: InsertSpectrumLeases
 
+    /// The four `instrument.*SoundBank*` download verbs' engine (m34-c) —
+    /// held ONE PER ROUTER (the `installCoordinator` precedent).
+    ///
+    /// ⚠️ Unlike the speech-model coordinator, this one is ALSO driven from
+    /// the app: the instrument picker's Download button goes through the SAME
+    /// actor. `DAWProApp` constructs one and injects it here; two instances
+    /// would mean a download started in the UI is invisible to
+    /// `instrument.soundBankDownloadStatus` and the single-flight guard would
+    /// guard nothing. The default constructs a live one so every headless
+    /// router still answers all four verbs.
+    private let soundBankDownloads: SoundBankDownloadCoordinator
+
     /// Read-only API-key store for `ai.providerStatus` (M6). Defaults to the
     /// real Keychain; tests inject an in-memory store. This is STATUS-ONLY —
     /// there is deliberately NO command to SET a key (see `ai.providerStatus`):
@@ -158,6 +170,17 @@ public final class CommandRouter {
     /// fallback); tests inject a fake writer instead. Resolved per call so a key
     /// added mid-session takes effect without a restart. Never logs key material.
     private let lyricsWriterProvider: @MainActor () throws -> any LyricsGenerating
+
+    /// `playbox.generate` (m34-g) — yields a configured chord-progression
+    /// generator, or THROWS the actionable no-provider error.
+    ///
+    /// ⭐ **THE SAME SHAPE AND THE SAME KEY CHAIN AS `lyricsWriterProvider`
+    /// ABOVE**, resolved per call so a key pasted into Settings works without a
+    /// relaunch. ⛔ **A THROW HERE IS NOT A FAILURE OF THE COMMAND** — the route
+    /// falls back to the local variation path and SAYS SO in its response, which
+    /// is the whole point of the fallback existing.
+    private let chordProgressionProvider:
+        @MainActor () throws -> any ChordProgressionGenerating
 
     /// `vc.importVoiceModel` (m23-di-2a) — the RVC voice store's target
     /// directory. Pure filesystem copy, no HTTP/sidecar dependency, so unlike
@@ -248,6 +271,26 @@ public final class CommandRouter {
         "instrument.listSoundBanks",
         "instrument.listSoundBankPrograms",
         "instrument.importSoundBank",
+        // m34-c: one-click download of a permissive, MIT-licensed SoundFont.
+        // FOUR verbs because a network transfer in an offline-capable app is
+        // not one operation: discover what is on offer (and under what
+        // licence), start it, watch it, stop it. The start/poll pair is the
+        // ai.installSpeechModel shape; cancel is new — no earlier long job in
+        // this tree had one.
+        //
+        // ⚠️ PLACED HERE, NEXT TO THEIR instrument.*SoundBank* SIBLINGS, AND
+        // DELIBERATELY NOT AT THE TAIL. Appending four entries at the end is
+        // additive in the sense that matters (nothing renamed, nothing
+        // reordered relative to anything else) but it moves the END, and this
+        // suite pins ~20 assertions of the form dropLast(N).last across a
+        // dozen files. That was measured, not guessed: a tail placement was
+        // tried first and reddened 14 tests. Every dropLast(N) window is
+        // measured from the END, so a MIDDLE insertion leaves all of them true
+        // by construction — the m23-ct/m23-cv/m34-h precedent.
+        "instrument.listDownloadableSoundBanks",
+        "instrument.downloadSoundBank",
+        "instrument.soundBankDownloadStatus",
+        "instrument.cancelSoundBankDownload",
         "instrument.importSampleLibrary",
         "instrument.describeSampler",
         "instrument.probeLiveness",
@@ -258,6 +301,22 @@ public final class CommandRouter {
         "engine.watchdogStatus",
         "engine.auPrepareStats",
         "macro.songSkeleton",
+        // m34-g: PLAYBOX. Generate a chord progression, as scale degrees, from
+        // the project's own key/tempo/section — the INVITATION a human then
+        // plays on the Musical Typing keys. Headless and read-only: it lights
+        // nothing and records nothing, it ANSWERS; the human plays it. The app
+        // calls the same generator behind its own button.
+        //
+        // ⚠️ PLACED HERE, NEXT TO THE OTHER VERB THAT BUILDS MUSICAL STRUCTURE
+        // FROM THE PROJECT'S OWN FACTS, AND NOT AT THE TAIL — the note.audition
+        // / pad.previewEffort / clip.applyBreathContour precedent. A tail
+        // append shifts EVERY end-relative assertion in this tree (the
+        // dropLast(N) windows in AudioProfileFileCommandTests,
+        // ClipCrossTrackMoveCommandTests and ClipGroupEditCommandTests); an
+        // insertion 150 elements from the end leaves all of them true by
+        // construction, so only the explicit count pins move. NOTE: no quoted
+        // string in this comment, deliberately (the m25-d rule).
+        "playbox.generate",
         "automation.addLane",
         "automation.removeLane",
         "automation.setPoints",
@@ -377,6 +436,48 @@ public final class CommandRouter {
         "midi.setControlMap",
         "midi.learnControl",
         "transport.record",
+        // m34-h LIVE LOOPING phase 1 — the take/playback weld, cut. The pair
+        // registered HERE, immediately after the verb whose machinery they
+        // share and 73 entries from the END (measured, not estimated — an
+        // earlier draft of this comment said ~120 by copying a neighbouring
+        // insertion's figure), for the reason recorded on the
+        // clip.applyBreathContour line: an insertion this far from the tail
+        // leaves every end-relative assertion in the tree (the dropLast sites
+        // and the suffix windows) true by construction, so only the explicit
+        // count pins move. A TAIL APPEND BROKE 80 ASSERTIONS ACROSS 22 TESTS AT
+        // m27 LEG D and every FILTERED run stayed green.
+        //
+        // ⚠️ BOTH ARE EXCLUDED FROM ControlTests' every-command routing loop,
+        // and the reasons are opposite halves of the same state: that loop is
+        // mid-take from transport.record onwards, so recordLayer legitimately
+        // refuses ("already recording a layer") — while finishLayer runs
+        // against the bare router's FakeEngine, which does not implement the
+        // keep-playing close and therefore answers the protocol default
+        // (closes nothing), which the store correctly turns into a throw. Both
+        // are proven instead by TransportLayerCommandTests (wire taxonomy over
+        // a spy engine) and DAWEngineTests/LiveLayerCaptureTests (the real
+        // engine). NOTE: no quoted string in these comments, deliberately (the
+        // m25-d rule).
+        "transport.recordLayer",
+        "transport.finishLayer",
+        // m34-h-1 LIVE LOOPING — the loop deck. Registered HERE, immediately
+        // after the two layer verbs whose machinery they drive, and ~71 entries
+        // from the END (measured by counting this array, not copied from a
+        // neighbouring insertion's figure — an earlier comment on this very
+        // block got that wrong), so every end-relative assertion in the tree
+        // stays true by construction and only the explicit count pins move.
+        //
+        // ⚠️ EXCLUDED from ControlTests' every-command routing loop for the
+        // same reason as their two neighbours: that loop runs mid-take from
+        // transport.record onwards, so every one of these legitimately refuses.
+        // They are proven instead by LooperCommandTests over a spy engine.
+        "looper.begin",
+        "looper.armLayer",
+        "looper.finishLayer",
+        "looper.undoLayer",
+        "looper.setLayerMuted",
+        "looper.status",
+        "looper.end",
         "track.setArm",
         "project.save",
         "project.open",
@@ -469,6 +570,45 @@ public final class CommandRouter {
         // BEFORE it would break). NOTE: no quoted string in this comment,
         // deliberately (the m25-d rule).
         "chord.voice",
+        // m34-f step ②: LIVE EXPRESSION — the pad's live-performance sibling of
+        // pad.previewEffort, and the ONLY path by which a continuous controller
+        // shaped by hand can be recorded into a take. Without it the pad sounds
+        // right while performed and vanishes from the bounce.
+        //
+        // ⚠️ PLACED HERE, NOT AT THE TAIL, AND NOT BETWEEN ANY OF THE FOUR
+        // VERBS ABOVE. Three adjacency pins run through that block —
+        // PadPreviewCommandTests holds pad.previewEffort at note.audition + 1,
+        // LivePlayCommandTests holds note.play at pad.previewEffort + 1, and
+        // ChordVoiceCommandTests holds chord.voice at note.play + 1 — so an
+        // insertion anywhere inside it breaks a pin that is asserting something
+        // true. AFTER the block keeps all three, and an insertion this far from
+        // the END leaves every end-relative assertion in the tree (the dropLast
+        // and suffix windows) true by construction, so only the explicit count
+        // pins move. A TAIL APPEND BROKE 80 ASSERTIONS ACROSS 22 TESTS AT m27
+        // LEG D and every FILTERED run stayed green. NOTE: no quoted string in
+        // this comment, deliberately (the m25-d rule).
+        "pad.playEffort",
+        // m34-l: THE SUSTAIN PEDAL. Presses or lifts CC 64 on a track right now,
+        // and on an armed instrument track during a take the edge lands in the
+        // clip's controller lane. The answer to the user's own question about
+        // why a note stops the moment they lift the key from the key. Rides
+        // m34-f's live controller funnel; the pedal is a LATCH, so it is NOT
+        // phrased as a gesture like the pad verbs are.
+        //
+        // ⚠️⚠️ PLACED HERE, BESIDE THE OTHER LIVE-PERFORMANCE VERBS, AND
+        // EXPLICITLY *NOT* AT THE TAIL — MEASURED, NOT REASONED. A tail append
+        // was tried first on this item and reddened 80+ assertions across 22
+        // tests: every dropLast/suffix window in the corpus is end-relative, so
+        // the LAST entry is the single most load-bearing position in this array.
+        // The three adjacency pins that run through the block above are all
+        // preserved (PadPreviewCommandTests holds pad.previewEffort at
+        // note.audition + 1, LivePlayCommandTests holds note.play at
+        // pad.previewEffort + 1, ChordVoiceCommandTests holds chord.voice at
+        // note.play + 1), and an insertion this far from the END leaves every
+        // end-relative assertion true by construction — so only the explicit
+        // count pins move. This is m34-f's own placement argument, re-run.
+        // NOTE: no quoted string in this comment, deliberately (the m25-d rule).
+        "play.sustain",
         // m23-h: the ONE track-ordering verb (arrange headers drag onto it;
         // the mixer follows in m23-z). Additive at the END (the same law).
         "track.reorder",
@@ -597,10 +737,12 @@ public final class CommandRouter {
         transcriber: WhisperTranscriber = WhisperTranscriber(),
         installCoordinator: WhisperModelInstallCoordinator = WhisperModelInstallCoordinator(),
         insertSpectrumLeases: InsertSpectrumLeases = InsertSpectrumLeases(),
+        soundBankDownloads: SoundBankDownloadCoordinator = SoundBankDownloadCoordinator(),
         keyStore: APIKeyStoring = KeychainKeyStore(),
         keyEnvironment: [String: String] = ProcessInfo.processInfo.environment,
         connectionInfo: ControlConnectionInfo = ControlConnectionInfo(),
         lyricsWriter: (@MainActor () throws -> any LyricsGenerating)? = nil,
+        chordProgressionGenerator: (@MainActor () throws -> any ChordProgressionGenerating)? = nil,
         importGenerator: SongGenerating? = nil,
         modelLifecycle: ModelLifecycleCoordinator = .shared,
         voiceModelImportDirectory: URL = VoiceModelImport.voicesDirectory
@@ -613,6 +755,7 @@ public final class CommandRouter {
         self.transcriber = transcriber
         self.installCoordinator = installCoordinator
         self.insertSpectrumLeases = insertSpectrumLeases
+        self.soundBankDownloads = soundBankDownloads
         self.keyStore = keyStore
         self.keyEnvironment = keyEnvironment
         self.connectionInfo = connectionInfo
@@ -624,6 +767,13 @@ public final class CommandRouter {
         // OWN process env instead.
         self.lyricsWriterProvider = lyricsWriter ?? {
             try resolveLyricsWriter(environment: keyEnvironment, store: keyStore)
+        }
+        // m34-g: the same chain, asked the same question ("who has a key?") for
+        // a different capability. Injectable so a suite can script the AI leg
+        // without a network and without the machine's own configuration
+        // deciding which branch the test takes.
+        self.chordProgressionProvider = chordProgressionGenerator ?? {
+            try resolveChordProgressionGenerator(environment: keyEnvironment, store: keyStore)
         }
         // Wire the store's generation-import seam over the SAME song generator
         // (M6 iii-a) so `ai.importGeneration` reaches finished audio + metas by
@@ -819,6 +969,199 @@ public final class CommandRouter {
             // invalidLoopRange surface via the LocalizedError mapping.
             try params.rejectUnknownKeys([], verb: "transport.record")
             try store.record()
+            return .success(request.id, try JSONValue(encoding: store.transport))
+
+        case "transport.recordLayer":
+            // m34-h LIVE LOOPING. No params. Starts the NEXT take on every
+            // armed track WITHOUT stopping or restarting the music — the
+            // transport must ALREADY be playing (the mirror image of
+            // transport.record, which requires a stopped transport). Nothing
+            // already sounding is rescheduled: the new capture aligns onto the
+            // running playback anchor. Finish it with transport.finishLayer,
+            // which lands the layer and keeps playing, or with transport.stop,
+            // which lands it and stops everything.
+            //
+            // Count-in does NOT apply to a layer, by design — the music already
+            // playing is the count, which is what every hardware and software
+            // looper does. Refused while the LOOP is enabled: recording into a
+            // loop region is overdub, which is not modelled (and
+            // transport.record's loop mode records ALTERNATE TAKES of one part,
+            // the opposite intent). Refused with a punch window for the same
+            // untested-combination reason. transportBusy/noArmedTracks/
+            // invalidLoopRange/invalidPunchRange/recordPermissionDenied/
+            // recordPermissionPending surface via the LocalizedError mapping.
+            try params.rejectUnknownKeys([], verb: "transport.recordLayer")
+            try store.recordLayer()
+            return .success(request.id, try JSONValue(encoding: store.transport))
+
+        case "transport.finishLayer":
+            // m34-h LIVE LOOPING. No params. Closes the rolling take, lands it
+            // as clips on the armed tracks, and LEAVES THE TRANSPORT PLAYING —
+            // the primitive this whole feature rests on. The response's
+            // isPlaying stays true and isRecording goes false.
+            //
+            // ⚠️ THE CLIP IS NOT ON THE TIMELINE WHEN THIS RETURNS. The take
+            // finalizes asynchronously (the capture writer closes on its own
+            // queue), exactly as it does after transport.stop — poll
+            // project.snapshot rather than assuming. It lands as ONE undo step
+            // ("Record Take N"), identical to the stop path.
+            //
+            // transportBusy surfaces via the LocalizedError mapping when
+            // nothing is recording, and when the engine has no keep-playing
+            // close (in which case NOTHING was closed — the take is still
+            // rolling and transport.stop is the honest way out).
+            try params.rejectUnknownKeys([], verb: "transport.finishLayer")
+            try store.finishLayer()
+            return .success(request.id, try JSONValue(encoding: store.transport))
+
+        case "looper.begin":
+            // m34-h-1 LIVE LOOPING — open a loop-deck session: stack layers in
+            // real time, the Kiffness workflow.
+            //
+            // ⛔⛔ THE TRANSPORT DOES NOT LOOP, AND THAT IS THE DESIGN, NOT A
+            // LIMITATION. A deck runs the timeline LINEARLY and repeats each
+            // layer by TILING its clip forward, so the piece is a real
+            // arrangement that bounces, exports and edits. transport.setLoop is
+            // a different feature entirely — loop-cycle TAKE recording, i.e.
+            // several attempts at ONE part for comping. This verb refuses while
+            // that loop is enabled, and says so.
+            //
+            // params: bars int (optional, 1...64). PRESENT = fixed-bar mode,
+            // the default and the beginner-safe one: you cannot pick a bad
+            // length because you never pick a length, only a bar count. OMITTED
+            // = press-to-end, where looper.finishLayer on the FIRST layer sets
+            // the length, rounded to the nearest whole bar so an off-grid loop
+            // is unrepresentable. quantize string (optional, cycle|bar|instant,
+            // default cycle) — the grid a layer's capture window opens on.
+            // mode string (optional, overdub|replace, default overdub) — what
+            // recording again on a track that already has a layer means.
+            // horizonCycles int (optional, >= 2) — how far ahead material is
+            // materialised; the runway extends itself as the playhead advances.
+            // transportBusy/invalidLoopRange surface via the LocalizedError
+            // mapping.
+            try params.rejectUnknownKeys(
+                ["bars", "quantize", "mode", "horizonCycles"], verb: "looper.begin")
+            let deckBars = params["bars"].flatMap { $0.doubleValue }.map { Int($0) }
+            let deckQuantizeRaw = params["quantize"]?.stringValue ?? LoopLaunchQuantize.cycle.rawValue
+            guard let deckQuantize = LoopLaunchQuantize(rawValue: deckQuantizeRaw) else {
+                throw ControlError("'quantize' must be one of: "
+                    + LoopLaunchQuantize.allCases.map(\.rawValue).joined(separator: ", "))
+            }
+            let deckModeRaw = params["mode"]?.stringValue ?? LoopLayerMode.overdub.rawValue
+            guard let deckMode = LoopLayerMode(rawValue: deckModeRaw) else {
+                throw ControlError("'mode' must be one of: "
+                    + LoopLayerMode.allCases.map(\.rawValue).joined(separator: ", "))
+            }
+            let deckHorizon = params["horizonCycles"].flatMap { $0.doubleValue }.map { Int($0) }
+            return .success(request.id, try JSONValue(encoding:
+                try store.beginLoopDeck(bars: deckBars, quantize: deckQuantize,
+                                        mode: deckMode, horizonCycles: deckHorizon)))
+
+        case "looper.armLayer":
+            // m34-h-1 LIVE LOOPING — arm the next layer on an INSTRUMENT track.
+            //
+            // ⭐ THE PRESS DOES NOT START THE RECORDING; THE QUANTIZE BOUNDARY
+            // DOES. The response's pendingLaunchBeat is the beat the capture
+            // window opens on, and pendingPhase reads queued until then. The
+            // take itself is armed a beat EARLY, so the engine's capture anchor
+            // is provably live before the window opens — a note played in that
+            // pre-roll is dropped rather than folded into the loop.
+            //
+            // ⭐ Placement does not depend on when this was called: every
+            // captured note lands at its position WITHIN the cycle. A layer
+            // recorded four cycles later lines up with the first one exactly.
+            //
+            // ⚠️ Arms EXACTLY this track and disarms every other, in one undo
+            // step: transport.recordLayer captures onto every armed instrument
+            // track, so a stale arm elsewhere would silently double the layer.
+            //
+            // ⚠️ v1 IS MIDI/INSTRUMENT LAYERS ONLY — an audio track is refused
+            // with trackKindUnsupported rather than landing a one-shot that
+            // never repeats. params: trackId uuid (required), mode string
+            // (optional, overdub|replace — defaults to the session's mode).
+            try params.rejectUnknownKeys(["trackId", "mode"], verb: "looper.armLayer")
+            let armTrackID = try params.requireUUID("trackId")
+            var armMode: LoopLayerMode?
+            if let raw = params["mode"]?.stringValue {
+                guard let parsed = LoopLayerMode(rawValue: raw) else {
+                    throw ControlError("'mode' must be one of: "
+                        + LoopLayerMode.allCases.map(\.rawValue).joined(separator: ", "))
+                }
+                armMode = parsed
+            }
+            return .success(request.id, try JSONValue(encoding:
+                try store.armLoopLayer(trackID: armTrackID, mode: armMode)))
+
+        case "looper.finishLayer":
+            // m34-h-1 LIVE LOOPING — end the rolling layer, WITHOUT stopping
+            // the music. Quantized like the launch: the pass closes at the next
+            // cycle boundary so it is a whole number of cycles long.
+            //
+            // ⚠️ THE LAYER IS NOT ON THE TIMELINE WHEN THIS RETURNS — the take
+            // finalizes asynchronously, exactly as transport.finishLayer's does.
+            // Poll looper.status or clip.getNotes rather than assuming.
+            //
+            // In PRESS-TO-END mode this is the press that decides the loop
+            // length for the whole session. params: immediate bool (optional,
+            // default false) — close at the press instead of at the boundary.
+            try params.rejectUnknownKeys(["immediate"], verb: "looper.finishLayer")
+            let finishNow = params["immediate"]?.boolValue ?? false
+            return .success(request.id, try JSONValue(encoding:
+                try store.finishLoopLayer(immediate: finishNow)))
+
+        case "looper.undoLayer":
+            // m34-h-1 LIVE LOOPING — ⭐⭐ THE MOST-USED CONTROL ON ANY LOOPER,
+            // AND IT MUST NOT STOP THE MUSIC. Takes back the most recent landed
+            // pass: a pass that created its layer removes the layer and its
+            // clip; a pass that overdubbed restores the cycle as it stood
+            // before. Repeatable — three bad passes take three calls.
+            //
+            // ⛔ THIS IS NOT edit.undo. The general journal is refused mid-take,
+            // carries every other edit in the session, and would reverse
+            // whatever happened last — a fader move, a rename. This verb is
+            // scoped to ONE layer, by design. No params. nothingToUndo surfaces
+            // via the LocalizedError mapping when no pass is left to peel.
+            try params.rejectUnknownKeys([], verb: "looper.undoLayer")
+            return .success(request.id, try JSONValue(encoding: try store.peelLoopLayer()))
+
+        case "looper.setLayerMuted":
+            // m34-h-1 LIVE LOOPING — drop a layer out of the mix (or bring it
+            // back) without losing its material: the "no drums in the verse"
+            // control. The layer's cycle is untouched, so unmuting restores it
+            // exactly. params: layerId uuid (required), muted bool (required).
+            try params.rejectUnknownKeys(["layerId", "muted"], verb: "looper.setLayerMuted")
+            let muteLayerID = try params.requireUUID("layerId")
+            let muted = try params.require("muted", \.boolValue)
+            return .success(request.id, try JSONValue(encoding:
+                try store.setLoopLayerMuted(layerID: muteLayerID, muted: muted)))
+
+        case "looper.status":
+            // m34-h-1 LIVE LOOPING — the deck as it stands, or null when no
+            // session is open. No params.
+            //
+            // ⭐ THE LAMP STATE IS DERIVED HERE, ONCE, so the wire and the app's
+            // deck strip read ONE answer rather than each computing their own
+            // and agreeing by luck. `lamps[].state` is the light language the
+            // performer reads: queued (flashing) / recording / closing /
+            // playing / muted. `cyclePhase` is 0..<1 through the current cycle —
+            // a sweep, not a number to read.
+            //
+            // ⚠️ It reports the DECK. It is not proof material landed: read
+            // clip.getNotes for that.
+            try params.rejectUnknownKeys([], verb: "looper.status")
+            if let status = store.loopDeckStatus {
+                return .success(request.id, try JSONValue(encoding: status))
+            }
+            return .success(request.id, .null)
+
+        case "looper.end":
+            // m34-h-1 LIVE LOOPING — close the session. The layers STAY: they
+            // are ordinary clips on ordinary tracks, which is the whole point
+            // of the linear route. A queued layer that never opened is
+            // cancelled. No params. transportBusy surfaces via the
+            // LocalizedError mapping when no session is open.
+            try params.rejectUnknownKeys([], verb: "looper.end")
+            try store.endLoopDeck()
             return .success(request.id, try JSONValue(encoding: store.transport))
 
         case "transport.setLoop":
@@ -1140,7 +1483,8 @@ public final class CommandRouter {
             // See ROADMAP m26-i for the agreed tool names.
             try params.rejectUnknownKeys(
                 ["trackId", "kind", "waveform", "sampler", "attack", "decay", "sustain",
-                    "release", "cutoffHz", "resonance", "gain", "audioUnit", "soundBank"], verb: "track.setInstrument")
+                    "release", "cutoffHz", "resonance", "gain", "pedalHoldLimit",
+                    "audioUnit", "soundBank"], verb: "track.setInstrument")
             let instTrackID = try params.requireTrackID()
             let kind = try parseInstrumentKind(params["kind"])
             let waveform = try parseWaveform(params["waveform"])
@@ -1194,6 +1538,20 @@ public final class CommandRouter {
                 cutoffHz: params["cutoffHz"]?.doubleValue,
                 resonance: params["resonance"]?.doubleValue,
                 gain: params["gain"]?.doubleValue,
+                // m34-q — the POLY SYNTH's pedal hold limit (the sampler's rides
+                // the `sampler` object, like every other sampler global). It
+                // REFUSES an out-of-range value rather than clamping, the
+                // `bendRangeSemitones` rule: an agent that asked for a cap of
+                // 300 and silently got 128 has no way to find out. Omitting the
+                // key keeps the track's current cap.
+                pedalHoldLimit: try Self.optionalBoundedInteger(
+                    params["pedalHoldLimit"], "pedalHoldLimit",
+                    PolySynthParams.pedalHoldLimitRange,
+                    "how many notes the sustain pedal (CC 64) keeps ringing on the built-in Poly "
+                        + "Synth; omit for unlimited, which is what it has always done. The oldest "
+                        + "pedal-held note is RELEASED through the patch's own release when the cap "
+                        + "is exceeded; a key you are still holding is never taken. Any value above "
+                        + "the 16-voice pool is unreachable and so means unlimited"),
                 sampler: sampler,
                 audioUnit: audioUnit,
                 soundBank: soundBank
@@ -1531,6 +1889,14 @@ public final class CommandRouter {
             }
             if let voiceMode = describeSamplerParams.voiceMode {
                 describeSamplerResult["voiceMode"] = .string(voiceMode.rawValue)
+            }
+            // m34-q, for the same reason spelled out twice above: this verb is
+            // the one place an agent LOOKS to find out what a sampler is set
+            // to, and a cap that can be written but not read back is the
+            // settable-but-unreadable shape this whole round exists to end.
+            // Only-when-SET; absent still means unlimited.
+            if let pedalHoldLimit = describeSamplerParams.pedalHoldLimit {
+                describeSamplerResult["pedalHoldLimit"] = .number(Double(pedalHoldLimit))
             }
             if params["offset"] != nil || params["limit"] != nil {
                 let describeSamplerOffset = try Self.parseZonePageOffset(params)
@@ -4709,6 +5075,101 @@ public final class CommandRouter {
                 "provider": .string(writeResult.provider),
             ]))
 
+        case "playbox.generate":
+            // m34-g — PLAYBOX: generate a chord progression, as SCALE DEGREES,
+            // for the project's own key/tempo/section.
+            //
+            // ⭐⭐ IT PRODUCES AN INVITATION, NOT A PERFORMANCE. This route
+            // lights nothing, sounds nothing and records nothing — it ANSWERS
+            // with degrees, and a human plays them on the Musical Typing keys.
+            // The app's own Playbox button calls the same generator; this is
+            // the agent-facing half of one capability.
+            //
+            // params: keyTonic (0-11, default 0 = C), keyMode (major|minor,
+            // default major), bars (2-16, default 4), tempoBPM (defaults to
+            // the transport's), section (defaults to the marker at or before
+            // the playhead), style (free text), preferLocal (skip the AI leg —
+            // used by gates so a test run never spends a real API call).
+            //
+            // ⛔ IT CANNOT FAIL FOR WANT OF AN API KEY. With no provider
+            // configured — or on any provider error, or an answer that is not
+            // a usable diatonic progression — the LOCAL variation over the
+            // built-in library runs instead, and the response says which path
+            // produced the answer. A feature that is dead without a key is
+            // dead for anyone who has not set one up.
+            //
+            // Response: {degrees, name, source (ai|local), detail, reason?}.
+            // `detail` is a provider NAME or a library progression name; it is
+            // never key material and never a model's raw text.
+            try params.rejectUnknownKeys(
+                ["keyTonic", "keyMode", "bars", "tempoBPM", "section", "style",
+                    "preferLocal"], verb: "playbox.generate")
+            var playboxRequest = PlayboxRequest()
+            if let tonic = params["keyTonic"]?.doubleValue {
+                playboxRequest.keyTonic = ((Int(tonic) % 12) + 12) % 12
+            }
+            if let rawMode = params["keyMode"]?.stringValue {
+                guard let mode = KeyMode(rawValue: rawMode) else {
+                    let valid = KeyMode.allCases.map(\.rawValue).joined(separator: ", ")
+                    throw ControlError("keyMode must be one of: \(valid) — got '\(rawMode)'")
+                }
+                playboxRequest.keyMode = mode
+            }
+            if let bars = params["bars"]?.doubleValue {
+                playboxRequest.bars = PlayboxProgression.clampBars(Int(bars))
+            }
+            // ⚠️ THE PROJECT'S OWN FACTS ARE THE DEFAULTS, not decoration:
+            // macro.songSkeleton establishes tempo and section markers, and a
+            // Playbox sequence that ignored them would fight the arrangement
+            // the user already has.
+            playboxRequest.tempoBPM = params["tempoBPM"]?.doubleValue
+                ?? store.transport.tempoMap.bpm(atBeat: store.transport.positionBeats)
+            if let section = params["section"]?.stringValue {
+                playboxRequest.sectionName = section
+            } else {
+                let here: Double = store.transport.positionBeats
+                let markers: [Marker] = store.markers
+                let reached: [Marker] = markers.filter { $0.beat <= here }
+                playboxRequest.sectionName = reached.max { $0.beat < $1.beat }?.name
+            }
+            playboxRequest.style = params["style"]?.stringValue
+            let preferLocal = params["preferLocal"]?.boolValue ?? false
+
+            var playboxPlan: PlayboxPlan
+            if preferLocal {
+                playboxPlan = PlayboxProgression.localVariation(
+                    request: playboxRequest,
+                    seed: UInt64(DispatchTime.now().uptimeNanoseconds))
+            } else {
+                do {
+                    let generator = try chordProgressionProvider()
+                    playboxPlan = try await generator.generateProgression(playboxRequest)
+                } catch {
+                    // ⛔ THE FALLBACK IS DECIDED HERE, NOT IN THE PROVIDER,
+                    // because only this layer can tell the caller which path
+                    // ran. AIServiceError reports provider names and HTTP
+                    // statuses, never key material.
+                    let local = PlayboxProgression.localVariation(
+                        request: playboxRequest,
+                        seed: UInt64(DispatchTime.now().uptimeNanoseconds))
+                    playboxPlan = PlayboxPlan(
+                        degrees: local.degrees, name: local.name,
+                        provenance: PlayboxProvenance(
+                            kind: .local, detail: local.provenance.detail,
+                            reason: error.localizedDescription))
+                }
+            }
+            var playboxResponse: [String: JSONValue] = [
+                "degrees": .array(playboxPlan.degrees.map { .number(Double($0)) }),
+                "name": .string(playboxPlan.name),
+                "source": .string(playboxPlan.provenance.kind.rawValue),
+                "detail": .string(playboxPlan.provenance.detail),
+            ]
+            if let reason = playboxPlan.provenance.reason {
+                playboxResponse["reason"] = .string(reason)
+            }
+            return .success(request.id, .object(playboxResponse))
+
         case "ai.generateSong":
             // Submits an async song-generation job to the local ACE-Step
             // sidecar (POST /release_task) and returns immediately — poll
@@ -5432,6 +5893,76 @@ public final class CommandRouter {
             }
             return .success(request.id, .object(playPayload))
 
+        case "play.sustain":
+            // ⭐⭐ m34-l — THE SUSTAIN (DAMPER) PEDAL, CC 64. The user asked why
+            // a note stops the instant they lift the key; a real piano's dampers
+            // do exactly that, and the pedal is what holds them off. This is
+            // that pedal, reachable by an agent.
+            //
+            // ⛔ A LATCH, NOT A GESTURE, AND THAT IS WHY IT IS NOT SPELT LIKE
+            // THE PAD VERBS. pad.playEffort takes begin/move/end because a drag
+            // has boundaries; a pedal has one bit and two edges. Phrasing it as
+            // a gesture would drag the pad machine's 30 s ceiling and its
+            // one-gesture-at-a-time rule onto a control that must be able to
+            // stay down for a whole song and must coexist with a pad drag.
+            //
+            // ⛔ down:false IS NEVER REFUSED. Gate the ons, never gate the offs:
+            // a lift whose track was deleted or re-kinded mid-hold must still
+            // reach the engine, or the pedal is stuck with nothing on screen
+            // explaining it. down:true is validated exactly as a note-on is.
+            //
+            // ⚠️ VALUE MAPPING IS THE MIDI STANDARD, NOT A CHOICE: >= 64 is
+            // down, < 64 is up, so the two edges are 127 and 0.
+            //
+            // MEASURED, not assumed, before this shipped: with CC 64 held, a
+            // key-up left the voice at full level on the built-in poly synth,
+            // the built-in sampler and the hosted GM sound bank; the same
+            // key-up without it read silent.
+            //
+            // ⚠️ TWO LITERALS BELOW ARE LOAD-BEARING — the verb name as a STRING
+            // LITERAL and the key array INLINE. doc-count-drift and
+            // ZeroParamVerbRejectionTests scrape this call site to derive the
+            // wire surface a second, independent way; hoisting either into a let
+            // makes this verb invisible to both. NOTE: no quoted string in this
+            // comment, deliberately (the m25-d rule).
+            try params.rejectUnknownKeys(
+                ["trackId", "down"], verb: "play.sustain",
+                hint: "'down' is a boolean — true presses the damper pedal (CC 64 = 127) so "
+                    + "notes keep ringing after their key is released, false lifts it")
+            let sustainTrackID = try params.requireTrackID()
+            guard let sustainDown = params["down"]?.boolValue else {
+                throw ControlError(
+                    "'down' must be a boolean — true presses the sustain pedal, false lifts it")
+            }
+            let sustainResult = try store.playLiveSustain(trackID: sustainTrackID,
+                                                          down: sustainDown)
+            var sustainPayload: [String: JSONValue] = [
+                "trackId": .string(sustainResult.trackID.uuidString),
+                // ⭐ THE STATE AFTER THE CALL, read back off the controller —
+                // not an echo of the request. A press onto a track whose
+                // renderer has gone comes back false, and a caller that trusted
+                // its own request would light a pedal that is not down.
+                "down": .bool(sustainResult.down),
+                "controller": .number(Double(LivePlayController.sustainCC)),
+                "value": .number(Double(sustainResult.down ? 127 : 0)),
+                // False when the latch coalesced the call away — an honest
+                // no-op, not a failure.
+                "pushed": .bool(sustainResult.pushed),
+                "audible": .bool(sustainResult.isAudible),
+                // THE HONESTY LIGHT: false means it sounded and went into NO take.
+                "recording": .bool(sustainResult.isRecording),
+                "capturedPoints": .number(Double(sustainResult.capturedPoints)),
+            ]
+            if let reason = Self.auditionReason(sustainResult.outcome.audition) {
+                sustainPayload["reason"] = .string(reason)
+            }
+            if let sustainKind = store.tracks.first(where: { $0.id == sustainTrackID })?
+                .instrument?.kind, sustainKind == .audioUnit || sustainKind == .soundBank {
+                sustainPayload["instrumentStatus"] =
+                    .string(instrumentStatusString(sustainTrackID))
+            }
+            return .success(request.id, .object(sustainPayload))
+
         case "chord.voice":
             // m23-cv — ONE-FINGER CHORDS' wire half, and it is DELIBERATELY the
             // small half.
@@ -5602,7 +6133,23 @@ public final class CommandRouter {
                 "chords": .array(voicedChords),
             ]))
 
-        case "pad.previewEffort":
+        case "pad.previewEffort", "pad.playEffort":
+            // ⭐ TWO VERBS, ONE PARSE PATH, ONE STORE CALL SITE (m34-f step ②).
+            // They differ in EXACTLY ONE thing — whether the value is captured
+            // into a rolling take — and every other rule (the gesture state
+            // machine, the 30 Hz cap, the neutral release, the CC override, the
+            // refusals, the echo shape) is shared. Two case bodies would be two
+            // records of the same protocol that nothing compares, which is this
+            // tree's characteristic failure; the ONE difference is a single
+            // branch on the verb, below, where it is impossible to miss.
+            //
+            // ⛔ pad.playEffort IS THE PERFORMANCE VERB: it is NOT refused while
+            // recording, and on an ARMED instrument track during a take its
+            // values land in the take's controller lane. pad.previewEffort keeps
+            // its original contract UNCHANGED — refused while recording, nothing
+            // recorded, ever — because an agent auditioning a shape must not
+            // write expression the user never performed.
+            //
             // Breath pad P6 — the LIVE DRAG PREVIEW. Streams one effort value
             // (0…1) to the track's instrument as a controller, right now,
             // outside the timeline. Sibling of note.audition above: same
@@ -5626,10 +6173,35 @@ public final class CommandRouter {
             //
             // No undo entry, no clip mutation: the record is the controller lane
             // that the effort-shape verb writes.
-            try params.rejectUnknownKeys(
-                ["trackId", "value", "gesture", "expressionCC"], verb: "pad.previewEffort",
-                hint: "'gesture' is one of begin/move/end — the pad streams ONLY between a "
-                    + "begin and its end")
+            // ⚠️ TWO GUARD CALLS WITH LITERAL VERB NAMES, ONE SHARED HINT — AND
+            // THE LITERALS ARE LOAD-BEARING, NOT STYLE. doc-count-drift.mjs and
+            // ZeroParamVerbRejectionTests each derive the wire surface a SECOND,
+            // independent way by SCRAPING the guard call sites for a string
+            // literal, then cross-check that against the array. A single call
+            // passing request.command compiles, behaves identically, and makes
+            // BOTH pad verbs invisible to those scrapes — measured: the gate
+            // exited 2 reporting them as advertised but UNGUARDED. The scrape
+            // also requires the key array to be an INLINE LITERAL, so it cannot
+            // be hoisted into a let either; that was measured on the same run.
+            //
+            // ⛔⛔ NOTE: NO QUOTED STRING AND NO ELLIPSIS-IN-BRACKETS ANYWHERE IN
+            // THIS COMMENT, DELIBERATELY (the m25-d rule). The first draft spelt
+            // the scraped pattern out literally and thereby FORGED a call site
+            // for a verb named with an ellipsis — ZeroParamVerbRejectionTests
+            // reported it as an orphaned guard, and only a FULL-SUITE run found
+            // it. A comment that describes a scraper is inside that scraper's
+            // input.
+            let padHint = "'gesture' is one of begin/move/end — the pad streams ONLY between a "
+                + "begin and its end"
+            if request.command == "pad.playEffort" {
+                try params.rejectUnknownKeys(
+                    ["trackId", "value", "gesture", "expressionCC"], verb: "pad.playEffort",
+                    hint: padHint)
+            } else {
+                try params.rejectUnknownKeys(
+                    ["trackId", "value", "gesture", "expressionCC"], verb: "pad.previewEffort",
+                    hint: padHint)
+            }
             let padTrackID = try params.requireTrackID()
             guard let padGestureRaw = params["gesture"]?.stringValue else {
                 throw ControlError(
@@ -5659,8 +6231,14 @@ public final class CommandRouter {
             // instead of previewing one nothing on the track reads.
             let padCC = try Self.optionalInteger(params["expressionCC"], "'expressionCC'")
                 ?? PadPreviewController.defaultExpressionCC
-            let padResult = try store.previewEffort(
-                trackID: padTrackID, value: padValue, phase: padPhase, expressionCC: padCC)
+            // THE ONE DIFFERENCE. Both methods run the SAME
+            // `PadPreviewController` gesture machine; only the capture verdict
+            // and the recording refusal differ.
+            let padResult = request.command == "pad.playEffort"
+                ? try store.playLiveExpression(
+                    trackID: padTrackID, value: padValue, phase: padPhase, expressionCC: padCC)
+                : try store.previewEffort(
+                    trackID: padTrackID, value: padValue, phase: padPhase, expressionCC: padCC)
             var padPayload: [String: JSONValue] = [
                 "trackId": .string(padResult.trackID.uuidString),
                 "gesture": .string(padResult.phase.rawValue),
@@ -5669,6 +6247,14 @@ public final class CommandRouter {
                 "streaming": .bool(padResult.streaming),
                 "delivered": .bool(padResult.delivered),
                 "audible": .bool(padResult.isAudible),
+                // m34-f step ②. ⚠️ ECHOED ON BOTH VERBS, and on
+                // pad.previewEffort they are ALWAYS 0 / false — that is not
+                // redundancy, it is the preview verb SAYING SO on every call
+                // rather than leaving a caller to infer it from a doc string.
+                // A field that is always false is a promise being kept in
+                // public.
+                "capturedPoints": .number(Double(padResult.capturedPoints)),
+                "recording": .bool(padResult.recording),
             ]
             if let padEffort = padResult.effort {
                 padPayload["value"] = .number(padEffort)
@@ -8059,6 +8645,118 @@ public final class CommandRouter {
             let toTrackResult = try store.moveClips(
                 ids: toTrackIDs, toTrackId: toTrackDestination, byBeats: toTrackBeats)
             return .success(request.id, try Self.clipsTrackMoveResultJSON(toTrackResult))
+
+        case "instrument.listDownloadableSoundBanks":
+            // No params. The built-in catalog of banks DAW Pro can fetch
+            // (m34-c), each annotated with whether it is ALREADY in the
+            // library. Never touches the network — this is a compile-time list
+            // plus one directory scan, so it is safe to call offline and cheap
+            // to poll.
+            //
+            // ⚠️ THE LICENCE TRAVELS WITH THE ENTRY, deliberately. The
+            // roadmap item's own words are that licensing is the whole item,
+            // not a footnote; a downloadable bank whose terms live only in a
+            // research document is a bank no agent and no user can audit at
+            // run time. `licence` + `attribution` are what a credits surface
+            // or an agent should quote.
+            //
+            // ⛔ `sha256` is an INTEGRITY pin (corruption/truncation), NOT an
+            // authenticity one, and it is SELF-COMPUTED — DAW Pro downloaded
+            // the file once and hashed it. Nobody upstream publishes a hash
+            // for it. Do not describe it as verifying provenance.
+            //
+            // Response {banks: [{id, name, url, fileName, sizeBytes,
+            // sizeDescription, sha256, licence, attribution, summary,
+            // installed: bool, installedPath?}]}.
+            try params.rejectUnknownKeys([], verb: "instrument.listDownloadableSoundBanks")
+            let offerings = SoundBankDownloadCoordinator.offerings(
+                library: store.soundBankLibrary)
+            return .success(request.id, .object([
+                "banks": .array(offerings.map { offering in
+                    var fields: [String: JSONValue] = [
+                        "id": .string(offering.bank.id),
+                        "name": .string(offering.bank.name),
+                        "url": .string(offering.bank.url.absoluteString),
+                        "fileName": .string(offering.bank.fileName),
+                        "sizeBytes": .number(Double(offering.bank.expectedBytes)),
+                        "sizeDescription": .string(offering.bank.sizeDescription),
+                        "sha256": .string(offering.bank.sha256),
+                        "licence": .string(offering.bank.licence),
+                        "attribution": .string(offering.bank.attribution),
+                        "summary": .string(offering.bank.summary),
+                        "installed": .bool(offering.installedPath != nil),
+                    ]
+                    if let path = offering.installedPath {
+                        fields["installedPath"] = .string(path)
+                    }
+                    return .object(fields)
+                }),
+            ]))
+
+        case "instrument.downloadSoundBank":
+            // params: id (required — an id from
+            // instrument.listDownloadableSoundBanks). Starts the download and
+            // RETURNS IMMEDIATELY; poll instrument.soundBankDownloadStatus.
+            // The ai.installSpeechModel shape and for the same reason: a
+            // 206 MB transfer is the stretch-render cost model, not
+            // clip.transcribe's.
+            //
+            // An UNKNOWN id is refused in this same round trip (a caller
+            // error). Every INSTALL-time failure — no disk space, the file
+            // already in the library, a truncated transfer, a checksum
+            // mismatch, a bank that installs but cannot be read — is
+            // discoverable ONLY by polling, so exactly one place
+            // (SoundBankInstaller.install) decides what counts as a failure.
+            //
+            // ⚠️ A successful response here means the request was ACCEPTED,
+            // never that a bank is installed. Only state "succeeded" from the
+            // status verb means that.
+            //
+            // ONE download in flight at a time across the whole app, including
+            // the instrument picker's own Download button (they share one
+            // coordinator): a second call while one runs is REFUSED, never
+            // queued and never coalesced.
+            //
+            // Response / instrument.soundBankDownloadStatus's response (SAME
+            // shape): {state: idle|downloading|succeeded|failed|cancelled,
+            // bankID?, bankName?, cancelRequested, progress?: {phase:
+            // preparing|downloading|verifying|installing|finished, bankID,
+            // phaseFraction, completedBytes, totalBytes}, bank?:
+            // <SoundBankInfo>, errorMessage?}. `phaseFraction` is 0-1 WITHIN
+            // the current phase, never a blended overall percentage.
+            try params.rejectUnknownKeys(["id"], verb: "instrument.downloadSoundBank")
+            let downloadBankID = try params.require("id", \.stringValue)
+            let downloadStatus = try await soundBankDownloads.start(bankID: downloadBankID)
+            return .success(request.id, try JSONValue(encoding: downloadStatus))
+
+        case "instrument.soundBankDownloadStatus":
+            // No params — one download slot for the whole app (in flight, or
+            // the most recently finished one), so there is nothing to
+            // disambiguate. Response: see instrument.downloadSoundBank.
+            //
+            // `bank` on a "succeeded" status is an ordinary SoundBankInfo
+            // whose source is a plain absolute path: a downloaded bank is
+            // indistinguishable from an imported one, which is why this
+            // feature needed no new SoundBankSource case.
+            try params.rejectUnknownKeys([], verb: "instrument.soundBankDownloadStatus")
+            let soundBankPollStatus = await soundBankDownloads.status()
+            return .success(request.id, try JSONValue(encoding: soundBankPollStatus))
+
+        case "instrument.cancelSoundBankDownload":
+            // No params. Asks the in-flight download to stop; refused when
+            // nothing is running (a no-op success would let a caller believe
+            // it cancelled something).
+            //
+            // ⚠️ THE RETURNED state IS STILL "downloading", ON PURPOSE, with
+            // cancelRequested:true. Cancellation is REQUESTED synchronously
+            // and OBSERVED by polling: the partial file is not gone until the
+            // job unwinds and removes its staging directory, and reporting
+            // "cancelled" before that would be a status racing the
+            // filesystem. Poll until state is "cancelled" — that is the
+            // moment nothing is left on disk.
+            try params.rejectUnknownKeys([], verb: "instrument.cancelSoundBankDownload")
+            let cancelDownloadStatus = try await soundBankDownloads.cancel()
+            return .success(request.id, try JSONValue(encoding: cancelDownloadStatus))
 
         default:
             // App-installed surface (see `appCommandHandler`): a non-nil return
@@ -10545,7 +11243,9 @@ public final class CommandRouter {
                               reminted: inout [String]) throws -> SamplerParams? {
         guard let value else { return nil }
         guard case .object(let obj) = value else {
-            throw ControlError("sampler must be an object {zones, oneShot?, attack?, release?, gain?}")
+            throw ControlError(
+                "sampler must be an object {zones, oneShot?, attack?, decay?, sustain?, "
+                    + "release?, gain?}")
         }
         // m26-g: `zones` and `zonePatches` are mutually exclusive. They say
         // OPPOSITE things about the zones the caller did not mention — `zones`
@@ -10671,7 +11371,47 @@ public final class CommandRouter {
                     + "was written against")
                 ?? fallback.bendRangeSemitones,
             voiceMode: try Self.optionalSamplerVoiceMode(obj["voiceMode"])
-                ?? fallback.voiceMode
+                ?? fallback.voiceMode,
+            // m34-o GLOBAL decay/sustain — the same fall-back-to-current rule
+            // as every scalar above, and the same REFUSE-don't-clamp rule as
+            // bendRangeSemitones. These complete the envelope: before m34-o a
+            // zone leaving `decay`/`sustain` nil fell to the hardcoded pair
+            // (0, 1) — hold at peak forever — and there was NO instrument-level
+            // knob able to change that, so a sampler could not be made to fade
+            // without authoring both fields on every zone. This is the
+            // "fade time configurable" the sustain-pedal report asked for, put
+            // where the rest of the envelope already lives rather than on the
+            // pedal (a pedal-level fade would be a second envelope owner and
+            // would be wrong on every patch that correctly holds).
+            decay: try Self.optionalBoundedNumber(
+                obj["decay"], "sampler.decay", SamplerZone.decayRange,
+                "seconds for a note to fall from full level to the sustain level after its "
+                    + "attack; omit to keep the legacy 0 (no decay stage). Set this WITH "
+                    + "'sustain' below 1 to make notes fade the way a piano does — a zone's "
+                    + "own 'decay' still wins over this")
+                ?? fallback.decay,
+            sustain: try Self.optionalBoundedNumber(
+                obj["sustain"], "sampler.sustain", SamplerZone.sustainRange,
+                "the level a note settles at after its decay, 0...1; omit to keep the legacy 1 "
+                    + "(hold at full level, correct for organs and pads). 0 makes the note fade "
+                    + "to silence in 'decay' seconds, which is what a piano under the sustain "
+                    + "pedal does — a zone's own 'sustain' still wins over this")
+                ?? fallback.sustain,
+            // m34-q — the same fall-back-to-current rule as every scalar above,
+            // and the same REFUSE-don't-clamp rule as bendRangeSemitones. This
+            // is the OTHER half of the sustain-pedal answer: m34-o made a held
+            // note able to fade on its own; this caps how many the pedal keeps
+            // going at all, releasing the oldest through that same envelope.
+            pedalHoldLimit: try Self.optionalBoundedInteger(
+                obj["pedalHoldLimit"], "sampler.pedalHoldLimit",
+                SamplerParams.pedalHoldLimitRange,
+                "how many notes the sustain pedal (CC 64) keeps ringing; omit for unlimited, "
+                    + "which is what the Sampler has always done. When the cap is exceeded the "
+                    + "OLDEST pedal-held note is RELEASED through this patch's own 'release' — "
+                    + "it is not cut — and a key you are still physically holding is never "
+                    + "taken. Any value above the 64-voice pool is unreachable and so means "
+                    + "unlimited")
+                ?? fallback.pedalHoldLimit
         )
     }
 
@@ -10689,6 +11429,28 @@ public final class CommandRouter {
                                + "\(bounds.upperBound) — \(meaning)")
         }
         return number
+    }
+
+    /// One optional, RANGE-CHECKED WHOLE NUMBER — `optionalBoundedNumber`'s
+    /// integer twin (m34-q). Refuses a FRACTIONAL value outright rather than
+    /// truncating it (the m23-aj-2 finding that `Int(double)` truncates
+    /// silently) and refuses out-of-range rather than clamping, so a caller
+    /// cannot end up with a setting they did not ask for and cannot see.
+    ///
+    /// The bounds are compared in Double BEFORE the conversion: `Int(1e300)`
+    /// traps, and a wire value is whatever the caller sent.
+    private static func optionalBoundedInteger(
+        _ value: JSONValue?, _ name: String,
+        _ bounds: ClosedRange<Int>, _ meaning: String
+    ) throws -> Int? {
+        guard let value else { return nil }
+        guard let number = value.doubleValue, number.isFinite,
+              number == number.rounded(),
+              number >= Double(bounds.lowerBound), number <= Double(bounds.upperBound) else {
+            throw ControlError("\(name) must be a whole number between \(bounds.lowerBound) and "
+                               + "\(bounds.upperBound) — \(meaning)")
+        }
+        return Int(number)
     }
 
     /// `"poly"` / `"mono"`, or nil when the key is absent. An unrecognised
@@ -11119,6 +11881,10 @@ public final class CommandRouter {
         if let voiceMode = sampler.voiceMode {
             samplerObject["voiceMode"] = .string(voiceMode.rawValue)
         }
+        // m34-q, same only-when-SET rule again.
+        if let pedalHoldLimit = sampler.pedalHoldLimit {
+            samplerObject["pedalHoldLimit"] = .number(Double(pedalHoldLimit))
+        }
         if let sourcePath = sampler.sourcePath {
             samplerObject["sourcePath"] = .string(sourcePath)
         }
@@ -11159,18 +11925,26 @@ public final class CommandRouter {
                  JSONValue.number(Double(
                     MIDIControllerType.cc(controller: controller).neutralDefault)))
             }))
+        var polyObject: [String: JSONValue] = [
+            "waveform": .string(poly.waveform.rawValue),
+            "attack": .number(poly.attack),
+            "decay": .number(poly.decay),
+            "sustain": .number(poly.sustain),
+            "release": .number(poly.release),
+            "cutoffHz": .number(poly.cutoffHz),
+            "resonance": .number(poly.resonance),
+            "gain": .number(poly.gain),
+        ]
+        // m34-q — the poly synth's FIRST only-when-SET key, and it follows the
+        // sampler's rule above rather than inventing one: an instrument that
+        // never set a cap keeps its pre-m34-q wire shape byte-for-byte, and
+        // "unset" stays distinguishable from "explicitly 128" on a round trip.
+        if let pedalHoldLimit = poly.pedalHoldLimit {
+            polyObject["pedalHoldLimit"] = .number(Double(pedalHoldLimit))
+        }
         return .object([
             "kind": .string(d.kind.rawValue),
-            "polySynth": .object([
-                "waveform": .string(poly.waveform.rawValue),
-                "attack": .number(poly.attack),
-                "decay": .number(poly.decay),
-                "sustain": .number(poly.sustain),
-                "release": .number(poly.release),
-                "cutoffHz": .number(poly.cutoffHz),
-                "resonance": .number(poly.resonance),
-                "gain": .number(poly.gain),
-            ]),
+            "polySynth": .object(polyObject),
             "sampler": .object(samplerObject),
             "honoredControllers": .object(supportObject),
         ])
@@ -11418,9 +12192,16 @@ public final class CommandRouter {
                 "oneShot: the stored global (\(oneShotUse.global)) is NOT what happens — every"
                     + " zone sets its own flag. See effectiveGlobals.oneShot.")
         }
+        // m34-o: decay and sustain report through the same fold as attack and
+        // release, now that they HAVE globals to report. Reported even when
+        // both are at their legacy defaults, because "decay 0 / sustain 1" is
+        // the answer to "why does nothing ever fade?" and a caller who cannot
+        // see the pair cannot diagnose it.
         let json = JSONValue.object([
             "release": numericField(SamplerGlobalUse.release(of: params), "release", sfzOpcode: "ampeg_release"),
             "attack": numericField(SamplerGlobalUse.attack(of: params), "attack", sfzOpcode: "ampeg_attack"),
+            "decay": numericField(SamplerGlobalUse.decay(of: params), "decay", sfzOpcode: "ampeg_decay"),
+            "sustain": numericField(SamplerGlobalUse.sustain(of: params), "sustain", sfzOpcode: "ampeg_sustain"),
             "oneShot": .object(oneShot),
         ])
         return (json, warnings)

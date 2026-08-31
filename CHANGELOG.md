@@ -1,5 +1,258 @@
 # Changelog
 
+## 2026-08-31 — Four Sampler settings did not survive being saved. Now they do.
+
+Set a Sampler so its notes fade, save the project, reopen it — and the notes
+held forever again. The setting was simply gone. The same was true of the
+instrument's pitch-bend range and of its mono/poly voice mode: you could set all
+four, hear all four, and lose all four the moment you closed the song.
+
+The cause was one list. A project file records a Sampler's settings by name, and
+these four names had never been added to it, so they were written nowhere and
+quietly reset to their defaults on open. Everything else about the instrument —
+its samples, gain, attack, release, expression settings — was recorded properly,
+which is why the loss was easy to miss: the patch came back looking almost
+right.
+
+**Why this mattered more than a missing checkbox.** With no decay and no sustain
+recorded, a note goes back to holding at full volume for as long as the pedal is
+down — which is exactly the complaint fixed earlier the same day, below. The fix
+arrived intact and a save undid it.
+
+All four are now written into the project and read back, and we checked it by
+sound rather than by reading the setting back afterwards: a saved-and-reopened
+fading patch is measured falling to silence, a saved-and-reopened octave bend is
+measured landing on the octave, and a saved-and-reopened mono line is measured
+cutting the note it replaces.
+
+**Songs you have already saved open exactly as they did before.** A Sampler with
+none of these four set writes no new information at all, and a file that never
+carried them still opens with the settings it always had — a whole-tone bend
+range, poly voices, and a note that holds. And if a future version saves a voice
+mode this one has never heard of, the song still opens; the unknown setting is
+ignored rather than refusing the whole file.
+
+## 2026-08-31 — Piano notes fade under the pedal. Organ notes do not.
+
+Hold the sustain pedal and play a piano note. It should ring, bloom, and die
+away — that is what a piano does, because the pedal only stops the dampers
+falling; it does not keep feeding the strings. Ours kept the note going at full
+volume, forever. A player noticed and asked whether they were wrong. They were
+not.
+
+**What we changed, and what we deliberately did not.** The fix is not "make
+notes fade". An organ, a string pad and a warm synth pad genuinely do hold for
+as long as you keep the pedal down, and making those fade would have been a
+worse bug than the one we started with. **The instrument decides, not the
+pedal.** So the pedal's job stays exactly what it was — it holds the note off
+its release — and the fading is now the instrument's own business.
+
+**Sounds you pick from a sound bank were already right.** A real grand piano
+program carries its own fade and always has; we measured it dying to silence in
+about fifteen seconds with the pedal held, while a church organ from the same
+bank sat perfectly level for the same fifteen seconds. Both correct.
+
+**The built-in Sampler could not fade at all.** It had knobs for how fast a note
+starts and how fast it stops after you let go, but nothing for what happens in
+between while you are still holding the key. If you loaded a piano library with
+sixty samples in it, the only way to make it fade was to edit all sixty. Now
+there are two instrument-wide controls — **Decay** (how long the note takes to
+drop) and **Sustain** (the level it settles at) — and any individual sample can
+still overrule them. Leave them alone and nothing you have already made changes
+by so much as a sample.
+
+**And the songs we build for you now use the right instruments.** Ask for a
+starter song in any of the fourteen styles and, until now, every part came out
+as the same buzzy synth — the one labelled "Piano", the one labelled "Organ",
+even the one labelled "Drums". Now a piano part is a piano, an organ part is an
+organ, drums are a drum kit, and a bass is a bass. Which means the piano fades
+and the organ holds, without you setting anything. Parts genuinely meant to be
+a synth — the ones labelled "Synth" and "Lead" — are left as the built-in
+synth on purpose.
+
+**Projects you already saved are untouched.** We checked this specifically
+rather than assuming it: the new sounds are written into songs as they are
+created, so nothing reaches back into work already on your disk.
+
+**Correction, later the same day:** the two new controls were not being written
+into your project file, so they reset every time you reopened the song. Fixed —
+see "Four Sampler settings did not survive being saved" at the top.
+
+## 2026-08-31 — Build a song by stacking loops, without ever stopping the music
+
+Play a chord part. While it keeps looping, arm a different track, switch to a
+bass sound, and play the bass part over the top. Then a shaker. The music never
+stops, and you never touch the stop button. That is live looping — the way
+The Kiffness builds a track in front of a camera — and DAW Pro now does it.
+
+**How to use it.** Press play, then open a loop session and say how long the
+loop is: **four bars, two bars, whatever you like**. (Or say nothing, play your
+first part, and press finish — the loop becomes as long as what you just played,
+rounded to whole bars so it can never end up slightly off.) Arm a track and a
+light starts **flashing amber**: the recording has not begun yet. It begins at
+the **start of the next time round the loop**, so what you play lands in time
+with what is already going — on a four-bar loop that can be up to four bars of
+flashing, which is the loop waiting for you, not the app ignoring you. (Prefer
+to come in sooner? Choose bar timing and it starts on the next bar line
+instead.) The light goes **solid amber** while you are recording and **cyan**
+once the layer is down and playing. Arm the next track and do it again.
+
+**The bit that matters most: a bad layer goes away with one press, and the
+music does not stop.** Play something wrong, press undo-layer, and it is gone
+while everything else keeps looping — press it again to take back the one before
+that. This is a separate control from the usual undo on purpose: the ordinary
+undo would take back whatever you did last, which mid-performance might be a
+volume change rather than the layer you want rid of.
+
+**You never have to read anything while playing.** The strip beside the
+transport is lights, not numbers: amber means "this one is being recorded into",
+cyan means "this one is sounding", and each light blinks in time with your loop
+rather than to some unrelated ticking. Each light is captioned with the end of
+its track's name — `…Chords`, `…Bass` — because that is the part that tells them
+apart.
+
+**What you end up with is a real song, not a performance that vanishes.** Each
+layer is an ordinary clip on an ordinary track, repeated along the timeline, so
+you can close the loop session and then edit it, mix it, bounce it or export it
+like anything else you have made.
+
+Two honest limits. This records **instrument layers** — parts you play — not
+microphone or guitar layers; those repeat differently and are still to come. And
+if you arm a layer in the last split-second before the bar line, it waits for the
+*next* bar rather than starting late and losing your first chord — the flashing
+light is telling you it heard you.
+
+## 2026-08-31 — A sustain pedal, on the Tab key
+
+Play the on-screen keys and a note stopped the instant you let go. That is what
+a real piano does too — a felt damper drops onto the string the moment the key
+comes up. What you were remembering is the pedal under the pianist's right foot,
+which lifts every damper off the strings so notes keep ringing while both hands
+move on to the next chord.
+
+**Press Tab.** A green **⇥ SUSTAIN** light comes on beside MUSICAL TYPING, and
+from then on the notes you play keep sounding after you let go of the keys — so
+you can move your hand, play the next chord, and hear the two blend the way a
+piano blends them. Press Tab again and everything the pedal was holding
+releases; anything you are still physically holding down keeps playing.
+
+It is a **latch**, not a hold: press once for on, once for off, rather than
+keeping a finger on Tab. Sustain exists precisely because a player has no spare
+finger — that is why it lives under a foot on a real piano — and a computer
+keyboard has no foot. The cost, said plainly: there is no half-pedalling and no
+quick flutter, so re-pedalling on a chord change is two presses instead of one
+foot movement. If you want that, a real MIDI pedal plugged into the Mac has
+always worked and still does.
+
+You can also click the SUSTAIN light itself, which matters because Tab normally
+moves between text boxes. It only becomes the pedal while Musical Typing is on
+and you are not typing into anything — in a name field, in the Copilot box, in
+Settings, or with the mode off, Tab still moves the cursor exactly as before.
+
+**It records.** With a take rolling on an armed instrument track, your pedalling
+is written into the clip as a real sustain lane, so playing the take back
+sustains the same notes in the same places. The pedal cannot be left stranded
+either: it lifts when the take ends, when you hit panic, when you switch off
+Musical Typing, and when the window loses focus — a pedal stuck down is a drone
+with no visible cause, and that is the one thing it must never be.
+
+An agent can work the same pedal through the new `play_sustain` tool.
+
+**Fixed along the way, and it would have bitten you:** a note held only by the
+pedal used to go silent after exactly eight seconds with the transport stopped.
+The instruments were sustaining correctly the whole time; the audio engine had
+stopped asking them to. It is fixed, and measured on all three instrument
+kinds — the built-in synth, the built-in sampler, and the downloaded sound
+banks.
+
+## 2026-08-30 — One button gets you a whole orchestra, and it tells you the truth about the download
+
+A stock Mac ships exactly one sound bank with exactly one drum kit. Ask for
+brushes and the answer used to be "you can't" — not "here is how," just no.
+
+Now there is a **Download** button in the instrument picker. It offers
+**MuseScore General**: 128 instruments and around fifteen drum kits, brushes
+among them, free, MIT-licensed, roughly 216 MB. The size and the licence are on
+screen *before* you press anything, because it is your bandwidth, your disk, and
+somebody else's work.
+
+While it runs, the picker says what is happening in words — "Downloading 88 MB
+of 216 MB…", then "Checking the download…", then "Adding MuseScore General to
+your instruments…" — with a bar that only moves during the actual transfer, and
+a **Cancel** that works. Cancelling says "Stopping…" until the download has
+really stopped, and then "Nothing was added," because the partial file is gone
+by then and not a moment earlier.
+
+**The part that matters most is what "finished" means.** A half-downloaded
+sound bank that reports success is the worst possible outcome here: an SF2's
+instrument names live *after* its sample data, so a transfer that dies two
+thirds of the way through leaves a file that opens, loads, and shows you 128
+instruments called "Program 0" through "Program 127". It looks fine. It is not.
+
+So a download is only finished when four separate things agree: the server's
+advertised size matches what we expect (checked in the first second, not after
+216 MB), the bytes on disk are the right *number* of bytes, they hash to the
+right fingerprint, and — the one that catches the case the others miss — the
+installed file gives up real instrument names when asked. Any of those failing
+deletes the file and tells you plainly what happened. Nothing partly downloaded
+is ever left where it can be mistaken for a working bank.
+
+Agents get the same four operations over the control protocol
+(`instrument.listDownloadableSoundBanks` / `downloadSoundBank` /
+`soundBankDownloadStatus` / `cancelSoundBankDownload`) and as MCP tools. The
+listing carries the licence and the copyright line, so an assistant can tell you
+what it is about to put on your machine.
+
+One piece of honesty about the fingerprint: nobody publishes a checksum for this
+file, so DAW Pro downloaded it once, hashed it, and pinned what it saw. That
+protects you from a corrupted or truncated download. It is **not** a signature
+and does not prove where the bytes came from — and the app's own documentation
+says so rather than implying otherwise.
+
+## 2026-08-30 — Playbox: the AI shows you what to play, you play it, and it is yours
+
+Ask for a set of chords and the keyboard lights up with them. Then **you** play
+them. That is the whole feature, and the order matters: the AI writes the
+invitation, you write the performance. The take is a real recording of you
+pressing keys, captured the same way any other take is. Nothing plays a note on
+your behalf.
+
+Turn on **CHORDS** in the keyboard strip and press **NEW LIGHTS**. You get a
+progression that fits the key, tempo and section you are already working in —
+not a generic one — and the keys that play it light up.
+
+**You choose when the lights move on, because the three ways of using this are
+three different things.**
+
+- **WHEN I PLAY IT** — the outline waits until you play the chord it is showing
+  you. Nothing is refused, nothing is rushed. This is for learning a part.
+- **ON THE BEAT** — the outline moves with the click, one chord per bar, and you
+  keep up. This is for performing one.
+- **AHEAD OF ME** — the outline moves on every chord you play, so the timing is
+  entirely yours. This is for writing with it, and it is the default.
+
+**You can now see what is coming, not just what is next.** The chord to play is
+outlined; the three after it carry a bar underneath, widest first. That is also
+the fix for something that was genuinely confusing: Four Chords and '50s Doo-Wop
+use the same four chords in a different order and both start on the same one, so
+until you played a note they looked identical. Now they do not.
+
+**It works without an API key, and it tells you which one you got.** With a key
+configured, a model writes the progression and the strip says so in violet.
+Without one — or if the model returns something unusable — the app varies one of
+its own built-in progressions instead, and says *that* instead. "The AI wrote
+this" and "we picked a stock progression" are different claims, and only one of
+them is ever true at a time.
+
+Chords only for now. Melody needs a different kind of light and a wider
+keyboard, so it is not half-built here.
+
+For agents: `playbox_generate` returns the progression as scale degrees, and
+defaults its tempo and section from the open project. It lights nothing and
+plays nothing. **Please do not follow it with `clip_set_notes` unless you were
+asked to** — writing the part for the user is precisely the thing this feature
+exists not to do.
+
 ## 2026-08-30 — One key, one chord: play real harmony without knowing how to voice one
 
 Musical Typing gave you one key, one note. That is enough to pick out a melody
@@ -622,6 +875,11 @@ which is to say gone rather than merely covered. That distinction matters, becau
 of overlapping notes only ever *hid* a re-attack under a decaying tail.
 
 **poly** remains the default and is unchanged.
+
+**Correction, 2026-08-31:** neither the bend range nor the voice mode was
+written into the project file, so a saved song reopened at a whole tone and in
+poly however they had been set. Fixed — see "Four Sampler settings did not
+survive being saved" at the top.
 
 ## 2026-08-23 — When a sampler setting is dead, the app says so and names a fix that works
 

@@ -266,6 +266,14 @@ public final class AudioEngine: AudioEngineControlling {
         let writer: RecordingWriter?
         let capture: InputCapture?
         let capturingMIDI: Bool
+        /// m34-h: this take JOINED playback already in progress
+        /// (`startTakeInPlayback`), so every path that ends it — the normal
+        /// close, a fatal input-configuration change, the no-input watchdog —
+        /// must leave the transport ROLLING. Carried on the take rather than
+        /// read from a flag on the engine because the abort paths fire
+        /// asynchronously and must honour the take they were armed for, not
+        /// whatever the engine looks like when they land.
+        let keepsPlayback: Bool
         let completion: @MainActor (Result<TakeResult, Error>) -> Void
     }
 
@@ -389,6 +397,16 @@ public final class AudioEngine: AudioEngineControlling {
     /// window — the engine side of the store/engine eligibility-unity pin
     /// (record with a loop must schedule with the window; without one, never).
     var loopContextActiveForTesting: Bool { loopContext != nil }
+    /// Test seam (m34-h): whether the transport is still ROLLING — the engine
+    /// half of "the take closed but the music did not stop". `currentAnchor`
+    /// is the one fact that distinguishes a live transport from a stopped one
+    /// (`stopPlayback` clears it; nothing else does), so this is the state read
+    /// that pairs with the behavioural check of watching the playhead advance.
+    var transportRollingForTesting: Bool { currentAnchor != nil }
+    /// Test seam (m34-h): whether a take is currently rolling, and whether it
+    /// is a LAYER take (one that must leave playback running when it ends, by
+    /// any route including the failure routes).
+    var activeTakeKeepsPlaybackForTesting: Bool? { activeTake?.keepsPlayback }
     /// Test seam (m15-b G6): the click player's timeline offset — negative
     /// exactly by the count-in delay on a count-in loop start (§5.4a).
     var metronomeElapsedOffsetForTesting: Double { metronomeElapsedOffset }
@@ -402,6 +420,13 @@ public final class AudioEngine: AudioEngineControlling {
     /// held-note fixture can inject synthetic events without CoreMIDI
     /// hardware. Control-plane only, like every seam here.
     var midiCaptureSessionForTesting: MIDICaptureSession? { midiInput?.captureSession }
+
+    /// m34-a-2: the rolling take's live extent — nil between takes, because
+    /// `captureSession` is nil between takes (set in `startTake`/
+    /// `startTakeInPlayback`, cleared in the finish and in every abort path).
+    /// A pure read of main-actor state the session already holds; it starts no
+    /// capture, touches no ring, and reaches nothing on the render thread.
+    public func liveTakeExtent() -> LiveTakeExtent? { midiInput?.captureSession?.liveExtent }
     /// The REAL meter map (m15-a), cached from every transport intent exactly
     /// like the loop window — the downbeat source for every click schedule
     /// and the count-in bar length. Before m15-a this was a `beatsPerBar`
@@ -1605,12 +1630,18 @@ public final class AudioEngine: AudioEngineControlling {
         Set(pitches.filter { $0 <= 127 })
     }
 
-    /// The `LiveMIDIEvent.source` stamped on every edge live play ingests.
+    /// The `LiveMIDIEvent.source` stamped on every edge live play ingests — and,
+    /// since m34-f step ②, on every controller point live EXPRESSION ingests.
     /// `Int32.min` is not a reachable CoreMIDI `kMIDIPropertyUniqueID`, so a
     /// synthetic edge is always distinguishable from a hardware one. Nothing on
     /// this path reads it today (the CC observer feeds off the capture RING,
-    /// which live play bypasses) — it exists so a future reader cannot mistake
-    /// a typed note for an endpoint that does not exist.
+    /// which both live paths bypass) — it exists so a future reader cannot
+    /// mistake a typed note for an endpoint that does not exist.
+    ///
+    /// ⭐ **AND THE RING BYPASS IS WHY A PAD DRAG IS NOT MIDI-LEARNABLE**, which
+    /// is the right answer rather than an accident: `midi.learnControl` watches
+    /// the capture ring for the last hardware `controlChange`, so the user's own
+    /// on-screen gesture can never be mistaken for a knob they turned.
     static let livePlayEventSource: Int32 = .min
 
     /// LIVE PLAY (m23-ct): sound `pitches` on `trackID` now AND put the note
@@ -1784,6 +1815,59 @@ public final class AudioEngine: AudioEngineControlling {
                 renderer: renderer, controller: cc, value: data)
         }
         return auditionAudibility(trackID: trackID)
+    }
+
+    /// LIVE EXPRESSION (m34-f step ②): push one controller value to `trackID`'s
+    /// instrument now AND put it into the rolling take when `captureIntoTake`.
+    ///
+    /// ⭐ **THE AUDIBLE HALF IS `previewController` VERBATIM — NOT A SECOND
+    /// COPY OF IT.** Every rule that method documents (the cold-app first-touch
+    /// guard, the per-renderer state filter, no heartbeat, no `auditionVoices`
+    /// entry) applies here unchanged, because this method *calls* it. What is
+    /// added is one main-actor `session.ingest`.
+    ///
+    /// ⛔⛔ **THE INGEST IS DELIBERATELY NOT GATED ON THE STRIP'S STATE FILTER.**
+    /// `previewController` suppresses a push whose (controller, value) is
+    /// already parked on the SAME renderer — a correct optimisation for the
+    /// strip and a wrong one for a take, because the strip's state and the
+    /// take's contents are different records of different things. A value that
+    /// the strip already holds is still a value the user is performing at this
+    /// instant, and `MIDICaptureSession`'s own §7 thinning already drops a
+    /// genuine duplicate at its own timestamp. Coupling them would let a strip
+    /// coincidence silently delete a take point — this tree's characteristic
+    /// failure, in miniature.
+    ///
+    /// ⚠️ **THE OUTCOME STILL NARROWS THE INGEST.** `.noRenderer` /
+    /// `.unsupported` mean nothing was delivered at all, and a take must not
+    /// contain expression that never sounded.
+    @discardableResult
+    public func setLiveExpression(trackID: UUID, controller: UInt8, value: UInt8,
+                                  captureIntoTake: Bool) -> LiveExpressionOutcome {
+        // ONE timestamp, taken BEFORE the audible half, so the take's clock is
+        // as close to the user's actual gesture as this actor can observe (the
+        // `setLivePlayPitches` precedent).
+        let hostTime = mach_absolute_time()
+        let audition = previewController(trackID: trackID, controller: controller, value: value)
+
+        let delivered = audition != .noRenderer && audition != .unsupported
+        guard captureIntoTake, delivered,
+              activeTake?.capturingMIDI == true,
+              let session = midiInput?.captureSession else {
+            return LiveExpressionOutcome(audition: audition, capturedPoints: 0,
+                                         recording: false)
+        }
+        // ⚠️ **THE PACKING IS THE ONE THING A SWAP WOULD HIDE.**
+        // `MIDICaptureSession.ingestController` reads the CC NUMBER out of
+        // `pitch` and the DATA BYTE out of `velocity` for
+        // `ScheduledMIDIEvent.controlChange`. Swapping them writes a
+        // plausible-looking lane on the wrong controller, which no smoke test
+        // that only counts points would ever notice — so it is pinned by name
+        // in `LiveExpressionCaptureTests`.
+        session.ingest(LiveMIDIEvent(hostTime: hostTime, source: Self.livePlayEventSource,
+                                     kind: ScheduledMIDIEvent.controlChange,
+                                     pitch: controller & 0x7F, velocity: value & 0x7F,
+                                     channel: 0))
+        return LiveExpressionOutcome(audition: audition, capturedPoints: 1, recording: true)
     }
 
     /// Test seam: the controller value this engine believes is parked on a
@@ -3384,6 +3468,83 @@ public final class AudioEngine: AudioEngineControlling {
         guard activeTake == nil, currentAnchor == nil else {
             throw EngineError.recordingFailed("already rolling")
         }
+        try beginTake(transport, audioURL: audioURL, captureMIDI: captureMIDI,
+                      joiningPlayback: false, completion: completion)
+    }
+
+    /// m34-h phase 1 — start a take that JOINS playback already in progress.
+    /// See `AudioEngineControlling.startTakeInPlayback` for the contract; the
+    /// refusals below are the whole of the difference at this level.
+    ///
+    /// ⭐ THE LOAD-BEARING PROPERTY: this path never calls `startPlayers`, so
+    /// the already-sounding layers are not stopped, not rescheduled and not
+    /// re-anchored. That is what makes "the music never stops" true by
+    /// construction rather than by measurement — there is no reschedule seam
+    /// to be seamless across.
+    public func startTakeInPlayback(_ transport: TransportState, audioURL: URL?, captureMIDI: Bool,
+                                    completion: @escaping @MainActor (Result<TakeResult, Error>) -> Void) throws {
+        guard activeTake == nil else {
+            throw EngineError.recordingFailed("already recording — finish the current take first")
+        }
+        guard let anchor = currentAnchor else {
+            throw EngineError.recordingFailed(
+                "nothing is playing — start playback first, or use the ordinary record path"
+            )
+        }
+        // v1 REFUSAL, and the reason is domain arithmetic, not caution. Under a
+        // live loop the transport's beat is MODULAR while every capture clock
+        // in this engine (the writer's host-time window, the MIDI session's
+        // note stamps, `derivedLinearBeats`) is LINEAR — see the m15-b clamp
+        // note on `closeActiveTake`. Translating a modular request beat onto
+        // the running (linear) anchor would silently place the layer at the
+        // wrong instant. Beyond the arithmetic, a mid-cycle layer INSIDE a loop
+        // region is overdub, which this app does not model at all (`overdub` =
+        // 0 files). The loop × punch refusal (m15-b, design-m15b §7) is the
+        // precedent for refusing a real combination rather than half-shipping it.
+        //
+        // Checked against BOTH the live schedule and the cached transport flag:
+        // a schedule that is currently linear with a loop merely ENABLED still
+        // wraps through `restart(fromBeat: loopStartBeat)` at the loop end (the
+        // playhead task's fallback), which replaces the anchor mid-take and
+        // would break this take's host-time geometry underneath it.
+        guard loopContext == nil, !transport.isLoopEnabled else {
+            throw EngineError.recordingFailed(
+                "cannot record a layer while the loop is enabled — disable the loop first "
+                + "(recording into a loop region is overdub, which is not supported yet)"
+            )
+        }
+        // Punch translates absolute timeline beats onto the take's own anchor;
+        // combined with a mid-playback start that is untested machinery, so it
+        // is refused rather than half-trusted.
+        guard !transport.isPunchEnabled else {
+            throw EngineError.recordingFailed(
+                "cannot record a layer with a punch window enabled — disable punch first"
+            )
+        }
+        // The requested start must lie AT or AFTER the running anchor's own
+        // beat. It always does in practice (playback started at or before the
+        // current playhead), but a request behind the anchor would clamp to the
+        // anchor and report a startOffsetSeconds measured from the START OF
+        // PLAYBACK — landing the clip an arbitrary distance downstream. That is
+        // a silent mis-landing, so it refuses instead.
+        let leadSeconds = transport.tempoMap.seconds(from: anchor.startBeats,
+                                                     to: transport.positionBeats)
+        guard leadSeconds >= 0 else {
+            throw EngineError.recordingFailed(
+                "requested layer start is behind the running playback anchor — seek is refused "
+                + "while recording, so this take cannot be placed"
+            )
+        }
+        try beginTake(transport, audioURL: audioURL, captureMIDI: captureMIDI,
+                      joiningPlayback: true, completion: completion)
+    }
+
+    /// Shared start for both take kinds: the m16-a exception barrier plus the
+    /// wind-down. `joiningPlayback` rides straight through to `startTakeBody`,
+    /// which is where the two paths actually differ.
+    private func beginTake(_ transport: TransportState, audioURL: URL?, captureMIDI: Bool,
+                           joiningPlayback: Bool,
+                           completion: @escaping @MainActor (Result<TakeResult, Error>) -> Void) throws {
         // m16-a Leg 1: the whole record start (input capture, hardware
         // prepare, the startPlayers play loop, writer/MIDI alignment) runs
         // under the exception barrier — startTake already throws, so a
@@ -3394,6 +3555,7 @@ public final class AudioEngine: AudioEngineControlling {
         do {
             try withObjCExceptionBarrier("record start") {
                 try startTakeBody(transport, audioURL: audioURL, captureMIDI: captureMIDI,
+                                  joiningPlayback: joiningPlayback,
                                   capture: &capture, writer: &writer,
                                   completion: completion)
             }
@@ -3416,6 +3578,7 @@ public final class AudioEngine: AudioEngineControlling {
     /// wind down whatever had already started when a raise cut the body
     /// short).
     private func startTakeBody(_ transport: TransportState, audioURL: URL?, captureMIDI: Bool,
+                               joiningPlayback: Bool,
                                capture: inout InputCapture?, writer: inout RecordingWriter?,
                                completion: @escaping @MainActor (Result<TakeResult, Error>) -> Void) throws {
         // 2. Audio capture side first (only when the take wants audio): any
@@ -3462,11 +3625,19 @@ public final class AudioEngine: AudioEngineControlling {
         // anchorPolicy: record starts at a chosen beat, like a transport start —
         // and it is the ONE site that passes a non-zero countInBars, which
         // `.atHostTime` explicitly does not support (§7).
-        startPlayers(fromBeat: transport.positionBeats, tempoMap: transport.tempoMap,
-                     countInBars: transport.countInBars,
-                     renderClockTrusted: true, cause: .relocation,
-                     anchorPolicy: .asSoonAsPractical)
-        startPlayheadTask()
+        //    m34-h: a LAYER take (joiningPlayback) skips this entirely. The
+        //    players, the anchor and the playhead task are ALREADY running and
+        //    must stay exactly as they are — `startPlayers` is the
+        //    stop-reschedule-resume seam, and crossing it would interrupt every
+        //    layer already sounding. Skipping it is not an optimisation, it is
+        //    the feature.
+        if !joiningPlayback {
+            startPlayers(fromBeat: transport.positionBeats, tempoMap: transport.tempoMap,
+                         countInBars: transport.countInBars,
+                         renderClockTrusted: true, cause: .relocation,
+                         anchorPolicy: .asSoonAsPractical)
+            startPlayheadTask()
+        }
         // 4. Align the writer to the shared player-start anchor: capture
         //    before this host time is trimmed, so file frame 0 ≈ the moment
         //    playback (and the take) began. startPlayers always sets the anchor.
@@ -3480,6 +3651,38 @@ public final class AudioEngine: AudioEngineControlling {
         //    position — that was a live-E2E bug. punchOutBeat > positionBeats
         //    is a ProjectStore.record() precondition.
         let anchor = currentAnchor!
+        //    m34-h: the take's OWN clock origin. For an ordinary take it is the
+        //    playback anchor itself, verbatim (byte-identical to the pre-m34-h
+        //    behaviour). For a LAYER take the playback anchor belongs to a roll
+        //    that started arbitrarily earlier, so the take is origined at the
+        //    host instant corresponding to `transport.positionBeats`, computed
+        //    off the running anchor with the SAME map integral the punch-in
+        //    point uses. A caller whose playhead read is a display-stale tick
+        //    behind simply opens the window a few ms in the past: the writer
+        //    then accepts from its next delivery and reports the true gap in
+        //    `startOffsetSeconds`, which is exactly what ProjectStore's inverse
+        //    integral needs to land the clip where capture really began. The
+        //    error self-corrects; it does not accumulate.
+        //
+        //    ⚠️ COUNT-IN IS DELIBERATELY INERT ON THE LAYER PATH, and this is a
+        //    musical decision, not an oversight: `startPlayers` is what
+        //    implements a count-in and the layer path does not call it. Every
+        //    canonical looper (Boss RC, Ableton, Loopy Pro) starts an overdub
+        //    against the music already playing — the running loop IS the count.
+        //    Refusing instead would break `recordLayer` for every user, since
+        //    the project default is one bar (m23-cy). Pinned by
+        //    `LiveLayerCaptureTests`, so it is measured rather than emergent.
+        let takeAnchorHost: UInt64
+        let takeAnchorBeats: Double
+        if joiningPlayback {
+            let lead = max(0, transport.tempoMap.seconds(from: anchor.startBeats,
+                                                         to: transport.positionBeats))
+            takeAnchorHost = anchor.anchorHostTime + AVAudioTime.hostTime(forSeconds: lead)
+            takeAnchorBeats = transport.positionBeats
+        } else {
+            takeAnchorHost = anchor.anchorHostTime
+            takeAnchorBeats = anchor.startBeats
+        }
         if let writer {
             if transport.isPunchEnabled {
                 // Punch window = the map integral from the record position to
@@ -3496,8 +3699,8 @@ public final class AudioEngine: AudioEngineControlling {
                 )
                 writer.setAcceptWindow(reference: anchor.anchorHostTime, start: startHost, end: endHost)
             } else {
-                writer.setAcceptWindow(reference: anchor.anchorHostTime,
-                                       start: anchor.anchorHostTime, end: nil)
+                writer.setAcceptWindow(reference: takeAnchorHost,
+                                       start: takeAnchorHost, end: nil)
             }
         }
         // 4b. MIDI capture rides the SAME anchor the writer aligns to — one
@@ -3510,8 +3713,8 @@ public final class AudioEngine: AudioEngineControlling {
         if captureMIDI, let midi = ensureMIDIInput() {
             midi.drainCaptureRing()  // discard pre-take events queued while idle
             midi.captureSession = MIDICaptureSession(
-                anchorHostTime: anchor.anchorHostTime,
-                anchorBeats: anchor.startBeats,
+                anchorHostTime: takeAnchorHost,
+                anchorBeats: takeAnchorBeats,
                 tempoMap: anchor.tempoMap,
                 ticksToSeconds: Self.hostTicksToSeconds
             )
@@ -3523,13 +3726,25 @@ public final class AudioEngine: AudioEngineControlling {
         //    watchdog arms ONLY when audio capture is active — a note-less
         //    MIDI take is legal silence.
         activeTake = ActiveTake(writer: writer, capture: capture,
-                                capturingMIDI: captureMIDI, completion: completion)
+                                capturingMIDI: captureMIDI,
+                                keepsPlayback: joiningPlayback, completion: completion)
         capture?.configurationChangeHandler = { [weak self] in
-            self?.stopRecording()
+            self?.endTakeOnFatalConfigurationChange()
         }
         if let writer {
             armFirstBufferWatchdog(for: writer)
         }
+    }
+
+    /// A FATAL input-configuration change (device unplugged, rate change —
+    /// `InputCapture` already filters the benign post-pin reconfigure) ends
+    /// the take. m34-h: it ends it the way the take was STARTED — a layer take
+    /// keeps the music running, an ordinary take stops like it always has.
+    /// Reading `activeTake?.keepsPlayback` here rather than capturing a flag
+    /// in the closure keeps the two facts (which take is live, how it ends)
+    /// from ever disagreeing.
+    private func endTakeOnFatalConfigurationChange() {
+        closeActiveTake(stoppingPlayback: !(activeTake?.keepsPlayback ?? false))
     }
 
     /// Arms the one-shot no-input watchdog for the take that owns `writer`.
@@ -3558,7 +3773,12 @@ public final class AudioEngine: AudioEngineControlling {
         recordingWatchdog = nil
         take.capture?.configurationChangeHandler = nil
         take.capture?.stop()
-        stopPlayback()
+        // m34-h: a LAYER take (one that joined running playback) must leave the
+        // music running even when its own input turns out to be dead. Killing
+        // the transport here would stop every already-recorded layer mid-
+        // performance — the exact failure this feature exists to prevent, on
+        // the one path nobody watches.
+        if !take.keepsPlayback { stopPlayback() }
         midiInput?.captureSession = nil  // discard the MIDI side too
         // Discard the file: zero frames deletes it inside finalize; the tiny
         // arrival-after-check race leaves at most one buffer, deleted here.
@@ -3579,7 +3799,31 @@ public final class AudioEngine: AudioEngineControlling {
     }
 
     public func stopRecording() {
-        guard let take = activeTake else { return }  // no-op when not recording
+        _ = closeActiveTake(stoppingPlayback: true)
+    }
+
+    /// m34-h phase 1 — the whole point of the item: close the capture, clamp
+    /// the open notes, finalize the file and deliver the take result, all
+    /// WITHOUT tearing the transport down. `stopRecording()`'s sibling; the
+    /// two share ONE body so the stop beat, the MIDI clamp and the writer
+    /// finalize cannot drift apart. See `AudioEngineControlling` for why the
+    /// Bool must not be ignored.
+    public func finishTakeKeepingPlayback() -> Bool {
+        closeActiveTake(stoppingPlayback: false)
+    }
+
+    /// The ONE close path for a rolling take. `stoppingPlayback` is the ONLY
+    /// axis: everything else — the LINEAR stop beat taken before any teardown,
+    /// the capture stop, the MIDI drain/clamp/close, the writer finalize and
+    /// the completion hop — is identical on both, by construction rather than
+    /// by review. Returns false when no take was rolling.
+    ///
+    /// ⚠️ NO DEFAULT ON `stoppingPlayback`, the `startPlayers(cause:)`
+    /// precedent: whether the music keeps running is exactly the decision this
+    /// function exists to make, so the compiler asks every call site.
+    @discardableResult
+    private func closeActiveTake(stoppingPlayback: Bool) -> Bool {
+        guard let take = activeTake else { return false }  // no-op when not recording
         activeTake = nil
         recordingWatchdog?.cancel()
         recordingWatchdog = nil
@@ -3594,7 +3838,13 @@ public final class AudioEngine: AudioEngineControlling {
         let stopBeat = derivedLinearBeats()
         take.capture?.configurationChangeHandler = nil
         take.capture?.stop()
-        stopPlayback()
+        // m34-h: THE ONE DIFFERENCE between stopRecording() and
+        // finishTakeKeepingPlayback(). Leaving this out keeps `currentAnchor`,
+        // the players, the playhead task and the render callbacks alive — the
+        // stop beat above was already taken, and it is the LAST thing in this
+        // function that reads the anchor, so nothing below depends on whether
+        // playback continued.
+        if stoppingPlayback { stopPlayback() }
         // MIDI side finishes synchronously on the main actor: drain any tail
         // events still queued, then close the session at the stop beat.
         var midiResult: MIDIRecordingResult?
@@ -3613,7 +3863,7 @@ public final class AudioEngine: AudioEngineControlling {
         guard let writer = take.writer else {
             completion(.success(TakeResult(audio: nil, midi: midiResult,
                                            stopBeats: stopBeat)))
-            return
+            return true
         }
         let midiSide = midiResult
         writer.finalize { @Sendable result in
@@ -3637,6 +3887,7 @@ public final class AudioEngine: AudioEngineControlling {
                 completion(mapped)
             }
         }
+        return true
     }
 
     /// Snapshots the loop region AND metronome state from any transport

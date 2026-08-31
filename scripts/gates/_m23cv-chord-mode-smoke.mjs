@@ -116,29 +116,36 @@ try {
   // ══ 4. THE PRESET OVERLAY — LIGHTS, NEVER GATES ═════════════════════════
   s = body(await cmd("debug.musicalTyping", { progression: "four-chords" }));
   ok(s.progression === "four-chords", "Four Chords is lit", String(s.progression));
+  // ⚠️ `order` IS NO LONGER PAINTED — m34-i deleted the numeric badges after the
+  // user reported them unreadable, and replaced them with the moving next-chord
+  // BORDER (`_m34i-next-chord-border-smoke.mjs` owns that). It survives as SEAM
+  // DATA: the step index, which is what the border's position is checked
+  // against. These legs still pin the step ASSIGNMENT, which m34-i inherits.
   ok(cell(s, "A")?.order === 1 && cell(s, "G")?.order === 2
      && cell(s, "H")?.order === 3 && cell(s, "F")?.order === 4,
-     "⭐ the lit keys are numbered I=1 V=2 vi=3 IV=4, the mock-up's row exactly",
+     "⭐ the lit keys step I=1 V=2 vi=3 IV=4, the mock-up's row exactly",
      JSON.stringify(["A", "G", "H", "F"].map(k => cell(s, k)?.order)));
   ok(cell(s, "S")?.order === null && cell(s, "D")?.order === null
      && cell(s, "J")?.order === null,
-     "…and the other three degrees are UNNUMBERED",
+     "…and the other three degrees carry no step",
      JSON.stringify(["S", "D", "J"].map(k => cell(s, k)?.order)));
-  // ⭐ EXACTLY FOUR BADGES ON A FOUR-CHORD PRESET, ON THE LIVE APP. Found by
-  // LOOKING at a screenshot: the first build numbered every cell sharing a lit
-  // degree, so the colour keys and the +8va run gave ten badges and four
+  // ⭐ EXACTLY FOUR STEPPED CELLS ON A FOUR-CHORD PRESET, ON THE LIVE APP. Found
+  // by LOOKING at a screenshot: the first build numbered every cell sharing a
+  // lit degree, so the colour keys and the +8va run gave ten badges and four
   // different cells all read `1`. No assertion in this tree can see a pixel, so
-  // this one pins the COUNT the pixel problem reduces to.
+  // this one pins the COUNT the pixel problem reduces to. ⚠️ THE BADGE IS GONE
+  // (m34-i) BUT THIS PIN IS NOT: the next-chord border inherits exactly the same
+  // narrowing and would re-earn the same bug without it.
   const numbered = (s.chordCells ?? []).filter(c => c.order !== null);
   ok(numbered.length === 4,
-     "⭐ exactly FOUR numbered cells for a four-chord preset",
+     "⭐ exactly FOUR stepped cells for a four-chord preset",
      JSON.stringify(numbered.map(c => `${c.key}=${c.order}`)));
   const litCells = (s.chordCells ?? []).filter(c => c.lit);
   ok(litCells.length > 4,
-     "…while LIT is wider than NUMBERED — any lit key plays that chord",
+     "…while LIT is wider than STEPPED — any lit key plays that chord",
      `${litCells.length} lit`);
   ok(cell(s, "W")?.lit === true && cell(s, "W")?.order === null,
-     "a colour key of a lit degree is lit but not numbered",
+     "a colour key of a lit degree is lit but carries no step",
      JSON.stringify(cell(s, "W")));
 
   // ⛔⛔ THE RULE THE USER'S CHOICE TURNS ON. A dim key must play exactly as

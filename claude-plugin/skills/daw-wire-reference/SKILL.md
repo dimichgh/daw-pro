@@ -22,22 +22,34 @@ alone over-counts — see the method below), so a real count needs a
 derivation you can state and defend, not a bare `grep -c`.
 
 It reflects the tool surface enumerated from
-`mcp-server/src/server.ts` (**196 tools**, re-derived 2026-08-29 at the
-m24-m leg A close, which added `vc_convert_clips`; previously 195 at the
-m32-b2 close: the MCP tool↔command bijection test,
+`mcp-server/src/server.ts` (**208 tools**, re-derived 2026-08-30 at the
+m34-f step ② close, which added `pad_play_effort` — the live-PERFORMANCE
+sibling of `pad_preview_effort`, whose values are recorded into a rolling
+take; previously 207, re-derived 2026-08-30 at the
+m34-c close, which added the four one-click SoundFont download tools
+(`instrument_list_downloadable_sound_banks`, `instrument_download_sound_bank`,
+`instrument_sound_bank_download_status`, `instrument_cancel_sound_bank_download`);
+previously 203, re-derived 2026-08-30 at the
+m34-g close, which added `playbox_generate`. ⚠️⚠️ **THIS PARAGRAPH WAS FOUND
+ROTTEN AT THAT CLOSE AND THE ROT PREDATES m34-g: it claimed 196 against a
+measured 202, a SIX-tool drift, because `doc-count-drift.mjs` scores the
+COMMAND count and nothing scores this one.** It was corrected by re-running the
+decomposition below, whose arithmetic then matched a live `tools/list` over the
+generated plugin bundle EXACTLY — 203, with a negative control (a name that is
+not a tool) correctly absent. The bijection test,
 `mcp-server/test/audit-tools.test.ts`, defines
-`tool count = commands + |exception table B| + |exception table C|` — 191
+`tool count = commands + |exception table B| + |exception table C|` — 203
 commands (below) + 3 Table-B tools with no backing command at all
 (`generate_image`, `generate_lyrics`, `generate_song_suno` — they call a
 generation provider directly) + 2 Table-C tools that bridge to an EXISTING
 command, `track.setInstrument`, under a friendlier name/shape
-(`instrument_set_sampler_param`, `instrument_set_sampler_zones`) = 196.
+(`instrument_set_sampler_param`, `instrument_set_sampler_zones`) = 208.
 ⚠️ The authoritative pin is `mcp-server/test/integration.test.ts`'s
-`assert.equal(result.tools.length, 196)` — **NOT** a `grep -c 'registerTool('`,
+`assert.equal(result.tools.length, 208)` — **NOT** a `grep -c 'registerTool('`,
 which is a known liar on this file and previously anchored this paragraph at a
 stale 194) and
 `Sources/DAWControl/Commands.swift`
-(**195 commands** — the `CommandRouter.allCommands.count == 193` pin in
+(**211 commands** — the `CommandRouter.allCommands.count == 211` pin in
 `Tests/DAWControlTests/RenderCommandTests.swift`)
 in the DAW Pro repo — not memory, and not the app's own in-app Copilot
 catalog (`Sources/DAWControl/CopilotCatalog.swift`), which is a **different,
@@ -360,6 +372,47 @@ that just started. The engine model allows same-pitch overlap (offs pair
 by note id) but that id is lost when flattened for a hosted AU, so the
 rule that is safe everywhere wins.
 
+### The sustain pedal held everything forever. Now it can be capped.
+
+CC 64 has always been an unlimited latch on both built-ins: every note played
+while the pedal is down rings until the pedal comes up. That is right for a
+piano. On an organ or pad patch it is how a passage turns into a wall of
+sound — the pedal latches note after note and nothing ever stops.
+
+**`pedalHoldLimit` caps how many notes the pedal keeps alive.** Omitted = the
+old unlimited behaviour, unchanged, so nothing you have already written moves.
+
+```
+track_set_instrument {kind: "sampler",   sampler: {pedalHoldLimit: 6}}   # the sampler's
+track_set_instrument {kind: "polySynth", pedalHoldLimit: 6}              # the synth's
+instrument_set_sampler_param {param: "pedalHoldLimit", value: 6}         # one-knob form
+```
+
+Note the asymmetry, because it will bite otherwise: the **sampler's** cap
+lives inside the `sampler` object like every other sampler global, while the
+**poly synth's** is a TOP-LEVEL param, like `attack` and `cutoffHz`.
+
+Three facts worth knowing before you set one:
+
+- **The oldest note is RELEASED, not cut.** It fades out through the patch's
+  own `release`, so a capped organ hands one chord over to the next instead of
+  clicking. A patch with a very short `release` will still sound abrupt — that
+  is the envelope's doing, not the cap's, and the fix is a longer release.
+- ⚠️ **A key you are still HOLDING DOWN is never taken.** Only notes whose
+  keys are already up, kept alive by the pedal alone, can be reclaimed. With a
+  cap of 2 you can still hold a five-note chord with your hands.
+- **It binds at the next note-on**, not the instant you set it. Setting a cap
+  mid-passage never yanks anything already sounding; the passage thins out as
+  new notes arrive.
+
+Refused, not clamped, outside **1-128** — at both levels, and the error names
+the field path. Any value above the instrument's voice pool (64 sampler, 16
+synth) is unreachable and therefore means unlimited. Try 4-8 for an organ or
+pad that should breathe; leave it off for piano, where sympathetic ringing is
+the point.
+
+⚠️ **No UI knob yet** — this is wire + MCP only. A user cannot set it by hand.
+
 ### Bulk composition: Standard MIDI File + `clip_import_midi`, not JSON + `clip_add_midi`
 
 Composing large arrangements as JSON notes is prohibitively expensive. A
@@ -508,6 +561,36 @@ Three things lose a take, all of them silent:
 The recording recipe, in order: `track_set_arm` → `transport_record` → wait
 → `note_play` with real waits between the notes → `note_play {pitches: []}`
 → `transport_stop` → `clip_get_notes` on the clip that landed.
+
+### `play_sustain` is the pedal, and it changes what `note_play []` means (m34-l)
+
+`play_sustain {trackId, down}` is the damper pedal, MIDI CC 64. It is the
+answer to *"why does the note stop the moment I let go of the key"* — a piano's
+felt dampers fall on key release, and the pedal holds them off.
+
+**With `down:true`, `note_play {pitches: []}` no longer silences anything.**
+The notes keep ringing; the empty set only says the KEYS are up. That is the
+feature, not a bug, and it is the one thing to hold in your head when you
+interleave the two tools. Sending `down:false` releases everything the pedal
+was holding, while anything still in your `note_play` set keeps sounding.
+
+- **ALWAYS LIFT IT (`down:false`) WHEN YOU ARE DONE.** A pedal left down is a
+  drone with no visible cause. Lifting is never refused — not on the wrong
+  kind of track, not on a track that no longer exists.
+- **`down` in the reply is the STATE AFTER the call, not an echo.** A press
+  onto a track whose instrument is not loaded comes back `false` with a
+  `reason`. `pushed:false` means the pedal was already in that state and
+  nothing was sent — an honest no-op.
+- **`recording` is the same honesty light `note_play` carries.** `false` means
+  the pedal moved and went into NO take.
+- **MEASURED SUPPORT, not inferred:** the built-in poly synth, the built-in
+  sampler and the hosted sound-bank (SoundFont/DLS) instruments all honour
+  CC 64. Hosted Audio Units receive it and honour it if the plugin does.
+
+The app lifts it for you at the start of a take, at the end of a take, on
+`transport_panic`, and when a project closes — so it cannot outlive the take it
+was pressed in. The human shortcut for the same pedal is **Tab**, while Musical
+Typing is on.
 
 ## Etiquette (every agent follows this)
 

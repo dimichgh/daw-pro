@@ -333,6 +333,56 @@ public struct MIDIRecordingResult: Sendable, Equatable {
     }
 }
 
+/// What the MIDI take currently being captured has accumulated SO FAR
+/// (m34-a-2) — the live half of `MIDIRecordingResult`, read from the main
+/// actor while the take is still rolling.
+///
+/// ⭐ **WHY THIS CROSSES THE ENGINE SEAM AT ALL, AND WHY THAT COSTS NOTHING
+/// REAL-TIME.** Until this existed the take was completely invisible until it
+/// stopped: `MIDICaptureSession.finish(atBeat:)` is what builds the clip, and
+/// its `lengthBeats` is `max(1, ceil(stopBeat − anchorBeats))` — a value that
+/// does not exist until the stop beat is known. So the timeline stayed blank
+/// while the user played, which is what they reported. The session is already
+/// `@MainActor` and already holds every one of these numbers privately; this
+/// type carries them out. **No ring producer is added, and nothing here is
+/// reachable from the render thread** — the same reasoning that made m23-ct's
+/// Route C safe. If a future change finds itself adding a producer to the
+/// capture ring to feed this, the design has gone wrong.
+///
+/// ⚠️ **BEATS ARE ABSOLUTE AND LINEAR**, in the take's own frozen-map domain —
+/// the same domain `MIDICaptureSession` pairs notes in, NOT the modular
+/// `transport.positionBeats` a loop take reports. `TakeRegionPreview` is where
+/// the two are reconciled (and where loop takes are refused for v1).
+public struct LiveTakeExtent: Sendable, Equatable {
+    /// The take's clock origin — `MIDICaptureSession`'s `anchorBeats`. For an
+    /// ordinary take this is the beat playback started from; for an m34-h
+    /// layer it is the beat the layer joined at. Count-in delays the HOST
+    /// anchor, never this one, so it is stable from the instant the take opens.
+    public var anchorBeat: Double
+    /// The newest ACCEPTED note edge, absolute beats — nil until the first
+    /// post-anchor note-on lands. ⚠️ Pre-anchor (count-in) note-ons are DROPPED
+    /// by the session and must never move this: a take that has captured
+    /// nothing has no extent, and pretending otherwise would draw a region for
+    /// a clip that is never going to exist.
+    public var latestEventBeat: Double?
+    /// How many notes would land if the take stopped now — closed notes plus
+    /// still-open ones (open notes clamp to the stop beat, so they land too).
+    ///
+    /// ⭐ **THIS IS THE FIELD THAT DECIDES WHETHER ANYTHING IS DRAWN**, and it
+    /// counts NOTES rather than events on purpose: `ProjectStore.finishTake`
+    /// discards a take whose `notes` are empty ("empty take discarded — no MIDI
+    /// notes received"), and it does that even when controller lanes captured
+    /// plenty. Counting events would promise a clip that the store then throws
+    /// away — a ghost region.
+    public var noteCount: Int
+
+    public init(anchorBeat: Double, latestEventBeat: Double?, noteCount: Int) {
+        self.anchorBeat = anchorBeat
+        self.latestEventBeat = latestEventBeat
+        self.noteCount = noteCount
+    }
+}
+
 /// Outcome of one finished take: the audio side (nil for MIDI-only takes) and
 /// the MIDI side (nil when MIDI capture was off or unsupported). One-take
 /// semantics: if the audio side aborts, the WHOLE take fails and captured
@@ -894,6 +944,57 @@ public protocol AudioEngineControlling: AnyObject {
     /// startRecording completion. No-op when not recording.
     func stopRecording()
 
+    /// LIVE LOOPING (m34-h phase 1) — close the rolling take and deliver its
+    /// result while the transport KEEPS PLAYING. The sibling of
+    /// `stopRecording()`, not a replacement: identical capture teardown,
+    /// identical linear stop-beat, identical open-note clamp, identical
+    /// writer finalize — the ONE difference is that playback is not torn
+    /// down, so the graph, the playhead and the render callbacks continue.
+    ///
+    /// Returns `true` when a take was actually closed this way. `false` means
+    /// NOTHING WAS CLOSED — either no take was rolling, or this engine has no
+    /// such capability (the default below). ⚠️ The Bool is load-bearing and
+    /// must never be ignored: a caller that assumed success would leave
+    /// `transport.isRecording` false over a still-rolling take, and the take
+    /// would land later against a cleared pending record — i.e. silently lost
+    /// work. `ProjectStore.finishLayer()` throws on `false` for that reason.
+    func finishTakeKeepingPlayback() -> Bool
+
+    /// The take currently being captured, as far as it has got (m34-a-2) — nil
+    /// when no MIDI take is rolling. Read from the main actor at the transport
+    /// tick's cadence (~30 Hz) so the arrange can draw a PROVISIONAL region
+    /// that grows while the user plays; the real clip replaces it at `finish`.
+    ///
+    /// ⚠️ **OPTIONAL CAPABILITY WITH THE FAMILIAR VACUITY RISK** (the
+    /// `previewController` / `setLivePlayPitches` hazard, stated at both): an
+    /// engine that forgot to override this returns nil forever, every model
+    /// and control test still passes because every caller handles "no extent"
+    /// honestly, and the symptom in the product is a blank timeline during a
+    /// take — i.e. exactly the defect this exists to fix, silently restored.
+    /// `Tests/DAWEngineTests/LiveTakeExtentTests.swift` holds the REAL engine
+    /// to it.
+    func liveTakeExtent() -> LiveTakeExtent?
+
+    /// LIVE LOOPING (m34-h phase 1) — start a take that JOINS playback already
+    /// in progress, so layer N+1 can be recorded without ever stopping.
+    ///
+    /// Unlike `startTake`, this must NOT reschedule anything: the already
+    /// sounding layers keep their existing schedule and their existing anchor,
+    /// and the new capture is aligned onto that SAME running anchor. Capture
+    /// begins at `transport.positionBeats` — translated onto the host clock
+    /// through the running anchor exactly as a punch-in point is — so a caller
+    /// whose playhead read is a display-stale tick behind still gets an honest
+    /// `startOffsetSeconds` and lands its clip where capture really began.
+    ///
+    /// Refuses (throws) when the transport is NOT already playing, when a take
+    /// is already rolling, when a count-in is requested (a count-in delays the
+    /// anchor, and this take shares the running anchor), and — v1 — when a
+    /// LOOP is active: a mid-cycle layer inside a loop region is overdub
+    /// semantics, which this app does not model yet (the m15-b loop × punch
+    /// refusal is the precedent).
+    func startTakeInPlayback(_ transport: TransportState, audioURL: URL?, captureMIDI: Bool,
+                             completion: @escaping @MainActor (Result<TakeResult, Error>) -> Void) throws
+
     /// MIDI input sources as CoreMIDI enumerates them (hot-plug refreshes the
     /// list). First call may lazily create the engine's MIDI client.
     func availableMIDIInputs() -> [MIDIInputDevice]
@@ -975,6 +1076,39 @@ public protocol AudioEngineControlling: AnyObject {
     /// will be heard when that is the case, exactly as `setAuditionPitches` does.
     @discardableResult
     func previewController(trackID: UUID, controller: UInt8, value: UInt8) -> AuditionOutcome
+
+    /// LIVE EXPRESSION (m34-f step ②): sends ONE controller value to `trackID`'s
+    /// instrument right now AND, when `captureIntoTake` is true and a take is
+    /// rolling, puts that value into the take's controller lane.
+    ///
+    /// ⭐⭐ **THE SEAM THE PAD WAS MISSING, AND IT IS THE WHOLE ITEM.**
+    /// `previewController` above is *"a preview, never the record"* — correct
+    /// for auditioning a shape, and a silent lie for a performance. Something
+    /// the user shapes by hand during an armed take must be IN that take, or it
+    /// sounds right while played and vanishes from the bounce. `MIDICapture-
+    /// Session` has ingested `controlChange` since m16-b3; nothing on the pad's
+    /// side ever handed it one.
+    ///
+    /// ⭐⭐ **NET: ZERO RINGS GAIN A PRODUCER — the m23-ct Route C argument,
+    /// unchanged.** ONE main-actor value fans to BOTH pipes at their MAIN-ACTOR
+    /// ends: the audible half rides the existing per-renderer audition ring
+    /// (`previewController`, untouched), and the capture half is a direct
+    /// main-actor call into the take's `MIDICaptureSession`, bypassing the
+    /// capture ring entirely. The CoreMIDI receive thread stays the sole
+    /// producer of every thru/capture ring; the main actor stays the sole
+    /// producer of every audition ring.
+    ///
+    /// ⚠️ **`captureIntoTake` IS A DOMAIN VERDICT, NOT AN ENGINE ONE.** Only
+    /// `ProjectStore` knows arm state, so it computes
+    /// `isRecording && isArmed && kind == .instrument` and hands the answer
+    /// down. The engine narrows it (is a take actually capturing MIDI, does a
+    /// session exist) but never widens it.
+    ///
+    /// Never throws; the outcome reports what was heard, how many points went
+    /// into the take, and whether a take received them at all.
+    @discardableResult
+    func setLiveExpression(trackID: UUID, controller: UInt8, value: UInt8,
+                           captureIntoTake: Bool) -> LiveExpressionOutcome
 
     /// LIVE PLAY (m23-ct): sounds exactly `pitches` on `trackID` right now AND,
     /// when `captureIntoTake` is true and a take is rolling, puts the note
@@ -1182,6 +1316,34 @@ extension AudioEngineControlling {
     public func previewController(trackID: UUID, controller: UInt8,
                                   value: UInt8) -> AuditionOutcome { .unsupported }
 
+    /// Live expression is optional capability (m34-f step ②).
+    ///
+    /// ⭐⭐ **THE DEFAULT FORWARDS TO `previewController` RATHER THAN RETURNING
+    /// `.unsupported`, AND THAT CHOICE IS DELIBERATE.** Every existing fake and
+    /// headless engine in this tree implements the preview and is asserted
+    /// against its push count; a default that answered `.unsupported` would
+    /// silence the pad for all of them the moment `PadPreviewController` was
+    /// pointed at this method. Forwarding keeps the AUDIBLE half exactly as it
+    /// was for every conformer, and leaves the CAPTURE half — the genuinely new
+    /// capability — as the only thing an engine has to opt into.
+    ///
+    /// ⚠️⚠️ **THAT MAKES THE VACUITY RISK SHARPER, NOT SOFTER, SO IT IS NAMED
+    /// HERE: a real engine that forgot to override this would sound perfect and
+    /// record nothing, forever, and every model-layer test would still pass.**
+    /// That is precisely the defect this item exists to prevent, so it must be
+    /// closed by a test that drives the REAL engine:
+    /// `Tests/DAWEngineTests/LiveExpressionCaptureTests.swift` rolls a take and
+    /// counts the controller points that reach `midiCaptureSessionForTesting`
+    /// — the `LivePlayCaptureTests` precedent applied to a method whose default
+    /// is a silently unrecorded performance.
+    @discardableResult
+    public func setLiveExpression(trackID: UUID, controller: UInt8, value: UInt8,
+                                  captureIntoTake: Bool) -> LiveExpressionOutcome {
+        LiveExpressionOutcome(
+            audition: previewController(trackID: trackID, controller: controller, value: value),
+            capturedPoints: 0, recording: false)
+    }
+
     /// Live play is optional capability (m23-ct, the `setAuditionPitches`
     /// precedent): fakes and headless engines have neither instrument renderers
     /// nor a MIDI capture session, so the default sounds nothing and captures
@@ -1198,6 +1360,36 @@ extension AudioEngineControlling {
     /// counting the edges that reach `midiCaptureSessionForTesting`.
     public func setLivePlayPitches(trackID: UUID, pitches: [UInt8], velocity: UInt8,
                                    captureIntoTake: Bool) -> LivePlayOutcome { .unsupported }
+
+    /// Closing a take without stopping playback is optional capability (m34-h,
+    /// the `setLivePlayPitches` precedent): fakes and headless engines own no
+    /// capture writer and no MIDI session, so the default closes NOTHING and
+    /// says so.
+    ///
+    /// ⚠️ **THE VACUITY RISK HERE IS THE WORST OF THE FAMILY, because the
+    /// default is not silence — it is a LOST TAKE.** An `AudioEngine` that
+    /// forgot to override this would report `false` forever; if the store
+    /// treated `false` as success it would clear `isRecording` and the pending
+    /// take while the engine kept capturing, and the performance would land
+    /// nowhere. Two things close that hole: the store THROWS on `false`
+    /// (`ProjectStore.finishLayer()`), and
+    /// `Tests/DAWEngineTests/LiveLayerCaptureTests.swift` asserts the REAL
+    /// engine returns `true` for a rolling take AND leaves playback running —
+    /// the `OutputDeviceTests` / `previewController` precedent applied to a
+    /// method whose default silently discards a recording.
+    public func finishTakeKeepingPlayback() -> Bool { false }
+
+    /// Joining running playback with a new take is optional capability (m34-h,
+    /// same precedent). The default THROWS rather than returning quietly: a
+    /// silent no-op would leave the caller believing layer 2 was rolling while
+    /// nothing captured, which is the same lost-performance failure
+    /// `finishTakeKeepingPlayback`'s Bool exists to prevent.
+    public func startTakeInPlayback(_ transport: TransportState, audioURL: URL?, captureMIDI: Bool,
+                                    completion: @escaping @MainActor (Result<TakeResult, Error>) -> Void) throws {
+        throw ProjectError.transportBusy(
+            "this engine cannot start a take while playback is running — stop first, then record"
+        )
+    }
 
     /// The audition all-stop is optional capability (m23-d): an engine with no
     /// audition support holds no voices, so the default is a no-op.
@@ -1411,6 +1603,13 @@ extension AudioEngineControlling {
             completion(result.map { TakeResult(audio: $0, midi: nil) })
         }
     }
+
+    /// Live take extent is optional capability (m34-a-2): fakes and headless
+    /// engines run no `MIDICaptureSession`, so they have no take to describe
+    /// and every conformer compiles unchanged. See the requirement's ⚠️ for
+    /// why this default is dangerous and which suite holds the real engine to
+    /// it.
+    public func liveTakeExtent() -> LiveTakeExtent? { nil }
 
     public func availableMIDIInputs() -> [MIDIInputDevice] { [] }
     public func midiEventCount() -> Int { 0 }

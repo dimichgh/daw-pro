@@ -38,6 +38,10 @@ struct ContentView: View {
     /// Gap between the pinned ruler block and the scrolling track area (m13-g) —
     /// reads as a distinct pinned ruler bar over the track panels.
     private static let arrangeBlockGap: CGFloat = 6
+    /// The arrange's shared VERTICAL scroller's coordinate space (m34-a-3).
+    /// Named so the lanes column can report its own top relative to it — the
+    /// horizontal `hScrollSpace` discipline, one axis over.
+    private static let arrangeVScrollSpace = "arrangeVScroll"
 
     /// The clip whose piano roll is open (nil = closed). Only MIDI clips open it.
     /// Hoisted onto AppModel — see `model` above.
@@ -599,11 +603,43 @@ struct ContentView: View {
                                 // Draggable sidebar↔timeline splitter (beta m10-d).
                                 sidebarSplitter
                                 arrangeTimeline(.lanes, viewport: bodyViewport)
+                                    // VERTICAL FOLLOW (m34-a-3): report the LANES
+                                    // column's own top in the vertical scroller's
+                                    // space, and its laid-out height.
+                                    //
+                                    // ⭐ MEASURED ON THE LANES, NOT ON THE HStack,
+                                    // AND THAT IS THE POINT: `ArrangeLaneGeometry.
+                                    // laneTops` are in the LANES' content space, so
+                                    // an offset measured against the lanes' own
+                                    // origin compares to them directly — with no
+                                    // assumption about how this HStack aligns its
+                                    // row column against its lane column. Measuring
+                                    // the HStack would silently inherit that
+                                    // alignment into every reveal decision.
+                                    //
+                                    // The GeometryReader rides view-update
+                                    // machinery, not preference machinery, for the
+                                    // m17-b reason recorded on the horizontal
+                                    // report inside TimelineLanesView.
+                                    .background(GeometryReader { laneGeo in
+                                        let minY = laneGeo.frame(in: .named(Self.arrangeVScrollSpace)).minY
+                                        let height = laneGeo.size.height
+                                        Color.clear
+                                            .onChange(of: minY, initial: true) { _, v in
+                                                model.reportArrangeVScroll(-v, contentHeight: height)
+                                            }
+                                            .onChange(of: height, initial: true) { _, v in
+                                                model.reportArrangeVScroll(
+                                                    -laneGeo.frame(in: .named(Self.arrangeVScrollSpace)).minY,
+                                                    contentHeight: v)
+                                            }
+                                    })
                             }
                             // Fill the viewport when content is short (glass panels stay
                             // full height); grow past it when tall (scroll takes over).
                             .frame(minHeight: bodyViewport, alignment: .top)
                         }
+                        .coordinateSpace(name: Self.arrangeVScrollSpace)
                         // Deep-scroll proof (m13-g G3): `debug.arrangeScroll` sets a
                         // target track id + bumps a nonce; the shared scroll jumps to
                         // it so a capture can frame the bottom of a deep session with
@@ -615,12 +651,30 @@ struct ContentView: View {
                                                anchor: model.arrangeScrollToBottom ? .bottom : .top)
                             }
                         }
+                        // VERTICAL FOLLOW (m34-a-3): reveal the take's
+                        // destination row. Same proxy, same `scrollTo(rowID:)`
+                        // mechanism as the deep-scroll seam above — and
+                        // deliberately NOT animated: a follow move may not glide,
+                        // for the reason the horizontal page turn records.
+                        // Nonce-driven, so a repeat of the same row still fires.
+                        .onChange(of: model.arrangeVFollowNonce) { _, _ in
+                            guard let target = model.arrangeVFollowTarget else { return }
+                            proxy.scrollTo(target,
+                                           anchor: model.arrangeVFollowAnchorsBottom ? .bottom : .top)
+                        }
                     }
                 }
                 // Report the live lanes viewport width to the zoom model (m17-b) —
                 // onChange (not inline) so the model mutation never runs mid-render.
                 .onChange(of: lanesViewportW, initial: true) { _, w in
                     model.arrangeViewportWidth = w
+                }
+                // The VERTICAL viewport (m34-a-3) — the scroll's own visible
+                // height, which is this block minus the pinned ruler and the gap.
+                // Reported from the same place `bodyViewport` is computed so the
+                // reveal decision and the layout can never disagree about it.
+                .onChange(of: bodyViewport, initial: true) { _, h in
+                    model.arrangeVViewportHeight = h
                 }
                 // FOLLOW THE PLAYHEAD (m23-c2) — driven from the TRANSPORT
                 // observation path, never from a geometry callback: a `scrollTo`
@@ -632,6 +686,13 @@ struct ContentView: View {
                 // fires on real playback and on nothing else.
                 .onChange(of: store.transport.positionBeats) { _, _ in
                     model.followArrangeTick()
+                    // m34-a-2 / m34-a-3: the growing take region and the
+                    // vertical follow ride the SAME transport observation, for
+                    // the reason stated above — a `scrollTo` (and an engine
+                    // read) issued inside a layout transaction is the m17-b
+                    // hazard, and this path is not one.
+                    store.refreshLiveTakeRegion()
+                    model.followArrangeVerticalTick()
                 }
                 // Pressing play is the moment a user expects the view to take
                 // charge again, so a start clears any manual-scroll suspension.
@@ -1203,6 +1264,11 @@ struct ContentView: View {
             tempoMap: store.transport.tempoMap,
             tempoLane: model.tempoLaneModel,
             isRecordingTransport: store.transport.isRecording,
+            // m34-a-2: the growing take region. A plain value read off the
+            // store — the DECISION about whether there is one lives in
+            // `TakeRegionPreview` (DAWCore), and `refreshLiveTakeRegion()` is
+            // its one writer, driven from the transport tick below.
+            liveTakeRegion: store.liveTakeRegion,
             // Ruler-block pinning (m13-g): the render mode + horizontal-sync wiring.
             content: content,
             hScrollOffset: arrangeHScroll,
@@ -1716,10 +1782,18 @@ struct ContentView: View {
                 // `AppModel` funnel rather than touching the controller directly,
                 // so the mouse, the chips and `debug.musicalTyping` drive ONE path.
                 onChordCellPress: { model.musicalTypingChordCellDown(cellIndex: $0) },
+                // m34-l: THE ONE FUNNEL — the pedal pill, the Tab key and
+                // `debug.musicalTyping {sustain:}` all land in `setSustain`.
+                onToggleSustain: { model.musicalTypingToggleSustain() },
                 onSetPlayMode: { model.setMusicalTypingPlayMode($0) },
                 onSetKey: { model.musicalTyping.setChordKey($0, mode: $1) },
                 onSetVoicingPreset: { model.musicalTyping.setVoicingPreset($0) },
-                onSetProgression: { model.musicalTyping.setProgression($0) }
+                onSetProgression: { model.musicalTyping.setProgression($0) },
+                // m34-g — Playbox. Same law: through an `AppModel` funnel, so
+                // the button and `debug.musicalTyping` drive ONE path.
+                onSetAdvanceMode: { model.setMusicalTypingAdvanceMode($0) },
+                onGeneratePlaybox: { model.generatePlaybox() },
+                isGeneratingPlaybox: model.playbox.isBusy
             )
             .onAppear { model.refreshMusicalTypingTarget() }
             // ⚠️ RELEASES ON BOTH EDGES, AND THAT IS A DECISION, NOT AN

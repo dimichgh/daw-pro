@@ -386,4 +386,223 @@ struct LivePlayCaptureTests {
         let shortNote = try #require(notes.first { $0.pitch == 103 })
         #expect(held.allSatisfy { $0.lengthBeats > shortNote.lengthBeats })
     }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // m34-f step ② — LIVE EXPRESSION capture, against the same REAL engine.
+    //
+    // ⚠️ **A STRUCTURAL FOLD, NOT A TOPICAL MERGE**, and the reason is written
+    // here rather than left to be re-derived: `MainActorOccupancySiteTests`
+    // Leg C caps this tree's `@MainActor` `@Suite` count, and the tree is AT
+    // the cap — measured, by this very item, which added a suite of its own
+    // and pushed it to 370 against a bound of 369. Raising the bound to fit a
+    // new suite would be raising the thing it measures. The same fold
+    // `HumanizeModelTests` performs for `BreathPadModel`.
+    //
+    // The fold is a good fit rather than merely a legal one: these tests need
+    // exactly this suite's fixture (a REAL `AudioEngine` with a rolling
+    // MIDI-only take, past the anchor), and a separate suite duplicated
+    // `rollingTake`, `TakeBox` and `settlePastAnchor` verbatim to get it.
+    //
+    // ⛔⛔ **THEY EXIST FOR THE SAME REASON THE NOTE TESTS ABOVE DO, ONE AXIS
+    // OVER, AND THE DEFAULT THEY GUARD IS MORE DANGEROUS.**
+    // `AudioEngineControlling.setLiveExpression` ships with a default that
+    // FORWARDS to `previewController` and captures nothing — chosen so every
+    // existing fake keeps SOUNDING, and therefore the one default in the family
+    // whose failure is inaudible. A real engine that forgot to override it
+    // would sound perfect, report a plausible `AuditionOutcome`, and record
+    // nothing, while every DAWCore test stayed green because
+    // `PadPreviewController` is written to keep working against an engine that
+    // cannot capture.
+    //
+    // ⚠️ SENTINEL CONTROLLER: CC 102, in the MIDI 1.0 "undefined" block, which
+    // no other suite here sends and no hardware default maps to — the
+    // sentinel-pitch discipline above, applied to a controller. CC 11 is
+    // asserted separately only where the DEFAULT ITSELF is the claim.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    private static let sentinelCC = 102
+
+    private func expressionLane(_ box: TakeBox, controller: Int) throws -> MIDIControllerLane? {
+        let take = try #require(box.result).get()
+        let midi = try #require(take.midi)
+        return midi.controllerLanes.first { $0.type == .cc(controller: controller) }
+    }
+
+    // MARK: - The vacuity closer
+
+    @Test("⛔ THE REAL ENGINE ACTUALLY CAPTURES — a performed value reaches the finished take's lane")
+    func theRealEngineIngestsAControllerPoint() async throws {
+        guard let (engine, track, box) = try rollingTake() else { return }
+        defer { engine.shutdown() }
+        // A session must EXIST, or every assertion below would pass vacuously on
+        // an empty take. Loud, not skipped.
+        #expect(engine.midiCaptureSessionForTesting != nil)
+        await settlePastAnchor()
+
+        let pushed = engine.setLiveExpression(trackID: track.id,
+                                              controller: UInt8(Self.sentinelCC),
+                                              value: 40, captureIntoTake: true)
+        #expect(pushed.capturedPoints == 1)
+        #expect(pushed.recording, "THE HONESTY LIGHT must be on when the take really received it")
+        #expect(pushed.audition != .noRenderer && pushed.audition != .unsupported)
+
+        engine.stopRecording()
+
+        let recorded = try #require(try expressionLane(box, controller: Self.sentinelCC),
+                                    "the take must carry a CC \(Self.sentinelCC) lane")
+        print("[measured] m34-f ingest: \(recorded.points.map { ($0.beat, $0.value) })")
+        #expect(recorded.points.contains { $0.value == 40 })
+    }
+
+    @Test("⚠️ THE PACKING PIN: the controller NUMBER and the DATA BYTE are not swapped")
+    func theEventPackingIsNotSwapped() async throws {
+        // ⛔ A SWAP IS THE ONE DEFECT A POINT-COUNTING TEST CANNOT SEE.
+        // `MIDICaptureSession.ingestController` reads the CC number out of
+        // `pitch` and the value out of `velocity`; reversing them still produces
+        // a lane with the right number of points, at the right beats, and every
+        // "did it record" assertion still passes — the lane is simply the wrong
+        // controller carrying the wrong numbers. The two are chosen DISTINCT and
+        // both in 0…127 so a swap cannot hide behind a clamp.
+        guard let (engine, track, box) = try rollingTake() else { return }
+        defer { engine.shutdown() }
+        #expect(engine.midiCaptureSessionForTesting != nil)
+        await settlePastAnchor()
+
+        engine.setLiveExpression(trackID: track.id, controller: UInt8(Self.sentinelCC),
+                                 value: 7, captureIntoTake: true)
+        engine.stopRecording()
+
+        let onTheRightLane = try expressionLane(box, controller: Self.sentinelCC)
+        let onTheSwappedLane = try expressionLane(box, controller: 7)
+        #expect(onTheRightLane != nil, "the lane must be CC \(Self.sentinelCC), the controller")
+        #expect(onTheSwappedLane == nil, "a lane at CC 7 means number and value were swapped")
+        #expect(onTheRightLane?.points.contains { $0.value == 7 } == true)
+    }
+
+    @Test("the DEFAULT controller really is CC 11 end to end, not only in a constant")
+    func theDefaultLaneIsExpression() async throws {
+        guard let (engine, track, box) = try rollingTake() else { return }
+        defer { engine.shutdown() }
+        #expect(engine.midiCaptureSessionForTesting != nil)
+        await settlePastAnchor()
+
+        engine.setLiveExpression(
+            trackID: track.id,
+            controller: UInt8(PadPreviewController.defaultExpressionCC),
+            value: 64, captureIntoTake: true)
+        engine.stopRecording()
+
+        #expect(try expressionLane(box, controller: 11) != nil,
+                "the pad's default must land on the expression lane BreathContour writes")
+    }
+
+    // MARK: - The gate
+
+    @Test("captureIntoTake:false SOUNDS and records NOTHING — the preview contract, at the engine")
+    func theCaptureGateIsRespected() async throws {
+        guard let (engine, track, box) = try rollingTake() else { return }
+        defer { engine.shutdown() }
+        #expect(engine.midiCaptureSessionForTesting != nil)
+        await settlePastAnchor()
+
+        let previewed = engine.setLiveExpression(trackID: track.id,
+                                                 controller: UInt8(Self.sentinelCC),
+                                                 value: 90, captureIntoTake: false)
+        #expect(previewed.capturedPoints == 0)
+        #expect(previewed.recording == false)
+        // It still SOUNDED — a preview is heard, it is simply not kept.
+        #expect(previewed.audition != .noRenderer && previewed.audition != .unsupported)
+        engine.stopRecording()
+
+        #expect(try expressionLane(box, controller: Self.sentinelCC) == nil,
+                "a preview must leave NO lane in the take")
+    }
+
+    @Test("a value the engine could not deliver captures nothing — a take never contains what never sounded")
+    func anUndeliveredValueIsNotCaptured() async throws {
+        guard let (engine, _, box) = try rollingTake() else { return }
+        defer { engine.shutdown() }
+        #expect(engine.midiCaptureSessionForTesting != nil)
+        await settlePastAnchor()
+
+        // A track the engine has never heard of has no renderer.
+        let ghost = engine.setLiveExpression(trackID: UUID(),
+                                             controller: UInt8(Self.sentinelCC),
+                                             value: 55, captureIntoTake: true)
+        #expect(ghost.audition == .noRenderer)
+        #expect(ghost.capturedPoints == 0)
+        #expect(ghost.recording == false)
+        engine.stopRecording()
+        #expect(try expressionLane(box, controller: Self.sentinelCC) == nil)
+    }
+
+    // MARK: - The strip filter must not gate the take
+
+    @Test("⛔ A REPEATED VALUE THE STRIP ALREADY HOLDS IS STILL CAPTURED — the filters are decoupled")
+    func theStripStateFilterDoesNotSuppressCapture() async throws {
+        // `previewController` suppresses a push whose (controller, value) is
+        // already parked on the SAME renderer — a correct optimisation for the
+        // strip and a wrong one for a take. A value the strip already holds is
+        // still a value the user is performing at this instant, and the
+        // session's own thinning is what decides whether it is worth a point.
+        // Coupling them would let a strip coincidence silently delete a take
+        // point.
+        guard let (engine, track, box) = try rollingTake() else { return }
+        defer { engine.shutdown() }
+        #expect(engine.midiCaptureSessionForTesting != nil)
+        await settlePastAnchor()
+
+        for _ in 0..<4 {
+            let repeated = engine.setLiveExpression(trackID: track.id,
+                                                    controller: UInt8(Self.sentinelCC),
+                                                    value: 33, captureIntoTake: true)
+            #expect(repeated.capturedPoints == 1,
+                    "the engine must OFFER every push to the take, even one the strip ignores")
+            try await Task.sleep(for: .milliseconds(40))
+        }
+        engine.stopRecording()
+
+        let recorded = try #require(try expressionLane(box, controller: Self.sentinelCC))
+        print("[measured] m34-f repeats: \(recorded.points.map { ($0.beat, $0.value) })")
+        // ⚠️ THE LANE ITSELF IS THINNED, AND THAT IS THE RIGHT LAYER FOR IT.
+        // `MIDICaptureSession`'s §7 duplicate-drop keeps one point for a run of
+        // identical values, so four offered pushes become one stored point. The
+        // assertion is therefore "the point exists", not "there are four" — the
+        // engine's job is to OFFER, the session's job is to THIN.
+        #expect(recorded.points.contains { $0.value == 33 })
+    }
+
+    // MARK: - A whole performed gesture
+
+    @Test("a swell performed through the pad's own controller lands as a rising lane")
+    func aPerformedSwellLandsAsARisingLane() async throws {
+        guard let (engine, track, box) = try rollingTake() else { return }
+        defer { engine.shutdown() }
+        #expect(engine.midiCaptureSessionForTesting != nil)
+        await settlePastAnchor()
+
+        let performed: [UInt8] = [10, 30, 60, 95, 120, 95, 60, 20]
+        for value in performed {
+            engine.setLiveExpression(trackID: track.id, controller: UInt8(Self.sentinelCC),
+                                     value: value, captureIntoTake: true)
+            try await Task.sleep(for: .milliseconds(40))
+        }
+        engine.stopRecording()
+
+        let recorded = try #require(try expressionLane(box, controller: Self.sentinelCC))
+        print("[measured] m34-f swell: \(recorded.points.map { ($0.beat, $0.value) })")
+        // ⚠️ NOT AN EXACT POINT COUNT. The session's spacing law may coalesce
+        // neighbours, and a wall-clock sleep is not a scheduler contract — an
+        // exact count here would be a flake, which this tree has already paid
+        // for once in `LivePlayCaptureTests`. What is asserted is the SHAPE: the
+        // performance rose and fell, and the extremes survived.
+        #expect(recorded.points.count >= 4)
+        let values = recorded.points.map(\.value)
+        #expect(values.max() ?? 0 >= 95, "the peak of the swell must be in the take")
+        #expect(values.first ?? 127 < 60, "the take must start quiet, as performed")
+        #expect(values.last ?? 127 < 60, "and end quiet")
+        // Beats must ADVANCE — a lane whose points all sit at one beat would be
+        // a stack, not a performance.
+        #expect(Set(recorded.points.map(\.beat)).count == recorded.points.count)
+    }
 }

@@ -228,12 +228,53 @@ test("instrument_set_sampler_param requires trackId, param, and value (schema la
 
 test("instrument_set_sampler_param rejects a param not in the enum (schema layer)", async () => {
   const trackId = randomUUID();
+  // ⚠️ m34-o CHANGED THIS TEST'S EXAMPLE, and the reason is the point. It used
+  // to send `param: "sustain"` and assert it was refused, on the stated ground
+  // that "sustain is a polySynth field, not a sampler global". That ground is
+  // no longer true: m34-o gave the sampler instrument-level `decay`/`sustain`
+  // so a patch can be made to FADE, which it previously could not be except by
+  // authoring both fields on every zone. Leaving the old example would have
+  // pinned the absence of a shipped feature.
+  //
+  // The test's PURPOSE is unchanged — an out-of-enum param must be refused at
+  // the schema layer, before the bridge — so it now names `cutoffHz`, a real
+  // polySynth field that genuinely is NOT a sampler global.
   const result = (await client.callTool({
     name: "instrument_set_sampler_param",
-    arguments: { trackId, param: "sustain", value: 0.5 },
+    arguments: { trackId, param: "cutoffHz", value: 800 },
   })) as any;
-  assert.ok(result.isError, "sustain is a polySynth field, not a sampler global — not a valid param here");
+  assert.ok(result.isError, "cutoffHz is a polySynth field, not a sampler global — not a valid param here");
   assert.equal(calls.length, 0);
+});
+
+test("m34-o instrument_set_sampler_param forwards decay and sustain — the fade controls", async () => {
+  // The other half of the change above: the two new globals must actually
+  // REACH THE WIRE. A test that only stopped refusing them would prove nothing.
+  for (const [param, value] of [["decay", 4], ["sustain", 0]] as const) {
+    calls.length = 0;
+    const trackId = randomUUID();
+    const result = (await client.callTool({
+      name: "instrument_set_sampler_param",
+      arguments: { trackId, param, value },
+    })) as any;
+    assert.ok(!result.isError, `${param} must be accepted: ${JSON.stringify(result)}`);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]!.command, "track.setInstrument");
+    assert.deepEqual(calls[0]!.params, { trackId, sampler: { [param]: value } });
+  }
+});
+
+test("m34-o track_set_instrument carries sampler decay/sustain through to the wire", async () => {
+  calls.length = 0;
+  const trackId = randomUUID();
+  const result = (await client.callTool({
+    name: "track_set_instrument",
+    arguments: { trackId, kind: "sampler", sampler: { decay: 6, sustain: 0 } },
+  })) as any;
+  assert.ok(!result.isError, JSON.stringify(result));
+  assert.equal(calls.length, 1);
+  assert.equal((calls[0]!.params["sampler"] as any).decay, 6);
+  assert.equal((calls[0]!.params["sampler"] as any).sustain, 0);
 });
 
 test("instrument_set_sampler_param rejects a non-number/non-boolean value at the schema layer", async () => {

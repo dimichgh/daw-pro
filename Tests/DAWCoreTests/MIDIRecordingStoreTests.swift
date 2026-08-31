@@ -73,6 +73,13 @@ final class FakeTakeEngine: AudioEngineControlling {
     func availableMIDIInputs() -> [MIDIInputDevice] { midiInputs }
     func midiEventCount() -> Int { eventCount }
 
+    /// m34-a-2: the engine's live capture extent, settable so a test can drive
+    /// the provisional take region. Defaults to nil — the SAME value the
+    /// `AudioEngineControlling` default returns — so every test written before
+    /// this property sees precisely what it saw before.
+    var liveExtent: LiveTakeExtent?
+    func liveTakeExtent() -> LiveTakeExtent? { liveExtent }
+
     func startRecording(_ transport: TransportState, to url: URL,
                         completion: @escaping @MainActor (Result<RecordingResult, Error>) -> Void) throws {
         Issue.record("ProjectStore must drive startTake, not the legacy startRecording")

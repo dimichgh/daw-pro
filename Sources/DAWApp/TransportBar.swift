@@ -26,6 +26,37 @@ struct TransportBar: View {
     /// control stays in both modes. Read per-bar (`Self.panelID`).
     private var isPro: Bool { densityStore.density(forPanel: Self.panelID) == .pro }
 
+    /// LIVE LOOPING (m34-h-2) — the loop length the LOOPER chip will open with.
+    ///
+    /// ⚠️⚠️ **THE INITIAL VALUE IS THE PRODUCT DEFAULT, NOT THE API DEFAULT.**
+    /// `ProjectStore.beginLoopDeck(bars:)` defaults to `nil`, which means
+    /// PRESS-TO-END; the product default is FIXED BARS, 4. Held here rather than
+    /// inside `LoopDeckControls` so a Pro user's bar count survives the view
+    /// swapping between its door and its session form.
+    @State private var deckLength: LoopDeckControlModel.LengthChoice =
+        LoopDeckControlModel.defaultLength
+
+    /// Which loop-deck controls are live right now, and the sentence each shows
+    /// when it is not. ⚠️ The bar's house idiom is `try? store.verb()`, which
+    /// swallows the store's teaching refusals whole — this resolver is what lets
+    /// the controls disable and EXPLAIN instead of accept and discard. The store
+    /// stays authoritative; `LoopDeckControlModelTests` pins the two in
+    /// agreement against a real store.
+    private var loopDeckControlModel: LoopDeckControlModel {
+        let status = store.loopDeckStatus
+        return LoopDeckControlModel.resolve(
+            hasSession: status != nil,
+            isPlaying: store.transport.isPlaying,
+            isRecording: store.transport.isRecording,
+            isTransportLoopEnabled: store.transport.isLoopEnabled,
+            pendingPhase: status?.pendingPhase,
+            canPeel: status?.canPeel ?? false,
+            instrumentTracks: store.tracks
+                .filter { $0.kind == .instrument }
+                .map { LoopDeckControlModel.TrackChoice(id: $0.id, name: $0.name) },
+            activeTrackID: appModel.activeTrackID)
+    }
+
     var body: some View {
         HStack(spacing: 20) {
             // Fixed leading width so PUNCH hiding closes the chip row up (LOOP +
@@ -70,6 +101,58 @@ struct TransportBar: View {
             // anchor — Position/Time stay put (the export button's rule).
             musicalTypingToggle
                 .explainable(.musicalTyping)
+
+            // ⭐ LIVE LOOPING (m34-h-1 strip, m34-h-2 controls) — the loop
+            // deck's surface: the LOOPER chip that OPENS a session, and, once
+            // one is open, the lamp strip plus arm/finish/peel/end.
+            //
+            // ⚠️⚠️ **THIS USED TO BE `if let deck = store.loopDeckStatus`, AND
+            // THAT GATE WAS THE WHOLE DEFECT m34-h-2 EXISTS TO FIX.** The strip
+            // appeared only once a session existed, and nothing anywhere in the
+            // app could create one — the only door to a fully-built, fully-
+            // tested looper was an AI agent over MCP. The presence rule is now
+            // INVERTED at the top level: the door is always here, and the strip
+            // still appears only with a session (the "no clutter when there is
+            // nothing to say" rule the engine-notices chip follows).
+            //
+            // Shows in BOTH densities, NOT gated on `isPro`, for the musical
+            // typing strip's reason (Rule 6): this is the ONLY surface that
+            // tells a performer which layer is armed and which is recording,
+            // and hiding a live performance indicator — or its only entry
+            // point — behind a mode chip would be exactly the "fully-built
+            // subsystem with no door" problem. **Pro reveals only the LENGTH
+            // CHOICE** (bar stepper + FREE); see `LoopDeckControls`.
+            //
+            // Right-region, past the Spacer, so it never touches the 340 pt
+            // readout anchor — Position/Time do not move when a session opens
+            // or closes. ⚠️ The door is ALWAYS present, so unlike the strip it
+            // costs right-region width permanently; it is deliberately the
+            // narrowest chip in that region at rest (one glyph + "LOOPER").
+            LoopDeckControls(
+                status: store.loopDeckStatus,
+                playheadBeat: store.transport.positionBeats,
+                model: loopDeckControlModel,
+                isPro: isPro,
+                length: $deckLength,
+                // ⚠️ `_ = try?`, NOT a bare `try?`: `@discardableResult` does NOT
+                // survive the `try?` wrapper (the OPTIONAL it produces is a new,
+                // non-discardable value), and this tree builds at zero warnings.
+                //
+                // ⚠️⚠️ AND THE DISCARD IS SAFE ONLY BECAUSE `loopDeckControlModel`
+                // ALREADY PREDICTED THE REFUSAL — every one of these controls is
+                // `.disabled` with the store's own reason on its tooltip when the
+                // store would throw. A bare `try?` here WITHOUT that resolver is
+                // precisely the dead press m34-h-2 exists to remove.
+                onStart: { choice in _ = try? store.beginLoopDeck(bars: choice.barsParameter) },
+                onArm: { trackID in _ = try? store.armLoopLayer(trackID: trackID) },
+                onFinish: { _ = try? store.finishLoopLayer() },
+                onPeel: { _ = try? store.peelLoopLayer() },
+                onEnd: { _ = try? store.endLoopDeck() },
+                onToggleMute: { layerID, muted in
+                    _ = try? store.setLoopLayerMuted(layerID: layerID, muted: muted)
+                }
+            )
+            .explainable(.loopDeck)
 
             // EXPORT: bounce the whole mix to a file. A core beginner action, so it
             // shows in BOTH densities. Right-region, past the Spacer — it never

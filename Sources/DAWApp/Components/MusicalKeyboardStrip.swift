@@ -62,6 +62,19 @@ struct MusicalKeyboardStrip: View {
     /// `controller.pointerDown(cellIndex:)` directly would be the m23-an defect in
     /// a new mode.
     var onChordCellPress: (Int) -> Void = { _ in }
+    /// **THE SUSTAIN PEDAL (m34-l), toggled WITH THE MOUSE.**
+    ///
+    /// ⛔ **SAME ONE-FUNNEL REASON AS `onPointerPress`.** The app hands in the
+    /// closure that refreshes the target state first, so the pedal pill, the Tab
+    /// key and `debug.musicalTyping {sustain:}` all end in one `setSustain`. A
+    /// view calling `controller.toggleSustain()` directly would judge the press
+    /// against a stale target state — the m23-an defect, on a new control.
+    ///
+    /// ⭐ It also gives the pedal a MOUSE route, which matters more here than
+    /// for the note keys: Tab is the one binding in this mode that a user might
+    /// reasonably expect to move focus, so there has to be a way to work the
+    /// pedal without pressing it.
+    var onToggleSustain: () -> Void = {}
     /// Turns chord mode on and off.
     var onSetPlayMode: (MusicalTypingPlayMode) -> Void = { _ in }
     /// Sets the tonic (pitch class) and, optionally, the scale.
@@ -70,6 +83,14 @@ struct MusicalKeyboardStrip: View {
     var onSetVoicingPreset: (VoicingPresetKind) -> Void = { _ in }
     /// Lights a named progression, or clears the lights with nil.
     var onSetProgression: (ChordProgressionPreset?) -> Void = { _ in }
+    /// **PLAYBOX (m34-g): chooses WHEN the outline moves.** Wait-for-you,
+    /// on-the-beat, or lights-run-ahead — the user asked for all three.
+    var onSetAdvanceMode: (ChordSequenceAdvanceMode) -> Void = { _ in }
+    /// **PLAYBOX: generate a fresh set of lights** from the project's own key,
+    /// tempo and section. ⛔ It lights keys; it plays nothing.
+    var onGeneratePlaybox: () -> Void = {}
+    /// True while a generation is in flight — the button dims.
+    var isGeneratingPlaybox: Bool = false
 
     /// Keyboard height. Tall enough for a black key (62 %) to be a comfortable
     /// mouse target and for the letter legend to sit under it without crowding.
@@ -85,8 +106,14 @@ struct MusicalKeyboardStrip: View {
         alpha: 1.0,
         backdrop: SRGBColor(hex: DAWTheme.keyWhiteHex))
 
-    /// Chord-row height. Four stacked labels (key letter, chord name, Roman
-    /// numeral, order badge) need more room than a piano key's single legend.
+    /// Chord-row height. Three stacked labels (key letter, chord name, Roman
+    /// numeral) plus clear air at the bottom of the cell need more room than a
+    /// piano key's single legend.
+    ///
+    /// ⚠️ **THE FOURTH LABEL IS GONE AND THE HEIGHT DELIBERATELY STAYED (m34-i).**
+    /// It used to read "four stacked labels … order badge"; the badge was deleted
+    /// and the room it held now goes to the next-chord outline's bloom, which
+    /// needs to read as a halo rather than as a hairline.
     private static let chordRowHeight: CGFloat = 76
 
     private var isChordMode: Bool { controller.playMode == .chords }
@@ -105,6 +132,7 @@ struct MusicalKeyboardStrip: View {
             if isChordMode {
                 chordPickers
                 progressionRow
+                playboxRow
                 chordRow
             } else {
                 keyboard
@@ -149,6 +177,19 @@ struct MusicalKeyboardStrip: View {
                 }
             }
 
+            // ⭐⭐ **THE PEDAL LAMP (m34-l) — STATE AS LIGHT, NEVER AS TEXT.**
+            // A performer cannot read while playing, so the word "SUSTAIN" is
+            // static chrome (exactly like "MUSICAL TYPING" beside it) and the
+            // only thing that MOVES is the light: filled + glowing when the
+            // damper is off the strings, a bare outline when it is down on them.
+            // The same law that deleted m34-i's numeric badges.
+            //
+            // ⚠️ `.fixedSize()` because the status line beside it is a long
+            // sentence with `.lineLimit(1)`: without it SwiftUI compresses the
+            // pill instead of truncating the sentence, and the indicator
+            // vanishes exactly when the status line is longest.
+            sustainPill.fixedSize()
+
             Text(statusLine)
                 .font(.system(size: 11))
                 .foregroundStyle(canSound ? DAWTheme.textSecondary : DAWTheme.record)
@@ -192,6 +233,53 @@ struct MusicalKeyboardStrip: View {
             .help("Stop capturing letter keys as notes.")
         }
     }
+
+    /// **THE SUSTAIN PEDAL'S LAMP AND ITS MOUSE TARGET, in one control.**
+    ///
+    /// ⚠️ **GREEN (`signal`), NOT CYAN (`playback`), AND THE CHOICE IS ABOUT
+    /// AMBIGUITY RATHER THAN TASTE.** The mode lamp two elements to the left is
+    /// already cyan; a second cyan lamp on the same row would read as a second
+    /// copy of the same state. `signal` is the palette's "this is engaged and
+    /// healthy" hue, it is not `record` (warning) or `clip` (destructive) —
+    /// neither of which a pedal is — and it is a token, never a new colour.
+    ///
+    /// ⚠️ **DIMMED WHEN THE KEYS CANNOT SOUND**, so the control never invites a
+    /// press that `setSustain` would refuse: the pedal has nothing to hold when
+    /// there is no instrument under it.
+    private var sustainPill: some View {
+        Button(action: onToggleSustain) {
+            HStack(spacing: 5) {
+                Circle()
+                    .fill(isSustainDown ? DAWTheme.signal : Color.clear)
+                    .overlay(Circle().stroke(
+                        isSustainDown ? DAWTheme.signal : DAWTheme.textFaint,
+                        lineWidth: 1))
+                    .frame(width: 7, height: 7)
+                    // Glow is EARNED BY STATE, never static chrome (Rule 3).
+                    .glow(DAWTheme.signal, radius: 6,
+                          intensity: isSustainDown ? 0.8 : 0)
+                Text("⇥ SUSTAIN")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .tracking(0.6)
+                    .foregroundStyle(isSustainDown ? DAWTheme.signal : DAWTheme.textDim)
+            }
+            .frame(height: 20)
+            .padding(.horizontal, 9)
+            .background(isSustainDown
+                        ? DAWTheme.signal.opacity(0.14) : DAWTheme.panelRaised)
+            .clipShape(RoundedRectangle(cornerRadius: 5))
+            .overlay(RoundedRectangle(cornerRadius: 5).stroke(
+                isSustainDown ? DAWTheme.signal.opacity(0.55) : DAWTheme.hairline,
+                lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .opacity(canSound ? 1 : 0.45)
+        .help("Sustain pedal (Tab) — keeps notes ringing after you lift the key, "
+              + "like the right pedal on a piano. Press again to let go.")
+        .accessibilityLabel(isSustainDown ? "Sustain pedal down" : "Sustain pedal up")
+    }
+
+    private var isSustainDown: Bool { controller.isSustainDown }
 
     /// ⛔ **`canSound`, NOT `== .ready`** — both recording states sound. Reading
     /// `.ready` here would drop the lamp to amber and the status line to red at
@@ -315,14 +403,18 @@ struct MusicalKeyboardStrip: View {
     /// sit in. Same `Canvas`, same `@Sendable` contract, same theme tokens as the
     /// piano above it — everything is snapshotted into values BEFORE the closure.
     ///
-    /// ⭐ **THREE STATES, ONE HUE, THREE INTENSITIES**, which is the research's own
+    /// ⭐ **FOUR STATES, ONE HUE, FOUR INTENSITIES**, which is the research's own
     /// instruction (§7.4: *"reusing the strip's existing held/lit visual language
     /// at a lower intensity"*) and keeps the palette semantic:
     ///
     ///   * **Sounding** — solid `playback` + glow. Identical to a held piano key,
     ///     because it means the same thing.
-    ///   * **Lit by the preset** — a `playback` outline and a faint wash, plus the
-    ///     order number. Visibly suggested, audibly nothing.
+    ///   * **NEXT in the progression (m34-i)** — the lit wash, brighter, inside a
+    ///     heavy `playback` outline with the house glow recipe's bloom. **This is
+    ///     the moving cue that replaced the numeric order badges**, and it is the
+    ///     only thing on this row that changes as you play.
+    ///   * **Lit by the preset** — a thin `playback` outline and a faint wash.
+    ///     Visibly suggested, audibly nothing.
     ///   * **Dim** — `panelRaised`. **Fully playable**, and the legend under the
     ///     row says so in words.
     private var chordRow: some View {
@@ -368,12 +460,73 @@ struct MusicalKeyboardStrip: View {
             context.fill(shape, with: .color(cell.addsColour
                                              ? DAWTheme.panel : DAWTheme.panelRaised))
             if cell.isLit {
-                context.fill(shape, with: .color(DAWTheme.playback.opacity(0.14)))
+                // The NEXT cell takes a brighter wash so it reads at a glance
+                // from across the room, not only at the border.
+                context.fill(shape, with: .color(
+                    DAWTheme.playback.opacity(cell.isNextInProgression ? 0.24 : 0.14)))
                 context.stroke(shape, with: .color(DAWTheme.playback.opacity(0.75)),
                                lineWidth: 1.5)
             } else {
                 context.stroke(shape, with: .color(DAWTheme.hairline), lineWidth: 1)
             }
+        }
+
+        // ⭐⭐ **THE NEXT-CHORD BORDER (m34-i) — THE USER'S OWN PROPOSAL, AND IT
+        // IS THE WHOLE FEATURE.** *"it is better to light up border on then next
+        // recommeded chord."* Exactly one cell wears it while a preset is lit
+        // (`MusicalTypingChordCell.isNextInProgression` pins the count), and it
+        // MOVES as the sequence advances — which is what makes Four Chords,
+        // Doo-Wop and Pop-Punk tell each other apart at all: they light the same
+        // four degrees and differ only in order.
+        //
+        // ⚠️ **THE INK FLIPS ON A SOUNDING CELL, AND THAT IS NOT COSMETIC.**
+        // Cyan-on-cyan is invisible. Today `.onMatch` moves the border OFF the
+        // cell you just played so the overlap is rare — but m34-g's on-the-beat
+        // mode advances the cue onto a chord you are still holding, and that is
+        // a state no capture in this repo can easily stage. Handled now rather
+        // than discovered then.
+        //
+        // ⚠️ **NO `.glow()` HERE — IT IS A VIEW MODIFIER AND THIS IS A `Canvas`
+        // RENDERER.** The house recipe (docs/DESIGN-LANGUAGE.md "Foundations":
+        // full-opacity core + tight halo + faint wide bloom) is reproduced with
+        // layered strokes, the `StereoScopeView` pattern. The path is INSET so
+        // the 6 pt bloom stays inside the 2 pt gutter between cells instead of
+        // bleeding onto the neighbour.
+        if cell.isNextInProgression {
+            let ink: Color = isSounding ? heldInk : DAWTheme.playback
+            let border = Path(roundedRect: rect.insetBy(dx: 2, dy: 2), cornerRadius: 3)
+            context.stroke(border, with: .color(ink.opacity(0.18)), lineWidth: 6)
+            context.stroke(border, with: .color(ink.opacity(0.50)), lineWidth: 3.5)
+            context.stroke(border, with: .color(ink), lineWidth: 2)
+        }
+
+        // ⭐⭐⭐ **THE LOOK-AHEAD QUEUE (m34-g) — AND IT CLOSES A DEFECT m34-i
+        // COULD ONLY STATE.** Four Chords `[1,5,6,4]` and Doo-Wop `[1,6,4,5]`
+        // light the same four degrees AND BOTH OPEN ON I, so with only a moving
+        // border two of the three presets still looked identical *at rest*. The
+        // queue is what tells them apart before a note is struck: the same four
+        // cells, in two different orders.
+        //
+        // ⛔⛔ **A SHRINKING BAR, NOT A NUMBER. STATE IS SHOWN BY LIGHT, NEVER BY
+        // TEXT** (docs/DESIGN-LANGUAGE.md) — a performer cannot read while
+        // playing, and a rank drawn as a digit is precisely the badge m34-i
+        // deleted for being unreadable. The order is carried by TWO redundant
+        // channels so it survives a glance: **width** (3/4, 2/4, 1/4 of the
+        // cell) and **brightness**. Nearer means wider and brighter.
+        //
+        // ⚠️ It sits in the bottom gutter the deleted badge freed, BELOW the
+        // "+8va" legend, so it never collides with a glyph.
+        if let rank = cell.queueRank {
+            let steps = CGFloat(MusicalTypingController.queueDepth + 1)
+            let remaining = max(1, steps - CGFloat(rank))
+            let inner = rect.insetBy(dx: 6, dy: 0)
+            let barWidth = inner.width * (remaining / steps)
+            let bar = Path(roundedRect: CGRect(x: rect.midX - barWidth / 2,
+                                               y: rect.maxY - 6,
+                                               width: barWidth, height: 3),
+                           cornerRadius: 1.5)
+            let ink: Color = isSounding ? heldInk : DAWTheme.playback
+            context.fill(bar, with: .color(ink.opacity(0.20 + 0.22 * (remaining / steps))))
         }
 
         let primary: Color = isSounding ? heldInk
@@ -399,25 +552,22 @@ struct MusicalKeyboardStrip: View {
                 .font(.system(size: 9, weight: .medium, design: .monospaced))
                 .foregroundColor(secondary),
             at: CGPoint(x: rect.midX, y: rect.minY + 44), anchor: .center)
-        // The order to play them in, on lit cells only — the `1 … 4 2 3` row of
-        // the user's mock-up.
-        // ⚠️ THE BADGE IS NARROWER THAN THE LIGHT. `isLit` paints the outline on
-        // every cell whose degree the preset uses; the numbered badge lands on
-        // one cell per step. See `MusicalTypingChordCell.progressionOrder` for
-        // the screenshot that forced the split.
-        if let order = cell.progressionOrder {
-            let badge = CGRect(x: rect.midX - 8, y: rect.maxY - 22, width: 16, height: 16)
-            context.fill(Path(ellipseIn: badge),
-                         with: .color(isSounding ? heldInk.opacity(0.25)
-                                      : DAWTheme.playback.opacity(0.9)))
-            context.draw(
-                Text(String(order))
-                    .font(.system(size: 10, weight: .bold, design: .monospaced))
-                    .foregroundColor(isSounding ? heldInk : DAWTheme.noteInkOnDark),
-                at: CGPoint(x: badge.midX, y: badge.midY), anchor: .center)
-        } else if cell.octaveShift > 0 {
+        // ⛔⛔ **THE ORDER BADGE USED TO BE DRAWN HERE AND IS DELETED (m34-i).**
+        // The user played the shipped build and reported the numbers were *"hard
+        // to read"* — and the same pass exposed what they were papering over: the
+        // three same-set presets were told apart by nothing else. **State is
+        // shown by LIGHT, never by text; a performer cannot read while playing.**
+        // The border above is the replacement. `cell.progressionOrder` survives
+        // as seam data only — if you are about to draw it again, read its doc
+        // first.
+        if cell.octaveShift > 0 {
             // The second run of degrees, marked so a user can tell it from the
             // first rather than wondering why two keys say the same thing.
+            //
+            // ⚠️ This used to be the `else` of the badge branch, so it was
+            // suppressed on any numbered cell — harmless then (a numbered cell is
+            // always `octaveShift == 0`), and unconditional now that the badge is
+            // gone, which is what it always meant.
             context.draw(
                 Text("+8va")
                     .font(.system(size: 8, weight: .medium, design: .monospaced))
@@ -504,11 +654,25 @@ struct MusicalKeyboardStrip: View {
         HStack(spacing: 14) {
             legendChip("Z / X", isChordMode ? "higher / lower" : "octave")
             legendChip("C / V", "louder / quieter")
+            // m34-l. The chip LIGHTS with the pedal — a second, in-place answer
+            // to "is it down?" right where the user's eye is when they are
+            // reading which key does what.
+            legendChip("⇥", "hold the sound", isOn: isSustainDown)
             if isChordMode {
                 // Rule 6: say what the row above actually means, in the words a
                 // beginner would use, rather than assuming the lights explain
                 // themselves.
-                Text("Lit keys are the preset, in order. The dim ones play too.")
+                //
+                // ⚠️ **"IN ORDER" WAS RETIRED AT m34-i BECAUSE IT STOPPED BEING
+                // TRUE OF A STILL PICTURE.** The order used to be printed on the
+                // keys as numbers; it is now a border that MOVES, so the line has
+                // to name the moving thing. And it changes with the preset
+                // picker, because "follow the outline" is nonsense when there is
+                // no outline to follow.
+                Text(controller.progression == nil
+                     ? "Every key plays a chord. Pick a preset — or press NEW LIGHTS — to be shown what to play."
+                     : "Follow the bright outline — that's your next chord. "
+                       + "The bars under the keys after it show what's coming, widest first. Every key still plays.")
                     .font(.system(size: 10))
                     .foregroundStyle(DAWTheme.textDim)
             }
@@ -600,9 +764,13 @@ struct MusicalKeyboardStrip: View {
     }
 
     /// ⭐ **THE PROGRESSION ROW — A HIGHLIGHT OVERLAY, NEVER A MODE.** Selecting
-    /// one lights and numbers four or five of the SAME keys the scale already
-    /// plays; the rest stay dim and fully playable. That is the user's own choice,
-    /// verbatim: *"Follow the lights, or ignore them. Same keys either way."*
+    /// one lights four or five of the SAME keys the scale already plays and
+    /// **starts the next-chord border on the progression's first chord**; the rest
+    /// stay dim and fully playable. That is the user's own choice, verbatim:
+    /// *"Follow the lights, or ignore them. Same keys either way."*
+    ///
+    /// ⚠️ **RE-CLICKING THE SELECTED PRESET RESTARTS THE SEQUENCE** — see
+    /// `MusicalTypingController.setProgression` for why that is deliberate.
     private var progressionRow: some View {
         HStack(spacing: 6) {
             pickerLabel("PRESET")
@@ -634,18 +802,104 @@ struct MusicalKeyboardStrip: View {
         .help(help)
     }
 
-    private func legendChip(_ keys: String, _ meaning: String) -> some View {
+    /// ⭐⭐⭐ **PLAYBOX (m34-g) — THE AI SHOWS YOU WHAT TO PLAY, YOU PLAY IT, AND
+    /// IT IS YOURS.** The user's own idea: *"it would be nice to have a playbox
+    /// mode where AI would pre-generate next series of lights to play and
+    /// record."*
+    ///
+    /// ⛔⛔ **THE BUTTON LIGHTS KEYS. IT PLAYS NOTHING.** This row generates an
+    /// INVITATION; the performance is the user's, on the keys, through the same
+    /// live capture path as any other take. That inversion is the whole point,
+    /// and for a non-musician with no MIDI hardware it is the difference between
+    /// owning the music and receiving it.
+    ///
+    /// ⭐ **THE MODE SWITCH IS HERE, VISIBLE, BECAUSE THEY ASKED TO CHOOSE** —
+    /// *"provide all three options to select from on advancing mode"* — and the
+    /// three are three different USES: wait-for-you is learning the part,
+    /// on-the-beat is performing it, lights-run-ahead is writing with it.
+    private var playboxRow: some View {
+        HStack(spacing: 6) {
+            pickerLabel("PLAYBOX")
+            Button(action: onGeneratePlaybox) {
+                HStack(spacing: 5) {
+                    Image(systemName: isGeneratingPlaybox
+                          ? "circle.dotted" : "sparkles")
+                        .font(.system(size: 9, weight: .bold))
+                    Text(isGeneratingPlaybox ? "THINKING…" : "NEW LIGHTS")
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .tracking(0.6)
+                }
+                // Violet ALWAYS means AI-generated (docs/DESIGN-LANGUAGE.md), and
+                // this button is the door to the AI path, so it is violet even
+                // before anything has been generated.
+                .foregroundStyle(isGeneratingPlaybox ? DAWTheme.textDim : DAWTheme.ai)
+                .frame(height: 20)
+                .padding(.horizontal, 9)
+                .background(DAWTheme.ai.opacity(isGeneratingPlaybox ? 0.06 : 0.14))
+                .clipShape(RoundedRectangle(cornerRadius: 5))
+                .overlay(RoundedRectangle(cornerRadius: 5)
+                    .stroke(DAWTheme.ai.opacity(0.45), lineWidth: 1))
+            }
+            .buttonStyle(.plain)
+            .disabled(isGeneratingPlaybox)
+            .help("Ask for a fresh set of chords to play, in your key and tempo. "
+                  + "It lights the keys — you play them.")
+
+            pickerLabel("LIGHTS MOVE")
+            ForEach(ChordSequenceAdvanceMode.allCases, id: \.self) { mode in
+                advanceModeChip(mode)
+            }
+
+            // ⛔⛔ **WHO WROTE THESE LIGHTS, SAID OUT LOUD.** "The AI wrote this"
+            // and "we picked a stock progression" are different claims and only
+            // one of them is true at a time. Violet only when it is genuinely
+            // the first; the neutral hierarchy otherwise.
+            if let provenance = controller.playboxProvenance {
+                Text(provenance.summary)
+                    .font(.system(size: 10))
+                    .foregroundStyle(provenance.isAI ? DAWTheme.ai : DAWTheme.textDim)
+                    .lineLimit(1)
+                    .help(provenance.reason ?? provenance.summary)
+            }
+
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func advanceModeChip(_ mode: ChordSequenceAdvanceMode) -> some View {
+        let isOn = controller.advanceMode == mode
+        return Button { onSetAdvanceMode(mode) } label: {
+            Text(mode.displayName)
+                .font(.system(size: 9, weight: isOn ? .bold : .regular,
+                              design: .monospaced))
+                .tracking(0.5)
+                .foregroundStyle(isOn ? DAWTheme.noteInkOnDark : DAWTheme.textSecondary)
+                .frame(height: 20)
+                .padding(.horizontal, 8)
+                .background(isOn ? DAWTheme.playback.opacity(0.85) : DAWTheme.panelRaised)
+                .clipShape(RoundedRectangle(cornerRadius: 5))
+                .overlay(RoundedRectangle(cornerRadius: 5)
+                    .stroke(isOn ? Color.clear : DAWTheme.hairline, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .help(mode.summary)
+    }
+
+    /// `isOn` lights the chip (m34-l) — additive: it defaults false, so the four
+    /// chips that had no state before draw byte-identically.
+    private func legendChip(_ keys: String, _ meaning: String,
+                            isOn: Bool = false) -> some View {
         HStack(spacing: 5) {
             Text(keys)
                 .font(.system(size: 9, weight: .bold, design: .monospaced))
-                .foregroundStyle(DAWTheme.textSecondary)
+                .foregroundStyle(isOn ? DAWTheme.signal : DAWTheme.textSecondary)
                 .padding(.horizontal, 5)
                 .padding(.vertical, 2)
-                .background(DAWTheme.panelRaised)
+                .background(isOn ? DAWTheme.signal.opacity(0.16) : DAWTheme.panelRaised)
                 .clipShape(RoundedRectangle(cornerRadius: 3))
             Text(meaning)
                 .font(.system(size: 10))
-                .foregroundStyle(DAWTheme.textDim)
+                .foregroundStyle(isOn ? DAWTheme.signal.opacity(0.9) : DAWTheme.textDim)
         }
     }
 }

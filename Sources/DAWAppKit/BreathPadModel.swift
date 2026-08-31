@@ -700,9 +700,18 @@ public final class BreathPadModel {
     /// ONE `performEdit("Effort Shape")` undo step. A recorder in tests.
     public typealias Apply = (UUID, EffortRing, Double, Double, AirBudget.Settings)
         throws -> EffortShapeApplication
-    /// Streams one effort value for as long as a gesture is open — wired to
-    /// `ProjectStore.previewEffort(trackID:value:phase:)`.
-    public typealias Preview = (UUID, Double, PadPreviewPhase) throws -> Void
+    /// Streams one effort value for as long as a gesture is open — wired, since
+    /// m34-f step ②, to `LiveExpressionSink.setExpression(trackID:effort:phase:)`
+    /// and through it to `ProjectStore.playLiveExpression`.
+    ///
+    /// ⚠️ **THE ANSWER IS RETURNED, NOT DISCARDED, AND THAT IS THE POINT.** It
+    /// carries the engine's own verdict on whether this push reached a rolling
+    /// take (`PadPreviewResult.recording`). A pad that could only say *"I sent
+    /// it"* would agree with itself through a dead pipe — the m23-o2
+    /// `widthSource` failure in another medium. `nil` is legal and means *this
+    /// closure has no answer* (a recorder in a test), which is a third state and
+    /// deliberately not folded into "not recording".
+    public typealias Preview = (UUID, Double, PadPreviewPhase) throws -> PadPreviewResult?
 
     private let applyClosure: Apply
     private let previewClosure: Preview
@@ -828,9 +837,27 @@ public final class BreathPadModel {
     /// Why the last commit did not happen.
     public private(set) var applyRefusal: String?
     /// Why the live preview is not being heard. Surfaced rather than swallowed:
-    /// `previewEffort` refuses on a non-instrument track and while recording, and
-    /// a pad that silently does nothing is indistinguishable from a broken one.
+    /// the live-expression path refuses on a non-instrument track, and a pad
+    /// that silently does nothing is indistinguishable from a broken one.
+    ///
+    /// ⚠️ **"AND WHILE RECORDING" WAS TRUE UNTIL m34-f AND IS NOW FALSE** — the
+    /// pad streams THROUGH a take and is captured into it. The retraction is
+    /// written here rather than the old clause quietly deleted: a stale *"this
+    /// cannot be done"* comment is the class of thing that froze four roadmap
+    /// items in this repo for eight days.
     public private(set) var previewRefusal: String?
+
+    /// ⭐ **THE HONESTY LIGHT (m34-f step ②) — playing vs recording.** The
+    /// ENGINE's answer to *"is what I am shaping being kept?"*, off the last
+    /// push. `nil` means nothing has been pushed this gesture, or the closure
+    /// under the seam has no answer to give; it is deliberately NOT folded into
+    /// `false`, because "I do not know" and "it is not being recorded" are
+    /// different things to put on screen.
+    public private(set) var isCapturingExpression: Bool?
+    /// Controller points this GESTURE has put into the take so far — the
+    /// running total the readout shows, so a user can see the count climb
+    /// rather than trust a lamp. Reset at every `begin`.
+    public private(set) var capturedExpressionPoints = 0
 
     /// What the VIEW was given and what it DREW — written by the panel, read by
     /// the debug echo, consulted by NOTHING.
@@ -912,9 +939,61 @@ public final class BreathPadModel {
         gesture = source
         gestureStartDot = dot
         previewRefusal = nil
+        // ⛔ **THE PRESSURE LATCH IS PER-GESTURE, NOT PER-SESSION.** A finger
+        // that lifted is a finger applying no force, and carrying the last
+        // gesture's pressure into the next one would open it at whatever force
+        // the user happened to release at. `pressureObserved` (the CAPABILITY
+        // fact) deliberately does NOT reset — hardware does not stop being
+        // Force Touch between gestures.
+        pressure = nil
         trail.clear()
         trail.record(dot)
         stream(phase: .begin)
+    }
+
+    // MARK: - Pressure (m34-f step ①)
+
+    /// The force currently on the pad, 0…1, or `nil` when none has been
+    /// observed THIS GESTURE.
+    ///
+    /// ⚠️ **`nil` IS NOT `0`.** It means "this machine has told us nothing about
+    /// force", which is the permanent state on a mouse or a non-Force-Touch
+    /// trackpad, and the state at the very start of every gesture until the
+    /// first pressure event lands. In that state the pad streams the dot's
+    /// effort alone — bit-for-bit what it streamed before this axis existed.
+    public private(set) var pressure: Double?
+
+    /// ⭐ **OBSERVED capability, never queried capability.** True once a real
+    /// `NSEventTypePressure` event has reached this model in this session — a
+    /// thing only a Force Touch trackpad emits. There is no verified public API
+    /// that answers "does this Mac have one" from inside a running app, so the
+    /// UI is driven by what actually happened rather than by a claim.
+    ///
+    /// ⛔ **NOTHING ON SCREEN MAY ANNOUNCE A PRESSURE AXIS UNTIL THIS IS TRUE.**
+    /// A pad that looks pressure-capable on a machine that cannot produce
+    /// pressure is a control that lies about what it does — and the user would
+    /// have no way to tell that from a control that is simply broken.
+    public private(set) var pressureObserved = false
+
+    /// A real pressure event arrived. Re-streams immediately at the new value,
+    /// because pressure is the fastest-moving of the three axes and waiting for
+    /// the next pointer move would make a swell lag the hand.
+    ///
+    /// ⚠️ **STREAMS AS `.move`, WHICH MEANS IT IS RATE-CAPPED AND
+    /// CHANGE-FILTERED, AND THAT IS CORRECT.** Trackpad pressure updates far
+    /// faster than 30 Hz and a dropped intermediate value is inaudible; a STUCK
+    /// last value would not be. `PadPreviewController` guarantees the last value
+    /// of a gesture is always delivered because `.end` bypasses the cap, so the
+    /// stream can never strand the strip at a pressure the finger has left.
+    ///
+    /// Ignored when no gesture is open: pressure without a click is not a thing
+    /// this surface can receive, and treating it as one would stream while the
+    /// transport merely rolls — the rule the whole gesture machine exists for.
+    public func pressureChanged(_ value: Double) {
+        pressureObserved = true
+        guard gesture != nil else { return }
+        pressure = PadPressure.clamp(value)
+        stream(phase: .move)
     }
 
     /// Moves the dot. Streams only if a gesture is open.
@@ -939,6 +1018,10 @@ public final class BreathPadModel {
         stream(phase: .end)
         gesture = nil
         gestureStartDot = nil
+        // AFTER the stream, never before: `.end` restores neutral and does not
+        // read the value, but a reader of `streamedEffort` at rest must see the
+        // dot alone rather than the force of a finger that has lifted.
+        pressure = nil
         trail.clear()
         guard moved else { return false }
         return commit()
@@ -952,6 +1035,7 @@ public final class BreathPadModel {
         stream(phase: .end)
         gesture = nil
         gestureStartDot = nil
+        pressure = nil
         trail.clear()
     }
 
@@ -1193,8 +1277,24 @@ public final class BreathPadModel {
     /// CC 11 is a square-law gain, so CC 63 against 127 is about −12 dB —
     /// audible, not a dead knob. It also never reaches 0: the pad cannot preview
     /// a silence, which matches §9.6's promise about the budget.
+    ///
+    /// ⚠️ **THAT LAST SENTENCE IS STILL TRUE OF THIS PROPERTY AND IS NO LONGER
+    /// TRUE OF WHAT THE PAD STREAMS (m34-f step ①).** `streamedEffort` scales
+    /// this by trackpad pressure, and pressure genuinely reaches 0. The claim is
+    /// narrowed rather than deleted, because it is still the right thing to know
+    /// about the DOT — see `PadPressure` for why a silent full-release is the
+    /// feature and not a regression.
     public var effort: Double {
         EffortField.effort(atBeat: 0, settings: fieldSettings)
+    }
+
+    /// ⭐ **WHAT ACTUALLY GOES OUT — the dot's effort scaled by pressure**
+    /// (m34-f step ①). Identical to `effort` whenever no pressure has been
+    /// observed, which is every mouse, every non-Force-Touch trackpad, and the
+    /// opening instant of every gesture. `PadPressure` owns the law and the
+    /// rationale; nothing is restated here.
+    public var streamedEffort: Double {
+        PadPressure.effort(dotEffort: effort, pressure: pressure)
     }
 
     /// The dot resolved: which patterns are sounding and how much of each.
@@ -1210,8 +1310,26 @@ public final class BreathPadModel {
     /// a clip can be shaped without an instrument to hear it on.
     private func stream(phase: PadPreviewPhase) {
         guard let trackID = targetTrackID else { return }
+        if phase == .begin {
+            capturedExpressionPoints = 0
+            isCapturingExpression = nil
+        }
         do {
-            try previewClosure(trackID, effort, phase)
+            let result = try previewClosure(trackID, streamedEffort, phase)
+            if let result {
+                capturedExpressionPoints += result.capturedPoints
+                // ⛔⛔ **ONLY A DELIVERED CALL CARRIES AN ANSWER, AND THIS LINE
+                // IS A MEASURED BUG FIX RATHER THAN A PRECAUTION.** A `.move`
+                // that the 30 Hz cap or the unchanged-value filter coalesced
+                // away never reached the engine, so its `recording: false` means
+                // *"nothing was asked"*, not *"nothing is being kept"*. Letting
+                // it through made the INTO TAKE lamp flicker off on the very
+                // next drag frame — caught by CAPTURING THE PANEL and reading
+                // the state beside it (`capturedExpressionPoints: 1` while
+                // `isCapturingExpression: false`, which cannot both be current).
+                // A coalesced frame now leaves the last real answer standing.
+                if result.delivered { isCapturingExpression = result.recording }
+            }
             if phase != .end { previewRefusal = nil }
         } catch {
             // A refused `.end` is not worth reporting — nothing was streaming.
@@ -1274,9 +1392,22 @@ public final class BreathPadModel {
     /// `"0.62 · CC 79"` — the effort the drag is streaming, and the expression
     /// value it becomes. The CC integer is `PadPreviewController`'s own mapping,
     /// not a second one.
+    ///
+    /// ⚠️ **READS `streamedEffort`, NOT `effort` (m34-f step ①).** The readout's
+    /// whole job is to say what is going out; showing the dot's unscaled effort
+    /// while pressure attenuated it would be a number that disagrees with the
+    /// sound, which is the worst kind of readout to ship.
     public var effortReadout: String {
-        String(format: "%.2f · CC %d", effort,
-               PadPreviewController.controllerValue(forEffort: effort))
+        String(format: "%.2f · CC %d", streamedEffort,
+               PadPreviewController.controllerValue(forEffort: streamedEffort))
+    }
+
+    /// `"0.48"` — the force on the pad right now, or nil when there is none to
+    /// report. **nil renders NOTHING**: no row, no dash, no zero. A readout that
+    /// showed `0.00` on a mouse would be reporting a constant as a measurement.
+    public var pressureReadout: String? {
+        guard pressureObserved, let pressure else { return nil }
+        return String(format: "%.2f", pressure)
     }
 
     /// `"MESSA DI VOCE 68% · LATE BLOOM 32%"` — which gestures the dot is

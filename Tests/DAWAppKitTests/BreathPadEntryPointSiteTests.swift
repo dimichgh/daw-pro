@@ -237,4 +237,81 @@ struct BreathPadEntryPointSiteTests {
         #expect(app.contains("case \"debug.breathPad\":"),
                 "the debug seam is gone — nothing headless can open the pad, and the render probe (the only instrument that has ever caught a defect in this panel) stops working.")
     }
+
+    // MARK: - m34-f step ① — the pressure surface
+    //
+    // ⚠️⚠️ **THE WEAKEST INSTRUMENT IN THIS ITEM, AND SAID SO PLAINLY.** `DAWApp`
+    // is an `executableTarget` with no test target, so an `NSPressureConfiguration`
+    // built at runtime cannot be constructed and inspected from any suite here —
+    // this reads the source instead. A spy would be better and is not available.
+    // What these legs genuinely rule out is the class of regression that has
+    // actually bitten this panel: a symbol that exists but is never mounted, and
+    // a configuration silently reverting to the system default.
+    //
+    // ⛔ **WHAT THEY DO NOT AND CANNOT PROVE: that a real `NSEventTypePressure`
+    // ever arrives, that the Force Click detent is genuinely suppressed, or that
+    // the AppKit y-flip is right.** All three need a human hand on a trackpad.
+
+    private static let padViewPath = "DAWApp/BreathPad/BreathPadView.swift"
+    private static let pressurePath = "DAWApp/BreathPad/PadPressureSurface.swift"
+
+    @Test("the pressure surface is MOUNTED on the dial, not merely defined")
+    func thePressureSurfaceIsMounted() {
+        let dial = Self.code(Self.padViewPath)
+        #expect(dial.count > 5_000, "BreathPadView.swift came back short: \(dial.count) chars")
+        // POSITIVE CONTROL: the extractor must find something known to be there,
+        // or an absence assertion below proves nothing.
+        #expect(dial.contains("BreathPadGeometry"),
+                "POSITIVE CONTROL FAILED: BreathPadGeometry is not in BreathPadView.swift, so the reads below are meaningless.")
+        #expect(dial.contains("PadPressureSurface(model: model"),
+                "a surface that is defined but never mounted compiles, ships, and is dead — the precise defect m25-c was filed for.")
+    }
+
+    @Test("⛔ the dial has exactly ONE pointer path — the old DragGesture is GONE, not doubled")
+    func thereIsOnlyOneInputPath() {
+        // Two input paths onto one model would double every `beginDrag`, and the
+        // pad's commit is gated on "the dot moved" — so one click would spend
+        // TWO undo steps. This is the assertion that keeps the swap a swap.
+        let dial = Self.code(Self.padViewPath)
+        #expect(dial.contains("PadPressureSurface"))
+        #expect(!dial.contains("DragGesture"),
+                "a DragGesture is back on the dial alongside the NSView — one press would open two gestures.")
+    }
+
+    @Test("⚠️ the pressure behaviour is .primaryGeneric — NOT the actuated system default")
+    func theConfigurationIsTheMusicalOne() {
+        // ⛔ `.primaryDeepClick` (the system default) is TWO-STAGE and ACTUATED:
+        // crossing into stage 2 fires the Force Click haptic. A physical click
+        // transient in the middle of a breath swell reads as a mixing artefact,
+        // not as expression. Only `.primaryGeneric` is one stage, unactuated,
+        // full-range — Apple's own header calls it the one for "drawing and
+        // general pressure use".
+        let surface = Self.code(Self.pressurePath)
+        #expect(surface.count > 1_000, "PadPressureSurface.swift came back short: \(surface.count) chars")
+        #expect(surface.contains("NSPressureConfiguration(pressureBehavior: .primaryGeneric)"))
+        #expect(surface.contains("pressureConfiguration = Self.musicalPressure"),
+                "a configuration that is built and never installed leaves the gesture on the system default.")
+        for banned in [".primaryDeepClick", ".primaryDeepDrag", ".primaryAccelerator"] {
+            #expect(!surface.contains(banned),
+                    "\(banned) would put a haptic detent or a speed curve through a breath swell.")
+        }
+    }
+
+    @Test("the coordinate space is FLIPPED, and the pressure event reaches the model")
+    func theSurfaceIsWiredEndToEnd() {
+        // ⚠️ AppKit is y-UP and `BreathPadGeometry` was written for SwiftUI's
+        // y-DOWN. Without `isFlipped` every press lands mirrored about the
+        // horizontal axis — invisible to every synthetic leg in this item (they
+        // all call the model directly) and obvious to a human in one second.
+        let surface = Self.code(Self.pressurePath)
+        #expect(surface.contains("override var isFlipped: Bool { true }"))
+        #expect(surface.contains("override func pressureChange(with event: NSEvent)"))
+        #expect(surface.contains("model?.pressureChanged(Double(event.pressure))"),
+                "the pressure event must reach the model, or the axis is decorative.")
+        // The three model calls the old DragGesture made, in the new home.
+        for call in ["model.beginDrag(at:", "model.drag(to:", "model.endDrag()"] {
+            #expect(surface.contains(call),
+                    "\(call) is missing — the NSView must make the SAME three calls the gesture did.")
+        }
+    }
 }
