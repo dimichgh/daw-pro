@@ -262,7 +262,7 @@ test("instrument_set_sampler_param still rejects an unknown param name (the enum
 // The schema and the descriptions ARE the contract
 // ---------------------------------------------------------------------------
 
-test("pedalHoldLimit is in instrument_set_sampler_param's param enum, and the enum is the documented twelve", () => {
+test("pedalHoldLimit is in instrument_set_sampler_param's param enum, and the enum is the documented thirteen", () => {
   const tool = tools.find((t) => t.name === "instrument_set_sampler_param");
   assert.ok(tool, "instrument_set_sampler_param is registered");
   const paramSchema = (tool.inputSchema as any).properties?.param;
@@ -272,8 +272,14 @@ test("pedalHoldLimit is in instrument_set_sampler_param's param enum, and the en
   // The description CLAIMS a field count. A claimed count that stops matching
   // the enum is exactly the "the record says X, the source says Y" shape this
   // tree keeps paying for, so pin them to each other rather than to a literal.
-  assert.equal(values.length, 12, `the enum holds twelve globals, got ${values.length}`);
-  assert.match(paramSchema.description as string, /twelve fields/, "the prose count must match the enum length");
+  // m34-t added `glideTime` — the thirteenth. This pin is why it could not be
+  // added without also updating the prose count.
+  assert.equal(values.length, 13, `the enum holds thirteen globals, got ${values.length}`);
+  assert.match(
+    paramSchema.description as string,
+    /thirteen fields/,
+    "the prose count must match the enum length"
+  );
 });
 
 test("descriptions teach the two load-bearing facts: RELEASED not cut, and a held key is never taken", () => {

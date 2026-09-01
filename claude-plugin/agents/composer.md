@@ -200,11 +200,16 @@ before then). So:
     `clip_set_controller_lane`/`clip_humanize` only for a shape neither tool
     offers.
   - ⛔ **Know the ceiling, and do not oversell it in a handoff.** ⚠️ CORRECTED
-    2026-08-23: the built-in `sampler` now has a real monophonic mode —
-    `track_set_instrument` with `{sampler: {voiceMode: "mono"}}` gives
-    LAST-NOTE priority, true voice *stealing* rather than masking (default
-    stays `poly`; built for wind lines — see `daw-wire-reference`'s "Overlap
-    masks a retrigger" section for the full story). **Everywhere else**
+    TWICE. 2026-08-23 said the built-in `sampler` "now has a real monophonic
+    mode" and left the impression it slurred; `{sampler: {voiceMode: "mono"}}`
+    is voice *stealing* — the new note still gets a **fresh attack**, so a
+    slurred pair re-tongues. ⭐ **2026-08-31 (m34-t) added the mode that
+    doesn't: `{sampler: {voiceMode: "legato"}}` CONTINUES the sounding voice at
+    the new pitch with no second attack — the real slur — and
+    `{sampler: {glideTime: 0.12}}` makes that pitch change a portamento SLIDE
+    (needs `mono` or `legato`; ignored under `poly`).** Default stays `poly`;
+    built for wind lines — see `daw-wire-reference`'s "Overlap masks a
+    retrigger" section for the mode table. **Everywhere else**
     (`soundBank`, hosted `audioUnit`) every note-on still starts a new voice
     with a fresh attack, and overlap only **masks** that retrigger under the
     previous note's tail; it does not remove it. Don't oversell masking as

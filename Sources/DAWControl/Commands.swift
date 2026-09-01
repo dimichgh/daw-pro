@@ -1855,13 +1855,30 @@ public final class CommandRouter {
             // each entry names both the stored number and what the engine
             // actually applies, so a caller never has to descend to learn the
             // scalar is wrong.
+            var describeSamplerWarnings: [String] = []
             if !describeSamplerParams.zones.isEmpty {
                 let (effectiveGlobals, warnings) =
                     Self.samplerEffectiveGlobalsJSON(describeSamplerParams)
                 describeSamplerResult["effectiveGlobals"] = effectiveGlobals
-                if !warnings.isEmpty {
-                    describeSamplerResult["warnings"] = .array(warnings.map(JSONValue.string))
-                }
+                describeSamplerWarnings += warnings
+            }
+            // m34-t: a glide set on a POLY sampler is silently inert — the same
+            // settable-but-doing-nothing shape every warning on this verb
+            // exists to end. It is NOT gated on `zones` (the block above is,
+            // because an inert global is a fact about zones); a zoneless
+            // sampler with a poly glide is just as wrong and just as invisible.
+            if describeSamplerParams.effectiveGlideTime > 0,
+               !describeSamplerParams.glideIsEffective {
+                describeSamplerWarnings.append(
+                    "glideTime is \(describeSamplerParams.effectiveGlideTime) s but voiceMode is "
+                    + "\(describeSamplerParams.effectiveVoiceMode.rawValue), and GLIDE IS "
+                    + "IGNORED under poly — there is no single previous note to slide from. Set "
+                    + "voiceMode to 'legato' (slide with no new attack, the real slur) or 'mono' "
+                    + "(the new note attacks but starts at the previous pitch) to hear it")
+            }
+            if !describeSamplerWarnings.isEmpty {
+                describeSamplerResult["warnings"]
+                    = .array(describeSamplerWarnings.map(JSONValue.string))
             }
             if let sourcePath = describeSamplerParams.sourcePath {
                 describeSamplerResult["sourcePath"] = .string(sourcePath)
@@ -1897,6 +1914,18 @@ public final class CommandRouter {
             // Only-when-SET; absent still means unlimited.
             if let pedalHoldLimit = describeSamplerParams.pedalHoldLimit {
                 describeSamplerResult["pedalHoldLimit"] = .number(Double(pedalHoldLimit))
+            }
+            // m34-t, same only-when-SET rule — plus ONE derived key that is not
+            // just a read-back. `glideTime` alone cannot tell a caller whether
+            // the slide will actually happen: it needs a monophonic voiceMode
+            // too, and a glide set on a poly sampler is silently inert. That is
+            // exactly this tree's characteristic failure shape (the record says
+            // X, the sound says Y, and nothing compares them), so the
+            // COMPARISON is published rather than left to be re-derived.
+            if let glideTime = describeSamplerParams.glideTime {
+                describeSamplerResult["glideTime"] = .number(glideTime)
+                describeSamplerResult["glideEffective"]
+                    = .bool(describeSamplerParams.glideIsEffective)
             }
             if params["offset"] != nil || params["limit"] != nil {
                 let describeSamplerOffset = try Self.parseZonePageOffset(params)
@@ -11411,7 +11440,21 @@ public final class CommandRouter {
                     + "it is not cut — and a key you are still physically holding is never "
                     + "taken. Any value above the 64-voice pool is unreachable and so means "
                     + "unlimited")
-                ?? fallback.pedalHoldLimit
+                ?? fallback.pedalHoldLimit,
+            // m34-t GLIDE — same fall-back-to-current rule, same
+            // REFUSE-don't-clamp rule. It only reaches the sound in a
+            // monophonic voiceMode; that is stated here rather than silently
+            // enforced, and `instrument.describeSampler` reports
+            // `glideEffective` so a caller can SEE whether it is doing anything.
+            glideTime: try Self.optionalBoundedNumber(
+                obj["glideTime"], "sampler.glideTime", SamplerParams.glideTimeRange,
+                "seconds for the pitch to SLIDE from the previous note to the new one "
+                    + "(portamento); omit or send 0 to make it step, which is what the Sampler "
+                    + "has always done. It needs voiceMode 'mono' or 'legato' — under 'poly' "
+                    + "there is no single previous note to slide from and the setting is "
+                    + "IGNORED. Under 'legato' the sounding voice slides with no new attack; "
+                    + "under 'mono' the new note attacks but starts at the previous pitch")
+                ?? fallback.glideTime
         )
     }
 
@@ -11453,22 +11496,30 @@ public final class CommandRouter {
         return Int(number)
     }
 
-    /// `"poly"` / `"mono"`, or nil when the key is absent. An unrecognised
-    /// string is REFUSED and lists the two legal values: a typo silently
-    /// falling back to poly would be a sampler that ignores the mode it was
-    /// told to use, reported as success.
+    /// `"poly"` / `"mono"` / `"legato"` (m34-t), or nil when the key is absent.
+    /// An unrecognised string is REFUSED and lists the legal values: a typo
+    /// silently falling back to poly would be a sampler that ignores the mode it
+    /// was told to use, reported as success.
+    ///
+    /// ⚠️ THE LEGAL SET IS DERIVED FROM THE ENUM, never re-typed — a fourth mode
+    /// added tomorrow must not leave this message naming three.
     private static func optionalSamplerVoiceMode(_ value: JSONValue?) throws -> SamplerVoiceMode? {
+        let legal = SamplerVoiceMode.allCases.map { "\"\($0.rawValue)\"" }
+            .joined(separator: " / ")
         switch value {
         case .none, .some(.null): return nil
         case .some(.string(let raw)):
             guard let mode = SamplerVoiceMode(rawValue: raw.lowercased()) else {
-                throw ControlError("sampler.voiceMode must be \"poly\" or \"mono\" — mono is "
-                                   + "LAST-NOTE priority, so a new note always takes over from "
-                                   + "the one sounding")
+                throw ControlError("sampler.voiceMode must be \(legal) — mono and legato are "
+                                   + "both LAST-NOTE priority, so a new note always takes over "
+                                   + "from the one sounding. They differ in HOW: mono "
+                                   + "RE-ATTACKS (the old voice releases, a new one starts), "
+                                   + "legato CONTINUES the sounding voice at the new pitch with "
+                                   + "no second attack — the real slur")
             }
             return mode
         case .some:
-            throw ControlError("sampler.voiceMode must be a string (\"poly\" or \"mono\")")
+            throw ControlError("sampler.voiceMode must be a string (\(legal))")
         }
     }
 
@@ -11880,6 +11931,10 @@ public final class CommandRouter {
         }
         if let voiceMode = sampler.voiceMode {
             samplerObject["voiceMode"] = .string(voiceMode.rawValue)
+        }
+        // m34-t glide, same only-when-SET rule.
+        if let glideTime = sampler.glideTime {
+            samplerObject["glideTime"] = .number(glideTime)
         }
         // m34-q, same only-when-SET rule again.
         if let pedalHoldLimit = sampler.pedalHoldLimit {

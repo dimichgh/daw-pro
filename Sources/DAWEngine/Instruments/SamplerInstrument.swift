@@ -17,11 +17,41 @@ import Foundation
 /// hard-wire**, so a project that never sets it renders byte-identically. See
 /// that field for why the default may not be widened.
 ///
-/// VOICE MODE (`SamplerParams.voiceMode`): poly (nil/default, unchanged) or
-/// MONO with LAST-NOTE priority — a new note chokes the sounding one into its
-/// release ramp, and a note-off for an already-superseded note is discarded
-/// rather than falling back to a note still held. See `monoChoke` and the
-/// note-off branch of `apply(_:)` for the wind-instrument reasoning.
+/// VOICE MODE (`SamplerParams.voiceMode`): poly (nil/default, unchanged), MONO,
+/// or (m34-t) LEGATO. Both mono modes are LAST-NOTE priority, and in both a
+/// note-off for an already-superseded note is discarded rather than falling
+/// back to a note still held. See `monoChoke` and the note-off branch of
+/// `apply(_:)` for the wind-instrument reasoning.
+///
+/// ⭐ m34-t — MONO AND LEGATO DIFFER IN THE ONE WAY THAT MATTERS, AND SAYING SO
+/// PLAINLY IS WORTH A PARAGRAPH BECAUSE THE SHIPPED WIRE DOCS ONCE DID NOT.
+/// `.mono` is voice STEALING: a new note-on chokes the sounding voice into its
+/// RELEASE ramp and writes a NEW voice with a FRESH ATTACK. It decides which
+/// note wins; it does not remove the tongue, so a slurred sax pair still
+/// re-articulates on the second note — which was the user-visible defect m34-t
+/// was filed for. `.legato` is voice CONTINUATION: `continueLegato` retunes the
+/// sounding voice(s) IN PLACE and touches the envelope not at all, so there is
+/// no second attack. The envelope keeps running from wherever it had got to,
+/// which is free rather than clever: coefficients are captured PER VOICE at
+/// trigger, so a voice that is never re-triggered simply carries on.
+///
+/// ⛔ A LEGATO VOICE DOES NOT CHANGE ZONE — it is retuned against its own
+/// zone's root pitch. A slur is one continuous excitation, so the sample must
+/// not change mid-slide; timbre drift on a wide slurred interval is the
+/// accepted limit. A DETACHED note (nothing sounding) triggers normally, with
+/// a full attack and normal zone mapping.
+///
+/// ⭐ GLIDE / PORTAMENTO (m34-t, `SamplerParams.glideTime`): instead of the
+/// pitch STEPPING to the new note, `baseIncrement` walks to it over `glideTime`
+/// on a GEOMETRIC per-frame ratio — linear in semitones, so the slide is even
+/// across the interval. It works in BOTH monophonic modes: under `.legato` the
+/// continued voice slides, and under plain `.mono` the new voice attacks but
+/// starts at the PREVIOUS note's pitch and slides to its own, which is how a
+/// hardware mono synth does portamento. It is IGNORED under `.poly` (see
+/// `SamplerParams.glideTime` for why that is a scope decision). Because it
+/// ramps `baseIncrement` and bend multiplies on top, GLIDE AND PITCH BEND
+/// COMPOSE without either knowing about the other. Per-frame cost when no
+/// voice is gliding: one Int32 compare — nil/0 renders byte-identically.
 ///
 /// m27 continuous expression: CC11 (expression), CC2 (breath) and CC1 (mod
 /// wheel) now reach the voice as a SMOOTHED per-voice amplitude multiplier —
@@ -259,9 +289,31 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
         /// Semitones per full bend deflection; nil in the model resolves HERE,
         /// once, to the GM default — the render thread never sees an Optional.
         var bendRangeSemitones: Double
-        /// `SamplerVoiceMode` flattened to a Bool so the snapshot stays POD and
-        /// the render thread branches on a plain load.
+        /// `SamplerVoiceMode` flattened to Bools so the snapshot stays POD and
+        /// the render thread branches on plain loads.
+        ///
+        /// ⚠️ m34-t WIDENED THIS ONE'S MEANING: it is now "MONOPHONIC" — true
+        /// for `.mono` AND `.legato` — because every rule it gates is about one
+        /// airstream rather than about re-attack (the note-off discard, the
+        /// choke arming, whether glide applies). `legatoVoiceMode` below is the
+        /// narrower question, and the two are deliberately not one tri-state:
+        /// the code that asks "is this monophonic" outnumbers the code that
+        /// asks "does it continue" three to one.
         var monoVoiceMode: Bool
+        /// m34-t: TRUE ONLY FOR `.legato`. Implies `monoVoiceMode`.
+        var legatoVoiceMode: Bool
+        /// m34-t GLIDE, carried RAW in SECONDS — the `attack`/`release`
+        /// precedent, and for the same reason: the frames figure depends on the
+        /// SAMPLE RATE, which the snapshot does not know. `recomputeCoefficients`
+        /// turns it into `glideFrames`, and `prepare` forces a readoption when
+        /// the rate changes so a re-prepared instrument re-derives it.
+        ///
+        /// ⛔ ALREADY RESOLVED AGAINST THE MODE HERE: `.poly` stores 0 no matter
+        /// what the user set, because glide is monophonic-only (see
+        /// `SamplerParams.glideTime`). Resolving it once, at the boundary, is
+        /// what makes "poly cannot change" a structural fact rather than a
+        /// branch someone has to remember downstream.
+        var glideTime: Double
         /// m34-o GLOBAL decay/sustain, carried RAW (seconds / 0…1 level) —
         /// deliberately NOT as a precomputed `decayStep` the way `attack` and
         /// `release` become `attackStep`/`releaseSlope` in
@@ -296,7 +348,16 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
             expressionFilterDepth = params.expressionFilterDepth ?? 0
             expressionFilterCC = params.expressionFilterCC ?? 11
             bendRangeSemitones = params.effectiveBendRangeSemitones
-            monoVoiceMode = params.effectiveVoiceMode == .mono
+            // ⚠️ m34-t: `.isMonophonic`, NOT `== .mono`. A `.legato` instrument
+            // is monophonic, and every rule this flag gates (the superseded
+            // note-off discard, the choke arming, glide's eligibility) applies
+            // to it. Reading `== .mono` here would leave legato behaving as
+            // POLY for all three, which no compiler could have caught.
+            monoVoiceMode = params.effectiveVoiceMode.isMonophonic
+            legatoVoiceMode = params.effectiveVoiceMode.continuesVoices
+            // ONE home for "can glide reach the sound at all" — the model's own
+            // accessor, so the engine and the wire's warning cannot disagree.
+            glideTime = params.glideIsEffective ? params.effectiveGlideTime : 0
             pedalHoldLimit = params.effectivePedalHoldLimit
         }
     }
@@ -345,6 +406,26 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
         var position = 0.0
         var increment = 0.0          // baseIncrement × bendFactor
         var baseIncrement = 0.0      // unbent source frames per output frame (m16-b2)
+        // m34-t GLIDE / PORTAMENTO — three scalars, all zero on a fresh voice,
+        // and `glideRemaining == 0` is the "not gliding" state, so a freed slot
+        // and an instrument that never sets `glideTime` cost exactly one Int32
+        // compare per voice per frame and change no arithmetic whatsoever.
+        //
+        // ⭐ THE RAMP IS GEOMETRIC ON `baseIncrement`, WHICH IS LINEAR IN
+        // SEMITONES. `glideCoeff` is the PER-FRAME RATIO
+        // `(target/start)^(1/frames)`, formed with one `pow` at EVENT rate (the
+        // `exp2` in the bend path is the precedent). The per-frame cost is then
+        // ONE multiply — never a `pow`, never an `exp2` — which is the reason
+        // this shape was chosen over storing a semitone offset and
+        // exponentiating each sample.
+        //
+        // ⛔ IT RAMPS `baseIncrement`, NOT `increment`. Bend multiplies on top
+        // (`increment = baseIncrement × bendFactor`, re-formed here every glide
+        // frame and by `applyBendFactor` on every bend event), so the two
+        // compose without either knowing about the other.
+        var glideRemaining: Int32 = 0   // frames left; 0 = not gliding
+        var glideCoeff = 1.0            // per-frame multiplier on baseIncrement
+        var glideTarget = 0.0           // snapped to EXACTLY this on the last frame
         // m32-d (design §7): the per-voice DIRECTION SCALAR. The frame actually
         // read is `readBase + readDir × position`.
         //
@@ -515,7 +596,40 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
     private var lastBendRaw = 8_192
     /// m30 mono (last-note priority). Render-thread scalars under the same
     /// single-writer discipline as `bendFactor`/`pedalDown`.
+    ///
+    /// ⚠️ m34-t: this means MONOPHONIC — true for `.mono` and `.legato` alike.
+    /// See `ScalarParams.monoVoiceMode`.
     private var monoVoiceMode = false
+    /// m34-t: true only for `.legato`. Implies `monoVoiceMode`.
+    private var legatoVoiceMode = false
+    /// m34-t: the glide length in FRAMES at the live rate, derived in
+    /// `recomputeCoefficients` from `ScalarParams.glideTime` exactly as
+    /// `attackStep`/`releaseSlope` are derived from their seconds. 0 = off,
+    /// which `.poly` always resolves to.
+    private var glideFrames: Int32 = 0
+    /// m34-t: the pitch of the last note this instrument actually SOUNDED —
+    /// the origin a glide slides FROM. −1 = none yet (or since the last
+    /// `reset()`), which means the next note snaps however long `glideTime` is.
+    ///
+    /// ⭐ THE RULE IS "ALWAYS GLIDE", NOT "FINGERED". A hardware synth that
+    /// glides only when the notes OVERLAP (fingered portamento) needs the
+    /// player to control legato with their hands; a sequenced part cannot, and
+    /// the two readings are indistinguishable from the wire. Always-glide is
+    /// the predictable one: set a time, every step slides. A detached note
+    /// after a long silence still slides from the previous pitch, which is what
+    /// `reset()` clearing this to −1 keeps bounded to one performance.
+    ///
+    /// ⚠️ Written in `trigger` (and in `continueLegato`), never in the
+    /// selection loop, so a note-on that sounds NOTHING does not move the
+    /// glide origin — the `monoActiveNoteID` discipline.
+    private var lastNotePitch: Int32 = -1
+    /// m34-t: `lastNotePitch` CAPTURED once per note-on, before `trigger` can
+    /// overwrite it. Without this a note-on firing several m19-a groups would
+    /// glide only its FIRST layer: the first `trigger` would set
+    /// `lastNotePitch` to the new pitch, and every later layer would compute a
+    /// glide from the new pitch to itself — a ratio of exactly 1. The
+    /// `monoPendingChoke` arm-then-fire discipline, for the same class of bug.
+    private var glideFromPitch: Int32 = -1
     /// The noteID of the note mono last actually SOUNDED. Never cleared on
     /// note-off — see the note-off rule in `apply(_:)`.
     private var monoActiveNoteID: UInt64 = 0
@@ -665,6 +779,13 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
         // does nothing — see `recomputeCoefficients`.)
         bendRangeSemitones = lastAppliedScalars.bendRangeSemitones
         monoVoiceMode = lastAppliedScalars.monoVoiceMode
+        legatoVoiceMode = lastAppliedScalars.legatoVoiceMode
+        // m34-t: same seeding rule, and it MATTERS here rather than being
+        // cosmetic — `prepare()` may not have run when the first events arrive
+        // in a test harness, and a glide of 0 frames would silently be a snap.
+        glideFrames = lastAppliedScalars.glideTime > 0
+            ? Int32(max(1.0, (lastAppliedScalars.glideTime * sampleRate).rounded()))
+            : 0
         pedalHoldLimit = lastAppliedScalars.pedalHoldLimit
         // xorshift64* has one degenerate state: 0 sticks at 0. Substitute a
         // fixed odd constant so a (vanishingly unlikely) zero seed still runs.
@@ -1051,7 +1172,15 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
         // reason `level` is in it: a NaN in a multiplier propagates forever
         // and nothing downstream would ever catch it.
         for index in 0..<Self.voiceCount where voices[index].active {
+            // m34-t adds `increment` to the sweep. It was previously covered
+            // only TRANSITIVELY — a non-finite increment poisons `position` on
+            // the very next frame, which this guard already caught — but glide
+            // is the first thing that WRITES the increment repeatedly on the
+            // hot path, and a state the render loop mutates every frame should
+            // be checked directly rather than through its downstream. Finite
+            // values are untouched, so no rendering changes.
             if !(voices[index].level.isFinite && voices[index].position.isFinite
+                 && voices[index].increment.isFinite
                  && voices[index].expGain.isFinite
                  && voices[index].lpZ1L.isFinite && voices[index].lpZ1R.isFinite) {
                 voices[index] = Voice()
@@ -1102,6 +1231,14 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
         monoStarted = false
         monoPendingChoke = false
         chokeFiredMask = 0
+        // m34-t: the glide ORIGIN is performance state, exactly like the mono
+        // note identity above — a stop/seek must not leave the next note
+        // sliding down from whatever was playing before the flush. The per-voice
+        // ramp state neutralises with the voice wipe (`Voice()` carries
+        // `glideRemaining == 0`). `glideFrames` itself is CONFIGURATION and
+        // deliberately SURVIVES, like `monoVoiceMode` and `pedalHoldLimit`.
+        lastNotePitch = -1
+        glideFromPitch = -1
         // m34-q: the ARM is per-note-on performance state, exactly like
         // `monoPendingChoke` above — a flush must not leave one primed to fire
         // on the first note after it. `pedalHoldLimit` itself is configuration
@@ -1174,6 +1311,40 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
             //     lane-free project byte-identical to pre-m27.
             voices[index].expGain += (voices[index].expGainTarget
                 - voices[index].expGain) * expressionRampCoeff
+
+            // 1c. m34-t GLIDE — ONE geometric step on `baseIncrement`, then the
+            //     bend product re-formed. Placed here, beside the expression
+            //     chase, so BOTH the looping and non-looping branches below
+            //     advance by the same updated increment exactly once.
+            //
+            //     ⭐ THE COST WHEN NOT GLIDING IS ONE Int32 COMPARE. A fresh
+            //     voice, a freed slot and an instrument that never sets
+            //     `glideTime` all carry `glideRemaining == 0`, and the
+            //     arithmetic below is skipped entirely — which is what keeps
+            //     every pre-m34-t project byte-identical. There is no
+            //     `pow`/`exp2` here: the per-frame ratio was formed once, at
+            //     event rate, in `retune`/`trigger`.
+            //
+            //     ⛔ THE LAST FRAME SNAPS to the stored target rather than
+            //     taking one more multiply. `start × coeff^n` accumulates
+            //     rounding over thousands of frames, and "lands EXACTLY on the
+            //     target pitch" is the property a glide has to have — a slide
+            //     that arrives a fraction of a cent flat is out of tune for the
+            //     whole rest of the note.
+            //
+            //     ⛔ IT RAMPS `baseIncrement`, so PITCH BEND COMPOSES FOR FREE:
+            //     `increment` is re-formed from the current base times the live
+            //     `bendFactor`, exactly as `applyBendFactor` does on a bend
+            //     event. Neither path needs to know about the other.
+            if voices[index].glideRemaining > 0 {
+                voices[index].glideRemaining -= 1
+                if voices[index].glideRemaining == 0 {
+                    voices[index].baseIncrement = voices[index].glideTarget
+                } else {
+                    voices[index].baseIncrement *= voices[index].glideCoeff
+                }
+                voices[index].increment = voices[index].baseIncrement * bendFactor
+            }
 
             // 2. Source read at the CURRENT playhead with linear
             //    interpolation, then advance. The looping branch (m20-g §3.5)
@@ -1317,6 +1488,18 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
         // click `expGain` exists to prevent — for a mode change the user made
         // between notes anyway.
         monoVoiceMode = params.monoVoiceMode
+        legatoVoiceMode = params.legatoVoiceMode
+        // m34-t: seconds → frames, HERE rather than in the snapshot, because
+        // the figure is rate-dependent — the `attackStep`/`releaseSlope`
+        // precedent two lines up. `max(1, …)` on a NON-ZERO time makes a
+        // sub-frame glide a single-frame ramp rather than a divide-by-zero,
+        // while an exact 0 (the default, and everything `.poly` ever produces)
+        // stays exactly 0 = OFF. A glide that takes effect at the next note-on
+        // is also the right cadence: retuning a sounding note because a knob
+        // moved would be a slide the user never played.
+        glideFrames = params.glideTime > 0
+            ? Int32(max(1.0, (params.glideTime * sampleRate).rounded()))
+            : 0
         // m34-q takes effect at the NEXT note-on for the same reason voice mode
         // does: trimming already-sounding notes at a snapshot boundary would be
         // a fade the user never played, for a knob they turned between notes.
@@ -1455,11 +1638,23 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
             // Legacy zones (all group 0, full spans, no gates) degenerate to
             // the original first-match scan; no eligible zone → the note is
             // silently ignored. O(zoneCount) compares, no allocation.
+            // ⭐ m34-t LEGATO, and it is the FIRST thing the note-on branch
+            // does because it is the branch that must not happen at all: when a
+            // voice is already sounding, this note CONTINUES it — no choke, no
+            // new voice, no zone selection, no fresh attack — and returns.
+            // Everything below (the choke arm, the hold-limit arm, the whole
+            // m19-a selection pass) is the DETACHED-note path, which legato
+            // reaches only when nothing is sounding.
+            if legatoVoiceMode, continueLegato(event: event) { return }
             // MONO, last-note priority: arm the choke. It fires inside
             // `trigger` — the first zone this note-on actually sounds — never
             // here, so a note that selects no zone leaves the sounding note
             // alone rather than opening a hole.
             monoPendingChoke = monoVoiceMode
+            // m34-t: CAPTURE the glide origin before any `trigger` can move it.
+            // See `glideFromPitch` for why a per-note-on capture rather than a
+            // direct read of `lastNotePitch`.
+            glideFromPitch = lastNotePitch
             // m34-q: the THIRD arm, and armed for the same reason as the two
             // around it. `Int.max` (the nil default) can never be <= the voice
             // count, so an instrument with no cap never arms and renders
@@ -1603,6 +1798,110 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
         for index in 0..<Self.voiceCount where voices[index].active {
             voices[index].increment = voices[index].baseIncrement * bendFactor
         }
+    }
+
+    // MARK: - Legato voice continuation + glide (m34-t, render thread)
+
+    /// ⭐ m34-t — THE SLUR. A note-on in `.legato` mode CONTINUES every voice
+    /// that is currently sounding instead of choking it and starting a new one:
+    /// the envelope is not touched, so there is no second attack, and the voice
+    /// simply changes pitch. That is what a wind player does when they move a
+    /// finger without re-tonguing, and it is the thing `.mono` could not do —
+    /// mono changed WHICH note wins, it did not remove the tongue.
+    ///
+    /// Returns FALSE when nothing is sounding, in which case the caller falls
+    /// through to the ordinary trigger path: a DETACHED note gets a full attack
+    /// and normal zone mapping, which is correct — the player did re-articulate.
+    ///
+    /// ⛔ THE ZONE DOES NOT CHANGE. Each continued voice is retuned against ITS
+    /// OWN zone's root pitch (`zones[voice.zoneIndex]`, the established lookup),
+    /// because a slur is one continuous excitation and swapping the sample
+    /// mid-slide would be an audible splice in the middle of the one gesture
+    /// this mode exists to make seamless. Timbre drift on a wide slurred
+    /// interval is the accepted, documented limit — every hardware mono sampler
+    /// has it.
+    ///
+    /// ⛔ THE NOTE ID IS ADOPTED, and it is the load-bearing line. A continued
+    /// voice still carries the OLD note's id; without this the new note's
+    /// note-off would match no voice and THE SLURRED NOTE WOULD NEVER END. It
+    /// also makes the old note's own note-off arrive as a note-off for a note
+    /// no voice carries, which is exactly the superseded-note-off case the mono
+    /// ruling already discards — the two mechanisms agree rather than compete.
+    ///
+    /// ⛔ `sustained` IS CLEARED. A voice held by CC 64 has its key UP; the note
+    /// continuing it has its key DOWN. Leaving the flag set would let the next
+    /// pedal-up release a note under the player's finger.
+    ///
+    /// ⚠️ EVERY SOUNDING VOICE CONTINUES, not just one — an m19-a layered patch
+    /// answers one key with several voices, and slurring only one layer would
+    /// change the sound rather than the pitch. Voices already in their RELEASE
+    /// stage are NOT continued: they were let go, and a note arriving over a
+    /// dying tail is a detached note, not a slur.
+    ///
+    /// ⚠️ ONE-SHOT AND PEDAL-HELD VOICES ARE CONTINUED, on the same reasoning
+    /// `monoChoke` gives for choking them: one-shot says "ignore note-OFF", and
+    /// this is not a note-off; and "one note at a time" would be a lie if CC 64
+    /// could suspend it.
+    ///
+    /// Render thread: one O(64) sweep and at most one `pow` per voice, at EVENT
+    /// rate. No allocation, no lock, no ObjC.
+    @inline(__always)
+    private func continueLegato(event: ScheduledMIDIEvent) -> Bool {
+        var continued = false
+        for index in 0..<Self.voiceCount
+        where voices[index].active && voices[index].stage != Stage.release {
+            let zone = zones[Int(voices[index].zoneIndex)]
+            // The `trigger` formula, character for character, against THIS
+            // voice's own zone — see the zone ruling above.
+            let target = exp2((Double(event.pitch) - Double(zone.rootPitch)) / 12.0)
+                * zone.tuneFactor * zone.fileRate / sampleRate
+            retune(index, to: target)
+            voices[index].noteID = event.noteID
+            voices[index].sustained = false
+            continued = true
+        }
+        guard continued else { return false }
+        // The slur is one note as far as identity goes: the new id becomes the
+        // active one, so the OLD note's note-off is discarded by the existing
+        // rule rather than by a second one written here.
+        monoActiveNoteID = event.noteID
+        monoStarted = true
+        lastNotePitch = Int32(event.pitch)
+        return true
+    }
+
+    /// m34-t: point one voice at a new `baseIncrement` — instantly when there
+    /// is no glide, or by arming the per-frame geometric ramp when there is.
+    ///
+    /// ⭐ GEOMETRIC, i.e. LINEAR IN SEMITONES. `glideCoeff` is the per-frame
+    /// ratio `(target/start)^(1/frames)`; walking it multiplicatively makes the
+    /// slide even across the interval, so a fifth sounds like a fifth wherever
+    /// it starts. A linear ramp on the increment would spend most of its time
+    /// near the upper pitch on the way down and near the lower on the way up —
+    /// audibly lopsided, and worse the wider the interval.
+    ///
+    /// One `pow` here, at EVENT rate (the `exp2` in the bend path is the
+    /// precedent); the per-frame cost is one multiply.
+    ///
+    /// ⚠️ `increment` is only re-formed on the SNAP path. On the ramp path the
+    /// per-frame step owns it, and writing it here as well would move the voice
+    /// a frame early.
+    @inline(__always)
+    private func retune(_ index: Int, to target: Double) {
+        let current = voices[index].baseIncrement
+        // A non-positive or non-finite endpoint has no logarithm; an unchanged
+        // pitch has nothing to ramp. Both snap, which for an equal pitch is a
+        // no-op on the exact same bits.
+        if glideFrames > 0, current > 0, target > 0, target != current,
+           current.isFinite, target.isFinite {
+            voices[index].glideRemaining = glideFrames
+            voices[index].glideTarget = target
+            voices[index].glideCoeff = pow(target / current, 1.0 / Double(glideFrames))
+            return
+        }
+        voices[index].glideRemaining = 0
+        voices[index].baseIncrement = target
+        voices[index].increment = target * bendFactor
     }
 
     /// MONO choke: the previous note ends because the player moved.
@@ -1854,6 +2153,29 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
         voice.baseIncrement = exp2((Double(event.pitch) - Double(zone.rootPitch)) / 12.0)
             * zone.tuneFactor * zone.fileRate / sampleRate
         voice.increment = voice.baseIncrement * bendFactor  // bend applies now
+        // ⭐ m34-t GLIDE ON A RETRIGGER — this is the plain-`.mono` half, and it
+        // is how a hardware mono synth does portamento: the new voice DOES
+        // attack (mono is a re-articulation), but it starts at the PREVIOUS
+        // note's pitch and slides to its own. `glideFrames` is 0 under `.poly`
+        // and whenever no time is set, so this whole block collapses to two
+        // compares and changes nothing.
+        //
+        // ⚠️ The origin is the previous pitch READ IN THIS ZONE — the same
+        // formula against the same root — so the ratio the ramp walks is
+        // exactly `2^((new − previous)/12)` however the zone is tuned or
+        // resampled. Deriving it from the OLD voice's increment instead would
+        // fold in a different zone's `fileRate` and glide the wrong interval.
+        if glideFrames > 0, glideFromPitch >= 0, Int32(event.pitch) != glideFromPitch {
+            let from = exp2((Double(glideFromPitch) - Double(zone.rootPitch)) / 12.0)
+                * zone.tuneFactor * zone.fileRate / sampleRate
+            if from > 0, from.isFinite {
+                voice.glideRemaining = glideFrames
+                voice.glideTarget = voice.baseIncrement
+                voice.glideCoeff = pow(voice.baseIncrement / from, 1.0 / Double(glideFrames))
+                voice.baseIncrement = from
+                voice.increment = from * bendFactor
+            }
+        }
         // Amp law (design §4.5): (1 − vt + vt·velocity/127) × zone.gain, with
         // params.gain staying in outputGain (hot-swap preserved). vt = 1 (nil)
         // reduces to (0 + velocity/127) × gain — today's law bit-for-bit; the
@@ -1902,6 +2224,13 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
             : Float(1.0 / max(1.0, Double(zone.envRelease) * sampleRate))
         voices[slot] = voice
         nextSerial &+= 1
+        // m34-t: the glide origin moves only when a note actually SOUNDS — the
+        // `monoActiveNoteID` discipline. A note-on that selects no zone never
+        // reaches here, so it cannot silently re-anchor the next slide.
+        // Idempotent across the m19-a per-group loop: every `trigger` of one
+        // note-on writes the same pitch, and the ORIGIN they all read
+        // (`glideFromPitch`) was captured before the first of them ran.
+        lastNotePitch = Int32(event.pitch)
     }
 
     /// One xorshift64* step → a Float in [0, 1) from the top 24 bits of the

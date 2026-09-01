@@ -89,9 +89,14 @@ tool call — id-capture rules and etiquette live there.
   a 309-zone library and leaves every zone standing, and the globals you don't
   mention keep their values. `instrument_set_sampler_param` is the narrower,
   friendlier version of the SAME partial update for exactly one global at a
-  time (`oneShot`/`attack`/`release`/`gain`/`expressionModDepth`/
-  `expressionFilterDepth`/`expressionFilterCC`/`bendRangeSemitones`/
-  `voiceMode`) when you don't want to shape a whole `sampler` object by hand.
+  time (`oneShot`/`attack`/`decay`/`sustain`/`release`/`gain`/
+  `expressionModDepth`/`expressionFilterDepth`/`expressionFilterCC`/
+  `bendRangeSemitones`/`voiceMode`/`pedalHoldLimit`/`glideTime`) when you don't
+  want to shape a whole `sampler` object by hand. ⭐ **`voiceMode: "legato"`
+  and `glideTime` (m34-t) are the pair that makes a solo line stop re-tonguing:
+  `legato` CONTINUES the sounding voice at the new pitch instead of
+  re-attacking (`mono` re-attacks), and `glideTime` slides between the pitches
+  — it needs `mono` or `legato` and is IGNORED under `poly`.**
   ⚠️ **The exception is a PRESENT `zones` array on `track_set_instrument` —
   it REPLACES the whole keyzone map.** So never send a partial zone list to
   `track_set_instrument` "to update a couple of zones": the ones you left out

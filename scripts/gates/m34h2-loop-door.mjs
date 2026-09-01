@@ -114,14 +114,29 @@ async function frames(label) {
   return by;
 }
 
+// m34-v: this used to call `transport.getState`, which IS NOT A COMMAND — so
+// every read returned undefined, `waitForBeat` never actually waited, and the
+// quantize-boundary wait silently degraded into a fixed ~2.4 s sleep. The read
+// below is the verified sibling's (`m34h1-loop-deck.mjs`), copied verbatim
+// rather than reinvented.
 async function playhead() {
-  const r = await cmd("transport.getState");
-  return r.result?.positionBeats;
+  const snap = await cmd("project.snapshot");
+  return snap.result?.transport?.positionBeats;
 }
 
-async function waitForBeat(target, budget = 40) {
+/**
+ * Polls the app's own playhead until it reaches `target`.
+ *
+ * m34-v: the budget is wall-clock, not an iteration count. The old
+ * `40 × 60 ms` cap was sized while the wait was a no-op; once the read works,
+ * 2.4 s is shorter than a single bar below 100 BPM, so a real bar-quantized
+ * wait would have timed out and returned early — trading one silent failure
+ * for another.
+ */
+async function waitForBeat(target, budgetMs = 20000) {
+  const deadline = Date.now() + budgetMs;
   let last;
-  for (let i = 0; i < budget; i++) {
+  while (Date.now() < deadline) {
     last = await playhead();
     if (typeof last === "number" && last >= target) return last;
     await sleep(60);

@@ -232,8 +232,8 @@ struct PedalHoldLimitCodableTests {
             oneShot: true, attack: 0.031, release: 0.61, gain: 0.53,
             sourcePath: "/tmp/none.sfz", displayName: "Test Patch",
             expressionModDepth: 0.42, expressionFilterDepth: 0.37, expressionFilterCC: 2,
-            bendRangeSemitones: 6, voiceMode: .mono, decay: 1.7, sustain: 0.23,
-            pedalHoldLimit: 5)
+            bendRangeSemitones: 6, voiceMode: .legato, decay: 1.7, sustain: 0.23,
+            pedalHoldLimit: 5, glideTime: 0.35)
         let descriptor = InstrumentDescriptor(kind: .sampler, sampler: configured)
 
         let data = try Self.encoder.encode(InstrumentDocument(from: descriptor, mediaRefs: [:]))
@@ -260,17 +260,21 @@ struct PedalHoldLimitCodableTests {
             "sustain": restored.sustain == configured.sustain,
             "bendRangeSemitones": restored.bendRangeSemitones == configured.bendRangeSemitones,
             "voiceMode": restored.voiceMode == configured.voiceMode,
+            // m34-t.
+            "glideTime": restored.glideTime == configured.glideTime,
         ]
         print("[measured] sampler globals surviving save/open: "
               + survived.keys.sorted().map { "\($0)=\(survived[$0]! ? "yes" : "NO")" }
                   .joined(separator: " "))
 
-        // m34-s: ALL FOURTEEN globals must survive. The last four were the
-        // defect — absent from SamplerDocument's CodingKeys until 2026-08-31.
+        // m34-s: FOURTEEN globals, of which the last four were the defect —
+        // absent from SamplerDocument's CodingKeys until 2026-08-31.
+        // m34-t adds the FIFTEENTH, `glideTime`.
         let mustSurvive = ["oneShot", "attack", "release", "gain", "sourcePath", "displayName",
                            "expressionModDepth", "expressionFilterDepth", "expressionFilterCC",
                            "pedalHoldLimit",
-                           "decay", "sustain", "bendRangeSemitones", "voiceMode"]
+                           "decay", "sustain", "bendRangeSemitones", "voiceMode",
+                           "glideTime"]
         for name in mustSurvive {
             #expect(survived[name] == true,
                     """
@@ -279,7 +283,34 @@ struct PedalHoldLimitCodableTests {
         }
 
         #expect(Set(mustSurvive) == Set(survived.keys),
-                "every global this type carries must be classified — a new one must be added here")
+                "every global this test names must be classified — the two lists must agree")
+
+        // ⭐⭐ m34-t CORRECTION, AND IT IS THE POINT OF THIS TEST RATHER THAN A
+        // TIDY-UP. Until now the classification assertion above compared TWO
+        // HAND-WRITTEN LISTS, and the comment on this test claimed a fifteenth
+        // global "must fail the classification assertion and force a decision".
+        // IT COULD NOT: `survived` is a literal dictionary, so a new field on
+        // `SamplerParams` would simply be absent from BOTH lists and the test
+        // would stay green while the field silently vanished on save — the
+        // EXACT m34-s failure shape, sitting inside the test written to prevent
+        // it. (Measured while adding `glideTime`: nothing here went red.)
+        //
+        // This asks the TYPE instead. `Mirror` enumerates the stored properties,
+        // so a sixteenth global added tomorrow fails HERE, by name, without
+        // anyone having to remember this file exists.
+        let stored = Set(Mirror(reflecting: configured).children.compactMap(\.label))
+        #expect(!stored.isEmpty, "control failed: Mirror returned no stored properties at all")
+        #expect(stored.contains("glideTime"),
+                "control failed: Mirror cannot see a property this test knows is there")
+        // `zones` is structural, not a global — it has its own coverage (a
+        // dropped zone is loud) and no meaningful "did it survive" scalar here.
+        #expect(stored.subtracting(mustSurvive) == ["zones"],
+                """
+                SamplerParams carries a global this test does not classify: \
+                \(stored.subtracting(mustSurvive).subtracting(["zones"]).sorted()). Add it to \
+                `survived` AND `mustSurvive`, and thread it through SamplerDocument's four \
+                touch points first — see ROADMAP m34-s and m34-t.
+                """)
         #expect(warnings.isEmpty, "a zone-less round trip must not warn: \(warnings)")
     }
 
@@ -364,6 +395,9 @@ struct PedalHoldLimitCodableTests {
             ("sustain", SamplerParams(sustain: 0.23)),
             ("bendRangeSemitones", SamplerParams(bendRangeSemitones: 6)),
             ("voiceMode", SamplerParams(voiceMode: .mono)),
+            // m34-t, held to the same discipline from its first day rather
+            // than being discovered missing later.
+            ("glideTime", SamplerParams(glideTime: 0.35)),
         ]
         for (name, params) in cases {
             let keys = try Self.keys(of: SamplerDocument(from: params, mediaRefs: [:]))
@@ -469,5 +503,55 @@ struct PedalHoldLimitCodableTests {
         let known = try Self.reopen(configured,
                                     overridingSamplerKey: (key: "voiceMode", value: "mono"))
         #expect(known.voiceMode == .mono, "control failed: a KNOWN rawValue must still resolve")
+    }
+
+    // MARK: - Leg G — m34-t: legato + glide through the same save format
+
+    /// ⭐ THE RAW-STRING SHAPE PAYING OFF, EXACTLY AS PREDICTED. m34-s chose to
+    /// persist `voiceMode` as its rawValue with a tolerant
+    /// `flatMap(init(rawValue:))` precisely so that a THIRD case could be added
+    /// without an older build being unable to open the project. m34-t added
+    /// `.legato`, and it needed NO change to the save format at all — this test
+    /// is the confirmation, not an assumption.
+    ///
+    /// The old-build direction is the second half: an older build sees
+    /// `"legato"`, does not know it, and resolves it to nil = poly. That is the
+    /// SAFE direction — the project opens and sounds like the pre-m34-t engine,
+    /// rather than failing to open at all.
+    @Test("m34-t: the new legato voiceMode rides the existing save key with no format change")
+    func legatoVoiceModeSurvivesTheSaveOpenPath() throws {
+        let configured = SamplerParams(bendRangeSemitones: 6, voiceMode: .legato, glideTime: 0.35)
+        let restored = try Self.reopen(configured)
+        #expect(restored.voiceMode == .legato,
+                "a legato patch that reopens as poly or mono is a different instrument")
+        #expect(restored.effectiveVoiceMode == .legato)
+        #expect(restored.effectiveVoiceMode.continuesVoices)
+
+        // What an OLDER build does with it: unknown rawValue → nil → poly, and
+        // the rest of the document intact.
+        let older = try Self.reopen(configured, droppingSamplerKey: "voiceMode")
+        #expect(older.voiceMode == nil)
+        #expect(older.effectiveVoiceMode == .poly)
+        #expect(older.glideTime == 0.35, "control failed: the neighbour must survive the deletion")
+    }
+
+    /// ⛔ THE m34-s TRAP, PAID FOR ONCE ALREADY: a setting that does not survive
+    /// a save is not a setting. `glideTime` is threaded through all four
+    /// `SamplerDocument` touch points; this is the end-to-end confirmation, with
+    /// the absent-key leg pinning that nil still means "the pitch steps".
+    @Test("m34-t: glideTime survives the real save/open path; absent still means a pitch STEP")
+    func glideTimeSurvivesTheSaveOpenPath() throws {
+        let configured = SamplerParams(voiceMode: .legato, glideTime: 0.35)
+        let restored = try Self.reopen(configured)
+        #expect(restored.glideTime == 0.35, "a glide that does not survive a save is not a setting")
+        #expect(restored.effectiveGlideTime == 0.35)
+        #expect(restored.glideIsEffective)
+
+        let legacy = try Self.reopen(configured, droppingSamplerKey: "glideTime")
+        #expect(legacy.glideTime == nil, "an absent key must decode as nil, never as a stored 0")
+        #expect(legacy.effectiveGlideTime == 0, "the documented default, stated as a number")
+        #expect(!legacy.glideIsEffective)
+        #expect(legacy.voiceMode == .legato,
+                "control failed: the neighbour must survive the deletion")
     }
 }

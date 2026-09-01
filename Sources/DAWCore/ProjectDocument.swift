@@ -929,7 +929,11 @@ public struct InstrumentDocument: Codable, Sendable, Equatable {
                                  decay: s.decay, sustain: s.sustain,
                                  // m34-q: absent (every pre-m34-q project) →
                                  // nil → unlimited, the pre-m34-q behaviour.
-                                 pedalHoldLimit: s.pedalHoldLimit)
+                                 pedalHoldLimit: s.pedalHoldLimit,
+                                 // m34-t: absent (every pre-m34-t project) →
+                                 // nil → 0 → the pitch STEPS, exactly what a
+                                 // project that never carried the key did.
+                                 glideTime: s.glideTime)
         }
         // The AU config round-trips intact even when the component isn't
         // installed on this machine — the engine reports `.missing` and
@@ -1011,6 +1015,25 @@ public struct SamplerDocument: Codable, Sendable, Equatable {
     /// CodingKeys is silently reset the next time the project opens.
     public var pedalHoldLimit: Int?
 
+    /// m34-t glide/portamento time in seconds — nil never encodes (the optional
+    /// encodeIfPresent rule above), so a sampler that never set a glide keeps a
+    /// document shape byte-identical to pre-m34-t, and every pre-m34-t project
+    /// decodes it as nil = 0 = the pitch steps, which is what it did.
+    ///
+    /// ⚠️ IT IS HERE FOR THE m34-s REASON, restated because that item cost four
+    /// silently-dropped globals: a setting that does not survive a save is not
+    /// a setting. `SamplerParams` does NOT persist through its own `Codable` —
+    /// this document is the save format.
+    ///
+    /// ⭐ `voiceMode` needed NOTHING for m34-t's new `.legato` case: it already
+    /// persists as its RAW STRING and resolves with
+    /// `flatMap(SamplerVoiceMode.init(rawValue:))`, so a third case rides the
+    /// existing key, and an OLDER build opening a legato project resolves the
+    /// unknown string to nil = poly rather than failing the open. That is the
+    /// safe direction, and it is the whole reason the raw-string shape was
+    /// chosen over `decodeIfPresent(SamplerVoiceMode.self)`.
+    public var glideTime: Double?
+
     private enum CodingKeys: String, CodingKey {
         case zones, oneShot, attack, release, gain, sourcePath, displayName
         case expressionModDepth, expressionFilterDepth, expressionFilterCC
@@ -1019,6 +1042,8 @@ public struct SamplerDocument: Codable, Sendable, Equatable {
         // never added here. Order is cosmetic (the encoder sorts keys); the
         // grouping records which item each arrived with.
         case bendRangeSemitones, voiceMode, decay, sustain
+        // m34-t.
+        case glideTime
     }
 
     init(from s: SamplerParams, mediaRefs: [UUID: String?]) {
@@ -1038,6 +1063,7 @@ public struct SamplerDocument: Codable, Sendable, Equatable {
         voiceMode = s.voiceMode?.rawValue
         decay = s.decay
         sustain = s.sustain
+        glideTime = s.glideTime
     }
 
     public init(from decoder: any Decoder) throws {
@@ -1058,6 +1084,7 @@ public struct SamplerDocument: Codable, Sendable, Equatable {
         voiceMode = try c.decodeIfPresent(String.self, forKey: .voiceMode)
         decay = try c.decodeIfPresent(Double.self, forKey: .decay)
         sustain = try c.decodeIfPresent(Double.self, forKey: .sustain)
+        glideTime = try c.decodeIfPresent(Double.self, forKey: .glideTime)
     }
 }
 

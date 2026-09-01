@@ -338,24 +338,54 @@ seeded timing/velocity result is bit-identical to before they existed.
 Only note LENGTHS change — ids, order, start beats, pitches and velocities
 are preserved, and a note is never extended past the clip end.
 
-### Overlap masks a retrigger. The BUILT-IN SAMPLER can now really slur; nothing else can.
+### Overlap masks a retrigger. The BUILT-IN SAMPLER slurs for real in `legato`; nothing else does.
 
-⚠️ **CORRECTED 2026-08-23 (`06dca3d`). This section used to say "No instrument in this
-app has a legato mode". That is FALSE now, and an agent following the old wording would
-walk straight past a shipped feature to a workaround.**
+⚠️ **CORRECTED TWICE, IN OPPOSITE DIRECTIONS, AND THE SECOND CORRECTION IS THE POINT.**
+Before 2026-08-23 this section said "No instrument in this app has a legato mode" — false
+then, and an agent following it walked past a shipped feature. `06dca3d` fixed that and
+overshot: it announced that `voiceMode: "mono"` meant the sampler "can now really slur".
+**It did not.** Mono was voice *stealing* — the old voice went into its release ramp and a
+NEW voice started with a **fresh attack**, so a slurred pair still re-tongued on the second
+note. Mono decided which note wins; it did not remove the tongue. The mode that actually
+removes it shipped 2026-08-31 (m34-t) and is called `legato`.
 
-**The built-in `sampler` has a real monophonic mode.** `track_set_instrument` with
-`{sampler: {voiceMode: "mono"}}` gives LAST-NOTE priority: an overlapping note takes
-over the airstream instead of opening a second voice — voice *stealing*, not masking.
-It deliberately does NOT fall back to a note still held underneath, because the overlap
-that creates the case is the legato idiom itself and falling back would fire a phantom
-backwards slur on every slurred pair. Built for wind lines. Default stays `poly`.
+**Three voice modes on the built-in `sampler`,** via `track_set_instrument`
+`{sampler: {voiceMode: …}}` or `instrument_set_sampler_param`. Default stays `poly`.
+
+| mode | one note at a time | new note re-attacks | use it for |
+|---|---|---|---|
+| `poly` (default) | no | — | everything polyphonic |
+| `mono` | yes, last-note priority | **YES — a fresh attack every note** | chopped-sample chokes, hi-hats, a re-tongued lead |
+| `legato` | yes, last-note priority | **NO — the sounding voice CONTINUES at the new pitch** | a sax/flute/lead line that must not re-tongue |
+
+**`legato` is the real slur.** The sounding voice keeps its envelope exactly where it is
+and only its pitch changes. A **detached** note (one arriving with nothing sounding)
+attacks normally, so articulation still reads. ⚠️ **A legato voice does NOT change sample
+mid-slur** — it stays on the zone it started on and is retuned against that zone's root
+pitch, because a slur is one continuous excitation. Timbre drifts on a very wide slurred
+interval; that is the accepted limit, and every hardware mono sampler has it.
+
+**Both mono modes** deliberately do NOT fall back to a note still held underneath, because
+the overlap that creates the case is the legato idiom itself and falling back would fire a
+phantom backwards slur on every slurred pair. Built for wind lines.
+
+**`glideTime` (seconds, 0–4) is portamento**, and it is a separate half you can use with or
+without the slur. Omitted or 0 = the pitch steps, which is what the sampler has always
+done. ⚠️ **It needs `voiceMode` `mono` or `legato` and is IGNORED under `poly`** — under
+poly there is no single previous note to slide from. Setting it on a poly sampler stores
+the value and changes nothing you can hear; `instrument_describe_sampler` reports
+`glideEffective: false` and warns. Under `legato` the sounding voice slides with no new
+attack; under `mono` the new note attacks but *starts at the previous note's pitch* and
+slides — which is how a hardware mono synth does portamento. The slide is even in
+**semitones**, not in Hz (halfway through 440→880 Hz you are at 622 Hz), and **pitch bend
+composes on top of it**.
 
 **Everything else still masks.** On the `soundBank` and hosted `audioUnit` paths every
 note-on starts a new voice with a fresh attack. There `legatoOverlapBeats` (m27-o) hides
 that attack under the previous note's decaying tail — masking, not voice continuation,
-and a handoff claiming otherwise is wrong. True legato on those paths needs a
-scripted-legato Audio Unit or new engine work.
+and a handoff claiming otherwise is wrong. Those paths flatten note-offs to plain MIDI
+with no note id, so voice continuation is not reachable there at all: true legato on them
+needs a scripted-legato Audio Unit or new engine work.
 
 **Also new on the built-in sampler:** `bendRangeSemitones` is settable per instrument.
 Default is **2.0**, the GM standard that every already-authored bend lane assumes, so a

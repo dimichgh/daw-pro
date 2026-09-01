@@ -1,5 +1,35 @@
 # Changelog
 
+## 2026-08-31 — A wind line that no longer re-tongues every note
+
+Play a sax or flute part in the built-in Sampler and every note used to start
+over: a fresh breath, a fresh attack, on all of them. That is what makes a
+melody sound typed in rather than played. Overlapping the notes only hid the
+problem — the new attack was still there, tucked under the previous note's
+tail — and the mono voice mode added earlier did not remove it either. Mono
+decided which note wins; it still re-struck the reed on the second one.
+
+The Sampler now has a third voice mode, `legato`. Under it a note arriving
+while another is still sounding does not start a new voice at all: the voice
+already playing simply changes pitch. Its envelope carries straight on from
+wherever it was. There is no second attack, because there is no second note —
+which is what a slur actually is. Play a note with nothing sounding and it
+attacks normally, so phrasing still reads.
+
+Alongside it, `glideTime` is portamento: instead of stepping to the new pitch,
+the voice slides, over anything from an imperceptible smear to four seconds.
+The slide is even across the interval — a semitone takes as long in the low
+register as the high — and it works in mono as well, where the note re-attacks
+but its pitch still slides in from the note before.
+
+One honest limit: a slurred voice keeps playing the sample it started on, so a
+very wide slur drifts in timbre as it goes. That is the same trade every
+hardware sampler makes, and it is the price of the sound being continuous —
+switching samples mid-slide would put a seam in the middle of the slur.
+
+Both are off by default: existing projects render byte-for-byte identically,
+verified by hash before and after.
+
 ## 2026-08-31 — Four Sampler settings did not survive being saved. Now they do.
 
 Set a Sampler so its notes fade, save the project, reopen it — and the notes

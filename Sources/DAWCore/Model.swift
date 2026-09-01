@@ -1763,9 +1763,30 @@ public struct SamplerParams: Codable, Sendable, Equatable {
     /// excludes 0 because it DIVIDES by the figure; here it only multiplies.)
     public var bendRangeSemitones: Double?
 
-    /// Poly (nil, the default and today's behaviour) or mono. ADDITIVE-OPTIONAL:
-    /// nil = `.poly`, which is byte-identical to the pre-existing engine.
+    /// Poly (nil, the default and today's behaviour), mono, or legato.
+    /// ADDITIVE-OPTIONAL: nil = `.poly`, which is byte-identical to the
+    /// pre-existing engine.
     public var voiceMode: SamplerVoiceMode?
+
+    /// m34-t GLIDE / PORTAMENTO: how long the pitch takes to travel from the
+    /// previous note to the new one, in seconds. nil or 0 = the pitch STEPS,
+    /// which is every pre-m34-t project's behaviour bit-for-bit.
+    ///
+    /// ⚠️ IT ONLY APPLIES IN A MONOPHONIC MODE (`.mono` or `.legato`) and is
+    /// IGNORED under `.poly` — deliberately, and this is a scope decision
+    /// rather than an oversight. "The previous note" is well defined only when
+    /// there is one line; under poly every voice would have to glide from
+    /// whichever note happened to be played last, which is a different feature
+    /// (poly portamento) with its own note-assignment rules. Refusing it here
+    /// is also what keeps `.poly` structurally unable to change — see
+    /// `SamplerVoiceMode` for the two modes it does reach.
+    ///
+    /// The ramp is EXPONENTIAL in the playback increment, i.e. LINEAR IN
+    /// SEMITONES: a slide from 440 Hz to 880 Hz is at 622.25 Hz (the geometric
+    /// mean) halfway through, not 660 Hz. That is what makes an octave slide
+    /// sound even, and it is the only choice under which two glides of the same
+    /// interval sound alike wherever on the keyboard they start.
+    public var glideTime: Double?
 
     /// GLOBAL decay/sustain (m34-o) — the instrument-wide half of the envelope
     /// that, until now, existed ONLY per zone.
@@ -1888,6 +1909,13 @@ public struct SamplerParams: Codable, Sendable, Equatable {
     /// structurally unreachable and therefore means exactly "unlimited" — the
     /// value to send when a caller wants to undo a cap they set earlier.
     public static let pedalHoldLimitRange: ClosedRange<Int> = 1...128
+    /// m34-t GLIDE/PORTAMENTO time, seconds, and what `glideTime == nil`
+    /// resolves to. 0 is legal and IS the default meaning: the pitch STEPS,
+    /// which is the pre-m34-t behaviour bit-for-bit (`.legato` at 0 is still a
+    /// real slur — no re-attack — it simply arrives at the new pitch in one
+    /// sample). The ceiling of 4 s is a musical one: past that a portamento
+    /// stops reading as one gesture and starts reading as a broken tuning.
+    public static let glideTimeRange: ClosedRange<Double> = 0...4
 
     public init(
         zones: [SamplerZone] = [],
@@ -1904,7 +1932,13 @@ public struct SamplerParams: Codable, Sendable, Equatable {
         voiceMode: SamplerVoiceMode? = nil,
         decay: Double? = nil,
         sustain: Double? = nil,
-        pedalHoldLimit: Int? = nil
+        pedalHoldLimit: Int? = nil,
+        // m34-t: APPENDED LAST on purpose. `SamplerDocument`'s
+        // `instrumentDescriptor` reconstruction calls this positionally-labeled,
+        // and the m34-s close-out records that argument order is declaration
+        // order — inserting in the middle silently re-binds nothing here, but
+        // every hand-written call site in the tree reads better appended.
+        glideTime: Double? = nil
     ) {
         self.zones = zones
         self.oneShot = oneShot
@@ -1943,6 +1977,10 @@ public struct SamplerParams: Codable, Sendable, Equatable {
         // Clamp rather than reject, matching every other field here; nil stays
         // nil so an untouched project's JSON round-trips byte-identically.
         self.pedalHoldLimit = pedalHoldLimit.map { $0.clamped(to: Self.pedalHoldLimitRange) }
+        // m34-t: same contract. A NEGATIVE glide clamps to 0 (= step) rather
+        // than being refused, because 0 is a legal, meaningful value here and
+        // the nearest legal neighbour is therefore the honest answer.
+        self.glideTime = glideTime.map { $0.clamped(to: Self.glideTimeRange) }
     }
 
     /// The figure the ENGINE uses — the stored value, or the GM default. One
@@ -1968,6 +2006,19 @@ public struct SamplerParams: Codable, Sendable, Equatable {
     /// The mode the ENGINE uses — the stored value, or poly.
     public var effectiveVoiceMode: SamplerVoiceMode { voiceMode ?? .poly }
 
+    /// m34-t. The glide the ENGINE uses — the stored value, or 0 (step). Same
+    /// one-accessor discipline as `effectiveBendRangeSemitones`: 0 needs no
+    /// special case downstream, because a ramp of zero frames IS the snap.
+    public var effectiveGlideTime: Double { glideTime ?? 0 }
+
+    /// m34-t. Whether glide can reach the sound AT ALL: it needs both a time
+    /// and a monophonic mode. ONE home for that conjunction — the engine
+    /// snapshot, the wire's warning and the tests all read this, so "why is my
+    /// glide silent" is answered in exactly one place rather than three.
+    public var glideIsEffective: Bool {
+        effectiveGlideTime > 0 && effectiveVoiceMode.isMonophonic
+    }
+
     /// The pedal-hold cap the ENGINE uses (m34-q). Same one-accessor discipline
     /// as `effectiveBendRangeSemitones`: "what does nil mean" is answered in
     /// exactly one place, and `Int.max` is the answer that needs no special
@@ -1976,19 +2027,49 @@ public struct SamplerParams: Codable, Sendable, Equatable {
     public var effectivePedalHoldLimit: Int { pedalHoldLimit ?? Int.max }
 }
 
-/// How many notes the built-in sampler lets sound at once.
+/// How many notes the built-in sampler lets sound at once — and, since m34-t,
+/// whether a new note RE-ATTACKS or CONTINUES the one already sounding.
 ///
-/// `.mono` is **LAST-NOTE priority**, and that is the whole point rather than a
-/// default among several: a wind line is ONE airstream. The newest note is the
-/// one being played, and the previous pitch ends because the player moved —
-/// not because it lost a priority contest. Low- and high-note priority are
-/// keyboard-synth conventions for two-handed playing; on a melodic line they
-/// produce the wrong note every time the phrase turns around, and under the
-/// slight note OVERLAPS that legato writing needs they randomly refuse to move
-/// at all. Last-note degrades correctly: the overlap becomes the slur.
-public enum SamplerVoiceMode: String, Codable, Sendable {
+/// ⭐ m34-t — `.legato` IS THE THIRD CASE, AND THE DIFFERENCE FROM `.mono` IS
+/// THE WHOLE POINT RATHER THAN A REFINEMENT OF IT. `.mono` is voice STEALING:
+/// a new note-on puts the sounding voice into its release ramp and starts a
+/// NEW voice with a FRESH ATTACK. It changed which note wins; it did not
+/// remove the tongue, so a slurred sax pair still re-articulates on the second
+/// note. `.legato` is voice CONTINUATION: the sounding voice keeps its
+/// envelope exactly where it is and merely changes pitch, which is what a wind
+/// player does when they move a finger without re-tonguing.
+///
+/// ⛔ A LEGATO VOICE DOES NOT CHANGE ZONE. A slur is ONE continuous excitation,
+/// so the continued voice stays on the sample it started on and is retuned
+/// against THAT zone's root pitch. Timbre drift on a wide slurred interval is
+/// the documented, accepted limit — every hardware mono sampler has it, and the
+/// alternative (swapping the sample mid-slide) is an audible splice in the
+/// middle of the one gesture the mode exists to make seamless. A DETACHED note
+/// — one arriving with nothing sounding — triggers normally and gets normal
+/// zone mapping.
+///
+/// Both `.mono` and `.legato` are LAST-NOTE priority, and that is the whole
+/// point rather than a default among several: a wind line is ONE airstream. The
+/// newest note is the one being played, and the previous pitch ends because the
+/// player moved — not because it lost a priority contest. Low- and high-note
+/// priority are keyboard-synth conventions for two-handed playing; on a melodic
+/// line they produce the wrong note every time the phrase turns around, and
+/// under the slight note OVERLAPS that legato writing needs they randomly
+/// refuse to move at all. Last-note degrades correctly: the overlap becomes the
+/// slur.
+public enum SamplerVoiceMode: String, Codable, Sendable, CaseIterable {
     case poly
     case mono
+    case legato
+
+    /// ONE note at a time — true for BOTH mono modes. Every rule that is about
+    /// "one airstream" rather than about re-attack reads this: the note-off
+    /// discard, the choke arming, and whether glide can apply at all.
+    public var isMonophonic: Bool { self != .poly }
+
+    /// Whether a note-on CONTINUES the sounding voice instead of choking it and
+    /// re-attacking. Only `.legato`.
+    public var continuesVoices: Bool { self == .legato }
 }
 
 /// One sampler key zone: an audio file mapped across a pitch span, played

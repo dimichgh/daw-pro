@@ -1767,18 +1767,53 @@ const samplerSchema = z
           "vibrato by the ratio if the two disagree (you get a warning when they do)."
       ),
     voiceMode: z
-      .enum(["poly", "mono"])
+      .enum(["poly", "mono", "legato"])
       .optional()
       .describe(
-        "How many notes the Sampler lets sound at once. Omitted = `poly` (the existing " +
-          "behaviour, 64 voices). `mono` is LAST-NOTE PRIORITY: a new note always takes " +
-          "over from the one sounding, because a wind line is one airstream and the " +
-          "newest note is the one being played. Use it for sax/flute/trumpet/solo-lead " +
-          "parts. Under the slight note OVERLAPS that legato writing needs, mono " +
-          "retriggers to the newest pitch — the overlap becomes the slur. A note-off for " +
-          "a note that has already been superseded is discarded: releasing an older " +
-          "still-held key does NOT fall back to it, because on a wind instrument that " +
-          "note ended when the player moved."
+        "How many notes the Sampler lets sound at once, and whether a new note RE-ATTACKS " +
+          "or CONTINUES the one already sounding. Omitted = `poly` (the existing " +
+          "behaviour, 64 voices). `mono` and `legato` are both LAST-NOTE PRIORITY: a new " +
+          "note always takes over from the one sounding, because a wind line is one " +
+          "airstream and the newest note is the one being played. Use either for " +
+          "sax/flute/trumpet/solo-lead parts. " +
+          "⭐ THE DIFFERENCE IS THE TONGUE. `mono` STEALS the voice: the old note goes " +
+          "into its release ramp and a NEW note starts with a FRESH ATTACK, so a slurred " +
+          "pair still re-articulates on the second note — it decides which note wins, it " +
+          "does not remove the tongue. `legato` CONTINUES the sounding voice: same " +
+          "envelope, no second attack, only the pitch changes. THAT is a real slur, and " +
+          "it is what you want for a sax line that should not re-tongue every note. " +
+          "Pair it with `glideTime` for portamento. " +
+          "⚠️ A legato voice does NOT change sample mid-slur — it stays on the zone it " +
+          "started on and is retuned from that zone's root pitch, because a slur is one " +
+          "continuous excitation. On a very wide slurred interval the timbre drifts; " +
+          "that is the accepted limit and every hardware mono sampler has it. A DETACHED " +
+          "note (nothing sounding) attacks normally and gets normal zone mapping. " +
+          "In BOTH modes a note-off for a note that has already been superseded is " +
+          "discarded: releasing an older still-held key does NOT fall back to it, because " +
+          "on a wind instrument that note ended when the player moved."
+      ),
+    glideTime: z
+      .number()
+      .min(0)
+      .max(4)
+      .optional()
+      .describe(
+        "GLIDE / PORTAMENTO on the built-in Sampler: seconds for the pitch to SLIDE from " +
+          "the previous note to the new one. OMITTED or 0 = the pitch steps, which is what " +
+          "the Sampler has always done. 0.05-0.15 reads as a fast expressive scoop; " +
+          "0.3-1.0 is an obvious slide. " +
+          "⚠️ IT NEEDS `voiceMode` \"mono\" OR \"legato\" AND IS IGNORED UNDER `poly` — " +
+          "under poly there is no single previous note to slide from. Setting it on a poly " +
+          "sampler stores the value, changes nothing you can hear, and " +
+          "instrument_describe_sampler will report `glideEffective: false` plus a warning " +
+          "saying so. " +
+          "Under `legato` the sounding voice slides with NO new attack (the real slur); " +
+          "under `mono` the new note DOES attack but starts at the previous note's pitch " +
+          "and slides to its own, which is how a hardware mono synth does portamento. " +
+          "The slide is even in SEMITONES, not in Hz: halfway through a 440→880 Hz glide " +
+          "the pitch is 622 Hz, so the same interval sounds the same wherever it starts. " +
+          "Pitch bend still applies ON TOP of a glide — the two compose. " +
+          "REFUSED (not clamped) outside 0-4."
       ),
     pedalHoldLimit: z
       .number()
@@ -3468,8 +3503,13 @@ registerTool(
       "kind, oneShot, attack, release, gain, sourcePath?, displayName?, zoneSummary, " +
       "effectiveGlobals?, warnings?}, plus whichever of the ONLY-WHEN-SET globals this " +
       "sampler has actually been given: expressionModDepth?, expressionFilterDepth?, " +
-      "expressionFilterCC?, bendRangeSemitones?, voiceMode?, pedalHoldLimit?. An absent " +
-      "key there means UNSET (i.e. that global's default), not zero. " +
+      "expressionFilterCC?, bendRangeSemitones?, voiceMode?, pedalHoldLimit?, glideTime?. " +
+      "An absent key there means UNSET (i.e. that global's default), not zero. " +
+      "⭐ `glideTime` brings a SECOND key with it: `glideEffective` (boolean), present only " +
+      "when a glide is set. A glide needs a monophonic `voiceMode` to do anything, so " +
+      "`glideEffective: false` means the value is stored but INERT — you will also get a " +
+      "top-level `warnings` entry naming the fix. Read it rather than assuming a stored " +
+      "glideTime is audible. " +
       "⚠️ READ `effectiveGlobals` BEFORE TRUSTING top-level `release`/`attack`/`oneShot`. " +
       "Those three are the STORED globals, and a zone that sets its own value WINS over " +
       "them — so on an imported library they are routinely numbers the engine never reads. " +
@@ -3675,9 +3715,10 @@ const samplerGlobalParamSchema = z
     "bendRangeSemitones",
     "voiceMode",
     "pedalHoldLimit",
+    "glideTime",
   ])
   .describe(
-    "Which Sampler GLOBAL to set — exactly one per call, matching one of the twelve fields " +
+    "Which Sampler GLOBAL to set — exactly one per call, matching one of the thirteen fields " +
       "track_set_instrument's own `sampler` object carries at this level (everything else " +
       "there, i.e. `zones`, is per-zone and out of reach of this narrower tool). `oneShot` " +
       "(boolean): true = every triggered sample always plays to completion regardless of " +
@@ -3706,8 +3747,17 @@ const samplerGlobalParamSchema = z
       "(number 0-48): how many semitones a full pitch-bend deflection moves the note; " +
       "omitted/nil = 2 (the General MIDI default, and what every already-authored bend " +
       "lane assumes) — 6 is the measured saturation point for expressive wind writing. " +
-      "`voiceMode` (STRING, \"poly\" or \"mono\" — the one param here that takes a string): " +
-      "`mono` is last-note priority, for sax/flute/solo-lead lines. " +
+      "`voiceMode` (STRING, \"poly\", \"mono\" or \"legato\" — the one param here that takes " +
+      "a string): `mono` and `legato` are both last-note priority, for " +
+      "sax/flute/solo-lead lines. `mono` RE-ATTACKS on every note (the old voice releases, " +
+      "a new one starts with a fresh attack), so a slurred pair still re-tongues; " +
+      "`legato` CONTINUES the sounding voice at the new pitch with NO second attack, " +
+      "which is a real slur. Reach for `legato` when a line should not re-tongue. " +
+      "`glideTime` (SECONDS, number 0-4): portamento — how long the pitch takes to SLIDE " +
+      "from the previous note to the new one; omitted/nil = 0 = it steps, today's " +
+      "behaviour. IT NEEDS `voiceMode` \"mono\" or \"legato\" and is IGNORED under poly " +
+      "(instrument_describe_sampler reports `glideEffective` and warns when it is inert). " +
+      "The slide is even in semitones, and pitch bend composes on top of it. " +
       "`pedalHoldLimit` (INTEGER 1-128): how many notes the SUSTAIN PEDAL (CC 64) keeps " +
       "ringing; omitted/nil = unlimited, today's behaviour — the reason an organ or pad " +
       "patch under a latched pedal becomes a wall of sound. With a cap set, the OLDEST " +
@@ -3724,12 +3774,12 @@ registerTool(
   {
     title:
       "Set one Sampler global (oneShot/attack/release/gain/expression*/bend range/voice " +
-      "mode/pedal hold limit)",
+      "mode/pedal hold limit/glide)",
     description:
       "Set exactly ONE global knob on a track's built-in Sampler — `oneShot`, `attack`, " +
       "`release`, `gain`, `expressionModDepth`, `expressionFilterDepth`, " +
-      "`expressionFilterCC`, `bendRangeSemitones`, `voiceMode` or `pedalHoldLimit` — " +
-      "without touching anything else on the sampler. This is a " +
+      "`expressionFilterCC`, `bendRangeSemitones`, `voiceMode`, `pedalHoldLimit` or " +
+      "`glideTime` — without touching anything else on the sampler. This is a " +
       "thin, narrower wrapper around track_set_instrument {sampler: {<param>: value}}: the " +
       "whole reason it exists is so you don't have to know that a partial sampler update is " +
       "safe (added m26-g/h) — this call is GUARANTEED to leave the track's zones, " +
@@ -3741,8 +3791,8 @@ registerTool(
       "Sending a boolean for a numeric param (or vice versa) is a readable error naming the " +
       "mismatch. Out-of-range numbers clamp silently for the six original numeric params, " +
       "through the same ranges track_set_instrument uses; `bendRangeSemitones`, " +
-      "`voiceMode` and `pedalHoldLimit` instead REFUSE an out-of-range number / " +
-      "unrecognised mode with a readable error, so a typo cannot land as a " +
+      "`voiceMode`, `pedalHoldLimit` and `glideTime` instead REFUSE an out-of-range " +
+      "number / unrecognised mode with a readable error, so a typo cannot land as a " +
       "silently-different setting (see " +
       "`param`'s own description for each range). Returns the full resolved instrument " +
       "object, same shape as track_set_instrument.",
@@ -3752,10 +3802,10 @@ registerTool(
       value: z
         .union([z.number(), z.boolean(), z.string()])
         .describe(
-          "The new value: a boolean for `param: \"oneShot\"`, the string \"poly\" or " +
-            "\"mono\" for `param: \"voiceMode\"`, and a number for every other `param` " +
-            "(seconds for `attack`/`release`, a 0-1 level for `gain`/" +
-            "`expressionModDepth`/`expressionFilterDepth`, an integer CC 0-127 for " +
+          "The new value: a boolean for `param: \"oneShot\"`, the string \"poly\", " +
+            "\"mono\" or \"legato\" for `param: \"voiceMode\"`, and a number for every " +
+            "other `param` (seconds for `attack`/`release`/`glideTime`, a 0-1 level for " +
+            "`gain`/`expressionModDepth`/`expressionFilterDepth`, an integer CC 0-127 for " +
             "`expressionFilterCC`, semitones 0-48 for `bendRangeSemitones`, a note count " +
             "1-128 for `pedalHoldLimit`). See " +
             "`param`'s description for which type and range applies."
@@ -3776,12 +3826,13 @@ registerTool(
       if (typeof value === "string" && param !== "voiceMode") {
         throw new Error(
           `sampler param "${param}" does not take a string — got ${JSON.stringify(value)}. ` +
-            `Only "voiceMode" is a string param ("poly" or "mono").`
+            `Only "voiceMode" is a string param ("poly", "mono" or "legato").`
         );
       }
       if (param === "voiceMode" && typeof value !== "string") {
         throw new Error(
-          `sampler param "voiceMode" takes the string "poly" or "mono" — got ${typeof value}.`
+          `sampler param "voiceMode" takes the string "poly", "mono" or "legato" — ` +
+            `got ${typeof value}.`
         );
       }
       return bridge.send("track.setInstrument", { trackId, sampler: { [param]: value } });
