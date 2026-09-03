@@ -697,6 +697,219 @@ struct PolySynthEditorModelTests {
                 == [SamplerZoneCoverage.Gap(lowerBound: 41, upperBound: 79)])
     }
 
+    // MARK: Sampler — VOICE MODE + GLIDE (m34-u, the UI half of m34-t)
+
+    @Test("the voice picker offers every domain case, in declaration order")
+    func samplerVoiceModesCoverTheDomain() {
+        // ⛔ THE POINT IS COVERAGE, NOT THE LIST. m34-t added `.legato` as a
+        // THIRD case; a picker built from a retyped two-or-three-element literal
+        // is exactly how a shipped engine feature stays unreachable from the UI,
+        // which is the defect m34-u exists to close. Sourcing from
+        // `CaseIterable` makes a FOURTH case appear in the picker by
+        // construction — and this asserts the order that comes with it, because
+        // the card renders the array as it stands.
+        #expect(SamplerEditorModel.voiceModes == SamplerVoiceMode.allCases)
+        #expect(SamplerEditorModel.voiceModes == [.poly, .mono, .legato])
+        #expect(SamplerEditorModel.voiceModes.count == 3,
+                "a two-state control cannot express three modes")
+    }
+
+    @Test("every voice-mode label is beginner-readable, distinct, and jargon-free")
+    func samplerVoiceModeLabelsAreBeginnerReadable() {
+        let labels = SamplerEditorModel.voiceModes.map(SamplerEditorModel.voiceModeLabel)
+        #expect(labels == ["Chords", "One Note", "Slurred"])
+        #expect(Set(labels).count == labels.count, "two segments must never read alike")
+        // Rule 6: the wire's own words are correct for an agent and useless on a
+        // chip. None of them may leak into the label.
+        let jargon = ["poly", "mono", "legato", "portamento", "glide"]
+        for label in labels {
+            for word in jargon {
+                #expect(!label.lowercased().contains(word),
+                        "\(label) leaks the wire word '\(word)' onto a human control")
+            }
+        }
+        // The detail text carries the RE-ATTACK distinction the two monophonic
+        // labels cannot fit — that difference is the whole reason `.legato`
+        // exists, so it must be said somewhere a user can reach.
+        let mono = SamplerEditorModel.voiceModeDetail(.mono).lowercased()
+        let legato = SamplerEditorModel.voiceModeDetail(.legato).lowercased()
+        #expect(mono.contains("fresh") || mono.contains("own attack"))
+        #expect(legato.contains("no new") && legato.contains("attack"))
+        #expect(SamplerEditorModel.voiceModeDetail(.poly).lowercased().contains("at once"))
+    }
+
+    @Test("the voice mode round-trips through the same setInstrument funnel")
+    func samplerVoiceModeRoundTrip() throws {
+        let zone = Self.samplerZone(Self.ping)
+        let f = try Self.samplerFixture(SamplerParams(zones: [zone], gain: 0.5))
+        // An untouched sampler lights CHORDS — never nothing. A three-way picker
+        // with no lit segment claims a state the engine does not have.
+        #expect(Self.storedSampler(f.store, f.trackID)?.voiceMode == nil)
+        #expect(f.model.voiceMode == .poly)
+
+        f.model.setVoiceMode(.legato)
+        #expect(Self.storedSampler(f.store, f.trackID)?.voiceMode == .legato)
+        #expect(f.model.voiceMode == .legato)
+        #expect(f.model.lastErrorMessage == nil)
+
+        // Pressing CHORDS stores the EXPLICIT case rather than clearing to nil.
+        f.model.setVoiceMode(.poly)
+        #expect(Self.storedSampler(f.store, f.trackID)?.voiceMode == .poly)
+        #expect(f.model.voiceMode == .poly)
+
+        // The read-modify-write left everything else alone.
+        #expect(Self.storedSampler(f.store, f.trackID)?.zones == [zone])
+        #expect(Self.storedSampler(f.store, f.trackID)?.gain == 0.5)
+
+        // A WIRE edit under the open card moves the picker — the card reads the
+        // live descriptor, never a snapshot taken at open time.
+        _ = try f.store.setInstrument(
+            id: f.trackID, sampler: SamplerParams(zones: [zone], gain: 0.5, voiceMode: .mono))
+        #expect(f.model.voiceMode == .mono)
+    }
+
+    @Test("glide round-trips, clamps to the domain, and resets to UNSET not to 0")
+    func samplerGlideRoundTrip() throws {
+        let zone = Self.samplerZone(Self.ping)
+        let f = try Self.samplerFixture(SamplerParams(zones: [zone], gain: 0.5))
+        #expect(f.model.glideTime == 0)
+        #expect(SamplerEditorModel.glideSpec.range == SamplerParams.glideTimeRange,
+                "the spec table must never fork the domain clamp")
+
+        f.model.setGlideTime(0.4)
+        #expect(Self.storedSampler(f.store, f.trackID)?.glideTime == 0.4)
+        #expect(f.model.glideTime == 0.4)
+
+        // This model's clamp is the ONLY clamp on the sampler path — the store
+        // passes a supplied `SamplerParams` through untouched.
+        f.model.setGlideTime(99)
+        #expect(Self.storedSampler(f.store, f.trackID)?.glideTime
+                == SamplerParams.glideTimeRange.upperBound)
+        f.model.setGlideTime(-5)
+        #expect(Self.storedSampler(f.store, f.trackID)?.glideTime == 0)
+
+        // ⚠️ RESET GOES TO nil, NOT TO AN EXPLICIT 0. Sound-identical, but only
+        // nil keeps a project that never asked for glide byte-identical on a
+        // JSON round trip and out of describeSampler's only-when-SET output.
+        f.model.setGlideTime(1)
+        #expect(Self.storedSampler(f.store, f.trackID)?.glideTime == 1)
+        f.model.resetGlide()
+        #expect(Self.storedSampler(f.store, f.trackID)?.glideTime == nil)
+        #expect(f.model.glideTime == 0, "nil still READS as 0 — that is what the engine uses")
+
+        // The knob fraction maps over the domain range, linearly.
+        f.model.setGlideFraction(0.5)
+        #expect(Self.storedSampler(f.store, f.trackID)?.glideTime == 2)
+        #expect(abs(f.model.glideFraction - 0.5) < 1e-9)
+    }
+
+    @Test("GLIDE's zero reads OFF, never a very fast glide")
+    func samplerGlideZeroReadsOff() {
+        // ⛔ THE SINGLE MOST LIKELY WAY TO GET THIS CONTROL WRONG. The card's
+        // ordinary seconds formatter renders 0 as "0.0 ms", which reads as a
+        // glide that is merely very quick. The bottom of this range is the
+        // ABSENCE of glide.
+        #expect(SamplerEditorModel.glideReadout(0).text == "OFF")
+        #expect(SamplerEditorModel.glideReadout(0).unit == "")
+        // Positive control: the formatter it delegates to really would have said
+        // that, so the guard above is doing work rather than agreeing by luck.
+        #expect(SamplerEditorModel.readout(value: 0, spec: SamplerEditorModel.glideSpec).text
+                == "0.0")
+        #expect(SamplerEditorModel.readout(value: 0, spec: SamplerEditorModel.glideSpec).unit
+                == "ms")
+        // Above zero it speaks the card's ordinary ms/s crossover.
+        #expect(SamplerEditorModel.glideReadout(0.25).text == "250")
+        #expect(SamplerEditorModel.glideReadout(0.25).unit == "ms")
+        #expect(SamplerEditorModel.glideReadout(2).text == "2.00")
+        #expect(SamplerEditorModel.glideReadout(2).unit == "s")
+    }
+
+    @Test("the honest light: a glide stored under CHORDS reads inert, and only then")
+    func samplerGlideInertUnderPoly() throws {
+        let zone = Self.samplerZone(Self.ping)
+        let f = try Self.samplerFixture(SamplerParams(zones: [zone]))
+
+        // (a) No glide, chords — the DEFAULT. Not a warning state: lighting one
+        // on the default would teach nothing.
+        #expect(f.model.glideIsInert == false)
+        #expect(f.model.glideIsEffective == false)
+
+        // (b) A glide set while the sampler plays chords is STRUCTURALLY inert —
+        // the engine resolves it away at the ScalarParams boundary — and this is
+        // the state the card must show rather than draw a live-looking knob.
+        f.model.setGlideTime(0.3)
+        #expect(f.model.glideIsInert)
+        #expect(f.model.glideIsEffective == false)
+
+        // (c) Both monophonic modes make it live. `.mono` too, not just
+        // `.legato`: the slide happens either way, the difference is the attack.
+        for mode in [SamplerVoiceMode.mono, .legato] {
+            f.model.setVoiceMode(mode)
+            #expect(f.model.glideIsEffective, "\(mode) must make a stored glide live")
+            #expect(f.model.glideIsInert == false)
+        }
+
+        // (d) Switching back to chords re-lights the warning.
+        f.model.setVoiceMode(.poly)
+        #expect(f.model.glideIsInert)
+
+        // (e) The card's verdict is the DOMAIN's, never a local re-derivation —
+        // so it cannot disagree with the `glideEffective` key
+        // `instrument.describeSampler` publishes to an agent.
+        let stored = try #require(Self.storedSampler(f.store, f.trackID))
+        #expect(f.model.glideIsEffective == stored.glideIsEffective)
+    }
+
+    @Test("the inert-glide note speaks to a human, not to an agent")
+    func samplerGlideInertNoteIsBeginnerReadable() {
+        let note = SamplerEditorModel.glideInertNote
+        // Rule 6: the person reading this card has never seen "poly"; they have
+        // seen the three chips. The note must name what they can see.
+        #expect(note.contains("CHORDS"))
+        #expect(note.contains("One Note") && note.contains("Slurred"))
+        for word in ["poly", "mono", "legato", "voiceMode"] {
+            #expect(!note.contains(word),
+                    "the note leaks the wire word '\(word)' at a human")
+        }
+        // It says what is wrong AND what to do — a warning that only names the
+        // fault leaves the repair to guesswork.
+        #expect(note.lowercased().contains("ignores"),
+                "the note must name the FAULT, not merely the repair")
+        #expect(note.lowercased().contains("use "),
+                "a warning that names only the fault leaves the repair to guesswork")
+        // ⚠️ It must stay SHORT enough to draw on ONE line: it lives in the
+        // card's fixed chrome, so a second line costs a zone row off the list —
+        // measured in pixels, twice, before the number settled (see
+        // `glideInertNote`'s own doc). 51 is what the card's width actually
+        // fits at 9 pt beside the warning glyph.
+        #expect(note.count <= 51, "\(note.count) chars will wrap and cost a zone row")
+    }
+
+    @Test("voice mode and glide obey the same honest gates as every other global")
+    func samplerVoiceAndGlideRefuseOnAWrongKind() throws {
+        let store = ProjectStore()
+        store.media = SamplerStubMedia()
+        let track = store.addTrack(kind: .instrument)
+        let model = Self.makeSamplerBacked(store)
+        model.prepare(trackID: track.id, targetLabel: "on Synth")
+        #expect(model.targetIsSampler == false)
+
+        // A poly-synth track: both edits refuse loudly and write nothing. An
+        // edit that appears to work and changes nothing audible is this
+        // codebase's characteristic failure mode.
+        model.setVoiceMode(.legato)
+        #expect(model.lastErrorMessage != nil)
+        #expect(store.tracks.first { $0.id == track.id }?.instrument?.sampler == nil)
+        // `select(zoneID:)` clears the inline error — the card's own reset — so
+        // the second edit is proven to raise its OWN refusal rather than
+        // inheriting the first one's.
+        model.select(zoneID: nil)
+        #expect(model.lastErrorMessage == nil)
+        model.setGlideTime(1)
+        #expect(model.lastErrorMessage != nil)
+        #expect(store.tracks.first { $0.id == track.id }?.instrument?.sampler == nil)
+    }
+
     // MARK: Sampler — loop fields (m20-g), the ones that make a note sustain
 
     @Test("the loop mode, start and end round-trip through the same setInstrument funnel")
@@ -1106,8 +1319,17 @@ struct PolySynthEditorModelTests {
             let visible = SamplerCardLayout.visibleRows(inHeight: height)
             #expect(visible >= 6,
                     "\(rowCount) zones: inspector open shows \(visible) rows, need ≥ 6")
-            #expect(visible == SamplerCardLayout.maxRowsWithInspector,
-                    "\(rowCount) zones: expected the \(SamplerCardLayout.maxRowsWithInspector)-row cap at the default window, got \(visible)")
+            // ⭐ m34-u MOVED THIS NUMBER, AND THE MOVE IS THE POINT OF THE
+            // ASSERTION. Until m34-u the 8-row CAP bound at the default window;
+            // the VOICE chip row plus the stored-but-inert GLIDE warning spend
+            // ~71 pt of chrome, so the BUDGET now binds first and the list draws
+            // 6. Pinned as a BAND, not as the cap: the cap is an upper bound the
+            // budget may legitimately sit under, and asserting equality with it
+            // would redden on every honest chrome change while saying nothing
+            // about the defect. What must never happen again is the slide toward
+            // ~1.7, and 6 is 3.5× that.
+            #expect(visible <= SamplerCardLayout.maxRowsWithInspector,
+                    "\(rowCount) zones: \(visible) rows exceeds the \(SamplerCardLayout.maxRowsWithInspector)-row cap")
         }
 
         // The state that was already fine must stay fine.

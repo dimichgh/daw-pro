@@ -638,10 +638,10 @@ public enum ExplainCatalog {
             title: "Poly Synth Controls",
             body: "The tuning panel for the built-in synth. Pick its basic wave shape, set how each note fades in and out, brighten or darken the tone with the filter, and set its level. Drag a knob to hear the change live; double-click resets it."),
 
-        // MARK: Sampler editor (m26-i)
+        // MARK: Sampler editor (m26-i; VOICE + GLIDE m34-u)
         .samplerEditor: ExplainEntry(
             title: "Sampler Controls",
-            body: "The tuning panel for the built-in sampler. The top row sets the whole instrument; the list below shows every sample and which keys it answers to. Pick one to change its tuning, envelope, level and looping. Drag a knob and let go to apply."),
+            body: "The tuning panel for the built-in sampler. The top rows set the whole instrument, including whether it plays chords, one note at a time, or slurred notes that slide together. The list below shows every sample; pick one to tune its pitch, envelope, level and looping."),
 
         // MARK: AI panels (violet affordances — Rule 3)
         .aiCopilot: ExplainEntry(

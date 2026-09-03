@@ -1,5 +1,33 @@
 # Changelog
 
+## 2026-08-31 — Knobs for the slur, and a slide that respects distance
+
+The slurring added earlier today could only be reached by asking an AI agent.
+It now has controls in the Sampler card: three buttons that say what they do
+rather than what they are called — **Chords**, **One Note**, **Slurred** — and
+a **Glide** knob beside them.
+
+Two details in that knob were deliberate. Turned fully down it reads `OFF`, not
+`0.0 ms`, because "no glide at all" and "a very fast glide" are different things
+and should not look the same. And glide does nothing at all on a Chords patch —
+so rather than greying the knob out, it stays usable, its markings dim, and a
+line underneath says `CHORDS ignores Glide — use One Note or Slurred.` You can
+still dial a glide in first and switch the mode after, which is the order most
+people would try.
+
+The slide itself also got smarter. Until now a glide took the same amount of
+time no matter how far it had to travel, so a one-step slur crawled while a leap
+of an octave was rushed through twelve times faster. There is now a second mode
+where distance sets duration, the way a real player's slide behaves: short
+intervals slide quickly, wide ones take their time. It is off by default, and
+the reference is a whole tone — so a glide that sounded right on a stepwise line
+sounds exactly the same after switching, and only changes where it should, on
+the leaps.
+
+One honest trade: the Sampler card's fixed area grew by 57 points to hold the
+new controls, so when the per-zone inspector is open the zone list below shows
+six rows where it used to show eight. Nothing changed with no zone selected.
+
 ## 2026-08-31 — A wind line that no longer re-tongues every note
 
 Play a sax or flute part in the built-in Sampler and every note used to start

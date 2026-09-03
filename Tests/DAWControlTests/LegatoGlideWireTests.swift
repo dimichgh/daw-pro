@@ -248,4 +248,158 @@ extension CommandRouterTests {
                 "an unset glide must not add a key to every describeSampler response")
         #expect(bare["voiceMode"]?.stringValue == "mono", "control: the mode IS read back")
     }
+
+    // MARK: - m34-w: glideMode, what the glideTime NUMBER means
+
+    @Test("m34-w wire: glideMode 'constantRate' is accepted, stored, and echoed back")
+    func glideModeRoundTrips() async throws {
+        let (router, store) = glideMakeRouter()
+        let trackID = store.addTrack(kind: .instrument).id.uuidString
+
+        let response = await glideSetSampler(
+            router, trackID,
+            ["voiceMode": .string("legato"), "glideTime": .number(0.12),
+             "glideMode": .string("constantRate")])
+        #expect(response.ok, "\(response.error ?? "")")
+        #expect(store.tracks[0].instrument?.sampler?.glideMode == .constantRate)
+        let sampler = try glideNested(try glideInstrumentObject(response), "sampler")
+        #expect(sampler["glideMode"]?.stringValue == "constantRate")
+    }
+
+    @Test("m34-w wire: an omitted glideMode keeps the one the track already had")
+    func glideOmittedGlideModeKeepsTheCurrentOne() async throws {
+        let (router, store) = glideMakeRouter()
+        let trackID = store.addTrack(kind: .instrument).id.uuidString
+
+        await glideSetSampler(router, trackID,
+                              ["voiceMode": .string("legato"),
+                               "glideMode": .string("constantRate")])
+        #expect(store.tracks[0].instrument?.sampler?.glideMode == .constantRate)
+
+        // A later call that says nothing about the mode must not silently
+        // revert it to constant time — which would be inaudible on a whole
+        // tone and obvious on an octave, the worst possible failure shape.
+        let second = await glideSetSampler(router, trackID,
+                                           ["glideTime": .number(0.2)], id: "2")
+        #expect(second.ok, "\(second.error ?? "")")
+        #expect(store.tracks[0].instrument?.sampler?.glideMode == .constantRate,
+                "an omitted glideMode silently reverted the track to constantTime")
+        #expect(store.tracks[0].instrument?.sampler?.glideTime == 0.2,
+                "control failed: the call that omitted the mode did not take effect at all")
+    }
+
+    @Test("m34-w wire: an unset glideMode emits no key — the pre-m34-w wire shape is unchanged")
+    func glideUnsetGlideModeEmitsNoKey() async throws {
+        let (router, store) = glideMakeRouter()
+        let trackID = store.addTrack(kind: .instrument).id.uuidString
+
+        let response = await glideSetSampler(router, trackID, ["glideTime": .number(0.2)])
+        let sampler = try glideNested(try glideInstrumentObject(response), "sampler")
+        #expect(sampler["glideMode"] == nil,
+                "an untouched glideMode must not add a key to every sampler response")
+        // CONTROL: the key DOES appear when it is set, so `nil` above is an
+        // absence rather than an echo path that never emits it.
+        let set = try glideNested(
+            try glideInstrumentObject(
+                await glideSetSampler(router, trackID,
+                                      ["glideMode": .string("constantRate")], id: "2")),
+            "sampler")
+        #expect(set["glideMode"]?.stringValue == "constantRate",
+                "control failed: a SET glide mode is not echoed")
+    }
+
+    /// A typo must not land as `constantTime`. A silently-wrong MODE is worse
+    /// than a silently-wrong number here: the sampler still glides, still lands
+    /// on the right pitch, and only the DURATION is wrong — nothing an agent
+    /// reads back would show it.
+    @Test("m34-w wire: an unknown or non-string glideMode is REFUSED, and the message names both modes")
+    func glideModeRefusesBadValues() async throws {
+        let (router, store) = glideMakeRouter()
+        let trackID = store.addTrack(kind: .instrument).id.uuidString
+
+        let bad = await glideSetSampler(router, trackID,
+                                        ["glideMode": .string("constantSpeed")])
+        #expect(!bad.ok, "an unrecognised glide mode must be refused, not silently ignored")
+        let message = bad.error ?? ""
+        print("[measured] unknown glideMode refusal: \(message)")
+        #expect(message.contains("constantTime"))
+        #expect(message.contains("constantRate"),
+                "the refusal must name the mode that scales with distance: \(message)")
+        #expect(store.tracks[0].instrument?.sampler == nil,
+                "a refused call must not have half-applied")
+
+        let wrongType = await glideSetSampler(router, trackID,
+                                              ["glideMode": .number(2)], id: "2")
+        #expect(!wrongType.ok, "a numeric glideMode must be refused")
+        #expect((wrongType.error ?? "").contains("glideMode"),
+                "the refusal must name the field: \(wrongType.error ?? "")")
+
+        // CONTROL: a LEGAL value on the same path is accepted, so the two
+        // refusals above are about the values and not about the path.
+        let good = await glideSetSampler(router, trackID,
+                                         ["glideMode": .string("constantTime")], id: "3")
+        #expect(good.ok, "control failed: a legal glideMode was refused too: \(good.error ?? "")")
+    }
+
+    /// ⭐ `glideMode: "constantRate"` alone does not tell a caller what the
+    /// number now BUYS, so describeSampler publishes the reference interval
+    /// straight from the engine's own constant. And a mode set with no time is
+    /// stored-but-inert — the honest-light rule this verb exists for.
+    @Test("m34-w wire: describeSampler reports glideMode with its UNIT, and warns when it scales nothing")
+    func glideModeDescribeCarriesTheUnitAndWarnsWhenInert() async throws {
+        let (router, store) = glideMakeRouter()
+        let trackID = store.addTrack(kind: .instrument).id.uuidString
+
+        // ① A rate mode WITH a time: read back, with the unit alongside it.
+        await glideSetSampler(router, trackID,
+                              ["voiceMode": .string("legato"), "glideTime": .number(0.12),
+                               "glideMode": .string("constantRate")])
+        let live = try glideInstrumentObject(await router.handle(ControlRequest(
+            id: "d1", command: "instrument.describeSampler",
+            params: ["trackId": .string(trackID)])))
+        #expect(live["glideMode"]?.stringValue == "constantRate")
+        #expect(live["glideRateReferenceSemitones"]?.doubleValue
+                == SamplerParams.glideRateReferenceSemitones,
+                "the unit must come from the engine's own constant, never from prose")
+        #expect(live["glideRateReferenceSemitones"]?.doubleValue == 2,
+                "…and that constant is 2 semitones — the calibration the user's 0.12 rests on")
+        #expect(live["glideEffective"]?.boolValue == true,
+                "mode is orthogonal to effectiveness: a legato rate glide is still effective")
+
+        // ② A rate mode with NO time: accepted, stored, and scaling nothing.
+        let inertTrackID = store.addTrack(kind: .instrument).id.uuidString
+        await glideSetSampler(router, inertTrackID,
+                              ["voiceMode": .string("legato"),
+                               "glideMode": .string("constantRate")], id: "2")
+        let inert = try glideInstrumentObject(await router.handle(ControlRequest(
+            id: "d2", command: "instrument.describeSampler",
+            params: ["trackId": .string(inertTrackID)])))
+        guard case .array(let warnings)? = inert["warnings"] else {
+            Issue.record("describeSampler emitted no warning for a rate mode with no glide time")
+            return
+        }
+        let text = warnings.compactMap(\.stringValue).joined(separator: " | ")
+        print("[measured] rate-mode-without-a-time warning: \(text)")
+        #expect(text.contains("constantRate"))
+        #expect(text.contains("glideTime"), "the warning must name the fix: \(text)")
+
+        // ③ A sampler that never chose a mode carries NEITHER key — the
+        // pre-m34-w describe shape, byte-for-byte.
+        let bareTrackID = store.addTrack(kind: .instrument).id.uuidString
+        await glideSetSampler(router, bareTrackID,
+                              ["voiceMode": .string("legato"), "glideTime": .number(0.12)],
+                              id: "3")
+        let bare = try glideInstrumentObject(await router.handle(ControlRequest(
+            id: "d3", command: "instrument.describeSampler",
+            params: ["trackId": .string(bareTrackID)])))
+        #expect(bare["glideMode"] == nil)
+        #expect(bare["glideRateReferenceSemitones"] == nil,
+                "an unset mode must not add the unit key to every describeSampler response")
+        #expect(bare["glideTime"]?.doubleValue == 0.12, "control: the glide IS read back")
+        if case .array(let bareWarnings)? = bare["warnings"] {
+            let bareText = bareWarnings.compactMap(\.stringValue).joined(separator: " | ")
+            #expect(!bareText.contains("constantRate"),
+                    "a sampler that never chose a mode must not be warned about one: \(bareText)")
+        }
+    }
 }

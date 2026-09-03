@@ -233,7 +233,7 @@ struct PedalHoldLimitCodableTests {
             sourcePath: "/tmp/none.sfz", displayName: "Test Patch",
             expressionModDepth: 0.42, expressionFilterDepth: 0.37, expressionFilterCC: 2,
             bendRangeSemitones: 6, voiceMode: .legato, decay: 1.7, sustain: 0.23,
-            pedalHoldLimit: 5, glideTime: 0.35)
+            pedalHoldLimit: 5, glideTime: 0.35, glideMode: .constantRate)
         let descriptor = InstrumentDescriptor(kind: .sampler, sampler: configured)
 
         let data = try Self.encoder.encode(InstrumentDocument(from: descriptor, mediaRefs: [:]))
@@ -262,6 +262,12 @@ struct PedalHoldLimitCodableTests {
             "voiceMode": restored.voiceMode == configured.voiceMode,
             // m34-t.
             "glideTime": restored.glideTime == configured.glideTime,
+            // m34-w. THREADED, not hand-listed: the Mirror assertion below
+            // failed by name the moment `glideMode` was added to the type, and
+            // adding it here without also adding it to SamplerDocument's four
+            // touch points would have turned the failure green while the
+            // setting still vanished on save.
+            "glideMode": restored.glideMode == configured.glideMode,
         ]
         print("[measured] sampler globals surviving save/open: "
               + survived.keys.sorted().map { "\($0)=\(survived[$0]! ? "yes" : "NO")" }
@@ -274,7 +280,7 @@ struct PedalHoldLimitCodableTests {
                            "expressionModDepth", "expressionFilterDepth", "expressionFilterCC",
                            "pedalHoldLimit",
                            "decay", "sustain", "bendRangeSemitones", "voiceMode",
-                           "glideTime"]
+                           "glideTime", "glideMode"]
         for name in mustSurvive {
             #expect(survived[name] == true,
                     """
@@ -302,6 +308,8 @@ struct PedalHoldLimitCodableTests {
         #expect(!stored.isEmpty, "control failed: Mirror returned no stored properties at all")
         #expect(stored.contains("glideTime"),
                 "control failed: Mirror cannot see a property this test knows is there")
+        #expect(stored.contains("glideMode"),
+                "control failed: Mirror cannot see m34-w's property either")
         // `zones` is structural, not a global — it has its own coverage (a
         // dropped zone is loud) and no meaningful "did it survive" scalar here.
         #expect(stored.subtracting(mustSurvive) == ["zones"],
@@ -398,6 +406,8 @@ struct PedalHoldLimitCodableTests {
             // m34-t, held to the same discipline from its first day rather
             // than being discovered missing later.
             ("glideTime", SamplerParams(glideTime: 0.35)),
+            // m34-w, same.
+            ("glideMode", SamplerParams(glideMode: .constantRate)),
         ]
         for (name, params) in cases {
             let keys = try Self.keys(of: SamplerDocument(from: params, mediaRefs: [:]))
@@ -553,5 +563,59 @@ struct PedalHoldLimitCodableTests {
         #expect(!legacy.glideIsEffective)
         #expect(legacy.voiceMode == .legato,
                 "control failed: the neighbour must survive the deletion")
+    }
+
+    // MARK: - Leg H — m34-w: what the glideTime NUMBER means
+
+    /// m34-w threads a SIXTEENTH global. The absent-key leg is the one that
+    /// matters most here, because a dropped `glideMode` does not silence the
+    /// sampler — it silently reverts to constant TIME, which still glides and
+    /// still lands on the right pitch. Nothing but a duration measurement or
+    /// this test would notice.
+    @Test("m34-w: glideMode survives the real save/open path; absent still means constantTime")
+    func glideModeSurvivesTheSaveOpenPath() throws {
+        let configured = SamplerParams(voiceMode: .legato, glideTime: 0.35,
+                                       glideMode: .constantRate)
+        let restored = try Self.reopen(configured)
+        #expect(restored.glideMode == .constantRate,
+                "a glide MODE that does not survive a save is not a setting")
+        #expect(restored.effectiveGlideMode == .constantRate)
+        #expect(restored.glideDuration(forSemitones: 12) == 0.35 * 6,
+                "the reopened patch must still bill an octave at six whole tones")
+
+        let legacy = try Self.reopen(configured, droppingSamplerKey: "glideMode")
+        #expect(legacy.glideMode == nil, "an absent key must decode as nil")
+        #expect(legacy.effectiveGlideMode == .constantTime,
+                "the documented default for every project written before m34-w")
+        #expect(legacy.glideDuration(forSemitones: 12) == 0.35,
+                "…and under constantTime the distance must not enter the arithmetic at all")
+        #expect(legacy.glideTime == 0.35,
+                "control failed: the neighbour must survive the deletion")
+    }
+
+    /// ⭐ THE FUTURE-BUILD DIRECTION, and it is the reason `glideMode` persists
+    /// as a RAW STRING rather than as the enum. A project written by a build
+    /// that has a third mode must still OPEN in this one — with the wrong
+    /// sound, which a user can hear and fix, rather than as an unopenable file,
+    /// which they cannot. Same tolerance `voiceMode` already has.
+    @Test("m34-w: an unknown glideMode written by a FUTURE build opens as constantTime, not as a throw")
+    func unknownGlideModeDecodesTolerantly() throws {
+        let configured = SamplerParams(voiceMode: .legato, glideTime: 0.35,
+                                       glideMode: .constantRate)
+        let future = try Self.reopen(
+            configured, overridingSamplerKey: (key: "glideMode", value: "logarithmicSwoop"))
+        #expect(future.glideMode == nil,
+                "an unrecognised mode must resolve to nil, not fail the open")
+        #expect(future.effectiveGlideMode == .constantTime)
+        #expect(future.glideTime == 0.35,
+                "control failed: the rest of the document must have decoded, or this proves nothing")
+
+        // CONTROL ON THE OVERRIDE ITSELF: a KNOWN value written the same way
+        // must come back intact, or the assertion above would pass for an
+        // override that never reached the JSON.
+        let known = try Self.reopen(
+            configured, overridingSamplerKey: (key: "glideMode", value: "constantTime"))
+        #expect(known.glideMode == .constantTime,
+                "control failed: overriding with a KNOWN value did not round-trip")
     }
 }

@@ -53,6 +53,16 @@ import Foundation
 /// COMPOSE without either knowing about the other. Per-frame cost when no
 /// voice is gliding: one Int32 compare — nil/0 renders byte-identically.
 ///
+/// ⭐ CONSTANT-RATE GLIDE (m34-w, `SamplerParams.glideMode`): under
+/// `.constantRate` the SAME `glideTime` number buys a fixed DISTANCE rather
+/// than a fixed duration, so a wide leap takes proportionally longer than a
+/// narrow one — a semitone no longer crawls while an octave is rushed through
+/// twelve times faster. It changes exactly one thing, `glideFrameCount`, which
+/// is how many frames the ramp lasts; the geometric ramp, the per-frame
+/// multiply, the final-frame snap and both arming sites are otherwise
+/// untouched. `.constantTime` is the default and returns before any of the new
+/// arithmetic exists, so a default render is bit-for-bit unchanged.
+///
 /// m27 continuous expression: CC11 (expression), CC2 (breath) and CC1 (mod
 /// wheel) now reach the voice as a SMOOTHED per-voice amplitude multiplier —
 /// the thing a wind player actually does mid-note, which no amount of
@@ -314,6 +324,14 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
         /// what makes "poly cannot change" a structural fact rather than a
         /// branch someone has to remember downstream.
         var glideTime: Double
+        /// m34-w: `SamplerGlideMode` flattened to a Bool so the snapshot stays
+        /// POD and the render thread branches on a plain load — the
+        /// `monoVoiceMode`/`legatoVoiceMode` precedent exactly.
+        ///
+        /// TRUE only for `.constantRate`, i.e. "distance sets duration". False
+        /// (the default, and everything a pre-m34-w project decodes to) is the
+        /// flat-duration behaviour, bit-for-bit.
+        var glideConstantRate: Bool
         /// m34-o GLOBAL decay/sustain, carried RAW (seconds / 0…1 level) —
         /// deliberately NOT as a precomputed `decayStep` the way `attack` and
         /// `release` become `attackStep`/`releaseSlope` in
@@ -358,6 +376,12 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
             // ONE home for "can glide reach the sound at all" — the model's own
             // accessor, so the engine and the wire's warning cannot disagree.
             glideTime = params.glideIsEffective ? params.effectiveGlideTime : 0
+            // m34-w: the mode is read UNCONDITIONALLY — it is orthogonal to
+            // whether the glide can be heard, and `glideTime` above has already
+            // resolved "can it be heard" to a 0 that switches the whole feature
+            // off. Gating this on `glideIsEffective` too would be a second
+            // place for the same decision to be made differently.
+            glideConstantRate = params.effectiveGlideMode.scalesWithInterval
             pedalHoldLimit = params.effectivePedalHoldLimit
         }
     }
@@ -607,6 +631,16 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
     /// `attackStep`/`releaseSlope` are derived from their seconds. 0 = off,
     /// which `.poly` always resolves to.
     private var glideFrames: Int32 = 0
+    /// m34-w: TRUE when `glideFrames` is the cost of ONE WHOLE TONE rather than
+    /// the cost of every leap. Adopted from `ScalarParams.glideConstantRate` in
+    /// `recomputeCoefficients`, seeded in `init` beside `glideFrames` — same
+    /// discipline as `monoVoiceMode`.
+    ///
+    /// ⛔ FALSE IS THE PRE-m34-w PATH AND MUST STAY FREE. `glideFrameCount`
+    /// early-returns `glideFrames` on this flag before any logarithm exists, so
+    /// a constant-time glide arms with character-for-character the same
+    /// `pow(target/current, 1/glideFrames)` it always did.
+    private var glideConstantRate = false
     /// m34-t: the pitch of the last note this instrument actually SOUNDED —
     /// the origin a glide slides FROM. −1 = none yet (or since the last
     /// `reset()`), which means the next note snaps however long `glideTime` is.
@@ -786,6 +820,11 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
         glideFrames = lastAppliedScalars.glideTime > 0
             ? Int32(max(1.0, (lastAppliedScalars.glideTime * sampleRate).rounded()))
             : 0
+        // m34-w: seeded here for the same reason `glideFrames` is — an event
+        // arriving before the first adoption would otherwise glide in the wrong
+        // mode, which is a wrong SOUND rather than a crash and so would not
+        // announce itself.
+        glideConstantRate = lastAppliedScalars.glideConstantRate
         pedalHoldLimit = lastAppliedScalars.pedalHoldLimit
         // xorshift64* has one degenerate state: 0 sticks at 0. Substitute a
         // fixed odd constant so a (vanishingly unlikely) zero seed still runs.
@@ -1500,6 +1539,13 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
         glideFrames = params.glideTime > 0
             ? Int32(max(1.0, (params.glideTime * sampleRate).rounded()))
             : 0
+        // m34-w: under `.constantRate` the SAME number is re-read as the cost
+        // of ONE WHOLE TONE (`SamplerParams.glideRateReferenceSemitones`)
+        // instead of the cost of every leap — so the seconds→frames arithmetic
+        // above is unchanged and only its MEANING moves. That is what keeps
+        // `glideFrames > 0` the single "is glide armed at all" test at both
+        // arming sites, in both modes.
+        glideConstantRate = params.glideConstantRate
         // m34-q takes effect at the NEXT note-on for the same reason voice mode
         // does: trimming already-sounding notes at a snapshot boundary would be
         // a fade the user never played, for a knob they turned between notes.
@@ -1886,6 +1932,57 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
     /// ⚠️ `increment` is only re-formed on the SNAP path. On the ramp path the
     /// per-frame step owns it, and writing it here as well would move the voice
     /// a frame early.
+    /// ⭐⭐ m34-w — THE ONLY THING CONSTANT-RATE GLIDE CHANGES: how long the
+    /// ramp is. The ramp itself (geometric, per-frame multiply, snap on the
+    /// last frame) is untouched, and so is every other line of the glide path.
+    ///
+    /// ⛔ THE `guard` IS THE BYTE-IDENTITY GUARANTEE, not a fast path. Under
+    /// `.constantTime` this returns `glideFrames` before any arithmetic exists,
+    /// so both arming sites still form `pow(ratio, 1.0 / Double(glideFrames))`
+    /// character for character and a default render is bit-for-bit what it was.
+    ///
+    /// Under `.constantRate`, `glideFrames` is re-read as the cost of ONE
+    /// REFERENCE INTERVAL (`SamplerParams.glideRateReferenceSemitones` = a
+    /// whole tone) and the leap is billed proportionally: an octave costs six
+    /// times a whole tone, a semitone half of one. That is the same rule as
+    /// `SamplerParams.glideDuration(forSemitones:)`, in frames rather than
+    /// seconds — the model owns the law, this owns the units.
+    ///
+    /// The floor of 1 frame matches the flat path's `max(1, …)`: an
+    /// arbitrarily small interval still ramps for a sample rather than dividing
+    /// by zero. Render thread: two compares and (rate mode only) two multiplies
+    /// and a divide, at EVENT rate. No allocation, no lock, no ObjC.
+    @inline(__always)
+    private func glideFrameCount(semitones: Double) -> Int32 {
+        guard glideConstantRate, semitones.isFinite else { return glideFrames }
+        let distance = min(abs(semitones), SamplerParams.glideMaxIntervalSemitones)
+        let scaled = (Double(glideFrames) * distance
+                      / SamplerParams.glideRateReferenceSemitones).rounded()
+        guard scaled.isFinite else { return glideFrames }
+        return Int32(max(1.0, min(scaled, Double(Int32.max / 2))))
+    }
+
+    /// m34-w, the same rule for a caller that holds the increment RATIO rather
+    /// than two note numbers. `baseIncrement` is proportional to frequency, so
+    /// `target / current` is exactly `2^(interval/12)` — every zone factor
+    /// (`tuneFactor`, `fileRate`, `sampleRate`) cancels — and the interval is
+    /// its base-2 logarithm times twelve.
+    ///
+    /// ⛔ THE LOGARITHM LIVES BEHIND THE GUARD, on purpose. Evaluating it in
+    /// the argument list would run a `log2` on every constant-time slur for a
+    /// number that is then thrown away.
+    ///
+    /// ⭐ IT IS THE REMAINING DISTANCE, AND THAT IS CORRECT. A slur arriving
+    /// mid-glide measures from where the pitch actually IS, not from the note
+    /// it set off from — which is what "the pitch moves at a fixed speed"
+    /// means. Billing the full nominal interval would make an interrupted
+    /// slide accelerate.
+    @inline(__always)
+    private func glideFrameCount(ratio: Double) -> Int32 {
+        guard glideConstantRate else { return glideFrames }
+        return glideFrameCount(semitones: 12.0 * log2(ratio))
+    }
+
     @inline(__always)
     private func retune(_ index: Int, to target: Double) {
         let current = voices[index].baseIncrement
@@ -1894,9 +1991,12 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
         // no-op on the exact same bits.
         if glideFrames > 0, current > 0, target > 0, target != current,
            current.isFinite, target.isFinite {
-            voices[index].glideRemaining = glideFrames
+            // m34-w: `glideFrames` under `.constantTime`, the interval-scaled
+            // count under `.constantRate`. Everything below is unchanged.
+            let frames = glideFrameCount(ratio: target / current)
+            voices[index].glideRemaining = frames
             voices[index].glideTarget = target
-            voices[index].glideCoeff = pow(target / current, 1.0 / Double(glideFrames))
+            voices[index].glideCoeff = pow(target / current, 1.0 / Double(frames))
             return
         }
         voices[index].glideRemaining = 0
@@ -2169,9 +2269,15 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
             let from = exp2((Double(glideFromPitch) - Double(zone.rootPitch)) / 12.0)
                 * zone.tuneFactor * zone.fileRate / sampleRate
             if from > 0, from.isFinite {
-                voice.glideRemaining = glideFrames
+                // m34-w: here the interval is EXACT — two MIDI note numbers,
+                // no logarithm needed and none taken. `retune`'s ratio overload
+                // exists only because the legato path has no note numbers to
+                // subtract, and the two agree to within float rounding.
+                let frames = glideFrameCount(
+                    semitones: Double(event.pitch) - Double(glideFromPitch))
+                voice.glideRemaining = frames
                 voice.glideTarget = voice.baseIncrement
-                voice.glideCoeff = pow(voice.baseIncrement / from, 1.0 / Double(glideFrames))
+                voice.glideCoeff = pow(voice.baseIncrement / from, 1.0 / Double(frames))
                 voice.baseIncrement = from
                 voice.increment = from * bendFactor
             }

@@ -342,6 +342,90 @@ public final class SamplerEditorModel {
         detail: "Play each sample to its end and ignore note-off — for drums and "
               + "percussion. Zones that LOOP ignore this.")
 
+    // MARK: - VOICE MODE + GLIDE (m34-u — the UI half of m34-t)
+
+    /// The three voice modes in the order the card renders them: the DEFAULT
+    /// first, then the two monophonic ones in increasing degree of connection.
+    /// Sourced from the domain's own `CaseIterable` conformance rather than
+    /// retyped, so a FOURTH case added tomorrow appears in the picker instead of
+    /// being silently unreachable from the UI — the settable-but-invisible shape
+    /// this item exists to close, arriving one layer up.
+    ///
+    /// ⚠️ `allCases` order IS the declaration order (`poly, mono, legato`), and
+    /// that is the order wanted; the assertion below is what makes that a fact
+    /// rather than a coincidence.
+    public static let voiceModes: [SamplerVoiceMode] = SamplerVoiceMode.allCases
+
+    /// BEGINNER-READABLE names (docs/DESIGN-LANGUAGE.md Rule 6). "Poly",
+    /// "mono" and above all "legato" are the wire's words and the right ones
+    /// for an agent reading `instrument.describeSampler`; none of the three
+    /// passes the newcomer test on a chip 60 pt wide.
+    ///
+    /// ⛔ THE THREE MUST DIFFER IN WHAT THEY SAY, NOT ONLY IN WHICH IS LIT.
+    /// "One Note" and "Slurred" are both monophonic, so a label pair like
+    /// "Mono"/"Legato" tells a newcomer nothing about the one thing that
+    /// separates them — whether the next note RE-ATTACKS. The words chosen name
+    /// the audible result: chords, one note at a time, or one note at a time
+    /// slurred into the next.
+    public static func voiceModeLabel(_ mode: SamplerVoiceMode) -> String {
+        switch mode {
+        case .poly: return "Chords"
+        case .mono: return "One Note"
+        case .legato: return "Slurred"
+        }
+    }
+
+    /// What each mode actually does, in the same register `loopModeDetail`
+    /// uses — the tooltip that carries the re-attack distinction the two
+    /// monophonic labels cannot fit.
+    public static func voiceModeDetail(_ mode: SamplerVoiceMode) -> String {
+        switch mode {
+        case .poly:
+            return "Chords — every key you hold sounds at once. The normal setting, "
+                 + "and the only one that can play more than one note."
+        case .mono:
+            return "One Note — only the newest key sounds, and each new note starts "
+                 + "fresh with its own attack. Like a synth lead, or a wind player "
+                 + "tonguing every note."
+        case .legato:
+            return "Slurred — only the newest key sounds, and a note played while "
+                 + "another is still held CONTINUES it: the pitch changes with no new "
+                 + "attack, the way a wind player moves a finger without re-tonguing. "
+                 + "Add Glide to slide between the two pitches."
+        }
+    }
+
+    /// The GLIDE global — modelled apart from `specs` on purpose, and for the
+    /// same reason `oneShotSpec` is: `specs` is the card's UNIFORM knob row and
+    /// this one is not uniform with it. Glide belongs beside the voice picker
+    /// (it is meaningless without one) and it needs its own readout, because
+    /// **0 must read OFF and not "very fast"** — see `glideReadout`.
+    ///
+    /// Range and the meaning of the reset value come from `SamplerParams`
+    /// itself, so this table can never fork the domain clamp.
+    public static let glideSpec = SamplerParamSpec(
+        name: "glideTime", label: "Glide", range: SamplerParams.glideTimeRange,
+        defaultValue: 0, unit: "s")
+
+    /// ⛔ THE HONEST LIGHT, in the card's own words rather than the wire's.
+    /// `instrument.describeSampler` warns with "voiceMode is poly … set
+    /// 'legato' or 'mono'" because an AI agent reads it and those are the
+    /// values it must send. A human reading this card has never seen those
+    /// words — the chips above say Chords / One Note / Slurred — so the note
+    /// names the CHIPS. Same fact, two audiences (Rule 6).
+    /// ⚠️ **ONE LINE, AND THAT IS A MEASURED BUDGET RATHER THAN A STYLE
+    /// PREFERENCE.** This note sits in the card's FIXED chrome, so every line it
+    /// wraps to is a line `SamplerCardLayout.chromeHeight` must carry — and at
+    /// the default window each one costs a ZONE ROW off the list below. The
+    /// first draft was 128 characters and the second 63; BOTH wrapped to two
+    /// lines, and the zone list drew a sliced 5.79 rows instead of a clean 6.
+    /// **The line holds 51 characters at this width — counted off a capture,
+    /// not estimated**, and the estimate was wrong twice before the pixels
+    /// settled it. The *why* (a slide needs one note at a time) lives in the
+    /// GLIDE knob's tooltip, which costs no pixels at all.
+    public static let glideInertNote =
+        "CHORDS ignores Glide — use One Note or Slurred."
+
     // MARK: - The per-zone spec table (source of truth: SamplerZone)
 
     /// Every numeric per-zone parameter the card edits.
@@ -464,6 +548,92 @@ public final class SamplerEditorModel {
             params.oneShot = on
             return true
         }
+    }
+
+    // MARK: - Voice mode + glide values/edits (m34-u)
+
+    /// The live voice mode. Reads through `effectiveVoiceMode`, so a sampler
+    /// that never set one lights the CHORDS chip rather than lighting nothing —
+    /// a three-way picker with no lit segment would claim a state the engine
+    /// does not have.
+    public var voiceMode: SamplerVoiceMode { params.effectiveVoiceMode }
+
+    /// The live glide time in seconds (0 = the pitch steps, the default).
+    public var glideTime: Double { params.effectiveGlideTime }
+
+    /// Whether glide can reach the sound AT ALL — `SamplerParams.glideIsEffective`
+    /// verbatim, never re-derived here. That conjunction (a time AND a
+    /// monophonic mode) has ONE home in the domain; the engine snapshot, the
+    /// wire's warning and this card all read it, so the card cannot come to a
+    /// different verdict than `instrument.describeSampler` publishes as
+    /// `glideEffective`.
+    public var glideIsEffective: Bool { params.glideIsEffective }
+
+    /// True when a glide is STORED but structurally inert — the card's
+    /// dim-the-knob + amber-note trigger. Not the negation of
+    /// `glideIsEffective`: an UNSET glide under chords is not a problem, it is
+    /// the default, and lighting a warning on it would teach nothing.
+    public var glideIsInert: Bool { glideTime > 0 && !glideIsEffective }
+
+    /// Applies the voice mode. Writes the EXPLICIT case, including `.poly` —
+    /// clicking CHORDS on an untouched sampler stores `poly` rather than
+    /// clearing to nil. Sound-identical either way (`effectiveVoiceMode`
+    /// resolves nil to `.poly`), and an explicit value is what a user pressing
+    /// a segment means.
+    public func setVoiceMode(_ mode: SamplerVoiceMode) {
+        mutate { params in
+            params.voiceMode = mode
+            return true
+        }
+    }
+
+    /// Applies the glide time. Clamps to the domain range first — this model's
+    /// clamp is the ONLY clamp on the sampler path (the store passes a supplied
+    /// `SamplerParams` through untouched).
+    public func setGlideTime(_ seconds: Double) {
+        let clamped = seconds.clamped(to: SamplerParams.glideTimeRange)
+        mutate { params in
+            params.glideTime = clamped
+            return true
+        }
+    }
+
+    /// Sets glide from a 0…1 knob travel fraction.
+    public func setGlideFraction(_ fraction: Double) {
+        setGlideTime(Self.value(forFraction: fraction, spec: Self.glideSpec))
+    }
+
+    /// Double-click reset — back to UNSET (nil), not to an explicit 0.
+    ///
+    /// The two are sound-identical (`effectiveGlideTime` resolves nil to 0), so
+    /// this is wire-shape hygiene rather than an audible difference: nil keeps a
+    /// project that never asked for glide byte-identical on a JSON round trip,
+    /// and keeps `glideTime` out of `instrument.describeSampler`'s only-when-SET
+    /// output. The per-zone `resetZoneParam` reasoning, one field over.
+    public func resetGlide() {
+        mutate { params in
+            params.glideTime = nil
+            return true
+        }
+    }
+
+    /// The glide knob's travel fraction.
+    public var glideFraction: Double {
+        Self.fraction(forValue: glideTime, spec: Self.glideSpec)
+    }
+
+    /// ⛔ **ZERO READS "OFF", NEVER "0 ms".** This is the single most likely way
+    /// to get this control wrong: `readout(value:spec:)` on an "s" unit formats
+    /// 0 as `0.0 ms`, which reads as *a very fast glide* — the exact
+    /// looks-live-does-nothing shape the rest of this card exists to avoid. The
+    /// bottom of this range is not a small amount of glide, it is the absence of
+    /// glide, and the readout has to say so.
+    ///
+    /// Above zero it falls through to the card's ordinary seconds formatter, so
+    /// glide speaks the same ms/s crossover every other time on the card does.
+    public static func glideReadout(_ seconds: Double) -> (text: String, unit: String) {
+        guard seconds > 0 else { return ("OFF", "") }
+        return readout(value: seconds, spec: glideSpec)
     }
 
     // MARK: - Selection

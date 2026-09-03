@@ -1815,6 +1815,30 @@ const samplerSchema = z
           "Pitch bend still applies ON TOP of a glide — the two compose. " +
           "REFUSED (not clamped) outside 0-4."
       ),
+    glideMode: z
+      .enum(["constantTime", "constantRate"])
+      .optional()
+      .describe(
+        "WHAT THE `glideTime` NUMBER MEANS. OMITTED = \"constantTime\" = what the Sampler " +
+          "has always done: EVERY transition takes `glideTime` seconds whatever its " +
+          "distance, so a semitone crawls and an octave is rushed through at twelve times " +
+          "the speed. " +
+          "⭐ \"constantRate\" is real portamento — the pitch moves at a fixed SPEED and " +
+          "DISTANCE SETS DURATION, so a wide leap takes proportionally longer than a narrow " +
+          "one. That is what a trombone slide and a fretless finger actually do. " +
+          "⭐⭐ THE UNIT, because the number does not change meaning by magic: under " +
+          "\"constantRate\" `glideTime` is THE SECONDS A WHOLE TONE (2 semitones) TAKES. " +
+          "An octave costs six times that, a semitone half of it: glideTime 0.12 gives " +
+          "0.12 s for a whole tone, 0.18 s for a minor third, 0.72 s for an octave. " +
+          "The reference is 2 semitones and not 12 ON PURPOSE — the project owner approved " +
+          "glideTime 0.12 by ear on a sax phrase whose slurs are 2-3 semitones, and this " +
+          "unit is what makes flipping the mode KEEP that sound rather than silently " +
+          "speeding it up four to six times. instrument_describe_sampler reports the " +
+          "reference back as `glideRateReferenceSemitones` so you never have to assume it. " +
+          "Needs the same monophonic `voiceMode` as `glideTime` itself, and does nothing " +
+          "at all when `glideTime` is 0 (there is no glide to scale — describe warns). " +
+          "REFUSED (not silently defaulted) for any other string."
+      ),
     pedalHoldLimit: z
       .number()
       .int()
@@ -3503,13 +3527,24 @@ registerTool(
       "kind, oneShot, attack, release, gain, sourcePath?, displayName?, zoneSummary, " +
       "effectiveGlobals?, warnings?}, plus whichever of the ONLY-WHEN-SET globals this " +
       "sampler has actually been given: expressionModDepth?, expressionFilterDepth?, " +
-      "expressionFilterCC?, bendRangeSemitones?, voiceMode?, pedalHoldLimit?, glideTime?. " +
+      "expressionFilterCC?, bendRangeSemitones?, voiceMode?, pedalHoldLimit?, glideTime?, " +
+      "glideMode?. " +
       "An absent key there means UNSET (i.e. that global's default), not zero. " +
       "⭐ `glideTime` brings a SECOND key with it: `glideEffective` (boolean), present only " +
       "when a glide is set. A glide needs a monophonic `voiceMode` to do anything, so " +
       "`glideEffective: false` means the value is stored but INERT — you will also get a " +
       "top-level `warnings` entry naming the fix. Read it rather than assuming a stored " +
       "glideTime is audible. " +
+      "⭐ `glideMode` (m34-w) likewise brings its UNIT with it: when it reads " +
+      "\"constantRate\" you also get `glideRateReferenceSemitones` (2), and that pair is " +
+      "the whole answer to \"how long will this slide take\". Under \"constantRate\" " +
+      "`glideTime` is THE SECONDS A WHOLE TONE TAKES and every other leap is proportional, " +
+      "so duration = glideTime × semitones / 2 — an octave is six times a whole tone. " +
+      "Under \"constantTime\" (the default, and an ABSENT `glideMode` key) every leap " +
+      "takes `glideTime` flat, whatever its distance. Read the mode rather than assuming " +
+      "the flat one: the two sound identical on a whole tone and six times apart on an " +
+      "octave. A `glideMode` of \"constantRate\" with `glideTime` 0 scales nothing and " +
+      "raises its own top-level `warnings` entry. " +
       "⚠️ READ `effectiveGlobals` BEFORE TRUSTING top-level `release`/`attack`/`oneShot`. " +
       "Those three are the STORED globals, and a zone that sets its own value WINS over " +
       "them — so on an imported library they are routinely numbers the engine never reads. " +
@@ -3716,9 +3751,10 @@ const samplerGlobalParamSchema = z
     "voiceMode",
     "pedalHoldLimit",
     "glideTime",
+    "glideMode",
   ])
   .describe(
-    "Which Sampler GLOBAL to set — exactly one per call, matching one of the thirteen fields " +
+    "Which Sampler GLOBAL to set — exactly one per call, matching one of the fourteen fields " +
       "track_set_instrument's own `sampler` object carries at this level (everything else " +
       "there, i.e. `zones`, is per-zone and out of reach of this narrower tool). `oneShot` " +
       "(boolean): true = every triggered sample always plays to completion regardless of " +
@@ -3758,6 +3794,13 @@ const samplerGlobalParamSchema = z
       "behaviour. IT NEEDS `voiceMode` \"mono\" or \"legato\" and is IGNORED under poly " +
       "(instrument_describe_sampler reports `glideEffective` and warns when it is inert). " +
       "The slide is even in semitones, and pitch bend composes on top of it. " +
+      "`glideMode` (STRING, \"constantTime\" or \"constantRate\" — the SECOND param here " +
+      "that takes a string) decides what that `glideTime` number MEANS. omitted/nil = " +
+      "\"constantTime\" = today's behaviour: every leap takes the same time, so an octave " +
+      "travels twelve times faster than a semitone. \"constantRate\" makes DISTANCE SET " +
+      "DURATION, and then `glideTime` is THE SECONDS A WHOLE TONE (2 semitones) TAKES — an " +
+      "octave six times that, a semitone half. 0.12 gives 0.12 s / 0.18 s / 0.72 s for a " +
+      "whole tone / minor third / octave. " +
       "`pedalHoldLimit` (INTEGER 1-128): how many notes the SUSTAIN PEDAL (CC 64) keeps " +
       "ringing; omitted/nil = unlimited, today's behaviour — the reason an organ or pad " +
       "patch under a latched pedal becomes a wall of sound. With a cap set, the OLDEST " +
@@ -3803,7 +3846,9 @@ registerTool(
         .union([z.number(), z.boolean(), z.string()])
         .describe(
           "The new value: a boolean for `param: \"oneShot\"`, the string \"poly\", " +
-            "\"mono\" or \"legato\" for `param: \"voiceMode\"`, and a number for every " +
+            "\"mono\" or \"legato\" for `param: \"voiceMode\"`, the string " +
+            "\"constantTime\" or \"constantRate\" for `param: \"glideMode\"`, and a " +
+            "number for every " +
             "other `param` (seconds for `attack`/`release`/`glideTime`, a 0-1 level for " +
             "`gain`/`expressionModDepth`/`expressionFilterDepth`, an integer CC 0-127 for " +
             "`expressionFilterCC`, semitones 0-48 for `bendRangeSemitones`, a note count " +
@@ -3823,15 +3868,25 @@ registerTool(
       // Deliberately minimal: this restores exactly what was lost and tightens
       // nothing else (a boolean for a numeric param was accepted before and
       // still is), because the wire contract is additive-only.
-      if (typeof value === "string" && param !== "voiceMode") {
+      // m34-w: `glideMode` is the SECOND string param, so the test can no
+      // longer be a hardcoded `!== "voiceMode"`. A SET, named once, because the
+      // two checks below must agree — a param in one list and not the other is
+      // a param that can neither be sent as a string nor as anything else.
+      const stringParams = new Set(["voiceMode", "glideMode"]);
+      const stringParamValues: Record<string, string> = {
+        voiceMode: '"poly", "mono" or "legato"',
+        glideMode: '"constantTime" or "constantRate"',
+      };
+      if (typeof value === "string" && !stringParams.has(param)) {
         throw new Error(
           `sampler param "${param}" does not take a string — got ${JSON.stringify(value)}. ` +
-            `Only "voiceMode" is a string param ("poly", "mono" or "legato").`
+            `Only "voiceMode" ("poly", "mono" or "legato") and "glideMode" ` +
+            `("constantTime" or "constantRate") are string params.`
         );
       }
-      if (param === "voiceMode" && typeof value !== "string") {
+      if (stringParams.has(param) && typeof value !== "string") {
         throw new Error(
-          `sampler param "voiceMode" takes the string "poly", "mono" or "legato" — ` +
+          `sampler param "${param}" takes the string ${stringParamValues[param]} — ` +
             `got ${typeof value}.`
         );
       }

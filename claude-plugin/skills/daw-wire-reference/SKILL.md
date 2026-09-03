@@ -380,6 +380,36 @@ slides — which is how a hardware mono synth does portamento. The slide is even
 **semitones**, not in Hz (halfway through 440→880 Hz you are at 622 Hz), and **pitch bend
 composes on top of it**.
 
+**`glideMode` decides what that `glideTime` number MEANS** (m34-w). It takes
+`"constantTime"` or `"constantRate"`, and omitting it is `"constantTime"` — the behaviour
+above, unchanged.
+
+| `glideMode` | `glideTime` means | a semitone | a whole tone | an octave |
+|---|---|---|---|---|
+| `constantTime` (default) | seconds for **every** leap | 0.12 s | 0.12 s | 0.12 s |
+| `constantRate` | seconds **per whole tone** | 0.06 s | 0.12 s | 0.72 s |
+
+⭐ **Under `constantTime` a wide leap travels faster**, because it covers twelve times the
+distance in the same time — so an octave is rushed through while a semitone crawls.
+`constantRate` moves the pitch at a fixed **speed**, so distance sets duration: that is
+what a trombone slide and a fretless finger actually do, and it is what to reach for on a
+line with mixed interval sizes.
+
+⚠️ **THE UNIT IS SECONDS PER WHOLE TONE (2 semitones), not per octave and not per
+semitone**, and the choice is calibrated rather than arbitrary. The project owner approved
+`glideTime: 0.12` by ear on a sax phrase whose slurs are 2–3 semitones; at this unit that
+same 0.12 still gives 0.12 s on a whole tone and 0.18 s on a minor third, so **flipping
+the mode keeps the sound they picked**. Per-octave would have made those slurs 0.02–0.03 s
+— four to six times faster, which does not read as a slide at all. Duration is
+`glideTime × semitones ÷ 2`, and `instrument_describe_sampler` reports the divisor back as
+`glideRateReferenceSemitones` so you never have to assume it.
+
+⚠️ **The two modes are indistinguishable on a whole tone and six times apart on an
+octave.** Read `glideMode` off `instrument_describe_sampler` rather than inferring it from
+a duration you heard once. It needs the same monophonic `voiceMode` `glideTime` does, and
+a `constantRate` set with `glideTime: 0` scales nothing — describe warns about exactly
+that.
+
 **Everything else still masks.** On the `soundBank` and hosted `audioUnit` paths every
 note-on starts a new voice with a fresh attack. There `legatoOverlapBeats` (m27-o) hides
 that attack under the previous note's decaying tail — masking, not voice continuation,

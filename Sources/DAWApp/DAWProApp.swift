@@ -10639,6 +10639,15 @@ final class AppModel {
             "selectedZoneId": samplerEditor.selectedZoneID.map { JSONValue.string($0.uuidString) } ?? .null,
             "oneShot": .bool(samplerEditor.oneShot),
             "values": .object(values),
+            // m34-u — READ-ONLY echo, additive, still no param setter (see the
+            // ⛔ note above). `glideEffective` is the same derived conjunction
+            // `instrument.describeSampler` publishes, so a pixel probe can
+            // stage the inert state and assert the card is IN it before it goes
+            // looking for the amber line.
+            "voiceMode": .string(samplerEditor.voiceMode.rawValue),
+            "glideTime": .number(samplerEditor.glideTime),
+            "glideEffective": .bool(samplerEditor.glideIsEffective),
+            "glideInert": .bool(samplerEditor.glideIsInert),
             "error": samplerEditor.lastErrorMessage.map { JSONValue.string($0) } ?? .null,
         ])
     }

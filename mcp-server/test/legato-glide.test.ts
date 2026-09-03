@@ -290,3 +290,162 @@ test("instrument_describe_sampler advertises glideTime AND glideEffective", () =
   assert.match(text, /glideTime\?/, "the only-when-set global must be listed in the return shape");
   assert.match(text, /glideEffective/, "the derived boolean must be advertised too");
 });
+
+// ---------------------------------------------------------------------------
+// m34-w — glideMode, what the glideTime NUMBER means
+//
+// ⚠️ THE SAME SPLIT OF GUARDS as m34-t above: `track_set_instrument` types
+// `glideMode` as a zod ENUM, so an unknown mode dies at the SCHEMA and never
+// reaches the bridge; `instrument_set_sampler_param`'s wide `value` union lets
+// the string through to be refused app-side. The one NEW boundary here is the
+// hand-written string re-narrowing inside set_sampler_param, which used to say
+// `param !== "voiceMode"` and would have refused `glideMode` outright.
+// ---------------------------------------------------------------------------
+
+test("track_set_instrument forwards sampler.glideMode through the strict nested schema", async () => {
+  const trackId = randomUUID();
+  queuedResult = { trackId, kind: "sampler", sampler: { glideMode: "constantRate" } };
+  const result = await client.callTool({
+    name: "track_set_instrument",
+    arguments: {
+      trackId,
+      kind: "sampler",
+      sampler: { voiceMode: "legato", glideTime: 0.12, glideMode: "constantRate" },
+    },
+  });
+  assert.ok(!result.isError, JSON.stringify(result));
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0]!.params["sampler"], {
+    voiceMode: "legato",
+    glideTime: 0.12,
+    glideMode: "constantRate",
+  });
+});
+
+test("an omitted glideMode forwards as undefined — never a fabricated 'constantTime'", async () => {
+  const trackId = randomUUID();
+  queuedResult = { trackId, kind: "sampler", sampler: {} };
+  await client.callTool({
+    name: "track_set_instrument",
+    arguments: { trackId, kind: "sampler", sampler: { glideTime: 0.12 } },
+  });
+  const sampler = calls[0]!.params["sampler"] as Record<string, unknown>;
+  assert.equal(sampler["glideMode"], undefined);
+  assert.ok(
+    !Object.prototype.hasOwnProperty.call(sampler, "glideMode"),
+    "an unset mode must not appear on the wire at all — the app treats a present key as an edit"
+  );
+});
+
+test("an unknown glideMode dies at the SCHEMA; both legal values do not", async () => {
+  const trackId = randomUUID();
+  const result = await client.callTool({
+    name: "track_set_instrument",
+    arguments: { trackId, kind: "sampler", sampler: { glideMode: "constantSpeed" } },
+  });
+  assert.ok(result.isError, "an unrecognised glide mode must be refused, not defaulted");
+  assert.equal(calls.length, 0, "a refused mode must not reach the app");
+
+  for (const good of ["constantTime", "constantRate"]) {
+    calls = [];
+    queuedResult = { trackId, kind: "sampler", sampler: { glideMode: good } };
+    const ok = await client.callTool({
+      name: "track_set_instrument",
+      arguments: { trackId, kind: "sampler", sampler: { glideMode: good } },
+    });
+    assert.ok(!ok.isError, `${good} is legal: ${JSON.stringify(ok)}`);
+    assert.equal((calls[0]!.params["sampler"] as any)["glideMode"], good);
+  }
+});
+
+test("instrument_set_sampler_param forwards glideMode as a one-key sampler patch", async () => {
+  const trackId = randomUUID();
+  queuedResult = { trackId, kind: "sampler", sampler: { glideMode: "constantRate" } };
+  const result = await client.callTool({
+    name: "instrument_set_sampler_param",
+    arguments: { trackId, param: "glideMode", value: "constantRate" },
+  });
+  assert.ok(!result.isError, JSON.stringify(result));
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.command, "track.setInstrument");
+  assert.deepEqual(calls[0]!.params["sampler"], { glideMode: "constantRate" });
+});
+
+/**
+ * ⛔ THE REGRESSION THIS EXISTS FOR, and it is not hypothetical: the string
+ * re-narrowing inside `instrument_set_sampler_param` was written as
+ * `param !== "voiceMode"`, so adding a SECOND string param would have made
+ * every `glideMode` call fail with "does not take a string" — a tool that
+ * advertises a param it structurally cannot accept. The test above proves the
+ * string gets through; this one proves the guard still refuses the wrong TYPE
+ * for the new param, and still refuses a string for a numeric one.
+ */
+test("m34-w: the string re-narrowing now knows TWO string params, and still refuses the rest", async () => {
+  const trackId = randomUUID();
+
+  // A number for a string param is refused, and the message names the param.
+  const numeric = await client.callTool({
+    name: "instrument_set_sampler_param",
+    arguments: { trackId, param: "glideMode", value: 2 },
+  });
+  assert.ok(numeric.isError, "a numeric glideMode must be refused at this boundary");
+  const numericText = JSON.stringify(numeric);
+  assert.match(numericText, /glideMode/);
+  assert.match(numericText, /constantTime|constantRate/, "the message must name the legal values");
+  assert.equal(calls.length, 0, "a refused value must not reach the app");
+
+  // …and the ORIGINAL narrowing still bites: a string for a numeric param.
+  const stringForNumber = await client.callTool({
+    name: "instrument_set_sampler_param",
+    arguments: { trackId, param: "gain", value: "loud" },
+  });
+  assert.ok(stringForNumber.isError, "a string for `gain` must still be refused");
+  assert.match(JSON.stringify(stringForNumber), /does not take a string/);
+  assert.equal(calls.length, 0);
+
+  // CONTROL: voiceMode, the ORIGINAL string param, must still work — otherwise
+  // the two refusals above are satisfied by a guard that refuses everything.
+  queuedResult = { trackId, kind: "sampler", sampler: { voiceMode: "legato" } };
+  const control = await client.callTool({
+    name: "instrument_set_sampler_param",
+    arguments: { trackId, param: "voiceMode", value: "legato" },
+  });
+  assert.ok(!control.isError, `control failed: voiceMode was refused too: ${JSON.stringify(control)}`);
+  assert.deepEqual(calls[0]!.params["sampler"], { voiceMode: "legato" });
+});
+
+test("the glideMode description states the UNIT and the calibration it rests on", () => {
+  const setInstrument = tools.find((t) => t.name === "track_set_instrument");
+  const mode = ((setInstrument.inputSchema as any).properties?.sampler?.properties?.glideMode
+    ?.description ?? "") as string;
+  assert.ok(mode.length > 0, "glideMode must be described, not merely typed");
+
+  // ⭐ THE ONE FACT AN AGENT CANNOT INFER: the number's unit. "constantRate"
+  // without "seconds per WHOLE TONE" is an invitation to guess, and the two
+  // plausible guesses (per octave, per semitone) are 6x apart in each direction.
+  assert.match(mode, /whole tone/i, `must name the reference interval: ${mode}`);
+  assert.match(mode, /2 semitones|\(2 semitones\)/i, "…and state it as a number");
+  assert.match(mode, /constantTime/, "the default must be named");
+  assert.match(mode, /0\.12/, "the calibrated example the unit was chosen for");
+  assert.match(mode, /0\.72|six times/i, "an octave's cost, so the scaling is concrete");
+  assert.match(
+    mode,
+    /glideRateReferenceSemitones/,
+    "must point at the read-back that reports the unit, so it is never assumed"
+  );
+});
+
+test("instrument_describe_sampler advertises glideMode AND its reference interval", () => {
+  const describe = tools.find((t) => t.name === "instrument_describe_sampler");
+  assert.ok(describe);
+  const text = (describe.description ?? "") as string;
+  assert.match(text, /glideMode\?/, "the only-when-set global must be listed in the return shape");
+  assert.match(
+    text,
+    /glideRateReferenceSemitones/,
+    "the derived unit must be advertised, or a caller has to guess it"
+  );
+  // The trap worth stating in the prose an agent actually reads: the two modes
+  // are INDISTINGUISHABLE on a whole tone and six times apart on an octave.
+  assert.match(text, /whole tone/i);
+});

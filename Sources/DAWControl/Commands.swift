@@ -1876,6 +1876,20 @@ public final class CommandRouter {
                     + "voiceMode to 'legato' (slide with no new attack, the real slur) or 'mono' "
                     + "(the new note attacks but starts at the previous pitch) to hear it")
             }
+            // m34-w: the OTHER way this pair can be stored-but-inert — a mode
+            // chosen with no time to scale. Same honest-light rule: a setting
+            // that is accepted and then silently does nothing is the shape
+            // every warning on this verb exists to end.
+            if describeSamplerParams.glideMode?.scalesWithInterval == true,
+               describeSamplerParams.effectiveGlideTime == 0 {
+                describeSamplerWarnings.append(
+                    "glideMode is 'constantRate' but glideTime is 0, so there is NO GLIDE to "
+                    + "scale and the mode does nothing. Under 'constantRate' glideTime is the "
+                    + "seconds a WHOLE TONE takes (\(SamplerParams.glideRateReferenceSemitones) "
+                    + "semitones) and wider leaps take proportionally longer — an octave six "
+                    + "times as long. Set glideTime above 0 (0.12 is the project owner's own "
+                    + "pick for a sax slur) to hear it")
+            }
             if !describeSamplerWarnings.isEmpty {
                 describeSamplerResult["warnings"]
                     = .array(describeSamplerWarnings.map(JSONValue.string))
@@ -1926,6 +1940,18 @@ public final class CommandRouter {
                 describeSamplerResult["glideTime"] = .number(glideTime)
                 describeSamplerResult["glideEffective"]
                     = .bool(describeSamplerParams.glideIsEffective)
+            }
+            // m34-w, same only-when-SET rule — plus the UNIT, because
+            // `glideMode: "constantRate"` alone does not tell a caller what
+            // the number now buys. Publishing the engine's own constant is
+            // what stops a doc sentence and the arithmetic drifting apart:
+            // this figure IS the divisor `glideDuration(forSemitones:)` uses.
+            if let glideMode = describeSamplerParams.glideMode {
+                describeSamplerResult["glideMode"] = .string(glideMode.rawValue)
+                if glideMode.scalesWithInterval {
+                    describeSamplerResult["glideRateReferenceSemitones"]
+                        = .number(SamplerParams.glideRateReferenceSemitones)
+                }
             }
             if params["offset"] != nil || params["limit"] != nil {
                 let describeSamplerOffset = try Self.parseZonePageOffset(params)
@@ -11454,7 +11480,12 @@ public final class CommandRouter {
                     + "there is no single previous note to slide from and the setting is "
                     + "IGNORED. Under 'legato' the sounding voice slides with no new attack; "
                     + "under 'mono' the new note attacks but starts at the previous pitch")
-                ?? fallback.glideTime
+                ?? fallback.glideTime,
+            // m34-w — what the glideTime NUMBER means. Same fall-back-to-current
+            // rule as every field above, and the same REFUSE-don't-clamp rule
+            // an unrecognised voiceMode gets.
+            glideMode: try Self.optionalSamplerGlideMode(obj["glideMode"])
+                ?? fallback.glideMode
         )
     }
 
@@ -11520,6 +11551,43 @@ public final class CommandRouter {
             return mode
         case .some:
             throw ControlError("sampler.voiceMode must be a string (\(legal))")
+        }
+    }
+
+    /// m34-w. `glideMode` off the wire, with the `optionalSamplerVoiceMode`
+    /// contract exactly: absent/null → nil (keep whatever the track had), an
+    /// unrecognised string REFUSED rather than silently falling back. A typo
+    /// landing as `constantTime` would be a sampler that ignores the mode it
+    /// was told to use, reported as success — the tree's characteristic failure
+    /// shape.
+    ///
+    /// ⚠️ THE LEGAL SET IS DERIVED FROM THE ENUM, never re-typed.
+    private static func optionalSamplerGlideMode(
+        _ value: JSONValue?
+    ) throws -> SamplerGlideMode? {
+        let legal = SamplerGlideMode.allCases.map { "\"\($0.rawValue)\"" }
+            .joined(separator: " / ")
+        switch value {
+        case .none, .some(.null): return nil
+        case .some(.string(let raw)):
+            // Case-insensitive on the SAME rule voiceMode uses, but matched
+            // against the rawValues rather than `lowercased()` alone — these
+            // two are camelCase, so `raw.lowercased()` would never match.
+            guard let mode = SamplerGlideMode.allCases.first(where: {
+                $0.rawValue.lowercased() == raw.lowercased()
+            }) else {
+                throw ControlError(
+                    "sampler.glideMode must be \(legal) — it decides what the glideTime NUMBER "
+                    + "means. 'constantTime' (the default, and what the Sampler has always "
+                    + "done) spends that many seconds on EVERY leap, so a semitone crawls and "
+                    + "an octave is rushed through twelve times faster. 'constantRate' spends "
+                    + "them on a WHOLE TONE and bills wider leaps proportionally, so the pitch "
+                    + "moves at a fixed speed and a big jump takes longer — which is what a "
+                    + "real portamento does")
+            }
+            return mode
+        case .some:
+            throw ControlError("sampler.glideMode must be a string (\(legal))")
         }
     }
 
@@ -11935,6 +12003,10 @@ public final class CommandRouter {
         // m34-t glide, same only-when-SET rule.
         if let glideTime = sampler.glideTime {
             samplerObject["glideTime"] = .number(glideTime)
+        }
+        // m34-w, same only-when-SET rule again.
+        if let glideMode = sampler.glideMode {
+            samplerObject["glideMode"] = .string(glideMode.rawValue)
         }
         // m34-q, same only-when-SET rule again.
         if let pedalHoldLimit = sampler.pedalHoldLimit {

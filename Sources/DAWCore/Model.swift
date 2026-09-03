@@ -1788,6 +1788,19 @@ public struct SamplerParams: Codable, Sendable, Equatable {
     /// interval sound alike wherever on the keyboard they start.
     public var glideTime: Double?
 
+    /// m34-w. WHAT `glideTime` MEANS — a flat duration, or a SPEED.
+    ///
+    /// ⭐ THE DEFECT THE USER HEARD BEFORE ASKING FOR THIS: under
+    /// `.constantTime` every transition takes the SAME time whatever its
+    /// distance, so a semitone crawls and an octave is rushed through at twelve
+    /// times the speed. Real portamento is closer to constant RATE — the pitch
+    /// moves at a roughly fixed speed and DISTANCE SETS DURATION. They asked
+    /// for it as *"allow range for slideTime"* and, asked to choose, picked
+    /// "speed scales with the leap" over a min/max humanize range.
+    ///
+    /// nil = `.constantTime` = the pre-m34-w behaviour bit-for-bit.
+    public var glideMode: SamplerGlideMode?
+
     /// GLOBAL decay/sustain (m34-o) — the instrument-wide half of the envelope
     /// that, until now, existed ONLY per zone.
     ///
@@ -1917,6 +1930,41 @@ public struct SamplerParams: Codable, Sendable, Equatable {
     /// stops reading as one gesture and starts reading as a broken tuning.
     public static let glideTimeRange: ClosedRange<Double> = 0...4
 
+    /// m34-w. THE REFERENCE INTERVAL for `.constantRate`, in semitones — the
+    /// distance `glideTime` buys. A leap of `glideRateReferenceSemitones` takes
+    /// exactly `glideTime` seconds; every other leap is proportional, so an
+    /// octave takes 6× a whole tone and a semitone takes half of one.
+    ///
+    /// ⭐⭐ IT IS 2 (A WHOLE TONE), AND THE NUMBER IS CALIBRATED, NOT PICKED FOR
+    /// TIDINESS. The project owner listened to three renders and approved
+    /// `glideTime: 0.12` under constant time, on a phrase whose slurred
+    /// intervals are 2 and 3 semitones (A4–C5–D5–E5–D5–C5–A4, four whole tones
+    /// and two minor thirds — `scripts/gates/_m34t-sax-legato-listen.mjs`).
+    /// The reference exists so that FLIPPING THE MODE KEEPS THE SOUND THEY
+    /// ALREADY PICKED: at R = 2 their four whole tones land on exactly 0.120 s
+    /// and their two minor thirds on 0.180 s.
+    ///
+    /// ⛔ THE TWO OBVIOUS UNITS BOTH FAIL THAT TEST, which is why neither was
+    /// taken. "Seconds per OCTAVE" would put their 2–3 semitone slurs at
+    /// 0.020–0.030 s — four to six times faster, and a 20 ms glide does not
+    /// read as a slide at all, so the mode would have silently discarded the
+    /// effect it was asked to improve. "Seconds per SEMITONE" would put them at
+    /// 0.240–0.360 s, two to three times slower. A whole tone is the nameable
+    /// musical interval nearest the approved phrase's mean slur (2.33
+    /// semitones), and it errs SLOW, which preserves a portamento; erring fast
+    /// destroys it.
+    public static let glideRateReferenceSemitones: Double = 2.0
+
+    /// m34-w. The widest leap `.constantRate` will bill for, in semitones —
+    /// the MIDI gamut, so it cannot bite a real note. It exists because the
+    /// engine derives one arming site's interval from an increment RATIO
+    /// (`12·log2(target/current)`) rather than from two note numbers: a
+    /// mis-tuned zone or a pathological ratio could otherwise ask for an
+    /// arbitrarily long ramp, and the clamp is what keeps the derived frame
+    /// count inside Int32 at every sample rate without a second, separate rule
+    /// living in the render thread.
+    public static let glideMaxIntervalSemitones: Double = 127.0
+
     public init(
         zones: [SamplerZone] = [],
         oneShot: Bool = false,
@@ -1938,7 +1986,11 @@ public struct SamplerParams: Codable, Sendable, Equatable {
         // and the m34-s close-out records that argument order is declaration
         // order — inserting in the middle silently re-binds nothing here, but
         // every hand-written call site in the tree reads better appended.
-        glideTime: Double? = nil
+        glideTime: Double? = nil,
+        // m34-w: APPENDED LAST for the same m34-s reason `glideTime` was —
+        // argument order is declaration order, and `SamplerDocument`'s
+        // reconstruction calls this labelled-positionally.
+        glideMode: SamplerGlideMode? = nil
     ) {
         self.zones = zones
         self.oneShot = oneShot
@@ -1981,6 +2033,9 @@ public struct SamplerParams: Codable, Sendable, Equatable {
         // than being refused, because 0 is a legal, meaningful value here and
         // the nearest legal neighbour is therefore the honest answer.
         self.glideTime = glideTime.map { $0.clamped(to: Self.glideTimeRange) }
+        // m34-w: nil stays nil, so a project that never chose a mode keeps a
+        // byte-identical JSON shape AND the pre-m34-w sound.
+        self.glideMode = glideMode
     }
 
     /// The figure the ENGINE uses — the stored value, or the GM default. One
@@ -2017,6 +2072,44 @@ public struct SamplerParams: Codable, Sendable, Equatable {
     /// glide silent" is answered in exactly one place rather than three.
     public var glideIsEffective: Bool {
         effectiveGlideTime > 0 && effectiveVoiceMode.isMonophonic
+    }
+
+    /// m34-w. The glide mode the ENGINE uses — the stored value, or
+    /// `.constantTime` (today's behaviour). Same one-accessor discipline as
+    /// `effectiveVoiceMode`.
+    ///
+    /// ⚠️ MODE IS ORTHOGONAL TO EFFECTIVENESS. `glideIsEffective` is still
+    /// exactly "a time above zero AND a monophonic voice mode" — a rate-mode
+    /// glide is no more and no less audible than a time-mode one, and folding
+    /// the mode into that conjunction would make a true statement about the
+    /// mode masquerade as a statement about whether anything will be heard.
+    public var effectiveGlideMode: SamplerGlideMode { glideMode ?? .constantTime }
+
+    /// ⭐⭐ m34-w — THE ONE HOME for "how long does a leap of this many
+    /// semitones take". The engine derives its frame count from this rule, the
+    /// gates assert against it, and `docs`/SKILL prose quotes it, so the
+    /// implementation and the documentation cannot drift apart.
+    ///
+    /// · `.constantTime` → `effectiveGlideTime`, whatever the distance. That is
+    ///   the pre-m34-w behaviour, and the `interval` argument is IGNORED.
+    /// · `.constantRate` → `effectiveGlideTime × |interval| /
+    ///   glideRateReferenceSemitones`. A whole tone costs `glideTime`; an
+    ///   octave costs six times that; a semitone costs half.
+    ///
+    /// `interval` is signed (a downward slur is negative) and is used by its
+    /// magnitude: sliding down a fifth takes as long as sliding up one.
+    ///
+    /// ⚠️ CLAMPED TO THE MIDI GAMUT (0…127 semitones) before scaling. A ratio
+    /// arriving from a mis-tuned zone could otherwise ask for an arbitrarily
+    /// long ramp; 127 semitones is the widest leap a MIDI keyboard can express,
+    /// so the clamp cannot bite a real note while it keeps the derived frame
+    /// count safely inside Int32 at every sample rate.
+    public func glideDuration(forSemitones interval: Double) -> Double {
+        let time = effectiveGlideTime
+        guard effectiveGlideMode == .constantRate else { return time }
+        guard interval.isFinite else { return time }
+        let distance = min(abs(interval), Self.glideMaxIntervalSemitones)
+        return time * distance / Self.glideRateReferenceSemitones
     }
 
     /// The pedal-hold cap the ENGINE uses (m34-q). Same one-accessor discipline
@@ -2070,6 +2163,33 @@ public enum SamplerVoiceMode: String, Codable, Sendable, CaseIterable {
     /// Whether a note-on CONTINUES the sounding voice instead of choking it and
     /// re-attacking. Only `.legato`.
     public var continuesVoices: Bool { self == .legato }
+}
+
+/// m34-w — WHAT THE BUILT-IN SAMPLER'S `glideTime` NUMBER MEANS.
+///
+/// ⭐ THE USER-VISIBLE DIFFERENCE, which is the whole item: under
+/// `.constantTime` a semitone and an octave take the SAME time, so the octave
+/// travels twelve times faster and stops sounding like the same gesture. Under
+/// `.constantRate` the pitch moves at a fixed SPEED and a wide leap takes
+/// proportionally longer — which is what a trombone slide, a fretless finger
+/// and a real portamento all actually do.
+///
+/// ⛔ `.constantTime` IS THE DEFAULT AND IS BIT-IDENTICAL TO PRE-m34-w. nil
+/// resolves here, so no existing project, render or golden hash moves.
+///
+/// The rate unit is documented on `SamplerParams.glideRateReferenceSemitones`
+/// and computed in exactly one place, `SamplerParams.glideDuration(forSemitones:)`.
+public enum SamplerGlideMode: String, Codable, Sendable, CaseIterable {
+    /// Every transition takes `glideTime` seconds, whatever the distance.
+    case constantTime
+    /// `glideTime` buys `SamplerParams.glideRateReferenceSemitones` semitones
+    /// (a whole tone); distance sets duration from there.
+    case constantRate
+
+    /// Whether duration scales with the interval. The render thread's snapshot
+    /// flattens the enum to this Bool, so the hot path branches on a plain
+    /// load rather than on an enum comparison.
+    public var scalesWithInterval: Bool { self == .constantRate }
 }
 
 /// One sampler key zone: an audio file mapped across a pitch span, played

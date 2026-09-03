@@ -32,6 +32,26 @@ import DAWAppKit
 ///    moved sample file makes the whole sampler read-only — the globals throw
 ///    too — so the inline error line is load-bearing here.
 ///
+/// ## m34-u — VOICE and GLIDE, and the honest light on one of them
+///
+/// The engine, the wire verb and the MCP tool for `voiceMode` (poly / mono /
+/// **legato**) and `glideTime` all shipped in m34-t with no control anywhere, so
+/// the only way to reach a slur was to ask an AI agent. They live in GLOBALS:
+/// GLIDE joins the knob row (first — a PITCH behaviour, the card's own group
+/// order) and VOICE is a three-segment chip row, because three named states are
+/// a categorical choice and never a knob.
+///
+/// Two things about them are load-bearing rather than stylistic:
+///
+/// * **The glide knob's zero reads `OFF`, not `0.0 ms`.** The bottom of that
+///   range is the ABSENCE of glide, and the ordinary seconds formatter would
+///   render it as a very fast one.
+/// * **Glide is structurally inert under `poly`** — the engine resolves it away
+///   at the `ScalarParams` boundary. The knob dims and an amber line says so,
+///   the same shape `oneShotOverrideNote` already wears below. It is NOT
+///   disabled: the wire stores a poly glide (and warns), and a card that
+///   refused what the wire accepts would break UI == wire.
+///
 /// ⛔ `loopStart`/`loopEnd` get NO controls, by the user's ruling (2026-08-18).
 /// They are SOURCE-FILE FRAMES: the right unit for a wire API and a meaningless
 /// one on a knob, deriving seconds needs the file's own sample rate (main-actor
@@ -226,13 +246,150 @@ struct SamplerEditorOverlay: View {
     private var globalsSection: some View {
         VStack(alignment: .leading, spacing: 6) {
             sectionLabel("GLOBALS")
+            // ⚠️ THE WIDTH BUDGET IS SPENT, AND IT DID NOT MOVE (m34-u). This
+            // row was 3 knobs (70) + the One Shot chip (62) + 4 gaps (8) = 304
+            // of the card's 308 pt interior. It is now 4 knobs + 3 gaps = 304 —
+            // the SAME number — because One Shot moved down to sit beside the
+            // voice chips, which are the other categorical control. Nothing was
+            // narrowed to make room, which is the m34-h-2 squeeze this card must
+            // not repeat.
+            //
+            // GLIDE goes FIRST, not appended: it is a PITCH behaviour, and this
+            // card's own zone inspector already orders its groups
+            // PITCH → ENVELOPE → OUTPUT (the SSL/Cubase/Pro-C3 strip rule, with
+            // gain last). It also lands the knob directly above the CHORDS chip
+            // — the one setting that can make it inert.
             HStack(alignment: .top, spacing: 8) {
+                glideKnob
                 ForEach(SamplerEditorModel.specs, id: \.name) { spec in
                     globalKnob(spec)
                 }
-                Spacer(minLength: 0)
-                oneShotToggle
             }
+            voiceRow
+            // ⛔ THE HONEST LIGHT (m34-u). `glideTime` is STRUCTURALLY inert
+            // under `poly` — the engine resolves it away at the `ScalarParams`
+            // boundary, so a glide set on a chord-playing sampler does nothing
+            // at all, anywhere. `instrument.describeSampler` already publishes
+            // `glideEffective` and warns; a card that drew a live-looking knob
+            // beside it would be the settable-and-silently-ignored shape this
+            // project keeps closing. Same treatment as `oneShotOverrideNote`
+            // one section down, and gated on the domain's ONE home for the
+            // conjunction (`SamplerParams.glideIsEffective`), never re-derived.
+            if model.glideIsInert {
+                glideInertNote
+            }
+        }
+    }
+
+    /// The GLIDE knob — a global like the three beside it, drawn apart from
+    /// `SamplerEditorModel.specs` because it is not uniform with them: its zero
+    /// reads OFF rather than "0.0 ms", and its ink reports whether the setting
+    /// can reach the sound at all.
+    ///
+    /// ⚠️ **INERT ⇒ DIM, BUT STILL LIVE.** The knob is not disabled under
+    /// Chords, on purpose and against the first instinct: the wire STORES a
+    /// glide under poly (`instrument.setSamplerParam` accepts it and
+    /// `describeSampler` warns rather than refusing), so a card that refused it
+    /// would break UI == wire, and it would forbid the perfectly ordinary
+    /// ordering "dial the slide in, then switch the mode". The precedent is
+    /// `oneShotToggle`, which also stays live while a looping zone ignores it.
+    /// What changes is the INK — `textFaint`, no glow — plus the amber line
+    /// under the row, which is the treatment the design language already gives
+    /// inert data (the disabled-automation-lane / beyond-clip-ghost idiom).
+    private var glideKnob: some View {
+        let spec = SamplerEditorModel.glideSpec
+        let inert = model.glideIsInert
+        return DeferredKnob(
+            label: spec.label,
+            fraction: model.glideFraction,
+            fillAnchor: 0,
+            accent: inert ? DAWTheme.textFaint : DAWTheme.textPrimary,
+            glowsReadout: false,
+            readout: { fraction in
+                SamplerEditorModel.glideReadout(
+                    SamplerEditorModel.value(forFraction: fraction, spec: spec))
+            },
+            onCommit: { model.setGlideFraction($0) },
+            onReset: { model.resetGlide() }
+        )
+        .frame(width: 70)
+        .help(Self.glideHelp(inert: inert))
+    }
+
+    static func glideHelp(inert: Bool) -> String {
+        let base = "Glide — how long the pitch takes to slide from the note before "
+                 + "it to the new one. All the way down reads OFF: the pitch jumps "
+                 + "straight there, which is the normal setting."
+        return inert
+            ? base + " ⚠︎ It is doing nothing right now — glide only works in One "
+                   + "Note or Slurred."
+            : base + " Needs One Note or Slurred; it is ignored under Chords."
+    }
+
+    /// VOICE — how many notes at once, and whether the next one re-attacks. A
+    /// segmented picker, never a knob: three named states are a categorical
+    /// choice (the same rule that keeps LOOP and the poly synth's waveform out
+    /// of their knob tables).
+    ///
+    /// One Shot rides the right end of this row rather than the knob row above
+    /// it — the two categorical globals together, which is also what freed the
+    /// 70 pt the GLIDE knob needed without narrowing anything.
+    private var voiceRow: some View {
+        HStack(alignment: .top, spacing: 8) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("VOICE")
+                    .font(.system(size: 8, weight: .semibold))
+                    .tracking(0.8)
+                    .foregroundStyle(DAWTheme.textDim)
+                    .lineLimit(1)
+                HStack(spacing: 6) {
+                    ForEach(SamplerEditorModel.voiceModes, id: \.rawValue) { mode in
+                        voiceModeChip(mode, on: mode == model.voiceMode)
+                    }
+                }
+            }
+            Spacer(minLength: 0)
+            oneShotToggle
+        }
+    }
+
+    /// One voice-mode segment — the house state-chip idiom the LOOP row and the
+    /// poly synth's OSC row already wear: cyan-lit = the earned current mode,
+    /// dim = available.
+    private func voiceModeChip(_ mode: SamplerVoiceMode, on: Bool) -> some View {
+        Button { model.setVoiceMode(mode) } label: {
+            Text(SamplerEditorModel.voiceModeLabel(mode).uppercased())
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .tracking(0.6)
+                .foregroundStyle(on ? DAWTheme.playback : DAWTheme.textDim)
+                .lineLimit(1)
+                .padding(.horizontal, 9)
+                .frame(height: 20)
+                .background(on ? DAWTheme.playback.opacity(0.18) : DAWTheme.panelRaised)
+                .clipShape(Capsule())
+                .overlay(Capsule().stroke(
+                    on ? DAWTheme.playback.opacity(0.5) : DAWTheme.hairline, lineWidth: 1))
+                .glow(DAWTheme.playback, radius: 4, intensity: on ? 0.4 : 0)
+        }
+        .buttonStyle(.plain)
+        .help(SamplerEditorModel.voiceModeDetail(mode))
+        .accessibilityValue(on ? "selected" : "not selected")
+    }
+
+    /// The stored-but-inert glide warning. Amber, the card's teaching-warning
+    /// colour — never the destructive red — and worded for a HUMAN: the wire's
+    /// own warning names `mono`/`legato` because an agent has to send those
+    /// strings, while the person reading this has only ever seen the chips
+    /// (Rule 6).
+    private var glideInertNote: some View {
+        HStack(alignment: .top, spacing: 5) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 9))
+                .foregroundStyle(DAWTheme.record)
+            Text(SamplerEditorModel.glideInertNote)
+                .font(.system(size: 9))
+                .foregroundStyle(DAWTheme.record)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 

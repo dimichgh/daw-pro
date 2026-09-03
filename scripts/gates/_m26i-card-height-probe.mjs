@@ -96,11 +96,24 @@ const library = (n) => Array.from({ length: n }, (_, i) => ({
 }));
 
 let trackId;
+// ⚠️⚠️ m34-u — EVERY MEASUREMENT STAGES THE CARD'S *TALLEST* CHROME, ON PURPOSE.
+// The GLOBALS section now carries a CONDITIONAL amber line: the stored-but-inert
+// glide warning, which shows when a glide is set while `voiceMode` is poly. It
+// lives in the FIXED chrome (unlike `oneShotOverrideNote`, which the yielding
+// inspector scroller absorbs), so measuring the quiet card would under-state
+// `chromeHeight` by exactly one wrapped line — in the one direction that
+// overflows the card. `glideTime` is therefore set on every payload, and
+// `voiceMode` is left at its poly default so the warning is UP. The
+// `glideInert` echo below is the positive control that it really is.
+const INERT_GLIDE = 0.25;
 // Measures the card: sets `n` zones, optionally selects the first, and returns
 // {height, y, avail}. Selection state is reached by REOPENING (there is no
 // deselect param), and the state response is asserted rather than assumed.
 const measure = async (n, select) => {
-  await cmd("track.setInstrument", { trackId, kind: "sampler", sampler: { zones: library(n) } });
+  await cmd("track.setInstrument", {
+    trackId, kind: "sampler",
+    sampler: { zones: library(n), glideTime: INERT_GLIDE },
+  });
   await cmd("debug.samplerEditor", { close: true });
   let st = await cmd("debug.samplerEditor", { open: true, trackId });
   if (select) {
@@ -109,6 +122,13 @@ const measure = async (n, select) => {
   }
   const selected = st.result?.selectedZoneId ?? null;
   if (select ? !selected : !!selected) throw new Error(`selection state wrong at n=${n}: ${selected}`);
+  // POSITIVE CONTROL for the paragraph above: if this ever reads false the
+  // amber line is NOT drawn and every chrome number below is the short one.
+  if (st.result?.glideInert !== true) {
+    throw new Error(`m34-u: card is not in the inert-glide state at n=${n} `
+      + `(glideInert=${st.result?.glideInert}, voiceMode=${st.result?.voiceMode}, `
+      + `glideTime=${st.result?.glideTime}) — chromeHeight would be measured short`);
+  }
   const fr = await cmd("debug.explainFrames", { ids: ["samplerEditor"] });
   const rect = fr.result?.frames?.samplerEditor?.[0];
   if (!rect) throw new Error(`no samplerEditor frame at n=${n} (explain mode off? id not in tree?)`);
@@ -200,8 +220,17 @@ try {
   console.log(`  DRAWN ROWS: 20 zones + inspector = ${rowsOpen20.toFixed(2)}`);
   console.log(`  DRAWN ROWS: 20 zones, nothing selected = ${rowsClosed20.toFixed(2)}`);
   console.log(`  DRAWN ROWS: 3 zones + inspector = ${rowsOpen3.toFixed(2)}`);
-  ck(`inspector open shows ${L.maxRowsWithInspector} rows, not the ~1.7 of the defect`,
-    Math.abs(rowsOpen20 - L.maxRowsWithInspector) <= 0.1, `drawn=${rowsOpen20.toFixed(2)}`);
+  // ⭐ m34-u CHANGED THIS NUMBER, AND THE CHANGE IS THE HONEST COST. Until
+  // m34-u the 8-row CAP bound here; the voice row + glide warning spend ~71 pt
+  // of chrome, so at the default window the BUDGET now binds first and the list
+  // draws 6. That is still 3.5× the defect this probe exists for (~1.7 rows)
+  // and well above `minVisibleRows`. The pin is a BAND rather than the cap:
+  // the cap is an upper bound the budget may legitimately sit under, but a
+  // slide back toward the defect must redden.
+  ck(`inspector open shows ≥ 6 rows and ≤ the ${L.maxRowsWithInspector}-row cap, `
+    + `not the ~1.7 of the defect`,
+    rowsOpen20 >= 6 - 0.1 && rowsOpen20 <= L.maxRowsWithInspector + 0.1,
+    `drawn=${rowsOpen20.toFixed(2)}`);
   ck(`nothing selected shows ${L.maxRowsWithoutInspector} rows`,
     Math.abs(rowsClosed20 - L.maxRowsWithoutInspector) <= 0.1, `drawn=${rowsClosed20.toFixed(2)}`);
   ck("a 3-zone library draws 3 rows, not a padded well",

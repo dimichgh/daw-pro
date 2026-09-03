@@ -933,7 +933,19 @@ public struct InstrumentDocument: Codable, Sendable, Equatable {
                                  // m34-t: absent (every pre-m34-t project) →
                                  // nil → 0 → the pitch STEPS, exactly what a
                                  // project that never carried the key did.
-                                 glideTime: s.glideTime)
+                                 glideTime: s.glideTime,
+                                 // m34-w: absent (every pre-m34-w project) →
+                                 // nil → .constantTime → glideTime is a flat
+                                 // duration, exactly what a project that never
+                                 // carried the key meant. TOLERANT DECODE, the
+                                 // voiceMode precedent four lines up: an
+                                 // unknown rawValue written by a FUTURE build
+                                 // resolves to nil rather than failing the
+                                 // open, so a project round-trips through an
+                                 // older build with a wrong SOUND rather than
+                                 // an unopenable file.
+                                 glideMode: s.glideMode
+                                     .flatMap(SamplerGlideMode.init(rawValue:)))
         }
         // The AU config round-trips intact even when the component isn't
         // installed on this machine — the engine reports `.missing` and
@@ -1034,6 +1046,13 @@ public struct SamplerDocument: Codable, Sendable, Equatable {
     /// chosen over `decodeIfPresent(SamplerVoiceMode.self)`.
     public var glideTime: Double?
 
+    /// m34-w. The enum's RAW STRING, per the `voiceMode`/`loopMode` precedent
+    /// directly above — that shape is what lets an older build open a project
+    /// written by a newer one (unknown string → nil → `.constantTime`) instead
+    /// of throwing. nil never encodes, so a sampler that never chose a mode
+    /// keeps a document shape byte-identical to pre-m34-w.
+    public var glideMode: String?
+
     private enum CodingKeys: String, CodingKey {
         case zones, oneShot, attack, release, gain, sourcePath, displayName
         case expressionModDepth, expressionFilterDepth, expressionFilterCC
@@ -1044,6 +1063,8 @@ public struct SamplerDocument: Codable, Sendable, Equatable {
         case bendRangeSemitones, voiceMode, decay, sustain
         // m34-t.
         case glideTime
+        // m34-w.
+        case glideMode
     }
 
     init(from s: SamplerParams, mediaRefs: [UUID: String?]) {
@@ -1064,6 +1085,8 @@ public struct SamplerDocument: Codable, Sendable, Equatable {
         decay = s.decay
         sustain = s.sustain
         glideTime = s.glideTime
+        // The enum's rawValue, per the voiceMode precedent above.
+        glideMode = s.glideMode?.rawValue
     }
 
     public init(from decoder: any Decoder) throws {
@@ -1085,6 +1108,7 @@ public struct SamplerDocument: Codable, Sendable, Equatable {
         decay = try c.decodeIfPresent(Double.self, forKey: .decay)
         sustain = try c.decodeIfPresent(Double.self, forKey: .sustain)
         glideTime = try c.decodeIfPresent(Double.self, forKey: .glideTime)
+        glideMode = try c.decodeIfPresent(String.self, forKey: .glideMode)
     }
 }
 

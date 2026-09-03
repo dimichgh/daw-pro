@@ -209,7 +209,25 @@ before then). So:
     `{sampler: {glideTime: 0.12}}` makes that pitch change a portamento SLIDE
     (needs `mono` or `legato`; ignored under `poly`).** Default stays `poly`;
     built for wind lines — see `daw-wire-reference`'s "Overlap masks a
-    retrigger" section for the mode table. **Everywhere else**
+    retrigger" section for the mode table.
+    ⭐⭐ **START A SAX/FLUTE/SOLO-WIND LINE AT `voiceMode: "legato"` +
+    `glideTime: 0.12`, WITH OVERLAPPING NOTES.** That exact pairing is not a
+    guess: the project owner was played the same phrase three ways — `mono`,
+    `legato`, and `legato` + `glideTime: 0.12` — and chose the third by ear
+    (2026-08-31). It is the sound they want on a wind line, so reach for it
+    rather than building up to it. ⚠️ **Validated on a GM tenor sax at 100 BPM
+    with ~0.1-beat overlaps — it is a STARTING POINT, not a universal
+    constant.** ⭐ **ADD `glideMode: "constantRate"` (m34-w) ON ANY LINE WITH
+    MIXED INTERVAL SIZES.** The default `constantTime` gives every transition
+    the same duration whatever its distance, so a wide leap is rushed through
+    twelve times faster than a semitone. `constantRate` scales duration by
+    distance, the way real portamento behaves. ⚠️ **It costs you nothing to
+    switch: the rate reference is a WHOLE TONE, so `glideTime: 0.12` sounds
+    IDENTICAL to constant-time on a 2-semitone step — the two modes only
+    diverge as the interval widens.** A faster line wants a shorter glide;
+    without overlap `legato`
+    has nothing to continue and you are back to a re-tongued line.
+    **Everywhere else**
     (`soundBank`, hosted `audioUnit`) every note-on still starts a new voice
     with a fresh attack, and overlap only **masks** that retrigger under the
     previous note's tail; it does not remove it. Don't oversell masking as

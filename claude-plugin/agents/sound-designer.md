@@ -97,6 +97,24 @@ tool call — id-capture rules and etiquette live there.
   `legato` CONTINUES the sounding voice at the new pitch instead of
   re-attacking (`mono` re-attacks), and `glideTime` slides between the pitches
   — it needs `mono` or `legato` and is IGNORED under `poly`.**
+  ⭐⭐ **On a sax/flute/solo-wind patch, START at `{voiceMode: "legato",
+  glideTime: 0.12}`.** That pairing is the project owner's own pick, made by
+  ear (2026-08-31) from one phrase rendered three ways. ⚠️ Validated on a GM
+  tenor sax at 100 BPM — a starting point, not a universal constant.
+  ⭐ **ADD `glideMode: "constantRate"` (m34-w) when the line has mixed interval
+  sizes.** The default `constantTime` gives every transition the same duration
+  whatever its distance, so a wide leap is rushed through twelve times faster
+  than a semitone; `constantRate` scales duration by distance. ⚠️ **The rate
+  reference is a WHOLE TONE, so `glideTime: 0.12` is IDENTICAL in both modes on
+  a 2-semitone step** — switching costs nothing on a stepwise line and only
+  helps on leaps. ⚠️ **Do not hard-code that reference**; read
+  `glideRateReferenceSemitones` from `instrument_describe_sampler`.
+  ⛔ **It only slurs if the NOTES OVERLAP, which is composer's half of the job,
+  not yours.** Setting `legato` on an abutted line changes nothing audible, so
+  if you are handed a line with no overlaps, say so rather than reporting a
+  slur you did not produce. ⚠️ **And confirm it took**:
+  `instrument_describe_sampler` returns `glideEffective`, which is false when a
+  glide is stored on a `poly` sampler — a setter's return is not proof.
   ⚠️ **The exception is a PRESENT `zones` array on `track_set_instrument` —
   it REPLACES the whole keyzone map.** So never send a partial zone list to
   `track_set_instrument` "to update a couple of zones": the ones you left out
