@@ -110,3 +110,11 @@ DAWPRO_PROFILE_ROOT=$PWD/out/profile DAW_CONTROL_PORT=17695 node subshot.mjs
 - **Shoot with `DAWPRO_PROFILE_ROOT` set.** It moves autosave/recovery/settings
   to a scratch dir, so no "Restore unsaved work?" sheet can draw itself across
   the panel you are photographing.
+- **A demo segment should show the app PLAYING it.** `burst()` in `build.mjs`
+  opens the piano roll, starts the transport and photographs the app until the
+  sound ends; `assemble.py` builds the play segment from those frames at the
+  rate `meta.json` records. Pass `{arrange: true}` for multi-track material —
+  one clip's roll scrolled to bar 1 while the playhead is at bar 36 is an empty
+  grid.
+- ⚠ **Set the master to zero first.** A burst plays through the machine's real
+  output device.

@@ -1,5 +1,45 @@
 # Changelog
 
+## 2026-09-04 — The third cut: the playhead moves
+
+⭐⭐⭐ **A demo segment is no longer a frozen picture with audio over it.** Every
+sound the film plays now shows the app playing it: the transport running, the
+position readout counting up, and the playhead crossing the notes in the piano
+roll — including the siren's pitch-bend curve drawn underneath its one held
+note, and the eight-track arrangement scrolling under follow-playhead at the
+drop.
+
+`assemble.py` already supported **bursts** (a directory of frames plus a
+`meta.json` frame rate, used in place of a still) and nothing in this rig had
+ever produced one. `build.mjs` now exports `burst(name, seconds, fromBeat,
+opts)`, which opens the roll on the clip, starts the transport and photographs
+the app until the sound ends. Nine exist.
+
+⭐ **Real time comes for free**: `debug.captureUI` costs ~285 ms per frame, so
+the transport advances ~285 ms between frames and a sequence played at the
+*measured* capture rate is the playback, correctly paced. Rates were 2.2–2.9 fps
+with audio running, against 3.5 idle; `meta.json` records what happened rather
+than assuming.
+
+⚠️ **Master volume to zero before capturing.** The burst plays through whatever
+output device the machine has, and nobody asked for eight seconds of siren out
+of their speakers. The audio was already rendered offline.
+
+⚠️ **A whole arrangement is the wrong thing to show in a piano roll.** The first
+`track-drop` burst opened one clip's roll, scrolled to bar 1 while the playhead
+was at bar 36 — an empty grid, photographed 36 times. Multi-track chapters now
+pass `{arrange: true}`. Found by looking at one frame.
+
+⚠️ **A stage naming a burst that does not exist silently degrades to a frozen
+still** — precisely what this change removes. `shortsmith.py` now warns at build
+time, naming the stage and the missing path, and the spec passes an explicit
+`bursts` directory because `--bursts` otherwise defaults to a *relative* path
+(the same defect `--work` had).
+
+⚠️ **These capture scripts did not exit.** `close()` does not always let node's
+event loop drain, so a finished script looked exactly like a hung one and
+blocked the capture loop for four minutes per chapter. They now `process.exit(0)`.
+
 ## 2026-09-04 — The second cut: chapters, controls that move, and a synth trying to talk
 
 The session film re-cut after the user watched it. Every note they gave was

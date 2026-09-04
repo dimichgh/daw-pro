@@ -6,7 +6,7 @@
 // palette the poly synth offers -- there is no noise oscillator and no sample
 // is loaded anywhere. Everything below is those four, a resonant filter, an
 // envelope, and effects.
-import { open, cmd, addTrack, addClip, n, rng, close } from "./build.mjs";
+import { open, cmd, addTrack, addClip, n, rng, close, burst } from "./build.mjs";
 
 const AUD = process.env.SESSION_AUDIO || "./audio";
 const only = process.argv[2] || "all";
@@ -19,8 +19,10 @@ const fresh = async (bpm = 120) => {
 const render = async (name, seconds) => {
   const r = await cmd("render.mixdown", { path: `${AUD}/${name}.wav`, durationSeconds: seconds });
   console.log(`  rendered ${name}.wav (${seconds}s)`);
+  await burst(name, seconds);
   return r;
 };
+
 
 await open();
 
@@ -172,3 +174,8 @@ if (want("vowel")) {
 
 await close();
 console.log("done");
+// ⚠ EXIT EXPLICITLY. Closing the socket does not always let node's event loop
+// drain, and a script that has finished its work but never exits looks exactly
+// like a script that hung — it blocked a capture loop for four minutes per
+// chapter before anyone noticed the work was already done.
+process.exit(0);

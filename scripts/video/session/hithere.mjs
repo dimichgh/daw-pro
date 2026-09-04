@@ -11,7 +11,7 @@
 // near-noise, and this synth has no noise oscillator (that is the whole film).
 // So the consonants are missing by construction and the result will read as a
 // voice humming the SHAPE of the words. That is the finding, not a bug to hide.
-import { open, cmd, close } from "./build.mjs";
+import { open, cmd, close, burst } from "./build.mjs";
 
 const A = process.env.SESSION_AUDIO || "./audio";
 const BPM = 90;
@@ -61,4 +61,8 @@ for (const [param, idx] of [["peak1Freq", 1], ["peak2Freq", 2]]) {
 const out = `${A}/hithere.wav`;
 await cmd("render.mixdown", { path: out, durationSeconds: 5.0 });
 console.log("rendered ->", out);
+// The automation lanes ARE the chapter, so the burst shows the playhead
+// crossing them while the two peaks travel.
+await burst("hithere", 5.0);
 await close();
+process.exit(0);

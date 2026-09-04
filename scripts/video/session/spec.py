@@ -232,6 +232,7 @@ stages = [
   # confirmed by rendering the crop and looking at it.
   dict(id="04-siren", shots=[sh("synth-bass-saw", [0.22, 0.26, 0.563, 0.50]), 2],
        cut=5.5, loop=f"{A}/siren.wav", bedEligible=False, playMax=9.0,
+       burst="siren",
        factCheck=[["three point nine seven", "3.97"], ["semitone"]],
        narration=(
          "The siren is one note. One. It is held for sixteen beats and it never "
@@ -249,7 +250,7 @@ stages = [
 
   # --------------------------------------------------------- 4. the heartbeat
   dict(id="05-heart", shots=[3], cut=5.0, loop=f"{A}/heart.wav",
-       bedEligible=False, playMax=9.0,
+       bedEligible=False, playMax=9.0, burst="heart",
        factCheck=[["ninety four", "94"], ["sixty", "60"]],
        narration=(
          "A heartbeat is a sine wave, and it is lower than most people guess. "
@@ -270,6 +271,7 @@ stages = [
        shots=[*sweep("sweep-cutoff-", [16000, 6000, 1800, 480, 70], PANEL),
               sh("arrange-drop", [0.16, 0.05, 0.80, 0.45]), 4],
        cut=2.8, loop=f"{A}/thunder2.wav", bedEligible=False, playMax=9.0,
+       burst="thunder2",
        factCheck=[["six hundred and fifty two", "652"], ["two hundred and twenty", "220"]],
        narration=(
          "Thunder is not a pitch. It is a spectrum collapsing — a bright crack "
@@ -303,7 +305,9 @@ stages = [
   dict(id="07-808",
        shots=[*sweep("sweep-drive-", [0, 14, 32], SATP), 5],
        cut=2.8, loop=f"{A}/bass808.wav",
+       burst="bass808",
        ab=dict(before=f"{A}/bass808-clean.wav", seconds=5.0, cycles=2,
+               beforeBurst="bass808-clean",
                # ⚠ THE "BEFORE" HALF MUST NOT SHOW THE "AFTER" PANEL. This was
                # the saturator at 32.0 dB while the narration says "here is a
                # clean sine" -- the same self-contradiction as the 30-vs-32
@@ -336,6 +340,11 @@ stages = [
 
   # ------------------------------------------------------ 7. rain, the failure
   dict(id="08-rain", shots=[6, 9], cut=5.0, loop=f"{A}/rain2.wav",
+       # ⚠ NO BURST FOR RAIN. The two rain attempts were built by an ad-hoc
+       # script that is not in this directory, so there is no builder to
+       # photograph the playhead against — and a burst directory that does not
+       # exist degrades to a frozen still, which is exactly what this whole
+       # change was fixing. shortsmith warns about the mismatch at build time.
        bedEligible=False, playMax=8.0,
        factCheck=[["zero point five six", "0.5615", "0.56"], ["flat"]],
        narration=(
@@ -362,6 +371,7 @@ stages = [
   dict(id="09-vowel",
        shots=[*sweep("sweep-vowel-", ["ee", "ah", "oo"], EQP), 7],
        cut=2.8, loop=f"{A}/vowel.wav", bedEligible=False, playMax=11.0,
+       burst="vowel",
        factCheck=[["seven hundred and thirty", "730"], ["vowel"]],
        narration=(
          "This is the one I find genuinely strange. A vowel — the difference "
@@ -382,7 +392,7 @@ stages = [
     "two numbers moving."),
 
   dict(id="09b-words", shots=[sh("fx-voice-eq", EQP), 13], cut=4.0,
-       loop=f"{A}/hithere.wav", bedEligible=False, playMax=6.0,
+       loop=f"{A}/hithere.wav", bedEligible=False, playMax=6.0, burst="hithere",
        factCheck=[["consonant"], ["vowel"]],
        narration=(
          "So I drew the two peaks as a curve over time and asked the saw wave "
@@ -402,7 +412,7 @@ stages = [
   dict(id="10-track",
        shots=[sh("arrange-full", TIMEL, TIMEL2), sh("pianoroll-bass", ROLL), 8],
        cut=4.0,
-       loop=f"{A}/track-drop.wav", playMax=16.0,
+       loop=f"{A}/track-drop.wav", playMax=16.0, burst="track-drop",
        factCheck=[["one thousand three hundred and twenty nine", "1,329", "1329"],
                   ["one hundred and twenty eight", "128"]],
        narration=(
@@ -420,7 +430,7 @@ stages = [
 
   # ------------------------------------------------------- 10b. the DJ chapter
   dict(id="11-loop", shots=[sh("arrange-drop", [0.16, 0.05, 0.80, 0.45]), 11],
-       cut=5.0, loop=f"{A}/dj-build.wav", playMax=20.0,
+       cut=5.0, loop=f"{A}/dj-build.wav", playMax=20.0, burst="dj-build",
        # ⚠ The script says "four-bar loop"; a gate asking for "four bars" would
        # reject eight perfect takes over a hyphen. Check the words that are
        # actually spoken.
@@ -488,6 +498,10 @@ model was used.
 #synthesis #sounddesign #musicproduction #daw #techno #musictheory"""
 
 spec = dict(
+    # ⚠ WITHOUT THIS, --bursts falls back to a path under the OUT-DIR and every
+    # `burst` silently degrades to a frozen still. The whole point of a burst is
+    # that it is not a still.
+    bursts=os.environ.get('SESSION_BURSTS') or f'{HERE}/bursts',
   id="F1",
   title="Four waveforms, one whole track — no samples, no AI music",
   filename="DAW Pro Session - Four Waveforms",

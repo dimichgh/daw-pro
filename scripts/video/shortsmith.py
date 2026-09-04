@@ -483,10 +483,23 @@ def build(spec, outdir, skip_narrate=False):
                        # spec's `ab` block was silently dropped and the stage
                        # played only the AFTER file. Nothing errored.
                        **({"ab": ab_shots(s["ab"], shots)} if s.get("ab") else {}),
+                       # a directory of frames photographed WHILE THE TRANSPORT
+                       # RAN: the play segment becomes the playhead actually
+                       # crossing the notes instead of a frozen picture.
+                       **({"burst": s["burst"]} if s.get("burst") else {}),
                        **({"holdLast": True} if s.get("holdLast", True) else {})}
                       for s in spec["stages"]]}
     manp = os.path.join(outdir, "manifest.json")
     json.dump(man, open(manp, "w"), ensure_ascii=False, indent=2)
+
+    # A `burst` that resolves to nothing degrades to a frozen still — visible
+    # only by watching the film. Say it at build time instead.
+    bdir = spec.get("bursts") or os.path.join(outdir, "bursts")
+    for st in spec["stages"]:
+        b = st.get("burst")
+        if b and not os.path.exists(os.path.join(bdir, b, "meta.json")):
+            print(f"  ⚠ burst  : {st['id']} names '{b}' but {bdir}/{b}/meta.json "
+                  f"is missing — that stage will show a STILL, not motion")
 
     vodir = os.path.join(outdir, "vo")
     report = [] if skip_narrate else narrate(spec, vodir)
@@ -509,8 +522,15 @@ def build(spec, outdir, skip_narrate=False):
     # was standing in -- which put 325 MB at this repo's root and 276 MB under
     # scripts/video before anyone noticed. Keep them beside the film they
     # belong to, where they are obviously disposable.
+    # ⚠ --bursts DEFAULTS TO A RELATIVE "bursts", i.e. whatever directory the
+    # builder happened to be standing in — the same defect --work had. A spec
+    # may name its own with "bursts"; otherwise look beside the spec file, then
+    # in the out-dir, so a stage's `burst` cannot silently resolve to nothing
+    # and fall back to a frozen still.
+    bursts = spec.get("bursts") or os.path.join(outdir, "bursts")
     run([VENV, f"{PLUGIN}/scripts/assemble.py", "--manifest", manp, "--vo", vodir,
          "--shots", outdir, "--loops", outdir, "--work", os.path.join(outdir, "segments"),
+         "--bursts", bursts,
          "--intro", intro, "--outro", outro, "--out", film])
 
     dur = float(run(["ffprobe", "-v", "error", "-show_entries", "format=duration",

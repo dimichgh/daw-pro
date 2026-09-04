@@ -1,3 +1,4 @@
+import fs from "node:fs";
 // The session builder. One socket, many commands, everything against STAGING.
 //
 // ⚠ PORT DISCIPLINE: this file must never talk to 17600. That is the user's
@@ -61,3 +62,56 @@ export async function addClip(trackId, startBeat, lengthBeats, notes, name) {
   });
   return c.id || (c.clip && c.clip.id);
 }
+
+// ---------------------------------------------------------------- bursts
+// A DEMO SEGMENT USED TO BE A FROZEN PICTURE while the sound played. This
+// photographs the app WHILE THE TRANSPORT RUNS, so the playhead crosses the
+// notes it is playing and the position readout counts up with it.
+//
+// ⚠ REAL TIME COMES FOR FREE. `debug.captureUI` costs ~285 ms per frame
+// (measured; `scale` does not change it), so the transport advances ~285 ms
+// between frames and a sequence played back at the MEASURED capture rate is
+// the playback, correctly paced. meta.json records that rate rather than
+// assuming one.
+//
+// ⚠ MASTER TO ZERO FIRST. This plays through whatever output device the
+// machine has, and nobody asked for eight seconds of siren out of their
+// speakers. The audio was already rendered offline; the burst only wants
+// pictures.
+export const burst = async (name, seconds, fromBeat = 0, opts = {}) => {
+  const root = process.env.SESSION_BURSTS;
+  if (!root) return;
+  const dir = `${root}/${name}`;
+  fs.mkdirSync(dir, { recursive: true });
+  const ov = await cmd("project.overview", {});
+  const clip = ov.tracks?.[0]?.clips?.[0]?.id;
+  await cmd("mixer.setMasterVolume", { volume: 0 });
+  // ⚠ A WHOLE ARRANGEMENT IS THE WRONG THING TO SHOW IN A PIANO ROLL. One
+  // clip's roll, scrolled to bar 1 while the playhead is at bar 36, is an
+  // empty grid -- measured by looking at the first take of this burst. For the
+  // multi-track chapters show the ARRANGE view and let it follow the playhead.
+  if (opts.arrange) {
+    await cmd("debug.panelLayout", { editorMaximized: false, followPlayhead: true });
+    await cmd("debug.followPlayhead", { enabled: true });
+  } else {
+    await cmd("debug.panelLayout", { editorMaximized: true });
+  }
+  // captureUI's OWN selectClip parameter opens the piano roll. There is no
+  // debug.selectClip command -- calling that name is how the first cut of the
+  // film shipped without a single shot of the note editor.
+  if (clip && !opts.arrange)
+    await cmd("debug.captureUI", { path: `${dir}/_open.png`, selectClip: clip });
+  await cmd("transport.seek", { beats: fromBeat });
+  await cmd("transport.play", {});
+  const t0 = Date.now();
+  let i = 0;
+  while ((Date.now() - t0) / 1000 < seconds) {
+    i += 1;
+    await cmd("debug.captureUI", { path: `${dir}/f${String(i).padStart(4, "0")}.png` });
+  }
+  await cmd("transport.stop", {});
+  const fps = i / ((Date.now() - t0) / 1000);
+  fs.writeFileSync(`${dir}/meta.json`,
+                   JSON.stringify({ fps: +fps.toFixed(4), frames: i, seconds }, null, 1));
+  console.log(`  burst ${name}: ${i} frames at ${fps.toFixed(2)} fps`);
+};

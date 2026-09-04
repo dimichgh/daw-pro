@@ -259,3 +259,49 @@ So the answer was neither "warn" nor "raise" alone: **raise is impossible, and
 the warning got better by being a measurement.** The 808 chapter now carries the
 TURN IT UP card too — it was four minutes after the only other one — and the
 card says what it costs you rather than just asking.
+
+
+## The third cut: the playhead actually moves
+
+The remaining note was the sharpest one: *"as you play sounds, can you show DAW
+transport and note editor as playhead travels through them"*. Until now a demo
+segment was a **frozen picture with audio over it** — the least honest frame in
+a film whose whole claim is that the work happens in the app.
+
+`assemble.py` already had the mechanism and nothing used it: a stage can name a
+**burst**, a directory of frames plus a `meta.json` giving their frame rate, and
+the play segment is built from those instead of a still. What was missing was
+anything that produced one.
+
+`build.mjs` now exports `burst(name, seconds, fromBeat, opts)`. It opens the
+piano roll on the clip, starts the transport, and photographs the app until the
+sound is over. Nine of them exist: siren, heart, thunder2, bass808,
+bass808-clean, vowel, hithere, track-drop, dj-build.
+
+⭐ **Real time comes for free.** `debug.captureUI` costs ~285 ms per frame, so
+the transport advances ~285 ms between frames; a sequence played back at the
+**measured** capture rate is the playback, correctly paced. Measured rates were
+2.2–2.9 fps with audio running (against 3.5 idle), and `meta.json` records what
+actually happened rather than assuming a number.
+
+Three things this cost, each worth keeping:
+
+- ⚠ **Master volume to zero before playing.** This plays through whatever output
+  device the machine has, and nobody asked for eight seconds of siren out of
+  their speakers. The audio was already rendered offline; the burst wants only
+  pictures.
+- ⚠ **A whole arrangement is the wrong thing to show in a piano roll.** The
+  first `track-drop` burst opened the Kick clip's roll, scrolled to bar 1 while
+  the playhead was at bar 36 — an empty grid, photographed 36 times. The
+  multi-track chapters use `{arrange: true}`, which shows the arrangement with
+  follow-playhead on. Caught by looking at one frame.
+- ⚠ **These scripts did not exit.** `close()` does not always let node's event
+  loop drain, so a finished script looked exactly like a hung one and blocked
+  the capture loop for four minutes per chapter. They now `process.exit(0)`.
+
+And a gate for the new failure mode: a stage naming a burst directory that does
+not exist **silently degrades to a frozen still** — the exact thing this change
+removes. `shortsmith.py` now prints a warning naming the stage and the missing
+path at build time. The rain chapter is the one stage that keeps a still, and
+says why in the spec: its two attempts were built by an ad-hoc script that is
+not in this directory, so there is no builder to photograph.

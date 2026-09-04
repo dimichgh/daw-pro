@@ -3,7 +3,7 @@
 // sweep over a source with no high content looks like, AND what a lane that
 // never applied looks like. So: widen the cluster, then render twice, once
 // with the lane enabled and once disabled, and compare.
-import { open, cmd, addTrack, addClip, n, rng, close } from "./build.mjs";
+import { open, cmd, addTrack, addClip, n, rng, close, burst } from "./build.mjs";
 const AUD = process.env.SESSION_AUDIO || "./audio";
 await open();
 await cmd("project.new", { discardChanges: true });
@@ -37,8 +37,11 @@ for (const [k, v] of [["roomSize",0.98],["mix",0.5],["damping",0.3],["preDelayMs
   await cmd("fx.setParam", { trackId: id, effectId: rvId, name: k, value: v });
 await cmd("render.mixdown", { path: `${AUD}/thunder2.wav`, durationSeconds: 9 });
 console.log("rendered thunder2.wav (lane ENABLED)");
+// The film plays THIS render, so this is the one the playhead burst must show.
+await burst("thunder2", 9);
 // CONTROL: same everything, lane off. If this measures the same, the lane is dead.
 await cmd("automation.setLaneEnabled", { trackId: id, laneId, enabled: false });
 await cmd("render.mixdown", { path: `${AUD}/thunder2-nolane.wav`, durationSeconds: 9 });
 console.log("rendered thunder2-nolane.wav (CONTROL, lane DISABLED)");
 await close();
+process.exit(0);
