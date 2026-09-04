@@ -134,5 +134,23 @@
       "1.40s_1840Hz": 26.6
     },
     "_why_it_is_not_words": "h, th and r are noise and near-noise. This synth has no noise oscillator, so every consonant in the phrase is missing by construction — what is left is the vowel path, which is why a recogniser hears vowels and guesses at words."
+  },
+  "small_speaker": {
+    "_method": "each demo segment AS IT SITS IN THE FILM, through two cascaded 2-pole high-passes at 150 Hz (a stand-in for a laptop or phone speaker), RMS compared with the same segment full-band.",
+    "loss_db_through_150hz_hpf": {
+      "heartbeat": -30.2,
+      "bass808_clean": -38.2,
+      "bass808_saturated": -33.6,
+      "siren": -0.1,
+      "full_track": -3.7
+    },
+    "saturation_survival_advantage_db": 4.6,
+    "_the_point": "the quiet is NOT a level problem. Every demo is already loudness-normalised to about -16 LUFS by the assembler, and the heartbeat sits AT the -1.5 dBTP ceiling with no headroom left. What is missing on a small speaker is the BAND, not the gain.",
+    "segment_lufs_measured": {
+      "heartbeat": -15.7,
+      "bass808_saturated": -16.4,
+      "siren": -16.2,
+      "full_track": -16.4
+    }
   }
 }

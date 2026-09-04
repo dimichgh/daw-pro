@@ -219,3 +219,43 @@ transcription of a known-good take proving the recogniser was working.
 That is the right answer for the wrong-sounding reason, and it is why the
 chapter is in the film. The vowels landed. Every consonant did not: /h/, /ð/
 and /r/ are noise, and noise is the one thing this instrument cannot make.
+
+
+## "Is the 808 deliberately quiet?" — no, and gain cannot fix it
+
+The viewer asked whether the 808 and heartbeat chapters were intentionally low,
+and whether to warn people or just raise the level. Measured, as the segments
+actually sit in the film:
+
+| segment | integrated | true peak | RMS |
+|---|---|---|---|
+| heartbeat | −15.7 LUFS | **−1.5 dBTP** | −15.7 dBFS |
+| 808, saturated | −16.4 LUFS | −6.1 dBTP | −14.6 dBFS |
+| siren | −16.2 LUFS | −10.3 dBTP | −20.4 dBFS |
+| full track | −16.4 LUFS | −3.8 dBTP | −17.9 dBFS |
+
+**They are already the loudest things in the film**, not the quietest —
+`assemble.py` loudness-normalises every demo (`loudnorm=I=-16:TP=-1.5`), and the
+heartbeat sits exactly on the true-peak ceiling with no headroom left. Raising
+it further would clip, not help.
+
+The missing thing is the BAND, not the gain. Through two cascaded 150 Hz
+high-passes — roughly what a laptop speaker does to you for free:
+
+| segment | energy lost |
+|---|---|
+| 808, clean | **−38.2 dB** |
+| 808, saturated | −33.6 dB |
+| heartbeat | −30.2 dB |
+| full track | −3.7 dB |
+| siren | −0.1 dB |
+
+⭐ **The 4.6 dB between the two 808 halves is the chapter's own thesis, and it
+had never been measured.** The film claimed saturation makes the note carry on a
+small speaker; now it quotes the number, and the A/B is stated to be
+loudness-matched so nobody can read it as a volume trick.
+
+So the answer was neither "warn" nor "raise" alone: **raise is impossible, and
+the warning got better by being a measurement.** The 808 chapter now carries the
+TURN IT UP card too — it was four minutes after the only other one — and the
+card says what it costs you rather than just asking.

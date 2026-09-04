@@ -20,6 +20,8 @@ W = M["waveforms"]
 SIR, HRT, THU, SAT, RN, VOW, TRK, DJ, WRD = (
     M["siren"], M["heart"], M["thunder"], M["saturator"], M["rain"],
     M["vowels"], M["track"], M["dj"], M["words"])
+SPK = M["small_speaker"]
+HPF = SPK["loss_db_through_150hz_hpf"]
 
 # ------------------------------------------------------------------- cards
 # ⚠ The card schema is `type` (not `kind`), and each template has its OWN field
@@ -61,7 +63,9 @@ cards = [
        items=[["0 dB", f'{SAT["harmonics_pct_at_0db"]:.3f} % above the fundamental'],
               ["14 dB", f'{SAT["harmonics_pct_at_14db"]:.3f} %'],
               ["32 dB", f'{SAT["harmonics_pct_at_32db"]:.3f} %', "hot"],
-              ["fundamental", "44 Hz in every one of them"]]),
+              ["fundamental", "44 Hz in every one of them"],
+              ["on a laptop",
+               f'saturated survives a 150 Hz high-pass by {SPK["saturation_survival_advantage_db"]:+.1f} dB', "hot"]]),
   dict(type="bignumber", label=sp("my best rain"),                       # 6
        value=f'{RN["flatness_attempt2"]}', unit=sp("spectral flatness"),
        notes=[f'white noise measures {RN["flatness_white_noise"]}',
@@ -92,8 +96,8 @@ cards = [
               ["pass 5", f'+ voice     700 Hz-2 kHz  {DJ["voice_db_700_2k"]:+.1f} dB']]),
   dict(type="statement", size=78, y=300,                                 # 12
        lines=["TURN IT UP", "FOR THIS PART"],
-       sub=["the next two sounds live below 60 hertz",
-            "a laptop or a phone cannot reproduce them at all"],
+       sub=[f'through a laptop speaker this one loses {abs(HPF["heartbeat"]):.0f} dB',
+            "it is already as loud as everything else in this film"],
        punch="HEADPHONES IF YOU HAVE THEM", punchSize=50),
   dict(type="list", title=sp("i asked it to say hi there"), step=76,     # 13
        items=[["asked for", f'"{WRD["asked_for"]}"'],
@@ -286,7 +290,9 @@ stages = [
     "underneath most hip-hop and pop you have heard in the last decade — the "
     "note you feel in a car. It is named after a drum machine from nineteen "
     "eighty, the Roland T R eight-oh-eight, and underneath all of it there is "
-    "nothing but a sine wave.", cut=4.0),
+    "nothing but a sine wave. Turn it up again for this one, and if the first "
+    "of the two sounds almost silent to you — that is not a mistake, and it is "
+    "the entire point of the chapter.", extra=[12], cut=5.0),
 
   # ------------------------------------------------------------- 6. the 808
   # ⚠ The original capture had the saturator sitting at 30.0 dB while the
@@ -306,19 +312,24 @@ stages = [
                beforeShots=[sh("synth-808-sine", [0.22, 0.26, 0.563, 0.50])],
                afterShots=[5]),
        bedEligible=False,
-       factCheck=[["seven point five nine seven", "7.597"], ["harmonic"]],
+       factCheck=[["seven point five nine seven", "7.597"], ["harmonic"],
+                  ["four point six", "4.6"]],
        narration=(
          "The most recognisable bass sound in modern music is a sine wave that "
          "somebody deliberately ruined. Here is a clean sine at forty four "
-         "hertz, and here is the same note through a saturator. Listen to the "
-         "second one arrive in the middle of the room instead of under the "
-         "floor. Nothing was added underneath it — the fundamental is identical. "
-         "What changed is the harmonics above it: at zero drive, zero per cent "
-         "of the energy sits above the fundamental. At thirty two decibels of "
-         "drive, seven point five nine seven per cent does. Those harmonics are "
-         "what a laptop speaker can actually reproduce, which is why the "
-         "distorted one sounds bigger on a device that cannot play the note at "
-         "all.")),
+         "hertz, and here is the same note through a saturator. Both halves are "
+         "matched to the same loudness, so nothing you are about to hear is a "
+         "volume trick. Nothing was added underneath either — the fundamental "
+         "is identical. What changed is the harmonics above it: at zero drive, "
+         "zero per cent of the energy sits above the fundamental. At thirty two "
+         "decibels of drive, seven point five nine seven per cent does. And "
+         "here is why that matters on the device you are probably using. I put "
+         "both through a filter that throws away everything below a hundred and "
+         "fifty hertz, which is roughly what a laptop speaker does to you for "
+         "free. The clean sine loses thirty eight decibels. The saturated one "
+         "loses thirty four — four point six decibels more of it survives. The "
+         "distortion is not there to sound aggressive. It is there so the note "
+         "can exist on a speaker that cannot play the note.")),
 
   chapter("rain",
     "Chapter five, and this is the one that did not work."),

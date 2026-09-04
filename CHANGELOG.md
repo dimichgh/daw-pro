@@ -51,8 +51,18 @@ snapshot is not an option when its owner cannot be told apart from the user's.
 seams to the production wire + MCP surface, because an agent that can mutate the
 project but cannot look at it is an agent that cannot check its own work.
 
-**Shipped:** the film at 507.5 s, 23 stages, all eight gates green (content
-separation 35.8x, the best this rig has measured).
+⭐⭐ **"Is the 808 deliberately quiet?" — no, and gain cannot fix it.** Measured
+as they sit in the film, the heartbeat is −15.7 LUFS at **−1.5 dBTP** and the
+808 −16.4 LUFS: already the loudest things in it, on the true-peak ceiling, with
+no headroom left (`assemble.py` loudness-normalises every demo). What is missing
+is the BAND. Through a 150 Hz high-pass — roughly what a laptop speaker does for
+free — the clean 808 loses **38.2 dB**, the saturated one **33.6 dB**, and the
+heartbeat **30.2 dB**, against 3.7 dB for the full track and 0.1 dB for the
+siren. **The 4.6 dB gap between the two 808 halves is that chapter's own thesis
+and had never been measured**; the film now quotes it, states that the A/B is
+loudness-matched, and carries the TURN IT UP card into the 808 chapter as well.
+
+**Shipped:** the film at 530.0 s, 23 stages, all eight gates green.
 
 ## 2026-09-04 — A whole track from four waveforms, and the chapter that failed
 
