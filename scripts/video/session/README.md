@@ -1,0 +1,72 @@
+# Session films — driving DAW Pro to build a track on camera
+
+These are the scripts behind *Four Waveforms*: a whole track written into DAW
+Pro over the control protocol, photographed as it is built, and narrated with
+numbers measured off the renders.
+
+Nothing here generates music with a model. Every sound is written as notes and
+shaped with the app's own synth, filter, envelope and effects.
+
+## The rule that shapes everything else
+
+The built-in poly synth accepts exactly four waveforms:
+
+```
+waveform must be one of saw|square|triangle|sine
+```
+
+`noise` and `pulse` are refused (measured, with a bogus value refused the same
+way as a control). So there is no noise oscillator, and no sample is loaded —
+rain, thunder, a siren and a singing vowel all have to come out of those four.
+
+## Layout
+
+| File | What it does |
+|---|---|
+| `build.mjs` | the shared wire helpers: one socket, `cmd`, `shot`, `addTrack`, `addClip`, a seeded RNG |
+| `sounds.mjs` | one chapter's sound per run — siren, heartbeat, thunder, 808, vowels — each in a fresh project, rendered solo |
+| `thunder2.mjs` | thunder take 2, **with the automation-off control render** |
+| `sat.mjs` | the saturator sweep: same note at 0 / 14 / 32 dB of drive |
+| `track.mjs` | the whole 64-bar arrangement, 8 tracks, ~1,300 notes |
+| `loops.mjs` | the DJ chapter: one 4-bar loop rendered five times with layers arriving |
+| `fixvoice.mjs` | raises the vocal hook and re-renders (it was arriving at +0.5 dB) |
+| `capture.mjs` | photographs the session — arrange, synth editors, effect editors, mixer |
+| `spec.py` / `shorts.py` | emit the film and Shorts specs for `shortsmith.py` |
+| `MEASUREMENTS.json` | every number the narration says, written by the measuring steps |
+
+## Running them
+
+```sh
+export DAW_CONTROL_PORT=17695        # NEVER 17600 — that is the user's live app
+export DAW_TIMEOUT_MS=900000         # a 2-minute render outlasts the 30 s default
+export SESSION_DIR=$PWD/out SESSION_AUDIO=$PWD/out/audio SESSION_SHOTS=$PWD/out/shots
+node build.mjs                       # (library — imported by the others)
+node sounds.mjs siren                # then heart, thunder, bass808, vowel
+node track.mjs && node loops.mjs && node capture.mjs
+python3 spec.py && python3 shorts.py
+```
+
+`build.mjs` refuses to run against port 17600 outright.
+
+## Things that cost a build each
+
+- **The wire and the MCP tool disagree.** `clip.addMIDI` takes `atBeat`, not
+  `startBeat`, and has no `returnNotes`. `transport.seek` takes `beats`, not
+  `beat`. Instrument parameters are FLAT (`waveform`, `cutoffHz`), not nested
+  under `polySynth`. Sending the MCP shape is refused, which is the good case.
+- **Pitch-bend lane points are raw 14-bit MIDI**, 0–16383 with 8192 as centre —
+  not the −1…+1 the name suggests. A normalised value is refused.
+- **`debug.*` varies by build.** This one has `captureUI` and `panelLayout` but
+  not `selectClip`, and an unknown command is a hard error that killed the
+  capture run twice. Every optional step in `capture.mjs` is wrapped, and what
+  it skipped is printed — a hole in the film, not a silent success.
+- **The client's reply timeout is 30 s.** A two-minute render blows through it
+  and reports `no reply in 30000ms` while the app is still working perfectly.
+- **Never run two of these at once.** They each call `project.new`; a second
+  script mid-flight wipes the first one's work.
+- **RMS is the wrong instrument for a hi-hat.** The hats layer measured +0.0 dB
+  of RMS and +7.6 dB in 2–16 kHz. Measure a layer in the band it occupies.
+- **A flat filter sweep and a dead automation lane look identical.** Thunder
+  take 1 barely moved because a low cluster has nothing up top for a lowpass to
+  remove. The only way to tell them apart was rendering again with the lane
+  disabled — which is why `thunder2.mjs` always writes both.

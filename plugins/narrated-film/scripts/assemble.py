@@ -59,6 +59,34 @@ class Film:
         self.NORM = "loudnorm=I=-16:TP=-1.5:LRA=11,aresample=48000,aformat=channel_layouts=stereo"
 
     # ---------------------------------------------------------------- video
+    @staticmethod
+    def _crop_expr(z, to, dur):
+        """Build a crop= for a zoom, in FRACTIONS of the source (0-1).
+
+        `z` is [x, y, w, h] to sit on. `to` optionally gives a second position
+        to travel to over `dur` seconds -- a PAN across the window.
+
+        ⚠ TWO ffmpeg facts, both learned the hard way here:
+        ① A comma inside min() MUST be escaped, or it ends crop's argument list
+          and ffmpeg reports the rest of the expression as a missing FILTER --
+          an error that reads like the filter does not exist.
+        ② crop's w/h are evaluated ONCE, at configure time; only x/y are
+          per-frame. So a moving crop can PAN but cannot ZOOM, and asking for a
+          size that changes with t fails with "Error when evaluating the
+          expression" rather than being silently ignored. A zoom that changes
+          scale needs zoompan, which re-scales every frame and shimmers on UI
+          text. These films therefore CUT to a zoom and pan within it -- which
+          is what a screencast does anyway.
+        The pan keeps `z`'s size and moves only the top-left corner.
+        """
+        w, h = z[2], z[3]
+        if not to:
+            return f"crop=iw*{w:.6f}:ih*{h:.6f}:iw*{z[0]:.6f}:ih*{z[1]:.6f}"
+        k = f"min(1\\,t/{max(dur, 0.001):.3f})"          # 0 -> 1 across the shot
+        px = f"(({z[0]:.6f})+(({to[0]:.6f})-({z[0]:.6f}))*{k})"
+        py = f"(({z[1]:.6f})+(({to[1]:.6f})-({z[1]:.6f}))*{k})"
+        return f"crop=iw*{w:.6f}:ih*{h:.6f}:iw*{px}:ih*{py}"
+
     def stills(self, shots, total, out, cut=None, hold_last=False):
         n = max(1, round(total / (cut or self.CUT)))
         if hold_last:
@@ -68,8 +96,15 @@ class Film:
         each = total / n
         ins, filt, labels = [], [], []
         for i, s in enumerate(seq):
+            # A shot is a path, or {"path": ..., "zoom": [x,y,w,h], "to": [...]}
+            # with the boxes given as FRACTIONS of the source image so a region
+            # survives a change of capture resolution.
+            z = to = None
+            if isinstance(s, dict):
+                z, to, s = s.get("zoom"), s.get("to"), s["path"]
             ins += ["-loop", "1", "-t", f"{each:.3f}", "-i", s]
-            filt.append(f"[{i}:v]{self.VF}[v{i}]")
+            pre = (self._crop_expr(z, to, each) + ",") if z else ""
+            filt.append(f"[{i}:v]{pre}{self.VF}[v{i}]")
             labels.append(f"[v{i}]")
         filt.append("".join(labels) + f"concat=n={n}:v=1:a=0[o]")
         run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *ins,
@@ -191,7 +226,18 @@ def main():
                 dict(shots=a.shots, loops=a.loops, bursts=a.bursts, work=a.work))
 
     def resolve(p, root):
+        """A shot is a path, or {"path":…, "zoom":[…], "to":[…]} for a zoom.
+
+        ⚠ The dict form was added for the session films and it reaches HERE
+        before it reaches stills(): both this and the os.path.exists filter
+        below would raise TypeError on a dict, so the zoom support has to be
+        threaded through the resolver too, not just the renderer."""
+        if isinstance(p, dict):
+            return {**p, "path": resolve(p["path"], root)}
         return p if os.path.isabs(p) else os.path.join(root, p)
+
+    def shot_path(s):
+        return s["path"] if isinstance(s, dict) else s
 
     parts, prev_loop, missing = [], None, []
     for st in man["stages"]:
@@ -199,7 +245,7 @@ def main():
         vo = os.path.join(a.vo, f"{sid}.wav")
 
         shots = [resolve(s, a.shots) for s in st.get("shots", [])]
-        shots = [s for s in shots if os.path.exists(s)]
+        shots = [s for s in shots if os.path.exists(shot_path(s))]
         if not shots:
             missing.append(f"{sid}: no stills")
             continue
@@ -248,7 +294,7 @@ def main():
                         key = "beforeShots" if tag == "BEFORE" else "afterShots"
                         if ab.get(key):
                             hs = [resolve(x, a.shots) for x in ab[key]]
-                            hs = [x for x in hs if os.path.exists(x)]
+                            hs = [x for x in hs if os.path.exists(shot_path(x))]
                             if hs:
                                 half_shots = hs
                         film.stills(half_shots, n, pv, st.get("cut"))

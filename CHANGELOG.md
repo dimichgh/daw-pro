@@ -1,5 +1,56 @@
 # Changelog
 
+## 2026-09-04 — A whole track from four waveforms, and the chapter that failed
+
+A session film and six Shorts, built by driving DAW Pro over the control
+protocol and photographing it as it went. **No generation model was used for
+any audio** — every sound is written as notes and shaped with the app's own
+synth, filter, envelope and effects.
+
+The constraint is the film. The built-in poly synth accepts exactly
+`saw|square|triangle|sine` and refuses everything else (measured, with a bogus
+value refused the same way as a control), so there is no noise oscillator and no
+sample is loaded — a police siren, a heartbeat, thunder, an 808 and a singing
+vowel all had to come out of those four shapes.
+
+**`scripts/video/session/`** is the whole rig: `build.mjs` (the wire helpers,
+which refuse port 17600 outright), `sounds.mjs` / `thunder2.mjs` / `sat.mjs`
+(one chapter's sound per run, rendered solo and measured), `track.mjs` (the
+64-bar arrangement, 8 tracks, 1,329 notes), `loops.mjs` (the DJ chapter),
+`capture.mjs` (the screenshots), and `spec.py` / `shorts.py`, which emit the
+specs for `shortsmith.py` with every figure injected from `MEASUREMENTS.json`.
+**A number is never typed twice**, so the film and the Shorts cannot disagree.
+
+⭐ **The rain chapter stays in, and it failed.** Spectral flatness went 0.0001 →
+0.0157 across two attempts — 157x better and still 36x short of white noise's
+0.5615. Cutting it would have made every other number less believable.
+
+⭐ **`shortsmith.py` now refuses to narrate a spec whose gates cannot pass.**
+A `factCheck` for "four bars" against a script that says "four-bar" burned eight
+speech takes before anyone noticed the gate, not the voice, was wrong. The
+pre-flight compares every `factCheck` and `brandCheck` against the script text
+before any synthesis runs, and was positive-controlled with a planted impossible
+gate. It caught two more spec bugs in this wave's own Shorts.
+
+⭐ **Narration is cached on a hash of the text AND its gates**, so fixing a typo
+in one stage no longer re-synthesises the other eleven. A 30-minute rebuild
+became about two minutes, which is what made iterating on the gates affordable.
+
+⚠️ **`amix` was quietly taking 6 dB off every bedded narration** — it normalises
+by input count. Fixed with `normalize=0`, verified by re-measuring a bedded
+stage (−5 dB → +1.44 dB) against an unbedded control that moved by exactly 0.00.
+
+⚠️ **A moving `crop` can pan but not zoom.** ffmpeg evaluates `crop`'s width and
+height once at configure time, so an animated zoom has to move the origin at a
+fixed size. `assemble.py`'s `_crop_expr` does that, and a comma inside `min()`
+ends `crop`'s argument list — reported, unhelpfully, as a missing filter.
+
+**Shipped:** the 406.7 s film and six Shorts, each with a publish sidecar
+carrying `containsSyntheticMedia: true`. The generated video is deliberately not
+committed; `.gitignore` now covers the media formats, `shots/`, `vo/` and
+`segments/` (601 MB of intermediates in this wave alone), with the reference
+voice files explicitly un-ignored.
+
 ## 2026-09-03h — A publisher that defaults to private, and a scope that would have failed quietly
 
 **`plugins/narrated-film/scripts/publish.py`** uploads a finished film to
@@ -7740,3 +7791,46 @@ required. Control-tested both ways.
 implemented before/after alternation with badges for some time, but shortsmith
 never passed the spec's `ab` block through, so such a stage silently played only
 the "after" file. `beforeShots`/`afterShots` are translated from card indices.
+
+## 2026-09-04j — a session film: a whole track from four waveforms
+
+`scripts/video/session/` drives DAW Pro over the control protocol to build a
+64-bar track on camera, photograph the app doing it, and narrate it with
+numbers measured off the renders. No generation model is used anywhere: every
+sound is written as notes and shaped with the app's own synth and effects.
+
+The constraint that turned out to be the story: the poly synth accepts
+`saw|square|triangle|sine` and refuses `noise`, so rain, thunder, a siren and a
+singing vowel all had to come out of those four. Rain is the chapter that
+failed, and it stays in — spectral flatness 0.0001 → 0.0157 against white
+noise's 0.5615, which is 157x better and still 36x short.
+
+Pipeline changes this needed:
+
+- **`shortsmith.py`: a stage can reference a captured screenshot**, not only a
+  rendered card. Cards-only made it impossible to put the app on screen, which
+  is the point of a session film.
+- **`assemble.py`: `zoom` and `to` on a shot** — cut into a region of a
+  screenshot and pan within it. Two ffmpeg facts are documented in the code
+  because each cost a build: a comma inside `min()` ends `crop`'s argument list
+  and is reported as a MISSING FILTER, and `crop`'s width/height are evaluated
+  once at configure time, so a moving crop can pan but cannot zoom. A `to` box
+  of a different size is silently ignored rather than refused.
+- **`shortsmith.py` names its own work dir.** `assemble.py --work` defaults to a
+  relative `segments`, which had put 325 MB at the repo root and 276 MB under
+  `scripts/video` before anyone noticed. Both are now gitignored, along with all
+  generated media — only the tools are tracked.
+- **`install.sh` is re-runnable.** It re-attempted the omlx install every time
+  and dead-ended on a requires-python bound already worked around on the first
+  run, so a user adding `--publish` to a working install was told their Python
+  was wrong and never reached the flag they asked for.
+- **`publish.py` accepts its global flags after the subcommand** as well as
+  before. `publish.py auth --client-secret X` is the obvious spelling and it
+  used to die with "unrecognized arguments" naming the flag it had just
+  documented one line above.
+- **`upload-batch.sh`** uploads a whole wave by filename match, keeps a ledger
+  so no film is sent twice, validates every sidecar offline before the first
+  upload, and prints the plan before it starts.
+- **Synthetic-media disclosure now defaults to true** in both the sidecar
+  generator and publish.py's fallback: this kit exists to make narrated films
+  and the narration is synthetic, so the default should over-disclose.

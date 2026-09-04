@@ -23,6 +23,7 @@ Needs the omlx speech server on :8000 (see the narrated-film plugin) unless
 import argparse
 import base64
 import difflib
+import hashlib
 import json
 import os
 import re
@@ -283,13 +284,55 @@ def fact_missing(facts, got):
 
 
 def narrate(spec, vodir, tries=8, floor=0.80):
+    """Synthesise one take per stage, keeping the best of up to `tries`.
+
+    ⚠ A CACHE, because a whole film's narration is ~30 minutes of wall clock and
+    ONE typo in ONE stage's factCheck used to cost all of it. A stage is
+    re-narrated only when its TEXT changes; the hash covers the narration and
+    both gates, so tightening a gate re-records and a re-run after an unrelated
+    edit does not. `--skip-narrate` remains the blunt instrument that reuses
+    everything regardless.
+    """
+    # ⚠ PRE-FLIGHT: a gate that asks for words the SCRIPT does not contain can
+    # never pass, and the failure arrives after eight takes and several minutes
+    # of synthesis, disguised as a speech problem. It is not a speech problem;
+    # it is a typo in the spec. Two real ones cost a build each: a brandCheck
+    # for "DAW Pro" against a script that only said "a DAW", and a factCheck for
+    # "four bars" against a script that said "four-bar".
+    bad = []
+    for st in spec["stages"]:
+        low = st["narration"].lower()
+        need = st.get("brandCheck")
+        if need and need.lower() not in low:
+            bad.append(f'{st["id"]}: brandCheck {need!r} is not in the narration')
+        for f in st.get("factCheck", []):
+            alts = f if isinstance(f, (list, tuple)) else [f]
+            if not any(str(a).lower() in low for a in alts):
+                bad.append(f'{st["id"]}: factCheck {alts[0]!r} is not in the narration')
+    if bad:
+        raise SystemExit("REFUSING TO NARRATE — a gate cannot pass as written:\n  "
+                         + "\n  ".join(bad))
+
     os.makedirs(vodir, exist_ok=True)
+    cachep = os.path.join(vodir, "_cache.json")
+    cache = {}
+    if os.path.exists(cachep):
+        try:
+            cache = json.load(open(cachep))
+        except Exception:
+            cache = {}                       # a corrupt cache re-records, never crashes
     report = []
     for st in spec["stages"]:
         text = st["narration"]
         need = st.get("brandCheck")
         facts = st.get("factCheck", [])
         out = os.path.join(vodir, f"{st['id']}.wav")
+        key = hashlib.sha256(
+            json.dumps([text, need, facts], sort_keys=True).encode()).hexdigest()
+        if cache.get(st["id"]) == key and os.path.exists(out):
+            print(f"  vo     : {st['id']} unchanged, kept", flush=True)
+            report.append((st["id"], "cached", 1.0))
+            continue
         best = None
         for i in range(1, tries + 1):
             tmp = os.path.join(vodir, f"_try{i}.wav")
@@ -312,6 +355,8 @@ def narrate(spec, vodir, tries=8, floor=0.80):
                          f"brand={need!r} facts={facts}. Best missed {best[3]}, "
                          f"transcript: {best[2]!r}")
         i, s, got = best[0], best[1], best[2]
+        cache[st["id"]] = key                 # only reached once a take is kept
+        json.dump(cache, open(cachep, "w"))
         bits = []
         if need:
             bits.append(f"brand OK")
@@ -345,7 +390,7 @@ def ab_shots(ab, shots):
     ab = dict(ab)
     for k in ("beforeShots", "afterShots"):
         if ab.get(k):
-            ab[k] = [shots[i] for i in ab[k]]
+            ab[k] = [shots[i] if isinstance(i, int) else i for i in ab[k]]
     return ab
 
 
@@ -358,7 +403,14 @@ def build(spec, outdir, skip_narrate=False):
                      "cut": spec.get("cut", 4.2), "bed": 0.16,
                      "playMax": spec.get("playMax", 14.0)},
            "stages": [{"id": s["id"], "narration": s["narration"],
-                       "shots": [shots[i] for i in s["shots"]],
+                       # A stage shot is EITHER an int (an index into the
+                       # rendered cards) OR a captured image -- a path, or
+                       # {"path":…, "zoom":[x,y,w,h], "to":[…]} to cut into a
+                       # region of it. Cards-only was the original design and it
+                       # made it impossible to put the APP on screen, which is
+                       # the whole point of a session film.
+                       "shots": [shots[i] if isinstance(i, int) else i
+                                 for i in s["shots"]],
                        "cut": s.get("cut", spec.get("cut", 4.2)),
                        # a stage may carry its own audio example, played clean
                        **({"loop": s["loop"]} if s.get("loop") else {}),

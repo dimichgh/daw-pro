@@ -1,0 +1,100 @@
+{
+  "_note": "Every figure the film says out loud. Each was measured off the rendered audio or read back off the wire in this session; nothing here is estimated. The spec injects them so no number is ever typed twice.",
+  "waveforms": [
+    "saw",
+    "square",
+    "triangle",
+    "sine"
+  ],
+  "waveforms_refused": [
+    "noise",
+    "pulse"
+  ],
+  "siren": {
+    "f0_min_hz": 393.4,
+    "f0_max_hz": 494.8,
+    "sweep_semitones_measured": 3.97,
+    "sweep_semitones_asked": 4.0,
+    "wails_in_8s": 8
+  },
+  "heart": {
+    "pct_below_60hz": 94.0,
+    "pct_60_120hz": 5.8,
+    "pct_above_120hz": 0.2,
+    "notes_written": 20,
+    "_detector_note": "a 25%-threshold onset detector finds 17 of the 20; the soft 'dub' at velocity 88 sits under it. The number on screen is the 20 that were WRITTEN."
+  },
+  "thunder": {
+    "centroid_lane_on_start_hz": 652,
+    "centroid_lane_on_end_hz": 220,
+    "centroid_lane_off_start_hz": 679,
+    "centroid_lane_off_end_hz": 357,
+    "max_sample_difference": 0.2019,
+    "_control": "the lane-off render is the control: identical audio would have meant the automation never applied. Take 1's flat sweep was a DESIGN failure \u2014 a low cluster has no high content for a lowpass to remove \u2014 not a dead lane."
+  },
+  "saturator": {
+    "harmonics_pct_at_0db": 0.0,
+    "harmonics_pct_at_14db": 0.071,
+    "harmonics_pct_at_32db": 7.597,
+    "range_db": [
+      0,
+      36
+    ],
+    "_note": "tanh stays gentle until the signal approaches full scale, so a source at -13 dBFS needs far more drive than the number suggests."
+  },
+  "rain": {
+    "flatness_attempt1": 0.0001,
+    "flatness_attempt2": 0.0157,
+    "flatness_white_noise": 0.5615,
+    "flatness_single_sine": 0.0,
+    "improvement_factor": 157,
+    "short_of_noise_factor": 36,
+    "grains_attempt1": 896,
+    "grains_attempt2": 3520
+  },
+  "vowels": {
+    "ee": [
+      270,
+      2290
+    ],
+    "eh": [
+      530,
+      1840
+    ],
+    "ah": [
+      730,
+      1090
+    ],
+    "oh": [
+      570,
+      840
+    ],
+    "oo": [
+      300,
+      870
+    ],
+    "landed": 4,
+    "of": 5,
+    "_why_oh_missed": "a filter can only amplify a harmonic that exists. At D3 (146.8 Hz) the nearest partial to 570 Hz is 440."
+  },
+  "capture": {
+    "width": 3000,
+    "height": 1900
+  },
+  "track": {
+    "bpm": 128,
+    "bars": 64,
+    "tracks": 8,
+    "clips": 8,
+    "notes": 1329
+  },
+  "dj": {
+    "passes": 5,
+    "bars_per_pass": 4,
+    "hats_db_2k_16k": 7.6,
+    "bass_db_120_2k": 12.3,
+    "sub_db_20_120": 4.6,
+    "voice_db_700_2k": 8.1,
+    "_note": "each layer measured in the band it occupies; RMS alone showed the hats arriving at 0.0 dB, which is the wrong instrument for a hi-hat."
+  }
+}
