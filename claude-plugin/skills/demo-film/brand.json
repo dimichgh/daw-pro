@@ -1,0 +1,135 @@
+{
+  "_comment": "DAW Pro's own identity. This file is what keeps the shipped cards identical now that brand.py reads its wordmark instead of hardcoding it. Other projects copy plugins/narrated-film/brand.json and edit that one.",
+  "wordmark": "DAW PRO",
+  "sub": "L E S S O N S",
+  "byline": "with Claude Opus-5",
+  "holder": "DAW Pro",
+  "line2": "Every figure on screen is measured, computed or cited",
+  "disclaimer": "Narration is a synthetic voice. No music-generation model was used.",
+  "palette": {
+    "bg": [
+      11,
+      13,
+      18
+    ],
+    "cyan": [
+      62,
+      230,
+      255
+    ],
+    "violet": [
+      180,
+      140,
+      255
+    ],
+    "dim": [
+      150,
+      158,
+      175
+    ],
+    "white": [
+      238,
+      242,
+      255
+    ]
+  },
+  "fonts": {
+    "sans": "/System/Library/Fonts/SFNS.ttf",
+    "mono": "/System/Library/Fonts/SFNSMono.ttf"
+  },
+  "channelSub": "A G E N T I C",
+  "tagline": "An AI that mixes \u2014 and measures whether it worked.",
+  "themes": {
+    "theory": {
+      "sub": "T H E O R Y",
+      "palette": {
+        "cyan": [
+          130,
+          205,
+          255
+        ],
+        "violet": [
+          180,
+          140,
+          255
+        ]
+      }
+    },
+    "classical": {
+      "sub": "C L A S S I C A L",
+      "palette": {
+        "cyan": [
+          255,
+          198,
+          122
+        ],
+        "violet": [
+          226,
+          170,
+          112
+        ]
+      }
+    },
+    "mastering": {
+      "sub": "M A S T E R I N G",
+      "palette": {
+        "cyan": [
+          255,
+          146,
+          92
+        ],
+        "violet": [
+          255,
+          96,
+          124
+        ]
+      }
+    },
+    "history": {
+      "sub": "H I S T O R Y",
+      "palette": {
+        "cyan": [
+          214,
+          192,
+          150
+        ],
+        "violet": [
+          178,
+          156,
+          206
+        ]
+      }
+    },
+    "quicktip": {
+      "sub": "6 0  S E C O N D S",
+      "palette": {
+        "cyan": [
+          118,
+          255,
+          196
+        ],
+        "violet": [
+          92,
+          222,
+          255
+        ]
+      }
+    },
+    "remix": {
+      "sub": "R E M I X",
+      "palette": {
+        "cyan": [
+          124,
+          240,
+          255
+        ],
+        "violet": [
+          255,
+          120,
+          220
+        ]
+      }
+    }
+  },
+  "_themes_comment": "Named overlays applied on top of the identity above. Only the accent colours and the sub-label move; the wordmark, the mark and the fonts never do, so a themed episode still reads as this channel."
+}

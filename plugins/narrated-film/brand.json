@@ -1,0 +1,55 @@
+{
+  "_comment": "Brand identity for brand.py (intro/outro cards) and channel.py (avatar, banner, lockup). Copy this next to your own project and edit it; pass a different one with --brand. Every string here is drawn on screen.",
+  "wordmark": "YOUR BRAND",
+  "sub": "S E R I E S",
+  "byline": "",
+  "holder": "Your Name",
+  "line2": "",
+  "disclaimer": "",
+  "palette": {
+    "bg": [
+      11,
+      13,
+      18
+    ],
+    "cyan": [
+      62,
+      230,
+      255
+    ],
+    "violet": [
+      180,
+      140,
+      255
+    ],
+    "dim": [
+      150,
+      158,
+      175
+    ],
+    "white": [
+      238,
+      242,
+      255
+    ]
+  },
+  "fonts": {
+    "sans": "/System/Library/Fonts/SFNS.ttf",
+    "mono": "/System/Library/Fonts/SFNSMono.ttf"
+  },
+  "channelSub": "C H A N N E L",
+  "tagline": "",
+  "themes": {
+    "example": {
+      "sub": "E P I S O D E  T W O",
+      "palette": {
+        "cyan": [
+          255,
+          198,
+          122
+        ]
+      }
+    }
+  },
+  "_themes_comment": "Optional. Each key is a theme name usable as `brand.py --theme NAME`; it overlays the identity above, so put ONLY what changes here."
+}

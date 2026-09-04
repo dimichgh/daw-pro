@@ -49,3 +49,9 @@ __pycache__/
 # it grows — so keeping it out of git isn't about diff churn, it's the same
 # "this describes THIS machine's runs" reasoning as the baseline.
 /scripts/gate-corpus-baseline.json.history.jsonl
+
+# Film-pipeline build intermediates. assemble.py's --work defaults to a
+# RELATIVE "segments", so it lands wherever the builder happened to be standing
+# -- twice already that was inside this repo (102 MB at the root, more under
+# scripts/video). They are regenerable output, never source.
+segments/

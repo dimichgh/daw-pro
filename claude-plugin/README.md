@@ -69,6 +69,7 @@ beats-vs-seconds units, safety policy) preloaded into their context.
 | `sound-designer` | Instrument selection/tuning, sound banks, sample libraries, effect chains and their parameters. | sonnet |
 | `mix-engineer` | Levels/pans/sends, BUSES (`track_add kind:"bus"` — the only track kind it may create), sidechain, automation lanes, the master chain, loudness analysis. | sonnet |
 | `finisher` | Renders: mixdown, stems, bounce-in-place — plus verifying the FILE that was written (`audio_profile_file`, `reference_import`), not just the session. | sonnet |
+| `demo-director` | VIDEO and SCREENSHOTS rather than songs: drives the app's UI over the control port (which no MCP tool can reach), renders audio examples, generates voice-over in one cloned voice, and assembles a narrated film. | opus |
 
 ### Skills (`skills/`)
 
@@ -79,6 +80,8 @@ beats-vs-seconds units, safety policy) preloaded into their context.
 | `/daw-pro-music-team:arrange` | Build or rework the arrangement from a structure description, via `arranger`. |
 | `/daw-pro-music-team:mix-check` | Read the mix state, analyze balance/tone/loudness, report issues, apply agreed fixes via `mix-engineer`. |
 | `/daw-pro-music-team:bounce` | Render a mixdown and/or stems with a loudness-verification gate, via `finisher`. |
+| `ui-capture` | Driving and photographing DAW Pro's interface: open any panel, select notes, move a control, take screenshots, and shoot before/after pairs of a knob. Carries the measured trap list for the `debug.*` surface. |
+| `demo-film` | Turn a session into a narrated video: manifest, local text-to-speech in one cloned voice, a transcribe-and-compare gate on every line, and ffmpeg assembly. |
 | `daw-wire-reference` | Not a runnable command — the shared reference every agent/skill above preloads: tool naming, id-capture rules, units, etiquette, and safety policy. Read `skills/daw-wire-reference/SKILL.md` directly if you want the full rules. |
 
 ## How a user installs and runs `/new-song`
@@ -169,6 +172,43 @@ additive `esbuild` devDependency and the `bundle:plugin` script (plus the
 `package-lock.json` update from `npm install`) — no `src/` changes, and the
 normal `npm run build`/`npm test` workflow for the MCP server itself is
 untouched.
+
+## Making videos and screenshots
+
+`demo-director`, plus the `ui-capture` and `demo-film` skills, produce narrated
+videos and app screenshots. They talk to DAW Pro's `debug.*` control surface —
+which is app-tier and **unreachable from MCP**, so it is the only way to open a
+panel, move a control, or take a screenshot.
+
+```bash
+S=claude-plugin/skills
+node $S/ui-capture/scripts/panels.mjs ids            # tracks, clips, inserts
+node $S/ui-capture/scripts/panels.mjs shoot ./shots  # every panel, safely targeted
+OUT_DIR=./vo MANIFEST=./manifest.json python3 $S/demo-film/scripts/narrate.py
+python3 $S/demo-film/scripts/assemble.py --manifest ./manifest.json \
+    --vo ./vo --out ~/Movies/film.mp4 --shots ./shots --loops ./loops
+```
+
+⚠️ These verbs **write** to the live project — knob values, note lengths,
+selections, and (for the pickers with no valid track id) a newly created track.
+Restore what you change and prove it by re-reading. The full trap list is in
+`skills/ui-capture/SKILL.md`; read it before writing capture code.
+
+Narration needs a local speech server and about 8 GB of models. Those are not
+vendored, and the whole narration/assembly pipeline now lives in a **separate,
+application-agnostic plugin**, `narrated-film`, in `plugins/narrated-film/` of
+this same marketplace:
+
+```
+/plugin install narrated-film@daw-pro
+```
+
+It carries the installer, the voice, the content gate, the assembler, the brand
+cards and a film verifier, and knows nothing about DAW Pro. This plugin keeps
+its own copy of those scripts under `skills/demo-film/scripts/` so the
+demo-director works with only this plugin installed; the two are kept identical.
+The DAW-specific half — driving and photographing the app over the control port
+— stays here, in `skills/ui-capture/`.
 
 ## What this plugin does not do
 

@@ -1,5 +1,402 @@
 # Changelog
 
+## 2026-09-03h — A publisher that defaults to private, and a scope that would have failed quietly
+
+**`plugins/narrated-film/scripts/publish.py`** uploads a finished film to
+YouTube, sets its thumbnail, files it in a playlist resolved BY TITLE (created
+if missing), and then **reads the video back** to assert title, privacy,
+duration and the synthetic-media flag against what was sent. Guide:
+`PUBLISHING.md`.
+
+⚠️ **The scope is `.../auth/youtube`, not `youtube.upload`.** Verified against
+the per-method authorization tables rather than recalled:
+`playlistItems.insert` accepts `youtube`, `youtubepartner` and
+`youtube.force-ssl` but **NOT** `youtube.upload`. The narrow scope uploads
+successfully and then fails to file the video — a partial success, which is this
+tree's characteristic failure shape.
+
+⚠️ **Uploads from an unaudited API project are FORCED to private** (any project
+created after 2020-07-28, until it passes YouTube's compliance audit).
+`verify` detects that exact case — asked public, stored private — and reports it
+as the audit lock with the remedy, rather than as a mismatch.
+
+⭐ **Verify POLLS.** `contentDetails.duration` is absent while YouTube is still
+processing, so a single read would compare against nothing and pass. It waits
+for `processed` before asserting.
+
+**Everything checkable offline is checked offline**, so the metadata is provably
+right before the one irreversible call. All 14 rules were negative-controlled:
+11 fail with exit 1 (over-long/blank/angle-bracketed title, over-long
+description, over-long tag set, non-numeric category, bad privacy, malformed
+`publishAt`, `publishAt` on a non-private video, missing thumbnail, non-boolean
+flags) and 3 warn deliberately and pass (unknown category id, `public`, unknown
+key). `--dry-run` prints the exact request body and touches no network.
+
+**Sidecars written for all five existing films** from the descriptions already
+drafted, and all five validate against their actual video files.
+
+⚠️ **The network paths are UNTESTED and cannot be tested until the user
+authorises** — that is stated in the guide and in the report rather than being
+papered over. `install.sh --publish` adds the Google libraries as an OPTIONAL
+extra so the tested default install is unchanged; `client_secret*.json` and
+`*token*.json` are gitignored, proven with a positive control and a negative
+control on `brand.json`.
+
+## 2026-09-03g — A plugin agent that silently lost its tools, and doc rot in the skill that taught it
+
+**`claude plugin validate` fails on `claude-plugin/agents/demo-director.md`, and
+that failure was invisible.** Its `description:` was an unquoted YAML scalar
+containing a colon-space, sitting above a `tools: >-` folded block; the parser
+cannot recover across that combination. The runtime consequence is the dangerous
+part: the agent still LOADS, taking its name from the filename, and **every
+other frontmatter field — `model: opus` and all 40-odd tool grants — is silently
+dropped.** A broken agent and a working one look identical until you run the
+validator. Both descriptions (`demo-director`, and `film-director` in the new
+plugin, which had the same latent shape) are now quoted, with the text preserved
+byte-for-byte through the escape. Both plugins validate clean.
+
+⭐ **The bisect was wrong until it had a baseline.** Quoting the description
+"fixed" it and removing the tools block "fixed" it — two independent single
+changes, which cannot both be the cause. The missing experiment was running the
+UNMODIFIED file through the same harness; it failed, confirming both results
+were real and the fault is the interaction, not either half.
+
+**Doc rot found by looking where the code had moved.** `skills/demo-film/SKILL.md`
+still taught the md5 frame check — extract PNGs, `md5 -q | sort -u | wc -l` —
+which this session PROVED passes a film that is a single still image, because
+h264 noise makes every extracted frame a different md5. It now points at
+`verify.py`, which sits in that same directory and compares pixels against a
+measured noise floor. `BRAND.md` still described `--holder` as defaulting to a
+neutral built-in; it now names `brand.json` as the source of truth and those
+flags as per-run overrides.
+
+⚠️ **`--brand` defaults to the copy inside the plugin.** Measured: with a
+`brand.json` in the working directory, `brand.py` without `--brand` loads the
+plugin's own file and ignores the local one — so a user's edited identity is
+skipped and the cards render the placeholder wordmark `YOUR BRAND` while passing
+every check in the kit. Documented in the plugin's SKILL.md and README, with the
+flag added to every example. The scripts print the brand file they loaded.
+
+**Verified by positive control:** agents AND skills are genuinely discovered by
+the validator (a deliberately broken copy of each was caught), so a clean pass
+means checked, not skipped.
+
+## 2026-09-03f — Three follow-ups, and a confound removed rather than documented
+
+**The `ms-halo` limiter ceiling was the wrong fix, and it is reverted.** It had
+been dropped to −4.4 dB to stop an AAC overshoot; that worked, but it limited
+that variant 2.8 dB harder than its siblings on an axis whose entire purpose is
+comparing INSTRUMENTS — so the listener would have been judging the limiter.
+MEASURED: encoding at 320k instead of 256k removes the overshoot completely
+(+1.0 → −1.2 dBTP) at the SAME −1.6 ceiling every other variant uses. The
+overshoot was codec headroom and the fix belonged in the encoder. All seven
+variants now share one ceiling and one bitrate, so the only difference between
+any two files is the thing named in its label. The original 256k encodes of the
+first three are kept in `256k-originals/`. ⭐ **A confound you can remove beats
+a confound you document.**
+
+**Both tech-house cuts get a trimmed greeting.** The shared greeting said "a
+digital audio workstation written almost entirely by AI" and the film's own
+opening said the same thing twelve seconds later. The identity sentence — "I am
+DAW Pro Claude Opus five" — is identical across every film, which is what
+carries the brand; only the overlapping clause is dropped. Lessons 1 and 2 keep
+the full greeting, because their openings do not collide with it. This avoided
+re-rendering 22 stages from an older-schema manifest, which was the actual risk.
+
+**The Russian cut is re-done**, with Russian voice-over and a Russian opening
+chapter.
+
+The brand-substring gate earned its place twice more. Both new greetings passed
+the aggregate content gate (0.83 and 0.89) while saying **"DAW Proclawed Opus
+five"** and **"DAW Pro Cloud Opus five"**. The English one was a real speech
+defect and took four regenerations to land. ⭐⭐ **The Russian one was NOT** —
+transcribing the ALREADY-SHIPPED Russian narration through the same recogniser
+shows it renders "Claude" as "Cloud" too, so that is Russian Whisper
+transliterating and the take was correct all along. **The same control that
+convicted the English take exonerated the Russian one; without it, six more
+regenerations would have chased a defect that did not exist.**
+
+The Russian film's join measured a 0.52 sample jump against 0.13 for English.
+Not a click: the source film, before any concatenation, has that same 0.5193
+step inside its own first 0.3 s, and both films start at exactly 0.0000. The
+concat contributed nothing. **Measure the source before blaming the edit.**
+
+Chapters re-derived for both tech-house cuts (+13 s, not the +17 s the longer
+greeting needed) and all five descriptions re-validated against actual
+durations; the tech-house runtime claim corrected to 13:35.
+
+## 2026-09-03e — The film pipeline becomes its own plugin
+
+The narrated-video pipeline is now `narrated-film`, a second plugin in this
+repo's marketplace with **no dependency on DAW Pro or on any other
+application**. `/plugin install narrated-film@daw-pro`.
+
+`tools/voice-video-kit/` was MOVED, not copied, to `plugins/narrated-film/` —
+it already existed to be "installed and run on its own" and only lacked a
+manifest, a skill and an agent. A third copy of these scripts would have been
+the duplication this tree has laws against. What moved: the installer, the
+cloned voice, the content gate, the assembler, the brand cards, the channel
+art. What did NOT move: `dawctl.mjs` and `panels.mjs`, which drive DAW Pro's
+control port and stay in `skills/ui-capture/`. **The generic plugin no longer
+requires node at all** — it was only ever needed by those two files.
+
+**Brand identity is now data.** `brand.py` and `channel.py` read `brand.json`
+— wordmark, sub-label, byline, copyright holder, disclaimer, palette, fonts,
+and `markBars`, the bar heights of the mark itself — instead of hardcoding
+"DAW PRO" in six places. DAW Pro's own values live in a `brand.json` beside the
+plugin's mirror, so its invocations are unchanged.
+
+**Pinned, not assumed.** Rendering the DAW cards through the parameterised
+scripts produces output **bit-identical** to the shipped `intro.mp4`,
+`outro.mp4`, `avatar.png`, `lockup.png` and `banner.png` — mean difference
+0.00, zero pixels changed, at every sampled frame. The control is a render with
+the *generic* brand file, which differs by 54,000–129,000 pixels and, on the
+intro, matches the shipped card until t=3.0 s and diverges exactly when the
+wordmark resolves. A pin that cannot fail is not a pin.
+
+**New: `scripts/verify.py`.** The probes that had been retyped as shell
+one-liners all week, in one place with exit codes: streams, A/V drift, distinct
+frames, audio present, loudness and true peak, concat join seams, and
+transcribe-back scored against its own script *and a different stage's*. Every
+check that could pass by doing nothing carries a positive control, and a check
+whose control fails reports `BROKEN` rather than `ok`.
+
+Writing it produced three findings of exactly the kind it exists to catch, all
+found by running it against a deliberately broken film rather than by reading
+it:
+
+- The frame check originally **hashed** the extracted PNGs and **passed a film
+  that was a single still image for its entire duration** — h264 noise makes
+  every extracted frame a different md5, so six identical pictures scored "5
+  distinct of 6". Hashing answers *are these files identical*, which is not the
+  question. It compares pixels now, against a measured noise floor (still film:
+  max 0.11; real film: max 5.04).
+- The loudness check read ebur128's **first per-frame** reading rather than the
+  summary and reported **−70.0 LUFS** for a healthy film, because the film opens
+  on a title card and frame one is gated silence. A wrong number that looks
+  exactly like a real measurement.
+- The join-seam **control was not a worst case**: splicing two arbitrary moments
+  gave a jump of 0.06 while ordinary audio in the same film reached 0.11, so the
+  control sat *below* the thing it was meant to bound. It is now peak against
+  inverted peak (0.91), which is the real worst case for the material.
+
+A fourth was a policy error rather than a bug: the loudness check enforced
+−14 LUFS by default and failed a perfectly good narrated lesson at −19.3. There
+is no single right integrated loudness for a film; the number is always
+reported and only enforced when the caller states a target. True peak over
+−1.0 dBTP stays a failure whatever the material.
+
+`REF_TEXT` in `narrate.py` still names DAW Pro, and that is correct — it is the
+literal transcript of the shipped reference clip. It now says so, loudly:
+generalising the string without replacing the audio degrades every line the
+model speaks, and the result still passes the content gate.
+
+DAW Pro plugin **0.10.0** (its mirrored scripts changed, and it gains
+`verify.py` and `design-voice.py`).
+
+## 2026-09-03d — MuseScore trailer variants, and a greeting on the back catalogue
+
+Four more channel-trailer variants, and the brand intro/greeting/end card added
+to the three films that shipped before Lesson 3 set the format. The existing
+three trailer variants are untouched and still byte-reproducible: `build.mjs`
+now takes variant names on the command line and defaults to exactly the old
+three.
+
+**The variants move on one axis at a time.** The original three vary ENERGY on
+General MIDI; the four new ones freeze energy at `theme` and vary INSTRUMENTS
+(MuseScore_General.sf2). Comparing across both at once would make a pick
+meaningless. All seven are gain-matched to −14.0…−14.2 LUFS measured on the
+delivered m4a, and pairwise-verified distinct (max-abs sample difference, with
+a file-against-itself control returning exactly 0.000000).
+
+Four things measured here, three of which were wrong first:
+
+**A patch that loads is not a patch that plays.** `project.overview` cannot
+verify a sound bank — its `instrument` field is the bare string `"soundBank"`,
+so the obvious readback would have thrown on every variant. `project.snapshot`
+carries the resolved patch NAME, which is the real gate: asking for a bank/LSB
+that is not in the file stores the numbers *exactly as requested* — a numeric
+round-trip passes it — and resolves to a placeholder `MuseScore_General · P89`
+instead of a real patch name. Verified by planting a bogus LSB and watching the
+name check fire where the number check could not.
+
+**Two files can be different patches and identical audio.** The "Expr." variant
+rendered byte-identical to the plain MuseScore one: same md5, sample difference
+exactly zero. The patches had loaded correctly. MuseScore builds them as the
+same samples with modulators routed to CC11 expression, so with nothing written
+on CC11 they *cannot* differ — the patch was fine, it had nothing to respond
+to. That variant now writes the swell, which is the only thing that makes the
+bank mean anything. Caught only because two variants reported identical loudness
+to two decimal places.
+
+**AAC overshoot is material-dependent, not a constant.** The halo/vibraphone
+variant rendered a clean −1.6 dBTP (DAW and ffmpeg agreeing) and encoded to
+**+1.0 dBTP** — a 2.6 dB overshoot where the same ceiling on `theme` overshot
+0.3 dB. Bright, dense, sustained content is the codec's worst case. Fixed with a
+per-variant ceiling (−4.4 dB), which costs no loudness because the convergence
+loop makes the target back up with gain.
+
+**A content gate that passes can still be shipping a wrong brand name.** The
+greeting scored 0.86 similarity — comfortably over the 0.60 floor — while
+saying *"Diadavius, Proclawed Opus five"* for "DAW Pro Claude Opus five". Four
+words out of forty cannot move an aggregate score, and those four are the only
+ones that must be right. It was caught by transcribing the ALREADY-SHIPPED
+Lesson 3, which renders the same phrase cleanly through the same recogniser —
+proving the fault was in the speech, not the transcription. Regenerated with an
+explicit check on the brand phrase; the accepted take scores 0.95.
+**An aggregate similarity score cannot gate a short critical substring — check
+the substring.**
+
+The three films are re-cut by stream copy, not re-encode: intro/outro/film all
+measured identical (h264 High, yuv420p, 1920×1080, 30/1, tb 1/15360, aac 48k
+stereo), so the finished lesson content is preserved bit-for-bit — verified by
+comparing a mid-film frame in the new cut against the original at the same
+moment (0.00 difference, against a control that returns 9.86). Originals are
+kept in `~/Movies/pre-intro-originals/`. One shared greeting take is reused
+across all three, deliberately: three generations would be three subtly
+different readings of the same words. Chapter timestamps shifted +17 s with a
+new opening chapter, all four descriptions re-validated against their actual
+durations.
+
+## 2026-09-03c — Channel-level brand assets, and a visualiser that is not Pillow
+
+Plugin **0.9.0**. A video series and a channel are not the same thing, so
+`scripts/channel.py` renders the assets a channel needs and the per-video cards
+in `brand.py` are left alone: the videos still say LESSONS, the channel says
+AGENTIC. `brand.py` gained `--sub` for exactly that, defaulting to the old
+string so every existing film renders byte-identically.
+
+Three traps, each of which produced a wrong artefact before it produced a right
+one:
+
+**The avatar is a circle, at 88 px.** A wordmark is mud at that size, so the
+avatar is a *mark* — the spectrum-bar motif, cyan at the edges resolving to
+violet in the middle, which is the design language's colour for anything
+AI-touched. `channel.py avatar` therefore writes circle-masked previews at 800
+and 88 px alongside the file, because "looks fine at full size" is not evidence
+about the size it is used at.
+
+**Hand-placed layout is centred layout's convincing impostor.** The banner
+lockup was left-aligned inside the 1546×423 safe area, which reads as balanced
+on a 2560 px desktop banner and badly lopsided on mobile, which crops to the box
+and nothing else. The lockup had the same bug worse: fixed at x=200 on a
+1600 px canvas, its artwork ended at x=822 — a logo file half of which was
+empty. Both now measure the text and centre the group.
+
+**And a README claim that was simply false.** It described the lockup as
+transparent; the file was opaque RGB. Verified by reading the pixel, not by
+reading the code that drew it. There is now a real RGBA variant, and the
+knockout is checked by counting opaque pixels and their bounding box rather
+than by sampling one point — the first probe sampled empty space and would have
+passed a blank image.
+
+**The trailer.** 72 s at 120 BPM in A minor: the same key and tempo as the
+5-second sting, opening with the sting's own rising figure and closing on its
+landing chord, so the channel loop sounds like the sting grew. Hand-written
+notes through GM instruments; no generation model, which is what the channel
+claims about itself and therefore had to be true of its own trailer.
+
+Three variants ship, differing on **one axis only** — energy — with identical
+harmony and melody, gain-matched to within 0.2 LUFS so the choice is musical
+rather than a loudness preference. Master chain is a gain insert (the fader
+stops at +6 dB and GM material needed +14 to +16) into a true-peak limiter, with
+the gain converged by measure-correct-repeat: a single computed gain cannot land
+it, because the limiter sits after the gain and the relationship is not linear.
+
+⚠️ **The limiter ceiling is −1.6 dBFS, not −1.0, and that is deliberate.** AAC
+overshoots: a −1.0 dBTP wav measured −0.5 dBTP once encoded. Limiting to −1.6
+lands the *delivered* mp4 on −1.3. Trimming the wav afterwards was tried first
+and cost 0.7 dB of loudness for the same peak.
+
+Finally, `showfreqs` was tried for the visualiser and rejected — `mode=bar`
+fills solid from the baseline with no gaps, so it cannot draw the logo's shape.
+The bars are Pillow, but the glow layer is rendered at 1/3 scale and upscaled,
+which is what makes 2160 frames take 75 seconds instead of ten minutes.
+
+## 2026-09-03b — A brand for the lessons, and a lesson that argued with me
+
+Plugin **0.8.0**. `scripts/brand.py` renders the two pieces of furniture every
+video now carries: a 5-second opening title whose spectrum bars are driven by
+the actual sting, and a closing copyright card. Both go through the same encoder
+flags as the film body, and `assemble.py` gained `--intro` / `--outro` which
+*refuse* a card whose streams do not match — `concat -c copy` does not error on a
+mismatch, it just glitches on playback.
+
+The sting is hand-written in DAW Pro at 120 BPM so that 5.0 s is exactly 10
+beats, landing on beat 7 where the wordmark resolves. It is gain-matched with a
+measured static gain, not `loudnorm`, which came out 3.7 dB hot on something
+that short and dynamic.
+
+Two drawing lessons are written down in `BRAND.md`: this ffmpeg has no
+`drawtext` at all (no libfreetype — the filter is simply absent and text
+silently never appears), and glow has to be a separate blurred layer, because
+blurring the finished frame turns a white wordmark grey.
+
+**Lesson 3 is the interesting one — it took three tries to measure honestly.**
+
+The first metric, low-mid share of the mix bus, went UP when the mix got better:
+moving the pad up an octave moves it *into* 150–500 Hz while moving it out of the
+bass's way. A mix-bus band share cannot see a collision at all. The second
+measured the parts separately — share of the pad's own energy below 250 Hz —
+which sees the collision but draws the line in the wrong place: the moved pad's
+bottom voice lands at 196–247 Hz, still under it, so the octave move scored a
+feeble −4.2 dB and the textbook carve appeared to make things *worse*.
+
+The line belongs to the bass, and the bass was never asked. Measured: it keeps
+92.9% of its energy below 150 Hz and half below 65 Hz. On that line the lesson
+resolves, and it now teaches the second mistake as well as the answer — every
+fix is scored twice, by share *and* by absolute decibels removed from the zone,
+because a share improves when you remove the right thing and worsens when you
+remove the wrong one. The 250 Hz carve does exactly that: it clears 1.4 dB from
+the collision zone, takes 3.6 dB of body out of the pad, and its share climbs
+from 66% to 76%. A bell at 250 Hz with a Q of 1.2 reaches ~167–375 Hz, and 77%
+of this pad is below it. Moving the part clears 58 dB and makes the pad 4 dB
+*louder* in its own range.
+
+⚠️ **And the numbers that fed the first cut of the narration were contaminated by
+a bug worth generalising.** The teardown between states read
+`track.effects ?? []`, but `project.overview` exposes a track's insert chain
+under **`fx`**. The list was always empty, the removal loop ran zero times, every
+call reported success, and EQs *accumulated* across states — three of six were
+wrong. It was caught by looking at a captured screenshot and seeing three EQ
+chips where there should have been one. **A `?? []` fallback on a key you have
+not verified is not a safe default; it is a loop that silently does not run.**
+
+## 2026-09-03 — Tools for filming the DAW, and two lessons made with them
+
+Making the demo films turned out to need a lot of small, hard-won knowledge that
+lived nowhere. It now ships as part of the plugin (**0.7.0**).
+
+Two new skills. **`ui-capture`** drives DAW Pro's `debug.*` surface — the one
+that is *not* reachable from MCP and is the only way to open a panel, move a
+control, or take a screenshot. It carries a `panels.mjs` registry that can
+photograph any panel by name, and a `pair()` helper that shoots the same knob
+before and after a change and then puts it back, proving the restore by
+re-reading rather than assuming it. **`demo-film`** covers narration and
+assembly: a local text-to-speech voice, and an assembler that turns stills,
+rendered loops and real transport footage into a narrated film.
+
+The traps in both are written down with the session that paid for them, because
+each one *looks like success*: a modal you forgot to close photographs over your
+subject, the instrument picker creates a track when given no valid id, and
+`debug.musicalTyping` returns after the first key it recognises, so two settings
+in one call silently applies one.
+
+The narration gate is the sharpest of these. Level, pace and spectrum checks all
+pass happily on speech that says the *wrong words* — one earlier film had lines
+that transcribed as nothing but "Thank you," and every meter said it was fine.
+So every take is now transcribed and compared against its script. That gate had
+a bug of its own worth knowing about generally: `difflib`'s `autojunk` heuristic
+discards common elements in any sequence over 200 long, and narration lines are
+600–1000 *characters* — so character-level matching threw away the spaces and
+scored a **verbatim** take at 0.17. Compared as word lists with `autojunk=False`
+the same take scores 0.91.
+
+There is also a new **`demo-director`** agent that holds both skills, and a
+standalone `tools/voice-video-kit/` for using the pipeline outside this repo.
+The model weights are not vendored — eight gigabytes of public builds do not
+belong in a git repository, so the installer fetches them.
+
 ## 2026-08-31 — Knobs for the slur, and a slide that respects distance
 
 The slurring added earlier today could only be reached by asking an AI agent.
@@ -7305,3 +7702,41 @@ Two things worth knowing from it. **You can already make an instrumental today**
 - 17 Swift tests passing (`./scripts/test.sh`); live E2E: 11/11 control-protocol checks against the running app.
 - Fixed: Swift 6 isolation trap in the metering tap (`@Sendable` on the AVFAudio tap closure).
 - Docs: VISION, ARCHITECTURE, ROADMAP (M0–M9), AI-INTEGRATIONS, DESIGN-LANGUAGE. Agent fleet (8) + skills (6).
+
+## 2026-09-04i — the lesson wave: 20 videos, and four gates that were not gates
+
+**Videos.** Eight lessons (L1–L8) and twelve Shorts now exist, all
+`verify.py`-green and all shipped to `~/Movies`. Tracker: `docs/lessons/PROGRAM.md`.
+
+**`brand.json` was making a false claim on every video.** `line2` read
+"Written, mixed and measured in DAW Pro" — true for the DAW-built lessons, not
+true for the Shorts, L2 or L4, whose audio is generated in Python. It now reads
+"Every number in this video was measured, not estimated", which is true of all
+of them, and **all 16 already-shipped videos were re-rendered**.
+
+**A demonstration is not a bed** (`assemble.py`, `shortsmith.py`). Each stage's
+audio used to carry on under the *next* stage's narration — right for music,
+wrong for a measurement, and in the tuning lesson a pair of beating test tones
+droned under the speaker. Stages now set `"bedEligible": false`. Verified with a
+control: the same manifest with the flag stripped still beats at 6.03 Hz under
+the narration; with it, 0.55 Hz.
+
+**A `[ FAIL ]` was printed and then ignored** (`shortsmith.py`). The Amen lesson
+failed its true-peak check and was copied to `~/Movies` anyway, one line below
+the word FAIL. Shipping now raises on any `[ FAIL ]`; `[BROKEN]` still does not
+block, since that means the probe could not judge.
+
+**True-peak backstop** (`assemble.py`). `loudnorm`'s single-pass `TP=` is a
+target, not a guarantee. The finished concat is now measured and, if over
+ceiling, given a **static trim** — no limiter, no transient reshaped — then
+re-measured, up to four passes, failing loudly if it will not converge.
+
+**`factCheck` may be a list of spellings** (`shortsmith.py`). It rejected eight
+perfect takes of "seventy two beats per minute" because the transcriber writes
+"72". Any one listed spelling now satisfies an entry; the entry is still
+required. Control-tested both ways.
+
+**A/B stages reach `assemble.py` again** (`shortsmith.py`). `assemble.py` has
+implemented before/after alternation with badges for some time, but shortsmith
+never passed the spec's `ab` block through, so such a stage silently played only
+the "after" file. `beforeShots`/`afterShots` are translated from card indices.

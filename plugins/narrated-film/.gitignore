@@ -1,0 +1,14 @@
+# The installer builds this; it is ~1 GB of wheels and must never be committed.
+.venv/
+__pycache__/
+*.pyc
+# Working output from a build
+vo/
+segments/
+*.mp4
+!example/*.mp4
+# ⚠ OAuth credentials for publish.py. These grant WRITE ACCESS to a YouTube
+# channel. Never commit either one.
+client_secret*.json
+youtube-token.json
+*token*.json

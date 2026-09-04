@@ -1,0 +1,17 @@
+{
+  "title": "Voice + Video Kit — install check",
+  "video": { "width": 1280, "height": 720, "fps": 30, "cut": 3.0, "bed": 0.16, "playMax": 6.0 },
+  "stages": [
+    {
+      "id": "one",
+      "narration": "This is the install check for the voice and video kit. If you can hear this sentence, and the words you hear are the words written in the manifest, then the speech model, the transcription gate and ffmpeg are all working together correctly.",
+      "shots": ["slate-1.png", "slate-2.png"]
+    },
+    {
+      "id": "two",
+      "narration": "The second stage plays a short tone underneath its own footage, and the narration you just heard is ducked beneath it. That is the whole shape of a film made with this kit: talk, then play, then talk again.",
+      "shots": ["slate-2.png"],
+      "loop": "tone.wav"
+    }
+  ]
+}
