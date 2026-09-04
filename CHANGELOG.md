@@ -62,7 +62,7 @@ MEASURED" shipped as "E SIREN, MEASUR". And a `list` card's left key had no
 column bound, so "the fundamental never moved" drew straight through its own
 value. The renderer now fits all three; the specs no longer need it to.
 
-**Shipped:** the 405 s film and six Shorts, each with a publish sidecar
+**Shipped:** the 405.0 s film and six Shorts, each with a publish sidecar
 carrying `containsSyntheticMedia: true`. The generated video is deliberately not
 committed; `.gitignore` now covers the media formats, `shots/`, `vo/` and
 `segments/` (601 MB of intermediates in this wave alone), with the reference

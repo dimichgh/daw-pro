@@ -55,13 +55,13 @@ The film and the Shorts quote the same figures because they read the same file
 
 | File | Length | Argument |
 |---|---|---|
-| `DAW Pro Session - Four Waveforms.mp4` | 406.7 s | the whole build, start to finish |
-| `DAW Pro Short 13 - One Note Siren.mp4` | 30.2 s | a siren is one held note; the bend does the moving |
+| `DAW Pro Session - Four Waveforms.mp4` | 405.0 s | the whole build, start to finish |
+| `DAW Pro Short 13 - One Note Siren.mp4` | 30.5 s | a siren is one held note; the bend does the moving |
 | `DAW Pro Short 14 - Heartbeat Under 60Hz.mp4` | 28.9 s | 94 % below 60 Hz, so a phone plays none of it |
-| `DAW Pro Short 15 - The 808 Is A Sine.mp4` | 43.7 s | drive adds above the fundamental, never below |
-| `DAW Pro Short 16 - A Vowel Is Two Numbers.mp4` | 29.9 s | F1/F2 on a saw and it says *ah* |
+| `DAW Pro Short 15 - The 808 Is A Sine.mp4` | 44.7 s | drive adds above the fundamental, never below |
+| `DAW Pro Short 16 - A Vowel Is Two Numbers.mp4` | 31.1 s | F1/F2 on a saw and it says *ah* |
 | `DAW Pro Short 17 - I Failed To Make Rain.mp4` | 38.8 s | the chapter that did not work, with its numbers |
-| `DAW Pro Short 18 - Thunder Is A Filter.mp4` | 32.4 s | a centroid collapsing, with the lane-off control |
+| `DAW Pro Short 18 - Thunder Is A Filter.mp4` | 33.1 s | a centroid collapsing, with the lane-off control |
 
 ⚠️ **The Shorts' content gate reports `[BROKEN]`, and that is the gate working.**
 It refuses to score a transcript-vs-script separation on two stages under 45 s,
