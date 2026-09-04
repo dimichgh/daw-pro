@@ -340,8 +340,7 @@ def narrate(spec, vodir, tries=8, floor=0.80):
         need = st.get("brandCheck")
         facts = st.get("factCheck", [])
         out = os.path.join(vodir, f"{st['id']}.wav")
-        key = hashlib.sha256(
-            json.dumps([text, need, facts], sort_keys=True).encode()).hexdigest()
+        key = vo_key(st)      # ONE definition, shared with verify_cached()
         if cache.get(st["id"]) == key and os.path.exists(out):
             print(f"  vo     : {st['id']} unchanged, kept", flush=True)
             report.append((st["id"], "cached", 1.0))
@@ -385,6 +384,51 @@ def narrate(spec, vodir, tries=8, floor=0.80):
                        "brandCheck": need, "factCheck": facts,
                        "belowFloor": s < floor, "transcript": got})
     return report
+
+
+def vo_key(st):
+    """The cache key for one stage -- text plus both gates, exactly as narrate()
+    computes it. Split out so --skip-narrate can check what narrate() wrote."""
+    return hashlib.sha256(json.dumps(
+        [st["narration"], st.get("brandCheck"), st.get("factCheck", [])],
+        sort_keys=True).encode()).hexdigest()
+
+
+def verify_cached(spec, vodir):
+    """Refuse to assemble a film out of takes that do not match its script.
+
+    ⚠ THIS EXISTS BECAUSE IT HAPPENED. A vo file is named for its STAGE ID, so
+    two specs built into ONE --out-dir share the directory: this film and its
+    six Shorts both have a stage called `01-hook`, and the Shorts were built
+    second. A later `--skip-narrate` rebuild of the film then assembled the
+    SHORT's opening line into the film -- 51 words of script playing 14 words of
+    audio -- and every one of the eight gates passed it, because each of them
+    measures the file that exists rather than the script it was supposed to say.
+    The film came out 11 seconds shorter and nothing said why.
+
+    `--skip-narrate` skips SYNTHESIS. It was never meant to skip knowing whether
+    the take on disk belongs to this spec.
+    """
+    cachep = os.path.join(vodir, "_cache.json")
+    cache = {}
+    if os.path.exists(cachep):
+        try:
+            cache = json.load(open(cachep))
+        except Exception:
+            cache = {}
+    bad = []
+    for st in spec["stages"]:
+        out = os.path.join(vodir, f"{st['id']}.wav")
+        if not os.path.exists(out):
+            bad.append(f"{st['id']}: no take on disk at {out}")
+        elif cache.get(st["id"]) != vo_key(st):
+            bad.append(f"{st['id']}: the take on disk was recorded from "
+                       f"DIFFERENT text or gates")
+    if bad:
+        raise SystemExit(
+            "REFUSING TO ASSEMBLE — --skip-narrate would use takes that do not\n"
+            "match this spec. Drop --skip-narrate to re-record just these:\n  "
+            + "\n  ".join(bad))
 
 
 # ------------------------------------------------------------------- assembly
@@ -446,6 +490,8 @@ def build(spec, outdir, skip_narrate=False):
 
     vodir = os.path.join(outdir, "vo")
     report = [] if skip_narrate else narrate(spec, vodir)
+    if skip_narrate:
+        verify_cached(spec, vodir)
 
     intro = os.path.join(outdir, "intro.mp4")
     outro = os.path.join(outdir, "outro.mp4")

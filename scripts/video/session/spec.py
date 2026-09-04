@@ -200,7 +200,12 @@ stages = [
   dict(id="07-808", shots=[sh("fx-saturator-32", [0.2745, 0.316, 0.45, 0.40]), 5],
        cut=5.0, loop=f"{A}/bass808.wav",
        ab=dict(before=f"{A}/bass808-clean.wav", seconds=5.0, cycles=2,
-               beforeShots=[sh("fx-saturator-32", [0.2745, 0.316, 0.45, 0.40])],
+               # ⚠ THE "BEFORE" HALF MUST NOT SHOW THE "AFTER" PANEL. This was
+               # the saturator at 32.0 dB while the narration says "here is a
+               # clean sine" -- the same self-contradiction as the 30-vs-32
+               # figure one comment up, one row down. It is the 808's own synth
+               # panel with SINE lit; shot fresh and the crop confirmed by eye.
+               beforeShots=[sh("synth-808-sine", [0.22, 0.26, 0.563, 0.50])],
                afterShots=[5]),
        bedEligible=False,
        factCheck=[["seven point five nine seven", "7.597"], ["harmonic"]],

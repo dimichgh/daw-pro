@@ -55,7 +55,7 @@ The film and the Shorts quote the same figures because they read the same file
 
 | File | Length | Argument |
 |---|---|---|
-| `DAW Pro Session - Four Waveforms.mp4` | 405.0 s | the whole build, start to finish |
+| `DAW Pro Session - Four Waveforms.mp4` | 404.4 s | the whole build, start to finish |
 | `DAW Pro Short 13 - One Note Siren.mp4` | 30.5 s | a siren is one held note; the bend does the moving |
 | `DAW Pro Short 14 - Heartbeat Under 60Hz.mp4` | 28.9 s | 94 % below 60 Hz, so a phone plays none of it |
 | `DAW Pro Short 15 - The 808 Is A Sine.mp4` | 44.7 s | drive adds above the fundamental, never below |
@@ -101,3 +101,56 @@ SIREN, MEASUR"**. Three separate faults, none of which any gate can see:
 
 Fixed in the renderer, so the next spec cannot hit them; and the spec's own keys
 were shortened so nothing has to shrink in the first place.
+
+## And a fifth one, from the same instrument
+
+Looking again at the 808 chapter's A/B — the film's centrepiece — found the
+"before" half showing the **saturator panel at 32.0 dB** while the narration
+says *"here is a clean sine"*. Exactly the contradiction the 30-vs-32 re-shoot
+had just fixed, one row down in the same `dict`, and every gate passed it twice:
+a gate can read the script and it can read the panel, but nothing in this rig
+compares the two.
+
+Fixed by shooting the 808's own **POLY SYNTH on 808 sub** panel with SINE lit
+(`synth-808-sine.png`) and pointing `beforeShots` at it.
+
+Two things that made the re-shoot cheap and safe:
+
+- The app's `DAWPRO_PROFILE_ROOT` env var moves the whole profile (autosave,
+  recovery, settings) to a scratch directory. The first attempt came back with a
+  **"Restore unsaved work?" sheet drawn straight across the panel** — the only
+  clean way past it, `project.recover {accept:false}`, discards a recovery
+  snapshot whose owner cannot be told apart from the user's, so it was never an
+  option. An isolated profile root has no snapshot to offer.
+- Build the shot in a **fresh project**, never by reopening the session file:
+  `project.open` on the 8-track project wedged the app twice.
+
+## The one that fixing a bug created
+
+Re-shipping the film after the A/B fix produced a file **eleven seconds
+shorter**, with all eight gates green. Nothing in the build said why.
+
+`shortsmith.py` names each narration take after its **stage id** — `vo/01-hook.wav`.
+The film and its six Shorts had been built into one `--out-dir`, and the film
+has a stage called `01-hook`; so does Short V1. The Shorts were built second, so
+V1's fourteen-word opening was sitting at that filename. `--skip-narrate` reuses
+whatever take is on disk without looking, so the rebuild assembled **the Short's
+opening line into the film**, under fifty-one words of script.
+
+Every gate passed it. Every gate measures the file that exists — streams, drift,
+loudness, distinct frames — and the content gate compares the audio to the
+script it was *handed*, not to the script that stage was written from. A wrong
+take is a perfectly healthy file.
+
+Two fixes:
+
+- `--skip-narrate` now **verifies the cache before assembling** and refuses,
+  naming the offending stages, when a take on disk was recorded from different
+  text or gates (`verify_cached()`). It skips synthesis, which is what it was
+  for; it no longer skips knowing whose voice it is using.
+- Give each spec its **own `--out-dir`**. Shared ids across specs is not an
+  unusual shape — every one of these Shorts opens with `01-…`.
+
+The way it was caught is the reusable part: **the eleven seconds were the only
+symptom**, and the way to read them was words-per-minute per stage. Eleven of
+twelve stages sat between 226 and 266 wpm. `01-hook` read **831**.

@@ -62,7 +62,31 @@ MEASURED" shipped as "E SIREN, MEASUR". And a `list` card's left key had no
 column bound, so "the fundamental never moved" drew straight through its own
 value. The renderer now fits all three; the specs no longer need it to.
 
-**Shipped:** the 405.0 s film and six Shorts, each with a publish sidecar
+⭐⭐ **A/B "before" halves are a fourth place the screen can contradict the
+script.** The 808 chapter played its clean-sine half over a screenshot of the
+SATURATOR at 32.0 dB — the same self-contradiction as the 30-vs-32 figure, one
+row down in the same spec entry. Re-shot against the 808's own POLY SYNTH panel
+with SINE lit. The re-shoot itself found two things worth keeping: the app's
+`DAWPRO_PROFILE_ROOT` gives a screenshot run an isolated profile, which is the
+only safe way past a "Restore unsaved work?" sheet (discarding the snapshot is
+not an option when its owner cannot be told apart from the user's), and a shot
+must be built in a fresh project — `project.open` on the 8-track session wedged
+the app twice.
+
+⭐⭐⭐ **`--skip-narrate` could assemble another spec's voice into a film, and
+did.** Narration takes are named for their STAGE id, so a film and a Short that
+each open with a stage called `01-hook` share one `vo/01-hook.wav` when built
+into the same `--out-dir`. A rebuild with `--skip-narrate` put the Short's
+fourteen-word opening under the film's fifty-one-word script, and **all eight
+gates passed** — every gate measures the file that exists, and a wrong take is a
+perfectly healthy file. The only symptom was eleven missing seconds. It was read
+off words-per-minute per stage: eleven stages between 226 and 266 wpm, and
+`01-hook` at 831. `--skip-narrate` now verifies the cache before assembling and
+refuses, naming the stages whose takes came from different text or gates
+(`verify_cached()`, positive-controlled — it names exactly the one stale stage
+and passes the other eleven). One `--out-dir` per spec is the other half.
+
+**Shipped:** the 404.4 s film and six Shorts, each with a publish sidecar
 carrying `containsSyntheticMedia: true`. The generated video is deliberately not
 committed; `.gitignore` now covers the media formats, `shots/`, `vo/` and
 `segments/` (601 MB of intermediates in this wave alone), with the reference

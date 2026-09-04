@@ -70,3 +70,12 @@ python3 spec.py && python3 shorts.py
   take 1 barely moved because a low cluster has nothing up top for a lowpass to
   remove. The only way to tell them apart was rendering again with the lane
   disabled — which is why `thunder2.mjs` always writes both.
+- **One `--out-dir` per spec, always.** Narration takes are named for their
+  STAGE id, so a film and a Short that both have a stage called `01-hook` share
+  `vo/01-hook.wav`. Building them into one directory let a Short's opening line
+  end up inside the film on the next `--skip-narrate` rebuild, and all eight
+  gates passed it. `shortsmith.py` now refuses that case rather than assembling
+  it, but separate directories are the actual fix.
+- **A stage's words-per-minute is the cheapest lie detector in the rig.** Every
+  take in this film sits between 226 and 266 wpm. Anything far outside that is
+  the wrong audio or a truncated one, and no other gate will say so.
