@@ -26,8 +26,10 @@ SIR, HRT, THU, SAT, RN, VOW, TRK, DJ = (M["siren"], M["heart"], M["thunder"],
 # names: statement/closing take `lines`, bignumber takes `label`/`value`/`unit`
 # /`notes`, list takes `title`/`items` where an item is [term, gloss, "hot"?].
 # Getting this wrong is a KeyError at render time, which is the good case.
-def sp(t):                      # the wide letter-spacing the label style uses
-    return "   ".join(t.upper())
+def sp(t): return t.upper()   # ⚠ NO literal spaces: card_bignumber and
+# card_list already letter-space with `track=`. Adding "   ".join() on top
+# TRIPLES the width, and every label then auto-shrank to 12-24pt to fit --
+# legible, but a third of the intended size, which reads as a mistake.
 
 cards = [
   dict(type="statement", size=84,                                        # 0
@@ -38,7 +40,7 @@ cards = [
        items=[["saw, square", "triangle, sine"],
               ["“noise”", "refused by the instrument", "hot"],
               ["“pulse”", "also refused"],
-              ["so rain, thunder and a voice", "have to be built out of the other four"]]),
+              ["so everything", "is built out of the other four"]]),
   dict(type="bignumber", label=sp("the siren, measured"),                # 2
        value=f'{SIR["sweep_semitones_measured"]}', unit=sp("semitones of sweep"),
        notes=[f'the pitch-bend lane asked for {SIR["sweep_semitones_asked"]:.2f}',
@@ -54,12 +56,12 @@ cards = [
                f'centroid {THU["centroid_lane_on_start_hz"]} → {THU["centroid_lane_on_end_hz"]} Hz', "hot"],
               ["automation OFF",
                f'centroid {THU["centroid_lane_off_start_hz"]} → {THU["centroid_lane_off_end_hz"]} Hz'],
-              ["the second line is the control", "identical audio would mean the lane never applied"]]),
+              ["the control", "identical audio would mean the lane never applied"]]),
   dict(type="list", title=sp("what drive actually adds"), step=80,       # 5
        items=[["0 dB", f'{SAT["harmonics_pct_at_0db"]:.3f} % above the fundamental'],
               ["14 dB", f'{SAT["harmonics_pct_at_14db"]:.3f} %'],
               ["32 dB", f'{SAT["harmonics_pct_at_32db"]:.3f} %', "hot"],
-              ["the fundamental never moved", "44 Hz in every one of them"]]),
+              ["fundamental", "44 Hz in every one of them"]]),
   dict(type="bignumber", label=sp("my best rain"),                       # 6
        value=f'{RN["flatness_attempt2"]}', unit=sp("spectral flatness"),
        notes=[f'white noise measures {RN["flatness_white_noise"]}',
@@ -144,7 +146,12 @@ stages = [
          "disagree with me.")),
 
   # ------------------------------------------------------------- 3. the siren
-  dict(id="04-siren", shots=[sh("synth-bass-saw", [0.10, 0.60, 0.30, 0.28]), 2],
+  # ⚠ THIS ZOOM WAS WRONG AND ONLY LOOKING CAUGHT IT. The first coordinates
+  # ([0.10, 0.60, 0.30, 0.28]) framed empty timeline below the panel; every gate
+  # in this rig passed anyway, because none of them knows WHERE a zoom lands.
+  # These frame the POLY SYNTH panel with saw|square|triangle|sine legible --
+  # confirmed by rendering the crop and looking at it.
+  dict(id="04-siren", shots=[sh("synth-bass-saw", [0.22, 0.26, 0.563, 0.50]), 2],
        cut=5.5, loop=f"{A}/siren.wav", bedEligible=False, playMax=9.0,
        factCheck=[["three point nine seven", "3.97"], ["semitone"]],
        narration=(
@@ -185,10 +192,15 @@ stages = [
          "there was nothing up there for the filter to remove.")),
 
   # ------------------------------------------------------------- 6. the 808
-  dict(id="07-808", shots=[sh("fx-saturator", [0.20, 0.18, 0.62, 0.58]), 5],
+  # ⚠ The original capture had the saturator sitting at 30.0 dB while the
+  # narration says "thirty two decibels" -- the figure the sweep was actually
+  # measured at. A film whose whole claim is that its numbers are measured
+  # cannot contradict itself on screen, so the panel was re-shot at 32.0 and
+  # the crop confirmed by looking at it.
+  dict(id="07-808", shots=[sh("fx-saturator-32", [0.2745, 0.316, 0.45, 0.40]), 5],
        cut=5.0, loop=f"{A}/bass808.wav",
        ab=dict(before=f"{A}/bass808-clean.wav", seconds=5.0, cycles=2,
-               beforeShots=[sh("fx-saturator", [0.20, 0.18, 0.62, 0.58])],
+               beforeShots=[sh("fx-saturator-32", [0.2745, 0.316, 0.45, 0.40])],
                afterShots=[5]),
        bedEligible=False,
        factCheck=[["seven point five nine seven", "7.597"], ["harmonic"]],

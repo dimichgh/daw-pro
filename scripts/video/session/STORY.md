@@ -68,3 +68,36 @@ It refuses to score a transcript-vs-script separation on two stages under 45 s,
 because with that little material the cross-stage control cannot mean anything.
 A gate that declined to score is not a gate that passed — the Shorts' words are
 covered instead by the per-stage `factCheck` assertions, which all passed.
+
+## The zoom bug, and why every gate missed it
+
+The film shipped once with `04-siren`'s zoom framing **empty timeline** below the
+synth panel. All eight verify gates passed: `distinct frames` is perfectly happy
+with two different views of nothing, and no gate in this rig has any idea *where*
+a crop lands. The same pass found the saturator panel reading `30.0 dB` while the
+narration says "thirty two decibels" — the figure the sweep was actually measured
+at, so the panel was re-shot rather than the sentence re-worded.
+
+**The check that found both takes three minutes** and belongs in every session:
+render each `zoom` rect as a still and look at it.
+
+```sh
+ffmpeg -y -i shots/<name>.png \
+  -vf "crop=iw*<w>:ih*<h>:iw*<x>:ih*<y>,scale=860:-1" -frames:v 1 /tmp/check.png
+```
+
+## And three card bugs under it
+
+The same frame that exposed the zoom showed the card behind it reading **"E
+SIREN, MEASUR"**. Three separate faults, none of which any gate can see:
+
+1. `sp()` joined letters with three literal spaces while the renderer *also*
+   letter-spaces with `track=`. Every label was three times its intended width,
+   so the auto-fit shrank it to 12–24 pt. Legible, and clearly wrong.
+2. `card_bignumber` had no fit on `label` or `unit` at all — `card_list`'s title
+   had been fixed for exactly this and the big-number card had not — so a label
+   that overflowed was simply sliced at both ends.
+3. A `list` card's left key had no column bound and drew through its own value.
+
+Fixed in the renderer, so the next spec cannot hit them; and the spec's own keys
+were shortened so nothing has to shrink in the first place.

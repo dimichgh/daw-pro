@@ -134,12 +134,16 @@ def card_statement(d, c, A, B):
 
 def card_bignumber(d, c, A, B):
     y = c.get("y") or (470 if H > W else 210)
-    centre(d, c["label"], fnt(MONO, 40), y, B, track=8)
+    # ⚠ fit_tracked, NOT fnt: a tracked label wider than the frame renders as a
+    # valid PNG with its first and last letters sliced off. "THE SIREN, MEASURED"
+    # shipped once as "E SIREN, MEASUR" -- the list title had this fix and the
+    # big-number label did not.
+    centre(d, c["label"], fit_tracked(d, c["label"], MONO, 40, 8), y, B, track=8)
     f = fit(d, c["value"], SF, c.get("size", 220), maxw=980)
     centre(d, c["value"], f, y + 100, A)
     y2 = y + 100 + c.get("size", 220) * 1.14
     if c.get("unit"):
-        centre(d, c["unit"], fnt(MONO, 46), y2, WHITE, track=10)
+        centre(d, c["unit"], fit_tracked(d, c["unit"], MONO, 46, 10), y2, WHITE, track=10)
         y2 += 90
     d.line([(W * 0.20, y2 + 30), (W * 0.80, y2 + 30)], fill=A, width=3)
     y2 += 90
@@ -165,11 +169,20 @@ def card_list(d, c, A, B):
         if isinstance(it, list) and len(it) > 1 and it[1]:
             while rsize > 20 and d.textlength(str(it[1]), font=fnt(SF, rsize)) > W * 0.52:
                 rsize -= 2
+    # The left column is a COLUMN: it stops at 0.39 where the right one starts.
+    # Without this, a long key silently draws THROUGH its own value -- "the
+    # fundamental never moved" shipped once overlapping "44 Hz in all three".
+    # One size for every key, same reasoning as the right column above.
+    lsize, lmax = 46, W * 0.21
+    for it in rows:
+        left = str(it[0] if isinstance(it, list) else it)
+        while lsize > 22 and d.textlength(left, font=fnt(MONO, lsize)) > lmax:
+            lsize -= 2
     y = top + 130
     for item in rows:
         left, right = (item + ["", ""])[:2] if isinstance(item, list) else (item, "")
         hot = isinstance(item, list) and len(item) > 2 and item[2] == "hot"
-        d.text((W * 0.16, y), str(left), font=fnt(MONO, 46), fill=A if hot else WHITE)
+        d.text((W * 0.16, y), str(left), font=fnt(MONO, lsize), fill=A if hot else WHITE)
         if right:
             d.text((W * 0.39, y + 6), str(right), font=fnt(SF, rsize), fill=A if hot else DIM)
         y += step

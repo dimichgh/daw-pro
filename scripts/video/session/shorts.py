@@ -14,7 +14,10 @@ S, A = f"{HERE}/shots", f"{HERE}/audio"
 SIR, HRT, THU, SAT, RN, VOW = (M["siren"], M["heart"], M["thunder"],
                                M["saturator"], M["rain"], M["vowels"])
 
-def sp(t): return "   ".join(t.upper())
+def sp(t): return t.upper()   # ⚠ NO literal spaces: card_bignumber and
+# card_list already letter-space with `track=`. Adding "   ".join() on top
+# TRIPLES the width, and every label then auto-shrank to 12-24pt to fit --
+# legible, but a third of the intended size, which reads as a mistake.
 def sh(name, zoom=None):
     return {"path": f"{S}/{name}.png", "zoom": zoom} if zoom else f"{S}/{name}.png"
 
@@ -82,7 +85,7 @@ SHORTS = [
               items=[["0 dB", f'{SAT["harmonics_pct_at_0db"]:.3f} % above the fundamental'],
                      ["14 dB", f'{SAT["harmonics_pct_at_14db"]:.3f} %'],
                      ["32 dB", f'{SAT["harmonics_pct_at_32db"]:.3f} %', "hot"],
-                     ["the note never moved", "44 Hz in all three"]]),
+                     ["the note", "44 Hz in all three"]]),
        ],
        stages=[
          dict(id="01-ab", shots=[0], cut=3.2, loop=f"{A}/bass808.wav",
@@ -111,7 +114,7 @@ SHORTS = [
               items=[["ee", f'{VOW["ee"][0]} / {VOW["ee"][1]} Hz'],
                      ["ah", f'{VOW["ah"][0]} / {VOW["ah"][1]} Hz', "hot"],
                      ["oo", f'{VOW["oo"][0]} / {VOW["oo"][1]} Hz'],
-                     ["F1 and F2", "that is the entire trick"]]),
+                     ["F1 + F2", "that is the entire trick"]]),
        ],
        stages=[
          dict(id="01-hear", shots=[0], cut=3.4, loop=f"{A}/vowel.wav",
@@ -137,9 +140,9 @@ SHORTS = [
                      f'one pure tone: {RN["flatness_single_sine"]:.4f}',
                      "this is my best attempt at rain"]),
          dict(type="list", title=sp("the honest version"), step=76,
-              items=[["attempt 1", f'{RN["flatness_attempt1"]}'],
-                     ["attempt 2", f'{RN["flatness_attempt2"]}', "hot"],
-                     [f'{RN["improvement_factor"]}x better',
+              items=[["first", f'{RN["flatness_attempt1"]}'],
+                     ["second", f'{RN["flatness_attempt2"]}', "hot"],
+                     ["157x",
                       f'and still {RN["short_of_noise_factor"]}x short of noise']]),
        ],
        stages=[
@@ -166,11 +169,11 @@ SHORTS = [
          dict(type="statement", size=74, lines=["THUNDER", "IS NOT A PITCH"],
               sub=["it is a spectrum collapsing"]),
          dict(type="list", title=sp("centroid over eight seconds"), step=76,
-              items=[["automation ON",
+              items=[["filter ON",
                       f'{THU["centroid_lane_on_start_hz"]} → {THU["centroid_lane_on_end_hz"]} Hz', "hot"],
-                     ["automation OFF",
+                     ["filter OFF",
                       f'{THU["centroid_lane_off_start_hz"]} → {THU["centroid_lane_off_end_hz"]} Hz'],
-                     ["the second line", "is the control that proves the first"]]),
+                     ["control", "proves the first line is the filter"]]),
        ],
        stages=[
          dict(id="01-hear", shots=[0], cut=3.2, loop=f"{A}/thunder2.wav",

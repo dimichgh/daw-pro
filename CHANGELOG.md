@@ -45,7 +45,24 @@ height once at configure time, so an animated zoom has to move the origin at a
 fixed size. `assemble.py`'s `_crop_expr` does that, and a comma inside `min()`
 ends `crop`'s argument list — reported, unhelpfully, as a missing filter.
 
-**Shipped:** the 406.7 s film and six Shorts, each with a publish sidecar
+⭐⭐ **No gate in this rig knows WHERE a zoom lands.** The film shipped once with
+the siren chapter's zoom framing empty timeline below the synth panel, and all
+eight verify gates passed — "distinct frames" is content with two different views
+of nothing. Rendering each zoom rect as a still and looking at it took three
+minutes and caught that plus a saturator panel reading 30.0 dB under a narration
+that says "thirty two decibels". The panel was re-shot at the measured figure;
+the sentence was right.
+
+⭐⭐ **Three card-layout bugs, all found by reading one frame.** `sp()` inserted
+three literal spaces between letters while `card_bignumber` and `card_list`
+already letter-space with `track=`, so every label was rendered at triple width
+and auto-shrank to 12-24 pt to fit — legible, and a third of its intended size.
+`card_bignumber` had no fit at all on its label and unit, so "THE SIREN,
+MEASURED" shipped as "E SIREN, MEASUR". And a `list` card's left key had no
+column bound, so "the fundamental never moved" drew straight through its own
+value. The renderer now fits all three; the specs no longer need it to.
+
+**Shipped:** the 405 s film and six Shorts, each with a publish sidecar
 carrying `containsSyntheticMedia: true`. The generated video is deliberately not
 committed; `.gitignore` now covers the media formats, `shots/`, `vo/` and
 `segments/` (601 MB of intermediates in this wave alone), with the reference
