@@ -31,6 +31,8 @@ rain, thunder, a siren and a singing vowel all have to come out of those four.
 | `loops.mjs` | the DJ chapter: one 4-bar loop rendered five times with layers arriving |
 | `fixvoice.mjs` | raises the vocal hook and re-renders (it was arriving at +0.5 dB) |
 | `capture.mjs` | photographs the session — arrange, synth editors, effect editors, mixer |
+| `satshot.mjs` | re-shoots the saturator panel at the **32 dB the narration names** (`fx-saturator-32.png`) |
+| `subshot.mjs` | shoots the 808's poly synth on SINE (`synth-808-sine.png`) — the A/B's honest "before" |
 | `spec.py` / `shorts.py` | emit the film and Shorts specs for `shortsmith.py` |
 | `MEASUREMENTS.json` | every number the narration says, written by the measuring steps |
 
@@ -47,6 +49,14 @@ python3 spec.py && python3 shorts.py
 ```
 
 `build.mjs` refuses to run against port 17600 outright.
+
+`satshot.mjs` and `subshot.mjs` each shoot ONE panel and are run the same way,
+with one addition — give them an isolated profile so no recovery sheet can draw
+itself across the panel:
+
+```sh
+DAWPRO_PROFILE_ROOT=$PWD/out/profile DAW_CONTROL_PORT=17695 node subshot.mjs
+```
 
 ## Things that cost a build each
 
@@ -79,3 +89,8 @@ python3 spec.py && python3 shorts.py
 - **A stage's words-per-minute is the cheapest lie detector in the rig.** Every
   take in this film sits between 226 and 266 wpm. Anything far outside that is
   the wrong audio or a truncated one, and no other gate will say so.
+- **Verify a shipped video by TRANSCRIBING IT, not by trusting the cache.**
+  `_cache.json` records who last *recorded* a take, which is not the same as who
+  last *used* one — `--skip-narrate` never writes to it. The six Shorts here
+  were cleared by extracting their audio and running `shortsmith.transcribe()`
+  over it: all six say their own script, every `factCheck` hits.
