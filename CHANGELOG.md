@@ -1,5 +1,59 @@
 # Changelog
 
+## 2026-09-04 — The second cut: chapters, controls that move, and a synth trying to talk
+
+The session film re-cut after the user watched it. Every note they gave was
+about something no gate in this rig can measure, which is the through-line.
+
+⭐⭐ **Panels are now SEQUENCES, not stills.** "Showing controls does not make
+sense unless you show modifying anything there" — correct, and a still cannot be
+told apart from a control that is doing something. `sweepshot.mjs` drives a
+parameter through its range and photographs each step, so the film shows the
+four oscillator buttons lighting in turn, the thunder filter closing 16 kHz →
+70 Hz with the number legible in every frame, the saturator at the three drive
+figures the narration quotes, and the two EQ peaks walking ee → ah → oo.
+
+⭐⭐ **Ten numbered chapter cards with spoken prologs.** The first cut ran the
+heartbeat straight into thunder with no break of any kind. An 808 is also now
+explained — a drum machine from 1980 — *before* the film calls it the most
+recognisable bass in music, and there is a TURN IT UP warning before the two
+chapters that live below 60 Hz, where a laptop speaker reproduces nothing.
+
+⭐⭐ **A new chapter: asking the synth to say "Hi there".** Two EQ peaks on
+automation lanes, walked along a vowel path. Measured: 730 Hz leads the first
+vowel (+29.1 dB over the window mean), 2290 Hz takes over through the glide,
+1840 Hz leads the second word. A local speech recogniser heard **"I am…"** —
+with a control transcription proving the recogniser worked. The vowels landed
+and every consonant did not, because h, th and r are noise and this synth has
+none. Second honest failure in the film, and it earns its place like the rain.
+
+⭐ **`debug.captureUI` measures 3.5 fps, and it is 3.5 at every `scale`** (277 /
+282 / 284 ms per frame at 2 / 1.5 / 1). The cost is the window render, not the
+pixels. That is the ceiling on motion in these films; screen recording is not a
+way around it (TCC permission this process cannot grant, no on-screen window,
+and it would capture the user's whole desktop).
+
+⚠️ **`debug.selectClip` does not exist — but the capability does**, as a
+parameter of `debug.captureUI`. The first cut shipped with no shot of the piano
+roll because `capture.mjs` called a command name that never existed and printed
+"skipped" into a log nobody read. `pianoshot.mjs` now shoots it, and the crop was
+re-framed after the first rect landed on the empty register ABOVE the notes —
+caught, again, only by looking at it.
+
+⭐ **`DAWPRO_PROFILE_ROOT` is how you photograph the app safely**: it moves
+autosave, recovery and settings to a scratch directory, so no "Restore unsaved
+work?" sheet can draw itself across the panel you are shooting. Discarding that
+snapshot is not an option when its owner cannot be told apart from the user's.
+
+**M35 seeded and designed, not built** (`docs/ROADMAP.md`, design in
+`docs/ARCHITECTURE.md` §Key future decisions): `view.capture`, `view.selectClip`,
+`view.panelLayout`, `view.openEditor` — promoting the capture and navigation
+seams to the production wire + MCP surface, because an agent that can mutate the
+project but cannot look at it is an agent that cannot check its own work.
+
+**Shipped:** the film at 507.5 s, 23 stages, all eight gates green (content
+separation 35.8x, the best this rig has measured).
+
 ## 2026-09-04 — A whole track from four waveforms, and the chapter that failed
 
 A session film and six Shorts, built by driving DAW Pro over the control

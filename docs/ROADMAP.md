@@ -3101,3 +3101,32 @@ first log. Raise its priority accordingly.
 - ~~M8 (glass-b) GPT Image asset set~~ **RESOLVED 2026-07-19/20 — this entry is STALE and M8 is FULLY COMPLETE.** Re-measured 2026-07-27 when the user offered the `.env` key to unblock it: the key arrived 2026-07-19, the **app icon landed the same day**, and the **surface-scoping eval COMPLETED 2026-07-20** (`docs/research/glass-b-asset-scoping.md`, 10,562 B on disk). Every M8 checkbox including `(glass-b)` and the `(glass-d)` hero promotion filed from that eval is `[x]`. **Nothing to do; no key needed; do not re-run generation.** Original entry — noted 2026-07-10: GPT Image generation requires `OPENAI_API_KEY` (absent; same key gap as the Lyrics/copilot gates). The design-compliance half proceeded as (glass-a). To unblock: provide the key, then scope which surfaces actually want generated assets (the Canvas-drawn cockpit may need none — evaluate before generating).
 - ~~M8 (ex-c) explain→copilot live hand-off gate~~ **RESOLVED 2026-07-11**: gate passed 7/7 (see the ex-c checkbox for evidence) — coherent punch-recording conversation through the rail, zero edits, zero key material. Original entry — noted 2026-07-10 at ex-a close-out: the "Ask the Copilot →" hand-off itself is key-independent (it only prefills the rail's input draft — verified live), but the (ex-c) gate — one real "explain this control" conversation through the rail — needs the same `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` as rail-e. To unblock: provide a key, toggle EXPLAIN, hover a control, press "Ask the Copilot →", send the prefilled draft, and verify the rail answers coherently about that control without driving unintended edits; then check (ex-c).
 - **M9 (pkg-b/c/e) Developer ID signing, notarization, auto-update** — noted 2026-07-10 at the packaging split: `security find-identity -v -p codesigning` returns 0 valid identities and there is no `notarytool` keychain profile, so Developer ID signing (pkg-b), notarization/stapling (pkg-c), and auto-update distribution (pkg-e, needs pkg-b plus a hosting URL) cannot proceed on this machine. Ad-hoc-signed bundle (pkg-a) + DMG (pkg-d) proceed now — sufficient for on-machine beta; distribution to OTHER machines hits Gatekeeper (right-click-open or `xattr -dr com.apple.quarantine`, documented in pkg-d). To unblock: enroll an Apple Developer account, install a "Developer ID Application" certificate, `xcrun notarytool store-credentials`; then pkg-b/c are mechanical re-runs of the same scripts with a real identity.
+
+## M35 — `view.*`: let an agent SEE the app (seeded 2026-09-04 by the user)
+
+Seeded while filming a session video. The user asked why the useful capture and
+navigation verbs live only in the `debug.*` tier: *"if this is useful in
+production, why not expose it in prod tools set … to end user who use AI to do
+similar things"*. They approved building it, after the video ships.
+
+**The gap, measured.** An agent over MCP can mutate the project but cannot look
+at it. It can add a track; it cannot screenshot the app, open the piano roll on
+a clip, frame what it wants to see, or open the panel it just changed. The four
+capabilities already work as app-tier `debug.*` seams that are deliberately off
+`CommandRouter.allCommands` and off MCP.
+
+**Design is settled** — `docs/ARCHITECTURE.md` §"Key future decisions", first
+entry: a typed app-layer seam (`ViewUISurface.swift`), copying the shipped
+`PluginUIControlling` / `EditPasteControlling` pattern, so no AppKit enters
+`DAWControl`. It names the schemas, the headless contract, the exact count pins
+that move (211→215 Swift at 16 sites, 216→220 MCP), where in `allCommands` the
+block must be inserted (after `plugin.listOpenUIs`, NOT the tail — 51
+end-relative assertions), and the build order.
+
+- [ ] **m35-a** — `ViewUISurface.swift` + `viewUI` on the router + `AppModel` install. Route: `swift-app-engineer`
+- [ ] **m35-b** — `view.capture` (+ all four `allCommands` entries and the count/doc pins, once). Route: `swift-app-engineer` + `mcp-integration-engineer`
+- [ ] **m35-c** — `view.selectClip`, with the honest `reason` enum (an audio clip selects but opens nothing). Route: `swift-app-engineer`
+- [ ] **m35-d** — `view.panelLayout` + the DESIGN-LANGUAGE.md amendment that narrows the non-invokable-layout rule to two named exceptions. Route: `swift-app-engineer`
+- [ ] **m35-e** — `view.openEditor` and its dispatch table, including AU delegation to the plugin seam. Route: `swift-app-engineer`
+- [ ] **m35-f** — staging probe (`scripts/gates/m35-view-surface-probe.mjs`), full-suite run, baseline re-measure. Route: `qa-test-engineer`
+- [ ] **m35-g** — tool grants in `claude-plugin/agents/*.md`, regenerate the bundle, stdio-verify `view_capture` is in it, then tell the user a `/plugin update` is due. Route: `mcp-integration-engineer`

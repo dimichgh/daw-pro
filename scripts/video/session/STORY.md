@@ -154,3 +154,68 @@ Two fixes:
 The way it was caught is the reusable part: **the eleven seconds were the only
 symptom**, and the way to read them was words-per-minute per stage. Eleven of
 twelve stages sat between 226 and 266 wpm. `01-hook` read **831**.
+
+
+## The second cut, and what a viewer actually noticed
+
+The film shipped, the user watched it, and every note back was about something
+no gate in this rig can measure. Worth recording verbatim, because they are all
+the same class:
+
+1. **"talking about heart beat and then switching to thunder without saying
+   something prolog or visual title"** — chapters cut into each other with no
+   break at all. Fixed: ten numbered title cards, each with a spoken prolog.
+2. **"showing controls does not make sense unless you show modifying anything
+   there"** — dead right. A still of a synth panel cannot be told apart from a
+   panel that is doing something. Every panel in the film is now a SEQUENCE of
+   stills of the same crop with the value stepping: four waveform buttons
+   lighting in turn, the thunder filter closing 16 kHz → 70, the saturator at
+   0 / 14 / 32 dB, the two EQ peaks walking ee → ah → oo.
+3. **"the most recognizable base in modern sound music… again no intro of what
+   it means"** — the film used the word "808" for four minutes without ever
+   saying what one is. Fixed in that chapter's prolog.
+4. **"for playing some of the very low volume sounds, you may need to warn
+   watcher to increase the volume"** — the heartbeat is 94 % below 60 Hz and a
+   laptop plays none of it. There is now a TURN IT UP card and a spoken warning
+   before it.
+5. **"you need to show that you did the work in DAW, not just saying it"** —
+   the reason for all of the above.
+
+## What the app can and cannot be filmed doing
+
+- **`debug.captureUI` runs at 3.5 frames per second, and it is the same 3.5 at
+  every capture `scale`** (measured: 277 / 282 / 284 ms per frame at scale 2 /
+  1.5 / 1). The cost is the window render, not the pixels — so shrinking the
+  image buys nothing. That is the ceiling on motion in these films.
+- **Screen recording is not the way around it.** It needs a TCC permission this
+  process cannot grant itself, the staging window is not on screen at all
+  (`CGWindowList` lists no window for the process — the capture path renders the
+  window's layer directly), and it would record the user's whole desktop.
+- ⭐ **`debug.selectClip` DOES NOT EXIST, but the capability does** — as a
+  PARAMETER of `debug.captureUI` (`{selectClip: <clipId>}`). The film went out
+  once without a single shot of the piano roll because `capture.mjs` called a
+  command name that never existed, and the wrapper printed "skipped" into a log
+  nobody read. Verified with the `DAW_DEBUG_OPEN_PIANOROLL` dev flag OFF.
+- ⭐ **`DAWPRO_PROFILE_ROOT` is the shot-taking flag that matters**: it moves
+  autosave/recovery/settings to a scratch directory, so no "Restore unsaved
+  work?" sheet can draw itself across the panel being photographed.
+
+## "Hi there", and what a speech recogniser heard
+
+The vowel chapter proves a vowel is two numbers. The words chapter asks the
+obvious next question: a word should then be those two numbers MOVING. So the
+two EQ peaks were put on automation lanes and walked along a vowel path —
+ah → ee for "Hi", eh → er for "there" — over two held saw notes.
+
+Measured, in 100 ms windows, as dB above the window's own mean level: 730 Hz
+leads at the start (**+29.1**), 2290 Hz takes over through the glide
+(**+19.0** at 0.90 s), 1840 Hz leads the second word (**+26.6** at 1.40 s). The
+path moved.
+
+Then the only honest test available: feed it to the same local speech
+recogniser that gates this narration. **It heard "I am…"** — with a control
+transcription of a known-good take proving the recogniser was working.
+
+That is the right answer for the wrong-sounding reason, and it is why the
+chapter is in the film. The vowels landed. Every consonant did not: /h/, /ð/
+and /r/ are noise, and noise is the one thing this instrument cannot make.

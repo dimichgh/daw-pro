@@ -32,6 +32,9 @@ rain, thunder, a siren and a singing vowel all have to come out of those four.
 | `fixvoice.mjs` | raises the vocal hook and re-renders (it was arriving at +0.5 dB) |
 | `capture.mjs` | photographs the session — arrange, synth editors, effect editors, mixer |
 | `satshot.mjs` | re-shoots the saturator panel at the **32 dB the narration names** (`fx-saturator-32.png`) |
+| `sweepshot.mjs` | a control BEING MOVED: waveform buttons, the filter closing, drive 0/14/32, the vowel peaks walking |
+| `pianoshot.mjs` | the piano roll, via `debug.captureUI {selectClip}` |
+| `hithere.mjs` | the words chapter: two EQ peaks on automation lanes, walked along a vowel path |
 | `subshot.mjs` | shoots the 808's poly synth on SINE (`synth-808-sine.png`) — the A/B's honest "before" |
 | `spec.py` / `shorts.py` | emit the film and Shorts specs for `shortsmith.py` |
 | `MEASUREMENTS.json` | every number the narration says, written by the measuring steps |
@@ -94,3 +97,16 @@ DAWPRO_PROFILE_ROOT=$PWD/out/profile DAW_CONTROL_PORT=17695 node subshot.mjs
   last *used* one — `--skip-narrate` never writes to it. The six Shorts here
   were cleared by extracting their audio and running `shortsmith.transcribe()`
   over it: all six say their own script, every `factCheck` hits.
+- **A panel on screen must be a panel DOING something.** `sweepshot.mjs` steps a
+  parameter and photographs each value; `shortsmith` cycles a stage's shots at
+  its `cut`, so N stills at a short cut IS the animation, and every frame is the
+  real app with the real number on it.
+- **`debug.captureUI` runs at 3.5 fps and `scale` does not change that** (277 /
+  282 / 284 ms per frame at scale 2 / 1.5 / 1 — the cost is the window render).
+  That is the ceiling on motion in these films.
+- **`debug.selectClip` does not exist; `debug.captureUI {selectClip}` does.**
+  Calling the non-existent name is how the first cut shipped with no shot of the
+  piano roll at all — the wrapper printed "skipped" into a log nobody read.
+- **Shoot with `DAWPRO_PROFILE_ROOT` set.** It moves autosave/recovery/settings
+  to a scratch dir, so no "Restore unsaved work?" sheet can draw itself across
+  the panel you are photographing.

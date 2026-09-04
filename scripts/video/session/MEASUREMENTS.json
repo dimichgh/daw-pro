@@ -30,7 +30,7 @@
     "centroid_lane_off_start_hz": 679,
     "centroid_lane_off_end_hz": 357,
     "max_sample_difference": 0.2019,
-    "_control": "the lane-off render is the control: identical audio would have meant the automation never applied. Take 1's flat sweep was a DESIGN failure \u2014 a low cluster has no high content for a lowpass to remove \u2014 not a dead lane."
+    "_control": "the lane-off render is the control: identical audio would have meant the automation never applied. Take 1's flat sweep was a DESIGN failure — a low cluster has no high content for a lowpass to remove — not a dead lane."
   },
   "saturator": {
     "harmonics_pct_at_0db": 0.0,
@@ -96,5 +96,43 @@
     "sub_db_20_120": 4.6,
     "voice_db_700_2k": 8.1,
     "_note": "each layer measured in the band it occupies; RMS alone showed the hats arriving at 0.0 dB, which is the wrong instrument for a hi-hat."
+  },
+  "words": {
+    "asked_for": "Hi there",
+    "heard_by_stt": "I am...",
+    "_method": "the rendered file, loudness-normalised to -18 LUFS, through the same local Whisper the narration gate uses; a control transcription of a known-good take proves the recogniser was working.",
+    "formant_path_hz": [
+      [
+        0.0,
+        730,
+        1090
+      ],
+      [
+        1.2,
+        300,
+        2200
+      ],
+      [
+        1.6,
+        270,
+        2290
+      ],
+      [
+        2.0,
+        530,
+        1840
+      ],
+      [
+        3.2,
+        490,
+        1350
+      ]
+    ],
+    "measured_peak_db_over_window_mean": {
+      "0.00s_730Hz": 29.1,
+      "0.90s_2290Hz": 19.0,
+      "1.40s_1840Hz": 26.6
+    },
+    "_why_it_is_not_words": "h, th and r are noise and near-noise. This synth has no noise oscillator, so every consonant in the phrase is missing by construction — what is left is the vowel path, which is why a recogniser hears vowels and guesses at words."
   }
 }

@@ -297,6 +297,42 @@ referenced by `.claude/agents/daw-architect.md` and by every design doc under
 `docs/research/`; it long ago stopped holding only un-made decisions, and the parenthetical
 "not yet made" it used to carry contradicted almost every entry below.)
 
+- **Agent-facing VIEW surface — `view.*` (SETTLED 2026-09-04 by design — NOT YET SHIPPED).**
+Four capabilities that today exist only as app-tier `debug.*` staging seams become PRODUCTION
+commands on `allCommands` + MCP: `view.capture` (screenshot the app), `view.selectClip` (focus a
+clip / open the piano roll on it), `view.panelLayout` (workspace + editor-maximize), and
+`view.openEditor` (open an instrument or effect editor). The gap they close is measured: an agent
+driving DAW Pro over MCP can MUTATE the project but cannot LOOK at it, so everything it knows
+about the UI it infers. **The handlers must live in `DAWApp` (AppKit windows, SwiftUI view
+state) while the commands live on the headless `CommandRouter`, and the mechanism that makes that
+legal is the typed app-layer seam — `Sources/DAWControl/ViewUISurface.swift`, a Foundation-only
+`@MainActor protocol ViewUIControlling` + result structs, installed by `AppModel` at startup
+onto `public weak var viewUI`.** This is the `PluginUIControlling` (`plugin.*`, M3 vi-b) and
+`EditPasteControlling` (`edit.pasteClips`, m26-k) precedent, verbatim. **Rejected — and the
+rejection is enforced by two independent gates, not by taste:** listing the verbs on
+`allCommands` while letting the router's `default` case serve them through the existing untyped
+`appCommandHandler` hook. (a) `scripts/gates/doc-count-drift.mjs` derives the command total a
+SECOND way from every `rejectUnknownKeys([…], verb: "…")` call site and hard-fails (exit 2) on a
+non-empty symmetric difference with the `allCommands` array — a `default`-served verb has no such
+site; `ZeroParamVerbRejectionTests.everyCommandReachesARejectUnknownKeysCallSite` asserts the same
+invariant in Swift. (b) Headless, `default` throws **"unknown command 'view.capture' — known: …
+view.capture …"**, an error that contradicts itself. **Also rejected:** moving the capture code
+down into `DAWControl` (it needs `NSWindow`/`ImageRenderer`; DAWControl depends on DAWCore +
+AIServices only and must stay headless-testable). **Headless contract — every one of the four
+fails LOUDLY rather than returning a success that means nothing:** `guard let viewUI else { throw
+ControlError("view.<verb> needs the app UI — this control session is headless …") }`, and
+`view.capture` deliberately does NOT inherit `debug.captureUI`'s `ImageRenderer` fallback (a
+1280×800 PNG whose every ScrollView is blank is exactly this tree's characteristic failure mode).
+**`debug.*` is kept byte-for-byte** — additive-only is a hard rule — and the two tiers share one
+implementation inside `AppModel`, with `debug.captureUI` keeping its fallback, its `target:"plugin"`
+mode and its permissive unknown-key behaviour. **Consequence recorded here because it amends a
+written rule:** `docs/DESIGN-LANGUAGE.md` records adjustable window layout as a documented
+NON-INVOKABLE preference with no wire command, and `setPanelLayout`'s comment block cites it. That
+rule is narrowed, not repealed — `view.panelLayout` exposes exactly `workspace` and
+`editorMaximized`, the two controls that determine WHAT A CAPTURE CAN SEE; sidebar width, row
+heights, zoom, minimap, waveform scaling and audition remain debug-tier chrome. Full plan,
+schemas, dispatch table and test-pin list: the m35 view-surface design brief.
+
 - **Sampler zone sample-buffer ownership (m32-a, SETTLED 2026-08-29 by design — NOT YET SHIPPED;
 full reasoning in `docs/research/design-m32-sample-flip.md` §3).** Zone audio loads **once per
 resolved source path per instrument-init pass**. `SamplerInstrument.ownedChannelBuffers` is the

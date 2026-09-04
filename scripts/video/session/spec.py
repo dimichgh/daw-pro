@@ -17,9 +17,9 @@ M = json.load(open(f"{HERE}/MEASUREMENTS.json"))
 S, A = f"{HERE}/shots", f"{HERE}/audio"
 
 W = M["waveforms"]
-SIR, HRT, THU, SAT, RN, VOW, TRK, DJ = (M["siren"], M["heart"], M["thunder"],
-                                        M["saturator"], M["rain"], M["vowels"],
-                                        M["track"], M["dj"])
+SIR, HRT, THU, SAT, RN, VOW, TRK, DJ, WRD = (
+    M["siren"], M["heart"], M["thunder"], M["saturator"], M["rain"],
+    M["vowels"], M["track"], M["dj"], M["words"])
 
 # ------------------------------------------------------------------- cards
 # ⚠ The card schema is `type` (not `kind`), and each template has its OWN field
@@ -90,7 +90,42 @@ cards = [
               ["pass 3", f'+ bass      120 Hz-2 kHz  {DJ["bass_db_120_2k"]:+.1f} dB'],
               ["pass 4", f'+ 808/stab  20-120 Hz  {DJ["sub_db_20_120"]:+.1f} dB', "hot"],
               ["pass 5", f'+ voice     700 Hz-2 kHz  {DJ["voice_db_700_2k"]:+.1f} dB']]),
+  dict(type="statement", size=78, y=300,                                 # 12
+       lines=["TURN IT UP", "FOR THIS PART"],
+       sub=["the next two sounds live below 60 hertz",
+            "a laptop or a phone cannot reproduce them at all"],
+       punch="HEADPHONES IF YOU HAVE THEM", punchSize=50),
+  dict(type="list", title=sp("i asked it to say hi there"), step=76,     # 13
+       items=[["asked for", f'"{WRD["asked_for"]}"'],
+              ["heard back", f'"{WRD["heard_by_stt"]}"', "hot"],
+              ["what landed", "the vowels, and the glide between them"],
+              ["what did not", "h, th and r. Every one of them is noise."]]),
 ]
+
+# ------------------------------------------------------------ chapter cards
+# ⚠ WHY THESE EXIST. The first cut ran the heartbeat straight into thunder with
+# no break of any kind, and the note back was exactly right: a chapter that
+# starts with no title and no prolog reads as the previous chapter still going.
+# Numbering is honest here — this IS a build order, each chapter using what the
+# one before it established.
+CHAPTERS = [
+  ("siren",   "THE SIREN",         "one note that never changes pitch"),
+  ("heart",   "THE HEARTBEAT",     "a sine wave you feel more than hear"),
+  ("thunder", "THUNDER",           "not a note. A spectrum collapsing."),
+  ("bass",    "THE 808",           "a sine wave somebody deliberately ruined"),
+  ("rain",    "RAIN",              "the chapter that failed"),
+  ("vowel",   "THE VOWEL",         "a voice made out of two numbers"),
+  ("words",   "THE WORDS",         "and what happens when you ask for consonants"),
+  ("track",   "THE TRACK",         "eight of these, playing at once"),
+  ("dj",      "THE DJ MOVE",       "one loop, five passes, nothing new"),
+  ("honest",  "WHAT I CANNOT SAY", "the part no measurement reaches"),
+]
+CHI = {}
+for _i, (_key, _title, _punch) in enumerate(CHAPTERS, start=1):
+    CHI[_key] = len(cards)
+    cards.append(dict(type="statement", size=86, y=330, lines=[_title],
+                      sub=[f"chapter {_i} of {len(CHAPTERS)}"],
+                      punch=_punch, punchSize=50))
 
 # ------------------------------------------------------------------ stages
 def sh(name, zoom=None, to=None):
@@ -111,6 +146,32 @@ HEADS2 = [0.02, 0.135, 0.42, 0.55]      # ... drifting down the list
 TIMEL  = [0.13, 0.055, 0.60, 0.42]      # the timeline, left half
 TIMEL2 = [0.38, 0.055, 0.60, 0.42]      # ... panning right across the arrangement
 
+# Panel crops, every one of them CONFIRMED BY RENDERING IT AND LOOKING. No gate
+# in this rig knows where a crop lands, so a rect that has not been looked at is
+# a rect that has not been checked.
+PANEL = [0.22, 0.26, 0.563, 0.50]        # a synth editor overlay, whole
+SATP  = [0.2745, 0.316, 0.45, 0.40]      # the saturator editor
+EQP   = [0.20, 0.18, 0.62, 0.58]         # the EQ editor, curve visible
+ROLL  = [0.045, 0.53, 0.405, 0.36]       # the piano roll: the NOTES, not the
+# empty register above them. The first rect framed the roll's top half, where
+# a bass part has nothing — a shot of an empty grid, and the eight gates passed
+# it exactly as they passed the siren zoom. Rendered and looked at.
+
+def sweep(prefix, values, box):
+    """A control BEING MOVED: the same crop, the same panel, the value stepping.
+
+    ⚠ A still of a panel tells a viewer nothing — they cannot tell a control
+    they are being shown from a control that is doing something. shortsmith
+    cycles a stage's shots at its `cut`, so a short cut over N stills IS the
+    animation, and every frame is the real app with the real value on it.
+    """
+    return [sh(f"{prefix}{v}", box) for v in values]
+
+def chapter(key, narration, extra=(), cut=3.6):
+    """A titled break between chapters, with a spoken prolog over it."""
+    return dict(id=f"ch-{key}", shots=[CHI[key], *extra], cut=cut,
+                narration=narration)
+
 stages = [
   # ---------------------------------------------------------------- 1. hook
   dict(id="01-hook", shots=[0], cut=4.0, loop=f"{A}/cold-open.wav",
@@ -121,7 +182,11 @@ stages = [
          "model was used. Every one of them is a saw, a square, a triangle or a "
          "sine wave — the only four shapes this synthesiser can make.")),
 
-  dict(id="02-claim", shots=[1], cut=5.0,
+  # The constraint, SHOWN: four stills of the same panel with a different
+  # oscillator lit in each. This used to be one frozen screenshot.
+  dict(id="02-claim",
+       shots=[*sweep("sweep-wave-", ["saw", "square", "triangle", "sine"], PANEL), 1],
+       cut=2.6,
        # ⚠ "sine" and "sign" are homophones and the transcriber writes the
        # WRONG one. The take was right; the gate was too literal. Same class of
        # bug as the transcriber writing "72" for "seventy two".
@@ -135,15 +200,25 @@ stages = [
          "shapes, a filter, an envelope, and effects that ship with the app.")),
 
   # ------------------------------------------------------- 2. the instrument
-  dict(id="03-instrument", shots=[sh("arrange-full", HEADS, HEADS2)], cut=6.0,
-       brandCheck="DAW Pro",
+  dict(id="03-instrument",
+       shots=[sh("arrange-full", HEADS, HEADS2), sh("pianoroll-bass", ROLL)],
+       cut=5.0, brandCheck="DAW Pro",
+       factCheck=[["one thousand three hundred and twenty nine", "1,329", "1329"]],
        narration=(
          "This is DAW Pro. It is a macOS digital audio workstation, and it was "
-         "written almost entirely by AI. I am not clicking anything: every move "
-         "in this session is a command sent over a local WebSocket, which is "
-         "also why every claim I make is checkable. I can render the audio and "
-         "measure it, and if the measurement disagrees with me, you will see it "
-         "disagree with me.")),
+         "written almost entirely by AI. Everything you see me do here, you can "
+         "do with a mouse — the knobs drag, the curves are drawn in the piano "
+         "roll, the filters have handles. I am not clicking, though: every move "
+         "in this session is a command sent over a local WebSocket. That is the "
+         "actual reason to do this with an agent. Nobody sits down and types "
+         "one thousand three hundred and twenty nine notes by hand — an agent "
+         "writes the whole arrangement in seconds, and then, which matters "
+         "more, it renders the result and measures it. If the measurement "
+         "disagrees with me, you will watch it disagree with me.")),
+
+  chapter("siren",
+    "Chapter one, and we start with a sound that every person watching this "
+    "already knows by heart."),
 
   # ------------------------------------------------------------- 3. the siren
   # ⚠ THIS ZOOM WAS WRONG AND ONLY LOOKING CAUGHT IT. The first coordinates
@@ -162,6 +237,12 @@ stages = [
          "off the rendered file, the sweep is three point nine seven semitones. "
          "That is the entire siren: one note and one curve.")),
 
+  chapter("heart",
+    "Chapter two, and a warning before it. This one lives at the very bottom "
+    "of what a person can hear. On a laptop speaker or a phone you will not "
+    "hear it at all — so turn it up, and put headphones on if you have a pair "
+    "nearby.", extra=[12], cut=4.0),
+
   # --------------------------------------------------------- 4. the heartbeat
   dict(id="05-heart", shots=[3], cut=5.0, loop=f"{A}/heart.wav",
        bedEligible=False, playMax=9.0,
@@ -174,9 +255,17 @@ stages = [
          "feels like pressure in your chest rather than a sound in your ears, "
          "and it is why it disappears completely on a phone speaker.")),
 
+  chapter("thunder",
+    "Chapter three. From a sound you feel in your chest, to a sound you hear "
+    "coming towards you."),
+
   # ------------------------------------------------------------- 5. thunder
-  dict(id="06-thunder", shots=[sh("arrange-drop", [0.16, 0.05, 0.80, 0.45]), 4],
-       cut=5.5, loop=f"{A}/thunder2.wav", bedEligible=False, playMax=9.0,
+  # The filter closing is this chapter's entire claim, so the knob is on screen
+  # doing it: five stills, 16 kHz down to 70, the number legible in each.
+  dict(id="06-thunder",
+       shots=[*sweep("sweep-cutoff-", [16000, 6000, 1800, 480, 70], PANEL),
+              sh("arrange-drop", [0.16, 0.05, 0.80, 0.45]), 4],
+       cut=2.8, loop=f"{A}/thunder2.wav", bedEligible=False, playMax=9.0,
        factCheck=[["six hundred and fifty two", "652"], ["two hundred and twenty", "220"]],
        narration=(
          "Thunder is not a pitch. It is a spectrum collapsing — a bright crack "
@@ -191,14 +280,23 @@ stages = [
          "— the filter was working perfectly, but the cluster was so low that "
          "there was nothing up there for the filter to remove.")),
 
+  chapter("bass",
+    "Chapter four, and let me say what an eight-oh-eight actually is before I "
+    "make any claims about it. It is that deep, round, slightly rude boom "
+    "underneath most hip-hop and pop you have heard in the last decade — the "
+    "note you feel in a car. It is named after a drum machine from nineteen "
+    "eighty, the Roland T R eight-oh-eight, and underneath all of it there is "
+    "nothing but a sine wave.", cut=4.0),
+
   # ------------------------------------------------------------- 6. the 808
   # ⚠ The original capture had the saturator sitting at 30.0 dB while the
   # narration says "thirty two decibels" -- the figure the sweep was actually
   # measured at. A film whose whole claim is that its numbers are measured
   # cannot contradict itself on screen, so the panel was re-shot at 32.0 and
   # the crop confirmed by looking at it.
-  dict(id="07-808", shots=[sh("fx-saturator-32", [0.2745, 0.316, 0.45, 0.40]), 5],
-       cut=5.0, loop=f"{A}/bass808.wav",
+  dict(id="07-808",
+       shots=[*sweep("sweep-drive-", [0, 14, 32], SATP), 5],
+       cut=2.8, loop=f"{A}/bass808.wav",
        ab=dict(before=f"{A}/bass808-clean.wav", seconds=5.0, cycles=2,
                # ⚠ THE "BEFORE" HALF MUST NOT SHOW THE "AFTER" PANEL. This was
                # the saturator at 32.0 dB while the narration says "here is a
@@ -222,6 +320,9 @@ stages = [
          "distorted one sounds bigger on a device that cannot play the note at "
          "all.")),
 
+  chapter("rain",
+    "Chapter five, and this is the one that did not work."),
+
   # ------------------------------------------------------ 7. rain, the failure
   dict(id="08-rain", shots=[6, 9], cut=5.0, loop=f"{A}/rain2.wav",
        bedEligible=False, playMax=8.0,
@@ -240,9 +341,16 @@ stages = [
          "right and it was not enough. So the rain became hi-hats instead, "
          "which is a very old story in this industry.")),
 
+  chapter("vowel",
+    "Chapter six. Four waveforms, a filter and an envelope — can that sing?"),
+
   # --------------------------------------------------------- 8. the vowel
-  dict(id="09-vowel", shots=[sh("fx-voice-eq", [0.20, 0.18, 0.62, 0.58]), 7],
-       cut=5.0, loop=f"{A}/vowel.wav", bedEligible=False, playMax=11.0,
+  # ee, ah, oo — the same EQ, the two peaks in three different places. The
+  # curve itself is the explanation, which is why it is on screen and not
+  # described.
+  dict(id="09-vowel",
+       shots=[*sweep("sweep-vowel-", ["ee", "ah", "oo"], EQP), 7],
+       cut=2.8, loop=f"{A}/vowel.wav", bedEligible=False, playMax=11.0,
        factCheck=[["seven hundred and thirty", "730"], ["vowel"]],
        narration=(
          "This is the one I find genuinely strange. A vowel — the difference "
@@ -257,8 +365,32 @@ stages = [
          "that is actually there, and at that note, there was nothing at that "
          "frequency to lift.")),
 
+  # ------------------------------------------------------------ 7b. the words
+  chapter("words",
+    "Chapter seven. If one vowel is two numbers, then a word ought to be those "
+    "two numbers moving."),
+
+  dict(id="09b-words", shots=[sh("fx-voice-eq", EQP), 13], cut=4.0,
+       loop=f"{A}/hithere.wav", bedEligible=False, playMax=6.0,
+       factCheck=[["consonant"], ["vowel"]],
+       narration=(
+         "So I drew the two peaks as a curve over time and asked the saw wave "
+         "to say hi there. The first word is a diphthong — it starts as ah and "
+         "glides to ee — and that glide is just the two numbers travelling. "
+         "Here is what came out. Then I did the only honest test I could think "
+         "of: I fed it to a speech recogniser, the same one that checks this "
+         "narration. It heard, quote, I am. Which is close, and it is close in "
+         "exactly the way the theory predicts. The vowels landed. Every "
+         "consonant did not — because h, th and r are noise, and noise is the "
+         "one thing this instrument cannot make.")),
+
   # ----------------------------------------------------------- 9. the track
-  dict(id="10-track", shots=[sh("arrange-full", TIMEL, TIMEL2), 8], cut=5.0,
+  chapter("track",
+    "Chapter eight. All of it at once, which is where the arrangement starts."),
+
+  dict(id="10-track",
+       shots=[sh("arrange-full", TIMEL, TIMEL2), sh("pianoroll-bass", ROLL), 8],
+       cut=4.0,
        loop=f"{A}/track-drop.wav", playMax=16.0,
        factCheck=[["one thousand three hundred and twenty nine", "1,329", "1329"],
                   ["one hundred and twenty eight", "128"]],
@@ -270,6 +402,10 @@ stages = [
          "the hook. Eight tracks, sixty four bars, one hundred and twenty eight "
          "beats per minute, one thousand three hundred and twenty nine notes — "
          "and not one sample.")),
+
+  chapter("dj",
+    "Chapter nine. The oldest move in dance music, and it is worth watching "
+    "happen."),
 
   # ------------------------------------------------------- 10b. the DJ chapter
   dict(id="11-loop", shots=[sh("arrange-drop", [0.16, 0.05, 0.80, 0.45]), 11],
@@ -288,6 +424,9 @@ stages = [
          "kilohertz, the bass adds twelve in the middle, the eight-oh-eight "
          "adds nearly five at the bottom. That is what arranging actually is, "
          "underneath the mystique.")),
+
+  chapter("honest",
+    "Chapter ten. What I am not going to claim."),
 
   # ------------------------------------------------------------ 10. the honest
   dict(id="11-honest", shots=[10], cut=5.0, brandCheck="DAW Pro",
