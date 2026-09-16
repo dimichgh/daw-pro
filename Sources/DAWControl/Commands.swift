@@ -231,6 +231,18 @@ public final class CommandRouter {
     /// route then fails with a readable error rather than crashing.
     public weak var editPaste: (any EditPasteControlling)?
 
+    /// Agent-facing VIEW seam (M35) — the typed app-layer surface the four
+    /// `view.*` commands route through, installed by DAWApp (`AppModel` itself;
+    /// see `ViewUISurface.swift`). Weak: `AppModel` is retained by `DAWProApp`'s
+    /// own `@State`, the same non-retaining-router precedent as
+    /// `pluginUI`/`editPaste`/`copilotEngine`.
+    ///
+    /// ⚠️ Nil in a headless control session, and every one of the four then
+    /// FAILS LOUDLY. There is deliberately no `plugin.listOpenUIs`-style
+    /// `{available:false}` honest-empty answer here: "list the windows" has a
+    /// true empty answer, "show me the app" does not.
+    public weak var viewUI: (any ViewUIControlling)?
+
     public static let allCommands: [String] = [
         "transport.play",
         "transport.stop",
@@ -502,6 +514,16 @@ public final class CommandRouter {
         "plugin.openUI",
         "plugin.closeUI",
         "plugin.listOpenUIs",
+        // M35 — the agent-facing VIEW surface. Placed HERE, immediately after
+        // the `plugin.*` block (`view.openEditor` delegates its Audio Unit case
+        // to `plugin.openUI`'s seam, so these are that family's nearest
+        // siblings) and ~70 entries from the END, NOT at the tail: ~51
+        // end-relative assertions across the suite read `dropLast(N)` windows
+        // and suffixes of this array, and a tail append reddens them.
+        "view.capture",
+        "view.selectClip",
+        "view.panelLayout",
+        "view.openEditor",
         "vc.sidecarStatus",
         "vc.sidecarStart",
         "vc.sidecarStop",
@@ -7624,6 +7646,165 @@ public final class CommandRouter {
                 "windows": .array(pluginUI.listOpenUIs().map { pluginUIWindowJSON($0) }),
             ]))
 
+        // ═══ M35 — the agent-facing VIEW surface ════════════════════════════
+        // Four production-tier twins of app-tier `debug.*` staging seams, so an
+        // agent over MCP can LOOK at the app it is mutating instead of inferring
+        // the UI. Handlers live in DAWApp (they need `NSWindow`, SwiftUI view
+        // state); this module holds only the typed seam (`ViewUISurface.swift`)
+        // — DAWControl depends on DAWCore + AIServices and must stay
+        // headless-testable. `debug.*` is untouched, byte-for-byte.
+        //
+        // ⚠️ ORDER INSIDE EVERY CASE: `rejectUnknownKeys` FIRST, `guard let
+        // viewUI` SECOND. A bad key is a caller error whether or not an app is
+        // attached, so the key error must win — and that is also what lets a
+        // headless suite assert the refusal of a debug-tier key with no fake
+        // installed.
+
+        case "view.capture":
+            // Screenshots the app's main window to a PNG (M35 m35-b) — the
+            // production twin of `debug.captureUI`'s window path, sharing ONE
+            // implementation inside AppModel. params: path? (~-expanded;
+            // default an auto-named file under NSTemporaryDirectory()/DAWPro).
+            // Response: {path, width, height (PIXELS), method:"window",
+            // rect:{x,y,width,height} (POINTS), scale (pixels-per-point),
+            // appActive}.
+            //
+            // ⚠️ NO `ImageRenderer` FALLBACK, deliberately (design, ARCHITECTURE
+            // §"Agent-facing VIEW surface"). `debug.captureUI` keeps one for its
+            // headless edge; this tier throws instead, because that path cannot
+            // draw NSScrollView-backed content — the track rows, the timeline
+            // clips and the piano-roll grid all rasterize BLANK — so it returns
+            // a 1280×800 success that means nothing. Also NO `selectClip` param:
+            // `view.selectClip` is that capability's one home here, and it
+            // answers WHY the roll did or did not open, which a capture cannot.
+            try params.rejectUnknownKeys(["path"], verb: "view.capture")
+            guard let viewUI else {
+                throw ControlError(
+                    "view.capture needs the app UI — this control session is headless (no window to "
+                    + "rasterize). Launch DAWApp/DAWPro.app and retry.")
+            }
+            return .success(request.id, viewCaptureJSON(try await viewUI.captureView(
+                path: params["path"]?.stringValue)))
+
+        case "view.selectClip":
+            // Focuses one clip and opens the piano roll on it when the clip and
+            // the workspace both permit (M35 m35-c). params: clipId (required
+            // UUID). Response: {clipId, trackId, clipKind ("midi"|"audio"),
+            // editorOpen, reason, workspace}.
+            //
+            // ⭐ `reason` IS HONEST, WHICH IS THE WHOLE ITEM. An AUDIO clip
+            // SELECTS — and opens no piano roll, because audio has no note
+            // editor — so the reply says `audio-clip-has-no-editor` rather than
+            // reporting a bare success an agent would then photograph and fail
+            // to explain. `workspace-is-not-arrange` is the third case: the roll
+            // mounts in the Arrange workspace, so a MIDI clip selected while the
+            // Mix console is up is focused but not on screen (fix it with
+            // `view.panelLayout {workspace:"arrange"}`).
+            try params.rejectUnknownKeys(["clipId"], verb: "view.selectClip")
+            let viewClipID = try params.requireClipID()
+            guard let viewUI else {
+                throw ControlError(
+                    "view.selectClip needs the app UI — this control session is headless (there is "
+                    + "no arrange view to focus a clip in). Launch DAWApp/DAWPro.app and retry.")
+            }
+            return .success(request.id,
+                            viewSelectClipJSON(try viewUI.selectClipForView(viewClipID)))
+
+        case "view.panelLayout":
+            // The two production-tier window-layout controls (M35 m35-d).
+            // params: workspace? ("arrange"|"mix"), editorMaximized? (Bool). A
+            // BARE call is READ-ONLY (the m11-a law). Response echoes the
+            // applied {workspace, editorMaximized} plus the read-only
+            // {editorFraction}, which is independent of `editorMaximized` — so
+            // one round trip proves the restore contract.
+            //
+            // ⚠️ EXACTLY TWO KEYS, AND EVERY OTHER LAYOUT SLOT IS REFUSED HERE.
+            // `docs/DESIGN-LANGUAGE.md` records adjustable window layout as a
+            // documented NON-INVOKABLE preference with no wire command; M35
+            // NARROWS that rule rather than repealing it. These two determine
+            // WHAT A CAPTURE CAN SEE — which surface is on screen, and whether
+            // the editor fills the window — so an agent that can capture must be
+            // able to set them. `sidebarWidth`, `rowHeight`, `pianoRollPPB`,
+            // `pianoRollRowHeight`, `pianoRollMinimap`, `waveform*`,
+            // `mixerInsertsCollapsed`, `followPlayhead` and `auditionEnabled`
+            // change what an eye prefers, not what exists to be seen: they stay
+            // debug-tier chrome and `debug.panelLayout` remains their one home.
+            // Sending one of them here is a rejected unknown key, on purpose.
+            try params.rejectUnknownKeys(["workspace", "editorMaximized"],
+                                         verb: "view.panelLayout")
+            var requestedWorkspace: String?
+            if let raw = params["workspace"]?.stringValue {
+                guard raw == "arrange" || raw == "mix" else {
+                    throw ControlError(
+                        "workspace must be \"arrange\" or \"mix\", got: \(raw)")
+                }
+                requestedWorkspace = raw
+            }
+            guard let viewUI else {
+                throw ControlError(
+                    "view.panelLayout needs the app UI — this control session is headless (there is "
+                    + "no window to lay out). Launch DAWApp/DAWPro.app and retry.")
+            }
+            return .success(request.id, viewPanelLayoutJSON(viewUI.applyViewPanelLayout(
+                workspace: requestedWorkspace,
+                editorMaximized: params["editorMaximized"]?.boolValue)))
+
+        case "view.openEditor":
+            // Opens the editor for a track's instrument or one insert effect
+            // (M35 m35-e). params: trackId (required — a track UUID, or
+            // "master" WITH an effectId to address the master chain), effectId?
+            // (omit for the track's INSTRUMENT editor). Response: {editor
+            // ("poly-synth"|"sampler"|"built-in-effect"|"plugin-window"),
+            // trackId?, effectId?, title, alreadyOpen, pluginWindow?}.
+            //
+            // The app dispatches on the target's OWN kind, so a caller does not
+            // have to know whether a track plays the built-in Poly Synth, the
+            // Sampler or a hosted Audio Unit — and the AU case DELEGATES to the
+            // shipped `plugin.*` window seam rather than growing a second code
+            // path that materializes AU windows. `pluginWindow` then carries the
+            // exact payload `plugin.openUI` returns.
+            try params.rejectUnknownKeys(["trackId", "effectId"], verb: "view.openEditor")
+            guard let rawViewTrack = params["trackId"]?.stringValue else {
+                throw ControlError(
+                    "view.openEditor requires trackId (a track UUID, or \"master\" together with "
+                    + "effectId for a master-chain insert)")
+            }
+            var viewEffectID: UUID?
+            if let rawEffect = params["effectId"]?.stringValue {
+                guard let parsed = UUID(uuidString: rawEffect) else {
+                    throw ControlError("effectId is not a valid UUID: \(rawEffect)")
+                }
+                viewEffectID = parsed
+            }
+            let viewEditorTarget: ViewEditorTarget
+            if rawViewTrack == "master" {
+                // The `fx.*` sentinel. Decoded HERE so `ViewEditorTarget` carries
+                // no magic string — and refused for the instrument shape,
+                // because the master chain hosts inserts only, never an
+                // instrument (`fx.setParam`'s own rule).
+                guard let effectID = viewEffectID else {
+                    throw ControlError(
+                        "trackId \"master\" addresses the master INSERT chain, which has no "
+                        + "instrument — pass effectId, or name a track UUID.")
+                }
+                viewEditorTarget = .effect(trackID: nil, effectID: effectID)
+            } else {
+                guard let trackID = UUID(uuidString: rawViewTrack) else {
+                    throw ControlError(
+                        "trackId is not \"master\" or a valid UUID: \(rawViewTrack)")
+                }
+                viewEditorTarget = viewEffectID.map {
+                    ViewEditorTarget.effect(trackID: trackID, effectID: $0)
+                } ?? .instrument(trackID: trackID)
+            }
+            guard let viewUI else {
+                throw ControlError(
+                    "view.openEditor needs the app UI — this control session is headless (there is "
+                    + "no window to open an editor in). Launch DAWApp/DAWPro.app and retry.")
+            }
+            return .success(request.id,
+                            viewEditorJSON(try await viewUI.openViewEditor(viewEditorTarget)))
+
         case "au.describeParams":
             // Reads the live AUParameterTree of the hosted Audio Unit behind
             // a track slot (design-au-parameter-surface): effectId names an
@@ -9566,6 +9747,81 @@ public final class CommandRouter {
         }
     }
 
+    // ═══ M35 — `view.*` wire encoders ══════════════════════════════════════
+    // One encoder per result type, kept beside the `edit.pasteClips` /
+    // `plugin.*` encoders they were copied from. Each is the SINGLE home for
+    // its key spelling, so a payload cannot drift key-for-key from the struct.
+
+    /// Wire shape for a `ViewRect` — `{x, y, width, height}` in POINTS, the
+    /// same four keys `debug.captureUI`'s `rect` uses (m23-ag), so a reader
+    /// written against either tier works on both.
+    private func viewRectJSON(_ rect: ViewRect) -> JSONValue {
+        .object([
+            "x": .number(rect.x),
+            "y": .number(rect.y),
+            "width": .number(rect.width),
+            "height": .number(rect.height),
+        ])
+    }
+
+    /// Wire shape for `view.capture` — `{path, width, height, method, rect,
+    /// scale, appActive}`. Key-for-key identical to `debug.captureUI`'s window
+    /// path on purpose: the two tiers describe the same rasterization, and a
+    /// gate that can read one must be able to read the other.
+    private func viewCaptureJSON(_ result: ViewCaptureResult) -> JSONValue {
+        .object([
+            "path": .string(result.path),
+            "width": .number(Double(result.width)),
+            "height": .number(Double(result.height)),
+            "method": .string(result.method),
+            "rect": viewRectJSON(result.rect),
+            "scale": .number(result.scale),
+            "appActive": .bool(result.appActive),
+        ])
+    }
+
+    /// Wire shape for `view.selectClip` — `{clipId, trackId, clipKind,
+    /// editorOpen, reason, workspace}`. `reason` is the enum's raw value, never
+    /// a sentence, so an agent can branch on it.
+    private func viewSelectClipJSON(_ result: ViewSelectClipResult) -> JSONValue {
+        .object([
+            "clipId": .string(result.clipID.uuidString),
+            "trackId": .string(result.trackID.uuidString),
+            "clipKind": .string(result.clipKind),
+            "editorOpen": .bool(result.editorOpen),
+            "reason": .string(result.reason.rawValue),
+            "workspace": .string(result.workspace),
+        ])
+    }
+
+    /// Wire shape for `view.panelLayout` — `{workspace, editorMaximized,
+    /// editorFraction}`, the APPLIED (post-clamp) values.
+    private func viewPanelLayoutJSON(_ result: ViewPanelLayoutResult) -> JSONValue {
+        .object([
+            "workspace": .string(result.workspace),
+            "editorMaximized": .bool(result.editorMaximized),
+            "editorFraction": .number(result.editorFraction),
+        ])
+    }
+
+    /// Wire shape for `view.openEditor` — `{editor, trackId?, effectId?, title,
+    /// alreadyOpen, pluginWindow?}`. The Audio Unit case nests the EXACT payload
+    /// `plugin.openUI` returns, through `pluginUIWindowJSON` rather than a
+    /// second spelling of the same keys.
+    private func viewEditorJSON(_ result: ViewEditorResult) -> JSONValue {
+        var obj: [String: JSONValue] = [
+            "editor": .string(result.editor.rawValue),
+            "trackId": result.trackID.map { JSONValue.string($0.uuidString) } ?? .null,
+            "effectId": result.effectID.map { JSONValue.string($0.uuidString) } ?? .null,
+            "title": .string(result.title),
+            "alreadyOpen": .bool(result.alreadyOpen),
+        ]
+        if let window = result.pluginWindow {
+            obj["pluginWindow"] = pluginUIWindowJSON(window)
+        }
+        return .object(obj)
+    }
+
     /// Wire shape for `macro.songSkeleton`'s result: the whole scaffold with
     /// real, actionable ids — `{genre, tempoBPM, tracks: [{id, name}],
     /// sectionClips: [{name, startBeat, lengthBeats}],
@@ -9656,7 +9912,13 @@ public final class CommandRouter {
     static func effectParamsJSON(_ effect: EffectDescriptor) -> JSONValue {
         switch effect.kind {
         case .gain:
-            return .object(["gainLinear": .number(effect.resolvedGain.gainLinear)])
+            let gain = effect.resolvedGain
+            // m38-a: the polarity switch rides as a 0/1 number, the same
+            // binary-on-the-numeric-surface shape as the limiter's truePeak.
+            return .object([
+                "gainLinear": .number(gain.gainLinear),
+                "invertPolarity": .number(gain.invertPolarity ? 1 : 0),
+            ])
         case .eq:
             let eq = effect.resolvedEQ
             return .object([

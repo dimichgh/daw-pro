@@ -3997,7 +3997,15 @@ const fxKindSchema = z
     "audioUnit",
   ])
   .describe(
-    "Effect kind. `gain` is a simple linear gain stage. `eq` is a parametric " +
+    "Effect kind. `gain` is a simple linear gain stage: `gainLinear` (the "
+      + "multiplier, 0-16) and `invertPolarity` (m38-a) — the mixer's \u00d8 switch, "
+      + "0 off / 1 on, anything >= 0.5 counts as on. Polarity changes NO level and "
+      + "NO tone on its own; a track heard alone sounds identical either way. What "
+      + "it changes is how that track SUMS with others: flip a mic that was wired "
+      + "backwards, try both polarities on the second mic of a pair and keep the "
+      + "one with more low end, or null-test two renders by inverting one and "
+      + "checking the sum goes silent. Flipping it during playback ramps through "
+      + "zero over ~5 ms, so it dips rather than clicks. `eq` is a parametric " +
       "equalizer (low shelf, two peaking/bell bands, high shelf, plus optional high-pass " +
       "and low-pass filters at 12 or 24 dB/oct, shelf Q, and per-band bypass) — call " +
       "fx_describe to see its exact parameter names and each one's teaching `note`, e.g. " +
@@ -4281,6 +4289,174 @@ server.registerTool(
       "frame, warning?), ordered by open sequence.",
   },
   async () => toToolResult(() => bridge.send("plugin.listOpenUIs"))
+);
+
+// ---------------------------------------------------------------------------
+// The agent-facing VIEW surface (M35) — `view.*`
+//
+// The gap these close is measured: an agent over MCP can MUTATE the project but
+// cannot LOOK at it, so everything it knows about the UI it infers. All four
+// were app-tier `debug.*` staging seams before M35, deliberately off the wire;
+// `debug.*` is kept byte-for-byte and the two tiers share one implementation
+// inside the app.
+//
+// ⚠️ ALL FOUR ROUTE THROUGH THE `registerTool` WRAPPER, not the direct
+// read-only `server.registerTool` path, and that is a schema decision rather
+// than a claim that they mutate the project: the wrapper is what applies
+// `.strict()`, and a mistyped key here (`workSpace`, `clipID`) should be a
+// teaching error rather than a silently ignored argument. mcp-log's
+// before-capture then treats them as mutating, which costs at most one wasted
+// read — the same trade `clip_get_notes` and `instrument_describe_sampler`
+// already make.
+// ---------------------------------------------------------------------------
+
+registerTool(
+  "view_capture",
+  {
+    title: "Screenshot the DAW window",
+    description:
+      "Take a REAL screenshot of the DAW Pro window and write it to a PNG, then " +
+      "read the file to SEE what the user sees. This is how you check your own " +
+      "work: after adding tracks, opening the piano roll on a clip, or changing " +
+      "the mix, capture and look. It draws the live window's actual pixels — " +
+      "including scrollable content (track rows, timeline clips, the piano-roll " +
+      "grid and notes) — so what comes back is the app, not a mock-up. It never " +
+      "records the SCREEN, only DAW Pro's own window, so it needs no Screen " +
+      "Recording permission and cannot capture anything else you have open. " +
+      "Returns {path (where the PNG was written), width/height (PIXELS), method " +
+      "(always \"window\"), rect:{x,y,width,height} (the POINTS those pixels " +
+      "cover), scale (pixels per point — 2 on a Retina display), appActive " +
+      "(whether DAW Pro was frontmost)}. If the app is running HEADLESS (no " +
+      "window) this errors readably rather than handing you a blank image: a " +
+      "screenshot that renders empty would be worse than no screenshot. Use " +
+      "view_panel_layout first to choose WHICH surface is on screen, and " +
+      "view_select_clip to open the piano roll on a particular clip. Calling it " +
+      "IMMEDIATELY after view_select_clip or view_open_editor is safe: the capture " +
+      "waits (briefly, and with a hard ceiling) for that change to actually be " +
+      "drawn, so you photograph the new frame and not the one before it.",
+    inputSchema: {
+      path: z
+        .string()
+        .optional()
+        .describe(
+          "Absolute path (or ~-prefixed) to write the PNG to. Omit for an " +
+            "auto-named file in the system temp directory; the path is returned either way."
+        ),
+    },
+  },
+  async ({ path }) => toToolResult(() => bridge.send("view.capture", { path }))
+);
+
+registerTool(
+  "view_select_clip",
+  {
+    title: "Focus a clip (and open the piano roll on it)",
+    description:
+      "Select one clip in the arrangement, which opens the PIANO ROLL editor on " +
+      "it when it is a MIDI clip. Use this before view_capture to photograph a " +
+      "clip's notes, or to point the app's editing surface at the clip you are " +
+      "about to work on. Returns {clipId, trackId, clipKind (\"midi\" or " +
+      "\"audio\"), editorOpen, reason, workspace}. `reason` tells you honestly " +
+      "what happened and is worth branching on: \"piano-roll-opened\" (a MIDI " +
+      "clip in the Arrange workspace — the editor is on screen), " +
+      "\"audio-clip-has-no-editor\" (the clip IS selected, but audio has no " +
+      "note editor, so nothing opened — this is a success, not an error; use " +
+      "clip_analyze_audio or clip_transcribe for audio), or " +
+      "\"workspace-is-not-arrange\" (a MIDI clip, selected, but the Mix " +
+      "console is showing, so the roll is not visible — call view_panel_layout " +
+      "with workspace:\"arrange\" and it will be). It deliberately does NOT " +
+      "switch the workspace for you. An unknown clipId is an error.",
+    inputSchema: {
+      clipId: z
+        .string()
+        .uuid()
+        .describe("Id of the clip to focus, from project_snapshot."),
+    },
+  },
+  async ({ clipId }) => toToolResult(() => bridge.send("view.selectClip", { clipId }))
+);
+
+registerTool(
+  "view_panel_layout",
+  {
+    title: "Choose which surface the window shows",
+    description:
+      "Set what the DAW window is SHOWING, so a screenshot frames what you " +
+      "actually want to look at: `workspace` picks the Arrange timeline or the " +
+      "Mix console, and `editorMaximized` makes the bottom editor (the piano " +
+      "roll) fill the window instead of sharing it with the timeline. Call it " +
+      "with NO arguments to READ the current layout without changing anything. " +
+      "Returns {workspace, editorMaximized, editorFraction} — `editorFraction` " +
+      "is read-only and is the user's own editor height, which maximizing never " +
+      "overwrites, so un-maximizing always restores exactly what they had. " +
+      "These are the ONLY two layout controls on the wire, on purpose: window " +
+      "layout is otherwise a user preference, and these two are here because " +
+      "they decide what a capture can SEE. Sidebar width, row heights, zoom, " +
+      "the minimap and waveform scaling are deliberately not adjustable from " +
+      "here and are rejected by name if you pass them.",
+    inputSchema: {
+      workspace: z
+        .enum(["arrange", "mix"])
+        .optional()
+        .describe(
+          "Which workspace to show: \"arrange\" (the timeline, clips and the " +
+            "piano roll) or \"mix\" (the mixing console). Omit to leave it alone."
+        ),
+      editorMaximized: z
+        .boolean()
+        .optional()
+        .describe(
+          "true = the bottom editor fills the window; false = it shares the window " +
+            "with the timeline. Omit to leave it alone."
+        ),
+    },
+  },
+  async ({ workspace, editorMaximized }) =>
+    toToolResult(() => bridge.send("view.panelLayout", { workspace, editorMaximized }))
+);
+
+registerTool(
+  "view_open_editor",
+  {
+    title: "Open an instrument or effect editor",
+    description:
+      "Open the editor for a track's INSTRUMENT (omit effectId) or for one of " +
+      "its INSERT EFFECTS (pass effectId), so you can photograph it with " +
+      "view_capture or leave it open for the user. You do NOT need to know what " +
+      "kind of thing it is — the app dispatches on the target itself: the " +
+      "built-in Poly Synth and Sampler open their in-app cards, a built-in " +
+      "effect opens its card in the Mix console, and a hosted Audio Unit opens " +
+      "the plugin's OWN floating window (the same one plugin_open_ui opens — " +
+      "there is only ever one). Pass trackId:\"master\" together with an " +
+      "effectId to open a master-chain insert. Returns {editor " +
+      "(\"poly-synth\" | \"sampler\" | \"built-in-effect\" | " +
+      "\"plugin-window\"), trackId, effectId, title, alreadyOpen, and — for " +
+      "the plugin-window case only — pluginWindow:{...} carrying exactly what " +
+      "plugin_open_ui returns, including the window frame}. Targets with no " +
+      "editor are refused readably: a sound-bank program has no card (its " +
+      "identity IS the program) and neither does the test tone.",
+    inputSchema: {
+      trackId: z
+        .string()
+        .min(1)
+        .describe(
+          "Id of the track, from project_snapshot — or the literal \"master\" to " +
+            "address the master insert chain (only valid together with effectId; the " +
+            "master chain has no instrument)."
+        ),
+      effectId: z
+        .string()
+        .uuid()
+        .optional()
+        .describe(
+          "Id of the insert effect whose editor to open, from project_snapshot's " +
+            "per-track `effects` or fx_add's result. Omit to open the track's " +
+            "INSTRUMENT editor instead."
+        ),
+    },
+  },
+  async ({ trackId, effectId }) =>
+    toToolResult(() => bridge.send("view.openEditor", { trackId, effectId }))
 );
 
 // ---------------------------------------------------------------------------

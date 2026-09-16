@@ -3595,7 +3595,18 @@ public final class ProjectStore {
     private static func applyEffectParam(_ effect: inout EffectDescriptor, name: String, value: Double) {
         switch effect.kind {
         case .gain:
-            if name == "gainLinear" { effect.gain = GainParams(gainLinear: value) }
+            // m38-a: read-modify-write, NOT a fresh GainParams per name — a
+            // rebuild from one field would silently reset the other (setting
+            // gainLinear would clear an armed polarity flip). `invertPolarity`
+            // is binary on the numeric surface (the truePeak/pingPong
+            // precedent, >= 0.5 = on).
+            var params = effect.resolvedGain
+            switch name {
+            case "gainLinear": params.gainLinear = value
+            case "invertPolarity": params.invertPolarity = value >= 0.5
+            default: return
+            }
+            effect.gain = params
         case .eq:
             var params = effect.resolvedEQ
             switch name {

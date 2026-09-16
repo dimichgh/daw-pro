@@ -22,7 +22,12 @@ alone over-counts — see the method below), so a real count needs a
 derivation you can state and defend, not a bare `grep -c`.
 
 It reflects the tool surface enumerated from
-`mcp-server/src/server.ts` (**208 tools**, re-derived 2026-08-30 at the
+`mcp-server/src/server.ts` (**220 tools**, re-derived 2026-09-04/05 at the
+m35-g close, which added the four `view.*` tools — `view_capture`,
+`view_select_clip`, `view_panel_layout`, `view_open_editor` — that let an
+agent SEE the app (screenshot it, focus a clip in the piano roll, read/set
+which workspace surface is on screen, open an instrument/effect editor);
+previously 208, re-derived 2026-08-30 at the
 m34-f step ② close, which added `pad_play_effort` — the live-PERFORMANCE
 sibling of `pad_preview_effort`, whose values are recorded into a rolling
 take; previously 207, re-derived 2026-08-30 at the
@@ -31,25 +36,28 @@ m34-c close, which added the four one-click SoundFont download tools
 `instrument_sound_bank_download_status`, `instrument_cancel_sound_bank_download`);
 previously 203, re-derived 2026-08-30 at the
 m34-g close, which added `playbox_generate`. ⚠️⚠️ **THIS PARAGRAPH WAS FOUND
-ROTTEN AT THAT CLOSE AND THE ROT PREDATES m34-g: it claimed 196 against a
+ROTTEN AT THE m34-g CLOSE AND THE ROT PREDATES IT: it claimed 196 against a
 measured 202, a SIX-tool drift, because `doc-count-drift.mjs` scores the
-COMMAND count and nothing scores this one.** It was corrected by re-running the
-decomposition below, whose arithmetic then matched a live `tools/list` over the
-generated plugin bundle EXACTLY — 203, with a negative control (a name that is
-not a tool) correctly absent. The bijection test,
+COMMAND count and nothing scores this one.** It was found rotten AGAIN at the
+m35-g close (claimed 208 against a measured 220, a TWELVE-tool drift, for the
+same reason) — **treat this paragraph as due for staleness at every close that
+adds a tool, not just the ones that remembered to touch it.** It was corrected
+by re-running the decomposition below, whose arithmetic then matched a live
+`tools/list` over the generated plugin bundle EXACTLY — 220, with a negative
+control (a name that is not a tool) correctly absent. The bijection test,
 `mcp-server/test/audit-tools.test.ts`, defines
-`tool count = commands + |exception table B| + |exception table C|` — 203
+`tool count = commands + |exception table B| + |exception table C|` — 215
 commands (below) + 3 Table-B tools with no backing command at all
 (`generate_image`, `generate_lyrics`, `generate_song_suno` — they call a
 generation provider directly) + 2 Table-C tools that bridge to an EXISTING
 command, `track.setInstrument`, under a friendlier name/shape
-(`instrument_set_sampler_param`, `instrument_set_sampler_zones`) = 208.
+(`instrument_set_sampler_param`, `instrument_set_sampler_zones`) = 220.
 ⚠️ The authoritative pin is `mcp-server/test/integration.test.ts`'s
-`assert.equal(result.tools.length, 208)` — **NOT** a `grep -c 'registerTool('`,
+`assert.equal(result.tools.length, 220)` — **NOT** a `grep -c 'registerTool('`,
 which is a known liar on this file and previously anchored this paragraph at a
 stale 194) and
 `Sources/DAWControl/Commands.swift`
-(**211 commands** — the `CommandRouter.allCommands.count == 211` pin in
+(**215 commands** — the `CommandRouter.allCommands.count == 215` pin in
 `Tests/DAWControlTests/RenderCommandTests.swift`)
 in the DAW Pro repo — not memory, and not the app's own in-app Copilot
 catalog (`Sources/DAWControl/CopilotCatalog.swift`), which is a **different,

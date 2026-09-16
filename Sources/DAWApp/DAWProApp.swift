@@ -4883,6 +4883,18 @@ final class AppModel {
         // `@State`, the same non-retaining-router precedent as
         // `copilotEngine`/`pluginUI`.
         router.editPaste = self
+        // view.* (M35): AppModel conforms to ViewUIControlling directly
+        // (ViewUIWireSurface.swift) — the `editPaste` shape verbatim, and for
+        // the same reason: AppModel already IS the one home for the capture
+        // window, the arrange selection, the workspace mode, the layout store
+        // and the four editor cards, so a second owned object would only be a
+        // place for those to drift. Beside `router.editPaste` at the TAIL of
+        // init rather than up beside `router.pluginUI`, because assigning
+        // `self` as a value requires every stored property to be definitely
+        // initialized first and this is a designated initializer. `self` is
+        // retained by DAWProApp's own `@State` — the same non-retaining-router
+        // precedent as `copilotEngine`/`pluginUI`/`editPaste`.
+        router.viewUI = self
     }
 
     /// Binds the REFERENCE panel model to the store (m22-g P3). Every READ goes
@@ -5501,15 +5513,25 @@ final class AppModel {
     /// `debug.panelLayout {sidebarWidth?, editorFraction?, rowHeight?,
     /// pianoRollPPB?, pianoRollRowHeight?, mixerInsertsCollapsed?, followPlayhead?, auditionEnabled?,
     /// waveformNormalize?, waveformVerticalZoom?, editorMaximized?,
-    /// pianoRollMinimap?, reset?}` —
+    /// pianoRollMinimap?, pianoRollCenterPitch?, reset?}` —
     /// stages the adjustable window layout (beta m10-d)
     /// so a headless capture / E2E can drive the arrange sidebar width, the bottom
     /// editor's height fraction, the global track-row height, and (m21-c) the
     /// piano-roll zoom before `debug.captureUI` (the `debug.panelDensity`
     /// precedent: writes straight to the shared `panelLayout` store so the live
-    /// splitters reflect it). Debug tier ONLY — off `allCommands`/MCP (window layout
+    /// splitters reflect it). Debug tier — off `allCommands`/MCP (window layout
     /// is a UI preference, not an invokable capability; agents drive the protocol,
-    /// not the chrome). Every field is optional; `reset:true` restores the defaults
+    /// not the chrome).
+    ///
+    /// ⚠️ **"ONLY" NO LONGER HOLDS FOR ONE KEY, AS OF M35.** `editorMaximized` is
+    /// ALSO reachable from production through `view.panelLayout` (which exposes
+    /// it and the workspace mode, and nothing else) — see the narrowed rule in
+    /// `docs/DESIGN-LANGUAGE.md` and the argument at that key's line below. This
+    /// handler is unchanged, byte-for-byte, and remains the ONE home for every
+    /// other key here; the two tiers share `panelLayout`'s setters, they do not
+    /// fork them.
+    ///
+    /// Every field is optional; `reset:true` restores the defaults
     /// FIRST (so `{reset:true, rowHeight:48}` resets then applies 48). Values are
     /// clamped by the store, and the result echoes the APPLIED (post-clamp) values.
     /// The piano-roll zoom lives HERE, not in a `debug.arrangeZoom` sibling: it is
@@ -5558,13 +5580,29 @@ final class AppModel {
             panelLayout.setWaveformVerticalZoom(CGFloat(z))
         }
         // m25-b-1: the MAXIMIZED editor mode. One more `PanelLayoutStore` slot, so
-        // it rides here for the `waveformNormalize` reasons — and the WIRE DECISION
-        // is deliberate rather than inherited: `docs/DESIGN-LANGUAGE.md` records
-        // adjustable layout as "a documented NON-INVOKABLE window preference — no
-        // wire command / MCP tool", every one of the nine sibling slots obeys it,
-        // and an `allCommands` entry would break the wire-count pins for a control
-        // that changes no project byte and no sound. An agent that wants the notes
-        // reads `project.snapshot`; how tall the pane is drawn is not its business.
+        // it rides here for the `waveformNormalize` reasons.
+        //
+        // ⚠️⚠️ **THE WIRE DECISION ON THIS ONE SLOT WAS RE-OPENED AND CHANGED AT
+        // M35 — the comment that used to stand here is now HALF WRONG, so it is
+        // rewritten rather than left to be believed.** `docs/DESIGN-LANGUAGE.md`
+        // still records adjustable layout as "a documented NON-INVOKABLE window
+        // preference — no wire command / MCP tool", and every OTHER slot in this
+        // handler still obeys it. But that rule is now NARROWED by two named
+        // exceptions: `editorMaximized` and the workspace mode are reachable from
+        // production as `view.panelLayout` (M35 m35-d).
+        //
+        // The m25-b-1 argument was not wrong; a DIFFERENT argument reaches the
+        // same control. m25-b-1 asked "does this change a project byte or a
+        // sound?" — no, so chrome. M35 asks "does this change what a CAPTURE CAN
+        // SEE?" — and it does: M35 shipped `view.capture`, so an agent that can
+        // photograph the app and cannot frame it has half a capability. Every
+        // other key in this handler still fails the second question too (they
+        // change what an eye prefers about something already on screen), which is
+        // why exactly two moved and `view.panelLayout` REJECTS the rest by name.
+        //
+        // ⛔ This line is still the ONLY writer of the slot. `view.panelLayout`
+        // does not fork it — it calls the same `panelLayout.setEditorMaximized`
+        // through `AppModel.applyViewPanelLayout` (ViewUIWireSurface.swift).
         //
         // ⚠️ ECHOED ALONGSIDE `editorFraction`, WHICH IS THE POINT OF ECHOING IT:
         // the two are INDEPENDENT (maximize never writes the fraction), so a gate
@@ -5579,6 +5617,25 @@ final class AppModel {
         // that wants to know where the notes are reads `project.snapshot`; where a
         // human happens to be LOOKING is not a capability.
         if let m = params["pianoRollMinimap"]?.boolValue { panelLayout.setPianoRollMinimap(m) }
+        // Scrolls the OPEN roll's pitch axis so this pitch sits in the middle of
+        // the note grid. The odd one out here — every other key above is a
+        // remembered dimension, this is a one-shot EVENT, so it is applied LAST
+        // (a row-height change in the same call re-pins the axis, and doing it the
+        // other way round would silently undo the focus) and it is NOT echoed
+        // below: there is no persisted value to report, and echoing the requested
+        // pitch would read as "the roll is showing this", which the reply cannot
+        // know. Read the frame, not the reply.
+        //
+        // WHY: the roll opens anchored high in the 128-row stack, so a low clip
+        // (a 49 Hz heartbeat at C1) opens on an empty grid — notes present in the
+        // minimap and the velocity lane, and below the viewport. MEASURED: at the
+        // 10 pt row-height floor -- the CLAMP, which is where a request for 5
+        // lands -- the grid still bottomed out at F2 with the notes below it, so
+        // shrinking rows is not a workaround. See
+        // `PanelLayoutStore.pianoRollFocusPitch`.
+        if let p = params["pianoRollCenterPitch"]?.doubleValue {
+            panelLayout.requestPianoRollFocus(pitch: Int(p.rounded()))
+        }
         return .object([
             "sidebarWidth": .number(Double(panelLayout.sidebarWidth)),
             "editorFraction": .number(Double(panelLayout.editorFraction)),
@@ -12868,26 +12925,28 @@ final class AppModel {
         }
 
         // Primary: snapshot the real window content (all ScrollView content).
-        if let window = mainCaptureWindow, let contentView = window.contentView,
-           contentView.bounds.width > 1, contentView.bounds.height > 1 {
-            window.displayIfNeeded()
-            contentView.layoutSubtreeIfNeeded()
-            guard let rep = contentView.bitmapImageRepForCachingDisplay(in: contentView.bounds) else {
-                throw DebugError("window has no drawable backing yet — retry once it has displayed")
-            }
-            contentView.cacheDisplay(in: contentView.bounds, to: rep)
-            try writePNG(rep, to: url)
+        //
+        // ⭐ M35 — THE RASTERIZATION ITSELF NOW LIVES IN ONE PLACE. Everything
+        // between `mainCaptureWindow` and the PNG write moved to
+        // `captureMainWindowCore(to:)`, which `view.capture` (the production
+        // tier) calls too. This arm is unchanged in BEHAVIOUR and in the keys it
+        // emits — the two tiers share an implementation rather than a
+        // copy-paste, so a fix to one can never miss the other. The notes below
+        // travel with the payload and stayed here because they document THIS
+        // command's contract:
+        //
+        //   • `rect` is what was actually rasterized, in POINTS — the same
+        //     `contentView.bounds` `debug.explainFrames` reports its
+        //     `captureOrigin` against, so the two payloads agree by construction
+        //     rather than by two independent reads (m23-ag).
+        if let core = try captureMainWindowCore(to: url) {
             return .object([
-                "path": .string(url.path),
-                "width": .number(Double(rep.pixelsWide)),
-                "height": .number(Double(rep.pixelsHigh)),
-                "method": .string("window"),
-                // What was actually rasterized, in POINTS — the same
-                // `contentView.bounds` `debug.explainFrames` reports its
-                // `captureOrigin` against, so the two payloads agree by
-                // construction rather than by two independent reads (m23-ag).
-                "rect": Self.rectJSON(contentView.bounds),
-                "scale": .number(Double(window.backingScaleFactor)),
+                "path": .string(core.path),
+                "width": .number(Double(core.width)),
+                "height": .number(Double(core.height)),
+                "method": .string(core.method),
+                "rect": Self.viewRectJSON(core.rect),
+                "scale": .number(core.scale),
                 // ⭐ m23-ds — THE CAPTURE STATES ITS OWN FOCUS AMBIENT.
                 // m23-ds chased a ~94 B erratic spread in `u0-open.png` across
                 // ~13 runs and excluded three mechanisms by MAGNITUDE (density
@@ -12902,7 +12961,7 @@ final class AppModel {
                 // F0 leg asserts exactly that) — so this is a fact that VARIES
                 // with the desktop, which is precisely why it must be recorded
                 // rather than assumed.
-                "appActive": .bool(NSApplication.shared.isActive),
+                "appActive": .bool(core.appActive),
             ])
         }
 
@@ -12930,6 +12989,64 @@ final class AppModel {
             // path renders offscreen chrome and should be focus-independent;
             // that is a claim worth being able to CHECK rather than assert.
             "appActive": .bool(NSApplication.shared.isActive),
+        ])
+    }
+
+    /// ⭐ **THE ONE MAIN-WINDOW RASTERIZATION (M35 m35-b).** Draws the live
+    /// NSWindow's contentView with `cacheDisplay(in:to:)` — which includes the
+    /// REAL rendered pixels of every ScrollView (track rows, timeline clips,
+    /// piano-roll keyboard/grid/notes) — writes the PNG, and reports what it
+    /// actually rasterized. Pixel size follows the window's backing scale
+    /// (Retina = 2×).
+    ///
+    /// **Returns nil when there is no drawable window**, and the two callers
+    /// answer that differently ON PURPOSE — which is the whole reason this is a
+    /// nil-returning core rather than a throwing one:
+    ///
+    ///   • `debug.captureUI` falls back to an offscreen `ImageRenderer` pass
+    ///     (app tier, kept byte-for-byte — additive-only is a hard rule).
+    ///   • `view.capture` THROWS. That fallback cannot draw NSScrollView-backed
+    ///     content, so everything an agent asked to SEE rasterizes blank while
+    ///     the call reports success — this tree's characteristic failure mode,
+    ///     and the production tier refuses to ship it.
+    ///
+    /// It still THROWS for a window that exists but has no drawable backing:
+    /// that is a retryable condition, not a missing window, and conflating the
+    /// two would send `debug.captureUI` down the fallback for a real window.
+    func captureMainWindowCore(to url: URL) throws -> ViewCaptureResult? {
+        guard let window = mainCaptureWindow, let contentView = window.contentView,
+              contentView.bounds.width > 1, contentView.bounds.height > 1 else {
+            return nil
+        }
+        window.displayIfNeeded()
+        contentView.layoutSubtreeIfNeeded()
+        guard let rep = contentView.bitmapImageRepForCachingDisplay(in: contentView.bounds) else {
+            throw DebugError("window has no drawable backing yet — retry once it has displayed")
+        }
+        contentView.cacheDisplay(in: contentView.bounds, to: rep)
+        try writePNG(rep, to: url)
+        return ViewCaptureResult(
+            path: url.path,
+            width: rep.pixelsWide,
+            height: rep.pixelsHigh,
+            method: "window",
+            rect: ViewRect(x: Double(contentView.bounds.origin.x),
+                           y: Double(contentView.bounds.origin.y),
+                           width: Double(contentView.bounds.width),
+                           height: Double(contentView.bounds.height)),
+            scale: Double(window.backingScaleFactor),
+            appActive: NSApplication.shared.isActive)
+    }
+
+    /// `{x,y,width,height}` in POINTS from a `ViewRect` — the `rectJSON` twin
+    /// for the shared capture core's Foundation-only geometry. Same four keys,
+    /// deliberately, so `debug.captureUI` emits exactly what it always did.
+    static func viewRectJSON(_ rect: ViewRect) -> JSONValue {
+        .object([
+            "x": .number(rect.x),
+            "y": .number(rect.y),
+            "width": .number(rect.width),
+            "height": .number(rect.height),
         ])
     }
 
@@ -13010,7 +13127,15 @@ final class AppModel {
     /// Destination URL: explicit `path` (~-expanded) or an auto-named file under
     /// NSTemporaryDirectory()/DAWPro.
     private func captureURL(_ params: [String: JSONValue]) -> URL {
-        if let raw = params["path"]?.stringValue {
+        captureDestinationURL(path: params["path"]?.stringValue)
+    }
+
+    /// The destination-URL rule itself, shared with `view.capture` (M35) so both
+    /// tiers name their auto-generated files from the SAME counter — two
+    /// counters would let a debug shot and a production shot collide on
+    /// `ui-capture-3.png` and silently overwrite each other.
+    func captureDestinationURL(path raw: String?) -> URL {
+        if let raw {
             return URL(fileURLWithPath: (raw as NSString).expandingTildeInPath)
         }
         let dir = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)

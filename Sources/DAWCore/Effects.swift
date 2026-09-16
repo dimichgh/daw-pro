@@ -156,16 +156,41 @@ public struct GainParams: Codable, Sendable, Equatable {
     /// in the `fx.describe` note and in the MCP tool description.
     public static let gainRange: ClosedRange<Double> = 0...16
 
-    public init(gainLinear: Double = 1) {
+    /// Polarity (phase) invert — the Ø button every hardware channel strip
+    /// has, and the one thing `gainRange` deliberately cannot express.
+    ///
+    /// WHY A BOOLEAN AND NOT A SIGNED RANGE (m38-a): widening `gainRange` to
+    /// -16...16 would make 0 an awkward midpoint of a control whose 0 already
+    /// means silence, and would fuse "turn it down" and "flip it" into one
+    /// knob. A switch is what the hardware does, what the user already
+    /// understands, and what reads correctly as a toggle in the editor.
+    ///
+    /// `true` multiplies by -1 AFTER `gainLinear` — i.e. the render side folds
+    /// the sign into the SAME smoothed coefficient the gain uses, so a live
+    /// flip ramps +g → -g through zero over ~5 ms (a brief dip) instead of
+    /// stepping full-scale (a click). See `GainEffect.signedTarget`.
+    ///
+    /// `false` is bit-exact with every pre-m38-a render: the coefficient is
+    /// literally the same Float, including the unity-skip fast path.
+    public var invertPolarity: Bool
+
+    public init(gainLinear: Double = 1, invertPolarity: Bool = false) {
         self.gainLinear = gainLinear.clamped(to: Self.gainRange)
+        self.invertPolarity = invertPolarity
     }
 
-    private enum CodingKeys: String, CodingKey { case gainLinear }
+    private enum CodingKeys: String, CodingKey { case gainLinear, invertPolarity }
 
-    /// Decoding routes through the clamping init.
+    /// Decoding routes through the clamping init. `invertPolarity` is ABSENT
+    /// from every project saved before m38-a and MUST decode to `false`, so an
+    /// existing session renders identically — the control is opt-in and
+    /// nothing on disk changes meaning (the `LimiterParams.truePeak`
+    /// precedent). The schema change is additive in both directions.
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        self.init(gainLinear: try c.decodeIfPresent(Double.self, forKey: .gainLinear) ?? 1)
+        self.init(
+            gainLinear: try c.decodeIfPresent(Double.self, forKey: .gainLinear) ?? 1,
+            invertPolarity: try c.decodeIfPresent(Bool.self, forKey: .invertPolarity) ?? false)
     }
 }
 
@@ -943,7 +968,26 @@ public struct EffectParamSpec: Sendable, Equatable {
                     + "— put a limiter AFTER this insert, and remember a "
                     + "normalizing bounce applies its gain after the whole "
                     + "master chain. Out-of-range values are clamped, not "
-                    + "rejected, and the clamp is reported in `warnings`.")]
+                    + "rejected, and the clamp is reported in `warnings`."),
+                // m38-a polarity — APPENDED so the automation slot index of
+                // gainLinear (0) never moves (the limiter `truePeak`
+                // precedent). Binary on the numeric surface: >= 0.5 = on.
+                EffectParamSpec(
+                    name: "invertPolarity", range: 0...1,
+                    defaultValue: 0, unit: "linear",
+                    note: "Polarity (phase) invert — the Ø switch on a hardware "
+                        + "channel strip. 0 (default) leaves the signal alone; 1 "
+                        + "multiplies it by -1, flipping every sample around "
+                        + "zero. It changes NO level and NO tone on its own: a "
+                        + "track heard alone sounds identical either way. What it "
+                        + "changes is how the track SUMS with others — flip a "
+                        + "mic that was wired backwards, try both polarities on "
+                        + "the second mic of a two-mic pair and keep the one with "
+                        + "more low end, or null-test two renders by inverting "
+                        + "one and checking the sum goes silent. Values are "
+                        + "binary: anything >= 0.5 is on. Flipping during "
+                        + "playback ramps through zero over ~5 ms — a brief dip, "
+                        + "not a click.")]
         case .eq:
             return [
                 EffectParamSpec(name: "lowShelfFreq", range: EQParams.lowShelfFreqRange,

@@ -364,6 +364,33 @@ public final class PanelLayoutStore {
         backing.storeValue(Double(pianoRollRowHeight), forKey: Self.pianoRollRowHeightKey)
     }
 
+    /// A one-shot request to scroll the piano roll's PITCH axis so `pitch` sits in
+    /// the middle of the note grid.
+    ///
+    /// ⚠️ **DELIBERATELY NOT PERSISTED, and the only slot on this type that is
+    /// not.** Every other value here is a remembered dimension; this one is an
+    /// EVENT — "put that pitch in frame, now" — and a remembered scroll position
+    /// would fight the roll's own anchor rules on the next launch. The
+    /// `followTargetX`/`followNonce` idiom is the precedent: the nonce is what
+    /// makes a repeat of the SAME pitch still scroll, so a driver can ask twice.
+    ///
+    /// WHY IT EXISTS: the roll opens anchored near the middle of the 128-row
+    /// stack, so a clip written low (a 49 Hz heartbeat at C1, an 808 at F1) opens
+    /// on an EMPTY grid — the notes are real, visible in the minimap and in the
+    /// velocity lane, and simply below the viewport. Shrinking `pianoRollRowHeight`
+    /// does not fix it: measured at the 10 pt floor -- the CLAMP, which is where a
+    /// request for 5 lands -- the grid still bottomed out at F2. Auto-centring the roll on its clip's own pitch range when it OPENS is
+    /// the product fix (m35-h); this slot is the drivable one underneath it.
+    public private(set) var pianoRollFocusPitch: Int?
+    public private(set) var pianoRollFocusNonce: Int = 0
+
+    /// Asks the open piano roll to centre its pitch axis on `pitch` (0...127,
+    /// clamped). Bumps the nonce so an identical repeat still applies.
+    public func requestPianoRollFocus(pitch: Int) {
+        pianoRollFocusPitch = pitch.clamped(to: 0...127)
+        pianoRollFocusNonce += 1
+    }
+
     /// Collapses or expands the mixer console's INSERTS sections (m23-a). No clamp
     /// to apply — a `Bool` has no out-of-range value — but it write-throughs like
     /// every other dimension, so the disclosure survives relaunch.

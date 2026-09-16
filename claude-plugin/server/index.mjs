@@ -46077,6 +46077,62 @@ server.registerTool(
   },
   async () => toToolResult(() => bridge.send("plugin.listOpenUIs"))
 );
+registerTool(
+  "view_capture",
+  {
+    title: "Screenshot the DAW window",
+    description: `Take a REAL screenshot of the DAW Pro window and write it to a PNG, then read the file to SEE what the user sees. This is how you check your own work: after adding tracks, opening the piano roll on a clip, or changing the mix, capture and look. It draws the live window's actual pixels \u2014 including scrollable content (track rows, timeline clips, the piano-roll grid and notes) \u2014 so what comes back is the app, not a mock-up. It never records the SCREEN, only DAW Pro's own window, so it needs no Screen Recording permission and cannot capture anything else you have open. Returns {path (where the PNG was written), width/height (PIXELS), method (always "window"), rect:{x,y,width,height} (the POINTS those pixels cover), scale (pixels per point \u2014 2 on a Retina display), appActive (whether DAW Pro was frontmost)}. If the app is running HEADLESS (no window) this errors readably rather than handing you a blank image: a screenshot that renders empty would be worse than no screenshot. Use view_panel_layout first to choose WHICH surface is on screen, and view_select_clip to open the piano roll on a particular clip. Calling it IMMEDIATELY after view_select_clip or view_open_editor is safe: the capture waits (briefly, and with a hard ceiling) for that change to actually be drawn, so you photograph the new frame and not the one before it.`,
+    inputSchema: {
+      path: external_exports.string().optional().describe(
+        "Absolute path (or ~-prefixed) to write the PNG to. Omit for an auto-named file in the system temp directory; the path is returned either way."
+      )
+    }
+  },
+  async ({ path: path6 }) => toToolResult(() => bridge.send("view.capture", { path: path6 }))
+);
+registerTool(
+  "view_select_clip",
+  {
+    title: "Focus a clip (and open the piano roll on it)",
+    description: 'Select one clip in the arrangement, which opens the PIANO ROLL editor on it when it is a MIDI clip. Use this before view_capture to photograph a clip\'s notes, or to point the app\'s editing surface at the clip you are about to work on. Returns {clipId, trackId, clipKind ("midi" or "audio"), editorOpen, reason, workspace}. `reason` tells you honestly what happened and is worth branching on: "piano-roll-opened" (a MIDI clip in the Arrange workspace \u2014 the editor is on screen), "audio-clip-has-no-editor" (the clip IS selected, but audio has no note editor, so nothing opened \u2014 this is a success, not an error; use clip_analyze_audio or clip_transcribe for audio), or "workspace-is-not-arrange" (a MIDI clip, selected, but the Mix console is showing, so the roll is not visible \u2014 call view_panel_layout with workspace:"arrange" and it will be). It deliberately does NOT switch the workspace for you. An unknown clipId is an error.',
+    inputSchema: {
+      clipId: external_exports.string().uuid().describe("Id of the clip to focus, from project_snapshot.")
+    }
+  },
+  async ({ clipId }) => toToolResult(() => bridge.send("view.selectClip", { clipId }))
+);
+registerTool(
+  "view_panel_layout",
+  {
+    title: "Choose which surface the window shows",
+    description: "Set what the DAW window is SHOWING, so a screenshot frames what you actually want to look at: `workspace` picks the Arrange timeline or the Mix console, and `editorMaximized` makes the bottom editor (the piano roll) fill the window instead of sharing it with the timeline. Call it with NO arguments to READ the current layout without changing anything. Returns {workspace, editorMaximized, editorFraction} \u2014 `editorFraction` is read-only and is the user's own editor height, which maximizing never overwrites, so un-maximizing always restores exactly what they had. These are the ONLY two layout controls on the wire, on purpose: window layout is otherwise a user preference, and these two are here because they decide what a capture can SEE. Sidebar width, row heights, zoom, the minimap and waveform scaling are deliberately not adjustable from here and are rejected by name if you pass them.",
+    inputSchema: {
+      workspace: external_exports.enum(["arrange", "mix"]).optional().describe(
+        'Which workspace to show: "arrange" (the timeline, clips and the piano roll) or "mix" (the mixing console). Omit to leave it alone.'
+      ),
+      editorMaximized: external_exports.boolean().optional().describe(
+        "true = the bottom editor fills the window; false = it shares the window with the timeline. Omit to leave it alone."
+      )
+    }
+  },
+  async ({ workspace, editorMaximized }) => toToolResult(() => bridge.send("view.panelLayout", { workspace, editorMaximized }))
+);
+registerTool(
+  "view_open_editor",
+  {
+    title: "Open an instrument or effect editor",
+    description: `Open the editor for a track's INSTRUMENT (omit effectId) or for one of its INSERT EFFECTS (pass effectId), so you can photograph it with view_capture or leave it open for the user. You do NOT need to know what kind of thing it is \u2014 the app dispatches on the target itself: the built-in Poly Synth and Sampler open their in-app cards, a built-in effect opens its card in the Mix console, and a hosted Audio Unit opens the plugin's OWN floating window (the same one plugin_open_ui opens \u2014 there is only ever one). Pass trackId:"master" together with an effectId to open a master-chain insert. Returns {editor ("poly-synth" | "sampler" | "built-in-effect" | "plugin-window"), trackId, effectId, title, alreadyOpen, and \u2014 for the plugin-window case only \u2014 pluginWindow:{...} carrying exactly what plugin_open_ui returns, including the window frame}. Targets with no editor are refused readably: a sound-bank program has no card (its identity IS the program) and neither does the test tone.`,
+    inputSchema: {
+      trackId: external_exports.string().min(1).describe(
+        'Id of the track, from project_snapshot \u2014 or the literal "master" to address the master insert chain (only valid together with effectId; the master chain has no instrument).'
+      ),
+      effectId: external_exports.string().uuid().optional().describe(
+        "Id of the insert effect whose editor to open, from project_snapshot's per-track `effects` or fx_add's result. Omit to open the track's INSTRUMENT editor instead."
+      )
+    }
+  },
+  async ({ trackId, effectId }) => toToolResult(() => bridge.send("view.openEditor", { trackId, effectId }))
+);
 var auTrackIdSchema = external_exports.string().min(1).describe(
   'Id of the track hosting the Audio Unit, from project_snapshot \u2014 targets its AU INSTRUMENT (omit effectId) or one of its AU insert effects (pass effectId). Not "master": the master chain hosts built-in effects only, never Audio Units.'
 );

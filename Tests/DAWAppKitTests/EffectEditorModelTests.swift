@@ -361,7 +361,8 @@ struct EffectEditorModelTests {
                 $0.0 == $1.0 && $0.1 == $1.1
             }
         }
-        #expect(matches(layout(.gain), [("", ["gainLinear"])]))
+        // m38-a: the polarity Ø switch joins the trim on the single card.
+        #expect(matches(layout(.gain), [("", ["gainLinear", "invertPolarity"])]))
         #expect(matches(layout(.eq), [
             ("HIGH PASS", ["highPassFreq", "highPassSlopeDbPerOct", "highPassEnabled"]),
             ("LOW SHELF", ["lowShelfFreq", "lowShelfGainDb", "lowShelfQ", "lowShelfEnabled"]),
@@ -459,6 +460,7 @@ struct EffectEditorModelTests {
                 // m22-f adds the delay's tempo `sync` to the binary family.
                 // m23-ch adds the limiter's truePeak mode to the family.
                 // m32-e adds the bit-crusher's antiAlias/dither switches.
+                // m38-a adds the gain utility's invertPolarity (the Ø switch).
                 // ⚠️ THIS LEG RESTATES THE SOURCE'S OWN EXPRESSION and therefore
                 // proves only that the two have not drifted APART — it cannot
                 // notice a binary param that neither side knows about. That is
@@ -469,6 +471,7 @@ struct EffectEditorModelTests {
                 let expected = spec.name == "pingPong" || spec.name == "sync"
                     || spec.name == "truePeak"
                     || spec.name == "antiAlias" || spec.name == "dither"
+                    || spec.name == "invertPolarity"
                     || spec.name.hasSuffix("Enabled")
                 #expect(EffectEditorModel.isToggleParam(spec) == expected,
                         "\(kind).\(spec.name)")

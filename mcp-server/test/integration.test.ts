@@ -469,7 +469,7 @@ test("tools/list returns exactly the audit-enforced tool count", { skip: SKIP_RE
   // mechanical (`looper.begin` -> `looper_begin`,
   // `looper.setLayerMuted` -> `looper_set_layer_muted`, ...), so no
   // exception-table entry is needed for any of them.
-  assert.equal(result.tools.length, 216);
+  assert.equal(result.tools.length, 220);
 });
 
 // ---------------------------------------------------------------------------

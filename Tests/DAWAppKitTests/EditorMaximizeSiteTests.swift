@@ -209,19 +209,62 @@ struct EditorMaximizeSiteTests {
         }
     }
 
-    /// The wire decision, asserted rather than remembered. Layout is a documented
-    /// non-invokable window preference (docs/DESIGN-LANGUAGE.md); the mode rides
-    /// `debug.panelLayout` and must never appear on `allCommands` or MCP, where it
-    /// would break the wire-count pins to buy an agent control over how tall a
-    /// pane is drawn.
-    @Test("the maximize mode stays OFF the wire — debug tier only")
-    func staysOffTheWire() {
+    /// The wire decision, asserted rather than remembered.
+    ///
+    /// ⚠️⚠️ **THIS TEST WAS INVERTED AT M35, AND THE INVERSION IS THE RECORD OF A
+    /// RULING, NOT A RELAXATION.** It used to assert `editorMaximized` NEVER
+    /// reaches DAWControl. `docs/DESIGN-LANGUAGE.md` still records adjustable
+    /// layout as a non-invokable window preference, and every other slot still
+    /// obeys it — but M35 narrowed that rule to TWO NAMED EXCEPTIONS, because
+    /// M35 also shipped `view.capture`: the workspace mode and the editor
+    /// maximize are the two controls that decide WHAT A CAPTURE CAN SEE, so an
+    /// agent that can photograph the app and cannot frame it has half a
+    /// capability. m25-b-1's "no project byte, no sound" argument was not
+    /// overturned; a different question reached the same control.
+    ///
+    /// So the assertion flips shape rather than disappearing: the mode must be
+    /// on the wire through `view.panelLayout` and NOWHERE ELSE, and the debug
+    /// seam must still stage it. An absence-test that simply deleted itself here
+    /// would leave the FENCE — the thing actually worth protecting — unguarded.
+    @Test("the maximize mode is on the wire through view.panelLayout ONLY (M35 narrowed the rule)")
+    func onlyReachableThroughViewPanelLayout() {
         let control = Self.text("DAWControl/Commands.swift")
-        let note14 = "`editorMaximized` reached DAWControl — layout is a non-invokable window " + "preference (DESIGN-LANGUAGE.md), and an allCommands entry breaks the " + "wire-count pins."
-        #expect(!control.contains("editorMaximized"), "\(note14)")
-        // Positive control: the reader really is reading a populated Commands.swift.
+        // Positive control FIRST: the reader really is reading a populated
+        // Commands.swift, so an absence below cannot be "the file never loaded".
         #expect(control.count > 10_000, "Commands.swift came back short: \(control.count) chars")
-        // And it IS reachable through the debug seam, so a capture can stage it.
+        #expect(control.contains("\"view.panelLayout\""),
+                "view.panelLayout is gone from DAWControl — the M35 exception vanished.")
+        #expect(control.contains("editorMaximized"),
+                "`editorMaximized` no longer reaches DAWControl; view.panelLayout cannot expose it.")
+
+        // ⛔ THE FENCE. Every OTHER PanelLayoutStore slot must stay debug-tier.
+        // A key listed here reaching Commands.swift's CODE means the narrowed
+        // rule got widened by accident — which is exactly how a "two named
+        // exceptions" rule rots into "layout is invokable".
+        //
+        // ⚠️ COMMENTS ARE STRIPPED FIRST, and that is not a convenience: the
+        // `view.panelLayout` arm NAMES every one of these keys in prose, to say
+        // it refuses them. A raw `contains` would read that refusal as a
+        // violation and redden on the very text that documents the fence.
+        let controlCode = Self.codeOnly(control)
+        for banned in ["sidebarWidth", "pianoRollPPB", "pianoRollRowHeight",
+                       "pianoRollMinimap", "pianoRollCenterPitch", "mixerInsertsCollapsed",
+                       "waveformNormalize", "waveformVerticalZoom", "auditionEnabled"] {
+            let note14 = "`\(banned)` reached DAWControl — M35 narrowed the non-invokable-layout rule "
+                + "to workspace + editorMaximized ONLY (DESIGN-LANGUAGE.md); everything else is "
+                + "debug-tier chrome and belongs to debug.panelLayout."
+            #expect(!controlCode.contains(banned), "\(note14)")
+        }
+        // `editorFraction` is the one key NOT in that list, and its absence from
+        // it is deliberate: it IS in DAWControl, as a READ-ONLY echo beside
+        // `editorMaximized` (the m25-b-1 restore contract — the two are
+        // independent, so one round trip proves it). It must never become
+        // SETTABLE, which is a claim about the accepted-key array, not about the
+        // file.
+        let note15 = "view.panelLayout's accepted-key array changed shape — re-check that " + "editorFraction did not become settable."
+        #expect(controlCode.contains("[\"workspace\", \"editorMaximized\"]"), "\(note15)")
+
+        // And it IS still reachable through the debug seam, so a capture can stage it.
         let app = Self.codeOnly(Self.text(Self.appPath))
         #expect(app.contains("params[\"editorMaximized\"]"),
                 "the debug.panelLayout seam no longer stages the mode, so no capture can drive it.")

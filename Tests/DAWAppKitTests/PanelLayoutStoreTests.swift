@@ -477,4 +477,44 @@ struct PanelLayoutStoreTests {
         store.reset()
         #expect(store.pianoRollRowHeight == 14)
     }
+
+    // MARK: - Piano-roll pitch FOCUS (the one non-persisted slot)
+
+    @Test("a focus request clamps, bumps its nonce, and persists NOTHING")
+    func pianoRollFocusIsAnEventNotADimension() {
+        let spy = SpyBacking()
+        let store = PanelLayoutStore(backing: spy)
+        #expect(store.pianoRollFocusPitch == nil)
+        #expect(store.pianoRollFocusNonce == 0)
+
+        store.requestPianoRollFocus(pitch: 24)
+        #expect(store.pianoRollFocusPitch == 24)
+        #expect(store.pianoRollFocusNonce == 1)
+
+        // ⭐ THE NONCE IS THE WHOLE POINT: asking for the SAME pitch twice must
+        // still scroll, because between the two asks the user may have scrolled
+        // away. A plain value slot would silently no-op the second request.
+        store.requestPianoRollFocus(pitch: 24)
+        #expect(store.pianoRollFocusNonce == 2)
+
+        store.requestPianoRollFocus(pitch: -5)
+        #expect(store.pianoRollFocusPitch == 0)
+        store.requestPianoRollFocus(pitch: 900)
+        #expect(store.pianoRollFocusPitch == 127)
+
+        // ⚠️ NOT PERSISTED — every other slot on this type write-throughs, so the
+        // negative has to be pinned or the next relaunch would scroll the roll
+        // somewhere the user never asked for. The spy saw four requests; it must
+        // hold nothing from any of them.
+        #expect(spy.storage.isEmpty)
+        let reopened = PanelLayoutStore(backing: spy)
+        #expect(reopened.pianoRollFocusPitch == nil)
+        #expect(reopened.pianoRollFocusNonce == 0)
+
+        // Positive control on that emptiness: the SAME spy does record a slot
+        // that is meant to be remembered, so `storage.isEmpty` above is a real
+        // measurement and not a spy that never wrote anything.
+        store.setPianoRollRowHeight(40)
+        #expect(spy.storage[PanelLayoutStore.pianoRollRowHeightKey] == 40)
+    }
 }

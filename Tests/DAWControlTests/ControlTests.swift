@@ -2272,7 +2272,25 @@ struct CommandRouterTests {
                 // Both are proven end to end, against an injected fake install
                 // function with no network, by SoundBankDownloadCommandTests.
                 "instrument.downloadSoundBank",
-                "instrument.cancelSoundBankDownload"].contains(command) {
+                "instrument.cancelSoundBankDownload",
+                // M35 — the four `view.*` verbs. Excluded because THIS ROUTER IS
+                // HEADLESS BY CONSTRUCTION (no `viewUI` seam installed) and the
+                // design's contract is that all four then fail LOUDLY rather
+                // than returning a success that means nothing: a `view.capture`
+                // that answered `ok` here would be reporting a screenshot of an
+                // app that does not exist. So the refusal IS the verb working.
+                // ⛔ Do NOT "fix" this by installing a fake seam in this
+                // fixture: the loud-refusal contract is the thing most worth
+                // protecting, and a fake here would make it untestable in the
+                // one place it is asserted.
+                // ⚠️ Two of the four would fail for a SECOND, unrelated reason
+                // as well — `view.selectClip` needs a `clipId` and
+                // `view.openEditor` a `trackId`, which this params-free loop
+                // cannot supply — and that is recorded so a future reader does
+                // not "repair" the wrong half. All four are proven, headless
+                // refusal included, by ViewSurfaceCommandTests.
+                "view.capture", "view.selectClip",
+                "view.panelLayout", "view.openEditor"].contains(command) {
                 continue
             }
             let response = await router.handle(ControlRequest(

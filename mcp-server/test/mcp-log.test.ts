@@ -122,7 +122,7 @@ test("both registration paths are instrumented: 216 total, empty symmetric diffe
   const instrumented = instrumentedToolNames();
   // m34-l: 208 -> 209 with `play_sustain`.
   // m34-h-1: 209 -> 216 with the seven-verb `looper_*` LIVE LOOPING family.
-  assert.equal(instrumented.length, 216, `expected 216 instrumented registrations, got ${instrumented.length}`);
+  assert.equal(instrumented.length, 220, `expected 220 instrumented registrations, got ${instrumented.length}`);
 
   const listed = await client.listTools();
   const listedNames = new Set(listed.tools.map((t) => t.name));

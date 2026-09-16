@@ -3119,14 +3119,207 @@ capabilities already work as app-tier `debug.*` seams that are deliberately off
 entry: a typed app-layer seam (`ViewUISurface.swift`), copying the shipped
 `PluginUIControlling` / `EditPasteControlling` pattern, so no AppKit enters
 `DAWControl`. It names the schemas, the headless contract, the exact count pins
-that move (211→215 Swift at 16 sites, 216→220 MCP), where in `allCommands` the
+that move (211→215 Swift, 216→220 MCP), where in `allCommands` the
 block must be inserted (after `plugin.listOpenUIs`, NOT the tail — 51
 end-relative assertions), and the build order.
 
-- [ ] **m35-a** — `ViewUISurface.swift` + `viewUI` on the router + `AppModel` install. Route: `swift-app-engineer`
-- [ ] **m35-b** — `view.capture` (+ all four `allCommands` entries and the count/doc pins, once). Route: `swift-app-engineer` + `mcp-integration-engineer`
-- [ ] **m35-c** — `view.selectClip`, with the honest `reason` enum (an audio clip selects but opens nothing). Route: `swift-app-engineer`
-- [ ] **m35-d** — `view.panelLayout` + the DESIGN-LANGUAGE.md amendment that narrows the non-invokable-layout rule to two named exceptions. Route: `swift-app-engineer`
-- [ ] **m35-e** — `view.openEditor` and its dispatch table, including AU delegation to the plugin seam. Route: `swift-app-engineer`
-- [ ] **m35-f** — staging probe (`scripts/gates/m35-view-surface-probe.mjs`), full-suite run, baseline re-measure. Route: `qa-test-engineer`
-- [ ] **m35-g** — tool grants in `claude-plugin/agents/*.md`, regenerate the bundle, stdio-verify `view_capture` is in it, then tell the user a `/plugin update` is due. Route: `mcp-integration-engineer`
+⚠️ **BOTH COUNT CLAIMS WERE CONFIRMED CORRECT BY RE-DERIVATION AT THE CLOSE
+(2026-09-04), AND A THIRD NUMBER IN CIRCULATION WAS NOT.** Wire 211→215 measured
+by `node scripts/gates/doc-count-drift.mjs` (two independent routes agreeing,
+own positive control firing first); MCP 216→220 measured by `npm test`'s
+`tools.length` pin and the bijection test. **A "208 MCP tools" figure was being
+quoted alongside these and was STALE.** Swift edits landed at 24 sites, not 16 —
+18 of them the mechanical `count == 211` → `215` pins.
+
+⚠️ **THE "m35 view-surface design brief" THIS SECTION AND `docs/ARCHITECTURE.md`
+BOTH CITED NEVER EXISTED ON DISK.** The citation was written forward and never
+redeemed. The shipped schemas, dispatch table and headless contract are
+documented at their declarations instead — `Sources/DAWControl/ViewUISurface.swift`,
+the four `case "view.*"` arms in `Sources/DAWControl/Commands.swift`, and
+`Sources/DAWApp/ViewUIWireSurface.swift`.
+
+- [x] **m35-a** — `ViewUISurface.swift` + `viewUI` on the router + `AppModel` install. **SHIPPED 2026-09-04.** `Sources/DAWControl/ViewUISurface.swift` (Foundation-only `@MainActor protocol ViewUIControlling` + `ViewRect`/`ViewCaptureResult`/`ViewSelectClipResult`/`ViewPanelLayoutResult`/`ViewEditorTarget`/`ViewEditorResult`), `public weak var viewUI` on `CommandRouter` beside `pluginUI`/`editPaste`, installed by `router.viewUI = self` at the TAIL of `AppModel.init` (the `editPaste` position — `self`-as-value needs every stored property initialized first). Handlers in `Sources/DAWApp/ViewUIWireSurface.swift`; NO AppKit/SwiftUI/DAWEngine entered DAWControl. Route: `swift-app-engineer`
+- [x] **m35-b** — `view.capture` (+ all four `allCommands` entries and the count/doc pins, once). **SHIPPED 2026-09-04.** The rasterization moved to ONE home, `AppModel.captureMainWindowCore(to:)`, which both tiers call — `debug.captureUI` is byte-for-byte unchanged in behaviour and keeps its `ImageRenderer` fallback, its `target:"plugin"` mode and its `selectClip` param; `view.capture` calls the core and THROWS when there is no drawable window, because that fallback cannot draw NSScrollView content and would report a blank 1280x800 PNG as a success. **Counts RE-DERIVED, not trusted: wire 211 -> 215 (`node scripts/gates/doc-count-drift.mjs`, both routes agreeing, positive control fired), MCP 216 -> 220 (`npm test`'s bijection + `tools.length` pins).** ⚠️ The "208 MCP tools" figure that circulated with this item was STALE; 216 was correct. Route: `swift-app-engineer` + `mcp-integration-engineer`
+- [x] **m35-c** — `view.selectClip`, with the honest `reason` enum (an audio clip selects but opens nothing). **SHIPPED 2026-09-04.** Three reasons: `piano-roll-opened` / `audio-clip-has-no-editor` / `workspace-is-not-arrange`. ⭐ THE THIRD WAS NOT IN THE SETTLED DESIGN and is the one that would have bitten: the roll's mount point is the Arrange workspace, so a MIDI clip focused while the Mix console is up is selected and NOT on screen — reporting that as `piano-roll-opened` would hand an agent a capture it could not explain. `editorOpen` is derived from `AppModel.openEditorClip` (the tree's ONE rule for "is the roll on screen"), never from `clip.isMIDI`, so the reply and the screen cannot diverge. The verb deliberately does NOT flip the workspace for you. Route: `swift-app-engineer`
+- [x] **m35-d** — `view.panelLayout` + the DESIGN-LANGUAGE.md amendment that narrows the non-invokable-layout rule to two named exceptions. **SHIPPED 2026-09-04.** Exactly `workspace` + `editorMaximized`; a bare call is READ-ONLY (the m11-a law); `editorFraction` rides back read-only so one round trip proves the m25-b-1 restore contract. Amended in THREE places that now agree: `docs/DESIGN-LANGUAGE.md` (the rule itself, narrowed not repealed), `setPanelLayout`'s header AND its m25-b-1 comment block in `DAWProApp.swift` (both cited the old rule). ⭐ **The fence is ENFORCED, not written down: 13 debug-tier keys are refused BY NAME at both the wire and the MCP boundary, asserted in `ViewSurfaceCommandTests` and `view-surface.test.ts`.** ⚠️ `EditorMaximizeSiteTests.staysOffTheWire` was INVERTED (renamed `onlyReachableThroughViewPanelLayout`) rather than deleted — an absence-test that deletes itself leaves the fence unguarded. Route: `swift-app-engineer`
+- [x] **m35-e** — `view.openEditor` and its dispatch table, including AU delegation to the plugin seam. **SHIPPED 2026-09-04.** EXHAUSTIVE `switch` over `InstrumentDescriptor.Kind` with NO `default:` — `polySynth`/`sampler` open their in-app cards through the same funnels the cards' own buttons use, `audioUnit` DELEGATES to `pluginWindows.openUI` (so exactly one code path in the app ever materializes an AU window, and the reply nests `plugin.openUI`'s exact payload), and `soundBank`/`testTone` are refused readably because neither has an editor card. Effects take the `"master"` sentinel, decoded in the router so `ViewEditorTarget` carries no magic string. Route: `swift-app-engineer`
+- [ ] **m35-f** — staging probe (`scripts/gates/m35-view-surface-probe.mjs`), full-suite run, baseline re-measure. ✅⭐⭐ **THE STALE-FRAME DEFECT IS FIXED AND THE PROBE SHIPPED 2026-09-04 — CONFIRMED BY LOOKING AT THE FRAME, NOT BY THE REPLY.** Fix: `view.capture` performs a BOUNDED FLUSH before it rasterizes — `flushPendingViewUpdates()` in `Sources/DAWApp/ViewUIWireSurface.swift`, 0.2 s, which is simultaneously the ceiling (it can never grow, and when it is reached — i.e. always — the capture proceeds and photographs whatever is drawn; it never fails and never waits twice). Placed in `captureView`, NOT in `captureMainWindowCore(to:)`: the core's job is “rasterize what is on screen”, waiting for a PENDING update is a production-tier policy about WHICH MOMENT to photograph, and a flush in the core would add a wait to every `debug.captureUI` call. `debug.captureUI` is untouched (its own 0.2 s spin, its own behaviour). NO `selectClip` param was re-added — the m35-b/m35-c split is the design. ⚠⚠ **THE OBVIOUS FIX WAS WRONG AND I SHIPPED IT FIRST: a nested `RunLoop.main.run(until:)` changed the captured frame by ZERO BYTES** (F1's sha came back bit-for-bit identical to the unfixed run). ⭐ **AND THE ARM WAS POSITIVE-CONTROLLED, because a spin that never ran and a spin that ran and could not help produce the SAME output:** re-run at 2.0 s with the capture's wall time instrumented, it measured **2349 ms — the spin demonstrably ran — and F1 was STILL the stale sha.** (Swift corroborates: `run(until:)` is `noasync`, so that arm only compiles while the verb is sync.) ⚠ Also be precise about the frame: the stale F1 is NOT “before the roll opened” — at 345 862 B vs F0’s 280 428 B it shows the roll MOUNTED at its default anchor. What had not landed is the SECOND-ORDER chain m35-h hangs off (viewport-geometry tick → `requestPianoRollFocus` → `focusPitchAxis`’ `scrollTo`), each link needing another main-actor turn. The caller OCCUPIES THE MAIN ACTOR while it spins, and the pending SwiftUI update is main-actor work, so it cannot run re-entrantly. **Spinning harder can never fix this; the actor must be RELEASED.** So `captureView` (and `ViewUIControlling.captureView`) is now `async` and the flush is `await Task.sleep`. ⭐ This also explains m35-h's note that `debug.captureUI {selectClip}` photographs the pre-focus frame despite its 0.2 s spin — same mechanism, and that path is deliberately left alone (additive-only). ⭐ **THE 0.2 s IS MARGIN, MEASURED AS SUCH: cut to 0.02 s ALL FOUR PROBE LEGS STILL PASSED**, so what the fix buys is the suspension, not the duration; 0.2 s is 10× the demonstrated-sufficient value (≈12 refreshes at 60 Hz). PROBE: `scripts/gates/m35-view-surface-probe.mjs` — launches its OWN staging instance on 17695 (pid-exact, profile-isolated, via `_staging.mjs`), drives all four `view.*` verbs, and scores `sha256(F1)==sha256(F2)` for three ALTERNATING `selectClip` trials (C1/D1 vs C7/D7) plus one `openEditor` pair, where F1 is captured immediately and F2 one no-op round trip later. **SELF-CONTROLLED: `sha256(F0)!=sha256(F2)` (the picture must actually MOVE) and `appActive` constant across the triple (m23-ds: a focus flip moves ~94 B of chrome); if a control does not fire it exits 3 and scores NOTHING.** ⭐ **IT WENT RED ON THE REAL DEFECT** (written before the fix: 3/4 legs failed, F1 byte-identical to F0 for the low clip — the empty grid, photographed); `M35F_ASSERT_STALE=1` inverts the polarity to repeat that demonstration on a fixed tree (exit 1, 0/4). FRAME EVIDENCE: the immediate capture now shows C1/D1 framed on the pitch axis — read by eye, not inferred from the reply. VERIFIED: `swift build` clean/0 warnings; **Swift 7924 tests / 709 suites / 0 failures (baseline HELD, none added, NONE RETIRED OR RENAMED)**; MCP 747/747, 220 tools (only `view_capture`'s DESCRIPTION changed — it now states the back-to-back pair is safe; ⛔ a bundle regen + `/plugin update` is owed for that text to reach the user's agents); `doc-count-drift` exit 0 @ 215 (no wire shape change: `{path,width,height,method,rect,scale,appActive}` is untouched key-for-key). ⚠ `m23fa3-verdict-enforcement` is 87/88 — the ONE non-compliant file is `doc-count-drift.mjs`, PRE-EXISTING and not from this item. Remaining: the `@MainActor` headroom campaign below. ⛔⛔ **ORIGINAL FINDING KEPT BELOW.** **THE FIRST QUESTION IS NOW ANSWERED, MEASURED ON STAGING 17695 2026-09-04, AND THE ANSWER IS THE BAD ONE: a back-to-back `view.selectClip` → `view.capture` PAIR PHOTOGRAPHS THE STALE FRAME.** Evidence: one clip at C1/D1, `view.panelLayout {editorMaximized:true}` → `view.selectClip` (which replied `reason: "piano-roll-opened", editorOpen: true` — a TRUE reply about a frame that had not been drawn yet) → `view.capture` produced the DEFAULT anchor with an empty grid; a second `view.capture` one round-trip later produced the notes correctly framed. **So the reply is honest and the picture is not, which is this tree's characteristic failure mode — a success that means nothing.** ⚠️ It is NOT specific to m35-h's auto-focus: the same one-round-trip lag makes `debug.captureUI {selectClip}` photograph the pre-focus frame, which nearly had me report m35-h as a dead feature off four frames that all showed the default anchor. ⭐ **BASELINES RE-MEASURED at the m35-a…e + m35-h close: Swift 7924 tests / 709 suites / 0 failures (from 7894/707: +18 `ViewSurfaceCommandTests`, +12 `PianoRollOpenFocusTests`, 0 retired, 1 RENAMED — `EditorMaximizeSiteTests.staysOffTheWire` → `onlyReachableThroughViewPanelLayout`, inverted rather than deleted so it now asserts the fence); wire 215 (`doc-count-drift` exit 0, positive control fired); MCP 220 tools / 747 tests.** ⚠️ **FULL-SUITE WALL 273.4 s ON A QUIESCENT TREE, so the `@MainActor` cadence campaign owed by the 375→377 bump STILL CANNOT RUN — its validity leg needs a median ≤ 248 s and would reject this as contaminated (exit 2). That debt is real and is not discharged by the suite being green.** Remaining: the probe script itself, and the capture-lag fix. ⭐⭐ **ORIGINAL QUESTION, KEPT because the reasoning is what made it measurable: does a back-to-back `view.selectClip` → `view.capture` PAIR photograph the newly-opened roll, or the frame before it?** `debug.captureUI` spins the main runloop 0.2 s after its own `selectClip` because setting the selection only SCHEDULES the SwiftUI update; the two production verbs are SEPARATE wire requests, so the answer depends on the control server yielding the main runloop between them. No headless test can see this. If the pair photographs the stale frame, the fix is a bounded layout flush in `view.capture` (NOT re-adding a `selectClip` param — that would re-merge the two capabilities m35-b/c deliberately split). ⛔ **ALSO NOW OWES ONE `scripts/gates/m23aw-prepare-headroom.mjs` CAMPAIGN.** M35 pushed the `@MainActor` suite census to 376 and bumped the cadence cap 375 → 377 PROVISIONALLY. The campaign could not be run at the M35 close: the gate's validity leg needs a median run wall ≤ 248 s and this machine measured 273.8 s / 281.4 s on two consecutive full-suite runs, so a campaign started then would have been REJECTED as contaminated rather than scored. Run it on a quiescent machine and paste the result into the bound's comment in `Tests/DAWEngineTests/MainActorOccupancySiteTests.swift`. ⚠️ Also re-measure the tree baseline while you are there: it stood at **7924 tests / 709 suites** post-M35 (**7906 / 708** without the new suite — the +18/+1 is `ViewSurfaceCommandTests` exactly, zero retired), which is already 12 tests / 1 suite above the 7894/707 figure that was in circulation. Route: `qa-test-engineer`
+- [x] **m35-g** — **SHIPPED 2026-09-05.** Grants: all four `view_*` tools (`view_capture`, `view_select_clip`, `view_panel_layout`, `view_open_editor`) went ONLY to `demo-director` (`claude-plugin/agents/demo-director.md`) — it is the sole agent in this plugin holding `Read`, so it is the only one that can actually LOOK at the PNG `view_capture` writes; the other six specialists (`arranger`, `composer`, `finisher`, `mix-engineer`, `producer`, `sound-designer`) hold no filesystem tools at all, so granting them a screenshot tool would have handed each a file path it can never inspect — a distraction, not a capability, so none were touched. Bundle regenerated FIRST (`cd mcp-server && npm run bundle:plugin`, esbuild, 2.1 MB) and verified SECOND by actually speaking MCP to the built artifact (`claude-plugin/server/index.mjs`) over stdio: `tools/list` returned **220 tools**, all four `view_*` names present, a NEGATIVE CONTROL (`view_delete_universe`) correctly absent, and `view_capture`'s bundled description carries the "back-to-back `view_select_clip` → `view_capture` is safe" text. `mcp-server` build clean; `npm test` **747/747**; `doc-count-drift` exit 0 @ 215. Plugin version bumped `0.11.0` → `0.12.0` in `claude-plugin/.claude-plugin/plugin.json` (note: that path, not `claude-plugin/plugin.json`). ⚠️ **FURTHER DRIFT FOUND AND FIXED WHILE IN THERE:** `claude-plugin/skills/daw-wire-reference/SKILL.md`'s hand-maintained tool count was stale at 208 (should have been 220, a 12-tool drift — `doc-count-drift.mjs` only scores the 215-command count, never this one); corrected with the same bijection decomposition (215 commands + 3 Table-B + 2 Table-C = 220) and a note that this paragraph rots at EVERY tool-adding close, not just the ones that remembered it. **`/plugin update` is now due** — the regenerated bundle carries the four tools, the grant, and the corrected `view_capture` description; running it before this close would have shipped the m32-close defect again (an announcement with no bundle behind it). Route: `mcp-integration-engineer`
+- [x] **m35-h** — **SHIPPED 2026-09-04, and CONFIRMED BY LOOKING — 8 frames, not a gate.** Policy lives in `Sources/DAWAppKit/PianoRollOpenFocus.swift` (headless-tested, 12 tests): empty clip → leave the anchor; already in frame → leave it (tested against a STRICT window with the 18 pt scrub strip subtracted and partial edge rows excluded — `PianoRollView.visiblePitchWindow` was deliberately NOT reused, its own doc calls its overstatement "safe", which is true for the paste nudge it bounds and backwards here); range that FITS → midpoint (guarantees every note lands); range too WIDE → the MEDIAN NOTE (an actual element, never an average — for a C1 bass with C6 ornaments the midpoint is ~C3.5, a region with NO NOTES, which would reproduce the very blank grid this fixes). Seam is the viewport-height reader's tick, latched once per `.id(clip.id)`; `.onAppear` was rejected (fires before geometry, so the in-frame test has no window) and `.onChange(of: clip)` was rejected (the m18-i SAME-identity seam — it would re-frame on every wire-side trim). ⚠️ **AND IT EXPOSED A BUG IN THE SEAM I HAD CALLED VERIFIED:** `focusPitchAxis` subtracted the strip on the WRONG SIDE — the readable band is `[Y+s, Y+H]` so centring costs `rowCentre − (H+s)/2`, not `− (H−s)/2`, which parked every focused row a full row (18 pt) high; the clamp was over by the same `s` and survived only because `scrollTo` clamps behind it. Both fixed. ⭐⭐ **THE CHECK THAT NEARLY REPORTED A FALSE FAILURE: capturing in the SAME `debug.captureUI {selectClip}` call photographs the frame BEFORE the deferred focus turn runs** — all four of my first frames showed the default anchor and looked like a dead feature. One extra round-trip and they are all correct. See m35-f. Verified by eye: HIGH (C7 — the shot that would catch a `gridScrollY == 0` race; it does not bite), LOW (C1/F1), WIDE (lands on the C1 cluster, C6 ornaments deliberately off-screen), EMPTY (default anchor, no motion), a wire `clip.trim` after a manual scroll (NO re-frame), a `pianoRollRowHeight` change (NO re-fire), and A→B→A (fires again on a real identity switch). ⚠️ ORIGINAL ITEM TEXT KEPT BELOW because the measurement in it is the reason zoom is not the fix. — **the piano roll opens on an EMPTY GRID for a low clip, and this is a real user-facing defect, not a rig problem.** The roll anchors high in the 128-row pitch stack, so a clip written at C1 (a 49 Hz sub, an 808) shows no notes at all: they are drawn in the minimap and in the velocity lane, and sit below the viewport. ⚠️ **Row height is NOT the workaround — MEASURED at the 10 pt floor the grid still bottomed out at F2** with the notes below it. Fix: when the roll OPENS on a clip, centre the pitch axis on that clip's own note range (and do nothing when the range is already in frame, so it never fights a user who scrolled deliberately). The scroll seam already exists — `PanelLayoutStore.requestPianoRollFocus(pitch:)` + `PianoRollView.focusPitchAxis(on:)`, driven today by `debug.panelLayout {pianoRollCenterPitch}` — so this item is the POLICY, not the plumbing. Found while shooting the session film, where every low chapter photographed a blank editor. Route: `swift-app-engineer`
+
+## M36 — Three defects the film wave found in the product (seeded 2026-09-05)
+
+Found while rebuilding the lesson films, each **reproduced with a control**, by
+an agent that was trying to shoot a video rather than trying to break the app.
+⭐ That is the point: dogfooding found these, not a test.
+
+- [ ] (m36-a) ⛔⛔ **A SOUND-BANK INSTRUMENT RENDERS SILENT OFFLINE AFTER THE
+  TRANSPORT HAS RUN — AND `render.bounce` STILL RETURNS `ok`.** Measured while
+  filming Bach House: once the transport had run for a capture burst, **every**
+  `soundBank` instrument in that app instance bounced to silence
+  (`piano72.wav` came back at **−70 LUFS**), while the command reported success
+  and simply **omitted the loudness report**. Re-issuing `track.setInstrument`
+  did not revive it. ⚠️⚠️ **THIS IS THE HOUSE FAILURE MODE IN ITS PUREST FORM: a
+  wrong answer that looks exactly like a right one.** An absent field is not an
+  error, and every caller that does not check for it gets silence and a success.
+  ⭐ **The fix has two halves and the second is the important one:** find the
+  dropout, AND make a bounce that produced silence SAY SO — a render whose
+  loudness report is missing must not return `ok`. GATE: bounce a soundBank
+  instrument after a transport run and assert non-silence, with a
+  pre-transport bounce as the positive control. Route: `audio-dsp-engineer`.
+- [ ] (m36-b) **The GeneralUser GS path drops notes on dense material.**
+  Identical pitches in bars 1 and 4 of BWV 846 rendered **14–64 dB apart** across
+  three controlled renders of the same notes; shortening every note made it
+  worse. ⚠️ **Consequence today: a sound-bank piano cannot be filmed**, which is
+  why the Bach House rebuild uses the built-in `polySynth` for a piano piece.
+  Route: `audio-dsp-engineer`. ⚠️ Check against m36-a first — they may share a
+  cause, and fixing one may move the other.
+- [ ] (m36-c) **`track.setVolume` clamps at 2.0 SILENTLY.** A request for 2.11
+  stored 2.0 and rendered 3 dB under target with no warning. ⭐ The project
+  already has the right shape for this — `fx.setParam` and
+  `mixer.setMasterVolume` return a `warnings` array naming what was asked, what
+  was stored, and the range, and the key is ABSENT when nothing was clamped.
+  **Make `track.setVolume` do the same**; it is a small, additive fix.
+  Route: `mcp-integration-engineer`.
+
+## M38 — Polarity: the Ø button every mixer has and this one did not (2026-09-06)
+
+- [x] (m38-a) ✅ **DONE 2026-09-06 — the gain insert gets a polarity (phase)
+  invert.** `GainParams.invertPolarity: Bool`, default `false`, appended at spec
+  slot 1 so `gainLinear` keeps automation slot 0. **`gainRange` was deliberately
+  NOT widened to allow negatives**: `gainLinear: 0` already means silence, so a
+  signed range makes 0 an awkward midpoint and fuses "turn it down" with "flip
+  it" — a boolean is what the hardware does and what reads correctly as a
+  toggle. Purely additive: a pre-m38-a project has no such key and decodes to
+  `false` through the same clamping init `gainLinear` uses.
+  ⭐ **NO new control command and NO new MCP tool** — effect params are a flat
+  name/value surface, so it reaches the wire through the existing
+  `fx.add` seeded-params path, `fx.setParam`, `fx.describe` and
+  `project.snapshot` (pinned by two new tests in `FXCommandTests`; the wire
+  count is unchanged at 215, `doc-count-drift` exit 0).
+  ⭐ **RT: the sign is folded into the SAME smoothed coefficient the gain
+  already ramps** (`GainEffect.signedTarget`), so a live flip walks +g → −g
+  through zero on the existing ~5 ms declick — a brief dip, not a full-scale
+  click — and `invertPolarity: false` is literally the same Float, unity skip
+  included. No new smoothing framework, no allocation, no locks, no logging.
+  ⭐⭐ **GATE = A NULL TEST SHOWN TO FAIL AS WELL AS PASS.** Two tracks, same
+  transient-rich fixture (LCG noise bursts, NOT a sine), identical unity gain
+  inserts, one boolean different: residual **exactly 0.0 → −∞ dBFS**. Control,
+  same graph with the flag OFF: **−1.94 dBFS peak, +6.0206 dB over solo** — and
+  planting `invert: false` into the null leg makes it fail at −1.94 dBFS, which
+  is how we know the null is not vacuous.
+
+## M37 — Cloud song generation: Lyria 3.5 and Eleven Music behind the existing provider protocol (seeded 2026-09-06 by the user)
+
+The user's brief: *"include new AI feature to generate audio using ElevenLabs and
+latest Google Lyra 3.5 model that is provided via API… That would be better than
+using heavy ACE model that has worse quality. We may actually remove it
+completely if google one is good."*
+
+⭐ **The plumbing already exists.** `SongGenerating`
+(`Sources/AIServices/Providers.swift:265`) is the contract, and there are already
+two conforming clients — `ACEStepClient` (local sidecar) and `SunoClient`
+(dormant cloud). A third and fourth are additive work, not architecture.
+
+**Verified 2026-09-06 by web search, because both names needed checking and one
+was wrong:**
+- ⚠️ **It is Lyr*ia*, not Lyra.** "Lyra" is Google's low-bitrate *speech codec* —
+  a different product entirely. **Lyria 3.5** is the music model, and it reached
+  the **Gemini API in public preview on 2026-09-03** — two days before this item
+  was written, and after my training data. Up to **3 minutes**, variable length,
+  own-lyrics or generated, vocal-style and acoustic controls, image→track.
+- **Eleven Music** is real and shipping: `POST /v1/music`, **3 s to 5 min**, up
+  to **44.1 kHz**, MP3/PCM/µ-law/a-law/Opus. **Music v2** is the default in their
+  UI; **v1 is still the API default during a transition**, so the model must be
+  named explicitly rather than defaulted. **Paid subscribers only.**
+
+### ✅ RULED BY THE USER 2026-09-06: **ACE-STEP STAYS. The removal question is CLOSED.**
+
+Their words, on the argument below: *"agree, keep it — but we need to look to add
+google one once it comes as release and we know more."*
+
+⛔ **Do not re-open this as a refactor, a cleanup, or a side effect of adding a
+cloud provider.** ACE-Step is the local/offline path and it is staying. A future
+proposal to remove it needs a NEW ruling from the user, on new evidence — not a
+re-reading of this milestone.
+
+⭐ **And Lyria is GATED ON GENERAL AVAILABILITY, not on preview.** The user's
+rule, in effect: adopt it *"once it comes as release and we know more."* See
+m37-a.
+
+The original argument, kept because it is the reasoning the ruling was made on:
+
+Deleting ACE-Step is a one-way door and the case for it currently rests on an
+untested claim. Three things argue against doing it as part of this work:
+
+1. **Lyria 3.5 is in PUBLIC PREVIEW.** Preview APIs change shape and get
+   deprecated. Deleting 56 GB of working local capability to depend on a
+   two-day-old preview endpoint is the kind of trade that only looks good until
+   it doesn't.
+2. **ACE is the only OFFLINE path.** No network, no per-call cost, and nothing
+   leaves the machine. For a DAW that is not a footnote: unreleased material,
+   no connectivity, and per-generation billing are all real user situations.
+3. **Rights and terms differ** between locally-generated and cloud-generated
+   audio. That is the user's call to make with the terms in front of them, not
+   an assumption to bury in a refactor.
+
+⭐ **The milestone still ends in a MEASURED BAKE-OFF (m37-e)** — not to decide
+whether ACE survives (it does), but to learn where each provider is actually
+better, so the app can ROUTE to the right one instead of picking a winner.
+
+- [ ] (m37-a) ⛔ **BLOCKED ON GA — DO NOT BUILD AGAINST THE PREVIEW.** User
+  ruling 2026-09-06: add Lyria *"once it comes as release and we know more."*
+  Public preview as of 2026-09-03 is not a release. **Re-check trigger:** Lyria
+  3.5 (or its successor) leaving preview on the Gemini API / Vertex AI. When
+  re-checking, RE-VERIFY the model name, the endpoint and the limits by search —
+  this item was written two days after the preview landed and the surface will
+  move. **The design below is unblocked work the moment it goes GA; nothing else
+  in M37 waits on it.**
+  **`LyriaClient`: `SongGenerating` over the Gemini API.** New
+  `AIProviderID` case + env key (`GEMINI_API_KEY`), submit/poll/fetch-once
+  semantics matching the protocol's documented contract (a failed upstream job
+  THROWS, it is never returned as a `.failed` value). ⚠️ Respect the documented
+  3-minute ceiling — refuse a longer request with a readable error rather than
+  silently truncating. `extractStems`/`lego` have no Lyria equivalent: conform by
+  throwing a clear "not supported by this provider" error, never by returning
+  empty (an empty result that looks like a valid answer is this tree's
+  characteristic failure). Route: `mcp-integration-engineer`.
+- [ ] (m37-b) **`ElevenMusicClient`: `SongGenerating` over `POST /v1/music`.**
+  `ELEVENLABS_API_KEY`. ⚠️ **Pin the model explicitly to Music v2** — the API
+  still defaults to v1, so an unpinned call silently gets the older model, which
+  would poison the bake-off in m37-e. Request PCM/44.1 kHz, not MP3: this is a
+  DAW and the file lands on a timeline. Route: `mcp-integration-engineer`.
+- [ ] (m37-c) **Provider selection on the wire, additively.** `generate_song`
+  currently means ACE and `generate_song_suno` is a separate tool — that pattern
+  does not scale to four. Add an optional `provider` param defaulting to today's
+  behaviour so nothing existing changes, and have `ai.providerStatus` report key
+  presence per provider. ⚠️ Additive only; never rename a live command.
+  Route: `mcp-integration-engineer`.
+- [ ] (m37-d) **Keys: env/keychain only, never on the wire or in logs.** Extend
+  `KeyStore`'s `AIProviderID` and its `KeyPresence` reporting. ⚠️ The existing
+  rule stands: never hardcode, never commit, and API keys never appear in a
+  control-protocol payload or a log line. Route: `mcp-integration-engineer`.
+- [ ] (m37-e) ⭐⭐ **THE BAKE-OFF.** ⚠️ **RUN IT WITHOUT LYRIA FIRST** — m37-a is
+  blocked on GA and this item must not inherit that block. **Leg 1 (now):
+  ACE-Step vs Eleven Music v2. Leg 2 (when Lyria ships): re-run all three**, and
+  re-run ACE and Eleven at the same time rather than quoting leg 1 forward — a
+  number that reached you from a document is not a measured number. Same
+  prompt, same duration.
+  Measure what can be measured (integrated loudness, true peak, spectral
+  balance, stereo width, mono-fold behaviour, and wall-clock + cost per
+  generation) and be honest that the rest is a listening judgement. ⭐ **Ship the
+  results as 3-4 options differing on ONE axis and let the user pick — their
+  pick IS the feedback** (standing user rule 2026-08-29; they are not a musician
+  and their words describe rather than diagnose, so do not read a description as
+  a defect report). **The output is a ROUTING recommendation — which provider for which kind of
+  ask — NOT a winner.** ACE's survival is not on the table (ruled 2026-09-06).
+  Route: `research-analyst` for the harness, `daw-architect` for the verdict.
+- [ ] (m37-f) **Separate win, worth taking while the key is there: ElevenLabs
+  TTS for the film narration.** The video pipeline currently synthesises every
+  take on a local omlx server — the thing that two builds killed each other's
+  copy of, and whose word-drops (`"violations"` dropped at similarity 1.00,
+  "lowest" for "slowest", *"What a day out we is"* for *"What a DAW is"*) have
+  cost a re-record in nearly every film. A hosted TTS would likely remove that
+  whole class of defect. ⚠️ **Keep the content gate regardless** — a better
+  synthesiser is a reason to trust the transcript less, not more, because the
+  errors get rarer without getting less damaging. Route: `demo-director`.

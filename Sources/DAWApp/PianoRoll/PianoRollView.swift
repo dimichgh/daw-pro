@@ -439,6 +439,10 @@ struct PianoRollView: View {
     /// minimap jump — follow never touches the pitch axis (`:1598-1606`).
     @State private var verticalTargetY: CGFloat = 0
     @State private var verticalNonce = 0
+    /// m35-h — the open-focus latch. `false` for exactly one view INSTANCE, and
+    /// `.id(clip.id)` gives one instance per clip OPEN, so this is what makes the
+    /// auto-centre a once-per-open event rather than a per-frame behaviour.
+    @State private var didAutoFocusPitchOnOpen = false
     @FocusState private var isFocused: Bool
 
     private static let keyboardWidth: CGFloat = 54
@@ -997,6 +1001,22 @@ struct PianoRollView: View {
             model.rowHeight = rowHeight
             repinRowZoomAnchor(oldRowHeight: oldRH, newRowHeight: rowHeight)
         }
+        // m25-b-4's THIRD writer of `verticalTargetY`, and it arrives holding the
+        // obligation `verticalJumpMarker`'s doc writes down: the y it sets is
+        // clamped into the gutter (`0 ... contentHeight − viewportHeight`) against
+        // the CURRENT row height, so it can never ask the scroller for an offset
+        // that does not exist.
+        //
+        // ⚠️ `initial:` is deliberately ABSENT. This is an event, not a dimension —
+        // firing it on appear would yank the pitch axis on every clip open,
+        // unconditionally. m35-h has since made that product decision, and it is
+        // CONDITIONAL (do nothing when the notes are already in frame), so it lives
+        // in `attemptOpenPitchFocus` off the viewport-height seam and calls
+        // `focusPitchAxis` directly. This seam stays external-drivers-only.
+        .onChange(of: layout.pianoRollFocusNonce) { _, _ in
+            guard let pitch = layout.pianoRollFocusPitch else { return }
+            focusPitchAxis(on: pitch)
+        }
         // m18-i: the external-mutation seam. `.id(clip.id)` recreates this view
         // (and its seeded @State models) only on a clip IDENTITY switch; a
         // wire/arrange-side geometry op (`clip.trim`/`move`/`split`, arrange
@@ -1130,6 +1150,92 @@ struct PianoRollView: View {
     /// The VERTICAL half cannot travel that seam — follow has no pitch axis
     /// (`:1598-1606` scopes it out on purpose) — so it rides its own target+nonce
     /// pair to the vertical scroller.
+    /// Scrolls the pitch axis so `pitch`'s row sits in the middle of the note
+    /// grid (m35 groundwork, driven by `debug.panelLayout {pianoRollCenterPitch}`).
+    ///
+    /// The scrub strip is subtracted from the viewport before centring, because
+    /// the strip is frozen OVER the top of the scroller — centring against the
+    /// full height would park the pitch that many points high, which is exactly
+    /// the plausible-looking wrong number the minimap's own doc warns about.
+    private func focusPitchAxis(on pitch: Int) {
+        // ⚠️ THE STRIP IS SUBTRACTED ONCE, NOT TWICE, AND THE SIGN IS THE WHOLE
+        // BUG THIS COMMENT EXISTS TO PREVENT. `verticalTargetY` is the content y
+        // placed at the top of the SCROLLER, whose height is
+        // `editorViewportHeight` (H); the frozen scrub strip covers its top
+        // `scrubStripHeight` (s). So the READABLE band is [Y+s, Y+H] and its
+        // centre is Y + (H+s)/2 — which means centring a row costs
+        //
+        //     Y = rowCentre − (H + s) / 2
+        //
+        // This shipped as `− (H − s) / 2`, i.e. the strip subtracted on the wrong
+        // side, which parked every focused row a full s (18 pt, about one row)
+        // ABOVE the readable centre. It looked right because it IS right to
+        // within one row, and one row is exactly the error a screenshot does not
+        // announce. Same slip in the clamp: the furthest legal offset puts the
+        // content's bottom at the SCROLLER's bottom, so it is
+        // `contentHeight − H`, not `contentHeight − (H − s)`. That one was
+        // harmless only because `scrollTo` clamps behind it.
+        let rowCentre = model.y(forPitch: pitch) + model.rowHeight / 2
+        let maxY = max(0, model.contentHeight - editorViewportHeight)
+        let centred = rowCentre - (editorViewportHeight + Self.scrubStripHeight) / 2
+        verticalTargetY = min(max(0, centred), maxY)
+        verticalNonce += 1
+    }
+
+    /// **m35-h — centre the pitch axis on the clip's own notes when the roll OPENS.**
+    ///
+    /// The defect and the policy live in `PianoRollOpenFocus` (headless-tested);
+    /// this is the seam that runs it exactly once per open, and the seam choice is
+    /// the part that could not be tested headless, so it is argued here.
+    ///
+    /// ⚠️ **WHY NOT `.onAppear`** (`:794`): appear fires before either geometry
+    /// reader has reported, so `editorViewportHeight` is still 0 and there is no
+    /// window to run the in-frame test against. Centring there would mean centring
+    /// unconditionally — it would yank a clip that was already perfectly framed,
+    /// which requirement 1 forbids.
+    ///
+    /// ⚠️ **WHY NOT `.onChange(of: clip)`** (`reseedFromExternalMutation`): that is
+    /// the m18-i EXTERNAL-MUTATION seam and it fires under the SAME clip identity —
+    /// a wire/arrange-side `clip.trim`/`move`/`split`, an undo, a redo. Auto-centring
+    /// there would re-frame the roll on every such edit, i.e. yank the view out from
+    /// under a user who had deliberately scrolled somewhere and then trimmed the
+    /// clip in the arrange. This fires on a clip IDENTITY switch only, because
+    /// `.id(clip.id)` gives a fresh `didAutoFocusPitchOnOpen` and nothing else does.
+    ///
+    /// ⚠️ **AND WHY IT IS DEFERRED ONE MAIN-ACTOR TURN.** `editorHeightReader` and
+    /// `editorVerticalScrollReader` are independent `GeometryReader`s that land in
+    /// unspecified order, and the open position comes from
+    /// `.defaultScrollAnchor(.center)` rather than from any write of ours — so on
+    /// the height reader's own tick `gridScrollY` may still read 0, which claims a
+    /// window at the TOP of the stack. That is not a harmless approximation: a LOW
+    /// clip would still be fixed (it scrolls either way), but a HIGH clip would test
+    /// as "already in frame" and the defect would survive, inverted and invisible.
+    /// The re-read on a fresh turn is the same m17-b durability idiom the vertical
+    /// jump's `scrollTo` already uses (`:2671`).
+    ///
+    /// The latch is set SYNCHRONOUSLY so a second height tick (a resize arriving in
+    /// the same frame) cannot schedule a second turn.
+    ///
+    /// ⚠️ This calls `focusPitchAxis` DIRECTLY rather than
+    /// `layout.requestPianoRollFocus`: the store's pitch+nonce pair is the seam for
+    /// EXTERNAL drivers, its `onChange` carries no `initial:`, and a nonce bumped
+    /// while this view is still mounting would simply be missed. Going direct also
+    /// keeps the writer count on `verticalTargetY` at three.
+    private func attemptOpenPitchFocus() {
+        guard !didAutoFocusPitchOnOpen, editorViewportHeight > 0 else { return }
+        didAutoFocusPitchOnOpen = true
+        Task { @MainActor in
+            guard let window = PianoRollOpenFocus.visiblePitchWindow(
+                scrollY: gridScrollY,
+                viewportHeight: editorViewportHeight,
+                topInset: Self.scrubStripHeight,
+                rowHeight: model.rowHeight) else { return }
+            guard let pitch = PianoRollOpenFocus.focusPitch(
+                notePitches: model.draft.map(\.pitch), visible: window) else { return }
+            focusPitchAxis(on: pitch)
+        }
+    }
+
     private func jumpToMinimapTarget(_ target: CGPoint) {
         follow.scrollExternally(to: target.x)
         verticalTargetY = target.y
@@ -1209,6 +1315,10 @@ struct PianoRollView: View {
             Color.clear
                 .onChange(of: geo.size.height, initial: true) { _, newValue in
                     editorViewportHeight = newValue
+                    // m35-h: and this tick is the OPEN seam — see
+                    // `attemptOpenPitchFocus` for why the auto-centre hangs off the
+                    // viewport's arrival and not off `.onAppear`.
+                    attemptOpenPitchFocus()
                 }
         }
         .allowsHitTesting(false)

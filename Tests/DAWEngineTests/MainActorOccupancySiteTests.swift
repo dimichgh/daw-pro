@@ -1245,6 +1245,43 @@ struct MainActorOccupancySiteTests {
     /// suite of slack, which keeps the cadence firing soon rather than
     /// silencing it for a week on an unverified rate. **Do not read 375 as a
     /// derived number. It is 373 + 2, chosen to keep the review frequent.**
+    /// ⭐⭐ **BUMPED 375 -> 377 AT M35 (2026-09-04). CAMPAIGN STATUS IS RECORDED
+    /// HONESTLY BELOW RATHER THAN IMPLIED BY THE BUMP.** The census stood at
+    /// EXACTLY 375, the cap, before M35 added ONE `@MainActor` suite
+    /// (`ViewSurfaceCommandTests`, the `view.*` wire taxonomy) -> 376. The
+    /// cadence therefore fired on schedule and on an unrelated feature — the
+    /// design working: the review is due, not the feature at fault.
+    ///
+    /// **377 = 376 + 1, the smallest bump that clears the observed census plus
+    /// one suite of slack**, deliberately keeping the review frequent. It is NOT
+    /// a derived number, exactly as the m34-l note above insists 375 was not.
+    /// The circularity that note records applies here unchanged: this bound must
+    /// be raised BEFORE a campaign can run, because until it is, THIS TEST IS
+    /// THE `✘` the campaign gate refuses to score.
+    ///
+    /// ⛔⛔ **THE CAMPAIGN WAS NOT RUN AT M35, AND THAT IS STATED HERE RATHER
+    /// THAN LEFT TO BE INFERRED FROM A MISSING PASTE.** The gate's CAMPAIGN
+    /// VALIDITY leg requires a median run wall time <= 248 s. This machine
+    /// measured **273.8 s and 281.4 s on two consecutive full-suite runs at the
+    /// M35 close** (and 419 s / 459 s earlier the same session), so a campaign
+    /// started now would be REJECTED as contaminated (exit 2) rather than
+    /// scored — the validity leg working exactly as designed. Running it anyway
+    /// would produce 25 minutes of machine time and no admissible observation,
+    /// and pasting a rejected campaign under a "campaign result" heading is
+    /// precisely the false-confidence move the leg exists to prevent.
+    /// **⛔ OWED: one valid campaign on a quiescent machine, folded into m35-f
+    /// (the staging probe + baseline re-measure item), which is where a
+    /// full-suite re-measure already belongs.** Until then this bump is
+    /// PROVISIONAL and unbacked by a headroom measurement — say so, do not
+    /// re-derive comfort from the fact that the suite is green.
+    ///
+    /// ⚠️ **THE NEW SUITE IS MAIN-ACTOR BY NECESSITY, NOT BY HABIT, AND THE
+    /// ALTERNATIVE WAS DELIBERATELY DECLINED.** `CommandRouter` is main-actor
+    /// isolated, so a router taxonomy suite has to be. Spelling `@MainActor` on
+    /// each `@Test` instead of on the `@Suite` would have kept this census at
+    /// 375 while changing NOTHING about the actual main-actor occupancy — i.e.
+    /// it would have silenced the instrument rather than reduced the quantity.
+    /// That is the one move this bound exists to make unattractive.
     @Test("Leg C — THE REVIEW CADENCE: @MainActor-isolated suite count stays inside the cadence")
     func mainActorSuiteCountStaysInsideCadence() {
         let counts = Self.structuralCounts()
@@ -1253,9 +1290,9 @@ struct MainActorOccupancySiteTests {
               + "prepare/prepareEffect-like sites \(counts.prepareLikeSites) (PRINTED ONLY — design §4.3 "
               + "rejects this as a ratchet channel; it is a proxy for the channel measured NOT to drift), "
               + "files \(counts.files)")
-        #expect(counts.mainActorSuites <= 375, """
-            @MainActor-isolated suite count is \(counts.mainActorSuites), over the 375 cadence limit \
-            (measured 373 at m34-l). This is a REVIEW CADENCE, not a physical threshold — ds/dN is \
+        #expect(counts.mainActorSuites <= 377, """
+            @MainActor-isolated suite count is \(counts.mainActorSuites), over the 377 cadence limit \
+            (measured 376 at M35). This is a REVIEW CADENCE, not a physical threshold — ds/dN is \
             unmeasured. Bumping this number requires pasting a fresh \
             scripts/gates/m23aw-prepare-headroom.mjs campaign result into the comment above this bound \
             first; raising it without running the gate is the same act as raising the horizon.

@@ -244,7 +244,9 @@ struct FXCommandTests {
                      "name": .string("bogus"), "value": .number(1)]
         ))
         #expect(!response.ok)
-        #expect(response.error == "unknown parameter 'bogus' for gain effect — valid: gainLinear")
+        // m38-a: the sentence lists the WHOLE spec table, so it grew a name.
+        #expect(response.error
+            == "unknown parameter 'bogus' for gain effect — valid: gainLinear, invertPolarity")
     }
 
     @Test("fx.setParam clamps an out-of-range value — and SAYS SO (m27-c)")
@@ -367,6 +369,86 @@ struct FXCommandTests {
         ))
         #expect(quiet.ok)
         #expect(quiet.result?["warnings"] == nil)
+    }
+
+    // MARK: - m38-a polarity: NO new command, NO new tool
+
+    @Test("m38-a: polarity reaches the wire through the EXISTING fx verbs")
+    func polarityRidesTheGenericParamSurface() async throws {
+        let (router, _) = makeRouter()
+        let trackID = await addTrack(router, name: "Snare Btm", kind: "audio")
+
+        // 1. fx.add SEEDS it — the one-call authoring path, no new verb.
+        let added = await router.handle(ControlRequest(
+            id: "1", command: "fx.add",
+            params: ["trackId": .string(trackID.uuidString), "kind": .string("gain"),
+                     "params": .object(["gainLinear": .number(1),
+                                        "invertPolarity": .number(1)])]
+        ))
+        #expect(added.ok)
+        let seeded = try #require(added.result?["effects"]?.arrayValue?.first?["params"])
+        #expect(seeded["invertPolarity"]?.doubleValue == 1)
+        #expect(seeded["gainLinear"]?.doubleValue == 1)
+        // An in-range binary seed clamps nothing, so it stays quiet.
+        #expect(added.result?["warnings"] == nil)
+        let effectID = try #require(added.result?["effectId"]?.stringValue)
+
+        // 2. fx.setParam RIDES it — same generic name/value surface.
+        let off = await router.handle(ControlRequest(
+            id: "2", command: "fx.setParam",
+            params: ["trackId": .string(trackID.uuidString), "effectId": .string(effectID),
+                     "name": .string("invertPolarity"), "value": .number(0)]
+        ))
+        #expect(off.ok)
+        #expect(off.result?["effects"]?.arrayValue?.first?["params"]?["invertPolarity"]?
+            .doubleValue == 0)
+
+        // 3. …and setting the GAIN does not disarm it (the read-modify-write).
+        _ = await router.handle(ControlRequest(
+            id: "3", command: "fx.setParam",
+            params: ["trackId": .string(trackID.uuidString), "effectId": .string(effectID),
+                     "name": .string("invertPolarity"), "value": .number(1)]
+        ))
+        let gained = await router.handle(ControlRequest(
+            id: "4", command: "fx.setParam",
+            params: ["trackId": .string(trackID.uuidString), "effectId": .string(effectID),
+                     "name": .string("gainLinear"), "value": .number(2)]
+        ))
+        let params = try #require(gained.result?["effects"]?.arrayValue?.first?["params"])
+        #expect(params["gainLinear"]?.doubleValue == 2)
+        #expect(params["invertPolarity"]?.doubleValue == 1)
+
+        // 4. project.snapshot reports it through the SAME effectParamsJSON.
+        let snapshot = await router.handle(ControlRequest(id: "5", command: "project.snapshot"))
+        let track = try #require(snapshot.result?["tracks"]?.arrayValue?
+            .first { $0["id"]?.stringValue == trackID.uuidString })
+        let snapFX = try #require(track["effects"]?.arrayValue?.first?["params"])
+        #expect(snapFX["invertPolarity"]?.doubleValue == 1)
+    }
+
+    @Test("m38-a: fx.describe reports invertPolarity with its type and default")
+    func fxDescribeReportsPolarity() async throws {
+        let (router, _) = makeRouter()
+        let response = await router.handle(ControlRequest(
+            id: "1", command: "fx.describe", params: ["kind": .string("gain")]
+        ))
+        #expect(response.ok)
+        let specs = try #require(response.result?["kinds"]?.arrayValue?.first?["params"]?
+            .arrayValue)
+        // APPENDED: gainLinear keeps automation slot 0.
+        #expect(specs.count == 2)
+        #expect(specs.first?["name"]?.stringValue == "gainLinear")
+        let polarity = try #require(specs.last)
+        #expect(polarity["name"]?.stringValue == "invertPolarity")
+        #expect(polarity["min"]?.doubleValue == 0)
+        #expect(polarity["max"]?.doubleValue == 1)
+        #expect(polarity["default"]?.doubleValue == 0)
+        #expect(polarity["unit"]?.stringValue == "linear")
+        // The note is the ONE home for what a bare 0…1 cannot carry: this is
+        // the Ø switch, it is binary, and it is what a null test needs.
+        let note = try #require(polarity["note"]?.stringValue)
+        #expect(note.contains("null"))
+        #expect(note.contains("0.5"))
     }
 
     @Test("fx.describe lists the gain schema from the spec table")

@@ -152,8 +152,11 @@ public final class EffectEditorModel {
     ) -> [(title: String, members: [(name: String, label: String?)])] {
         switch kind {
         case .gain:
-            // Single-knob card — no header needed.
-            return [("", [("gainLinear", nil)])]
+            // Two-control card — no header needed. m38-a appends the polarity
+            // switch beside the trim, the hardware channel-strip layout (the
+            // limiter's `truePeak` sits beside the ceiling it reinterprets for
+            // the same reason: the toggle belongs with what it acts on).
+            return [("", [("gainLinear", nil), ("invertPolarity", "Polarity")])]
         case .eq:
             // One band per group, low → high (HP first, LP last — signal-flow
             // order); short labels — the band prefix lives in the header (the
@@ -293,8 +296,9 @@ public final class EffectEditorModel {
     /// (report §3/§6): delay `pingPong` (`DelayParams` rounds it), the
     /// EQ's `*Enabled` band bypasses (the store snaps ≥ 0.5 to on, m22-a),
     /// the delay's tempo `sync` (m22-f, same ≥ 0.5 snap), the limiter's
-    /// `truePeak` mode (m23-ch, same ≥ 0.5 snap), and the bit-crusher's
-    /// `antiAlias`/`dither` switches (m32-e, same ≥ 0.5 snap). The wire shape
+    /// `truePeak` mode (m23-ch, same ≥ 0.5 snap), the bit-crusher's
+    /// `antiAlias`/`dither` switches (m32-e, same ≥ 0.5 snap), and the gain
+    /// utility's `invertPolarity` Ø switch (m38-a, same ≥ 0.5 snap). The wire shape
     /// is untouched: the toggle still writes 0.0/1.0 through the same `set`
     /// path.
     ///
@@ -313,6 +317,7 @@ public final class EffectEditorModel {
     public static func isToggleParam(_ spec: EffectParamSpec) -> Bool {
         spec.name == "pingPong" || spec.name == "sync" || spec.name == "truePeak"
             || spec.name == "antiAlias" || spec.name == "dither"
+            || spec.name == "invertPolarity"
             || spec.name.hasSuffix("Enabled")
     }
 
@@ -588,7 +593,12 @@ public final class EffectEditorModel {
     public static func paramValue(_ name: String, in effect: EffectDescriptor) -> Double? {
         switch effect.kind {
         case .gain:
-            return name == "gainLinear" ? effect.resolvedGain.gainLinear : nil
+            let p = effect.resolvedGain
+            switch name {
+            case "gainLinear": return p.gainLinear
+            case "invertPolarity": return p.invertPolarity ? 1 : 0  // m38-a
+            default: return nil
+            }
         case .eq:
             let p = effect.resolvedEQ
             switch name {

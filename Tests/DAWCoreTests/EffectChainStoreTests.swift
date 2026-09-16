@@ -302,4 +302,45 @@ struct EffectChainStoreTests {
         #expect(vox.effects.first?.resolvedGain.gainLinear == 0.5)
         #expect(warnings.contains("unknown effect kind 'phaser' on track 'Vox' — effect dropped"))
     }
+
+    // MARK: - m38-a gain polarity (the name->field mapping)
+
+    @Test("fx param writes snap invertPolarity at 0.5 and never clobber the gain")
+    func storeWritesBothParamsIndependently() throws {
+        let store = ProjectStore()
+        let track = store.addTrack(name: "SRC", kind: .audio)
+        let fx = try store.addEffect(toTrack: track.id, kind: .gain)
+
+        // Binary on the numeric surface (the truePeak/pingPong precedent).
+        for (written, expected) in [(0.0, false), (0.49, false), (0.5, true), (1.0, true)] {
+            let updated = try store.setEffectParam(trackID: track.id, effectID: fx.id,
+                                                   name: "invertPolarity", value: written)
+            #expect(updated.resolvedGain.invertPolarity == expected,
+                    "invertPolarity \(written) should snap to \(expected)")
+        }
+
+        // THE regression this mapping exists for: the old one-liner rebuilt
+        // GainParams from a single field, so setting the gain would silently
+        // disarm an armed polarity flip.
+        let afterGain = try store.setEffectParam(trackID: track.id, effectID: fx.id,
+                                                 name: "gainLinear", value: 2)
+        #expect(afterGain.resolvedGain.gainLinear == 2)
+        #expect(afterGain.resolvedGain.invertPolarity, "setting the gain must not disarm Ø")
+
+        // …and the converse: flipping polarity must not reset the gain.
+        let afterFlip = try store.setEffectParam(trackID: track.id, effectID: fx.id,
+                                                 name: "invertPolarity", value: 0)
+        #expect(afterFlip.resolvedGain.gainLinear == 2)
+        #expect(afterFlip.resolvedGain.invertPolarity == false)
+    }
+
+    @Test("the MASTER chain reaches the same polarity mapping")
+    func masterChainWritesPolarity() throws {
+        let store = ProjectStore()
+        let fx = try store.addMasterEffect(kind: .gain)
+        let updated = try store.setMasterEffectParam(effectID: fx.id,
+                                                     name: "invertPolarity", value: 1)
+        #expect(updated.resolvedGain.invertPolarity)
+        #expect(updated.resolvedGain.gainLinear == 1)
+    }
 }

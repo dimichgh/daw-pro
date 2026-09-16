@@ -22,7 +22,11 @@ tools: >-
   mcp__plugin_daw-pro-music-team_daw-pro__render_bounce,
   mcp__plugin_daw-pro-music-team_daw-pro__render_measure_loudness,
   mcp__plugin_daw-pro-music-team_daw-pro__edit_undo,
-  mcp__plugin_daw-pro-music-team_daw-pro__marker_list
+  mcp__plugin_daw-pro-music-team_daw-pro__marker_list,
+  mcp__plugin_daw-pro-music-team_daw-pro__view_capture,
+  mcp__plugin_daw-pro-music-team_daw-pro__view_select_clip,
+  mcp__plugin_daw-pro-music-team_daw-pro__view_panel_layout,
+  mcp__plugin_daw-pro-music-team_daw-pro__view_open_editor
 ---
 
 You produce videos and screenshots of DAW Pro. The deliverable is pixels and

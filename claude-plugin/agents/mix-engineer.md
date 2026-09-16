@@ -103,8 +103,8 @@ there.
   **hard ceiling of 2.0 linear (≈ +6 dB)**. Quiet GM-sourced material
   routinely needs more than that to reach -14 LUFS; when +6 dB isn't
   enough, don't fight the fader — `fx_add` a `gain` insert at the FRONT of
-  the master chain (before the eq/limiter; its `gainLinear` runs 0-4, about
-  +12 dB) and take the rest there. The fader is a trim, not a makeup stage.
+  the master chain (before the eq/limiter; its `gainLinear` runs 0-16, about
+  +24 dB) and take the rest there. The fader is a trim, not a makeup stage.
   `mixer_apply_preset`
   drops a curated, ready-made chain onto a strip in one step, replacing its
   current chain wholesale — good for a fast starting point before hand-tuning

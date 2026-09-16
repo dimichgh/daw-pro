@@ -1,5 +1,383 @@
 # Changelog
 
+## 2026-09-06 — The mixer gets its Ø: polarity invert on the gain insert
+
+`GainParams.invertPolarity` (m38-a). A boolean, default `false`, appended at
+`EffectParamSpec` slot 1 so `gainLinear` keeps automation slot 0. It is the
+ordinary channel-strip control this app had none of, and nothing shipped could
+stand in for it: `gainRange` is `0...16`, clamped on init, so **no combination
+of existing settings could produce a negative multiplier.** That blocked fixing
+a backwards-wired mic, blocked auditioning both polarities on a two-mic pair,
+and blocked the null test — the single most useful verification move in audio.
+
+**`gainRange` was deliberately left alone.** A signed range was considered and
+declined: `gainLinear: 0` already means silence, so a −16…16 span makes 0 an
+awkward midpoint and fuses "turn it down" with "flip it" into one control. A
+switch is what the hardware does, what a beginner already understands, and what
+renders correctly as a toggle. The change is purely additive — a project saved
+before today has no `invertPolarity` key and decodes to `false` through the same
+clamping init `gainLinear` routes through, so no existing render moves.
+
+**No new command and no new MCP tool, and that was checked rather than assumed.**
+Effect parameters are a flat name/value surface, so polarity reaches agents
+through the verbs that already exist: seeded by `fx.add`, ridden by
+`fx.setParam`, described by `fx.describe` (name, `0...1`, default 0, unit
+`linear`, plus a note that teaches what a bare 0…1 cannot), echoed by
+`project.snapshot`. Wire count unchanged at **215** — `doc-count-drift` exit 0.
+
+⭐ **The real-time question was the transition, not the multiply.** An instant
+polarity flip mid-playback is a full-scale discontinuity, i.e. a click. The gain
+stage already smooths coefficient changes over ~5 ms, so the sign is folded into
+**that same coefficient** (`GainEffect.signedTarget`) rather than applied as a
+second stage: an armed flip retargets +g → −g and the existing declick ramp
+walks it through zero — a brief dip. Measured on a DC block: max per-sample step
+**0.0084**, where a raw flip would be 2.0, with exactly one sign change. No new
+smoothing machinery, and `invertPolarity: false` is bit-for-bit the old path,
+unity skip and all.
+
+⭐⭐ **The gate is a null test, and it has been shown to FAIL as well as pass.**
+Two audio tracks play the same transient-rich fixture — LCG noise bursts with
+hard onsets, deliberately *not* a sine, which can null by accident at the wrong
+offset — through identical unity-gain inserts, one with the flag armed. The
+residual is **exactly 0.0, i.e. −∞ dBFS** (x + (−x) is exact in IEEE-754, so
+this is asserted as zero, not as "small"). The control that makes it mean
+something: the same graph with the flag OFF sums to **−1.94 dBFS peak, +6.0206
+dB over the solo render** — and planting `invert: false` into the null leg makes
+that leg fail at −1.94 dBFS. A null test that has never been shown to fail is
+not a test.
+
+19 tests added across two new suites (`m38-a gain polarity — params, schema,
+persistence`, `m38-a gain polarity — offline render null test`) plus the store
+and control suites that already own those surfaces; nothing retired. Suite total
+7943 / 711, zero failures, 267.0 s.
+
+## 2026-09-05 — B3 re-cut: release is PREDICTED, and demo 3 stops being a comparison
+
+The compressor lesson is re-shipped to the SAME filename —
+`~/Movies/DAW Pro Lesson - The Compressor, Measured.mp4`, 1920x1080, **411.5 s,
+20.3 MB (was 338.6 s / 13.7 MB)**, all eight `verify.py` gates green, `-16.4
+LUFS / -1.5 dBTP`, a/v drift 14.7 ms. Sources: `scripts/video/comp/` gains
+`d3burst.mjs` (the new material), `d3measure.py` (the per-sample gain curve) and
+`pairgain.py` (the shared static gain an un-levelled A/B needs).
+
+⭐⭐ **DEMO 3 WAS THE HOLE AND IT IS FILLED WITH ARITHMETIC.** Every other
+chapter hands the viewer a number they can check; this one handed them a
+comparison, after its 6.45 Hz "pumping rate" was retracted for reading
+identically in the bypassed control. Release turns out to be exactly as
+predictable as threshold and knee: `CompressorEffect.swift:184` builds
+`releaseCoeff = exp(-1/(releaseMs*0.001*sampleRate))`, a one-pole with
+`tau = releaseMs`, so from G dB of reduction the time back to within 1 dB of
+unity is `releaseMs x ln(G)`. **Predicted 74.55 / 248.49 / 1987.93 ms at 30 /
+100 / 800 ms release. Measured 74.57 / 248.49 / 1987.92.** The falsifying control — the
+same burst at ratio 1:1 — sits at 0.0 dB with no crossing to time, so its
+recovery is undefined, as it must be.
+
+⚠️ **THE MATERIAL IS A GATED BURST, AND IT DROPS TO A QUIET TAIL RATHER THAN TO
+SILENCE.** A drum loop cannot show a release at all (the next hit arrives before
+the recovery finishes — now one sentence of narration rather than a missing
+demonstration). And the gain curve is `compressed / dry` SAMPLE BY SAMPLE, which
+on silence is 0/0: the tail, 12.7 dB below threshold, is the carrier the
+recovery is measured on.
+
+⚠️ **THREE CONFOUNDERS, EACH HANDLED RATHER THAN HOPED AWAY.** (1) The burst
+voice's own synth release was 0.05 s in every other rig here — long enough to
+take ~70 ms to fall through 12.8 dB, so a 30 ms release would have measured the
+SYNTH. It is 0.001 s on this rig. (2) The first pass set the reduction to
+12.2 dB and the 30 ms release **never reached -12 dB** (deepest -11.934),
+because a fast release starts recovering while the peak detector is still
+falling; deepening to 13.8 dB makes the crossing exist at every release, and a
+two-crossing time (-12 dB to -1 dB) is independent of depth. (3) The detector's own fixed 5 ms
+decay, which I expected to make the recovery run long — and this is where the
+re-cut caught itself.
+
+⚠️⚠️ **THE RE-CUT RETRACTED ITS OWN DEVIATION MID-BUILD, AND THE RETRACTION IS
+NOW A 40-SECOND BEAT IN THE FILM.** The first pass measured 74.688 ms at a 30 ms
+release and put "the detector's own 5 ms decay" on the card as the cause. That
+was the INSTRUMENT, not the compressor: `d3measure.py` discarded every sample
+within `FLOOR_DB` of a zero crossing, and against a −39.67 dBFS tail a −60 dB
+floor blanks ~0.15 ms per half cycle — which finds the −12 dB crossing EARLY and
+the −1 dB crossing LATE, both biases pointing long. At a −80 dB floor it reads
+74.583; with both crossings linearly interpolated, **74.57 against a 74.55
+prediction — a residual of 0.02 ms.** The detector's decay is real and is still
+falling when the release begins; it CANCELS between two crossings, because once
+the target reaches 0 the envelope is a pure exponential. ⭐ **A deviation with a
+named cause is only as strong as the test behind the name** — the 6.45 Hz
+retraction's own lesson, one layer deeper, and the film now says it out loud.
+
+⭐ **CHAPTERS 6 AND 7 STOPPED SHARING A CLAUSE.** "Makeup and mix are not
+compression at all" was one idea over two chapters and ~90 s. They are not one
+idea: makeup changes the LEVEL, mix changes how much of the compressor is in the
+signal at all. Each has its own clause now, and the closing card and closing
+narration were rewritten so the spine is seven clauses for seven chapters.
+
+⭐ **DEMO 6'S LOUDNESS HALF IS AUDIBLE INSTEAD OF ASSERTED.** The A/B is no
+longer loudness-levelled: one shared static gain (+12.581 dB) across both halves
+with `normalize: false`, so the 19.3 LU collapse plays rather than sitting on a
+card the ear cannot check. The 11.65 dB transient figure rides the same pair.
+
+⚠️ **A/B HALVES THAT DIFFER ONLY BY A BADGE READ AS A STUCK VIDEO.** The re-cut
+first used the two arrangement bursts for demo 3's halves; extracted, they were
+the same two clips with the playhead in the same place. The halves now show the
+compressor panel at 30 ms against 800 ms — the one value the ear is being asked
+to judge. Found by looking at the frames, which no gate in this rig can do.
+
+**Verified by reading ten frames of the shipped file**, including one INSIDE the
+intro (the corner meter is correctly absent — the sting already is that
+instrument at full size) and one during narration (present, 48 thin lines,
+violet-to-cyan frequency ramp, peak caps).
+
+## 2026-09-04 — B3: the compressor lesson, and a pipeline that inverted its own point
+
+The probe episode for the mix-panel series is shot and shipped:
+`~/Movies/DAW Pro Lesson - The Compressor, Measured.mp4`, 1920x1080, 338.6 s,
+13.7 MB, all eight `verify.py` gates green. Six demonstrations, every number
+predicted from the compressor's gain computer before anything was rendered and
+then measured off the render. Built from `scripts/video/comp/shoot.mjs` (the
+panels, each knob photographed at every value with a read-back asserted against
+the project before the frame is spent) and `scripts/video/comp/spec.py`.
+
+⭐⭐ **`assemble.py` could not carry the episode's honesty beat, and no gate
+would have said so.** Play segments ran a single-pass `loudnorm`, which is
+dynamic. Demo 5 exists to show that makeup gain makes the compressed take
+LOUDER and that louder wins every blind A/B — and MEASURED, a pair that really
+differed by 2.1 LU (-26.7 vs -24.6 LUFS) came out of that filter at -17.3 vs
+-18.8: the difference was **inverted**, not merely flattened. A stage may now
+set `"normalize": false` (default unchanged) and pre-gain its own wavs with one
+shared static gain. Concatenating the pair into a single file was tried first
+and does not work — that is where the inversion was measured.
+
+⭐⭐ **A/V drift, and the two fixes that made it worse.** The gate failed at
+521 ms and then 875 ms. Trimming the stills track to an exact `total` was
+wrong (the truncation happens later, in `mux`'s `-shortest` with `-c:v copy`);
+having `talk_audio` return the written file's duration was wrong (it equals the
+vo's). The cause, found by probing the concat in isolation, is `meter.py`: it
+re-encodes video at a constant `-r fps` over a concat whose last frames are
+HELD, so 338.520 s of video (10129 packets = 337.63 s of frames) became
+337.667 s while the audio stayed 338.541 s. `meter.py` now pads with a cloned
+last frame and cuts to the audio's duration — **8.0 ms**. Its pre-existing
+`shortest=1` guard fixed the mirror-image case and was blind to this one.
+`assemble.py` also gained a same-shaped backstop for the meter-off path.
+
+Two defects that only LOOKING AT THE PIXELS could find, both of which passed
+every gate: the bursts photographed the MIXER (`debug.effectEditor` selects the
+MIX tab and nothing selected it back, so "the app playing" was three channel
+strips with no arrangement, no playhead and no notes — `ui.showMixer
+{show:false}` before the burst is the fix), and the BEFORE/AFTER badge at
+`H*0.82` sat squarely on the MIX readout in demo 6, the one value that A/B
+exists to show (fixed with a taller crop for A/B halves only).
+
+Findings, including the words-per-minute check's limit on short lines, are in
+`docs/lessons/PROGRAM.md`. No generated video is committed.
+
+## 2026-09-05 — M35 g: the four `view.*` tools reach the user's agents
+
+The three prior M35 items built the wire commands and MCP tools that let an
+agent SEE the app; this one ships them. `demo-director` — the only agent in
+`claude-plugin/` holding the `Read` tool, and therefore the only one that can
+actually look at the PNG `view_capture` writes — is granted all four:
+`view_capture`, `view_select_clip`, `view_panel_layout`, `view_open_editor`.
+The other six specialist agents hold no filesystem tools and were left
+untouched: a screenshot tool with nothing to read it back would be a
+distraction, not a capability.
+
+The plugin's bundled server (`claude-plugin/server/index.mjs`) was
+regenerated from `mcp-server/src/` (esbuild) and stdio-verified against the
+built artifact itself: `tools/list` reports 220 tools including all four
+`view_*` names, a negative control (`view_delete_universe`) is correctly
+absent, and `view_capture`'s description carries the "back-to-back
+`view_select_clip` → `view_capture` is safe" text. Plugin version bumped
+`0.11.0` → `0.12.0`. **A `/plugin update` is now due.**
+
+Also fixed in passing: `claude-plugin/skills/daw-wire-reference/SKILL.md`'s
+hand-maintained tool count, which had drifted to 208 against a measured 220 —
+`doc-count-drift.mjs` only pins the command count, not this one, so it rotted
+silently across several closes.
+
+## 2026-09-04 — M35 f: the screenshot showed the frame BEFORE the thing you asked for
+
+⛔ **A `view.selectClip` → `view.capture` pair photographed the STALE frame,
+and both calls reported success.** Selecting a clip written at C1/D1 answered
+`reason: "piano-roll-opened", editorOpen: true` — an honest reply about a frame
+that had not been drawn yet — and the screenshot taken straight afterwards came
+back as the piano roll at its default anchor with an EMPTY GRID. One more round
+trip and the same call framed the notes correctly. The reply was true and the
+picture was a lie, which is the worst possible failure on the one verb whose job
+is showing you the truth: an agent goes on to reason about a photograph of the
+past, with nothing to tell it so.
+
+**`view.capture` now performs a bounded flush before it rasterizes**, so a
+capture taken immediately after `view.selectClip` or `view.openEditor` shows what
+those calls did. `debug.captureUI` is untouched.
+
+⚠️ **The obvious fix did not work, and that is the interesting part.** Spinning a
+nested runloop — what `debug.captureUI` has always done — changed the captured
+frame by ZERO bytes, and because a spin that never ran looks exactly like a spin
+that ran and could not help, that arm was re-run at 2.0 s with the capture's wall
+time instrumented: 2349 ms measured, same stale frame. The caller is *occupying
+the main actor* while it spins, and the work it is waiting for is main-actor
+work, so it cannot run. Spinning harder could never have fixed it; the actor has
+to be released. The flush is therefore a short `await`, and with it cut to 20 ms
+every check still passed — what the fix buys is the SUSPENSION, and the 0.2 s
+ceiling is pure margin.
+
+⚠️ And the stale frame was not "before the roll opened": it showed the roll
+MOUNTED at its default anchor. What had not landed was the second-order chain the
+pitch-axis focus hangs off — geometry tick → focus request → scroll — each link
+needing another main-actor turn.
+
+⭐ **`scripts/gates/m35-view-surface-probe.mjs`** drives a real staging app on
+17695 through all four `view.*` verbs and fails if a capture disagrees with one
+taken a round trip later. It was written BEFORE the fix and went red on the real
+defect; `M35F_ASSERT_STALE=1` inverts its polarity so the same demonstration can
+be repeated on a fixed tree. It refuses to score at all (exit 3) if its own
+controls do not fire — a probe that cannot show it would fail is worth nothing.
+
+## 2026-09-04 — M35 a–e: an agent can now LOOK at the app it is driving
+
+⭐⭐ **The gap was measured, not felt.** An agent over MCP could mutate the
+project but could not see it: it could add a track and it could not screenshot
+the app, open the piano roll on a clip, frame what it wanted to see, or open the
+panel it had just changed. Those four capabilities already worked — as app-tier
+`debug.*` staging seams deliberately off `allCommands` and off MCP. They are now
+production verbs: **`view.capture`, `view.selectClip`, `view.panelLayout`,
+`view.openEditor`**, mirrored 1:1 as `view_capture` / `view_select_clip` /
+`view_panel_layout` / `view_open_editor` (the mechanical name rule lands on all
+four unaided — no exception-table entry, confirmed rather than assumed).
+
+The mechanism is the shipped `PluginUIControlling` / `EditPasteControlling`
+pattern, verbatim: `Sources/DAWControl/ViewUISurface.swift` holds a
+Foundation-only `@MainActor protocol ViewUIControlling` plus its result types,
+`CommandRouter` gains `public weak var viewUI`, and `AppModel` installs itself at
+startup. **No AppKit, no SwiftUI, no DAWEngine entered DAWControl** — the
+handlers live in `Sources/DAWApp/ViewUIWireSurface.swift`.
+
+⭐ **`debug.*` is unchanged in BEHAVIOUR and in every key it emits, and the two
+tiers share ONE implementation rather than a copy.** The rasterization moved into
+`AppModel.captureMainWindowCore(to:)` and both callers use it, so the `debug`
+handler's lines DID move — "byte-for-byte" would be the wrong claim and is not
+made. `debug.captureUI` keeps its `ImageRenderer` fallback, its `target:"plugin"`
+mode, its `selectClip` parameter and its permissive unknown-key behaviour.
+
+⚠️ **`view.capture` deliberately does NOT inherit that fallback, and the absence
+is the feature.** `ImageRenderer` cannot draw NSScrollView-backed content, so the
+track rows, the timeline clips and the piano-roll grid — everything an agent
+asked to SEE — rasterize blank in a 1280×800 PNG the call would report as a
+success. That is this tree's characteristic failure mode. It throws instead, and
+so do the other three when the session is headless: there is no honest empty
+answer to "show me the app."
+
+⭐ **`view.selectClip` answers WHY, and one of its three reasons was not in the
+settled design.** An AUDIO clip selects and opens no piano roll — the reply says
+`audio-clip-has-no-editor` rather than reporting a bare success. The third
+reason, `workspace-is-not-arrange`, came out of building it: the roll mounts in
+the Arrange workspace, so a MIDI clip focused while the Mix console is up is
+selected and **not on screen**, and calling that `piano-roll-opened` would hand
+an agent a capture it could not explain. `editorOpen` is derived from
+`AppModel.openEditorClip` — the tree's one rule for "is the roll on screen" —
+never from `clip.isMIDI`, so the reply and the screen cannot disagree.
+
+⚠️ **A WRITTEN RULE WAS NARROWED, AND THE THREE PLACES THAT CITED IT NOW AGREE.**
+`docs/DESIGN-LANGUAGE.md` records adjustable window layout as a documented
+non-invokable preference with no wire command, and `setPanelLayout`'s header and
+its m25-b-1 comment block both cited it. `view.panelLayout` exposes exactly
+`workspace` and `editorMaximized` — the two controls that decide **what a capture
+can see** — and every other slot (sidebar width, row heights, zoom, minimap,
+waveform scaling, audition, follow) stays debug-tier chrome. m25-b-1's own
+argument was not overturned; a different question reached the same control from
+the capture side. **The fence is enforced, not merely written: 13 debug-tier keys
+are refused by name at both the wire and the MCP boundary.**
+
+`view.openEditor` dispatches an exhaustive `switch` over
+`InstrumentDescriptor.Kind` with **no `default:`** — a future kind must be routed
+on purpose rather than fall into a bucket that names an editor which is not on
+screen — and delegates every hosted Audio Unit to `pluginWindows.openUI`, so
+exactly one code path in this app ever materializes an AU window.
+
+**Counts re-derived, never trusted.** Wire **211 → 215** (`node
+scripts/gates/doc-count-drift.mjs`, two independent routes agreeing, its own
+positive control firing before it scored anything); MCP **216 → 220**. ⚠️ A
+"208 MCP tools" figure in circulation alongside these was **stale**; 216 was
+correct, and the tool pin says so. The four entries went in immediately after
+`plugin.listOpenUIs`, ~70 from the end — a tail append would have reddened ~51
+end-relative assertions — and that placement is now pinned BY NAME in a test that
+explains the reason, so a future append breaks one test that teaches instead of
+fifty that do not.
+
+⚠️ **The "m35 view-surface design brief" that `docs/ARCHITECTURE.md` and
+`docs/ROADMAP.md` both cited as the home of the schemas NEVER EXISTED ON DISK.**
+A citation written forward and never redeemed — the registry-drift shape
+`doc-count-drift.mjs` exists to catch, one layer up where no gate was watching.
+Both citations are replaced with paths that can be opened.
+
+Two existing tests changed shape rather than counts, and neither was retired:
+`EditorMaximizeSiteTests.staysOffTheWire` was **inverted and renamed**
+`onlyReachableThroughViewPanelLayout` (an absence-test that simply deleted itself
+would have left the fence unguarded), and `ControlTests`' every-command-has-a-route
+loop excludes the four `view.*` verbs because that router is headless by
+construction and the loud refusal IS the verb working. The `@MainActor` suite
+cadence fired on schedule at 375 and was bumped to 377 with the circularity its
+own note predicts recorded again.
+
+⛔ **One thing no headless test can see, filed for m35-f's staging probe to
+measure FIRST:** `debug.captureUI` spins the main runloop 0.2 s after a
+`selectClip` before it rasterizes, because setting the selection only SCHEDULES
+the SwiftUI update. `view.selectClip` and `view.capture` are two separate wire
+requests, so whether a back-to-back pair photographs the newly-opened roll or the
+frame before it depends on the control server yielding the main runloop between
+them. That is a real-app question, and the probe on staging 17695 is where it
+gets answered.
+
+**Measured: Swift 7924 tests / 709 suites, 0 failures (7906 / 708 without the new
+suite — +18 tests, +1 suite, zero retired). MCP 747/747 (was 732; +15). `swift
+build` clean. `doc-count-drift` exit 0 at 215.**
+
+## 2026-09-04 — The fourth cut: the roll finds its notes, and a meter in the corner
+
+⭐⭐ **The piano roll was photographing an empty grid, and it was right to.** A
+49 Hz heartbeat is written at C1; the roll opens anchored high in the 128-row
+pitch stack, so the notes were drawn in the minimap and in the velocity lane and
+nowhere the camera was pointed. Shrinking the rows is not the answer —
+**measured at the 10 pt row-height floor the grid still bottomed out at F2**,
+with the notes below it.
+
+So the pitch axis got a way to be pointed: `PanelLayoutStore` gains a
+`pianoRollFocusPitch` + nonce pair — deliberately the ONE slot on that type that
+is **not** persisted, because it is an event ("put that pitch in frame, now")
+and not a remembered dimension — and `PianoRollView.focusPitchAxis(on:)` turns
+it into a clamped vertical scroll. `debug.panelLayout {pianoRollCenterPitch}`
+drives it. `burst()` sends the clip's own MEDIAN pitch, so no chapter is
+special-cased and the heartbeat, the 808 and the vowel chapters all frame their
+own material.
+
+⚠️ **The product half is NOT done and is filed as m35-h**: a user who opens the
+roll on a bass clip still sees an empty grid. The seam exists; the policy —
+centre on the clip's own pitch range when the roll opens — is the roadmap item.
+
+⭐ **A corner meter, and it is a real analysis rather than a decoration.**
+`scripts/video/meter.py` splits the film's own audio into 16 log-spaced bands
+and burns a small spectrum display into the bottom-right, in the intro sting's
+palette. It moves under the narration and it moves under every demo, so a viewer
+can tell "this is playing" from "this is a still" without listening — and
+because it is banded, the 49 Hz heartbeat lights the left of it and nothing
+else. **Measured on the shipped film: bands 0–6 at full height, 7–15 at zero.**
+It runs BEFORE the duration read and before `verify.py`, so every gate judges
+the film that actually ships; a post-processing step after the gates is a step
+the gates cannot see.
+
+Two rig defects fell out of doing it, both found by counting rather than by
+looking:
+
+- **A re-shoot did not clear its burst directory.** It writes `f0001..fN` and
+  stops, so the previous take's frames past N survived and the assembler globs
+  the directory — a shorter re-shoot silently ended on frames it was meant to
+  replace (25 files on disk, 18 in `meta.json`).
+- ⭐ **Two instruments disagreed, and neither was broken.** The meter read flat
+  where `ffmpeg astats` read −16 dB. `ffmpeg -ss` before `-i` is a FAST seek and
+  does not land on the second you asked for: the two were reading different
+  moments, and the audio at that instant really is a −37 dB gap between words.
+  **Check that two instruments are pointed at the same sample before believing
+  either.**
+
 ## 2026-09-04 — The third cut: the playhead moves
 
 ⭐⭐⭐ **A demo segment is no longer a frozen picture with audio over it.** Every
