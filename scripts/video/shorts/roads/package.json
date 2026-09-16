@@ -1,0 +1,10 @@
+{
+  "name": "daw-pro-roads",
+  "private": true,
+  "type": "module",
+  "description": "Headless three.js renderer for the 3D light-road note visualiser (Shorts).",
+  "dependencies": {
+    "puppeteer": "^25.10.0",
+    "three": "^0.185.1"
+  }
+}

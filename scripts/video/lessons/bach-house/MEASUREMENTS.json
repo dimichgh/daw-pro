@@ -1,0 +1,670 @@
+{
+ "renderReport": {
+  "probe-Prelude": {
+   "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/bach-house/audio/probe-Prelude.wav",
+   "fromBeat": 32,
+   "seconds": 8,
+   "lufs": -16.480666100770694,
+   "truePeak": -5.620289952487756
+  },
+  "probe-Kick": {
+   "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/bach-house/audio/probe-Kick.wav",
+   "fromBeat": 32,
+   "seconds": 8,
+   "lufs": -23.4834923285992,
+   "truePeak": -10.615076065172357
+  },
+  "probe-Hats": {
+   "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/bach-house/audio/probe-Hats.wav",
+   "fromBeat": 32,
+   "seconds": 8,
+   "lufs": -30.51588016351603,
+   "truePeak": -8.899662628845261
+  },
+  "probe-Clap": {
+   "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/bach-house/audio/probe-Clap.wav",
+   "fromBeat": 32,
+   "seconds": 8,
+   "lufs": -29.52076592545182,
+   "truePeak": -12.191842840298072
+  },
+  "probe-Bass": {
+   "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/bach-house/audio/probe-Bass.wav",
+   "fromBeat": 32,
+   "seconds": 8,
+   "lufs": -27.403537997095746,
+   "truePeak": -12.873323012080899
+  },
+  "piano124": {
+   "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/bach-house/audio/piano124.wav",
+   "fromBeat": 0,
+   "seconds": 15.483870967741936,
+   "lufs": -21.030011000633124,
+   "truePeak": -10.140176547104067
+  },
+  "l2-kick": {
+   "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/bach-house/audio/l2-kick.wav",
+   "fromBeat": 8,
+   "seconds": 13,
+   "lufs": -17.600513054825853,
+   "truePeak": -3.2617137451952742
+  },
+  "l3-hats": {
+   "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/bach-house/audio/l3-hats.wav",
+   "fromBeat": 16,
+   "seconds": 13,
+   "lufs": -17.25304735155043,
+   "truePeak": -3.2675619138841676
+  },
+  "l4-clap": {
+   "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/bach-house/audio/l4-clap.wav",
+   "fromBeat": 24,
+   "seconds": 13,
+   "lufs": -16.936448758312643,
+   "truePeak": -1.0784378801850014
+  },
+  "l5-bass": {
+   "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/bach-house/audio/l5-bass.wav",
+   "fromBeat": 32,
+   "seconds": 13,
+   "lufs": -15.722468548674085,
+   "truePeak": -0.9747154540363976
+  },
+  "full": {
+   "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/bach-house/audio/full.wav",
+   "fromBeat": 0,
+   "seconds": 30.967741935483872,
+   "lufs": -16.670480166870952,
+   "truePeak": -0.9745151525782674
+  },
+  "ab-piano-src": {
+   "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/bach-house/audio/ab-piano-src.wav",
+   "fromBeat": 32,
+   "seconds": 15.483870967741936,
+   "lufs": -21.030011000633124,
+   "truePeak": -10.140176547104067
+  },
+  "ab-full-src": {
+   "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/bach-house/audio/ab-full-src.wav",
+   "fromBeat": 32,
+   "seconds": 15.483870967741936,
+   "lufs": -15.71496462337573,
+   "truePeak": -0.9747154540363976
+  },
+  "piano72": {
+   "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/bach-house/audio/piano72.wav",
+   "fromBeat": 0,
+   "seconds": 26.666666666666668,
+   "lufs": -22.932899936819407,
+   "truePeak": -10.448454178492844
+  }
+ },
+ "balance": {
+  "Prelude": {
+   "effectId": "A3B71844-B10C-4DAA-9BD2-76AD2E515712",
+   "volume": 0.8,
+   "probedLufs": -16.480666100770694,
+   "target": -21,
+   "gainLinear": 0.5943,
+   "gainDb": -4.52
+  },
+  "Kick": {
+   "effectId": "41E47780-2B75-4625-9038-A533B1EE146A",
+   "volume": 0.8,
+   "probedLufs": -23.4834923285992,
+   "target": -20,
+   "gainLinear": 1.4934,
+   "gainDb": 3.48
+  },
+  "Hats": {
+   "effectId": "DA826DE3-9826-4E06-B2E8-EE1E0E3D0B74",
+   "volume": 0.8,
+   "probedLufs": -30.51588016351603,
+   "target": -28,
+   "gainLinear": 1.336,
+   "gainDb": 2.52
+  },
+  "Clap": {
+   "effectId": "25086631-2117-419E-80C7-6ED13710A0BE",
+   "volume": 0.8,
+   "probedLufs": -29.52076592545182,
+   "target": -26,
+   "gainLinear": 1.4998,
+   "gainDb": 3.52
+  },
+  "Bass": {
+   "effectId": "76CE3E2B-D652-4A71-B146-69EF7894D950",
+   "volume": 0.8,
+   "probedLufs": -27.403537997095746,
+   "target": -22,
+   "gainLinear": 1.8628,
+   "gainDb": 5.4
+  }
+ },
+ "counts": {
+  "piano": 288,
+  "kick": 56,
+  "hats": 48,
+  "clap": 20,
+  "bass": 32,
+  "bars8": 144
+ },
+ "bpm": {
+  "bach": 72,
+  "house": 124
+ },
+ "entry": {
+  "kick": 3,
+  "hats": 5,
+  "clap": 7,
+  "bass": 9
+ },
+ "roots": [
+  60,
+  60,
+  59,
+  60,
+  60,
+  60,
+  59,
+  59
+ ],
+ "barPitches": [
+  [
+   60,
+   64,
+   67,
+   72,
+   76
+  ],
+  [
+   60,
+   62,
+   69,
+   74,
+   77
+  ],
+  [
+   59,
+   62,
+   67,
+   74,
+   77
+  ],
+  [
+   60,
+   64,
+   67,
+   72,
+   76
+  ],
+  [
+   60,
+   64,
+   69,
+   76,
+   81
+  ],
+  [
+   60,
+   62,
+   66,
+   69,
+   74
+  ],
+  [
+   59,
+   62,
+   67,
+   74,
+   79
+  ],
+  [
+   59,
+   60,
+   64,
+   67,
+   72
+  ]
+ ],
+ "bassDrop": 24,
+ "tempoChangeMovedNothing": true,
+ "pianoNotes": 288,
+ "invariance": {
+  "onsetsPerBar": 16,
+  "onsetVector": [
+   0,
+   0.25,
+   0.5,
+   0.75,
+   1,
+   1.25,
+   1.5,
+   1.75,
+   2,
+   2.25,
+   2.5,
+   2.75,
+   3,
+   3.25,
+   3.5,
+   3.75
+  ],
+  "onsetChangesAcross8Bars": 0,
+  "pitchChangesAcross8Bars": 7,
+  "identicalPitchBarPairs": [
+   [
+    1,
+    4
+   ]
+  ],
+  "note": "the SAME comparator run on the pitch vectors returns 7 changes and finds bars 1 and 4 identical, which is the positive control that a 0 on the onset vectors means something"
+ },
+ "evenness": {
+  "piano124": {
+   "perBarDb": [
+    -24.59,
+    -24.74,
+    -24.58,
+    -24.46,
+    -25.15,
+    -24.56,
+    -24.57,
+    -24.22
+   ],
+   "spreadDb": 0.93
+  },
+  "probe-Prelude": {
+   "perBarDb": [
+    -20.07,
+    -20.23,
+    -20.06,
+    -19.94
+   ],
+   "spreadDb": 0.29
+  },
+  "probe-Kick": {
+   "perBarDb": [
+    -23.55,
+    -23.55,
+    -23.55,
+    -23.55
+   ],
+   "spreadDb": 0.0
+  },
+  "probe-Hats": {
+   "perBarDb": [
+    -37.57,
+    -37.57,
+    -37.57,
+    -37.57
+   ],
+   "spreadDb": 0.0
+  },
+  "probe-Clap": {
+   "perBarDb": [
+    -37.3,
+    -37.3,
+    -37.3,
+    -37.3
+   ],
+   "spreadDb": 0.0
+  },
+  "probe-Bass": {
+   "perBarDb": [
+    -28.26,
+    -28.25,
+    -28.29,
+    -28.25
+   ],
+   "spreadDb": 0.04
+  }
+ },
+ "loudness": {
+  "piano124": {
+   "integratedLufs": -21.0,
+   "truePeakDbtp": -10.1,
+   "lra": 0.2,
+   "appLufs": -21.030011000633124,
+   "deltaVsApp": 0.03
+  },
+  "l2-kick": {
+   "integratedLufs": -17.6,
+   "truePeakDbtp": -3.3,
+   "lra": 0.4,
+   "appLufs": -17.600513054825853,
+   "deltaVsApp": 0.0
+  },
+  "l3-hats": {
+   "integratedLufs": -17.3,
+   "truePeakDbtp": -3.3,
+   "lra": 0.4,
+   "appLufs": -17.25304735155043,
+   "deltaVsApp": -0.05
+  },
+  "l4-clap": {
+   "integratedLufs": -16.9,
+   "truePeakDbtp": -1.1,
+   "lra": 0.4,
+   "appLufs": -16.936448758312643,
+   "deltaVsApp": 0.04
+  },
+  "l5-bass": {
+   "integratedLufs": -15.7,
+   "truePeakDbtp": -1.0,
+   "lra": 0.3,
+   "appLufs": -15.722468548674085,
+   "deltaVsApp": 0.02
+  },
+  "full": {
+   "integratedLufs": -16.7,
+   "truePeakDbtp": -1.0,
+   "lra": 3.0,
+   "appLufs": -16.670480166870952,
+   "deltaVsApp": -0.03
+  },
+  "ab-piano-src": {
+   "integratedLufs": -21.0,
+   "truePeakDbtp": -10.1,
+   "lra": 0.2,
+   "appLufs": -21.030011000633124,
+   "deltaVsApp": 0.03
+  },
+  "ab-full-src": {
+   "integratedLufs": -15.7,
+   "truePeakDbtp": -1.0,
+   "lra": 0.3,
+   "appLufs": -15.71496462337573,
+   "deltaVsApp": 0.01
+  },
+  "piano72": {
+   "integratedLufs": -22.9,
+   "truePeakDbtp": -10.5,
+   "lra": 1.1,
+   "appLufs": -22.932899936819407,
+   "deltaVsApp": 0.03
+  }
+ },
+ "bands": {
+  "edges": [
+   [
+    20,
+    60
+   ],
+   [
+    60,
+    100
+   ],
+   [
+    100,
+    250
+   ],
+   [
+    250,
+    1000
+   ],
+   [
+    1000,
+    4000
+   ],
+   [
+    4000,
+    20000
+   ]
+  ],
+  "piano": [
+   {
+    "lo": 20,
+    "hi": 60,
+    "db": -81.55,
+    "share": 0.0
+   },
+   {
+    "lo": 60,
+    "hi": 100,
+    "db": -77.12,
+    "share": 1e-05
+   },
+   {
+    "lo": 100,
+    "hi": 250,
+    "db": -42.77,
+    "share": 0.02026
+   },
+   {
+    "lo": 250,
+    "hi": 1000,
+    "db": -27.76,
+    "share": 0.64173
+   },
+   {
+    "lo": 1000,
+    "hi": 4000,
+    "db": -30.67,
+    "share": 0.32857
+   },
+   {
+    "lo": 4000,
+    "hi": 20000,
+    "db": -46.09,
+    "share": 0.00943
+   }
+  ],
+  "full": [
+   {
+    "lo": 20,
+    "hi": 60,
+    "db": -23.74,
+    "share": 0.29165
+   },
+   {
+    "lo": 60,
+    "hi": 100,
+    "db": -24.27,
+    "share": 0.2582
+   },
+   {
+    "lo": 100,
+    "hi": 250,
+    "db": -26.06,
+    "share": 0.1708
+   },
+   {
+    "lo": 250,
+    "hi": 1000,
+    "db": -25.7,
+    "share": 0.18547
+   },
+   {
+    "lo": 1000,
+    "hi": 4000,
+    "db": -29.72,
+    "share": 0.0735
+   },
+   {
+    "lo": 4000,
+    "hi": 20000,
+    "db": -35.58,
+    "share": 0.01908
+   }
+  ]
+ },
+ "sub100": {
+  "pianoFull": -25.84,
+  "pianoSub": -75.44,
+  "pianoDown": 49.6,
+  "mixFull": -18.39,
+  "mixSub": -20.97,
+  "mixDown": 2.59
+ },
+ "tempo": {
+  "slow": {
+   "bpm": 72,
+   "predictedOnsetsPerSec": 4.8,
+   "measuredOnsetsPerSec": 4.8,
+   "peakShare": 0.0521
+  },
+  "fast": {
+   "bpm": 124,
+   "predictedOnsetsPerSec": 8.266666666666667,
+   "measuredOnsetsPerSec": 8.2666,
+   "peakShare": 0.107
+  },
+  "ratio": 1.7222,
+  "measuredRatio": 1.7222,
+  "secondsFor8Bars": {
+   "slow": 26.667,
+   "fast": 15.484
+  }
+ },
+ "ab": {
+  "tempo": {
+   "a": {
+    "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/bach-house/audio/ab-t-a.wav",
+    "source": "piano72",
+    "integratedLufs": -15.8,
+    "truePeakDbtp": -3.4,
+    "lra": 1.1
+   },
+   "b": {
+    "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/bach-house/audio/ab-t-b.wav",
+    "source": "piano124",
+    "integratedLufs": -13.9,
+    "truePeakDbtp": -3.0,
+    "lra": 0.2
+   },
+   "sharedGain": 2.26281,
+   "deltaLu": 1.9
+  },
+  "build": {
+   "a": {
+    "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/bach-house/audio/ab-b-a.wav",
+    "source": "ab-piano-src",
+    "integratedLufs": -23.1,
+    "truePeakDbtp": -12.2,
+    "lra": 0.2
+   },
+   "b": {
+    "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/bach-house/audio/ab-b-b.wav",
+    "source": "ab-full-src",
+    "integratedLufs": -17.8,
+    "truePeakDbtp": -3.0,
+    "lra": 0.3
+   },
+   "sharedGain": 0.79069,
+   "deltaLu": 5.3
+  }
+ },
+ "marker": {
+  "fps": 50,
+  "frames": 1548,
+  "seconds": 30.96,
+  "barSeconds": 1.9355,
+  "entrySeconds": {
+   "kick": 3.871,
+   "hats": 7.742,
+   "clap": 11.613,
+   "bass": 15.484
+  },
+  "bands": {
+   "kick": [
+    20,
+    110
+   ],
+   "bass": [
+    120,
+    400
+   ],
+   "clap": [
+    900,
+    9000
+   ],
+   "hats": [
+    6000,
+    16000
+   ]
+  },
+  "entrySteps": {
+   "kick": {
+    "band": [
+     20,
+     110
+    ],
+    "beforeDb": -46.76,
+    "afterDb": -20.74,
+    "stepDb": 26.02,
+    "peakBeforeDb": -29.86,
+    "peakAfterDb": -9.9,
+    "peakStepDb": 19.97,
+    "onHitsBeforeDb": -57.41,
+    "onHitsAfterDb": -15.98,
+    "onHitsStepDb": 41.43,
+    "entrySeconds": 3.871,
+    "entryBar": 3
+   },
+   "hats": {
+    "band": [
+     6000,
+     16000
+    ],
+    "beforeDb": -57.44,
+    "afterDb": -36.11,
+    "stepDb": 21.33,
+    "peakBeforeDb": -53.84,
+    "peakAfterDb": -24.09,
+    "peakStepDb": 29.75,
+    "onHitsBeforeDb": -58.09,
+    "onHitsAfterDb": -31.37,
+    "onHitsStepDb": 26.72,
+    "entrySeconds": 7.742,
+    "entryBar": 5
+   },
+   "clap": {
+    "band": [
+     900,
+     9000
+    ],
+    "beforeDb": -29.15,
+    "afterDb": -28.05,
+    "stepDb": 1.09,
+    "peakBeforeDb": -25.75,
+    "peakAfterDb": -20.49,
+    "peakStepDb": 5.26,
+    "onHitsBeforeDb": -26.72,
+    "onHitsAfterDb": -24.13,
+    "onHitsStepDb": 2.58,
+    "entrySeconds": 11.613,
+    "entryBar": 7
+   },
+   "bass": {
+    "band": [
+     120,
+     400
+    ],
+    "beforeDb": -26.48,
+    "afterDb": -24.24,
+    "stepDb": 2.24,
+    "peakBeforeDb": -18.0,
+    "peakAfterDb": -18.02,
+    "peakStepDb": -0.01,
+    "onHitsBeforeDb": -28.02,
+    "onHitsAfterDb": -22.49,
+    "onHitsStepDb": 5.52,
+    "entrySeconds": 15.484,
+    "entryBar": 9
+   }
+  },
+  "wholeMixSteps": {
+   "kick": 6.0,
+   "hats": -0.03,
+   "clap": 0.15,
+   "bass": 1.37
+  },
+  "order": [
+   "kick",
+   "hats",
+   "clap",
+   "bass"
+  ]
+ }
+}

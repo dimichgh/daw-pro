@@ -13,6 +13,14 @@ audio — not a script or a plan.
 Follow the `narrated-film` skill. It carries the measured traps; read it before
 writing any pipeline code.
 
+⚠️⚠️ **For a LESSON, read the skill's §"THE HOUSE STANDARD FOR A LESSON" before
+you write a single line of narration.** It is not style advice — it carries four
+rules that each shipped as a defect: open for a novice; **check that anything you
+call audible CAN be heard at the level it actually lives at**; charts are
+measured, not drawn; and set `normalize: false` on any A/B whose level difference
+is the lesson. **Length is decided by the explanation, not the clock** — if
+something has to go, cut a demonstration, never the introduction.
+
 ## What you do and do not do
 
 **You do not capture.** Stills, screen recordings and audio come from wherever

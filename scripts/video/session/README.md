@@ -37,6 +37,7 @@ rain, thunder, a siren and a singing vowel all have to come out of those four.
 | `hithere.mjs` | the words chapter: two EQ peaks on automation lanes, walked along a vowel path |
 | `subshot.mjs` | shoots the 808's poly synth on SINE (`synth-808-sine.png`) — the A/B's honest "before" |
 | `spec.py` / `shorts.py` | emit the film and Shorts specs for `shortsmith.py` |
+| `../meter.py` | burns a live 16-band spectrum meter into a corner of a finished film, driven by the film's OWN audio (`"meter": "br"` in a spec turns it on) |
 | `MEASUREMENTS.json` | every number the narration says, written by the measuring steps |
 
 ## Running them
@@ -60,6 +61,17 @@ itself across the panel:
 ```sh
 DAWPRO_PROFILE_ROOT=$PWD/out/profile DAW_CONTROL_PORT=17695 node subshot.mjs
 ```
+
+## Tooling — what is installed, and what each is FOR
+
+| Tool | State | Use it for |
+|---|---|---|
+| `debug.captureUI` / `view.capture` | shipped | ⭐ **THE DEFAULT FOR EVERYTHING.** Headless — no window need be on screen, no permission, does not disturb the user. **They named this as a feature they like; do not migrate away from it for convenience.** |
+| ScreenCaptureKit recorder (`scripts/video/screenrec/`) | ✅ **BUILT 2026-09-05**, permission verified granted; 150 frames in 5.0 s at 30 fps, motion proven against a static control | **MOTION ONLY** — a terminal scrolling, a drag, a control actually moving, the "I can dance" film. `debug.captureUI` runs at ~3.5 fps (measured; `scale` does not change it) and cannot film movement at all. |
+| `manim` 0.21.0 | installed 2026-09-05 | Animated diagrams: a transfer curve bending as the knee widens, an envelope recovering, a spectrum sliding. The right tool for a channel about curves and numbers. ⚠️ Needed `brew install pkg-config cairo pango` first — pip alone fails at `pycairo`'s meson step. Homebrew is needed at BUILD time only; renders fine without `/opt/homebrew/bin` on `PATH` (verified). |
+| `matplotlib` 3.11.1 | installed 2026-09-05 | Measurement plots. ⚠️ It failed the first time only because it shared a `pip install` line with `manim`, whose metadata failure aborted the whole resolve — **a collateral failure that looked like its own.** |
+| ffmpeg `zoompan` / `xfade` / `scroll` | ALREADY THERE, still unused | Slow pushes on stills and real chapter transitions, for free. ⭐ **Reach for these BEFORE asking for an install.** |
+| ffmpeg `drawtext` | ⛔ ABSENT (no freetype in this build) | Nothing — this is why every card's text is rendered through PIL. |
 
 ## Things that cost a build each
 
@@ -118,3 +130,22 @@ DAWPRO_PROFILE_ROOT=$PWD/out/profile DAW_CONTROL_PORT=17695 node subshot.mjs
   grid.
 - ⚠ **Set the master to zero first.** A burst plays through the machine's real
   output device.
+- **The roll opens on an EMPTY GRID for a low clip, and no amount of zoom fixes
+  it.** It anchors high in the 128-row pitch stack, so a 49 Hz heartbeat at C1
+  draws in the minimap and the velocity lane and nowhere else. MEASURED at the
+  10 pt row-height floor (the clamp — a request for 5 lands there): the grid still bottomed out at F2 with the notes
+  below it. `debug.panelLayout {pianoRollCenterPitch}` scrolls the pitch axis;
+  `burst()` sends the clip's own MEDIAN pitch, so no chapter is special-cased.
+  ⚠ ORDER MATTERS: open the roll first (the scroller has to exist), and send the
+  focus AFTER any row-height change (that re-pins the axis and undoes it).
+  The product half of this — auto-centring when a roll OPENS — is roadmap m35-h.
+- **A re-shoot must CLEAR the burst directory first.** It writes `f0001..fN` and
+  stops; the previous take's frames past N survive and `assemble.py` globs the
+  directory, so a shorter re-shoot silently ends on frames it was meant to
+  replace. Caught by counting files against `meta.json` — 25 on disk, 18 in
+  meta. `build.mjs` now clears; the CHECK is still worth running.
+- **`spec.py` resolves `shots/` and `audio/` from ITS OWN directory**, not from
+  `SESSION_SHOTS`/`SESSION_AUDIO` (those are read by the node capture scripts
+  only). Run the copy that sits beside the assets, or every path in the emitted
+  spec points at an empty repo directory and the build dies on the first
+  `ffprobe`.

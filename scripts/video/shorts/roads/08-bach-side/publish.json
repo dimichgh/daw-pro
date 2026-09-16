@@ -1,0 +1,20 @@
+{
+  "title": "J. S. Bach - Prelude in C, BWV 846 (complete) - watched from the side",
+  "description": "The first prelude of The Well-Tempered Clavier, Book I - all thirty-five bars,\nfrom the opening arpeggio to the fermata. Same performance as the main film,\nseen from off the edge of the page instead of from behind.\n\nThe score IS the road. Time runs away from you down the page: each staff is a\nlane, each note sits where it really sits on the stave, and the three lights are\nthe three voices Bach actually wrote - the broken-chord figure in the right hand,\nand the two held voices underneath it that the left hand plays as one gesture.\n\nThis angle exists for one passage. At 1:32 the bass stops moving sideways and\nholds a single low G for eight bars while everything above it keeps flowing -\nthirty-two seconds of one unchanging note. From the side its road runs nearest\nthe camera, so that held note reads as a continuous bar of light rather than a\ndistant dot. It lands on C at 2:04. A bar later, at 2:08, the figure finally\nbreaks its own pattern, and it never returns to it: the last three bars are all\ndifferent.\n\nBuilt and rendered end to end in DAW Pro - an AI-native DAW for macOS. The\nperformance, the mix, the loudness pass and the visualiser are all one pipeline;\nnothing here was recorded from a screen.\n\nSCORE / LICENCE\nVisualisation inspired by Polyfjord - thank you for the idea.\n\nNotes derived from the Mutopia Project edition Mutopia-2011/09/12-5, typeset by\nShay Rojansky, edited by Han-Wen Nienhuys and Tobias Erbsland.\nThe edition's own header dedicates it to the public domain.\nSource: https://www.mutopiaproject.org/\n\nThe composition itself is in the public domain.\n\nAUDIO\nRendered offline at 48 kHz, normalised to -14 LUFS integrated with a -1 dBTP\nceiling (the usual streaming convention).\n\nCHAPTERS\n0:00 Bars 1-10 - the figure, and the two voices under it\n0:40 Bar 11 - the harmony moves off the opening\n1:12 Bar 19 - the approach\n1:32 Bars 24-31 - the pedal: the bass stops moving\n2:04 Bar 32 - the bass lands on C\n2:08 Bar 33 - the figure breaks its own pattern\n2:16 Bar 35 - the final chord\n\nLICENCE NOTES\n1. The public-domain statement above is the typesetter's own dedication,\nwritten inside the LilyPond source file (copyright = \"Public Domain\"). It is a\nstatement in a source file rather than a licence document, and it is quoted\nhere, not interpreted.\n2. That same header's \"source\" field reads \"Unknown\", so the edition this was\nkeyed from is not stated. The composition is unambiguously public domain; the\nengraving's provenance rests on the dedication above.",
+  "tags": [
+    "Bach",
+    "Prelude in C",
+    "BWV 846",
+    "Well-Tempered Clavier",
+    "classical music",
+    "music visualiser",
+    "sheet music",
+    "piano",
+    "DAW Pro",
+    "three.js"
+  ],
+  "categoryId": "10",
+  "privacyStatus": "private",
+  "containsSyntheticMedia": true,
+  "madeForKids": false
+}

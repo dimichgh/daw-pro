@@ -1,0 +1,65 @@
+el= 6 az=  0 Strings  vis= 303892 occluded=  0.00 %   bright vis= 48125 occludedBright=  0.00 %
+el= 6 az=  0 Bass     vis=  18233 occluded=  0.00 %   bright vis=  4794 occludedBright=  0.00 %
+el= 6 az=  0 Lead     vis=1119033 occluded=  5.85 %   bright vis=106588 occludedBright=  0.00 %
+el= 6 az=  0 Stabs    vis= 152870 occluded=  0.01 %   bright vis= 22810 occludedBright=  0.00 %
+el= 6 az= 45 Strings  vis= 473011 occluded=  0.00 %   bright vis= 62998 occludedBright=  0.00 %
+el= 6 az= 45 Bass     vis=  26334 occluded=  0.00 %   bright vis=  7011 occludedBright=  0.00 %
+el= 6 az= 45 Lead     vis=1026053 occluded= 14.33 %   bright vis= 97806 occludedBright=  0.00 %
+el= 6 az= 45 Stabs    vis= 102183 occluded=  3.44 %   bright vis= 11458 occludedBright=  0.00 %
+el= 6 az= 90 Strings  vis= 304040 occluded=  0.00 %   bright vis= 48136 occludedBright=  0.00 %
+el= 6 az= 90 Bass     vis=  40129 occluded=  0.01 %   bright vis= 10650 occludedBright=  0.00 %
+el= 6 az= 90 Lead     vis=1117813 occluded=  3.31 %   bright vis=106574 occludedBright=  0.00 %
+el= 6 az= 90 Stabs    vis=  87102 occluded=  0.86 %   bright vis= 11713 occludedBright=  0.00 %
+el= 6 az=135 Strings  vis= 173505 occluded=  0.00 %   bright vis= 25021 occludedBright=  0.00 %
+el= 6 az=135 Bass     vis=  48330 occluded=  0.00 %   bright vis= 12478 occludedBright=  0.00 %
+el= 6 az=135 Lead     vis=1143248 occluded=  0.00 %   bright vis=142326 occludedBright=  0.00 %
+el= 6 az=135 Stabs    vis=  77092 occluded= 14.39 %   bright vis= 10375 occludedBright= 30.84 %
+el= 6 az=180 Strings  vis= 109825 occluded= 10.23 %   bright vis= 14461 occludedBright= 21.42 %
+el= 6 az=180 Bass     vis=  40128 occluded=  0.01 %   bright vis= 10650 occludedBright=  0.00 %
+el= 6 az=180 Lead     vis=1312841 occluded=  0.00 %   bright vis=255512 occludedBright=  0.00 %
+el= 6 az=180 Stabs    vis=  86502 occluded=  8.63 %   bright vis= 11713 occludedBright=  0.00 %
+el= 6 az=225 Strings  vis=  99505 occluded= 38.63 %   bright vis= 11666 occludedBright= 53.64 %
+el= 6 az=225 Bass     vis=  26335 occluded=  0.00 %   bright vis=  7011 occludedBright=  0.00 %
+el= 6 az=225 Lead     vis=1756936 occluded=  0.00 %   bright vis=431854 occludedBright=  0.00 %
+el= 6 az=225 Stabs    vis= 102108 occluded=  9.13 %   bright vis= 11458 occludedBright=  0.00 %
+el= 6 az=270 Strings  vis= 100355 occluded= 20.31 %   bright vis= 14460 occludedBright= 20.80 %
+el= 6 az=270 Bass     vis=  18233 occluded=  0.00 %   bright vis=  4793 occludedBright=  0.00 %
+el= 6 az=270 Lead     vis=1313018 occluded=  0.29 %   bright vis=255308 occludedBright=  0.00 %
+el= 6 az=270 Stabs    vis= 152871 occluded=  0.00 %   bright vis= 22810 occludedBright=  0.00 %
+el= 6 az=315 Strings  vis= 173505 occluded=  0.00 %   bright vis= 25021 occludedBright=  0.00 %
+el= 6 az=315 Bass     vis=  15800 occluded= 40.14 %   bright vis=  4002 occludedBright=100.00 %
+el= 6 az=315 Lead     vis=1144300 occluded=  0.00 %   bright vis=142241 occludedBright=  0.00 %
+el= 6 az=315 Stabs    vis= 196017 occluded=  0.00 %   bright vis= 26470 occludedBright=  0.00 %
+el=60 az=  0 Strings  vis= 112012 occluded=  0.00 %   bright vis=  5015 occludedBright=  0.00 %
+el=60 az=  0 Bass     vis=   5884 occluded=  0.00 %   bright vis=  1558 occludedBright=  0.00 %
+el=60 az=  0 Lead     vis= 559776 occluded=  0.32 %   bright vis= 28446 occludedBright=  0.00 %
+el=60 az=  0 Stabs    vis=  53902 occluded=  0.00 %   bright vis=  3438 occludedBright=  0.00 %
+el=60 az= 45 Strings  vis= 112108 occluded=  0.00 %   bright vis=  4083 occludedBright=  0.00 %
+el=60 az= 45 Bass     vis=   6135 occluded=  0.00 %   bright vis=  1576 occludedBright=  0.00 %
+el=60 az= 45 Lead     vis= 455412 occluded=  0.92 %   bright vis= 25531 occludedBright=  0.00 %
+el=60 az= 45 Stabs    vis=  45592 occluded=  0.00 %   bright vis=  3001 occludedBright=  0.00 %
+el=60 az= 90 Strings  vis= 111495 occluded=  0.00 %   bright vis=  5009 occludedBright=  0.00 %
+el=60 az= 90 Bass     vis=   6096 occluded=  0.00 %   bright vis=  1495 occludedBright=  0.00 %
+el=60 az= 90 Lead     vis= 559486 occluded=  0.33 %   bright vis= 28442 occludedBright=  0.00 %
+el=60 az= 90 Stabs    vis=  39208 occluded=  0.00 %   bright vis=  3594 occludedBright=  0.00 %
+el=60 az=135 Strings  vis=  91986 occluded=  0.00 %   bright vis=  5520 occludedBright=  0.00 %
+el=60 az=135 Bass     vis=   5837 occluded=  0.00 %   bright vis=  1366 occludedBright=  0.00 %
+el=60 az=135 Lead     vis= 750253 occluded=  0.00 %   bright vis= 29889 occludedBright=  0.00 %
+el=60 az=135 Stabs    vis=  37182 occluded=  0.00 %   bright vis=  3512 occludedBright=  0.00 %
+el=60 az=180 Strings  vis=  70725 occluded=  0.00 %   bright vis=  5246 occludedBright=  0.00 %
+el=60 az=180 Bass     vis=   6096 occluded=  0.00 %   bright vis=  1496 occludedBright=  0.00 %
+el=60 az=180 Lead     vis= 719755 occluded=  0.00 %   bright vis= 28707 occludedBright=  0.00 %
+el=60 az=180 Stabs    vis=  39208 occluded=  0.00 %   bright vis=  3595 occludedBright=  0.00 %
+el=60 az=225 Strings  vis=  66182 occluded=  0.00 %   bright vis=  5050 occludedBright=  0.00 %
+el=60 az=225 Bass     vis=   6135 occluded=  0.00 %   bright vis=  1576 occludedBright=  0.00 %
+el=60 az=225 Lead     vis= 602503 occluded=  0.00 %   bright vis= 32170 occludedBright=  0.00 %
+el=60 az=225 Stabs    vis=  45620 occluded=  0.00 %   bright vis=  3000 occludedBright=  0.00 %
+el=60 az=270 Strings  vis=  70751 occluded=  0.00 %   bright vis=  5245 occludedBright=  0.00 %
+el=60 az=270 Bass     vis=   5884 occluded=  0.00 %   bright vis=  1558 occludedBright=  0.00 %
+el=60 az=270 Lead     vis= 719808 occluded=  0.00 %   bright vis= 28699 occludedBright=  0.00 %
+el=60 az=270 Stabs    vis=  53203 occluded=  0.00 %   bright vis=  3437 occludedBright=  0.00 %
+el=60 az=315 Strings  vis=  91534 occluded=  0.00 %   bright vis=  5524 occludedBright=  0.00 %
+el=60 az=315 Bass     vis=   5740 occluded=  0.00 %   bright vis=  1548 occludedBright=  0.00 %
+el=60 az=315 Lead     vis= 750944 occluded=  0.00 %   bright vis= 29890 occludedBright=  0.00 %
+el=60 az=315 Stabs    vis=  58059 occluded=  0.00 %   bright vis=  3224 occludedBright=  0.00 %
+wrote /Users/dsemenov/Views/daw-pro/scripts/video/shorts/roads/r36-stage/measure/occl-L2-lowhigh.json  rows=64

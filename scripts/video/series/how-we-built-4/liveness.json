@@ -1,0 +1,90 @@
+{
+ "out": {
+  "Apple GM DLS": {
+   "verdict": "static",
+   "ladder": [
+    {
+     "timbreGroup": 1,
+     "rmsDb": -51.5849897232762,
+     "centroidHz": 2165.1456077715816,
+     "velocity": 25
+    },
+    {
+     "rmsDb": -36.37550643637239,
+     "timbreGroup": 1,
+     "centroidHz": 2167.0642088815785,
+     "velocity": 60
+    },
+    {
+     "rmsDb": -28.393640236627014,
+     "timbreGroup": 1,
+     "velocity": 95,
+     "centroidHz": 2165.14560407829
+    },
+    {
+     "rmsDb": -23.349412028107768,
+     "timbreGroup": 1,
+     "velocity": 127,
+     "centroidHz": 2167.063967438719
+    }
+   ],
+   "rmsSpreadDb": 28.235577695168434,
+   "centroidSpreadPercent": 0.08861319994713122,
+   "distinctTimbreCount": 1,
+   "selfCheck": {
+    "lowToneHz": 440,
+    "highToneHz": 1760,
+    "rule": "a 1760 Hz tone must read a centroid more than TWICE that of a 440 Hz tone, measured through the same code path as the ladder. If this fails the probe errors out instead of returning a verdict.",
+    "lowToneCentroidHz": 440.1179722560796,
+    "passed": true,
+    "highToneCentroidHz": 1759.7303938142281
+   },
+   "instrumentDetail": "General MIDI program 65 — Alto Sax — General MIDI",
+   "summary": "STATIC — one timbre. 28.2 dB of level movement and only 0.09 % of timbre movement, with 1 distinct timbre detected. Velocity is a volume knob on this patch: it has effectively ONE sample. It will read as lifeless on any exposed melodic part — prefer an instrument with real velocity layers for leads and solos."
+  },
+  "GeneralUser GS": {
+   "verdict": "live",
+   "ladder": [
+    {
+     "centroidHz": 2370.690627128978,
+     "velocity": 25,
+     "rmsDb": -52.4943647510166,
+     "timbreGroup": 1
+    },
+    {
+     "centroidHz": 2488.9888715573466,
+     "velocity": 60,
+     "rmsDb": -37.284405366853164,
+     "timbreGroup": 2
+    },
+    {
+     "centroidHz": 2556.761679716066,
+     "velocity": 95,
+     "rmsDb": -29.301333865751378,
+     "timbreGroup": 3
+    },
+    {
+     "centroidHz": 2557.2562159944337,
+     "velocity": 127,
+     "rmsDb": -24.258277318968027,
+     "timbreGroup": 3
+    }
+   ],
+   "rmsSpreadDb": 28.23608743204857,
+   "centroidSpreadPercent": 7.869672522027709,
+   "distinctTimbreCount": 3,
+   "selfCheck": {
+    "lowToneHz": 440,
+    "highToneHz": 1760,
+    "rule": "a 1760 Hz tone must read a centroid more than TWICE that of a 440 Hz tone, measured through the same code path as the ladder. If this fails the probe errors out instead of returning a verdict.",
+    "passed": true,
+    "lowToneCentroidHz": 440.1179722560796,
+    "highToneCentroidHz": 1759.7303938142281
+   },
+   "instrumentDetail": "GeneralUser-GS.sf2 program 65 — Alto Sax — GeneralUser-GS",
+   "summary": "LIVE — 3 distinct timbres across the ladder (7.87 % centroid movement over 28.2 dB of level). Velocity changes the tone, not just the volume."
+  }
+ },
+ "tracksBefore": 4,
+ "tracksAfter": 4
+}

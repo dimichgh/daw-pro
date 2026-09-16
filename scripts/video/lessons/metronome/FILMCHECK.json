@@ -1,0 +1,478 @@
+{
+ "segments": [
+  {
+   "file": "00-open-talk-mux.mp4",
+   "lufs": -16.1,
+   "peakDbfs": -4.5
+  },
+  {
+   "file": "01-words-talk-mux.mp4",
+   "lufs": -16.3,
+   "peakDbfs": -4.5
+  },
+  {
+   "file": "02-notsay-talk-mux.mp4",
+   "lufs": -16.6,
+   "peakDbfs": -4.5
+  },
+  {
+   "file": "03-scope-talk-mux.mp4",
+   "lufs": -16.7,
+   "peakDbfs": -4.4
+  },
+  {
+   "file": "04-tempofield-talk-mux.mp4",
+   "lufs": -16.5,
+   "peakDbfs": -4.4
+  },
+  {
+   "file": "05-notes-play-mux.mp4",
+   "lufs": -16.8,
+   "peakDbfs": -1.1
+  },
+  {
+   "file": "05-notes-talk-mux.mp4",
+   "lufs": -16.6,
+   "peakDbfs": -4.4
+  },
+  {
+   "file": "06-fermata-talk-mux.mp4",
+   "lufs": -16.7,
+   "peakDbfs": -3.8
+  },
+  {
+   "file": "07-calibrate-play-mux.mp4",
+   "lufs": -18.2,
+   "peakDbfs": -1.4
+  },
+  {
+   "file": "07-calibrate-talk-mux.mp4",
+   "lufs": -16.5,
+   "peakDbfs": -3.6
+  },
+  {
+   "file": "08-strings-talk-mux.mp4",
+   "lufs": -16.1,
+   "peakDbfs": -4.4
+  },
+  {
+   "file": "09-mark-play-mux.mp4",
+   "lufs": -16.8,
+   "peakDbfs": -1.1
+  },
+  {
+   "file": "09-mark-talk-mux.mp4",
+   "lufs": -16.2,
+   "peakDbfs": -4.4
+  },
+  {
+   "file": "10-plos-talk-mux.mp4",
+   "lufs": -16.4,
+   "peakDbfs": -3.9
+  },
+  {
+   "file": "11-ab-tempo-ab0-after-mux.mp4",
+   "lufs": -19.0,
+   "peakDbfs": -1.0
+  },
+  {
+   "file": "11-ab-tempo-ab0-before-mux.mp4",
+   "lufs": -18.9,
+   "peakDbfs": -0.8
+  },
+  {
+   "file": "11-ab-tempo-ab1-after-mux.mp4",
+   "lufs": -19.0,
+   "peakDbfs": -1.0
+  },
+  {
+   "file": "11-ab-tempo-ab1-before-mux.mp4",
+   "lufs": -18.9,
+   "peakDbfs": -0.8
+  },
+  {
+   "file": "11-ab-tempo-talk-mux.mp4",
+   "lufs": -16.4,
+   "peakDbfs": -3.9
+  },
+  {
+   "file": "12-marker-play-mux.mp4",
+   "lufs": -20.5,
+   "peakDbfs": -1.3
+  },
+  {
+   "file": "12-marker-talk-mux.mp4",
+   "lufs": -16.4,
+   "peakDbfs": -2.7
+  },
+  {
+   "file": "13-hyp1-talk-mux.mp4",
+   "lufs": -16.6,
+   "peakDbfs": -4.4
+  },
+  {
+   "file": "14-eroica-ab0-after-mux.mp4",
+   "lufs": -18.4,
+   "peakDbfs": -1.3
+  },
+  {
+   "file": "14-eroica-ab0-before-mux.mp4",
+   "lufs": -18.2,
+   "peakDbfs": -1.2
+  },
+  {
+   "file": "14-eroica-ab1-after-mux.mp4",
+   "lufs": -18.4,
+   "peakDbfs": -1.3
+  },
+  {
+   "file": "14-eroica-ab1-before-mux.mp4",
+   "lufs": -18.2,
+   "peakDbfs": -1.2
+  },
+  {
+   "file": "14-eroica-talk-mux.mp4",
+   "lufs": -16.4,
+   "peakDbfs": -4.3
+  },
+  {
+   "file": "15-hyp2-talk-mux.mp4",
+   "lufs": -16.3,
+   "peakDbfs": -2.9
+  },
+  {
+   "file": "16-hyp3-play-mux.mp4",
+   "lufs": -18.1,
+   "peakDbfs": -1.2
+  },
+  {
+   "file": "16-hyp3-talk-mux.mp4",
+   "lufs": -16.4,
+   "peakDbfs": -3.0
+  },
+  {
+   "file": "17-ab-unit-ab0-after-mux.mp4",
+   "lufs": -19.3,
+   "peakDbfs": -1.0
+  },
+  {
+   "file": "17-ab-unit-ab0-before-mux.mp4",
+   "lufs": -18.9,
+   "peakDbfs": -0.8
+  },
+  {
+   "file": "17-ab-unit-ab1-after-mux.mp4",
+   "lufs": -19.3,
+   "peakDbfs": -1.0
+  },
+  {
+   "file": "17-ab-unit-ab1-before-mux.mp4",
+   "lufs": -18.9,
+   "peakDbfs": -0.8
+  },
+  {
+   "file": "17-ab-unit-talk-mux.mp4",
+   "lufs": -16.8,
+   "peakDbfs": -4.4
+  },
+  {
+   "file": "18-ninth-talk-mux.mp4",
+   "lufs": -16.7,
+   "peakDbfs": -4.2
+  },
+  {
+   "file": "19-settle-talk-mux.mp4",
+   "lufs": -16.3,
+   "peakDbfs": -3.7
+  },
+  {
+   "file": "20-close-talk-mux.mp4",
+   "lufs": -16.3,
+   "peakDbfs": -4.0
+  }
+ ],
+ "segmentLufsRange": [
+  -20.5,
+  -16.1
+ ],
+ "cuts": [
+  {
+   "file": "05-notes-play-mux.mp4",
+   "tailDbOfPeak": -27.48,
+   "seconds": 9.5
+  },
+  {
+   "file": "07-calibrate-play-mux.mp4",
+   "tailDbOfPeak": -150.09,
+   "seconds": 8.6
+  },
+  {
+   "file": "09-mark-play-mux.mp4",
+   "tailDbOfPeak": -27.48,
+   "seconds": 9.5
+  },
+  {
+   "file": "11-ab-tempo-ab0-after-mux.mp4",
+   "tailDbOfPeak": -31.0,
+   "seconds": 10.0
+  },
+  {
+   "file": "11-ab-tempo-ab0-before-mux.mp4",
+   "tailDbOfPeak": -29.1,
+   "seconds": 10.0
+  },
+  {
+   "file": "11-ab-tempo-ab1-after-mux.mp4",
+   "tailDbOfPeak": -31.0,
+   "seconds": 10.0
+  },
+  {
+   "file": "11-ab-tempo-ab1-before-mux.mp4",
+   "tailDbOfPeak": -29.1,
+   "seconds": 10.0
+  },
+  {
+   "file": "11-ab-tempo-talk-mux.mp4",
+   "tailDbOfPeak": -54.64,
+   "seconds": 34.88
+  },
+  {
+   "file": "12-marker-play-mux.mp4",
+   "tailDbOfPeak": -Infinity,
+   "seconds": 13.0
+  },
+  {
+   "file": "14-eroica-ab0-after-mux.mp4",
+   "tailDbOfPeak": -Infinity,
+   "seconds": 8.6
+  },
+  {
+   "file": "14-eroica-ab0-before-mux.mp4",
+   "tailDbOfPeak": -155.07,
+   "seconds": 8.6
+  },
+  {
+   "file": "14-eroica-ab1-after-mux.mp4",
+   "tailDbOfPeak": -Infinity,
+   "seconds": 8.6
+  },
+  {
+   "file": "14-eroica-ab1-before-mux.mp4",
+   "tailDbOfPeak": -155.07,
+   "seconds": 8.6
+  },
+  {
+   "file": "16-hyp3-play-mux.mp4",
+   "tailDbOfPeak": -Infinity,
+   "seconds": 14.0
+  },
+  {
+   "file": "17-ab-unit-ab0-after-mux.mp4",
+   "tailDbOfPeak": -34.12,
+   "seconds": 8.889
+  },
+  {
+   "file": "17-ab-unit-ab0-before-mux.mp4",
+   "tailDbOfPeak": -30.27,
+   "seconds": 8.889
+  },
+  {
+   "file": "17-ab-unit-ab1-after-mux.mp4",
+   "tailDbOfPeak": -34.12,
+   "seconds": 8.889
+  },
+  {
+   "file": "17-ab-unit-ab1-before-mux.mp4",
+   "tailDbOfPeak": -30.27,
+   "seconds": 8.889
+  },
+  {
+   "file": "17-ab-unit-talk-mux.mp4",
+   "tailDbOfPeak": -86.27,
+   "seconds": 27.52
+  }
+ ],
+ "cutControlDb": -0.18,
+ "talkMaxMomentary": -11.3,
+ "demoMomentary": [
+  {
+   "file": "05-notes-play-mux.mp4",
+   "maxMomentaryLufs": -15.2,
+   "luUnderVoice": 3.9
+  },
+  {
+   "file": "07-calibrate-play-mux.mp4",
+   "maxMomentaryLufs": -17.7,
+   "luUnderVoice": 6.4
+  },
+  {
+   "file": "09-mark-play-mux.mp4",
+   "maxMomentaryLufs": -15.2,
+   "luUnderVoice": 3.9
+  },
+  {
+   "file": "11-ab-tempo-ab0-after-mux.mp4",
+   "maxMomentaryLufs": -17.1,
+   "luUnderVoice": 5.8
+  },
+  {
+   "file": "11-ab-tempo-ab0-before-mux.mp4",
+   "maxMomentaryLufs": -17.0,
+   "luUnderVoice": 5.7
+  },
+  {
+   "file": "11-ab-tempo-ab1-after-mux.mp4",
+   "maxMomentaryLufs": -17.1,
+   "luUnderVoice": 5.8
+  },
+  {
+   "file": "11-ab-tempo-ab1-before-mux.mp4",
+   "maxMomentaryLufs": -17.0,
+   "luUnderVoice": 5.7
+  },
+  {
+   "file": "11-ab-tempo-talk-mux.mp4",
+   "maxMomentaryLufs": -11.3,
+   "luUnderVoice": 0.0
+  },
+  {
+   "file": "12-marker-play-mux.mp4",
+   "maxMomentaryLufs": -17.8,
+   "luUnderVoice": 6.5
+  },
+  {
+   "file": "14-eroica-ab0-after-mux.mp4",
+   "maxMomentaryLufs": -17.8,
+   "luUnderVoice": 6.5
+  },
+  {
+   "file": "14-eroica-ab0-before-mux.mp4",
+   "maxMomentaryLufs": -17.8,
+   "luUnderVoice": 6.5
+  },
+  {
+   "file": "14-eroica-ab1-after-mux.mp4",
+   "maxMomentaryLufs": -17.8,
+   "luUnderVoice": 6.5
+  },
+  {
+   "file": "14-eroica-ab1-before-mux.mp4",
+   "maxMomentaryLufs": -17.8,
+   "luUnderVoice": 6.5
+  },
+  {
+   "file": "16-hyp3-play-mux.mp4",
+   "maxMomentaryLufs": -17.8,
+   "luUnderVoice": 6.5
+  },
+  {
+   "file": "17-ab-unit-ab0-after-mux.mp4",
+   "maxMomentaryLufs": -17.3,
+   "luUnderVoice": 6.0
+  },
+  {
+   "file": "17-ab-unit-ab0-before-mux.mp4",
+   "maxMomentaryLufs": -17.0,
+   "luUnderVoice": 5.7
+  },
+  {
+   "file": "17-ab-unit-ab1-after-mux.mp4",
+   "maxMomentaryLufs": -17.3,
+   "luUnderVoice": 6.0
+  },
+  {
+   "file": "17-ab-unit-ab1-before-mux.mp4",
+   "maxMomentaryLufs": -17.0,
+   "luUnderVoice": 5.7
+  },
+  {
+   "file": "17-ab-unit-talk-mux.mp4",
+   "maxMomentaryLufs": -13.0,
+   "luUnderVoice": 1.7
+  }
+ ],
+ "worstDemoGapLu": 6.5,
+ "distinctMomentaryValues": 8,
+ "speechStarts": [
+  44.809312,
+  71.918979,
+  75.604396,
+  78.789604,
+  81.378708,
+  83.552625,
+  88.591146,
+  91.075667,
+  95.862,
+  102.422646,
+  103.771396,
+  105.740479,
+  108.632896,
+  110.216771,
+  111.89775,
+  116.956521,
+  120.436771,
+  125.998312,
+  130.366917,
+  178.210708,
+  182.626688,
+  184.391729,
+  186.152938,
+  188.159542,
+  188.847813,
+  189.537917,
+  191.024021,
+  191.650854,
+  192.270646,
+  194.777604,
+  198.939437,
+  302.237062,
+  302.792604,
+  303.348167,
+  303.903729,
+  304.459271,
+  305.014833,
+  305.570396,
+  306.125937,
+  306.6815,
+  307.237062,
+  307.792604,
+  308.348208,
+  308.902542,
+  309.458937,
+  310.014875,
+  310.389958,
+  351.395708,
+  355.689354,
+  357.308833,
+  362.325021,
+  540.4215,
+  540.977104,
+  541.532646,
+  542.088208,
+  544.171542,
+  544.796542,
+  545.4215,
+  545.977104,
+  546.532646,
+  547.088208,
+  549.171542,
+  549.796542,
+  551.849167,
+  556.999937,
+  562.839958,
+  576.675396,
+  582.682708,
+  616.377062,
+  616.932604,
+  617.488167,
+  618.043729,
+  618.599271,
+  619.154833,
+  619.710396,
+  620.265937,
+  620.8215,
+  621.377062,
+  621.932604,
+  622.487625
+ ]
+}

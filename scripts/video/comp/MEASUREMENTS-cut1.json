@@ -1,0 +1,110 @@
+{
+ "_": "Every number the compressor lesson says. MEASURED off renders on 2026-09-04, never assumed. Predictions in predict.py were written BEFORE any of it was rendered.",
+ "material": {
+  "tone": "one held A3 sine from the poly synth, 7.5 beats at 100 BPM",
+  "drums": "kick/snare/hat programmed note by note from sine + square. No sample is loaded anywhere.",
+  "tone_dry_peak_dbfs": -15.233022,
+  "drums_dry_peak_dbfs": -10.590619,
+  "drums_dry_lufs": -26.3,
+  "silence_control_peak": "-inf"
+ },
+ "d1_threshold_and_ratio": {
+  "_": "over = 12 dB by construction (threshold derived from the MEASURED dry peak), hard knee, so the prediction is the plain ratio line.",
+  "predicted_gr_db": 9.0,
+  "measured_gr_db": 8.891,
+  "control_ratio1_predicted_db": 0.0,
+  "control_ratio1_measured_db": 0.0
+ },
+ "d1b_why_it_is_not_exactly_9": {
+  "_": "⭐ THE BEST BEAT IN THE EPISODE AND IT WAS NOT PLANNED. The static curve is an idealisation; the detector is a PEAK follower that decays between the peaks of the wave, so steady-state reduction falls slightly short. CONFIRMED by three points, not asserted: the shortfall closes monotonically as release lengthens.",
+  "shortfall_db_at_release_5ms": 0.5518,
+  "shortfall_db_at_release_100ms": 0.109,
+  "shortfall_db_at_release_2000ms": 0.0158
+ },
+ "d2_attack": {
+  "_": "Same drum hit, same everything, only attackMs changes. Attack is not 'how fast it works' — it is HOW MUCH OF THE TRANSIENT YOU KEEP.",
+  "bypassed_control_peak_dbfs": -10.590619,
+  "attack_0p1ms_peak_dbfs": -24.012997,
+  "attack_50ms_peak_dbfs": -11.062143,
+  "transient_kept_vs_crushed_db": 12.95
+ },
+ "d3_release": {
+  "_": "RE-DESIGNED 2026-09-05: release is PREDICTED, not compared. The first cut measured the output envelope of a drum loop and reported 6.45 Hz for fast release, slow release AND the bypassed control — that rate was the drum pattern, and the figure was retracted. Release is exactly as predictable as threshold and knee.",
+  "formula": "CompressorEffect.swift:184 — releaseCoeff = exp(-1/(releaseMs*0.001*sampleRate)) is a one-pole with tau = releaseMs, so from G dB of reduction the time back to within 1 dB of unity is t = releaseMs * ln(G). From 12 dB: ln(12) = 2.4849.",
+  "material": "A GATED BURST, not the drum loop: a loop cannot show a release because the next hit arrives before the recovery finishes. A4 for two beats over a quiet A3 tail 25.5 dB below it.",
+  "why_a_tail_and_not_silence": "Gain is measured as compressed/dry SAMPLE BY SAMPLE (mix 1, makeup 0, so comp[i] = dry[i]*gain[i] exactly). On silence that division is 0/0. The tail is the carrier the recovery is measured ON, and at 12.7 dB below the threshold the compressor's target is exactly 0 throughout it.",
+  "burst_dry_peak_dbfs": -14.159876,
+  "tail_dry_peak_dbfs": -39.669997,
+  "settings": "threshold = burst peak - 14.5 dB, ratio 20, hard knee, attack 1 ms, makeup 0, mix 1",
+  "measured_from": "the gain crossing -12 dB to the gain crossing -1 dB, each crossing LINEARLY INTERPOLATED between the samples that bracket it — a TWO-CROSSING time, which does not depend on where the burst ended or on how deep the reduction went",
+  "release_30ms": {
+   "predicted_ms": 74.55,
+   "measured_ms": 74.57,
+   "deepest_reduction_db": -13.5016
+  },
+  "release_100ms": {
+   "predicted_ms": 248.49,
+   "measured_ms": 248.49,
+   "deepest_reduction_db": -13.6197
+  },
+  "release_800ms": {
+   "predicted_ms": 1987.93,
+   "measured_ms": 1987.92,
+   "deepest_reduction_db": -13.727
+  },
+  "control_ratio1": {
+   "_": "⭐ THE CONTROL THAT MAKES IT FALSIFIABLE. Same burst, ratio 1:1 — no reduction to recover from, so the recovery time must be undefined.",
+   "gain_curve_db": 0.0,
+   "measured_ms": null,
+   "verdict": "undefined, as it must be"
+  },
+  "deviation_and_its_named_cause": "⚠⚠ RETRACTED WITHIN THE SAME RE-CUT, AND THE RETRACTION IS NOW THE BEAT. The first pass measured 74.688 ms at a 30 ms release and attributed the 0.2 ms overshoot to the detector's fixed 5 ms peak decay (CompressorEffect.swift:140). THAT WAS THE INSTRUMENT, NOT THE COMPRESSOR: the gain curve discarded every sample within FLOOR_DB of a zero crossing, and against a -39.67 dBFS tail a -60 dB floor blanks ~0.15 ms per half cycle — which finds the -12 crossing EARLY and the -1 crossing LATE, both biases pointing long. At a -80 dB floor it reads 74.583; with both crossings interpolated, 74.57 against a 74.55 prediction, a residual of 0.02 ms. The detector's decay IS real and IS still falling when the release starts — it simply CANCELS between two crossings, because after the target reaches 0 the envelope is a pure exponential. ⭐ CONTROL YOUR METRIC BEFORE YOU EXPLAIN A NUMBER IT PRODUCED — the same lesson that retracted the 6.45 Hz figure, one layer deeper.",
+  "first_attempt_retained_as_evidence": "The first pass set the reduction to 12.2 dB and the 30 ms release NEVER REACHED -12 (deepest -11.934) — a fast release starts recovering while the peak detector is still falling. Deepening to 13.8 dB makes the -12 crossing exist at every release; the two-crossing time is independent of depth."
+ },
+ "d4_knee": {
+  "_": "The demo nobody does: a tone 2 dB BELOW threshold. A hard knee is not working at all; a soft knee already is.",
+  "tone_relative_to_threshold_db": -2.0,
+  "hard_knee_predicted_gr_db": 0.0,
+  "hard_knee_measured_gr_db": 0.0,
+  "soft_knee_24db_predicted_gr_db": 1.5625,
+  "soft_knee_24db_measured_gr_db": 1.5202
+ },
+ "d5_makeup": {
+  "_": "Why every compressor A/B you have heard is a lie. Gentle 3:1, soft knee — the setting a mix engineer actually reaches for.",
+  "uncompressed_lufs": -26.3,
+  "compressed_makeup0_lufs": -31.6,
+  "loss_lu": 5.3,
+  "loudness_matched_makeup_db": 5.3,
+  "loudness_matched_lufs": -26.3,
+  "unfair_demo_makeup_db": 7.3,
+  "unfair_demo_lufs": -24.3,
+  "unfair_advantage_lu": 2.0,
+  "surprise_peak_note": "⭐ AT EQUAL LOUDNESS the compressed take PEAKS 4.5 dB HIGHER (-6.09 vs -10.59 dBFS): a 10 ms attack passes the transient, then makeup lifts it. Compression did not reduce the peaks — it raised them. This is why a limiter follows a compressor.",
+  "uncompressed_peak_dbfs": -10.590619,
+  "matched_peak_dbfs": -6.091552
+ },
+ "d6_mix": {
+  "_": "Parallel ('New York') compression: density back without flattening the transient — impossible fully wet.",
+  "dry_control": {
+   "lufs": -26.3,
+   "peak_dbfs": -10.590619
+  },
+  "fully_wet": {
+   "lufs": -50.0,
+   "peak_dbfs": -26.232411
+  },
+  "parallel_mix_0p4": {
+   "lufs": -30.7,
+   "peak_dbfs": -14.581361
+  },
+  "parallel_vs_wet_louder_lu": 19.3,
+  "parallel_vs_wet_peak_kept_db": 11.65,
+  "bit_exact_bypass_at_mix0": {
+   "_": "The docs CLAIM mix:0 is a bit-exact bypass. VERIFIED three ways rather than repeated.",
+   "null_test_peak": "-inf",
+   "positive_control_null_against_wet_peak_dbfs": -11.27864,
+   "sha256_identical_to_dry": true
+  },
+  "ab_is_unlevelled": "⭐ CHANGED 2026-09-05: the A/B is NO LONGER loudness-levelled. The levelled version put the 19.3 LU collapse on a card while only the transient half was audible — a number on screen the ear could not check. One shared static gain (+12.581 dB, chosen from the louder file's peak) is applied to both halves, so the 19.3 LU really plays."
+ }
+}

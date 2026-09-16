@@ -25,6 +25,7 @@ import base64
 import difflib
 import hashlib
 import json
+import math
 import os
 import re
 import subprocess
@@ -224,7 +225,7 @@ def _ref():
     return base64.b64encode(open(REF_WAV, "rb").read()).decode()
 
 
-def synth(text, out, temperature=0.35):
+def _synth_one(text, out, temperature=0.35):
     body = {"model": TTS, "input": text, "ref_audio": _ref(), "ref_text": REF_TEXT,
             "response_format": "wav", "stream": False, "temperature": temperature,
             "top_p": 0.85, "top_k": 40, "repetition_penalty": 1.1}
@@ -232,6 +233,192 @@ def synth(text, out, temperature=0.35):
                                headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(r, timeout=1200) as x:
         open(out, "wb").write(x.read())
+
+
+# ----------------------------------------------------- chunked synthesis + echo
+# ⭐ WHY THIS EXISTS, AND IT IS MEASURED, NOT INFERRED.
+# A listener reported "a background self-feeding echo when narration goes too
+# long". It is real, and it is a property of TAKE LENGTH, not of the words. The
+# controlled pair -- the SAME 1,432 characters, once as one take and once as two
+# -- measured, as the 10th-percentile "gap floor" inside each fifth of the take:
+#   1,432 ch, ONE take   58.1 s  20 ms-RMS peak -7.1 dB  -50.3 -42.2 -33.1 -28.8 -28.3
+#     715 ch, take A     31.7 s        (sample peak is -0.4 to -1.6 dBFS on
+#     716 ch, take B     31.5 s         every take; the two are not the same
+#                                    number and echo_floor() reports the SAMPLE one)
+#     715 / 716 ch floors:  -45.4 -50.3 -49.3 -43.2 -41.8  /  -42.1 -68.6 -46.9 -47.1 -40.3
+# The pauses in the long take end up only ~21 dB under the voice; in the split
+# takes they stay 34-41 dB under. Nothing here explains WHY the floor climbs --
+# "self-feeding" is the listener's name for the sound, not a mechanism I have
+# shown. What is established is the correlation with length and that splitting
+# removes it.
+#
+# ⚠ IT IS NOT DETERMINISTIC, so a chunk budget alone is not a fix. Measured
+# across one film's 16 stages, 12-film is 1,093 characters and clean (ends
+# -42.8 dB) while 07-converge is 848 and affected (ends -27.8). That is why
+# echo_floor() below is also wired into narrate() as a take-PREFERENCE:
+# chunking lowers the odds, the measurement catches the residual.
+#
+# ⭐ THE BUDGET IS MEASURED, not chosen. The worst stage of one film (1,134
+# characters, gap floor ending -26.9 dB) was re-synthesised at three budgets:
+#   600 -> 2 chunks  -49.4 -45.4 -48.9 -51.6 -37.4   (better, still marginal)
+#   400 -> 4 chunks  -47.6 -49.6 -54.1 -53.2 -49.3   (clean)
+#   300 -> 5 chunks  -68.6 -63.1 -51.1 -59.4 -60.9   (clean by a wide margin)
+# Transcribe-back similarity was 0.951 / 0.934 / 0.951 -- unchanged -- and the
+# synthesis took 32/34/33 s against 38 s for the single take, so splitting is
+# not slower. 300 is the value this pipeline uses.
+#
+# ⚠ OFF BY DEFAULT, deliberately. Enabling it changes vo_key, which re-records
+# every cached take of every film on its next build. Set VO_CHUNK_CHARS (600 is
+# the measured value) to opt a film in; flip CHUNK_DEFAULT to make it universal,
+# but not while another film's build is in flight.
+CHUNK_DEFAULT = 0                      # characters; 0 = one take per stage (300 = on)
+CHUNK_METHOD = "chunk-v1"              # bump to force a re-record of chunked vo
+CHUNK_GAP_S = 0.30                     # measured inter-sentence pause: 0.25-0.40 s
+ECHO_FLOOR_DB = -38.0                  # final-fifth gap floor must be AT OR BELOW
+
+
+def chunk_chars():
+    try:
+        return int(os.environ.get("VO_CHUNK_CHARS", CHUNK_DEFAULT))
+    except ValueError:
+        return CHUNK_DEFAULT
+
+
+def split_for_synth(text, budget):
+    """Greedily pack whole SENTENCES up to `budget` characters. Never splits a
+    sentence -- a half sentence is synthesised with the wrong prosody, and the
+    join is then audible as a stumble rather than a breath."""
+    if budget <= 0 or len(text) <= budget:
+        return [text]
+    sents = re.split(r"(?<=[.!?])\s+", text.strip())
+    # ⚠ EVEN packing, not greedy. Greedy at 400 chars produced chunks of
+    # 372/344/353/62 -- a 62-character runt synthesised on its own, which is a
+    # different prosody problem from the one being fixed. Aim at len/n instead.
+    n = max(1, math.ceil(len(text) / budget))
+    target = len(text) / n
+    out, cur = [], ""
+    for sent in sents:
+        if cur and len(cur) + 1 + len(sent) > target:
+            out.append(cur)
+            cur = sent
+        else:
+            cur = f"{cur} {sent}".strip()
+    if cur:
+        out.append(cur)
+    # ⚠ MERGE RUNTS. A sentence boundary is the only legal cut, so a short
+    # sentence followed by a long one can still leave a 69-character chunk, and
+    # a two-word chunk synthesised alone comes back with the wrong cadence.
+    # Anything under RUNT joins its smaller neighbour, target be damned.
+    RUNT = 110
+    while len(out) > 1:
+        i = min(range(len(out)), key=lambda j: len(out[j]))
+        if len(out[i]) >= RUNT:
+            break
+        j = i - 1 if i == len(out) - 1 else (
+            i + 1 if i == 0 else (i - 1 if len(out[i - 1]) <= len(out[i + 1]) else i + 1))
+        a, b = min(i, j), max(i, j)
+        out[a:b + 1] = [out[a] + " " + out[b]]
+    return out
+
+
+def _rd(path):
+    import wave, array
+    w = wave.open(path, "rb")
+    assert w.getsampwidth() == 2 and w.getnchannels() == 1, f"{path}: expected mono 16-bit"
+    a = array.array("h")
+    a.frombytes(w.readframes(w.getnframes()))
+    sr = w.getframerate()
+    w.close()
+    return a, sr
+
+
+def _wr(path, samples, sr):
+    import wave, array
+    w = wave.open(path, "wb")
+    w.setnchannels(1)
+    w.setsampwidth(2)
+    w.setframerate(sr)
+    w.writeframes(array.array("h", samples).tobytes())
+    w.close()
+
+
+def _frame_db(a, sr, ms=20):
+    """RMS of consecutive `ms` windows, in dBFS. Pure python on purpose: numpy
+    is not installed for this interpreter and a 60 s take is only ~3,000 frames."""
+    import math
+    n = max(1, int(sr * ms / 1000))
+    out = []
+    for i in range(0, len(a) - n + 1, n):
+        acc = 0
+        for v in a[i:i + n]:
+            acc += v * v
+        r = math.sqrt(acc / n) / 32768.0
+        out.append(20 * math.log10(r) if r > 1e-9 else -180.0)
+    return out
+
+
+def echo_floor(path, fifths=5):
+    """Return (peak_dbfs, [gap floor per fifth]). The floor is the 10th
+    percentile of the frame energies inside that fifth -- i.e. how quiet the
+    QUIET parts are. A clean take holds its floor; an affected one climbs.
+
+    ⚠ CONFOUND, stated because it bit the first version of this metric: in a
+    dense passage with few pauses the 10th percentile lands on speech, so a
+    single fifth can read high innocently, and a very quiet lead-in makes the
+    FIRST fifth read absurdly low and inflates any 'rise' figure. That is why
+    the gate below reads the LAST fifth's absolute value and not the rise."""
+    import math
+    a, sr = _rd(path)
+    db = _frame_db(a, sr)
+    peak = max((abs(v) for v in a), default=1) / 32768.0
+    peak_db = 20 * math.log10(peak) if peak > 0 else -180.0
+    k = max(1, len(db) // fifths)
+    floors = []
+    for i in range(fifths):
+        seg = db[i * k: (i + 1) * k] if i < fifths - 1 else db[i * k:]
+        # ⚠ DROP THE DIGITAL SILENCE THIS PIPELINE PUTS THERE ITSELF. synth()
+        # joins chunks with 0.30 s of exact zeros, which score -180 and would
+        # drag the percentile down -- the measurement would then be flattered by
+        # the very thing it is supposed to be judging. No neural vocoder output
+        # reaches -100 dBFS in 16-bit; only a run of exact zeros does, so that
+        # is a safe discriminator. 15 frames per join against 300-550 per fifth
+        # usually would not reach rank 10 % anyway, but "usually" is not a
+        # measurement.
+        seg = sorted(v for v in seg if v > -100.0)
+        floors.append(seg[max(0, int(0.10 * len(seg)))] if seg else -180.0)
+    return peak_db, floors
+
+
+def synth(text, out, temperature=0.35):
+    """Synthesise `text`. Long text is split into sentence chunks and joined,
+    because a single long take grows an audible wash in its pauses (see above)."""
+    budget = chunk_chars()
+    chunks = split_for_synth(text, budget)
+    if len(chunks) == 1:
+        return _synth_one(text, out, temperature)
+    parts, sr = [], None
+    for i, c in enumerate(chunks):
+        tmp = f"{out}.part{i}.wav"
+        _synth_one(c, tmp, temperature)
+        a, sr = _rd(tmp)
+        # Trim each chunk's own lead-in/tail silence at -45 dBFS, keeping 60 ms
+        # of pad, so the join gap is the gap we ask for and not that plus two
+        # arbitrary tails.
+        db = _frame_db(a, sr)
+        n = max(1, int(sr * 0.020))
+        live = [j for j, v in enumerate(db) if v > -45.0]
+        if live:
+            pad = int(sr * 0.060)
+            a = a[max(0, live[0] * n - pad): min(len(a), (live[-1] + 1) * n + pad)]
+        parts.append(a)
+        os.remove(tmp)
+    gap = [0] * int(sr * CHUNK_GAP_S)
+    joined = []
+    for i, a in enumerate(parts):
+        if i:
+            joined.extend(gap)
+        joined.extend(a)
+    _wr(out, joined, sr)
 
 
 def transcribe(path):
@@ -346,6 +533,14 @@ def narrate(spec, vodir, tries=8, floor=0.80):
             report.append((st["id"], "cached", 1.0))
             continue
         best = None
+        # ⚠ THE ECHO CHECK IS A PREFERENCE, NOT A VETO. Armed only when chunking
+        # is on. It cannot be a hard gate: a take that is clean on words and
+        # merely marginal on the floor is still the best audio available, and
+        # failing the build on it would report the miss as a factCheck failure,
+        # which is a lie about what went wrong. So: accept immediately on a take
+        # that passes everything, otherwise keep the QUIETEST-pauses take among
+        # those that passed the word gates, and say what it measured.
+        clean = []          # (floor_db, i, sim, transcript, path) -- word gates passed
         for i in range(1, tries + 1):
             tmp = os.path.join(vodir, f"_try{i}.wav")
             synth(text, tmp, 0.35 if i < 4 else 0.30)
@@ -353,19 +548,48 @@ def narrate(spec, vodir, tries=8, floor=0.80):
             s = sim(text, got)
             ok_brand = (need.lower() in got.lower()) if need else True
             missing = fact_missing(facts, got)
-            if s >= floor and ok_brand and not missing:
+            words_ok = s >= floor and ok_brand and not missing
+            echo_db = None
+            if chunk_chars() > 0 and words_ok:
+                try:
+                    echo_db = echo_floor(tmp)[1][-1]
+                except Exception as e:
+                    print(f"  vo     : ⚠ echo check unavailable ({e})")
+            if words_ok and (echo_db is None or echo_db <= ECHO_FLOOR_DB):
                 os.replace(tmp, out)
                 best = (i, s, got)
                 break
+            if words_ok and echo_db is not None:
+                keep = os.path.join(vodir, f"_echo{i}.wav")
+                os.replace(tmp, keep)
+                clean.append((echo_db, i, s, got, keep))
+                print(f"  vo     : {st['id']} take {i} words OK but gap floor "
+                      f"{echo_db:.1f} dB > {ECHO_FLOOR_DB} — trying again")
+                continue
             if best is None or s > best[1]:
                 best = (i, s, got, missing)
                 if not need and not facts:
                     os.replace(tmp, out)
-        else:
-            if need or facts:
-                sys.exit(f"✘ {st['id']}: {tries} takes, none satisfied "
-                         f"brand={need!r} facts={facts}. Best missed {best[3]}, "
-                         f"transcript: {best[2]!r}")
+        if best is None or len(best) == 4:
+            if clean:
+                clean.sort()
+                echo_db, i, s, got, keep = clean[0]
+                os.replace(keep, out)
+                best = (i, s, got)
+                print(f"  vo     : {st['id']} kept take {i} — quietest of "
+                      f"{len(clean)}, gap floor {echo_db:.1f} dB (over "
+                      f"{ECHO_FLOOR_DB}; words all pass)")
+        for _, _, _, _, keep in clean:
+            if os.path.exists(keep):
+                os.remove(keep)
+        # ⚠ THIS WAS A for/else. It stopped meaning what it said the moment a
+        # second for loop was written above it -- `else` binds to the NEAREST
+        # for, so it would have fired on every stage that has a factCheck,
+        # regardless of whether a take had been accepted. Written out.
+        if best is not None and len(best) == 4 and (need or facts):
+            sys.exit(f"✘ {st['id']}: {tries} takes, none satisfied "
+                     f"brand={need!r} facts={facts}. Best missed {best[3]}, "
+                     f"transcript: {best[2]!r}")
         i, s, got = best[0], best[1], best[2]
         cache[st["id"]] = key                 # only reached once a take is kept
         json.dump(cache, open(cachep, "w"))
@@ -389,8 +613,12 @@ def narrate(spec, vodir, tries=8, floor=0.80):
 def vo_key(st):
     """The cache key for one stage -- text plus both gates, exactly as narrate()
     computes it. Split out so --skip-narrate can check what narrate() wrote."""
+    # ⚠ THE SYNTHESIS METHOD IS PART OF THE KEY. Without this, turning chunking
+    # on kept every echo-era take in the cache and the fix shipped to nothing.
+    # It also means opting a film in re-records all of it -- that is the intent.
     return hashlib.sha256(json.dumps(
-        [st["narration"], st.get("brandCheck"), st.get("factCheck", [])],
+        [st["narration"], st.get("brandCheck"), st.get("factCheck", []),
+         (CHUNK_METHOD, chunk_chars()) if chunk_chars() else None],
         sort_keys=True).encode()).hexdigest()
 
 
@@ -487,6 +715,17 @@ def build(spec, outdir, skip_narrate=False):
                        # RAN: the play segment becomes the playhead actually
                        # crossing the notes instead of a frozen picture.
                        **({"burst": s["burst"]} if s.get("burst") else {}),
+                       # ⚠ OPT OUT OF loudnorm ON A LOUDNESS LESSON. assemble's
+                       # play segments run a single-pass loudnorm, which is
+                       # dynamic -- MEASURED, it INVERTED a real 2.1 LU
+                       # difference between a compressor A/B's two halves. A
+                       # stage that is demonstrating LEVEL sets this false and
+                       # pre-gains its own wavs statically.
+                       **({"normalize": False}
+                          if s.get("normalize", True) is False else {}),
+                       # A play segment that IS a rendered chart has a fixed
+                       # length; the film-wide playMax would cut it mid-sweep.
+                       **({"playMax": s["playMax"]} if s.get("playMax") else {}),
                        **({"holdLast": True} if s.get("holdLast", True) else {})}
                       for s in spec["stages"]]}
     manp = os.path.join(outdir, "manifest.json")
@@ -502,9 +741,28 @@ def build(spec, outdir, skip_narrate=False):
                   f"is missing — that stage will show a STILL, not motion")
 
     vodir = os.path.join(outdir, "vo")
-    report = [] if skip_narrate else narrate(spec, vodir)
     if skip_narrate:
         verify_cached(spec, vodir)
+        # ⚠⚠ AN EMPTY LIST IS NOT A RECORD OF A SKIP -- it reads as "no stages
+        # were narrated", which is the same shape as a real failure. Three
+        # --skip-narrate rebuilds of HWB3 overwrote a good narration record with
+        # [], and the per-take scores survived only in build.log. Carry the last
+        # real record forward and SAY that is what happened.
+        prev = os.path.join(outdir, "build-report.json")
+        report = []
+        if os.path.exists(prev):
+            try:
+                report = json.load(open(prev)).get("narration") or []
+            except (ValueError, OSError):
+                report = []
+        narration_note = ("carried forward from the previous build — this run "
+                          "passed --skip-narrate and synthesised nothing"
+                          if report else
+                          "NOT RECORDED — --skip-narrate, and no earlier "
+                          "build-report.json to carry forward")
+    else:
+        report = narrate(spec, vodir)
+        narration_note = None
 
     intro = os.path.join(outdir, "intro.mp4")
     outro = os.path.join(outdir, "outro.mp4")
@@ -533,6 +791,47 @@ def build(spec, outdir, skip_narrate=False):
          "--bursts", bursts,
          "--intro", intro, "--outro", outro, "--out", film])
 
+    # ⭐ THE CORNER METER, and it runs HERE -- before the duration read and
+    # before verify.py -- so every gate downstream judges the film that actually
+    # ships. A post-processing step bolted on AFTER the gates is a step the gates
+    # cannot see, which is how this rig shipped an 11-second-short film with all
+    # eight of them green.
+    #
+    # Opt-in per spec (`"meter": true`, or a corner: "br"/"bl"/"tr"/"tl"), because
+    # a 40-second Short has no long stretch of static frame to explain and does
+    # not need one. Audio is stream-copied, so the loudness gate reads the same
+    # numbers it did before this existed.
+    if spec.get("meter"):
+        m = spec["meter"]
+        metered = os.path.join(outdir, f"{spec['id']}-meter.mp4")
+        # ⛔ START AFTER THE INTRO. The sting already IS this instrument at full
+        # size; a corner copy on top of it is the same face twice. The intro's
+        # own length is the number to skip, and it is right here in the spec —
+        # `brand.py` was handed exactly this value a few lines above.
+        intro_s = float(spec.get("introSeconds", 4))
+        # A 9:16 frame has ~44% of the width to spend, so the Shorts build is
+        # smaller. Read the size the spec actually asked for rather than
+        # guessing from the id.
+        W_spec, H_spec = (spec.get("size", "1920x1080").split("x") + ["1080"])[:2]
+        portrait = int(H_spec) > int(W_spec)
+        run([VENV, os.path.join(os.path.dirname(os.path.abspath(__file__)), "meter.py"),
+             film, metered, "--work", os.path.join(outdir, "segments"),
+             "--corner", m if isinstance(m, str) else "br",
+             "--start", f"{intro_s:.3f}"] + (["--short"] if portrait else []))
+        # ⭐ KEEP THE PRE-METER MASTER. The meter is BURNED IN, so once this
+        # replace has happened the only way to change the meter's look is to
+        # re-assemble the whole film -- burning a second meter over the first
+        # draws two. Keeping the clean master makes a restyle a one-command
+        # re-burn instead of a rebuild. It costs one extra copy of the film.
+        nometer = os.path.join(outdir, f"{spec['id']}-nometer.mp4")
+        try:
+            os.replace(film, nometer)
+        except OSError:
+            nometer = None
+        os.replace(metered, film)
+        if nometer:
+            print(f"  master : {nometer}  (pre-meter, for restyling)")
+
     dur = float(run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
                      "-of", "default=nw=1:nk=1", film]).strip())
     print(f"  film   : {film}  {dur:.1f}s")
@@ -544,15 +843,27 @@ def build(spec, outdir, skip_narrate=False):
     # a BROKEN probe that looks like a film problem and is not one.
     v = subprocess.run([VENV, f"{PLUGIN}/scripts/verify.py", "--film", film,
                         "--manifest", manp], capture_output=True, text=True)
-    fails = []
+    fails, broken = [], []
     for line in v.stdout.splitlines():
         if line.startswith("[") or "FAIL" in line:
             print("  " + line)
         if line.lstrip().startswith("[ FAIL ]"):
             fails.append(line.strip())
-    json.dump({"spec": spec["id"], "duration": dur, "narration": report,
-               "verifyFails": fails},
-              open(os.path.join(outdir, "build-report.json"), "w"), indent=2)
+        # ⚠⚠ A BROKEN CHECK IS NOT A PASSING CHECK. verify.py tags the one
+        # case a film may legitimately ship through -- a Short too small for
+        # the cross-stage control -- as "not applicable". Every other BROKEN
+        # means the probe could not judge: a dead speech server, a failed
+        # import, a control that collapsed. Those used to print and be
+        # ignored, so a run silently dropped from "8 ok" to "7 ok + 1 BROKEN"
+        # and still reported success. MEASURED: two film builds killed each
+        # other's speech server on port 8000 in one night.
+        elif line.lstrip().startswith("[BROKEN]") and "not applicable" not in line:
+            broken.append(line.strip())
+    rep = {"spec": spec["id"], "duration": dur, "narration": report,
+           "verifyFails": fails, "verifyBroken": broken}
+    if narration_note:
+        rep["narrationNote"] = narration_note
+    json.dump(rep, open(os.path.join(outdir, "build-report.json"), "w"), indent=2)
     # ⚠ A [ FAIL ] USED TO BE PRINTED AND THEN IGNORED. The Amen lesson failed
     # its true-peak check and was copied to ~/Movies anyway, one line below the
     # word FAIL. A gate nobody obeys is decoration -- shipping now stops here.
@@ -561,6 +872,12 @@ def build(spec, outdir, skip_narrate=False):
     if fails:
         raise SystemExit("REFUSING TO SHIP — verify.py failed:\n  "
                          + "\n  ".join(fails))
+    if broken:
+        raise SystemExit("REFUSING TO SHIP — a gate could not judge this film, "
+                         "which is not the same as passing:\n  "
+                         + "\n  ".join(broken)
+                         + "\n  Fix the probe (is the speech server up on $OMLX_BASE?) "
+                           "and re-run verify. Do NOT re-run the build to make it go away.")
     return film, dur
 
 

@@ -1,0 +1,383 @@
+{
+ "bpm": {
+  "bach": 72,
+  "house": 124
+ },
+ "counts": {
+  "piano": 288,
+  "kick": 56,
+  "hats": 48,
+  "clap": 20,
+  "bass": 32,
+  "bars8": 144
+ },
+ "entry": {
+  "kick": 3,
+  "hats": 5,
+  "clap": 7,
+  "bass": 9
+ },
+ "roots": [
+  60,
+  60,
+  59,
+  60,
+  60,
+  60,
+  59,
+  59
+ ],
+ "barPitches": [
+  [
+   60,
+   64,
+   67,
+   72,
+   76
+  ],
+  [
+   60,
+   62,
+   69,
+   74,
+   77
+  ],
+  [
+   59,
+   62,
+   67,
+   74,
+   77
+  ],
+  [
+   60,
+   64,
+   67,
+   72,
+   76
+  ],
+  [
+   60,
+   64,
+   69,
+   76,
+   81
+  ],
+  [
+   60,
+   62,
+   66,
+   69,
+   74
+  ],
+  [
+   59,
+   62,
+   67,
+   74,
+   79
+  ],
+  [
+   59,
+   60,
+   64,
+   67,
+   72
+  ]
+ ],
+ "barOnsets": [
+  [
+   0,
+   0.25,
+   0.5,
+   0.75,
+   1,
+   1.25,
+   1.5,
+   1.75,
+   2,
+   2.25,
+   2.5,
+   2.75,
+   3,
+   3.25,
+   3.5,
+   3.75
+  ],
+  [
+   0,
+   0.25,
+   0.5,
+   0.75,
+   1,
+   1.25,
+   1.5,
+   1.75,
+   2,
+   2.25,
+   2.5,
+   2.75,
+   3,
+   3.25,
+   3.5,
+   3.75
+  ],
+  [
+   0,
+   0.25,
+   0.5,
+   0.75,
+   1,
+   1.25,
+   1.5,
+   1.75,
+   2,
+   2.25,
+   2.5,
+   2.75,
+   3,
+   3.25,
+   3.5,
+   3.75
+  ],
+  [
+   0,
+   0.25,
+   0.5,
+   0.75,
+   1,
+   1.25,
+   1.5,
+   1.75,
+   2,
+   2.25,
+   2.5,
+   2.75,
+   3,
+   3.25,
+   3.5,
+   3.75
+  ],
+  [
+   0,
+   0.25,
+   0.5,
+   0.75,
+   1,
+   1.25,
+   1.5,
+   1.75,
+   2,
+   2.25,
+   2.5,
+   2.75,
+   3,
+   3.25,
+   3.5,
+   3.75
+  ],
+  [
+   0,
+   0.25,
+   0.5,
+   0.75,
+   1,
+   1.25,
+   1.5,
+   1.75,
+   2,
+   2.25,
+   2.5,
+   2.75,
+   3,
+   3.25,
+   3.5,
+   3.75
+  ],
+  [
+   0,
+   0.25,
+   0.5,
+   0.75,
+   1,
+   1.25,
+   1.5,
+   1.75,
+   2,
+   2.25,
+   2.5,
+   2.75,
+   3,
+   3.25,
+   3.5,
+   3.75
+  ],
+  [
+   0,
+   0.25,
+   0.5,
+   0.75,
+   1,
+   1.25,
+   1.5,
+   1.75,
+   2,
+   2.25,
+   2.5,
+   2.75,
+   3,
+   3.25,
+   3.5,
+   3.75
+  ]
+ ],
+ "bassDrop": 24,
+ "balance": {
+  "Prelude": {
+   "effectId": "A3B71844-B10C-4DAA-9BD2-76AD2E515712",
+   "volume": 0.8,
+   "probedLufs": -16.480666100770694,
+   "target": -21,
+   "gainLinear": 0.5943,
+   "gainDb": -4.52
+  },
+  "Kick": {
+   "effectId": "41E47780-2B75-4625-9038-A533B1EE146A",
+   "volume": 0.8,
+   "probedLufs": -23.4834923285992,
+   "target": -20,
+   "gainLinear": 1.4934,
+   "gainDb": 3.48
+  },
+  "Hats": {
+   "effectId": "DA826DE3-9826-4E06-B2E8-EE1E0E3D0B74",
+   "volume": 0.8,
+   "probedLufs": -30.51588016351603,
+   "target": -28,
+   "gainLinear": 1.336,
+   "gainDb": 2.52
+  },
+  "Clap": {
+   "effectId": "25086631-2117-419E-80C7-6ED13710A0BE",
+   "volume": 0.8,
+   "probedLufs": -29.52076592545182,
+   "target": -26,
+   "gainLinear": 1.4998,
+   "gainDb": 3.52
+  },
+  "Bass": {
+   "effectId": "76CE3E2B-D652-4A71-B146-69EF7894D950",
+   "volume": 0.8,
+   "probedLufs": -27.403537997095746,
+   "target": -22,
+   "gainLinear": 1.8628,
+   "gainDb": 5.4
+  }
+ },
+ "tempoChangeMovedNothing": true,
+ "pianoNotes": 288,
+ "barSecondsHouse": 1.935483870967742,
+ "secs8House": 15.483870967741936,
+ "secs8Bach": 26.666666666666668,
+ "secsHouse": 30.967741935483872,
+ "renders": {
+  "probe-Prelude": {
+   "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/bach-house/audio/probe-Prelude.wav",
+   "fromBeat": 32,
+   "seconds": 8,
+   "lufs": -16.480666100770694,
+   "truePeak": -5.620289952487756
+  },
+  "probe-Kick": {
+   "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/bach-house/audio/probe-Kick.wav",
+   "fromBeat": 32,
+   "seconds": 8,
+   "lufs": -23.4834923285992,
+   "truePeak": -10.615076065172357
+  },
+  "probe-Hats": {
+   "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/bach-house/audio/probe-Hats.wav",
+   "fromBeat": 32,
+   "seconds": 8,
+   "lufs": -30.51588016351603,
+   "truePeak": -8.899662628845261
+  },
+  "probe-Clap": {
+   "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/bach-house/audio/probe-Clap.wav",
+   "fromBeat": 32,
+   "seconds": 8,
+   "lufs": -29.52076592545182,
+   "truePeak": -12.191842840298072
+  },
+  "probe-Bass": {
+   "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/bach-house/audio/probe-Bass.wav",
+   "fromBeat": 32,
+   "seconds": 8,
+   "lufs": -27.403537997095746,
+   "truePeak": -12.873323012080899
+  },
+  "piano124": {
+   "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/bach-house/audio/piano124.wav",
+   "fromBeat": 0,
+   "seconds": 15.483870967741936,
+   "lufs": -21.030011000633124,
+   "truePeak": -10.140176547104067
+  },
+  "l2-kick": {
+   "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/bach-house/audio/l2-kick.wav",
+   "fromBeat": 8,
+   "seconds": 13,
+   "lufs": -17.600513054825853,
+   "truePeak": -3.2617137451952742
+  },
+  "l3-hats": {
+   "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/bach-house/audio/l3-hats.wav",
+   "fromBeat": 16,
+   "seconds": 13,
+   "lufs": -17.25304735155043,
+   "truePeak": -3.2675619138841676
+  },
+  "l4-clap": {
+   "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/bach-house/audio/l4-clap.wav",
+   "fromBeat": 24,
+   "seconds": 13,
+   "lufs": -16.936448758312643,
+   "truePeak": -1.0784378801850014
+  },
+  "l5-bass": {
+   "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/bach-house/audio/l5-bass.wav",
+   "fromBeat": 32,
+   "seconds": 13,
+   "lufs": -15.722468548674085,
+   "truePeak": -0.9747154540363976
+  },
+  "full": {
+   "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/bach-house/audio/full.wav",
+   "fromBeat": 0,
+   "seconds": 30.967741935483872,
+   "lufs": -16.670480166870952,
+   "truePeak": -0.9745151525782674
+  },
+  "ab-piano-src": {
+   "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/bach-house/audio/ab-piano-src.wav",
+   "fromBeat": 32,
+   "seconds": 15.483870967741936,
+   "lufs": -21.030011000633124,
+   "truePeak": -10.140176547104067
+  },
+  "ab-full-src": {
+   "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/bach-house/audio/ab-full-src.wav",
+   "fromBeat": 32,
+   "seconds": 15.483870967741936,
+   "lufs": -15.71496462337573,
+   "truePeak": -0.9747154540363976
+  },
+  "piano72": {
+   "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/bach-house/audio/piano72.wav",
+   "fromBeat": 0,
+   "seconds": 26.666666666666668,
+   "lufs": -22.932899936819407,
+   "truePeak": -10.448454178492844
+  }
+ }
+}

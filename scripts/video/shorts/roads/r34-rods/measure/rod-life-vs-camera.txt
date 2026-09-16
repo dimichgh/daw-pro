@@ -1,0 +1,71 @@
+
+note t=100.0175 dur=2 x=1.7400000000000002 anchor z=-180.03  road 2
+  u=0.00 t=100.017  camZ=-176.02 playheadZ=-180.03 camTrail=4.02  anchorDepth=4.13  sx=1443 sy=591 in frame
+  u=0.25 t=100.267  camZ=-176.40 playheadZ=-180.48 camTrail=4.08  anchorDepth=3.83  sx=1458 sy=647 in frame
+  u=0.50 t=100.517  camZ=-176.79 playheadZ=-180.93 camTrail=4.14  anchorDepth=3.53  sx=1475 sy=715 in frame
+  u=0.75 t=100.767  camZ=-177.17 playheadZ=-181.38 camTrail=4.21  anchorDepth=3.24  sx=1495 sy=796 in frame
+  u=1.00 t=101.017  camZ=-177.55 playheadZ=-181.83 camTrail=4.28  anchorDepth=2.95  sx=1518 sy=895 in frame
+  u=1.25 t=101.267  camZ=-177.94 playheadZ=-182.28 camTrail=4.35  anchorDepth=2.68  sx=1546 sy=1017 in frame
+  u=1.50 t=101.517  camZ=-178.31 playheadZ=-182.73 camTrail=4.42  anchorDepth=2.40  sx=1579 sy=1168 in frame
+  u=1.75 t=101.767  camZ=-178.69 playheadZ=-183.18 camTrail=4.49  anchorDepth=2.14  sx=1619 sy=1358 in frame
+  u=2.00 t=102.017  camZ=-179.07 playheadZ=-183.63 camTrail=4.56  anchorDepth=1.87  sx=1670 sy=1603 in frame
+  u=2.25 t=102.267  camZ=-179.45 playheadZ=-184.08 camTrail=4.63  anchorDepth=1.62  sx=1736 sy=1926 in frame
+  u=2.50 t=102.517  camZ=-179.82 playheadZ=-184.53 camTrail=4.71  anchorDepth=1.37  sx=1824 sy=2368 in frame
+  u=2.75 t=102.767  camZ=-180.20 playheadZ=-184.98 camTrail=4.78  anchorDepth=1.12  sx=1950 sy=3002 off-x
+  u=3.00 t=103.017  camZ=-180.57 playheadZ=-185.43 camTrail=4.86  anchorDepth=0.88  sx=2143 sy=3984 off-x
+  u=3.25 t=103.267  camZ=-180.95 playheadZ=-185.88 camTrail=4.93  anchorDepth=0.64  sx=2477 sy=5691 off-x
+  u=3.50 t=103.517  camZ=-181.32 playheadZ=-186.33 camTrail=5.01  anchorDepth=0.40  sx=3196 sy=9370 off-x
+  u=3.75 t=103.767  camZ=-181.70 playheadZ=-186.78 camTrail=5.08  anchorDepth=0.17  sx=5861 sy=23013 off-x
+  u=4.00 t=104.017  camZ=-182.07 playheadZ=-187.23 camTrail=5.16  anchorDepth=-0.06  sx=-11964 sy=-68238 BEHIND
+  u=4.25 t=104.267  camZ=-182.45 playheadZ=-187.68 camTrail=5.23  anchorDepth=-0.29  sx=-1502 sy=-14670 BEHIND
+  u=4.50 t=104.517  camZ=-182.82 playheadZ=-188.13 camTrail=5.31  anchorDepth=-0.52  sx=-299 sy=-8500 BEHIND
+
+note t=128.0175 dur=4 x=1.34 anchor z=-230.43  road 2
+  u=0.00 t=128.018  camZ=-225.27 playheadZ=-230.43 camTrail=5.16  anchorDepth=4.99  sx=1566 sy=521 in frame
+  u=0.25 t=128.268  camZ=-225.72 playheadZ=-230.88 camTrail=5.16  anchorDepth=4.57  sx=1610 sy=547 in frame
+  u=0.50 t=128.518  camZ=-226.17 playheadZ=-231.33 camTrail=5.16  anchorDepth=4.14  sx=1664 sy=578 in frame
+  u=0.75 t=128.768  camZ=-226.62 playheadZ=-231.78 camTrail=5.16  anchorDepth=3.71  sx=1731 sy=616 in frame
+  u=1.00 t=129.018  camZ=-227.07 playheadZ=-232.23 camTrail=5.16  anchorDepth=3.28  sx=1814 sy=664 in frame
+  u=1.25 t=129.268  camZ=-227.52 playheadZ=-232.68 camTrail=5.16  anchorDepth=2.86  sx=1923 sy=727 off-x
+  u=1.50 t=129.518  camZ=-227.97 playheadZ=-233.13 camTrail=5.16  anchorDepth=2.43  sx=2070 sy=812 off-x
+  u=1.75 t=129.768  camZ=-228.42 playheadZ=-233.58 camTrail=5.16  anchorDepth=2.00  sx=2279 sy=932 off-x
+  u=2.00 t=130.018  camZ=-228.87 playheadZ=-234.03 camTrail=5.16  anchorDepth=1.58  sx=2602 sy=1118 off-x
+  u=2.25 t=130.268  camZ=-229.32 playheadZ=-234.48 camTrail=5.16  anchorDepth=1.15  sx=3166 sy=1443 off-x
+  u=2.50 t=130.518  camZ=-229.77 playheadZ=-234.93 camTrail=5.16  anchorDepth=0.72  sx=4400 sy=2154 off-x
+  u=2.75 t=130.768  camZ=-230.22 playheadZ=-235.38 camTrail=5.16  anchorDepth=0.29  sx=9238 sy=4940 off-x
+  u=3.00 t=131.018  camZ=-230.67 playheadZ=-235.83 camTrail=5.16  anchorDepth=-0.13  sx=-16608 sy=-9945 BEHIND
+  u=3.25 t=131.268  camZ=-231.12 playheadZ=-236.28 camTrail=5.16  anchorDepth=-0.56  sx=-3154 sy=-2197 BEHIND
+  u=3.50 t=131.518  camZ=-231.57 playheadZ=-236.73 camTrail=5.16  anchorDepth=-0.99  sx=-1322 sy=-1142 BEHIND
+  u=3.75 t=131.768  camZ=-232.02 playheadZ=-237.18 camTrail=5.16  anchorDepth=-1.42  sx=-595 sy=-723 BEHIND
+  u=4.00 t=132.018  camZ=-232.47 playheadZ=-237.63 camTrail=5.16  anchorDepth=-1.84  sx=-205 sy=-498 BEHIND
+  u=4.25 t=132.268  camZ=-232.92 playheadZ=-238.08 camTrail=5.16  anchorDepth=-2.27  sx=38 sy=-358 BEHIND
+  u=4.50 t=132.518  camZ=-233.37 playheadZ=-238.53 camTrail=5.16  anchorDepth=-2.70  sx=205 sy=-263 BEHIND
+  u=4.75 t=132.768  camZ=-233.82 playheadZ=-238.98 camTrail=5.16  anchorDepth=-3.13  sx=325 sy=-193 BEHIND
+  u=5.00 t=133.018  camZ=-234.27 playheadZ=-239.43 camTrail=5.16  anchorDepth=-3.55  sx=417 sy=-140 BEHIND
+  u=5.25 t=133.268  camZ=-234.72 playheadZ=-239.88 camTrail=5.16  anchorDepth=-3.98  sx=489 sy=-99 BEHIND
+  u=5.50 t=133.518  camZ=-235.17 playheadZ=-240.33 camTrail=5.17  anchorDepth=-4.39  sx=549 sy=-75 BEHIND
+  u=5.75 t=133.768  camZ=-235.56 playheadZ=-240.78 camTrail=5.22  anchorDepth=-4.60  sx=616 sy=-148 BEHIND
+  u=6.00 t=134.018  camZ=-235.91 playheadZ=-241.23 camTrail=5.32  anchorDepth=-4.56  sx=696 sy=-312 BEHIND
+  u=6.25 t=134.268  camZ=-236.23 playheadZ=-241.68 camTrail=5.46  anchorDepth=-4.37  sx=797 sy=-523 BEHIND
+  u=6.50 t=134.518  camZ=-236.52 playheadZ=-242.13 camTrail=5.61  anchorDepth=-4.22  sx=925 sy=-686 BEHIND
+
+note t=30.0175 dur=2 x=2.64 anchor z=-54.03  road 2
+  u=0.00 t=30.017  camZ=-50.12 playheadZ=-54.03 camTrail=3.91  anchorDepth=4.61  sx=1528 sy=467 in frame
+  u=0.25 t=30.267  camZ=-50.57 playheadZ=-54.48 camTrail=3.91  anchorDepth=4.19  sx=1611 sy=490 in frame
+  u=0.50 t=30.517  camZ=-51.02 playheadZ=-54.93 camTrail=3.91  anchorDepth=3.77  sx=1713 sy=519 in frame
+  u=0.75 t=30.767  camZ=-51.47 playheadZ=-55.38 camTrail=3.91  anchorDepth=3.34  sx=1840 sy=555 in frame
+  u=1.00 t=31.017  camZ=-51.92 playheadZ=-55.83 camTrail=3.91  anchorDepth=2.92  sx=2005 sy=601 off-x
+  u=1.25 t=31.267  camZ=-52.37 playheadZ=-56.28 camTrail=3.91  anchorDepth=2.50  sx=2225 sy=663 off-x
+  u=1.50 t=31.517  camZ=-52.82 playheadZ=-56.73 camTrail=3.91  anchorDepth=2.07  sx=2536 sy=751 off-x
+  u=1.75 t=31.767  camZ=-53.27 playheadZ=-57.18 camTrail=3.91  anchorDepth=1.65  sx=3007 sy=883 off-x
+  u=2.00 t=32.017  camZ=-53.72 playheadZ=-57.63 camTrail=3.91  anchorDepth=1.23  sx=3802 sy=1107 off-x
+  u=2.25 t=32.267  camZ=-54.17 playheadZ=-58.08 camTrail=3.91  anchorDepth=0.80  sx=5439 sy=1568 off-x
+  u=2.50 t=32.517  camZ=-54.62 playheadZ=-58.53 camTrail=3.91  anchorDepth=0.38  sx=10746 sy=3062 off-x
+  u=2.75 t=32.767  camZ=-55.07 playheadZ=-58.98 camTrail=3.91  anchorDepth=-0.05  sx=-82177 sy=-23094 BEHIND
+  u=3.00 t=33.017  camZ=-55.52 playheadZ=-59.43 camTrail=3.91  anchorDepth=-0.47  sx=-7377 sy=-2039 BEHIND
+  u=3.25 t=33.267  camZ=-55.97 playheadZ=-59.88 camTrail=3.91  anchorDepth=-0.89  sx=-3543 sy=-960 BEHIND
+  u=3.50 t=33.517  camZ=-56.42 playheadZ=-60.33 camTrail=3.91  anchorDepth=-1.32  sx=-2176 sy=-575 BEHIND
+  u=3.75 t=33.767  camZ=-56.87 playheadZ=-60.78 camTrail=3.91  anchorDepth=-1.74  sx=-1475 sy=-378 BEHIND
+  u=4.00 t=34.017  camZ=-57.32 playheadZ=-61.23 camTrail=3.91  anchorDepth=-2.16  sx=-1048 sy=-258 BEHIND
+  u=4.25 t=34.267  camZ=-57.77 playheadZ=-61.68 camTrail=3.91  anchorDepth=-2.59  sx=-761 sy=-177 BEHIND
+  u=4.50 t=34.517  camZ=-58.22 playheadZ=-62.13 camTrail=3.91  anchorDepth=-3.01  sx=-555 sy=-119 BEHIND

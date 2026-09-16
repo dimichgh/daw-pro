@@ -1,0 +1,1842 @@
+{
+  "markers" : [
+    {
+      "beat" : 0,
+      "id" : "027C54E9-0CCA-4C8E-B6DF-8F691EF0F9DF",
+      "name" : "Loop"
+    }
+  ],
+  "masterVolume" : 0.41,
+  "name" : "HowWeBuilt1-demo",
+  "savedAt" : "2026-09-05T21:34:16Z",
+  "schemaVersion" : 1,
+  "tracks" : [
+    {
+      "clips" : [
+        {
+          "id" : "0DE13B4C-B73D-4ED2-8B96-7D05CB3F79F3",
+          "isAIGenerated" : false,
+          "lengthBeats" : 32,
+          "media" : null,
+          "name" : "Drums",
+          "notes" : [
+            {
+              "id" : "5C68BC9C-B867-4598-9A98-919AE34168F6",
+              "lengthBeats" : 0.5,
+              "pitch" : 36,
+              "startBeat" : 0,
+              "velocity" : 110
+            },
+            {
+              "id" : "09C93E2C-8151-46F4-943B-C5AD1C8D3628",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 0,
+              "velocity" : 82
+            },
+            {
+              "id" : "F305952F-4B42-4FFA-B89A-D361CB69E688",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 0.5,
+              "velocity" : 62
+            },
+            {
+              "id" : "EC165A96-6D7B-424A-8D4E-911255A5E109",
+              "lengthBeats" : 0.5,
+              "pitch" : 38,
+              "startBeat" : 1,
+              "velocity" : 104
+            },
+            {
+              "id" : "DE760C2B-C1FF-48F4-A558-330D31724A9D",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 1,
+              "velocity" : 82
+            },
+            {
+              "id" : "035FA521-00B4-47B9-9107-7424D1A4AB53",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 1.5,
+              "velocity" : 62
+            },
+            {
+              "id" : "C9CAF40F-509C-4048-9336-0BE083E37482",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 2,
+              "velocity" : 82
+            },
+            {
+              "id" : "A25F369B-EE48-4995-8AD7-93F087289E4B",
+              "lengthBeats" : 0.5,
+              "pitch" : 36,
+              "startBeat" : 2.5,
+              "velocity" : 100
+            },
+            {
+              "id" : "067E7A18-E26B-4C66-B3EE-8C661605C143",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 2.5,
+              "velocity" : 62
+            },
+            {
+              "id" : "6937F879-8383-430E-824A-EBC0823056AF",
+              "lengthBeats" : 0.5,
+              "pitch" : 38,
+              "startBeat" : 3,
+              "velocity" : 108
+            },
+            {
+              "id" : "9CA7509C-A75C-4B2E-9ADA-982F39AEBFB4",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 3,
+              "velocity" : 82
+            },
+            {
+              "id" : "84078A60-6357-46E4-B5ED-0994996CD1DF",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 3.5,
+              "velocity" : 62
+            },
+            {
+              "id" : "321EB227-2F71-4EDB-B1ED-0E5EDB1F0158",
+              "lengthBeats" : 0.5,
+              "pitch" : 36,
+              "startBeat" : 4,
+              "velocity" : 110
+            },
+            {
+              "id" : "B7D79463-D139-4A0F-9C5A-325336DFBA62",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 4,
+              "velocity" : 82
+            },
+            {
+              "id" : "C7720301-59C9-4BE0-8D30-C8ACC08776E0",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 4.5,
+              "velocity" : 62
+            },
+            {
+              "id" : "4C846122-FC78-4EA6-B62D-31FB1F9332C2",
+              "lengthBeats" : 0.5,
+              "pitch" : 38,
+              "startBeat" : 5,
+              "velocity" : 104
+            },
+            {
+              "id" : "20EF5F67-3B56-421D-988D-4443D27C0F70",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 5,
+              "velocity" : 82
+            },
+            {
+              "id" : "2A6DFAE1-9EE4-4428-A8AB-C425D6A901D2",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 5.5,
+              "velocity" : 62
+            },
+            {
+              "id" : "B5E465F3-8767-43AD-AC37-99C31D4DB40C",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 6,
+              "velocity" : 82
+            },
+            {
+              "id" : "4FDE5E10-4177-4F59-B3DB-37FC5C580678",
+              "lengthBeats" : 0.5,
+              "pitch" : 36,
+              "startBeat" : 6.5,
+              "velocity" : 100
+            },
+            {
+              "id" : "D56F1ABE-300E-4F05-A966-2AA98E09676A",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 6.5,
+              "velocity" : 62
+            },
+            {
+              "id" : "72541797-F44C-4C7A-B3DC-0AFFC57AF17E",
+              "lengthBeats" : 0.5,
+              "pitch" : 38,
+              "startBeat" : 7,
+              "velocity" : 108
+            },
+            {
+              "id" : "C5D8AC4C-3522-4E7A-AC72-324B556DDA3B",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 7,
+              "velocity" : 82
+            },
+            {
+              "id" : "3C120F3D-BCE1-4C14-ADDA-BE9174C7C098",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 7.5,
+              "velocity" : 62
+            },
+            {
+              "id" : "1353721E-4C3D-42F6-B8C9-7C0B6779AFBB",
+              "lengthBeats" : 0.5,
+              "pitch" : 36,
+              "startBeat" : 8,
+              "velocity" : 110
+            },
+            {
+              "id" : "C3658BD5-5910-4747-BD42-DB9EE0A6C2C0",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 8,
+              "velocity" : 82
+            },
+            {
+              "id" : "7985293E-B548-452D-B087-117C1CF67586",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 8.5,
+              "velocity" : 62
+            },
+            {
+              "id" : "CAFA6607-567C-4524-B1B3-CC3381BBB1ED",
+              "lengthBeats" : 0.5,
+              "pitch" : 38,
+              "startBeat" : 9,
+              "velocity" : 104
+            },
+            {
+              "id" : "1F210926-0E9E-4123-B0F5-71FE6A193661",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 9,
+              "velocity" : 82
+            },
+            {
+              "id" : "7F58E6D6-FBC4-4BCF-8FD6-3A05030EE936",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 9.5,
+              "velocity" : 62
+            },
+            {
+              "id" : "B309B3B5-EBDD-44EE-8309-C5C4D8100A9B",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 10,
+              "velocity" : 82
+            },
+            {
+              "id" : "29C51731-8E83-4B69-B880-262D0AAAB844",
+              "lengthBeats" : 0.5,
+              "pitch" : 36,
+              "startBeat" : 10.5,
+              "velocity" : 100
+            },
+            {
+              "id" : "CA0110C3-5BC7-45A0-AC1B-3B8D120FDE22",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 10.5,
+              "velocity" : 62
+            },
+            {
+              "id" : "C9E7163E-49CB-471F-A86C-25A326FEDA99",
+              "lengthBeats" : 0.5,
+              "pitch" : 38,
+              "startBeat" : 11,
+              "velocity" : 108
+            },
+            {
+              "id" : "B9B88DE9-7572-40FC-AC08-039CC60E7A87",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 11,
+              "velocity" : 82
+            },
+            {
+              "id" : "368A071D-389A-46AA-8A83-876454814F29",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 11.5,
+              "velocity" : 62
+            },
+            {
+              "id" : "3FDCD382-FB80-4CCD-879F-4A3DBCE86691",
+              "lengthBeats" : 0.5,
+              "pitch" : 36,
+              "startBeat" : 12,
+              "velocity" : 110
+            },
+            {
+              "id" : "D5217E5B-9B88-42DD-A5E6-4D7EB7FDDE95",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 12,
+              "velocity" : 82
+            },
+            {
+              "id" : "250777EB-3A27-468D-884D-622828FB6D1E",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 12.5,
+              "velocity" : 62
+            },
+            {
+              "id" : "E4CAD18A-5E2C-414F-A9B0-5785E5D69E1F",
+              "lengthBeats" : 0.5,
+              "pitch" : 38,
+              "startBeat" : 13,
+              "velocity" : 104
+            },
+            {
+              "id" : "6793E923-2DA8-4407-A2A7-425CACEB3094",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 13,
+              "velocity" : 82
+            },
+            {
+              "id" : "F427907A-4E7B-4910-8E68-7760D62878FA",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 13.5,
+              "velocity" : 62
+            },
+            {
+              "id" : "9BD81866-AE4E-4E97-9F70-16AFEAB6C3BD",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 14,
+              "velocity" : 82
+            },
+            {
+              "id" : "58ADED49-0085-46EF-AFBC-057D15F82422",
+              "lengthBeats" : 0.5,
+              "pitch" : 36,
+              "startBeat" : 14.5,
+              "velocity" : 100
+            },
+            {
+              "id" : "42529877-34FA-4E5F-8F5E-282B643331E7",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 14.5,
+              "velocity" : 62
+            },
+            {
+              "id" : "131F5F11-2279-49A1-8489-E767B4349655",
+              "lengthBeats" : 0.5,
+              "pitch" : 38,
+              "startBeat" : 15,
+              "velocity" : 108
+            },
+            {
+              "id" : "25E12E65-B57B-4C7C-B91A-9BD05C3A4F7B",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 15,
+              "velocity" : 82
+            },
+            {
+              "id" : "F5EA9FED-C4DA-49A5-983C-06023431DAA2",
+              "lengthBeats" : 0.25,
+              "pitch" : 46,
+              "startBeat" : 15.5,
+              "velocity" : 62
+            },
+            {
+              "id" : "64191AFB-DA45-4CB5-A2F3-E159444B7199",
+              "lengthBeats" : 0.5,
+              "pitch" : 36,
+              "startBeat" : 16,
+              "velocity" : 110
+            },
+            {
+              "id" : "8268D4D3-94E9-4C91-987E-0EE45FF8AF99",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 16,
+              "velocity" : 82
+            },
+            {
+              "id" : "36C9E599-EA8C-4624-B586-246C9B6FE4C8",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 16.5,
+              "velocity" : 62
+            },
+            {
+              "id" : "C91A6D52-9AC3-4B9E-81EF-A31F0C52E3F9",
+              "lengthBeats" : 0.5,
+              "pitch" : 38,
+              "startBeat" : 17,
+              "velocity" : 104
+            },
+            {
+              "id" : "B737A3E0-3D19-4D4A-840E-D456AAC579C0",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 17,
+              "velocity" : 82
+            },
+            {
+              "id" : "CCB086C8-D593-44AA-9ED5-3AFABB49D807",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 17.5,
+              "velocity" : 62
+            },
+            {
+              "id" : "B7EDD0B1-4B5A-4C1B-A580-024670160DA1",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 18,
+              "velocity" : 82
+            },
+            {
+              "id" : "3FFFEF8D-02B7-4C10-92DB-862C47611D35",
+              "lengthBeats" : 0.5,
+              "pitch" : 36,
+              "startBeat" : 18.5,
+              "velocity" : 100
+            },
+            {
+              "id" : "74750ADA-83AF-4076-9466-B4F7F4D3DF95",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 18.5,
+              "velocity" : 62
+            },
+            {
+              "id" : "E9C3BB0A-070F-43E9-8D99-BE71E887E5CF",
+              "lengthBeats" : 0.5,
+              "pitch" : 38,
+              "startBeat" : 19,
+              "velocity" : 108
+            },
+            {
+              "id" : "EA67F9D5-D4A6-49C3-A240-D0BBE6432904",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 19,
+              "velocity" : 82
+            },
+            {
+              "id" : "F8787B51-2FFB-41F8-9F87-58CA470DAEEC",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 19.5,
+              "velocity" : 62
+            },
+            {
+              "id" : "89DC7891-85AE-4621-83C1-EA4945E7D8D5",
+              "lengthBeats" : 0.5,
+              "pitch" : 36,
+              "startBeat" : 20,
+              "velocity" : 110
+            },
+            {
+              "id" : "8EC7AAB0-113D-4180-9456-E99FAD90A9B8",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 20,
+              "velocity" : 82
+            },
+            {
+              "id" : "40F0B860-77FB-49BF-9005-50F7DED76240",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 20.5,
+              "velocity" : 62
+            },
+            {
+              "id" : "4E8999EE-D171-4390-A9D1-C0BA69777A6A",
+              "lengthBeats" : 0.5,
+              "pitch" : 38,
+              "startBeat" : 21,
+              "velocity" : 104
+            },
+            {
+              "id" : "F0DB48D7-F25E-4258-9992-62FBCF11AF3A",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 21,
+              "velocity" : 82
+            },
+            {
+              "id" : "4E02B60C-03A8-4397-B6BE-32A49BD3D144",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 21.5,
+              "velocity" : 62
+            },
+            {
+              "id" : "6FDC12AE-43D8-4B86-9018-B4FC1EC4E3EF",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 22,
+              "velocity" : 82
+            },
+            {
+              "id" : "070776F2-4601-441E-90AF-33ED5BC1709A",
+              "lengthBeats" : 0.5,
+              "pitch" : 36,
+              "startBeat" : 22.5,
+              "velocity" : 100
+            },
+            {
+              "id" : "E0853655-319A-4729-9868-09216790AE9E",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 22.5,
+              "velocity" : 62
+            },
+            {
+              "id" : "C5B102B1-35B8-4BBD-8479-FD70354264D8",
+              "lengthBeats" : 0.5,
+              "pitch" : 38,
+              "startBeat" : 23,
+              "velocity" : 108
+            },
+            {
+              "id" : "0DC6CF55-D34C-4479-A75E-926AC1E94DF7",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 23,
+              "velocity" : 82
+            },
+            {
+              "id" : "5600DA77-392A-4E73-872C-006951A4AF82",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 23.5,
+              "velocity" : 62
+            },
+            {
+              "id" : "A61F7787-3953-45A8-B145-A9959DC25402",
+              "lengthBeats" : 0.5,
+              "pitch" : 36,
+              "startBeat" : 24,
+              "velocity" : 110
+            },
+            {
+              "id" : "B6073CAA-0871-4E2E-8964-533615AF973D",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 24,
+              "velocity" : 82
+            },
+            {
+              "id" : "6843F2C2-63F1-40A6-BD5C-F707BAEC92E6",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 24.5,
+              "velocity" : 62
+            },
+            {
+              "id" : "25B735BD-7000-4147-AE28-00194687D804",
+              "lengthBeats" : 0.5,
+              "pitch" : 38,
+              "startBeat" : 25,
+              "velocity" : 104
+            },
+            {
+              "id" : "6E73890A-86E4-40E5-B7D3-F1179A31CBE9",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 25,
+              "velocity" : 82
+            },
+            {
+              "id" : "AD19AA2B-0709-4A17-8283-678EE02E7201",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 25.5,
+              "velocity" : 62
+            },
+            {
+              "id" : "0C928F5F-80D6-481F-A0FB-F7A567CBC02A",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 26,
+              "velocity" : 82
+            },
+            {
+              "id" : "BBA829DE-038A-4FD9-9B30-C743AB0BFF42",
+              "lengthBeats" : 0.5,
+              "pitch" : 36,
+              "startBeat" : 26.5,
+              "velocity" : 100
+            },
+            {
+              "id" : "8C1B5E4E-6161-4674-92A2-5A516B4D805F",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 26.5,
+              "velocity" : 62
+            },
+            {
+              "id" : "331E281F-0F3F-436C-879E-3A36E8B28030",
+              "lengthBeats" : 0.5,
+              "pitch" : 38,
+              "startBeat" : 27,
+              "velocity" : 108
+            },
+            {
+              "id" : "55E2F2DE-71A0-4717-85DC-1BD019961B23",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 27,
+              "velocity" : 82
+            },
+            {
+              "id" : "9F6DA7D3-EB3D-4D3A-97CC-FFADB057DE7C",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 27.5,
+              "velocity" : 62
+            },
+            {
+              "id" : "ED3CE961-2CA6-45B6-B8C2-3960EB5CC10B",
+              "lengthBeats" : 0.5,
+              "pitch" : 36,
+              "startBeat" : 28,
+              "velocity" : 110
+            },
+            {
+              "id" : "0FFB1545-5C01-48F2-8790-4AA41CCFA0F5",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 28,
+              "velocity" : 82
+            },
+            {
+              "id" : "AFD1AC37-BA21-420A-8EE8-51A9A2E22E73",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 28.5,
+              "velocity" : 62
+            },
+            {
+              "id" : "386D4B9C-AC3E-4FA6-A575-ED67CECC5F4E",
+              "lengthBeats" : 0.5,
+              "pitch" : 38,
+              "startBeat" : 29,
+              "velocity" : 104
+            },
+            {
+              "id" : "C492B0FF-81C8-4799-8BDF-9913A25DBDB9",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 29,
+              "velocity" : 82
+            },
+            {
+              "id" : "CFE2B5F4-C01B-403E-BF12-A5114170F818",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 29.5,
+              "velocity" : 62
+            },
+            {
+              "id" : "AAF235F2-4060-4B6D-AB1E-AAE6EC4C4CB4",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 30,
+              "velocity" : 82
+            },
+            {
+              "id" : "463CD4CC-E44B-49F5-9791-3FF103ED4E2B",
+              "lengthBeats" : 0.5,
+              "pitch" : 36,
+              "startBeat" : 30.5,
+              "velocity" : 100
+            },
+            {
+              "id" : "33532E3C-F316-4FE3-9780-FB5297E6CD5F",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 30.5,
+              "velocity" : 62
+            },
+            {
+              "id" : "95C24DC4-B513-46BF-A841-8A75EDF62A74",
+              "lengthBeats" : 0.5,
+              "pitch" : 38,
+              "startBeat" : 31,
+              "velocity" : 108
+            },
+            {
+              "id" : "D968F8D4-5852-4A35-A620-A192602D0D7B",
+              "lengthBeats" : 0.25,
+              "pitch" : 42,
+              "startBeat" : 31,
+              "velocity" : 82
+            },
+            {
+              "id" : "3AF16062-9CF5-4A22-A259-65550FF6C680",
+              "lengthBeats" : 0.25,
+              "pitch" : 46,
+              "startBeat" : 31.5,
+              "velocity" : 62
+            }
+          ],
+          "startBeat" : 0
+        }
+      ],
+      "id" : "19C5445F-D24F-4D59-BA5E-7E02FF066E7E",
+      "instrument" : {
+        "kind" : "soundBank",
+        "polySynth" : {
+          "attack" : 0.005,
+          "cutoffHz" : 8000,
+          "decay" : 0.08,
+          "gain" : 0.8,
+          "release" : 0.15,
+          "resonance" : 0.1,
+          "sustain" : 0.7,
+          "waveform" : "saw"
+        },
+        "soundBank" : {
+          "bankLSB" : 0,
+          "bankMSB" : 120,
+          "displayName" : "Standard 1 — GeneralUser-GS",
+          "program" : 0,
+          "source" : "\/Users\/dsemenov\/Library\/Audio\/Sounds\/Banks\/GeneralUser-GS.sf2"
+        }
+      },
+      "isAIGenerated" : false,
+      "isArmed" : false,
+      "isMuted" : false,
+      "isSoloed" : false,
+      "kind" : "instrument",
+      "name" : "Drums",
+      "pan" : 0,
+      "volume" : 0.85
+    },
+    {
+      "clips" : [
+        {
+          "id" : "B4D625D9-B708-4003-B3FD-238C14F4D48A",
+          "isAIGenerated" : false,
+          "lengthBeats" : 32,
+          "media" : null,
+          "name" : "Bass",
+          "notes" : [
+            {
+              "id" : "EEC5711B-CDA7-49C9-A8DB-050AC4BAA462",
+              "lengthBeats" : 1,
+              "pitch" : 36,
+              "startBeat" : 0,
+              "velocity" : 104
+            },
+            {
+              "id" : "E3C431AA-9D07-4779-BF1F-3550FC87ACF1",
+              "lengthBeats" : 0.5,
+              "pitch" : 36,
+              "startBeat" : 1.5,
+              "velocity" : 88
+            },
+            {
+              "id" : "D6480B93-D85F-430E-8E83-EE802ACDC87F",
+              "lengthBeats" : 0.5,
+              "pitch" : 48,
+              "startBeat" : 2,
+              "velocity" : 92
+            },
+            {
+              "id" : "A857D0F5-7793-42A0-8773-99A569835529",
+              "lengthBeats" : 0.75,
+              "pitch" : 36,
+              "startBeat" : 3,
+              "velocity" : 96
+            },
+            {
+              "id" : "96EA9B77-6A3C-4FDB-81F6-A2C818F05057",
+              "lengthBeats" : 1,
+              "pitch" : 32,
+              "startBeat" : 4,
+              "velocity" : 104
+            },
+            {
+              "id" : "05D9A937-D563-48E1-969B-E54364B0C397",
+              "lengthBeats" : 0.5,
+              "pitch" : 32,
+              "startBeat" : 5.5,
+              "velocity" : 88
+            },
+            {
+              "id" : "A9690113-086F-471D-826B-CE2B936A64C2",
+              "lengthBeats" : 0.5,
+              "pitch" : 44,
+              "startBeat" : 6,
+              "velocity" : 92
+            },
+            {
+              "id" : "CCF541C3-9B80-45F8-875D-8EE9C666AD0A",
+              "lengthBeats" : 0.75,
+              "pitch" : 32,
+              "startBeat" : 7,
+              "velocity" : 96
+            },
+            {
+              "id" : "1B0ECB7D-483E-484F-86CC-6C44758BEA08",
+              "lengthBeats" : 1,
+              "pitch" : 39,
+              "startBeat" : 8,
+              "velocity" : 104
+            },
+            {
+              "id" : "0794C260-3F99-4C73-B323-3F1936D6AA72",
+              "lengthBeats" : 0.5,
+              "pitch" : 39,
+              "startBeat" : 9.5,
+              "velocity" : 88
+            },
+            {
+              "id" : "9D57AD10-C068-46E6-AB26-EFEC014F9A1C",
+              "lengthBeats" : 0.5,
+              "pitch" : 51,
+              "startBeat" : 10,
+              "velocity" : 92
+            },
+            {
+              "id" : "9C999B3B-EF8C-4F2C-B2FC-D88DC49460B0",
+              "lengthBeats" : 0.75,
+              "pitch" : 39,
+              "startBeat" : 11,
+              "velocity" : 96
+            },
+            {
+              "id" : "DECF94C6-8A30-410B-A4AA-A1D2785CDA4D",
+              "lengthBeats" : 1,
+              "pitch" : 34,
+              "startBeat" : 12,
+              "velocity" : 104
+            },
+            {
+              "id" : "A5C8B0BE-86A6-4877-A31F-2AE824676616",
+              "lengthBeats" : 0.5,
+              "pitch" : 34,
+              "startBeat" : 13.5,
+              "velocity" : 88
+            },
+            {
+              "id" : "10CF49A3-5BEA-49B3-AC34-F4349766DDEE",
+              "lengthBeats" : 0.5,
+              "pitch" : 46,
+              "startBeat" : 14,
+              "velocity" : 92
+            },
+            {
+              "id" : "1E1CFEFD-4599-4F81-A91E-E1A862C128AD",
+              "lengthBeats" : 0.75,
+              "pitch" : 34,
+              "startBeat" : 15,
+              "velocity" : 96
+            },
+            {
+              "id" : "817A1C02-255B-4401-8185-2F7F25B2B6A5",
+              "lengthBeats" : 1,
+              "pitch" : 36,
+              "startBeat" : 16,
+              "velocity" : 104
+            },
+            {
+              "id" : "CEE1A20A-D7EB-4B87-BA63-E9CF69055F62",
+              "lengthBeats" : 0.5,
+              "pitch" : 36,
+              "startBeat" : 17.5,
+              "velocity" : 88
+            },
+            {
+              "id" : "1147CEAB-456C-4381-995F-1D5E68306DFE",
+              "lengthBeats" : 0.5,
+              "pitch" : 48,
+              "startBeat" : 18,
+              "velocity" : 92
+            },
+            {
+              "id" : "6C74E760-AF94-45BB-B297-965F579F6420",
+              "lengthBeats" : 0.75,
+              "pitch" : 36,
+              "startBeat" : 19,
+              "velocity" : 96
+            },
+            {
+              "id" : "CB1534D5-DDBC-4482-8336-007224EDA693",
+              "lengthBeats" : 1,
+              "pitch" : 32,
+              "startBeat" : 20,
+              "velocity" : 104
+            },
+            {
+              "id" : "29A9F115-DB63-4235-9DED-5F6B877FE954",
+              "lengthBeats" : 0.5,
+              "pitch" : 32,
+              "startBeat" : 21.5,
+              "velocity" : 88
+            },
+            {
+              "id" : "ABEE5533-3E85-4A51-9632-380E5A48D2C2",
+              "lengthBeats" : 0.5,
+              "pitch" : 44,
+              "startBeat" : 22,
+              "velocity" : 92
+            },
+            {
+              "id" : "10D01C94-E90E-4B47-A6B9-3A829F417906",
+              "lengthBeats" : 0.75,
+              "pitch" : 32,
+              "startBeat" : 23,
+              "velocity" : 96
+            },
+            {
+              "id" : "2738B641-8391-4A37-BD41-7F919D0BC794",
+              "lengthBeats" : 1,
+              "pitch" : 39,
+              "startBeat" : 24,
+              "velocity" : 104
+            },
+            {
+              "id" : "C266D858-8E20-41E1-9BA5-6257E2B4F57C",
+              "lengthBeats" : 0.5,
+              "pitch" : 39,
+              "startBeat" : 25.5,
+              "velocity" : 88
+            },
+            {
+              "id" : "41819162-FF3F-47CB-9B20-40FDC4E089E7",
+              "lengthBeats" : 0.5,
+              "pitch" : 51,
+              "startBeat" : 26,
+              "velocity" : 92
+            },
+            {
+              "id" : "784DBF08-2062-44BF-BA64-9447BC565DAE",
+              "lengthBeats" : 0.75,
+              "pitch" : 39,
+              "startBeat" : 27,
+              "velocity" : 96
+            },
+            {
+              "id" : "CA584C3B-3262-4432-8E8E-009EC3601A9A",
+              "lengthBeats" : 1,
+              "pitch" : 34,
+              "startBeat" : 28,
+              "velocity" : 104
+            },
+            {
+              "id" : "D67E6276-281A-458E-9B8F-DC0C02DC82C3",
+              "lengthBeats" : 0.5,
+              "pitch" : 34,
+              "startBeat" : 29.5,
+              "velocity" : 88
+            },
+            {
+              "id" : "F368BFFE-BDAC-4E00-AD2D-509EACC167E8",
+              "lengthBeats" : 0.5,
+              "pitch" : 46,
+              "startBeat" : 30,
+              "velocity" : 92
+            },
+            {
+              "id" : "191CA7B8-CFDC-4758-8D86-DEFB071D7844",
+              "lengthBeats" : 0.75,
+              "pitch" : 34,
+              "startBeat" : 31,
+              "velocity" : 96
+            }
+          ],
+          "startBeat" : 0
+        }
+      ],
+      "id" : "9245B048-67A2-4F79-9ED8-55A9B5454E34",
+      "instrument" : {
+        "kind" : "soundBank",
+        "polySynth" : {
+          "attack" : 0.005,
+          "cutoffHz" : 8000,
+          "decay" : 0.08,
+          "gain" : 0.8,
+          "release" : 0.15,
+          "resonance" : 0.1,
+          "sustain" : 0.7,
+          "waveform" : "saw"
+        },
+        "soundBank" : {
+          "bankLSB" : 0,
+          "bankMSB" : 121,
+          "displayName" : "Finger Bass — GeneralUser-GS",
+          "program" : 33,
+          "source" : "\/Users\/dsemenov\/Library\/Audio\/Sounds\/Banks\/GeneralUser-GS.sf2"
+        }
+      },
+      "isAIGenerated" : false,
+      "isArmed" : false,
+      "isMuted" : false,
+      "isSoloed" : false,
+      "kind" : "instrument",
+      "name" : "Bass",
+      "pan" : 0,
+      "volume" : 0.7
+    },
+    {
+      "clips" : [
+        {
+          "id" : "60BA1072-56CF-481E-B462-BC8D09374DD2",
+          "isAIGenerated" : false,
+          "lengthBeats" : 32,
+          "media" : null,
+          "name" : "Keys",
+          "notes" : [
+            {
+              "id" : "CB1AEDC5-AC27-4DCF-947B-E523E67A2697",
+              "lengthBeats" : 0.4,
+              "pitch" : 48,
+              "startBeat" : 0.5,
+              "velocity" : 74
+            },
+            {
+              "id" : "F1394296-D7E7-4164-AF5C-1771BE53F274",
+              "lengthBeats" : 0.4,
+              "pitch" : 51,
+              "startBeat" : 0.5,
+              "velocity" : 74
+            },
+            {
+              "id" : "892DF6D8-E96D-468D-827E-8896E4E7B6DB",
+              "lengthBeats" : 0.4,
+              "pitch" : 55,
+              "startBeat" : 0.5,
+              "velocity" : 74
+            },
+            {
+              "id" : "91599030-7543-420A-8DD2-CF55841221E2",
+              "lengthBeats" : 0.4,
+              "pitch" : 48,
+              "startBeat" : 2.5,
+              "velocity" : 68
+            },
+            {
+              "id" : "1E477850-F108-4F88-AD06-18FF71B4525F",
+              "lengthBeats" : 0.4,
+              "pitch" : 51,
+              "startBeat" : 2.5,
+              "velocity" : 68
+            },
+            {
+              "id" : "EB2C5BFB-07D7-4A3C-8C9E-F7C73E14613A",
+              "lengthBeats" : 0.4,
+              "pitch" : 55,
+              "startBeat" : 2.5,
+              "velocity" : 68
+            },
+            {
+              "id" : "6E8B97B8-A4B1-4D8B-8D3F-970740C56712",
+              "lengthBeats" : 0.4,
+              "pitch" : 44,
+              "startBeat" : 4.5,
+              "velocity" : 74
+            },
+            {
+              "id" : "97E46981-DFEE-4CBC-9FA8-C7E79B70F545",
+              "lengthBeats" : 0.4,
+              "pitch" : 48,
+              "startBeat" : 4.5,
+              "velocity" : 74
+            },
+            {
+              "id" : "36D17D29-13E0-4083-A093-67F89E113421",
+              "lengthBeats" : 0.4,
+              "pitch" : 51,
+              "startBeat" : 4.5,
+              "velocity" : 74
+            },
+            {
+              "id" : "BF2E954A-215D-4B0A-A008-1B03DBCE5FD5",
+              "lengthBeats" : 0.4,
+              "pitch" : 44,
+              "startBeat" : 6.5,
+              "velocity" : 68
+            },
+            {
+              "id" : "4DC9827D-0742-47AA-9024-562EECF699A8",
+              "lengthBeats" : 0.4,
+              "pitch" : 48,
+              "startBeat" : 6.5,
+              "velocity" : 68
+            },
+            {
+              "id" : "235438E3-ADE8-4A00-9792-92585E8928BA",
+              "lengthBeats" : 0.4,
+              "pitch" : 51,
+              "startBeat" : 6.5,
+              "velocity" : 68
+            },
+            {
+              "id" : "D453CAF2-0284-4420-8067-218E2A3BDCBA",
+              "lengthBeats" : 0.4,
+              "pitch" : 51,
+              "startBeat" : 8.5,
+              "velocity" : 74
+            },
+            {
+              "id" : "299F9E96-C563-4ED2-A747-E710C3B492F7",
+              "lengthBeats" : 0.4,
+              "pitch" : 55,
+              "startBeat" : 8.5,
+              "velocity" : 74
+            },
+            {
+              "id" : "41FAF46F-3079-496D-B6ED-196752D66184",
+              "lengthBeats" : 0.4,
+              "pitch" : 58,
+              "startBeat" : 8.5,
+              "velocity" : 74
+            },
+            {
+              "id" : "5202413B-02F2-4835-8E01-1F6D4D6C9276",
+              "lengthBeats" : 0.4,
+              "pitch" : 51,
+              "startBeat" : 10.5,
+              "velocity" : 68
+            },
+            {
+              "id" : "3B268712-C79D-4229-AC0C-4EFDB8953770",
+              "lengthBeats" : 0.4,
+              "pitch" : 55,
+              "startBeat" : 10.5,
+              "velocity" : 68
+            },
+            {
+              "id" : "239D1B6D-4B7C-4C98-B33D-9A2AFC3AAA05",
+              "lengthBeats" : 0.4,
+              "pitch" : 58,
+              "startBeat" : 10.5,
+              "velocity" : 68
+            },
+            {
+              "id" : "C56D8D41-5727-47EF-9FFD-212ED93E1D57",
+              "lengthBeats" : 0.4,
+              "pitch" : 46,
+              "startBeat" : 12.5,
+              "velocity" : 74
+            },
+            {
+              "id" : "BFB09920-C0AC-4DB2-A3CD-D99E836BC871",
+              "lengthBeats" : 0.4,
+              "pitch" : 50,
+              "startBeat" : 12.5,
+              "velocity" : 74
+            },
+            {
+              "id" : "58301C9C-F85F-4D28-A028-A289ABBFA033",
+              "lengthBeats" : 0.4,
+              "pitch" : 53,
+              "startBeat" : 12.5,
+              "velocity" : 74
+            },
+            {
+              "id" : "032988DC-C9F4-4791-94C2-BD5756292DBA",
+              "lengthBeats" : 0.4,
+              "pitch" : 46,
+              "startBeat" : 14.5,
+              "velocity" : 68
+            },
+            {
+              "id" : "F89568F3-F4D0-4C98-9443-1C8D14FD0184",
+              "lengthBeats" : 0.4,
+              "pitch" : 50,
+              "startBeat" : 14.5,
+              "velocity" : 68
+            },
+            {
+              "id" : "4C5940D3-1C45-4A3D-BF07-69DEF6494AE3",
+              "lengthBeats" : 0.4,
+              "pitch" : 53,
+              "startBeat" : 14.5,
+              "velocity" : 68
+            },
+            {
+              "id" : "34E58A7B-EB5C-4157-989F-03CD84064FA6",
+              "lengthBeats" : 0.4,
+              "pitch" : 48,
+              "startBeat" : 16.5,
+              "velocity" : 74
+            },
+            {
+              "id" : "535F8B23-26DF-43BE-9BE1-95D7CEC86514",
+              "lengthBeats" : 0.4,
+              "pitch" : 51,
+              "startBeat" : 16.5,
+              "velocity" : 74
+            },
+            {
+              "id" : "319A4C59-4CBB-4ECA-A489-F91DAC683C3D",
+              "lengthBeats" : 0.4,
+              "pitch" : 55,
+              "startBeat" : 16.5,
+              "velocity" : 74
+            },
+            {
+              "id" : "B14769FB-3098-4A08-AA3E-17FAD21E8874",
+              "lengthBeats" : 0.4,
+              "pitch" : 48,
+              "startBeat" : 18.5,
+              "velocity" : 68
+            },
+            {
+              "id" : "F75AE42D-676C-48C0-878C-A2EF1ECA0023",
+              "lengthBeats" : 0.4,
+              "pitch" : 51,
+              "startBeat" : 18.5,
+              "velocity" : 68
+            },
+            {
+              "id" : "987C3FEF-6C9B-4F16-ADEE-A06AA44F3F4E",
+              "lengthBeats" : 0.4,
+              "pitch" : 55,
+              "startBeat" : 18.5,
+              "velocity" : 68
+            },
+            {
+              "id" : "8FCD18EA-C86D-490D-80FD-2DEB0E80DCC3",
+              "lengthBeats" : 0.4,
+              "pitch" : 44,
+              "startBeat" : 20.5,
+              "velocity" : 74
+            },
+            {
+              "id" : "8A57C079-4EB8-47C2-A14B-2A989D7EF5BE",
+              "lengthBeats" : 0.4,
+              "pitch" : 48,
+              "startBeat" : 20.5,
+              "velocity" : 74
+            },
+            {
+              "id" : "1A792AD8-20EB-4208-B8D3-C774809D22D4",
+              "lengthBeats" : 0.4,
+              "pitch" : 51,
+              "startBeat" : 20.5,
+              "velocity" : 74
+            },
+            {
+              "id" : "5B9331B8-013F-455B-8C3A-ADF00635A35E",
+              "lengthBeats" : 0.4,
+              "pitch" : 44,
+              "startBeat" : 22.5,
+              "velocity" : 68
+            },
+            {
+              "id" : "C2927A2D-C7F0-459F-91EE-5354B9EE4E58",
+              "lengthBeats" : 0.4,
+              "pitch" : 48,
+              "startBeat" : 22.5,
+              "velocity" : 68
+            },
+            {
+              "id" : "36BE97FE-66FD-432A-90DB-CDA9274B6472",
+              "lengthBeats" : 0.4,
+              "pitch" : 51,
+              "startBeat" : 22.5,
+              "velocity" : 68
+            },
+            {
+              "id" : "1FF3C678-EEC0-47E7-BB03-66E9D7846414",
+              "lengthBeats" : 0.4,
+              "pitch" : 51,
+              "startBeat" : 24.5,
+              "velocity" : 74
+            },
+            {
+              "id" : "B22ADD80-D532-4D7D-9197-B1C7D2B72DA4",
+              "lengthBeats" : 0.4,
+              "pitch" : 55,
+              "startBeat" : 24.5,
+              "velocity" : 74
+            },
+            {
+              "id" : "B5D5CE49-170E-4411-A585-7C6DF5D207C4",
+              "lengthBeats" : 0.4,
+              "pitch" : 58,
+              "startBeat" : 24.5,
+              "velocity" : 74
+            },
+            {
+              "id" : "5D591B7A-461E-4A12-A26D-C8FD63602C6C",
+              "lengthBeats" : 0.4,
+              "pitch" : 51,
+              "startBeat" : 26.5,
+              "velocity" : 68
+            },
+            {
+              "id" : "CD340D17-48B4-40E1-B155-386700712749",
+              "lengthBeats" : 0.4,
+              "pitch" : 55,
+              "startBeat" : 26.5,
+              "velocity" : 68
+            },
+            {
+              "id" : "5E0072EF-1856-4D90-BDC7-9280E62E2E25",
+              "lengthBeats" : 0.4,
+              "pitch" : 58,
+              "startBeat" : 26.5,
+              "velocity" : 68
+            },
+            {
+              "id" : "B224157D-0D55-465D-9DB9-DDE378C68972",
+              "lengthBeats" : 0.4,
+              "pitch" : 46,
+              "startBeat" : 28.5,
+              "velocity" : 74
+            },
+            {
+              "id" : "BC514129-2472-4D3D-AA18-08FE1BB05C18",
+              "lengthBeats" : 0.4,
+              "pitch" : 50,
+              "startBeat" : 28.5,
+              "velocity" : 74
+            },
+            {
+              "id" : "59751EBC-80B1-4ED7-B673-C533B3CF9D57",
+              "lengthBeats" : 0.4,
+              "pitch" : 53,
+              "startBeat" : 28.5,
+              "velocity" : 74
+            },
+            {
+              "id" : "591509E9-3774-4931-8407-B9945499ACF9",
+              "lengthBeats" : 0.4,
+              "pitch" : 46,
+              "startBeat" : 30.5,
+              "velocity" : 68
+            },
+            {
+              "id" : "53E50142-22FA-42E9-A9BC-CAE8DD574275",
+              "lengthBeats" : 0.4,
+              "pitch" : 50,
+              "startBeat" : 30.5,
+              "velocity" : 68
+            },
+            {
+              "id" : "C615354C-5DB9-49EA-AAFA-78C1B2553AE6",
+              "lengthBeats" : 0.4,
+              "pitch" : 53,
+              "startBeat" : 30.5,
+              "velocity" : 68
+            }
+          ],
+          "startBeat" : 0
+        }
+      ],
+      "id" : "1A0B11DC-2D53-46CF-97EC-84C19C9E8FB9",
+      "instrument" : {
+        "kind" : "soundBank",
+        "polySynth" : {
+          "attack" : 0.005,
+          "cutoffHz" : 8000,
+          "decay" : 0.08,
+          "gain" : 0.8,
+          "release" : 0.15,
+          "resonance" : 0.1,
+          "sustain" : 0.7,
+          "waveform" : "saw"
+        },
+        "soundBank" : {
+          "bankLSB" : 0,
+          "bankMSB" : 121,
+          "displayName" : "Tine Electric Piano — GeneralUser-GS",
+          "program" : 4,
+          "source" : "\/Users\/dsemenov\/Library\/Audio\/Sounds\/Banks\/GeneralUser-GS.sf2"
+        }
+      },
+      "isAIGenerated" : false,
+      "isArmed" : false,
+      "isMuted" : false,
+      "isSoloed" : false,
+      "kind" : "instrument",
+      "name" : "Keys",
+      "pan" : 0,
+      "volume" : 0.45
+    },
+    {
+      "clips" : [
+        {
+          "id" : "F6066F23-E8E6-4CF6-8EF8-A0DFEAE33151",
+          "isAIGenerated" : false,
+          "lengthBeats" : 32,
+          "media" : null,
+          "name" : "Pad",
+          "notes" : [
+            {
+              "id" : "AF82DAC3-0875-4C2F-8D98-EEA0065B5794",
+              "lengthBeats" : 4,
+              "pitch" : 60,
+              "startBeat" : 0,
+              "velocity" : 70
+            },
+            {
+              "id" : "2A682816-EE85-49F8-B774-DFB39E24B76E",
+              "lengthBeats" : 4,
+              "pitch" : 63,
+              "startBeat" : 0,
+              "velocity" : 70
+            },
+            {
+              "id" : "D8FA5F63-02C3-4487-90EF-9ADA9BF9F917",
+              "lengthBeats" : 4,
+              "pitch" : 67,
+              "startBeat" : 0,
+              "velocity" : 70
+            },
+            {
+              "id" : "604DA1EB-F91D-44D4-9170-9AFD273CB234",
+              "lengthBeats" : 4,
+              "pitch" : 56,
+              "startBeat" : 4,
+              "velocity" : 70
+            },
+            {
+              "id" : "4B2D2A38-D468-4ADC-BB04-D788CF1BDB27",
+              "lengthBeats" : 4,
+              "pitch" : 60,
+              "startBeat" : 4,
+              "velocity" : 70
+            },
+            {
+              "id" : "5D8EAE8F-6889-4228-A414-D06F557F710F",
+              "lengthBeats" : 4,
+              "pitch" : 63,
+              "startBeat" : 4,
+              "velocity" : 70
+            },
+            {
+              "id" : "90BCFA0E-7AEE-4E07-8E02-0E1C1FEEC98A",
+              "lengthBeats" : 4,
+              "pitch" : 63,
+              "startBeat" : 8,
+              "velocity" : 70
+            },
+            {
+              "id" : "D16C2D90-EC1B-40E8-8593-68246DE1505F",
+              "lengthBeats" : 4,
+              "pitch" : 67,
+              "startBeat" : 8,
+              "velocity" : 70
+            },
+            {
+              "id" : "34C3DDE7-E2D0-48F9-9A4B-DB66EC19330F",
+              "lengthBeats" : 4,
+              "pitch" : 70,
+              "startBeat" : 8,
+              "velocity" : 70
+            },
+            {
+              "id" : "ED98082F-DAED-4F48-8E4D-E224485748C6",
+              "lengthBeats" : 4,
+              "pitch" : 58,
+              "startBeat" : 12,
+              "velocity" : 70
+            },
+            {
+              "id" : "41321DDC-0161-48CD-A1C4-D6132ED7179A",
+              "lengthBeats" : 4,
+              "pitch" : 62,
+              "startBeat" : 12,
+              "velocity" : 70
+            },
+            {
+              "id" : "372E0036-1445-43AA-A949-3C23C49FAD3B",
+              "lengthBeats" : 4,
+              "pitch" : 65,
+              "startBeat" : 12,
+              "velocity" : 70
+            },
+            {
+              "id" : "EFD61B47-752D-44FA-BD87-F19B305B1922",
+              "lengthBeats" : 4,
+              "pitch" : 60,
+              "startBeat" : 16,
+              "velocity" : 70
+            },
+            {
+              "id" : "581480F4-748E-4EC8-B9C2-C926CCE8E26F",
+              "lengthBeats" : 4,
+              "pitch" : 63,
+              "startBeat" : 16,
+              "velocity" : 70
+            },
+            {
+              "id" : "057D15C1-6C34-45BB-845C-6562C889DBBD",
+              "lengthBeats" : 4,
+              "pitch" : 67,
+              "startBeat" : 16,
+              "velocity" : 70
+            },
+            {
+              "id" : "5DE8AA0F-E7C9-43F5-B890-93B3F4B35D0B",
+              "lengthBeats" : 4,
+              "pitch" : 56,
+              "startBeat" : 20,
+              "velocity" : 70
+            },
+            {
+              "id" : "FFF27C1A-CD34-4415-A4E9-DAF79A7D4362",
+              "lengthBeats" : 4,
+              "pitch" : 60,
+              "startBeat" : 20,
+              "velocity" : 70
+            },
+            {
+              "id" : "1A422CC7-2122-4B51-814D-F3D48137AD90",
+              "lengthBeats" : 4,
+              "pitch" : 63,
+              "startBeat" : 20,
+              "velocity" : 70
+            },
+            {
+              "id" : "DCCB6B22-0F09-4DD2-909A-11B3BE870071",
+              "lengthBeats" : 4,
+              "pitch" : 63,
+              "startBeat" : 24,
+              "velocity" : 70
+            },
+            {
+              "id" : "02623E3A-36E7-41EE-9C26-E62F44359CB1",
+              "lengthBeats" : 4,
+              "pitch" : 67,
+              "startBeat" : 24,
+              "velocity" : 70
+            },
+            {
+              "id" : "B325B6ED-DFD6-48A5-9D43-9EDF609B809F",
+              "lengthBeats" : 4,
+              "pitch" : 70,
+              "startBeat" : 24,
+              "velocity" : 70
+            },
+            {
+              "id" : "527830C9-F4AE-4040-B774-908C81F1FF2E",
+              "lengthBeats" : 4,
+              "pitch" : 58,
+              "startBeat" : 28,
+              "velocity" : 70
+            },
+            {
+              "id" : "7E7FA723-351A-469E-AD7D-5BF646E45680",
+              "lengthBeats" : 4,
+              "pitch" : 62,
+              "startBeat" : 28,
+              "velocity" : 70
+            },
+            {
+              "id" : "700CCA57-BA2F-47DB-93ED-B914615A82DC",
+              "lengthBeats" : 4,
+              "pitch" : 65,
+              "startBeat" : 28,
+              "velocity" : 70
+            }
+          ],
+          "startBeat" : 0
+        }
+      ],
+      "id" : "9CB673CE-08C2-48AD-AB7B-94C6BF33ABFB",
+      "instrument" : {
+        "kind" : "soundBank",
+        "polySynth" : {
+          "attack" : 0.005,
+          "cutoffHz" : 8000,
+          "decay" : 0.08,
+          "gain" : 0.8,
+          "release" : 0.15,
+          "resonance" : 0.1,
+          "sustain" : 0.7,
+          "waveform" : "saw"
+        },
+        "soundBank" : {
+          "bankLSB" : 0,
+          "bankMSB" : 121,
+          "displayName" : "Warm Pad — GeneralUser-GS",
+          "program" : 89,
+          "source" : "\/Users\/dsemenov\/Library\/Audio\/Sounds\/Banks\/GeneralUser-GS.sf2"
+        }
+      },
+      "isAIGenerated" : false,
+      "isArmed" : false,
+      "isMuted" : false,
+      "isSoloed" : false,
+      "kind" : "instrument",
+      "name" : "Pad",
+      "pan" : 0,
+      "volume" : 0.28
+    },
+    {
+      "clips" : [
+        {
+          "id" : "94566BF1-3E0B-41F3-8B26-8A6FA313BD21",
+          "isAIGenerated" : false,
+          "lengthBeats" : 32,
+          "media" : null,
+          "name" : "Lead",
+          "notes" : [
+            {
+              "id" : "F5A23DF9-87D9-4E88-B9D7-097DEBC6A1C7",
+              "lengthBeats" : 1.5,
+              "pitch" : 67,
+              "startBeat" : 0,
+              "velocity" : 98
+            },
+            {
+              "id" : "4D6F8D57-CFD1-4388-ACD5-BCBD42661DC0",
+              "lengthBeats" : 0.5,
+              "pitch" : 70,
+              "startBeat" : 1.5,
+              "velocity" : 98
+            },
+            {
+              "id" : "F7D69F74-B4CD-4031-9F9E-C76DBE2174D3",
+              "lengthBeats" : 1,
+              "pitch" : 72,
+              "startBeat" : 2,
+              "velocity" : 98
+            },
+            {
+              "id" : "5BBB6FD6-9A55-4533-8635-4FCD13A370D1",
+              "lengthBeats" : 1,
+              "pitch" : 70,
+              "startBeat" : 3,
+              "velocity" : 98
+            },
+            {
+              "id" : "08EBD3B3-7DC4-4CCB-BC1E-6B121C866F58",
+              "lengthBeats" : 1,
+              "pitch" : 67,
+              "startBeat" : 4,
+              "velocity" : 98
+            },
+            {
+              "id" : "1C46D179-D262-4621-AD69-40A34B76B9ED",
+              "lengthBeats" : 1,
+              "pitch" : 63,
+              "startBeat" : 5,
+              "velocity" : 98
+            },
+            {
+              "id" : "6313CF60-D970-4BA7-B3ED-372233121741",
+              "lengthBeats" : 2,
+              "pitch" : 65,
+              "startBeat" : 6,
+              "velocity" : 98
+            },
+            {
+              "id" : "0C769FD3-E24E-4072-B0C2-BFC4E9B2790D",
+              "lengthBeats" : 1.5,
+              "pitch" : 67,
+              "startBeat" : 8,
+              "velocity" : 98
+            },
+            {
+              "id" : "DC7552C2-BAD9-412F-89FE-AA5F8E3CDAE2",
+              "lengthBeats" : 0.5,
+              "pitch" : 70,
+              "startBeat" : 9.5,
+              "velocity" : 98
+            },
+            {
+              "id" : "8E655012-A340-4EBF-9523-C7247DB77073",
+              "lengthBeats" : 1.5,
+              "pitch" : 75,
+              "startBeat" : 10,
+              "velocity" : 98
+            },
+            {
+              "id" : "69B63C93-0C8C-4475-B51F-4FE570248963",
+              "lengthBeats" : 0.5,
+              "pitch" : 74,
+              "startBeat" : 11.5,
+              "velocity" : 98
+            },
+            {
+              "id" : "B70FD057-1613-4C10-A58A-C42C9ED689AA",
+              "lengthBeats" : 1,
+              "pitch" : 72,
+              "startBeat" : 12,
+              "velocity" : 98
+            },
+            {
+              "id" : "BFAC113B-A4EC-43B0-9142-537889634724",
+              "lengthBeats" : 1,
+              "pitch" : 70,
+              "startBeat" : 13,
+              "velocity" : 98
+            },
+            {
+              "id" : "56F2C102-52F0-4C3D-B11C-5B20E4C3F592",
+              "lengthBeats" : 2,
+              "pitch" : 67,
+              "startBeat" : 14,
+              "velocity" : 98
+            },
+            {
+              "id" : "561870B4-6162-49EF-8DA3-19375B4944FD",
+              "lengthBeats" : 1,
+              "pitch" : 70,
+              "startBeat" : 16,
+              "velocity" : 98
+            },
+            {
+              "id" : "8E98E664-9917-4A44-BAB8-F98E5D18BA05",
+              "lengthBeats" : 1,
+              "pitch" : 72,
+              "startBeat" : 17,
+              "velocity" : 98
+            },
+            {
+              "id" : "756A069D-DA09-4276-954D-7F7971EAC3E2",
+              "lengthBeats" : 1.5,
+              "pitch" : 74,
+              "startBeat" : 18,
+              "velocity" : 98
+            },
+            {
+              "id" : "68A65DB7-F177-4211-9008-17069B743224",
+              "lengthBeats" : 0.5,
+              "pitch" : 75,
+              "startBeat" : 19.5,
+              "velocity" : 98
+            },
+            {
+              "id" : "CD3E6928-57C6-4B28-A9FF-0437CB5B499C",
+              "lengthBeats" : 1,
+              "pitch" : 74,
+              "startBeat" : 20,
+              "velocity" : 98
+            },
+            {
+              "id" : "86CC3344-1ACD-478E-A5E9-67D82C466486",
+              "lengthBeats" : 1,
+              "pitch" : 72,
+              "startBeat" : 21,
+              "velocity" : 98
+            },
+            {
+              "id" : "BFCBD03C-221E-4D63-AF5F-8E9F612D78B1",
+              "lengthBeats" : 2,
+              "pitch" : 70,
+              "startBeat" : 22,
+              "velocity" : 98
+            },
+            {
+              "id" : "DCCE917C-D57C-487B-9602-DBE8E422FE3E",
+              "lengthBeats" : 1.5,
+              "pitch" : 67,
+              "startBeat" : 24,
+              "velocity" : 98
+            },
+            {
+              "id" : "804E3188-713F-470D-B577-0B3006C93C68",
+              "lengthBeats" : 0.5,
+              "pitch" : 63,
+              "startBeat" : 25.5,
+              "velocity" : 98
+            },
+            {
+              "id" : "CE7AF387-5850-4C15-96B2-E870CFC8C837",
+              "lengthBeats" : 1,
+              "pitch" : 65,
+              "startBeat" : 26,
+              "velocity" : 98
+            },
+            {
+              "id" : "FF4FDE5C-4E1A-44F2-A723-81B5096BD1BE",
+              "lengthBeats" : 1,
+              "pitch" : 67,
+              "startBeat" : 27,
+              "velocity" : 98
+            },
+            {
+              "id" : "5BC30A45-6CB7-4D10-90E1-792D86D9319E",
+              "lengthBeats" : 1,
+              "pitch" : 70,
+              "startBeat" : 28,
+              "velocity" : 98
+            },
+            {
+              "id" : "F6E61C41-AD6F-4F9C-BDFF-097BDFB525B4",
+              "lengthBeats" : 1,
+              "pitch" : 67,
+              "startBeat" : 29,
+              "velocity" : 98
+            },
+            {
+              "id" : "0AC9FE31-4DFD-43AC-91F6-1E82470C01FA",
+              "lengthBeats" : 2,
+              "pitch" : 60,
+              "startBeat" : 30,
+              "velocity" : 98
+            }
+          ],
+          "startBeat" : 0
+        }
+      ],
+      "id" : "3E355B9D-B6AA-4402-93F3-589C1569A75A",
+      "instrument" : {
+        "kind" : "soundBank",
+        "polySynth" : {
+          "attack" : 0.005,
+          "cutoffHz" : 8000,
+          "decay" : 0.08,
+          "gain" : 0.8,
+          "release" : 0.15,
+          "resonance" : 0.1,
+          "sustain" : 0.7,
+          "waveform" : "saw"
+        },
+        "soundBank" : {
+          "bankLSB" : 0,
+          "bankMSB" : 121,
+          "displayName" : "Saw Lead — GeneralUser-GS",
+          "program" : 81,
+          "source" : "\/Users\/dsemenov\/Library\/Audio\/Sounds\/Banks\/GeneralUser-GS.sf2"
+        }
+      },
+      "isAIGenerated" : false,
+      "isArmed" : false,
+      "isMuted" : false,
+      "isSoloed" : false,
+      "kind" : "instrument",
+      "name" : "Lead",
+      "pan" : 0,
+      "volume" : 0.4
+    }
+  ],
+  "transport" : {
+    "countInBars" : 1,
+    "isLoopEnabled" : true,
+    "isMetronomeEnabled" : false,
+    "isPunchEnabled" : false,
+    "loopEndBeat" : 32,
+    "loopStartBeat" : 0,
+    "positionBeats" : 0,
+    "punchInBeat" : 0,
+    "punchOutBeat" : 4,
+    "tempoBPM" : 100,
+    "timeSignature" : {
+      "beatUnit" : 4,
+      "beatsPerBar" : 4
+    }
+  }
+}

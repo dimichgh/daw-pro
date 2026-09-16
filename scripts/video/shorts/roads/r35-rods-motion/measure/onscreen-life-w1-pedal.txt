@@ -1,0 +1,74 @@
+
+V1-bass-thin-tall-lit-not-emitting
+  rods/bars that appear at all: 9  (born inside the window: 8)
+  frames with anything visible: 539/540
+   z= -172.83  visible 2.03s  ON SCREEN 1.30s  t 96.03..98.03
+   z= -176.43  visible 2.17s  ON SCREEN 1.87s  t 98.03..100.17
+   z= -180.03  visible 2.17s  ON SCREEN 2.17s  t 100.03..102.17
+   z= -183.63  visible 2.17s  ON SCREEN 2.17s  t 102.03..104.17
+   z= -187.23  visible 2.17s  ON SCREEN 2.17s  t 104.03..106.17
+   z= -190.83  visible 2.17s  ON SCREEN 2.17s  t 106.03..108.17
+   z= -194.43  visible 2.17s  ON SCREEN 2.17s  t 108.03..110.17
+   z= -198.03  visible 2.17s  ON SCREEN 2.17s  t 110.03..112.17
+   z= -201.63  visible 1.97s  ON SCREEN 1.97s  t 112.03..113.97
+  MEAN on-screen life (born in window): 2.10 s
+
+V1h-thin-tall-with-a-hole
+  rods/bars that appear at all: 9  (born inside the window: 8)
+  frames with anything visible: 539/540
+   z= -172.83  visible 2.03s  ON SCREEN 1.30s  t 96.03..98.03
+   z= -176.43  visible 2.17s  ON SCREEN 1.87s  t 98.03..100.17
+   z= -180.03  visible 2.17s  ON SCREEN 2.17s  t 100.03..102.17
+   z= -183.63  visible 2.17s  ON SCREEN 2.17s  t 102.03..104.17
+   z= -187.23  visible 2.17s  ON SCREEN 2.17s  t 104.03..106.17
+   z= -190.83  visible 2.17s  ON SCREEN 2.17s  t 106.03..108.17
+   z= -194.43  visible 2.17s  ON SCREEN 2.17s  t 108.03..110.17
+   z= -198.03  visible 2.17s  ON SCREEN 2.17s  t 110.03..112.17
+   z= -201.63  visible 1.97s  ON SCREEN 1.97s  t 112.03..113.97
+  MEAN on-screen life (born in window): 2.10 s
+
+V4-bass-height-from-duration
+  rods/bars that appear at all: 9  (born inside the window: 8)
+  frames with anything visible: 539/540
+   z= -172.83  visible 2.03s  ON SCREEN 1.30s  t 96.03..98.03
+   z= -176.43  visible 2.17s  ON SCREEN 1.87s  t 98.03..100.17
+   z= -180.03  visible 2.17s  ON SCREEN 2.17s  t 100.03..102.17
+   z= -183.63  visible 2.17s  ON SCREEN 2.17s  t 102.03..104.17
+   z= -187.23  visible 2.17s  ON SCREEN 2.17s  t 104.03..106.17
+   z= -190.83  visible 2.17s  ON SCREEN 2.17s  t 106.03..108.17
+   z= -194.43  visible 2.17s  ON SCREEN 2.17s  t 108.03..110.17
+   z= -198.03  visible 2.17s  ON SCREEN 2.17s  t 110.03..112.17
+   z= -201.63  visible 1.97s  ON SCREEN 1.97s  t 112.03..113.97
+  MEAN on-screen life (born in window): 2.10 s
+
+V8-standing-ahead-at-V5-colour
+  rods/bars that appear at all: 13  (born inside the window: 9)
+  frames with anything visible: 540/540
+   z= -172.83  visible 2.10s  ON SCREEN 1.33s  t 96.00..98.07
+   z= -176.43  visible 4.20s  ON SCREEN 3.90s  t 96.00..100.17
+   z= -180.03  visible 6.20s  ON SCREEN 6.20s  t 96.00..102.17
+   z= -183.63  visible 8.20s  ON SCREEN 8.20s  t 96.00..104.17
+   z= -187.23  visible 9.03s  ON SCREEN 9.03s  t 97.17..106.17
+   z= -190.83  visible 9.03s  ON SCREEN 9.03s  t 99.17..108.17
+   z= -194.43  visible 9.03s  ON SCREEN 9.03s  t 101.17..110.17
+   z= -198.03  visible 9.03s  ON SCREEN 9.03s  t 103.17..112.17
+   z= -201.63  visible 8.83s  ON SCREEN 8.83s  t 105.17..113.97
+   z= -205.23  visible 6.83s  ON SCREEN 6.83s  t 107.17..113.97
+   z= -208.83  visible 4.83s  ON SCREEN 4.83s  t 109.17..113.97
+   z= -212.43  visible 2.83s  ON SCREEN 2.83s  t 111.17..113.97
+  MEAN on-screen life (born in window): 6.70 s
+
+V9-horizontal-duration-bar
+  rods/bars that appear at all: 10  (born inside the window: 8)
+  frames with anything visible: 540/540
+   z= -169.23  visible 0.37s  ON SCREEN 0.37s  t 96.00..96.33  maxLen 3.6 units = 2.00s of road
+   z= -172.83  visible 2.33s  ON SCREEN 2.33s  t 96.03..98.33  maxLen 3.6 units = 2.00s of road
+   z= -176.43  visible 2.33s  ON SCREEN 2.33s  t 98.03..100.33  maxLen 3.6 units = 2.00s of road
+   z= -180.03  visible 2.33s  ON SCREEN 2.33s  t 100.03..102.33  maxLen 3.6 units = 2.00s of road
+   z= -183.63  visible 2.33s  ON SCREEN 2.33s  t 102.03..104.33  maxLen 3.6 units = 2.00s of road
+   z= -187.23  visible 2.33s  ON SCREEN 2.33s  t 104.03..106.33  maxLen 3.6 units = 2.00s of road
+   z= -190.83  visible 2.33s  ON SCREEN 2.33s  t 106.03..108.33  maxLen 3.6 units = 2.00s of road
+   z= -194.43  visible 2.33s  ON SCREEN 2.33s  t 108.03..110.33  maxLen 3.6 units = 2.00s of road
+   z= -198.03  visible 2.33s  ON SCREEN 2.33s  t 110.03..112.33  maxLen 3.6 units = 2.00s of road
+   z= -201.63  visible 1.97s  ON SCREEN 1.97s  t 112.03..113.97  maxLen 3.5 units = 1.95s of road
+  MEAN on-screen life (born in window): 2.29 s

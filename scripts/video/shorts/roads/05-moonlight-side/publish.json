@@ -1,0 +1,19 @@
+{
+  "title": "Beethoven - Moonlight Sonata (bars 1-42) - a road of light, side view",
+  "description": "Beethoven's Sonata quasi una fantasia in C# minor, Op. 27 No. 2 - the Adagio\nsostenuto, from the first bar through the return of the tonic at bar 42.\n\nA SIDE VIEW of the same film: the camera rides off the edge of the paper the\nwhole way, crossing over the top to the other side for the middle of the piece\nand back for the descent.\n\nThe score IS the road. Time runs away from you down the page: each staff is a\nlane, each note is where it actually sits on the stave, and the three lights are\nthe three strands of the music - the melody, the triplet accompaniment that never\nstops for the whole movement, and the bass.\n\nWatch for the moment the melody enters at 0:20 over an accompaniment that has\nalready been running for twenty seconds; the long dominant pedal from 2:12 where\nthe melody drops out entirely and the triplets and the bass hold it up alone -\nfrom 2:25 the bass stops moving and simply holds one low octave for twelve beats\nunder them; and the melody's return at 2:36 into the descent.\n\nBuilt and rendered end to end in DAW Pro - an AI-native DAW for macOS. The\nperformance, the mix, the loudness pass and the visualiser are all one pipeline;\nnothing here was recorded from a screen.\n\nSCORE / LICENCE\nVisualisation inspired by Polyfjord - thank you for the idea.\n\nNotes derived from the Mutopia Project edition Mutopia-2007/02/11-276, engraved\nby Stewart Holmes from the Berners edition of 1908, edited by A. Winterberger.\nUsed under Creative Commons Attribution-ShareAlike 2.5:\nhttps://creativecommons.org/licenses/by-sa/2.5/\nSource: https://www.mutopiaproject.org/\n\nThe composition itself is in the public domain.\n\nAUDIO\nRendered offline at 48 kHz, normalised to -14 LUFS integrated with a -1 dBTP\nceiling.\n\nCHAPTERS\n0:00 Bars 1-4 - the accompaniment alone\n0:20 Bar 5 - the melody enters\n1:34 Bars 23-31 - the middle\n2:12 Bar 32 - the melody drops out, the pedal holds\n2:36 Bars 37-40 - the melody returns, the descent\n2:55 Bar 42 - the tonic returns",
+  "tags": [
+    "Beethoven",
+    "Moonlight Sonata",
+    "classical music",
+    "music visualiser",
+    "sheet music",
+    "Op. 27 No. 2",
+    "piano",
+    "DAW Pro",
+    "three.js"
+  ],
+  "categoryId": "10",
+  "privacyStatus": "private",
+  "containsSyntheticMedia": true,
+  "madeForKids": false
+}

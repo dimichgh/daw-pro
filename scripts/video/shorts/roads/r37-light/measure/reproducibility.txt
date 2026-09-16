@@ -1,0 +1,9 @@
+⚠ NEITHER BLENDER ENGINE IS BYTE-REPRODUCIBLE ON THIS MACHINE.
+   So an md5 comparison CANNOT answer 'did my edit change the picture'
+   for a Blender still — only for three.js. Pixel RMS can.
+   EEVEE  run vs run            RMS= 0.0085  max=  1.0
+   EEVEE  run vs shipped still  RMS= 0.0016  max=  1.0
+   CYCLES run vs run            RMS= 0.3591  max= 58.0
+   CYCLES run vs shipped still  RMS= 0.3426  max= 55.0
+   three.js, by contrast, is byte-identical: the r36 still re-shot after
+   this round's stage.html edit returned md5 9665d3d4… unchanged.

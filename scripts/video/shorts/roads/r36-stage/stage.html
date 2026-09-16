@@ -1,0 +1,607 @@
+<!doctype html><html><head><meta charset=utf-8><style>
+  html,body{margin:0;background:#05050a;overflow:hidden}
+  canvas{display:block}
+  #ttl{position:absolute;left:44px;top:34px;color:#e8e2d6;font:600 26px/1.2 -apple-system,Helvetica;letter-spacing:.02em}
+  #sub{position:absolute;left:44px;top:70px;color:#b9ae9c;font:400 15px/1.3 'SF Mono',Menlo,monospace}
+  #ph {position:absolute;right:44px;top:34px;color:#c99;font:700 15px/1.3 'SF Mono',Menlo,monospace;letter-spacing:.16em}
+</style></head><body>
+<canvas id=cvs></canvas>
+<div id=ttl></div><div id=sub></div><div id=ph>PLACEHOLDER MATERIAL</div>
+<script type="importmap">{"imports":{
+  "three":"../node_modules/three/build/three.module.js",
+  "three/addons/":"../node_modules/three/examples/jsm/"}}</script>
+<script type="module">
+// ROUND 36 — THE STAGE. A NEW scene, not the road.
+//
+// The road was a timeline you travelled ALONG: z = -t * zps, past behind you,
+// future ahead. Nothing here is a timeline. Instruments stand at FIXED
+// positions in a play area and the camera orbits them, so:
+//   • an object is never left behind — it is re-framed (that is the whole
+//     reason the rod is worth building here and was not on the road);
+//   • "what just happened" has no home in space any more, so persistence has
+//     to be BUILT rather than inherited from geometry. See the FLOOR MEMORY
+//     block: rings + cooling embers, on the floor, at the station that played.
+//
+// ⛔ THIS FILE IS SEPARATE FROM lib/road.html ON PURPOSE. Nothing here imports
+// it, nothing here writes to it, and the eight shipped films cannot be reached
+// from this directory at all. What is LIFTED is the LIGHTING DISCIPLINE — the
+// lamps are the only light, the ground is dark, ACES + bloom + the warm/cool
+// grade, the blackbody cooling ramp, the leap-out-of-a-hole percussion — all
+// copied by value, not by reference.
+//
+// Driven frame-by-frame from puppeteer, exactly like the road: window.__init(P)
+// once, window.__frame(t) per frame. No requestAnimationFrame, no wall clock.
+import * as THREE from 'three';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+
+let W = 1920, H = 1080;
+let R, scene, cam, comp, P, grade, floorMesh;
+let stations = [];      // one per instrument
+let kitRigs = [];       // one per drum hit
+let ringPool = [];      // floor memory: expanding rings
+let camOverride = null; // { az, el, r, fov, tgt }
+let DBG = { show: null, black: null, allUp: false, plant: null };
+let plantMesh = null;
+
+const ss = x => { x = Math.min(1, Math.max(0, x)); return x * x * (3 - 2 * x); };
+const lerp = (a, b, k) => a + (b - a) * k;
+
+// ---- the warm/cool grade, lifted verbatim from the road's GRADE ------------
+const GRADE = {
+  uniforms: { tDiffuse: { value: null }, uLightY: { value: 0.42 },
+              uWarm: { value: new THREE.Vector3(1.0, 0.66, 0.36) },
+              uCool: { value: new THREE.Vector3(0.92, 0.86, 0.70) },
+              uTintAmt: { value: 0.20 }, uVig: { value: 1.0 } },
+  vertexShader: `varying vec2 vUv; void main(){vUv=uv;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}`,
+  fragmentShader: `
+    uniform sampler2D tDiffuse; uniform float uLightY, uVig, uTintAmt;
+    uniform vec3 uWarm, uCool; varying vec2 vUv;
+    void main(){
+      vec4 c = texture2D(tDiffuse, vUv);
+      float k = smoothstep(uLightY - 0.30, uLightY + 0.42, vUv.y);
+      vec3 tint = mix(uWarm, uCool, k);
+      c.rgb *= mix(vec3(1.0), tint, uTintAmt);
+      vec2 d = vUv - 0.5; d.x *= 0.72;
+      c.rgb *= mix(1.0, clamp(1.0 - dot(d,d) * 1.45, 0.0, 1.0), uVig);
+      gl_FragColor = c;
+    }`,
+};
+
+// ⭐ BLACKBODY COOLING, lifted from the road's struck-note ramp. The user asked
+// for "decay into red like metal getting cooled" and reacted well to it every
+// time; the stage's persistence uses the SAME ramp so the two read as one
+// family. u = 1 hot .. 0 out, and it reaches EXACTLY black by construction.
+function cool(u) {
+  const stops = [[0.00, 0.55, 0.00, 0.00], [0.18, 1.00, 0.06, 0.00],
+                 [0.40, 1.00, 0.32, 0.04], [0.68, 1.00, 0.72, 0.26],
+                 [1.00, 1.00, 0.97, 0.90]];
+  let i = 0; while (i < stops.length - 2 && u > stops[i + 1][0]) i++;
+  const A = stops[i], B = stops[i + 1];
+  const f = Math.min(1, Math.max(0, (u - A[0]) / (B[0] - A[0])));
+  return new THREE.Color(A[1] + (B[1] - A[1]) * f, A[2] + (B[2] - A[2]) * f, A[3] + (B[3] - A[3]) * f);
+}
+
+function glowSprite(hex, size) {
+  const cv = document.createElement('canvas'); cv.width = cv.height = 128;
+  const g = cv.getContext('2d');
+  const gr = g.createRadialGradient(64, 64, 0, 64, 64, 64);
+  gr.addColorStop(0, hex); gr.addColorStop(0.25, hex + '88');
+  gr.addColorStop(1, 'rgba(0,0,0,0)');
+  g.fillStyle = gr; g.fillRect(0, 0, 128, 128);
+  const t = new THREE.CanvasTexture(cv); t.colorSpace = THREE.SRGBColorSpace;
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: t, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true }));
+  s.scale.setScalar(size);
+  return s;
+}
+
+// ---------------------------------------------------------------- geometry
+let rodGeo, sheathGeo, holeGeo, ringGeo, diskGeo;
+
+// ⭐⭐ THE LAYOUT IS DATA, because "which layout" is the round's open question.
+// A station's world position is (r cos az, plinth, r sin az) — see the payload's
+// `instruments[].az / .rad / .plinth`, and r36-stage/author.mjs for the two
+// layouts this round measures against each other.
+function stationPos(ins) {
+  const a = ins.az * Math.PI / 180;
+  return new THREE.Vector3(ins.rad * Math.cos(a), ins.plinth ?? 0, ins.rad * Math.sin(a));
+}
+
+// A RANK is how a station holds more than one beam: n slots on a line
+// perpendicular to the station's own radius, so the rank always faces outward
+// and never stacks front-to-back along the radial line.
+function slotOffset(ins, k) {
+  const n = ins.rank ?? 1;
+  if (n <= 1) return new THREE.Vector3(0, 0, 0);
+  const a = ins.az * Math.PI / 180;
+  const px = -Math.sin(a), pz = Math.cos(a);          // perpendicular, unit
+  const sp = ins.rankSpread ?? 0.30;
+  const off = (k - (n - 1) / 2) * sp;
+  return new THREE.Vector3(px * off, 0, pz * off);
+}
+
+window.__init = (payload) => {
+ try {
+  P = payload; W = P.width ?? 1920; H = P.height ?? 1080;
+  const L = P.look;
+  const cvs = document.getElementById('cvs');
+  cvs.width = W; cvs.height = H; cvs.style.width = W + 'px'; cvs.style.height = H + 'px';
+  R = new THREE.WebGLRenderer({ canvas: cvs, antialias: true });
+  R.setPixelRatio(1); R.setSize(W, H, false);
+  R.toneMapping = THREE.ACESFilmicToneMapping;
+  R.toneMappingExposure = L.exposure ?? 0.85;
+  R.outputColorSpace = THREE.SRGBColorSpace;
+
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(L.bg ?? 0x05050a);
+  // ⚠ The fog is what turns a beam into a beam IN HAZE: an additive sheath fades
+  // toward the background with distance instead of staying a hard tube.
+  scene.fog = new THREE.FogExp2(L.bg ?? 0x05050a, L.fog ?? 0.030);
+  cam = new THREE.PerspectiveCamera(L.fov ?? 40, W / H, 0.05, 400);
+
+  // ---- the floor. Dark, matte, lit by the lamps and nothing else -----------
+  floorMesh = new THREE.Mesh(new THREE.CircleGeometry(L.floorR ?? 16, 96),
+    new THREE.MeshStandardMaterial({ color: new THREE.Color(L.floorColor ?? 0x2a2723),
+      roughness: L.floorRough ?? 0.96, metalness: 0.0 }));
+  floorMesh.rotation.x = -Math.PI / 2;
+  scene.add(floorMesh);
+
+  // A very low ambient so the floor is not literally zero outside every pool.
+  scene.add(new THREE.AmbientLight(0xffffff, L.ambient ?? 0.035));
+
+  // ⭐ THE DECK EDGE. Without it the rig floats in black from the high pose and
+  // "layout" is unreadable — you cannot see the shape you are being asked to
+  // judge. One faint additive ring, not a lit stage: the lamps stay the only
+  // real light source, exactly as on the road.
+  if ((L.deckAlpha ?? 0) > 0) {
+    const dk = new THREE.Mesh(new THREE.RingGeometry(0.985, 1.0, 128),
+      new THREE.MeshBasicMaterial({ color: new THREE.Color(L.deckColor ?? 0xffd9a8),
+        toneMapped: false, transparent: true, opacity: L.deckAlpha,
+        blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide }));
+    dk.rotation.x = -Math.PI / 2; dk.position.y = 0.003;
+    dk.scale.setScalar(L.deckR ?? 5.4);
+    scene.add(dk);
+  }
+
+  rodGeo    = new THREE.CylinderGeometry(1, 1, 1, 20); rodGeo.translate(0, 0.5, 0);
+  sheathGeo = new THREE.CylinderGeometry(1, 1, 1, 20); sheathGeo.translate(0, 0.5, 0);
+  holeGeo   = new THREE.CircleGeometry(1, 28);
+  ringGeo   = new THREE.RingGeometry(0.86, 1.0, 48);
+  diskGeo   = new THREE.CylinderGeometry(1, 1, 1, 26);
+
+  // ---- one station per instrument ------------------------------------------
+  stations = P.instruments.map((ins, ii) => {
+    const base = stationPos(ins);
+    // ⚠ A PLINTH MUST BE A REAL OBJECT. Raising a station in y without building
+    // anything under it renders a hole and a beam FLOATING IN MID-AIR — which
+    // is exactly what the first probe frame showed from the high pose. The
+    // riser is the thing that makes a staggered-height layout legible instead
+    // of broken, and it is also the most Trans-Siberian object on the stage.
+    if ((ins.plinth ?? 0) > 0.001) {
+      const ri = new THREE.Mesh(new THREE.CylinderGeometry(1, 1.04, 1, 40),
+        new THREE.MeshStandardMaterial({ color: new THREE.Color(P.look.riserColor ?? 0x1d1b19),
+          roughness: 0.92, metalness: 0.05 }));
+      ri.geometry.translate(0, -0.5, 0);
+      const rr = (ins.riserR ?? 0.62);
+      ri.scale.set(rr, ins.plinth, rr);
+      ri.position.set(base.x, base.y, base.z);
+      scene.add(ri);
+    }
+    const col = new THREE.Color(ins.color);
+    const n = ins.rank ?? 1;
+    const slots = [];
+    for (let k = 0; k < n; k++) {
+      const p = base.clone().add(slotOffset(ins, k));
+      const grp = new THREE.Group(); grp.position.copy(p); scene.add(grp);
+      // the hole the rod comes out of — a dark disk, a hair above the floor
+      const hole = new THREE.Mesh(holeGeo, new THREE.MeshBasicMaterial({
+        color: new THREE.Color(P.look.holeColor ?? 0x0b0b0d), toneMapped: false }));
+      hole.rotation.x = -Math.PI / 2; hole.position.y = 0.004;
+      hole.scale.setScalar((ins.rodR ?? 0.045) * (P.look.holeK ?? 3.0));
+      // the EMBER: the hole keeps glowing after the rod has gone back down.
+      const ember = new THREE.Mesh(holeGeo, new THREE.MeshBasicMaterial({
+        color: 0x000000, toneMapped: false, transparent: true, opacity: 1,
+        blending: THREE.AdditiveBlending, depthWrite: false }));
+      ember.rotation.x = -Math.PI / 2; ember.position.y = 0.006;
+      ember.scale.setScalar((ins.rodR ?? 0.045) * (P.look.holeK ?? 3.0) * 0.92);
+      // the rod: a LIT cylinder (not an emitter) — round 34/35's V1 shape
+      const rod = new THREE.Mesh(rodGeo, new THREE.MeshBasicMaterial({
+        toneMapped: false, transparent: true, opacity: 1 }));
+      // the SHEATH: a wider additive tube. This is the "beam in haze" —
+      // cheap, fogged, and it is what makes a 4 cm rod read at 9 m.
+      const sheath = new THREE.Mesh(sheathGeo, new THREE.MeshBasicMaterial({
+        toneMapped: false, transparent: true, opacity: 0, depthWrite: false,
+        blending: THREE.AdditiveBlending }));
+      const cap = glowSprite(ins.color, P.look.capGlow ?? 0.34);
+      const light = new THREE.PointLight(col, 0, P.look.lightDist ?? 7, P.look.decay ?? 1.6);
+      grp.add(hole, ember, rod, sheath, cap, light);
+      slots.push({ grp, hole, ember, rod, sheath, cap, light, note: null });
+    }
+    return { ins, ii, base, col, slots };
+  });
+
+  // ---- the kit: the leap-out-of-a-hole mechanic, carried over whole --------
+  kitRigs = (P.drums ?? []).map(d => {
+    const lane = P.kit.lanes[d.lane];
+    const col = new THREE.Color(lane.color);
+    const light = new THREE.PointLight(col, 0, P.look.lightDist ?? 7, P.look.decay ?? 1.6);
+    const dr = P.look.drumCoreR ?? 0.13;
+    const core = new THREE.Mesh(diskGeo, new THREE.MeshBasicMaterial({
+      color: new THREE.Color(4.85, 4.74, 4.58), toneMapped: false }));
+    core.scale.set(dr, dr * 0.42, dr);
+    core.userData.base = new THREE.Vector3(dr, dr * 0.42, dr);
+    const halo = glowSprite(lane.color, P.look.drumHalo ?? 0.5);
+    const grp = new THREE.Group(); grp.add(light, core, halo);
+    grp.visible = false; scene.add(grp);
+    return { grp, light, core, halo, d, lane };
+  });
+  // one permanent hole per kit lane
+  (P.kit.lanes ?? []).forEach(lane => {
+    const h = new THREE.Mesh(holeGeo, new THREE.MeshBasicMaterial({
+      color: new THREE.Color(P.look.holeColor ?? 0x0b0b0d), toneMapped: false }));
+    h.rotation.x = -Math.PI / 2; h.position.set(lane.pos[0], 0.004, lane.pos[1]);
+    h.scale.setScalar(P.look.drumCoreR ?? 0.13);
+    scene.add(h);
+  });
+
+  // ---- FLOOR MEMORY: the expanding ring pool -------------------------------
+  // ⭐⭐ THIS IS THE ROUND'S PERSISTENCE PROPOSAL. On the road, "what just
+  // happened" was free: it was behind you. Here the past has to be put
+  // somewhere, and the floor is the only surface that is always in frame from
+  // every azimuth and every elevation — a beam's afterglow is edge-on from
+  // above, but a ring on the floor is at its most legible exactly there.
+  for (let i = 0; i < (P.look.ringPool ?? 40); i++) {
+    const m = new THREE.Mesh(ringGeo, new THREE.MeshBasicMaterial({
+      color: 0xffffff, toneMapped: false, transparent: true, opacity: 0,
+      blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide }));
+    m.rotation.x = -Math.PI / 2; m.position.y = 0.008; m.visible = false;
+    scene.add(m); ringPool.push(m);
+  }
+
+  comp = new EffectComposer(R);
+  comp.addPass(new RenderPass(scene, cam));
+  comp.addPass(new UnrealBloomPass(new THREE.Vector2(W, H),
+    P.look.bloomStrength ?? 1.05, P.look.bloomRadius ?? 0.62, P.look.bloomThreshold ?? 0.80));
+  grade = new ShaderPass(GRADE);
+  grade.uniforms.uVig.value = P.look.vignette ?? 1.0;
+  grade.uniforms.uTintAmt.value = P.look.gradeTint ?? 0.20;
+  comp.addPass(grade);
+  comp.addPass(new OutputPass());
+
+  document.getElementById('ttl').textContent = P.title ?? '';
+  document.getElementById('sub').textContent = P.subtitle ?? '';
+  document.getElementById('ph').textContent = P.badge ?? '';
+  window.__ready = true;
+ } catch (e) { window.__err = String(e && e.stack || e); }
+};
+
+// ---------------------------------------------------------------- the camera
+// Three named poses, all as (azimuth, elevation, radius) about the play area's
+// centre — which is why nothing can ever be left behind: the camera turns
+// around the rig instead of travelling away from it.
+function camPlan(t) {
+  const K = P.camera.keys;
+  let i = 0; while (i < K.length - 2 && t > K[i + 1].t) i++;
+  const A = K[i], B = K[i + 1];
+  const f = ss((t - A.t) / Math.max(1e-6, B.t - A.t));
+  return { az: lerp(A.az, B.az, f), el: lerp(A.el, B.el, f),
+           r: lerp(A.r, B.r, f), fov: lerp(A.fov ?? 40, B.fov ?? 40, f),
+           tgt: [lerp((A.tgt ?? [0, 0.5, 0])[0], (B.tgt ?? [0, 0.5, 0])[0], f),
+                 lerp((A.tgt ?? [0, 0.5, 0])[1], (B.tgt ?? [0, 0.5, 0])[1], f),
+                 lerp((A.tgt ?? [0, 0.5, 0])[2], (B.tgt ?? [0, 0.5, 0])[2], f)] };
+}
+function placeCam(c) {
+  const a = c.az * Math.PI / 180, e = c.el * Math.PI / 180;
+  cam.position.set(c.tgt[0] + c.r * Math.cos(e) * Math.cos(a),
+                   c.tgt[1] + c.r * Math.sin(e),
+                   c.tgt[2] + c.r * Math.cos(e) * Math.sin(a));
+  cam.fov = c.fov; cam.updateProjectionMatrix();
+  cam.lookAt(c.tgt[0], c.tgt[1], c.tgt[2]);
+}
+
+// --------------------------------------------------------------- the frame
+window.__frame = (t) => {
+ try {
+  window.__t = t;
+  const L = P.look;
+  const c = camOverride ? { ...camPlan(t), ...camOverride } : camPlan(t);
+  placeCam(c);
+  grade.uniforms.uLightY.value = L.lightY ?? 0.42;
+
+  // ring pool bookkeeping: rebuilt from the note list every frame (no state)
+  let ringN = 0;
+  const pushRing = (x, z, r0, r1, u, k, col) => {
+    if (ringN >= ringPool.length) return;
+    const m = ringPool[ringN++];
+    m.visible = true; m.position.set(x, 0.008, z);
+    m.scale.setScalar(lerp(r0, r1, 1 - u));
+    m.material.color.copy(col); m.material.opacity = k;
+  };
+
+  const RISE = L.rise ?? 0.07, FALL = L.fall ?? 0.30;
+  const RINGTAU = L.ringTau ?? 1.5, EMBERTAU = L.emberTau ?? 2.4;
+
+  stations.forEach(stn => {
+    const ins = stn.ins;
+    const shown = DBG.show == null || DBG.show.includes(stn.ii);
+    const blacked = DBG.black != null && DBG.black.includes(stn.ii);
+    // pitch -> height, within THIS instrument's own declared range. On a stage
+    // pitch cannot be a position on a staff, so it is the beam's LENGTH; the
+    // note's DURATION is how long the beam stands, which is round 34/35's
+    // faithful V1 reading, finally on a camera that cannot outrun it.
+    const pitchK = p => {
+      const lo = ins.pitchLo ?? 36, hi = ins.pitchHi ?? 84;
+      return Math.min(1, Math.max(0, (p - lo) / Math.max(1, hi - lo)));
+    };
+    // which notes are live in each slot
+    const live = stn.slots.map(() => null);
+    let memBest = 0;                                   // hottest recent memory
+    for (const nt of P.notes) {
+      if (nt.i !== stn.ii) continue;
+      const u = t - nt.t;
+      if (u < 0 || u > nt.dur + FALL + Math.max(RINGTAU, EMBERTAU)) continue;
+      const k = (ins.rank ?? 1) <= 1 ? 0
+              : Math.min((ins.rank ?? 1) - 1, Math.max(0, nt.slot ?? 0));
+      if (u <= nt.dur + FALL) { if (!live[k] || u < live[k].u) live[k] = { nt, u }; }
+      // FLOOR MEMORY — born at note-OFF, on the floor, at this slot
+      const uo = u - nt.dur;
+      if (uo > 0) {
+        const p = stn.slots[k] ? stn.slots[k].grp.position : stn.base;
+        // ⚠ THE RING IS SIZED BY THE STATION, NOT BY THE ROD. Sizing it from
+        // rodR made the LEAD's memory a 0.45-unit ring that was gone in about
+        // half a second — measured on the first persistence strip — while the
+        // fat bass left a big one. The mark a note leaves should say WHICH
+        // STATION played, so its size is the station's, and only its colour and
+        // its life say how long ago.
+        // ⚠ AND NOT THE RISER EITHER. Falling back to riserR made the LEAD's
+        // rings 3.5 units across — one slot of a 12-slot rank leaving a mark
+        // wider than the whole rig, measured on the orbit sheet. A ring is one
+        // SLOT's footprint, so it gets its own small number.
+        const rr = (ins.ringR ?? 0.30);
+        if (uo < RINGTAU) {
+          const g = 1 - uo / RINGTAU;
+          pushRing(p.x, p.z, rr * (L.ringGrow ?? 3.0), rr * 0.55, g,
+                   (L.ringAlpha ?? 0.5) * Math.pow(g, 1.3), cool(g));
+        }
+        if (uo < EMBERTAU) memBest = Math.max(memBest, 1 - uo / EMBERTAU);
+      }
+    }
+    stn.slots.forEach((sl, k) => {
+      const forced = DBG.allUp;
+      const lv = live[k];
+      let vis = shown && (forced || !!lv);
+      sl.grp.visible = vis || blacked;
+      // the hole and its ember are floor objects: they stay whatever happens
+      sl.hole.visible = shown && !blacked;
+      const emberK = memBest;
+      sl.ember.visible = shown && !blacked && emberK > 0.002;
+      if (sl.ember.visible) {
+        sl.ember.material.color.copy(cool(emberK));
+        sl.ember.material.opacity = (L.emberAlpha ?? 0.55) * emberK * emberK;
+      }
+      if (!vis && !blacked) { sl.rod.visible = sl.sheath.visible = sl.cap.visible = false; sl.light.intensity = 0; return; }
+      // ⛔ A BLACK OCCLUDER WITH NOTHING SOUNDING IS NOT AN OCCLUDER. Without
+      // this line the code below dereferenced a null note and threw, the frame
+      // aborted half-rendered, and the occlusion probe read a confident
+      // 100.00 % for three instruments at every azimuth — a broken probe that
+      // looked exactly like a catastrophic layout.
+      if (blacked && !DBG.allUp && !lv) {
+        sl.grp.visible = false; sl.rod.visible = sl.sheath.visible = sl.cap.visible = false;
+        sl.light.intensity = 0; return;
+      }
+
+      let hk = 1, a = 1, hot = 1;
+      let pk = forced ? 0.7 : pitchK(lv.nt.pitch);
+      let vel = forced ? 0.8 : lv.nt.vel;
+      if (!forced) {
+        const u = lv.u, dur = lv.nt.dur;
+        if (u < RISE) hk = ss(u / RISE);
+        else if (u <= dur) hk = 1;
+        else { hk = 1 - ss((u - dur) / FALL); hot = 1 - ss((u - dur) / FALL); }
+      }
+      const hLo = ins.hMin ?? 0.5, hHi = ins.hMax ?? 2.4;
+      const hFull = hLo + (hHi - hLo) * pk;
+      const h = Math.max(0.001, hFull * hk);
+      const rr = (ins.rodR ?? 0.045) * (0.75 + 0.45 * vel);
+
+      sl.rod.visible = sl.sheath.visible = true;
+      sl.rod.scale.set(rr, h, rr);
+      sl.sheath.scale.set(rr * (L.sheathK ?? 2.6), h, rr * (L.sheathK ?? 2.6));
+      sl.cap.visible = !blacked; sl.cap.position.y = h;
+
+      if (blacked) {
+        // ⛔ THE OCCLUDER FORM. Pure black, throws no light: what is measured
+        // then is GEOMETRY BLOCKING GEOMETRY, never one lamp washing out
+        // another. Same rule the road's occlusion campaign used.
+        sl.rod.material.color.setRGB(0, 0, 0);
+        sl.rod.material.opacity = 1;
+        sl.sheath.material.opacity = 0;
+        sl.light.intensity = 0;
+        sl.rod.material.blending = THREE.NormalBlending;
+        sl.rod.material.depthWrite = true;
+        return;
+      }
+      // ⭐ LIT, NOT EMITTING — round 34's finding: this is the only rod shape
+      // where the hole at its foot survives, because a bright lamp at the base
+      // washes the floor white and the opening disappears.
+      const base = stn.col.clone().multiplyScalar((L.rodGain ?? 1.25) * (0.55 + 0.45 * vel));
+      const mixHot = hot < 1 ? cool(hot) : null;
+      sl.rod.material.color.copy(mixHot ? base.clone().lerp(mixHot, 0.55 * (1 - hot)) : base);
+      sl.rod.material.opacity = a;
+      sl.rod.material.blending = THREE.NormalBlending; sl.rod.material.depthWrite = true;
+      sl.sheath.material.color.copy(stn.col);
+      sl.sheath.material.opacity = (L.sheathAlpha ?? 0.10) * (0.5 + 0.5 * vel) * hk;
+      sl.cap.material.opacity = Math.min(1, hk * (0.6 + 0.5 * vel));
+      sl.light.position.y = h * 0.55;
+      sl.light.intensity = (L.rodPower ?? 0.55) * hk * (0.5 + 0.5 * vel);
+    });
+  });
+
+  // ---- the kit: leap out of the hole, then fall back into it ---------------
+  const G = P.kit.gravity ?? 9.0, HD = L.holeDepth ?? 0.42;
+  kitRigs.forEach(r => {
+    const shownK = DBG.show == null || DBG.show.includes(-1);
+    // the kit can OCCLUDE too (it sits in the middle of the rig and the low
+    // pose looks straight across it), so it takes the same black-occluder form
+    // the stations do rather than being quietly left out of the measurement.
+    const blackedK = DBG.black != null && DBG.black.includes(-1);
+    const rel = t - r.d.t;
+    if ((!shownK && !blackedK) || rel < -0.55 || rel > 0.95) { r.grp.visible = false; return; }
+    if (blackedK) {
+      r.grp.visible = true;
+      r.grp.position.set(r.lane.pos[0], DBG.allUp ? 0.30 : Math.max(0, r.d.y ?? 0.0), r.lane.pos[1]);
+      r.light.intensity = 0; r.halo.material.opacity = 0;
+      r.core.material.color.setRGB(0, 0, 0);
+      const bb = r.core.userData.base;
+      r.core.scale.set(bb.x * 1.5, bb.y * 1.5, bb.z * 1.5);
+      return;
+    }
+    let y, al;
+    if (rel < 0) { y = -HD * (L.drumRestK ?? 0.55);
+                   al = (L.drumRestGlow ?? 0.22) * Math.min(1, (rel + 0.55) / 0.30); }
+    else { const v0 = (L.drumLeap ?? 0.72) * G * (0.45 + 0.55 * r.d.vel);
+           y = v0 * rel - 0.5 * G * rel * rel;
+           al = Math.exp(-rel / (L.drumFade ?? 0.34)); }
+    const k = (rel >= 0 ? 1.6 : 0.7) * al * (0.5 + 0.5 * r.d.vel);
+    if (k <= 0.004) { r.grp.visible = false; return; }
+    r.grp.visible = true;
+    r.grp.position.set(r.lane.pos[0], y, r.lane.pos[1]);
+    r.light.intensity = (L.drumPower ?? 0.8) * k;
+    r.halo.material.opacity = Math.min(1, k);
+    const b = r.core.userData.base, kk = 0.6 + 0.9 * k;
+    r.core.scale.set(b.x * kk, b.y * kk, b.z * kk);
+    // the kit gets the same floor memory as everything else
+    if (rel > 0 && rel < (L.ringTau ?? 1.5)) {
+      const g = 1 - rel / (L.ringTau ?? 1.5);
+      pushRing(r.lane.pos[0], r.lane.pos[1], (L.drumCoreR ?? 0.13) * (L.ringGrow ?? 7.0),
+               (L.drumCoreR ?? 0.13), g, (L.ringAlpha ?? 0.5) * g * g * 0.9, cool(g));
+    }
+  });
+
+  for (let i = ringN; i < ringPool.length; i++) ringPool[i].visible = false;
+
+  // the positive control for the occlusion campaign: an opaque slab that MOVES
+  if (DBG.plant) {
+    if (!plantMesh) {
+      plantMesh = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1),
+        new THREE.MeshBasicMaterial({ color: 0x000000, toneMapped: false }));
+      plantMesh.geometry.translate(0, 0.5, 0); scene.add(plantMesh);
+    }
+    const pl = DBG.plant, a = pl.az * Math.PI / 180;
+    plantMesh.visible = true;
+    plantMesh.position.set(pl.rad * Math.cos(a), 0, pl.rad * Math.sin(a));
+    // ⚠ 90° - az, not -az. Rotating a box by -az leaves its thin axis along
+    // world Z, so at az 0 the slab is EDGE ON and blocks almost nothing — the
+    // first run of this control read 2.53 % and looked like a weak layout
+    // rather than a broken probe. We want the box's local Z (its thin axis)
+    // pointing along the radial direction (cos az, 0, sin az).
+    plantMesh.rotation.y = Math.PI / 2 - a;
+    plantMesh.scale.set(pl.w ?? 1.2, pl.h ?? 2.2, 0.05);
+  } else if (plantMesh) plantMesh.visible = false;
+
+  comp.render();
+ } catch (e) { window.__err = String(e && e.stack || e); }
+};
+
+window.__setCam  = (o) => { camOverride = o ? { ...(camOverride || {}), ...o } : null; };
+window.__setLook = (o) => { Object.assign(P.look, o); };
+window.__setDbg  = (o) => { DBG = { show: null, black: null, allUp: false, plant: null, ...o }; };
+window.__stats   = () => ({ stations: stations.length, slots: stations.reduce((a, s) => a + s.slots.length, 0),
+                            kit: kitRigs.length, rings: ringPool.length });
+// ⭐⭐ ROUND 37: RESOLVED-STATE DUMP, so the renderer is the ONLY variable.
+// Round 37 rebuilds this same instant in Blender EEVEE and Cycles. If Python
+// re-implemented the envelopes, the pitch->height map and the camera
+// interpolation, then any difference between the three pictures would be a
+// difference between two IMPLEMENTATIONS, and the comparison would be worth
+// nothing. So three.js stays the single source of truth for STATE: this dumps
+// the fully resolved scene at the current instant — world positions, resolved
+// heights, radii, LINEAR colours, light intensities, ring alphas, and the
+// resolved camera — and Blender receives coordinates only.
+// ⚠ It READS; it sets nothing. Call it AFTER __frame(t).
+window.__dumpScene = () => {
+  const L = P.look;
+  const C = c => ({ r: c.r, g: c.g, b: c.b });     // LINEAR, three.js >= r152
+  const rods = [];
+  stations.forEach(stn => stn.slots.forEach((sl, k) => {
+    if (!sl.grp.visible || !sl.rod.visible) return;
+    rods.push({ i: stn.ii, name: stn.ins.name, k,
+      x: sl.grp.position.x, y: sl.grp.position.y, z: sl.grp.position.z,
+      radius: sl.rod.scale.x, height: sl.rod.scale.y,
+      color: C(sl.rod.material.color), opacity: sl.rod.material.opacity,
+      sheathR: sl.sheath.scale.x, sheathAlpha: sl.sheath.material.opacity,
+      sheathColor: C(sl.sheath.material.color),
+      capVisible: sl.cap.visible, capAlpha: sl.cap.material.opacity,
+      capSize: sl.cap.scale.x, capY: sl.cap.position.y,
+      lightY: sl.light.position.y, lightIntensity: sl.light.intensity,
+      lightColor: C(sl.light.color), lightDistance: sl.light.distance,
+      lightDecay: sl.light.decay });
+  }));
+  const holes = [];
+  stations.forEach(stn => stn.slots.forEach((sl, k) => {
+    if (!sl.hole.visible) return;
+    holes.push({ i: stn.ii, k, x: sl.grp.position.x, y: sl.grp.position.y, z: sl.grp.position.z,
+      r: sl.hole.scale.x, emberVisible: sl.ember.visible,
+      emberAlpha: sl.ember.visible ? sl.ember.material.opacity : 0,
+      emberColor: C(sl.ember.material.color), emberR: sl.ember.scale.x });
+  }));
+  const risers = P.instruments.filter(ins => (ins.plinth ?? 0) > 0.001).map(ins => {
+    const b = stationPos(ins);
+    return { name: ins.name, x: b.x, z: b.z, top: ins.plinth, r: ins.riserR ?? 0.62 };
+  });
+  const kit = kitRigs.filter(r => r.grp.visible).map(r => ({
+    lane: r.lane.name, x: r.grp.position.x, y: r.grp.position.y, z: r.grp.position.z,
+    coreR: r.core.scale.x, coreH: r.core.scale.y,
+    haloAlpha: r.halo.material.opacity, haloSize: r.halo.scale.x,
+    lightIntensity: r.light.intensity, lightColor: C(r.light.color) }));
+  const kitHoles = (P.kit.lanes ?? []).map(l => ({ name: l.name, x: l.pos[0], z: l.pos[1],
+    r: P.look.drumCoreR ?? 0.13 }));
+  const rings = ringPool.filter(m => m.visible).map(m => ({
+    x: m.position.x, z: m.position.z, r: m.scale.x,
+    color: C(m.material.color), alpha: m.material.opacity }));
+  return { t: window.__t,
+    camera: { position: { x: cam.position.x, y: cam.position.y, z: cam.position.z },
+              fovDegVertical: cam.fov, aspect: cam.aspect, W, H,
+              target: camOverride && camOverride.tgt ? camOverride.tgt : camPlan(window.__t).tgt },
+    look: { fogDensity: L.fog, bg: L.bg, exposure: L.exposure, ambient: L.ambient,
+            floorR: L.floorR, floorColor: L.floorColor, floorRough: L.floorRough,
+            deckR: L.deckR, deckAlpha: L.deckAlpha, deckColor: L.deckColor,
+            riserColor: L.riserColor, holeColor: L.holeColor, holeDepth: L.holeDepth,
+            lightDist: L.lightDist, decay: L.decay },
+    rods, holes, risers, kit, kitHoles, rings };
+};
+
+// ⭐ ROUND 36: PER-ROD ON-SCREEN PROBE. The round's central claim — an orbiting
+// camera cannot outrun a rod — has to be a NUMBER, exactly as round 35 made the
+// road's version a number. Reports every rod currently standing, with BOTH its
+// foot and its cap projected: a rod counts as on screen only when both ends are
+// inside the frame, which is the strict reading (a beam half out of frame does
+// not state its own length).
+window.__rodScreen = () => {
+  const out = [];
+  stations.forEach(stn => stn.slots.forEach((sl, k) => {
+    if (!sl.rod.visible || !sl.grp.visible) return;
+    const h = sl.rod.scale.y;
+    const foot = sl.grp.position.clone();
+    const cap = foot.clone(); cap.y += h;
+    const pf = foot.clone().project(cam), pc = cap.clone().project(cam);
+    const S = v => ({ x: (v.x * 0.5 + 0.5) * W, y: (-v.y * 0.5 + 0.5) * H, front: v.z < 1 });
+    const a = S(pf), b = S(pc);
+    const inside = p => p.front && p.x >= 0 && p.x <= W && p.y >= 0 && p.y <= H;
+    out.push({ i: stn.ii, k, h, footX: a.x, footY: a.y, capX: b.x, capY: b.y,
+               onScreen: inside(a) && inside(b) });
+  }));
+  return out;
+};
+
+// where each station projects on screen, and whether it is in frame
+window.__screen = () => stations.map(s => {
+  const v = s.base.clone().project(cam);
+  return { i: s.ii, name: s.ins.name,
+           sx: (v.x * 0.5 + 0.5) * W, sy: (-v.y * 0.5 + 0.5) * H,
+           onScreen: v.z < 1 && Math.abs(v.x) <= 1 && Math.abs(v.y) <= 1 };
+});
+</script></body></html>

@@ -1,0 +1,25 @@
+<!doctype html><meta charset=utf-8>
+<style>html,body{margin:0;background:#05060a}</style>
+<canvas id=c width=540 height=960></canvas>
+<script type="importmap">{"imports":{"three":"./node_modules/three/build/three.module.js"}}</script>
+<script type="module">
+import * as THREE from 'three';
+try {
+  const r = new THREE.WebGLRenderer({canvas:document.getElementById('c'), antialias:true});
+  const sc = new THREE.Scene();
+  const cam = new THREE.PerspectiveCamera(50, 540/960, .1, 100);
+  cam.position.set(0, 2.0, 5.5); cam.lookAt(0, 0, -8);
+  for (let i=0;i<5;i++){
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(0.03, 44),
+              new THREE.MeshBasicMaterial({color:0x8fa4bb}));
+    m.rotation.x = -Math.PI/2; m.position.set((i-2)*0.45, 0, -16); sc.add(m);
+  }
+  for (const [x,z,col] of [[-0.45,-2,0xffffff],[0.45,-5,0xffc27a],[0,-9,0x8ab4ff]]) {
+    const s = new THREE.Mesh(new THREE.SphereGeometry(0.14,24,24),
+              new THREE.MeshBasicMaterial({color:col}));
+    s.position.set(x,0.14,z); sc.add(s);
+  }
+  r.render(sc, cam);
+  window.__done = true;
+} catch (e) { window.__err = String(e); }
+</script>

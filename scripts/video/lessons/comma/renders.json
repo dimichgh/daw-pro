@@ -1,0 +1,112 @@
+{
+ "bpm": 120,
+ "pitches": [
+  69,
+  76,
+  71,
+  78,
+  73,
+  80,
+  75,
+  70,
+  77,
+  72,
+  79,
+  74,
+  81
+ ],
+ "renders": {
+  "walk": {
+   "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/comma/audio/walk.wav",
+   "fromBeat": 0,
+   "seconds": 20,
+   "lufs": -16.603742738110586,
+   "truePeak": -11.263792818710993
+  },
+  "walk-et": {
+   "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/comma/audio/walk-et.wav",
+   "fromBeat": 0,
+   "seconds": 20,
+   "lufs": -16.607586745220953,
+   "truePeak": -11.23550915655879
+  },
+  "single": {
+   "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/comma/audio/single.wav",
+   "fromBeat": 48,
+   "seconds": 12,
+   "lufs": -16.73957291386486,
+   "truePeak": -16.054417117655944
+  },
+  "unison": {
+   "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/comma/audio/unison.wav",
+   "fromBeat": 80,
+   "seconds": 12,
+   "lufs": -13.661592618631756,
+   "truePeak": -12.976230042966822
+  },
+  "comma": {
+   "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/comma/audio/comma.wav",
+   "fromBeat": 112,
+   "seconds": 12,
+   "lufs": -13.726681375059913,
+   "truePeak": -10.034133777911617
+  },
+  "saw-alone": {
+   "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/comma/audio/saw-alone.wav",
+   "fromBeat": 144,
+   "seconds": 12,
+   "lufs": -18.795797116863696,
+   "truePeak": -16.05131994996175
+  },
+  "fifth-pure": {
+   "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/comma/audio/fifth-pure.wav",
+   "fromBeat": 144,
+   "seconds": 12,
+   "lufs": -15.918820163165913,
+   "truePeak": -12.055041605493804
+  },
+  "fifth-et": {
+   "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/comma/audio/fifth-et.wav",
+   "fromBeat": 144,
+   "seconds": 12,
+   "lufs": -15.556113474677652,
+   "truePeak": -10.04469752779666
+  },
+  "third-pure": {
+   "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/comma/audio/third-pure.wav",
+   "fromBeat": 144,
+   "seconds": 12,
+   "lufs": -15.8795671665776,
+   "truePeak": -11.601563209751344
+  },
+  "third-et": {
+   "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/comma/audio/third-et.wav",
+   "fromBeat": 144,
+   "seconds": 12,
+   "lufs": -15.676504043815827,
+   "truePeak": -10.042159531356159
+  }
+ },
+ "tracks": {
+  "tones": "6D5238C4-201B-442F-AB36-3A8BE0705D5C",
+  "etones": "AAF64635-A071-41C1-80E6-EA08BF1DC454",
+  "root": "E6ED5E7E-4D3F-4BE0-ACD8-BE3AE461E2DC",
+  "f5p": "5541F35F-FCF8-40A6-A102-4F8C34AC9707",
+  "f5e": "FF77EA08-7A19-469A-BA7C-FA54E4DCDFE2",
+  "m3p": "7FA80B53-F47A-46F3-B6EB-B5832F069DCC",
+  "m3e": "1D3919B1-A0B1-4A0F-A5AF-A80F707AFC2D"
+ },
+ "beats": {
+  "solo": 48,
+  "unison": 80,
+  "comma": 112,
+  "pair": 144
+ },
+ "clips": {
+  "walk": "F4392C80-E9E0-4125-A093-F8197F422E6E",
+  "walkET": "695373D7-90D0-4019-92F3-4143AC432350",
+  "solo": "941A8307-DA15-4B5E-85B1-47CB1488F237",
+  "unison": "938D28A9-D3F0-412C-96B9-A337B972A2F6",
+  "beat": "47F3E925-4A37-4E46-889D-FB003B31581D"
+ }
+}

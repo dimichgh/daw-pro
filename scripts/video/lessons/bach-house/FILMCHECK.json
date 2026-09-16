@@ -1,0 +1,33 @@
+{
+ "halves": {
+  "07-tempo": {
+   "BEFORE": {
+    "wav": "ab-t-a.wav",
+    "seconds": 4.6,
+    "onsetsPerSec": 4.799
+   },
+   "AFTER": {
+    "wav": "ab-t-b.wav",
+    "seconds": 4.6,
+    "onsetsPerSec": 8.266
+   }
+  },
+  "15-ab": {
+   "BEFORE": {
+    "wav": "ab-b-a.wav",
+    "seconds": 5.5,
+    "sub100Db": -75.14,
+    "midDb": -26.83
+   },
+   "AFTER": {
+    "wav": "ab-b-b.wav",
+    "seconds": 5.5,
+    "sub100Db": -19.98,
+    "midDb": -24.73
+   }
+  }
+ },
+ "tempoRatioInFilm": 1.7224,
+ "buildSub100DeltaDb": 55.16,
+ "buildMidDeltaDb": 2.1
+}

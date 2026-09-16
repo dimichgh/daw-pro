@@ -1,0 +1,30 @@
+{
+ "stageStarts": {
+  "00-open-talk": 4.0,
+  "01-project-talk": 56.8,
+  "01-project-play": 77.92,
+  "02-green-talk": 90.12,
+  "03-empty-talk": 129.16,
+  "03-empty-play": 169.48,
+  "05-pdc-talk": 186.78,
+  "06-flam-talk": 242.78,
+  "06-flam-play": 261.18,
+  "07-apart-talk": 268.68,
+  "07-apart-play": 282.28,
+  "08-plant-talk": 289.78,
+  "08-plant-play": 327.86,
+  "09-red-talk": 345.26,
+  "10-controls-talk": 382.38,
+  "11-restore-talk": 426.86,
+  "12-probe-talk": 469.26,
+  "13-ladder-talk": 509.1,
+  "14-blind-talk": 549.26,
+  "15-comment-talk": 589.58,
+  "16-gates-talk": 629.42,
+  "17-wedge-talk": 664.94,
+  "18-eyes-talk": 720.3,
+  "18-eyes-play": 762.06,
+  "19-close-talk": 773.993
+ },
+ "totalFromSegments": 824.033
+}

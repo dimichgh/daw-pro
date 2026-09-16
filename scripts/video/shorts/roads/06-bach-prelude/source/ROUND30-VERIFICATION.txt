@@ -1,0 +1,75 @@
+### ROUND 30 verification transcript  2026-09-08 05:34:53
+
+== ly2notes CLI on the Moonlight source (ground_truth, 42 bars) ==
+  note mel: barline intervals are not uniform: {5.0: 1, 1.0: 59, 2.0: 1, 3.0: 1}
+  note bass: barline intervals are not uniform: {1.0: 67, 2.0: 1}
+ground truth ok: 42 bars x 12 triplet slots at k/12, 502 sounding, bass on the beat; written rests inside the triplets in bars [29, 31]
+  bars(arp) 67 events 796 166 129
+  arp: 792 sounding, through whole-note 66.50
+  mel: 127 sounding, through whole-note 69.00
+  bass: 129 sounding, through whole-note 69.00
+
+== song.json md5 after the parser rewrite ==
+03-moonlight-long  e0df571ed9d6b1e41637e4e958cefa67   want e0df571ed9d6b1e41637e4e958cefa67
+04-moonlight-short abdc8a842bbfd0e33e194d5254386f70   want abdc8a842bbfd0e33e194d5254386f70
+05-moonlight-side  5bf383cd1ca67c43df29e379301f4a4d   want 5bf383cd1ca67c43df29e379301f4a4d
+00-sample          1f1bb5b33bb83ba57a801c5a5dd25759   want 1f1bb5b33bb83ba57a801c5a5dd25759  (untouched, regression anchor)
+CONTROL MOON_BARS=41 -> 4659c45c9f1c631ada04037f2b127cd5  (differs, as it must)
+
+== the MIDI oracle (LilyPond's own render of the same .ly) ==
+MIDI: 384 ticks/quarter, 3 tracks (0, 134, 415 notes)
+  figure  (right): 415 parsed vs 415 in the MIDI — 415 exact (100.00 %), 0 disagreements, 0 MIDI notes unmatched
+  tenor   (left v0): 67 parsed vs 67 in the MIDI — 67 exact (100.00 %), 0 disagreements, 0 MIDI notes unmatched
+  bass    (left v1): 67 parsed vs 67 in the MIDI — 67 exact (100.00 %), 0 disagreements, 0 MIDI notes unmatched
+  TOTAL: 549/549 = 100.00 % exact
+validate.py exit 0
+-- POSITIVE CONTROL: the same scorer against the ROUND-29 parser --
+  right hand (figure): 0 parsed vs 415 in the MIDI — 0 exact (0.00 %), 0 disagreements, 415 MIDI notes unmatched
+  left hand, both voices: 202 parsed vs 134 in the MIDI — 0 exact (0.00 %), 202 disagreements, 134 MIDI notes unmatched
+  TOTAL: 0/549 = 0.00 % exact
+
+== per-fix positive controls ==
+==============================================================================
+FIX 1  block() matched inside `copyright = "Public Domain"`
+  BEFORE  block(src,'right') -> 0 events, and NO ERROR
+  AFTER   parse_voice(src,'right') -> 479 events, 413 sounding
+  LATENT HERE TOO: 'bottom =' occurs at [11443, 14036, 14583, 14611] in the Moonlight file
+     the music is the FIRST hit (11443); the others are `ragged-bottom =` / `ragged-last-bottom =` inside \paper.
+     with a decoy `bottom =` placed BEFORE the music, the OLD parser reads 8 bass events instead of 104
+     the NEW one is line-anchored: 129 events either way
+==============================================================================
+FIX 2  `<< A \\ B >>` polyphony concatenated into one line
+  BEFORE  68 events, 1 with a None pitch list, total duration 4.25 whole notes (the piece is 35)
+  AFTER   voice 0 67 sounding (35.00 whole notes), voice 1 67 (35.00)
+==============================================================================
+FIX 3  the pitch model was hard-coded RELATIVE; this source is ABSOLUTE
+  BEFORE  bar 1 = ['G3', 'C5', 'E6', 'G6', 'C8', 'E9']   highest MIDI in the part: 1392
+  AFTER   bar 1 = ['G4', 'C5', 'E5', 'G4', 'C5', 'E5']   highest MIDI in the part: 81
+  MIDI    bar 1 = ['G4', 'C5', 'E5', 'G4', 'C5', 'E5']  (LilyPond's own)
+  mode DETECTED as: absolute   (Moonlight: relative)
+==============================================================================
+FIX 4  `\transpose c c'` left its two arguments behind as notes
+  BEFORE  first two events: [(0.0, 'C3'), (0.25, 'C4')]  <- phantom
+  AFTER   first two events: [(0.125, 'G4'), (0.1875, 'C5')]
+  the transposition itself is now APPLIED: shift = (7, 12) (diatonic steps, semitones)
+==============================================================================
+FIX 5  `!` (forced accidental) detached the duration
+  BEFORE  'c4 b!2. b4' -> durations [0.25, 0.25, 0.25]  (a dotted half is 0.75 whole notes)
+  AFTER   'c4 b!2. b4' -> durations [0.25, 0.75, 0.25]  (a dotted half is 0.75 whole notes)
+  IN THE MOONLIGHT FILE: `b!2.` (line 137), `fis,!`/`a!` (260), `b,!`/`e!` (289).
+  The fix moves 31 melody events, ALL at whole-note 55.0 or later (bar 56+);
+  the film renders 42 bars, so all three song.json files are byte-identical.
+==============================================================================
+THE GUARD ITSELF — it must FIRE, or it is decoration
+  fires: part: MIDI 124 (e9) at whole-note 0.9375 is outside 21..108 — an 88-key piano. The usual cause is the wrong octave MODE (absolute source parsed as rel
+  and it does NOT fire on the correct mode (negative control) — ok
+  invariants fires: probe: event 0 at 0.0: MIDI 9 (c-1) outside 21..108
+  invariants passes a well-formed part (negative control) — ok
+==============================================================================
+FIX 6  `\clef "bass"` -> the quote strip left `\clef`, which then ate the next word
+  BEFORE  '\\clef "bass" \n    r8   f,16 a,'
+          after the quoted-string strip: '\\clef   \n    r8   f,16 a,'
+          after the unquoted clef rule : ' 8   f,16 a,'   <- the rest is GONE
+  AFTER   '  \n    r8   f,16 a,'
+  MEASURED against LilyPond's MIDI: 21 of 415 figure notes disagreed (all in bars 33-34), 0 after.
+==============================================================================

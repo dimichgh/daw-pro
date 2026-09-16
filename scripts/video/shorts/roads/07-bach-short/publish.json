@@ -1,0 +1,20 @@
+{
+  "title": "Bach's Prelude in C - the first eleven bars, as a road of light #Shorts",
+  "description": "The opening of J. S. Bach's Prelude in C, BWV 846 - bars 1 to 11, ending on the\nfirst big arrival in the piece.\n\nThe score IS the road. Time runs away from you down the page: each staff is a\nlane, each note sits where it really sits on the stave, and the three lights are\nthe three voices Bach actually wrote - the broken-chord figure in the right hand,\nand the two held voices underneath it that the left hand plays as one gesture.\n\nThe figure never changes shape. Watch the two quiet lights on the right instead:\nacross bars nine, ten and eleven the harmony drops a fifth each time - A, then D,\nthen G. At 0:40 it lands on a plain G major chord, the first structural arrival\nin the piece, and the cut runs to the end of that bar and stops, at 0:44. That is\nwhy this excerpt ends where it does rather than at a round number of seconds.\n\n(The bass writes the last of those three steps as a rising fourth rather than a\nfalling fifth - the same root motion.)\n\nBuilt and rendered end to end in DAW Pro - an AI-native DAW for macOS. The\nperformance, the mix, the loudness pass and the visualiser are all one pipeline;\nnothing here was recorded from a screen.\n\nSCORE / LICENCE\nVisualisation inspired by Polyfjord - thank you for the idea.\n\nNotes derived from the Mutopia Project edition Mutopia-2011/09/12-5, typeset by\nShay Rojansky, edited by Han-Wen Nienhuys and Tobias Erbsland.\nThe edition's own header dedicates it to the public domain.\nSource: https://www.mutopiaproject.org/\n\nThe composition itself is in the public domain.\n\nAUDIO\nRendered offline at 48 kHz, normalised to -14 LUFS integrated with a -1 dBTP\nceiling (the usual streaming convention).\n\nThe complete thirty-five-bar film is a separate video.\n\nLICENCE NOTES\n1. The public-domain statement above is the typesetter's own dedication,\nwritten inside the LilyPond source file (copyright = \"Public Domain\"). It is a\nstatement in a source file rather than a licence document, and it is quoted\nhere, not interpreted.\n2. That same header's \"source\" field reads \"Unknown\", so the edition this was\nkeyed from is not stated. The composition is unambiguously public domain; the\nengraving's provenance rests on the dedication above.",
+  "tags": [
+    "Bach",
+    "Prelude in C",
+    "BWV 846",
+    "classical music",
+    "music visualiser",
+    "sheet music",
+    "piano",
+    "DAW Pro",
+    "three.js",
+    "Shorts"
+  ],
+  "categoryId": "10",
+  "privacyStatus": "private",
+  "containsSyntheticMedia": true,
+  "madeForKids": false
+}

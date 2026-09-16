@@ -1,0 +1,695 @@
+{
+ "_source": "measure.py over audio/ rendered by DAW Pro staging 17695",
+ "tuning": {
+  "a440": {
+   "measuredHz": 439.99999892975154,
+   "predictedHz": 440.0,
+   "errCents": -4.2110240166058936e-06
+  },
+  "sawRoot": {
+   "measuredHz": 439.99999892975046,
+   "predictedHz": 440.0,
+   "errCents": -4.211028245128889e-06
+  },
+  "commaLow": {
+   "measuredHz": 439.99999867553805,
+   "predictedHz": 440.0,
+   "errCents": -5.211258258972748e-06
+  },
+  "commaHigh": {
+   "measuredHz": 446.0030379019951,
+   "predictedHz": 446.00303649902344,
+   "errCents": 5.445865154819781e-06
+  },
+  "fifthPure": {
+   "measuredHz": 659.9999981875008,
+   "predictedHz": 660,
+   "errCents": -4.754334058585375e-06
+  },
+  "fifthET": {
+   "measuredHz": 659.2551125236445,
+   "predictedHz": 659.2551138257398,
+   "errCents": -3.4193618636587943e-06
+  },
+  "thirdPure": {
+   "measuredHz": 549.9999981693811,
+   "predictedHz": 550,
+   "errCents": -5.762235958902636e-06
+  },
+  "thirdET": {
+   "measuredHz": 554.3652634254969,
+   "predictedHz": 554.3652619537442,
+   "errCents": 4.596154611365464e-06
+  }
+ },
+ "beats": {
+  "single": {
+   "predictedHz": 0.0,
+   "full": {
+    "rateHz": 39.998931555638634,
+    "depth": 3.515733865872744e-07,
+    "prominence": 8324357.600398249,
+    "envMean": 0.15748017820721014,
+    "envelope": null
+   }
+  },
+  "unison": {
+   "predictedHz": 0.0,
+   "full": {
+    "rateHz": 39.99893366331057,
+    "depth": 3.1162073732717617e-07,
+    "prominence": 10467474.87881385,
+    "envMean": 0.22445288174573902,
+    "envelope": null
+   }
+  },
+  "comma": {
+   "predictedHz": 6.0030364990234375,
+   "full": {
+    "rateHz": 6.003136643899771,
+    "depth": 0.9366712408226257,
+    "prominence": 215809.43951066324,
+    "envMean": 0.20053985367700222,
+    "envelope": null
+   }
+  },
+  "sawAlone": {
+   "predictedHz": 0.0,
+   "full": {
+    "rateHz": 39.99893979025239,
+    "depth": 4.889311709904891e-05,
+    "prominence": 460624.4068484783,
+    "envMean": 0.09844016034354697,
+    "envelope": null
+   },
+   "band": {
+    "rateHz": 39.99893973965613,
+    "depth": 9.963146016430537e-07,
+    "prominence": 24960634.026627593,
+    "envMean": 0.02968620044383245,
+    "envelope": null
+   },
+   "partialHz": 1320
+  },
+  "fifthPure": {
+   "predictedHz": 0,
+   "full": {
+    "rateHz": 19.999929321846896,
+    "depth": 4.428633159120389e-05,
+    "prominence": 703841.0837751228,
+    "envMean": 0.14019803467201283,
+    "envelope": null
+   },
+   "band": {
+    "rateHz": 39.9989397184443,
+    "depth": 5.043706423272999e-06,
+    "prominence": 17592924.793010127,
+    "envMean": 0.014806699055120996,
+    "envelope": null
+   },
+   "partialHz": 1320
+  },
+  "fifthET": {
+   "predictedHz": 1.4897723485203187,
+   "full": {
+    "rateHz": 1.4897096090985869,
+    "depth": 0.008921548011061214,
+    "prominence": 28497.094460120985,
+    "envMean": 0.1406575716007228,
+    "envelope": null
+   },
+   "band": {
+    "rateHz": 1.4897130238008969,
+    "depth": 0.6674068775416931,
+    "prominence": 1373270.0120802803,
+    "envMean": 0.049101307002398106,
+    "envelope": null
+   },
+   "partialHz": 1320
+  },
+  "thirdPure": {
+   "predictedHz": 0,
+   "full": {
+    "rateHz": 10.000063832241052,
+    "depth": 0.0027203905867472975,
+    "prominence": 257662.12984092647,
+    "envMean": 0.13966963118206405,
+    "envelope": null
+   },
+   "band": {
+    "rateHz": 10.000063447866136,
+    "depth": 0.006948441803295895,
+    "prominence": 3935930.5844816603,
+    "envMean": 0.006146968422618121,
+    "envelope": null
+   },
+   "partialHz": 2200
+  },
+  "thirdET": {
+   "predictedHz": 17.46104781497661,
+   "full": {
+    "rateHz": 17.4611229655034,
+    "depth": 0.009301950684322944,
+    "prominence": 38277.1658487002,
+    "envMean": 0.14067037251316442,
+    "envelope": null
+   },
+   "band": {
+    "rateHz": 17.461123339375217,
+    "depth": 0.6986374930765733,
+    "prominence": 186315.56530218932,
+    "envMean": 0.026372943200562535,
+    "envelope": null
+   },
+   "partialHz": 2200
+  }
+ },
+ "loudness": {
+  "walk": {
+   "lufs": -16.6,
+   "truePeak": -11.3
+  },
+  "walk-et": {
+   "lufs": -16.6,
+   "truePeak": -11.2
+  },
+  "single": {
+   "lufs": -16.7,
+   "truePeak": -16.1
+  },
+  "unison": {
+   "lufs": -13.7,
+   "truePeak": -13.0
+  },
+  "comma": {
+   "lufs": -13.7,
+   "truePeak": -10.0
+  },
+  "saw-alone": {
+   "lufs": -18.8,
+   "truePeak": -16.1
+  },
+  "fifth-pure": {
+   "lufs": -15.9,
+   "truePeak": -12.1
+  },
+  "fifth-et": {
+   "lufs": -15.6,
+   "truePeak": -10.0
+  },
+  "third-pure": {
+   "lufs": -15.9,
+   "truePeak": -11.6
+  },
+  "third-et": {
+   "lufs": -15.7,
+   "truePeak": -10.0
+  }
+ },
+ "walk": {
+  "steps": [
+   {
+    "step": 0,
+    "tSec": 0.0,
+    "measuredHz": 439.9999999805741,
+    "predictedHz": 440.0,
+    "cents": 0,
+    "errCents": -7.643362824565105e-08
+   },
+   {
+    "step": 1,
+    "tSec": 1.5,
+    "measuredHz": 659.9999999783599,
+    "predictedHz": 660.0,
+    "cents": 701.9550008653874,
+    "errCents": -5.6763692552049706e-08
+   },
+   {
+    "step": 2,
+    "tSec": 3.0,
+    "measuredHz": 494.99999997808794,
+    "predictedHz": 495.0,
+    "cents": 203.91000173077487,
+    "errCents": -7.663621293776125e-08
+   },
+   {
+    "step": 3,
+    "tSec": 4.5,
+    "measuredHz": 742.4999999799176,
+    "predictedHz": 742.5000000000001,
+    "cents": 905.8650025961624,
+    "errCents": -4.682512589219666e-08
+   },
+   {
+    "step": 4,
+    "tSec": 6.0,
+    "measuredHz": 556.8750000042646,
+    "predictedHz": 556.875,
+    "cents": 407.82000346154973,
+    "errCents": 1.3257957202757957e-08
+   },
+   {
+    "step": 5,
+    "tSec": 7.5,
+    "measuredHz": 835.3124999782657,
+    "predictedHz": 835.3124999999999,
+    "cents": 1109.775004326937,
+    "errCents": -4.504530212662987e-08
+   },
+   {
+    "step": 6,
+    "tSec": 9.0,
+    "measuredHz": 626.4843750050635,
+    "predictedHz": 626.4843750000001,
+    "cents": 611.7300051923248,
+    "errCents": 1.3992182557426558e-08
+   },
+   {
+    "step": 7,
+    "tSec": 10.5,
+    "measuredHz": 469.8632812722358,
+    "predictedHz": 469.8632812499999,
+    "cents": 113.68500605771169,
+    "errCents": 8.192917047784975e-08
+   },
+   {
+    "step": 8,
+    "tSec": 12.0,
+    "measuredHz": 704.7949218661413,
+    "predictedHz": 704.7949218750001,
+    "cents": 815.6400069230995,
+    "errCents": -2.1760555897901113e-08
+   },
+   {
+    "step": 9,
+    "tSec": 13.5,
+    "measuredHz": 528.5961914181241,
+    "predictedHz": 528.5961914062501,
+    "cents": 317.59500778848724,
+    "errCents": 3.8889341481756e-08
+   },
+   {
+    "step": 10,
+    "tSec": 15.0,
+    "measuredHz": 792.8942871262883,
+    "predictedHz": 792.894287109375,
+    "cents": 1019.5500086538741,
+    "errCents": 3.692922887264465e-08
+   },
+   {
+    "step": 11,
+    "tSec": 16.5,
+    "measuredHz": 594.6707153450632,
+    "predictedHz": 594.6707153320314,
+    "cents": 521.5050095192619,
+    "errCents": 3.793869263250498e-08
+   },
+   {
+    "step": 12,
+    "tSec": 18.0,
+    "measuredHz": 446.00303652077065,
+    "predictedHz": 446.0030364990236,
+    "cents": 23.46001038464965,
+    "errCents": 8.44147731705704e-08
+   }
+  ],
+  "stepSeconds": 1.5,
+  "maxErrCents": 8.44147731705704e-08,
+  "et": {
+   "steps": [
+    {
+     "step": 0,
+     "measuredHz": 439.9999999805741,
+     "predictedHz": 440.0,
+     "cents": 0,
+     "errCents": -7.643362824565105e-08
+    },
+    {
+     "step": 1,
+     "measuredHz": 659.2551138113918,
+     "predictedHz": 659.2551138257398,
+     "cents": 700,
+     "errCents": -3.7678638469751006e-08
+    },
+    {
+     "step": 2,
+     "measuredHz": 493.8833012750866,
+     "predictedHz": 493.8833012561241,
+     "cents": 200,
+     "errCents": 6.647007485640227e-08
+    },
+    {
+     "step": 3,
+     "measuredHz": 739.9888454440836,
+     "predictedHz": 739.9888454232688,
+     "cents": 900,
+     "errCents": 4.869720833970796e-08
+    },
+    {
+     "step": 4,
+     "measuredHz": 554.3652619719686,
+     "predictedHz": 554.3652619537442,
+     "cents": 400,
+     "errCents": 5.69132284993817e-08
+    },
+    {
+     "step": 5,
+     "measuredHz": 830.6093951378695,
+     "predictedHz": 830.6093951598903,
+     "cents": 1100,
+     "errCents": -4.5897733919317405e-08
+    },
+    {
+     "step": 6,
+     "measuredHz": 622.2539674612487,
+     "predictedHz": 622.2539674441618,
+     "cents": 600,
+     "errCents": 4.753897745302083e-08
+    },
+    {
+     "step": 7,
+     "measuredHz": 466.16376151942507,
+     "predictedHz": 466.1637615180899,
+     "cents": 100,
+     "errCents": 4.958519816717934e-09
+    },
+    {
+     "step": 8,
+     "measuredHz": 698.4564628747369,
+     "predictedHz": 698.4564628660078,
+     "cents": 800,
+     "errCents": 2.1636583291931513e-08
+    },
+    {
+     "step": 9,
+     "measuredHz": 523.2511306186655,
+     "predictedHz": 523.2511306011972,
+     "cents": 300,
+     "errCents": 5.7795452158503106e-08
+    },
+    {
+     "step": 10,
+     "measuredHz": 783.9908719825506,
+     "predictedHz": 783.9908719634985,
+     "cents": 1000,
+     "errCents": 4.207149723351118e-08
+    },
+    {
+     "step": 11,
+     "measuredHz": 587.3295358445664,
+     "predictedHz": 587.3295358348151,
+     "cents": 500,
+     "errCents": 2.8743192784951275e-08
+    },
+    {
+     "step": 12,
+     "measuredHz": 439.9999999805741,
+     "predictedHz": 440.0,
+     "cents": 0,
+     "errCents": -7.643362824565105e-08
+    }
+   ],
+   "maxErrCents": 7.643362824565105e-08,
+   "finalHz": 439.9999999805741,
+   "finalErrCentsFromA": -7.643362824565105e-08
+  }
+ },
+ "material": {
+  "a4": 440,
+  "fifthPure": 701.9550008653874,
+  "fifthET": 700,
+  "thirdPure": 386.3137138648348,
+  "thirdET": 400,
+  "commaRatio": 1.0136432647705078,
+  "comma": 23.460010384649014,
+  "etNarrowing": 1.955000865387433,
+  "walk": [
+   {
+    "step": 0,
+    "rawCents": 0,
+    "cents": 0,
+    "octaves": 0
+   },
+   {
+    "step": 1,
+    "rawCents": 701.9550008653874,
+    "cents": 701.9550008653874,
+    "octaves": 0
+   },
+   {
+    "step": 2,
+    "rawCents": 1403.9100017307749,
+    "cents": 203.91000173077487,
+    "octaves": 1
+   },
+   {
+    "step": 3,
+    "rawCents": 2105.8650025961624,
+    "cents": 905.8650025961624,
+    "octaves": 1
+   },
+   {
+    "step": 4,
+    "rawCents": 2807.8200034615497,
+    "cents": 407.82000346154973,
+    "octaves": 2
+   },
+   {
+    "step": 5,
+    "rawCents": 3509.775004326937,
+    "cents": 1109.775004326937,
+    "octaves": 2
+   },
+   {
+    "step": 6,
+    "rawCents": 4211.730005192325,
+    "cents": 611.7300051923248,
+    "octaves": 3
+   },
+   {
+    "step": 7,
+    "rawCents": 4913.685006057712,
+    "cents": 113.68500605771169,
+    "octaves": 4
+   },
+   {
+    "step": 8,
+    "rawCents": 5615.6400069230995,
+    "cents": 815.6400069230995,
+    "octaves": 4
+   },
+   {
+    "step": 9,
+    "rawCents": 6317.595007788487,
+    "cents": 317.59500778848724,
+    "octaves": 5
+   },
+   {
+    "step": 10,
+    "rawCents": 7019.550008653874,
+    "cents": 1019.5500086538741,
+    "octaves": 5
+   },
+   {
+    "step": 11,
+    "rawCents": 7721.505009519262,
+    "cents": 521.5050095192619,
+    "octaves": 6
+   },
+   {
+    "step": 12,
+    "rawCents": 8423.46001038465,
+    "cents": 23.46001038464965,
+    "octaves": 7
+   }
+  ],
+  "walkBasePitch": 60,
+  "predict": {
+   "unison": 6.0030364990234375,
+   "fifthPure": 0,
+   "fifthET": 1.4897723485203187,
+   "thirdPure": 0,
+   "thirdET": 17.46104781497661
+  },
+  "partial": {
+   "fifth": 1320,
+   "third": 2200
+  },
+  "hz": {
+   "a": 440,
+   "commaA": 446.00303649902344,
+   "fifthPure": 660,
+   "fifthET": 659.2551138257398,
+   "thirdPure": 550,
+   "thirdET": 554.3652619537442
+  },
+  "ratioNum": 531441,
+  "ratioDen": 524288
+ },
+ "renders": {
+  "bpm": 120,
+  "pitches": [
+   69,
+   76,
+   71,
+   78,
+   73,
+   80,
+   75,
+   70,
+   77,
+   72,
+   79,
+   74,
+   81
+  ],
+  "renders": {
+   "walk": {
+    "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/comma/audio/walk.wav",
+    "fromBeat": 0,
+    "seconds": 20,
+    "lufs": -16.603742738110586,
+    "truePeak": -11.263792818710993
+   },
+   "walk-et": {
+    "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/comma/audio/walk-et.wav",
+    "fromBeat": 0,
+    "seconds": 20,
+    "lufs": -16.607586745220953,
+    "truePeak": -11.23550915655879
+   },
+   "single": {
+    "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/comma/audio/single.wav",
+    "fromBeat": 48,
+    "seconds": 12,
+    "lufs": -16.73957291386486,
+    "truePeak": -16.054417117655944
+   },
+   "unison": {
+    "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/comma/audio/unison.wav",
+    "fromBeat": 80,
+    "seconds": 12,
+    "lufs": -13.661592618631756,
+    "truePeak": -12.976230042966822
+   },
+   "comma": {
+    "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/comma/audio/comma.wav",
+    "fromBeat": 112,
+    "seconds": 12,
+    "lufs": -13.726681375059913,
+    "truePeak": -10.034133777911617
+   },
+   "saw-alone": {
+    "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/comma/audio/saw-alone.wav",
+    "fromBeat": 144,
+    "seconds": 12,
+    "lufs": -18.795797116863696,
+    "truePeak": -16.05131994996175
+   },
+   "fifth-pure": {
+    "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/comma/audio/fifth-pure.wav",
+    "fromBeat": 144,
+    "seconds": 12,
+    "lufs": -15.918820163165913,
+    "truePeak": -12.055041605493804
+   },
+   "fifth-et": {
+    "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/comma/audio/fifth-et.wav",
+    "fromBeat": 144,
+    "seconds": 12,
+    "lufs": -15.556113474677652,
+    "truePeak": -10.04469752779666
+   },
+   "third-pure": {
+    "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/comma/audio/third-pure.wav",
+    "fromBeat": 144,
+    "seconds": 12,
+    "lufs": -15.8795671665776,
+    "truePeak": -11.601563209751344
+   },
+   "third-et": {
+    "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/comma/audio/third-et.wav",
+    "fromBeat": 144,
+    "seconds": 12,
+    "lufs": -15.676504043815827,
+    "truePeak": -10.042159531356159
+   }
+  },
+  "tracks": {
+   "tones": "6D5238C4-201B-442F-AB36-3A8BE0705D5C",
+   "etones": "AAF64635-A071-41C1-80E6-EA08BF1DC454",
+   "root": "E6ED5E7E-4D3F-4BE0-ACD8-BE3AE461E2DC",
+   "f5p": "5541F35F-FCF8-40A6-A102-4F8C34AC9707",
+   "f5e": "FF77EA08-7A19-469A-BA7C-FA54E4DCDFE2",
+   "m3p": "7FA80B53-F47A-46F3-B6EB-B5832F069DCC",
+   "m3e": "1D3919B1-A0B1-4A0F-A5AF-A80F707AFC2D"
+  },
+  "beats": {
+   "solo": 48,
+   "unison": 80,
+   "comma": 112,
+   "pair": 144
+  },
+  "clips": {
+   "walk": "F4392C80-E9E0-4125-A093-F8197F422E6E",
+   "walkET": "695373D7-90D0-4019-92F3-4143AC432350",
+   "solo": "941A8307-DA15-4B5E-85B1-47CB1488F237",
+   "unison": "938D28A9-D3F0-412C-96B9-A337B972A2F6",
+   "beat": "47F3E925-4A37-4E46-889D-FB003B31581D"
+  }
+ },
+ "excerpts": {
+  "unison": {
+   "gain": 2.2477357431784806,
+   "seconds": 12.0,
+   "files": [
+    "ab-unison.wav",
+    "ab-comma.wav"
+   ],
+   "lufs": {
+    "unison": -9.6,
+    "comma": -9.7
+   },
+   "deltaLu": -0.1
+  },
+  "fifth": {
+   "gain": 2.250271274982922,
+   "seconds": 8.0,
+   "files": [
+    "ab-fifth-pure.wav",
+    "ab-fifth-et.wav"
+   ],
+   "lufs": {
+    "fifth-pure": -11.9,
+    "fifth-et": -11.5
+   },
+   "deltaLu": 0.4
+  },
+  "third": {
+   "gain": 2.2496138470845084,
+   "seconds": 8.0,
+   "files": [
+    "ab-third-pure.wav",
+    "ab-third-et.wav"
+   ],
+   "lufs": {
+    "third-pure": -11.9,
+    "third-et": -11.6
+   },
+   "deltaLu": 0.3
+  },
+  "walk": {
+   "gain": 2.583853728522158,
+   "seconds": 19.5,
+   "files": [
+    "play-walk.wav",
+    "play-walk-et.wav"
+   ],
+   "lufs": {
+    "play-walk": -11.3,
+    "play-walk-et": -11.3
+   },
+   "deltaLu": 0.0
+  }
+ }
+}

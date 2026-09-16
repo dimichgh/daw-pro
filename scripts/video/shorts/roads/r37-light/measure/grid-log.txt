@@ -1,0 +1,42 @@
+ALIGNMENT: worst cap delta = 0.00 px  over 6 rods
+RENDERTIME 11.468 s  engine=CYCLES sigma=haze(0.07000) samples=128 vol=64 out=stills/P1-mid-orbit--cycles.png
+ALIGNMENT: worst cap delta = 0.00 px  over 6 rods
+RENDERTIME 10.705 s  engine=CYCLES sigma=haze(0.07000) samples=128 vol=64 out=stills/P1-mid-orbit--cycles.png
+ALIGNMENT: worst cap delta = 0.00 px  over 6 rods
+RENDERTIME 1.266 s  engine=EEVEE sigma=haze(0.07000) samples=64 vol=128 out=stills/P1-mid-orbit--eevee.png
+ALIGNMENT: worst cap delta = 0.00 px  over 6 rods
+RENDERTIME 1.266 s  engine=EEVEE sigma=haze(0.07000) samples=64 vol=128 out=stills/P1-mid-orbit--eevee.png
+ALIGNMENT: worst cap delta = 0.00 px  over 6 rods
+RENDERTIME 10.653 s  engine=CYCLES sigma=haze(0.07000) samples=128 vol=64 out=stills/P2-high-look-down--cycles.png
+ALIGNMENT: worst cap delta = 0.00 px  over 6 rods
+RENDERTIME 10.580 s  engine=CYCLES sigma=haze(0.07000) samples=128 vol=64 out=stills/P2-high-look-down--cycles.png
+ALIGNMENT: worst cap delta = 0.00 px  over 6 rods
+RENDERTIME 1.257 s  engine=EEVEE sigma=haze(0.07000) samples=64 vol=128 out=stills/P2-high-look-down--eevee.png
+ALIGNMENT: worst cap delta = 0.00 px  over 6 rods
+RENDERTIME 1.275 s  engine=EEVEE sigma=haze(0.07000) samples=64 vol=128 out=stills/P2-high-look-down--eevee.png
+ALIGNMENT: worst cap delta = 0.00 px  over 6 rods
+RENDERTIME 10.808 s  engine=CYCLES sigma=haze(0.07000) samples=128 vol=64 out=stills/P3-low-look-up--cycles.png
+ALIGNMENT: worst cap delta = 0.00 px  over 6 rods
+RENDERTIME 10.692 s  engine=CYCLES sigma=haze(0.07000) samples=128 vol=64 out=stills/P3-low-look-up--cycles.png
+ALIGNMENT: worst cap delta = 0.00 px  over 6 rods
+RENDERTIME 1.193 s  engine=EEVEE sigma=haze(0.07000) samples=64 vol=128 out=stills/P3-low-look-up--eevee.png
+ALIGNMENT: worst cap delta = 0.00 px  over 6 rods
+RENDERTIME 1.189 s  engine=EEVEE sigma=haze(0.07000) samples=64 vol=128 out=stills/P3-low-look-up--eevee.png
+ALIGNMENT: worst cap delta = 0.00 px  over 6 rods
+RENDERTIME 11.022 s  engine=CYCLES sigma=haze(0.07000) samples=128 vol=64 out=stills/P4-low-az315-occl--cycles.png
+ALIGNMENT: worst cap delta = 0.00 px  over 6 rods
+RENDERTIME 11.129 s  engine=CYCLES sigma=haze(0.07000) samples=128 vol=64 out=stills/P4-low-az315-occl--cycles.png
+ALIGNMENT: worst cap delta = 0.00 px  over 6 rods
+RENDERTIME 1.141 s  engine=EEVEE sigma=haze(0.07000) samples=64 vol=128 out=stills/P4-low-az315-occl--eevee.png
+ALIGNMENT: worst cap delta = 0.00 px  over 6 rods
+RENDERTIME 1.135 s  engine=EEVEE sigma=haze(0.07000) samples=64 vol=128 out=stills/P4-low-az315-occl--eevee.png
+=== the physically-right rod: the EMISSIVE CYLINDER IS the lamp
+ALIGNMENT: worst cap delta = 0.00 px  over 6 rods
+RENDERTIME 11.130 s  engine=CYCLES sigma=haze(0.07000) samples=128 vol=64 out=stills/P3-low-look-up--cycles-MESHLAMP.png
+ALIGNMENT: worst cap delta = 0.00 px  over 6 rods
+RENDERTIME 0.776 s  engine=EEVEE sigma=haze(0.07000) samples=64 vol=128 out=stills/P3-low-look-up--eevee-MESHLAMP.png
+=== the haze density DERIVED from three.js's FogExp2 (0.0156), for the record
+ALIGNMENT: worst cap delta = 0.00 px  over 6 rods
+RENDERTIME 10.550 s  engine=CYCLES sigma=matched(0.01561) samples=128 vol=64 out=measure/P3--cycles-SIGMA-MATCHED.png
+ALIGNMENT: worst cap delta = 0.00 px  over 6 rods
+RENDERTIME 1.274 s  engine=EEVEE sigma=matched(0.01561) samples=64 vol=128 out=measure/P3--eevee-SIGMA-MATCHED.png

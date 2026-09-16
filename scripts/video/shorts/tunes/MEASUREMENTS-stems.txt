@@ -1,0 +1,69 @@
+# Stem levels, measured with lib/stemlevels.sh (ffmpeg astats, RMS dB)
+# positive control: a file of digital silence reads -inf
+
+## 01-stack, tutti window (ss 38, t 8) — AFTER the bass fix
+01 Air.wav                       -33.737309
+02 Kick.wav                      -31.109110
+03 Bass.wav                      -27.379774
+04 Hi-hats.wav                   -39.213769
+05 Pizzicato strings.wav         -29.825382
+06 Marimba.wav                   -32.176046
+07 Tine electric piano.wav       -29.226014
+08 Choir.wav                     -30.672639
+09 French horns.wav              -26.104823
+10 Cello.wav                     -25.879180
+11 Glockenspiel.wav              -33.093459
+12 Trumpet.wav                   -30.589836
+13 Taiko.wav                     -28.382333
+
+## 02-rooms, each room measured in ITS OWN four-bar window — AFTER the fixes
+(windows: bossa 0+9.6, house 9.6+9.6, metal 19.2+9.6, quartet 28.8+9.6, lo-fi 38.4+12.6)
+02 Nylon guitar.wav            -25.6
+03 Upright bass.wav            -25.1
+04 Brushes.wav                 -32.1   (was -49.6 before the fix)
+05 Flute.wav                   -29.6   (was -32.6)
+06 Kit.wav                     -27.8
+07 Synth bass.wav              -34.7   (was -39.8, moved up an octave)
+08 Electric piano stabs.wav    -25.3
+09 String section.wav          -28.1
+10 Distortion guitar.wav       -20.5
+11 Picked bass.wav             -21.9
+12 Power kit.wav               -25.3
+13 Church organ.wav            -30.9
+14 Violin I.wav                -30.4
+15 Violin II.wav               -31.6   (was -38.3)
+16 Viola.wav                   -32.2
+17 Cello.wav                   -25.9
+18 Rhodes.wav                  -24.0
+19 Soft bass.wav               -26.6
+20 Brush kit.wav               -30.4   (was -41.5)
+21 Vibraphone.wav              -33.6   (was -43.3)
+
+## 06-cascade, whole file (each instrument plays 1/24 of the notes, so whole-file RMS is comparable between them)
+01 Air.wav                       -34.137100
+02 Grand piano.wav               -35.636554
+03 Glockenspiel.wav              -42.628799
+04 Nylon guitar.wav              -37.776246
+05 Flute.wav                     -36.434679
+06 Marimba.wav                   -35.820857
+07 Pizzicato strings.wav         -41.503300
+08 Clarinet.wav                  -40.483743
+09 Vibraphone.wav                -44.379775
+10 Harp.wav                      -37.943608
+11 Oboe.wav                      -41.312126
+12 Celesta.wav                   -41.265920
+13 Steel guitar.wav              -43.615193
+14 Trumpet.wav                   -37.002160
+15 Kalimba.wav                   -49.877011
+16 Recorder.wav                  -38.382834
+17 Music box.wav                 -39.010314
+18 Koto.wav                      -39.645884
+19 Piccolo.wav                   -38.342836
+20 Xylophone.wav                 -48.464908
+21 Harpsichord.wav               -43.874796
+22 Banjo.wav                     -41.402722
+23 Pan flute.wav                 -42.083874
+24 Tubular bells.wav             -43.037604
+25 Steel drums.wav               -40.940430
+26 Bowed bed.wav                 -32.231742
+27 Timpani.wav                   -34.427449

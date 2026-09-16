@@ -1,0 +1,36 @@
+V0-no-rods-control t=31  rodsShown=0 overflow=0  
+V0-no-rods-control t=101  rodsShown=0 overflow=0  
+V0-no-rods-control t=129  rodsShown=0 overflow=0  
+V0-no-rods-control t=131  rodsShown=0 overflow=0  
+V1-bass-thin-tall-lit-not-emitting t=31  rodsShown=1 overflow=0  [road2 z=-54.0 h=0.950 sx=1956 frac=0.319 on=false]
+V1-bass-thin-tall-lit-not-emitting t=101  rodsShown=1 overflow=0  [road2 z=-180.0 h=0.950 sx=1485 frac=0.227 on=true]
+V1-bass-thin-tall-lit-not-emitting t=129  rodsShown=1 overflow=0  [road2 z=-230.4 h=0.950 sx=1779 frac=0.242 on=true]
+V1-bass-thin-tall-lit-not-emitting t=131  rodsShown=0 overflow=0  
+V2-bass-thick-short-emitting t=31  rodsShown=1 overflow=0  [road2 z=-54.0 h=0.400 sx=1956 frac=0.128 on=false]
+V2-bass-thick-short-emitting t=101  rodsShown=1 overflow=0  [road2 z=-180.0 h=0.400 sx=1485 frac=0.088 on=true]
+V2-bass-thick-short-emitting t=129  rodsShown=1 overflow=0  [road2 z=-230.4 h=0.400 sx=1779 frac=0.097 on=true]
+V2-bass-thick-short-emitting t=131  rodsShown=0 overflow=0  
+V3-bass-and-tenor-thin-tall t=31  rodsShown=2 overflow=0  [road1 z=-54.5 h=0.880 sx=1165 frac=0.295 on=true] [road2 z=-54.0 h=0.880 sx=1956 frac=0.293 on=false]
+V3-bass-and-tenor-thin-tall t=101  rodsShown=2 overflow=0  [road1 z=-180.5 h=0.880 sx=946 frac=0.182 on=true] [road2 z=-180.0 h=0.880 sx=1485 frac=0.208 on=true]
+V3-bass-and-tenor-thin-tall t=129  rodsShown=2 overflow=0  [road1 z=-230.9 h=0.880 sx=1300 frac=0.192 on=true] [road2 z=-230.4 h=0.880 sx=1779 frac=0.223 on=true]
+V3-bass-and-tenor-thin-tall t=131  rodsShown=1 overflow=0  [road1 z=-230.9 h=0.880 sx=2467 frac=0.423 on=false]
+V4-bass-height-from-duration t=31  rodsShown=1 overflow=0  [road2 z=-54.0 h=0.891 sx=1956 frac=0.297 on=false]
+V4-bass-height-from-duration t=101  rodsShown=1 overflow=0  [road2 z=-180.0 h=0.891 sx=1485 frac=0.211 on=true]
+V4-bass-height-from-duration t=129  rodsShown=1 overflow=0  [road2 z=-230.4 h=1.150 sx=1779 frac=0.298 on=true]
+V4-bass-height-from-duration t=131  rodsShown=0 overflow=0  
+V5-bass-strong-colour-separation t=31  rodsShown=1 overflow=0  [road2 z=-54.0 h=0.700 sx=1956 frac=0.229 on=false]
+V5-bass-strong-colour-separation t=101  rodsShown=1 overflow=0  [road2 z=-180.0 h=0.700 sx=1485 frac=0.161 on=true]
+V5-bass-strong-colour-separation t=129  rodsShown=1 overflow=0  [road2 z=-230.4 h=0.700 sx=1779 frac=0.174 on=true]
+V5-bass-strong-colour-separation t=131  rodsShown=0 overflow=0  
+V6-bass-rod-replaces-disk t=31  rodsShown=1 overflow=0  [road2 z=-54.0 h=0.720 sx=1956 frac=0.236 on=false]
+V6-bass-rod-replaces-disk t=101  rodsShown=1 overflow=0  [road2 z=-180.0 h=0.720 sx=1485 frac=0.166 on=true]
+V6-bass-rod-replaces-disk t=129  rodsShown=1 overflow=0  [road2 z=-230.4 h=0.720 sx=1779 frac=0.180 on=true]
+V6-bass-rod-replaces-disk t=131  rodsShown=0 overflow=0  
+V7-bass-rods-standing-ahead t=31  rodsShown=4 overflow=0  [road2 z=-54.0 h=0.800 sx=1956 frac=0.265 on=false] [road2 z=-57.6 h=0.360 sx=1283 frac=0.057 on=true] [road2 z=-61.2 h=0.360 sx=1083 frac=0.038 on=true] [road2 z=-64.8 h=0.360 sx=953 frac=0.029 on=true]
+V7-bass-rods-standing-ahead t=101  rodsShown=4 overflow=0  [road2 z=-180.0 h=0.800 sx=1485 frac=0.186 on=true] [road2 z=-183.6 h=0.360 sx=1351 frac=0.050 on=true] [road2 z=-187.2 h=0.360 sx=1306 frac=0.036 on=true] [road2 z=-190.8 h=0.360 sx=1284 frac=0.028 on=true]
+V7-bass-rods-standing-ahead t=129  rodsShown=2 overflow=0  [road2 z=-230.4 h=0.800 sx=1779 frac=0.201 on=true] [road2 z=-237.6 h=0.360 sx=1319 frac=0.032 on=true]
+V7-bass-rods-standing-ahead t=131  rodsShown=2 overflow=0  [road2 z=-237.6 h=0.360 sx=1434 frac=0.047 on=true] [road2 z=-244.8 h=0.360 sx=1261 frac=0.024 on=true]
+V8-standing-ahead-at-V5-colour t=31  rodsShown=4 overflow=0  [road2 z=-54.0 h=0.800 sx=1956 frac=0.265 on=false] [road2 z=-57.6 h=0.360 sx=1283 frac=0.057 on=true] [road2 z=-61.2 h=0.360 sx=1083 frac=0.038 on=true] [road2 z=-64.8 h=0.360 sx=953 frac=0.029 on=true]
+V8-standing-ahead-at-V5-colour t=101  rodsShown=4 overflow=0  [road2 z=-180.0 h=0.800 sx=1485 frac=0.186 on=true] [road2 z=-183.6 h=0.360 sx=1351 frac=0.050 on=true] [road2 z=-187.2 h=0.360 sx=1306 frac=0.036 on=true] [road2 z=-190.8 h=0.360 sx=1284 frac=0.028 on=true]
+V8-standing-ahead-at-V5-colour t=129  rodsShown=2 overflow=0  [road2 z=-230.4 h=0.800 sx=1779 frac=0.201 on=true] [road2 z=-237.6 h=0.360 sx=1319 frac=0.032 on=true]
+V8-standing-ahead-at-V5-colour t=131  rodsShown=2 overflow=0  [road2 z=-237.6 h=0.360 sx=1434 frac=0.047 on=true] [road2 z=-244.8 h=0.360 sx=1261 frac=0.024 on=true]

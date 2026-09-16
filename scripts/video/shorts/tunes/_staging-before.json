@@ -1,0 +1,80 @@
+{
+ "tracks": [
+  {
+   "clips": [
+    {
+     "lengthBeats": 32,
+     "id": "0C603AE4-FAC0-48F3-96E7-48F21687A436",
+     "kind": "midi",
+     "startBeat": 0,
+     "name": "Fifth, opening",
+     "noteCount": 32
+    }
+   ],
+   "kind": "instrument",
+   "rmsDb": -46.896117377424645,
+   "automation": [],
+   "soloed": false,
+   "armed": false,
+   "instrument": "soundBank",
+   "fx": [],
+   "id": "451DACCF-F6AD-4960-8269-04F7FE2F9862",
+   "peakDb": -31.579795249634373,
+   "sends": [],
+   "volume": 0.85,
+   "pan": 0,
+   "name": "Strings",
+   "muted": false
+  },
+  {
+   "rmsDb": -57.21921754879722,
+   "clips": [
+    {
+     "id": "5C935B80-561B-4F4E-A5F5-B467C4A76E02",
+     "lengthBeats": 32,
+     "kind": "midi",
+     "startBeat": 0,
+     "name": "Metronome",
+     "noteCount": 16
+    }
+   ],
+   "kind": "instrument",
+   "automation": [],
+   "soloed": false,
+   "armed": false,
+   "instrument": "soundBank",
+   "fx": [],
+   "id": "90A3A085-425D-4296-8B2E-D9B27032C2C5",
+   "peakDb": -41.61395131152438,
+   "sends": [],
+   "volume": 0.62,
+   "pan": 0,
+   "name": "Click",
+   "muted": false
+  }
+ ],
+ "master": {
+  "volume": 1
+ },
+ "transport": {
+  "isRecording": false,
+  "loop": {
+   "enabled": false,
+   "endBeat": 16,
+   "startBeat": 0
+  },
+  "metronome": {
+   "enabled": false,
+   "countInBars": 1
+  },
+  "positionBeats": 0,
+  "tempoBPM": 216,
+  "punch": {
+   "enabled": false,
+   "outBeat": 4,
+   "inBeat": 0
+  },
+  "isPlaying": false
+ },
+ "markerCount": 0
+}

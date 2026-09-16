@@ -1,0 +1,150 @@
+{
+ "_comment": "LOCAL brand for the wordless music shorts. The shared claude-plugin/skills/demo-film/brand.json is UNTOUCHED -- every other film reads it. It is copied here only because its outro card says 'Narration is a synthetic voice', which is FALSE on a film with no narration at all: I found that by opening a frame of a finished film, not from any gate.",
+ "wordmark": "DAW PRO",
+ "sub": "T U N E S",
+ "byline": "with Claude Opus-5",
+ "holder": "DAW Pro",
+ "line2": "Every note written by hand, in DAW Pro",
+ "disclaimer": "No narration. No music-generation model: the app's own sound bank plays it.",
+ "palette": {
+  "bg": [
+   11,
+   13,
+   18
+  ],
+  "cyan": [
+   62,
+   230,
+   255
+  ],
+  "violet": [
+   180,
+   140,
+   255
+  ],
+  "dim": [
+   150,
+   158,
+   175
+  ],
+  "white": [
+   238,
+   242,
+   255
+  ]
+ },
+ "fonts": {
+  "sans": "/System/Library/Fonts/SFNS.ttf",
+  "mono": "/System/Library/Fonts/SFNSMono.ttf"
+ },
+ "channelSub": "A G E N T I C",
+ "tagline": "An AI that mixes \u2014 and measures whether it worked.",
+ "themes": {
+  "theory": {
+   "sub": "T H E O R Y",
+   "palette": {
+    "cyan": [
+     130,
+     205,
+     255
+    ],
+    "violet": [
+     180,
+     140,
+     255
+    ]
+   }
+  },
+  "classical": {
+   "sub": "C L A S S I C A L",
+   "palette": {
+    "cyan": [
+     255,
+     198,
+     122
+    ],
+    "violet": [
+     226,
+     170,
+     112
+    ]
+   }
+  },
+  "mastering": {
+   "sub": "M A S T E R I N G",
+   "palette": {
+    "cyan": [
+     255,
+     146,
+     92
+    ],
+    "violet": [
+     255,
+     96,
+     124
+    ]
+   }
+  },
+  "history": {
+   "sub": "H I S T O R Y",
+   "palette": {
+    "cyan": [
+     214,
+     192,
+     150
+    ],
+    "violet": [
+     178,
+     156,
+     206
+    ]
+   }
+  },
+  "quicktip": {
+   "sub": "6 0  S E C O N D S",
+   "palette": {
+    "cyan": [
+     118,
+     255,
+     196
+    ],
+    "violet": [
+     92,
+     222,
+     255
+    ]
+   }
+  },
+  "remix": {
+   "sub": "R E M I X",
+   "palette": {
+    "cyan": [
+     124,
+     240,
+     255
+    ],
+    "violet": [
+     255,
+     120,
+     220
+    ]
+   }
+  },
+  "tunes": {
+   "sub": "T U N E S",
+   "palette": {
+    "cyan": [
+     62,
+     230,
+     255
+    ],
+    "violet": [
+     180,
+     140,
+     255
+    ]
+   }
+  }
+ },
+ "_themes_comment": "Named overlays applied on top of the identity above. Only the accent colours and the sub-label move; the wordmark, the mark and the fonts never do, so a themed episode still reads as this channel."
+}

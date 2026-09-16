@@ -502,6 +502,13 @@ spec = dict(
     # `burst` silently degrades to a frozen still. The whole point of a burst is
     # that it is not a still.
     bursts=os.environ.get('SESSION_BURSTS') or f'{HERE}/bursts',
+  # A small live spectrum meter in the bottom-right, driven by the film's OWN
+  # audio: it moves under the narration and it moves under every demo, so a
+  # viewer can tell "this is playing" from "this is a still" without listening.
+  # The intro's bars are the same instrument at full size. It earns its corner
+  # in a film whose subject IS the spectrum -- the 49 Hz heartbeat lights the
+  # left three bars and nothing else, MEASURED (bands 0-6 at 1.0, 7-15 at 0.0).
+  meter="br",
   id="F1",
   title="Four waveforms, one whole track — no samples, no AI music",
   filename="DAW Pro Session - Four Waveforms",

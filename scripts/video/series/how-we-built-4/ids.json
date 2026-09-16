@@ -1,0 +1,94 @@
+{
+ "ids": {
+  "Pad": "CE9A694B-E806-4721-8A8E-ACC85E899B2B",
+  "Pad:clip": "060C2A76-9CF6-406D-B6F4-BF906CFAF589",
+  "Bass": "F4D9D896-496E-4B7A-9955-426E98B759C8",
+  "Bass:clip": "3E2180CB-3591-4BDA-A0BA-18733A5F2DD1",
+  "Drums": "07ECF9DC-6A45-48EF-9A08-CDE753216641",
+  "Drums:clip": "75790C0A-5F66-41D2-9315-1F0C0671F06D",
+  "Lead": "0C9E44E7-CCBA-4E4C-A918-CA0C208B68E8",
+  "Lead:clip": "207C1C4D-9D2E-40D7-B12A-42409785F63C"
+ },
+ "demo": {
+  "tracks": 4,
+  "notes": 318,
+  "tempoBPM": 100,
+  "names": [
+   "Pad",
+   "Bass",
+   "Drums",
+   "Lead"
+  ],
+  "effects": [
+   0,
+   0,
+   0,
+   0
+  ],
+  "sends": [
+   0,
+   0,
+   0,
+   0
+  ],
+  "master": 1
+ },
+ "render": {
+  "ditherApplied": false,
+  "bitDepth": 24,
+  "path": "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-4/audio/mix-full.wav",
+  "sampleRate": 48000,
+  "channels": 2,
+  "durationSeconds": 20
+ },
+ "layout": {
+  "editorFraction": 0.45,
+  "followPlayhead": false,
+  "pianoRollPPB": 32,
+  "auditionEnabled": true,
+  "sidebarWidth": 260,
+  "pianoRollRowHeight": 14,
+  "waveformNormalize": true,
+  "editorMaximized": false,
+  "waveformVerticalZoom": 1,
+  "rowHeight": 50,
+  "pianoRollMinimap": true,
+  "editorEscapeMountHits": 0,
+  "mixerInsertsCollapsed": false,
+  "humanizePanelClipId": null,
+  "humanizePanelVisible": false
+ },
+ "frame": {
+  "layoutMinHeight": 640,
+  "height": 900,
+  "y": 184,
+  "x": 0,
+  "width": 1600,
+  "minHeight": 672,
+  "minWidth": 1208
+ },
+ "banks": {
+  "banks": [
+   {
+    "supported": true,
+    "unsupportedReason": null,
+    "format": "dls",
+    "name": "General MIDI",
+    "builtin": true,
+    "source": "gm",
+    "sizeBytes": 1996068,
+    "path": "/System/Library/Components/CoreAudio.component/Contents/Resources/gs_instruments.dls"
+   },
+   {
+    "supported": true,
+    "unsupportedReason": null,
+    "name": "GeneralUser-GS",
+    "format": "sf2",
+    "builtin": false,
+    "source": "/Users/dsemenov/Library/Audio/Sounds/Banks/GeneralUser-GS.sf2",
+    "sizeBytes": 32319396,
+    "path": "/Users/dsemenov/Library/Audio/Sounds/Banks/GeneralUser-GS.sf2"
+   }
+  ]
+ }
+}

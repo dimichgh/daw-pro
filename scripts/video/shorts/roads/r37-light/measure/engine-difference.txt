@@ -1,0 +1,13 @@
+EEVEE vs CYCLES, same scene file, per pose (0-255 RGB):
+  P1-mid-orbit         RMS= 15.47  mean(E-C)=-11.53  max|d|= 194
+  P2-high-look-down    RMS= 13.90  mean(E-C)=-10.43  max|d|= 179
+  P3-low-look-up       RMS= 16.36  mean(E-C)=-12.66  max|d|= 208
+  P4-low-az315-occl    RMS= 15.98  mean(E-C)=-12.19  max|d|= 152
+
+MESH-EMISSION-AS-LAMP: does the engine light the haze from an emissive mesh?
+  cycles  haze patch beside the Lead rod: mean= 80.42  max= 101
+  eevee   haze patch beside the Lead rod: mean= 55.07  max=  57
+
+HAZE DENSITY: sigma matched to three.js FogExp2 (0.0156) vs stage haze (0.07)
+  cycles  matched mean= 37.99   haze mean= 67.76
+  eevee   matched mean= 32.56   haze mean= 55.11

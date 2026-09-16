@@ -247,6 +247,126 @@ def check_joins(film, joins):
            f"worst seam {worst:.4f} at t={where}s vs peak-to-inverted-peak control {ctrl:.4f}, ordinary {ref:.4f}")
 
 
+def lufs(path, ss=None, t=None):
+    """Integrated loudness of a file, or of a window inside one. None if ungated."""
+    pre = (["-ss", str(ss)] if ss is not None else []) + (["-t", str(t)] if t is not None else [])
+    out = ff(pre + ["-i", path, "-af", "ebur128=peak=true"])
+    # ⚠ Parse the SUMMARY, not the first "I:" -- the running per-frame reading
+    # at t=0 is gated silence and reports -70.0, a wrong number that looks real.
+    tail = out[out.rindex("Summary:"):] if "Summary:" in out else ""
+    m = re.search(r"I:\s*(-?[\d.]+)\s*LUFS", tail)
+    if not m:
+        return None
+    v = float(m.group(1))
+    return None if v <= -70.0 else v
+
+
+def half_pcm(film, start, dur):
+    """Mono float PCM of one A/B half, trimmed clear of assemble's 0.15 s fades."""
+    import numpy as np
+    pad = 0.2
+    d = max(0.2, dur - 2 * pad)
+    r = run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-ss", f"{start + pad:.3f}",
+             "-t", f"{d:.3f}", "-i", film, "-f", "f32le", "-ac", "1", "-ar", "48000", "-"],
+            binary=True)
+    return np.frombuffer(r.stdout, dtype="float32").astype("float64")
+
+
+def check_ab_separation(film, timeline):
+    """Did the A/B halves reach the viewer still SOUNDING DIFFERENT?
+
+    ⚠⚠ THIS GATE EXISTS BECAUSE A DOCUMENTED TRAP WITH NO GATE IS NOT FIXED.
+    `assemble.py` loudnorm-normalises EACH HALF of an A/B separately unless the
+    stage sets `normalize: false`. MEASURED on cut 1 of the compressor lesson,
+    three chapters shipped their entire demonstration flattened or inverted:
+
+        threshold+ratio  -8.90 LU raw  ->  +0.00 LU as shipped
+        attack           +9.60 LU raw  ->  -2.20 LU as shipped (INVERTED)
+        knee             -1.60 LU raw  ->  +0.00 LU as shipped
+
+    The `normalize=False` flag ALREADY EXISTED, added when this same mechanism
+    inverted the makeup A/B, and its docstring said so in capitals. Three later
+    chapters simply never set it, and nothing measured the result -- so every
+    gate passed on a film whose demonstrations demonstrated nothing.
+
+    ⭐ It is a COMPARISON, not a threshold: the film's delta is judged against
+    the SOURCE wavs' delta. A pair that genuinely does not differ (the
+    loudness-matched makeup take, -0.1 LU) passes, because nothing was lost.
+    """
+    if not os.path.exists(timeline):
+        return record("A/B separation", BROKE,
+                      f"no timeline sidecar at {os.path.basename(timeline)} "
+                      "(assemble.py writes it whenever a film has an A/B)")
+    tl = json.load(open(timeline))["abHalves"]
+    if not tl:
+        return record("A/B separation", OK, "no A/B stages in this film")
+
+    pairs, bad, rows = {}, [], []
+    for h in tl:
+        pairs.setdefault((h["stage"], h["cycle"]), {})[h["tag"]] = h
+    for (stage, cycle), p in sorted(pairs.items()):
+        if cycle != 0 or "BEFORE" not in p or "AFTER" not in p:
+            continue            # one cycle is enough; they are the same audio
+        b, a_ = p["BEFORE"], p["AFTER"]
+        src = [lufs(b["wav"]), lufs(a_["wav"])]
+        fil = [lufs(film, h["startSec"], round(h["endSec"] - h["startSec"], 3))
+               for h in (b, a_)]
+        if any(v is None for v in src + fil):
+            bad.append(f"{stage}: a half measured as gated silence")
+            continue
+        ds, df = src[0] - src[1], fil[0] - fil[1]
+        rows.append(f"{stage} src {ds:+.2f} -> film {df:+.2f} LU")
+
+        # ⚠⚠ A LEVEL COMPARISON CANNOT SEE TWO HALVES THAT ARE THE SAME AUDIO.
+        # MEASURED, on a real film: a stage whose BEFORE and AFTER both resolved
+        # to the SAME wav passed this check GREEN at +0.00 LU -- correctly, by
+        # its own logic, because identical halves genuinely do not differ in
+        # level. The demonstration never happened and every gate said ok. It was
+        # caught by a human reading timeline.json.
+        #
+        # `assemble.py` takes BEFORE from ab["before"] but AFTER from the
+        # stage's own `loop`, so pointing both at one file is a one-character
+        # spec mistake with no visible symptom -- only the badge changes.
+        #
+        # This also covers the case the level test is blind to by design: a pair
+        # deliberately level-matched (a beat-rate or timbre demo) differs by ~0 LU
+        # on purpose, so loudness can NEVER be evidence for it. Content can.
+        try:
+            import numpy as np
+            pa = half_pcm(film, b["startSec"], b["endSec"] - b["startSec"])
+            pb = half_pcm(film, a_["startSec"], a_["endSec"] - a_["startSec"])
+            n = min(len(pa), len(pb))
+            if n > 4800:
+                pa, pb = pa[:n], pb[:n]
+                sig = float(np.sqrt((pa ** 2).mean()))
+                dif = float(np.sqrt(((pa - pb) ** 2).mean()))
+                if sig > 1e-6:
+                    sep = 20 * np.log10(max(dif, 1e-12) / sig)
+                    rows[-1] += f" (content {sep:+.1f} dB)"
+                    # -40 dB apart is two renders of the same passage differing
+                    # only by codec noise: the same audio, played twice.
+                    if sep < -40.0:
+                        bad.append(f"{stage}: the two halves are the SAME AUDIO "
+                                   f"(difference {sep:.1f} dB below signal) -- "
+                                   f"check ab.before and the stage's loop are not "
+                                   f"the same file; the demonstration is not happening")
+        except Exception as e:
+            rows[-1] += f" (content check unavailable: {e})"
+        # Only judge pairs whose source halves ACTUALLY differ. Below 1 LU there
+        # is nothing for the normaliser to have destroyed.
+        if abs(ds) < 1.0:
+            continue
+        if abs(df) < 0.5:
+            bad.append(f"{stage}: source halves differ {ds:+.2f} LU but the film's "
+                       f"differ only {df:+.2f} -- the per-half loudnorm ate it "
+                       f"(set \"normalize\": false on this stage)")
+        elif (ds > 0) != (df > 0):
+            bad.append(f"{stage}: sign INVERTED, source {ds:+.2f} LU vs film "
+                       f"{df:+.2f} -- the quieter take is playing back louder")
+    record("A/B separation", OK if not bad else BAD,
+           "; ".join(rows) if not bad else "; ".join(bad))
+
+
 def check_content(film, manifest, base):
     """Transcribe the film back and score each stage against its OWN line and a
     DIFFERENT one. Without the second number the first proves nothing."""
@@ -264,9 +384,13 @@ def check_content(film, manifest, base):
     # 0.29 on a 27 s two-stage film that was in fact perfect. Refuse to score
     # rather than report a failure the film did not earn.
     if len(stages) < 3 or dur0 < 45:
+        # ⚠ THE ONLY BROKEN THAT A BUILD MAY SHIP THROUGH. It is tagged
+        # "not applicable" so a wrapper can tell "this film is too small to
+        # judge" apart from "the probe died" -- every OTHER BROKEN means the
+        # check did not run, and a check that did not run is not a pass.
         return record("content", BROKE,
-                      f"{len(stages)} narrated stages over {dur0:.0f}s -- too few/short for the "
-                      "cross-stage control to mean anything (need >=3 stages and >=45s)")
+                      f"not applicable: {len(stages)} narrated stages over {dur0:.0f}s -- too few/short "
+                      "for the cross-stage control to mean anything (need >=3 stages and >=45s)")
 
     def transcribe(path):
         b = uuid.uuid4().hex
@@ -341,6 +465,8 @@ def main():
     ap.add_argument("--film", required=True)
     ap.add_argument("--manifest", help="enables the transcribe-back content gate")
     ap.add_argument("--joins", help="comma-separated seconds where clips were concatenated")
+    ap.add_argument("--timeline", help="A/B timeline sidecar written by assemble.py "
+                                       "(default: <film>.timeline.json when present)")
     ap.add_argument("--target-lufs", type=float, default=None,
                     help="enforce an integrated-loudness target; omitted = report only")
     ap.add_argument("--tolerance", type=float, default=1.5)
@@ -356,6 +482,12 @@ def main():
         check_distinct_frames(a.film, tmp)
         check_audio_present(a.film)
         check_loudness(a.film, a.target_lufs, a.tolerance)
+        # Runs whenever the sidecar exists. A film with no A/B writes none and
+        # the gate is skipped; a film WITH an A/B that somehow lost its sidecar
+        # reports BROKE rather than quietly passing.
+        tlj = a.timeline or (a.film + ".timeline.json")
+        if a.timeline or os.path.exists(tlj):
+            check_ab_separation(a.film, tlj)
         if a.joins:
             check_joins(a.film, [float(x) for x in a.joins.split(",")])
         if a.manifest:

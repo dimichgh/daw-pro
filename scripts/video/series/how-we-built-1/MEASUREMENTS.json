@@ -1,0 +1,128 @@
+{
+ "swiftFiles": 462,
+ "swiftLines": 209766,
+ "testFiles": 594,
+ "testLines": 224005,
+ "tsLines": 15746,
+ "tsTestLines": 19973,
+ "gateScripts": 148,
+ "designDocs": 104,
+ "commits": 105,
+ "programLinesAll": 225512,
+ "testLinesAll": 243978,
+ "testsExceedSwift": true,
+ "testsExceedAll": true,
+ "modules": [
+  {
+   "name": "DAWCore",
+   "lines": 57149,
+   "files": 118,
+   "blurb": "the model \u2014 tracks, clips, notes, tempo"
+  },
+  {
+   "name": "DAWEngine",
+   "lines": 29944,
+   "files": 72,
+   "blurb": "makes the sound, in real time"
+  },
+  {
+   "name": "DAWControl",
+   "lines": 16991,
+   "files": 13,
+   "blurb": "the socket \u2014 every action as a message"
+  },
+  {
+   "name": "DAWApp",
+   "lines": 54758,
+   "files": 101,
+   "blurb": "what you see and click"
+  },
+  {
+   "name": "DAWAppKit",
+   "lines": 36923,
+   "files": 127,
+   "blurb": "the controls the window is built from"
+  },
+  {
+   "name": "AIServices",
+   "lines": 14001,
+   "files": 31,
+   "blurb": "talks to the AI providers"
+  }
+ ],
+ "commands": 215,
+ "tools": 220,
+ "toolsByGrep": 223,
+ "toolGrepOvercount": 3,
+ "firstCommit": "2026-07-06",
+ "lastCommit": "2026-09-04",
+ "spanDays": 60,
+ "convergence": {
+  "button": {
+   "file": "Sources/DAWApp/TransportBar.swift",
+   "line": 236,
+   "text": "store.transport.isPlaying ? store.stop() : store.play()"
+  },
+  "socket": {
+   "file": "Sources/DAWControl/Commands.swift",
+   "line": 841,
+   "text": "case \"transport.play\":"
+  },
+  "shared": {
+   "file": "Sources/DAWCore/ProjectStore.swift",
+   "line": 811,
+   "text": "public func play() {"
+  },
+  "engine": {
+   "file": "Sources/DAWCore/ProjectStore.swift",
+   "line": 816,
+   "text": "engine.startPlayback(transport)"
+  }
+ },
+ "demo": {
+  "tempoBPM": 100,
+  "beats": 32,
+  "tracks": 5,
+  "noteCounts": {
+   "Drums": 96,
+   "Bass": 32,
+   "Keys": 48,
+   "Pad": 24,
+   "Lead": 28
+  },
+  "notes": 228
+ },
+ "driveCommands": 22,
+ "_commands": {
+  "swiftFiles": "find Sources -name '*.swift' | wc -l",
+  "swiftLines": "find Sources -name '*.swift' -exec cat {} + | wc -l",
+  "testFiles": "find Tests -name '*.swift' | wc -l",
+  "testLines": "find Tests -name '*.swift' -exec cat {} + | wc -l",
+  "tsLines": "find mcp-server/src -name '*.ts' -exec cat {} + | wc -l",
+  "tsTestLines": "find mcp-server/test -name '*.ts' -exec cat {} + | wc -l",
+  "gateScripts": "ls scripts/gates/*.mjs | wc -l",
+  "designDocs": "ls docs/research/*.md | wc -l",
+  "commits": "git log --oneline | wc -l",
+  "mod:DAWCore:lines": "find Sources/DAWCore -name '*.swift' -exec cat {} + | wc -l",
+  "mod:DAWCore:files": "find Sources/DAWCore -name '*.swift' | wc -l",
+  "mod:DAWEngine:lines": "find Sources/DAWEngine -name '*.swift' -exec cat {} + | wc -l",
+  "mod:DAWEngine:files": "find Sources/DAWEngine -name '*.swift' | wc -l",
+  "mod:DAWControl:lines": "find Sources/DAWControl -name '*.swift' -exec cat {} + | wc -l",
+  "mod:DAWControl:files": "find Sources/DAWControl -name '*.swift' | wc -l",
+  "mod:DAWApp:lines": "find Sources/DAWApp -name '*.swift' -exec cat {} + | wc -l",
+  "mod:DAWApp:files": "find Sources/DAWApp -name '*.swift' | wc -l",
+  "mod:DAWAppKit:lines": "find Sources/DAWAppKit -name '*.swift' -exec cat {} + | wc -l",
+  "mod:DAWAppKit:files": "find Sources/DAWAppKit -name '*.swift' | wc -l",
+  "mod:AIServices:lines": "find Sources/AIServices -name '*.swift' -exec cat {} + | wc -l",
+  "mod:AIServices:files": "find Sources/AIServices -name '*.swift' | wc -l",
+  "commands": "grep -o 'allCommands.count == [0-9]*' Tests/DAWControlTests/RenderCommandTests.swift | head -1",
+  "tools": "grep -o 'tools.length, [0-9]*' mcp-server/test/integration.test.ts | head -1",
+  "toolsByGrep": "grep -c 'registerTool(' mcp-server/src/server.ts",
+  "firstCommit": "git log --reverse --format=%ad --date=short | head -1",
+  "lastCommit": "git log -1 --format=%ad --date=short",
+  "where:Sources/DAWApp/TransportBar.swift:store.transport.isPlaying ? store.stop() : store.play()": "grep -n 'store.transport.isPlaying ? store.stop() : store.play()' Sources/DAWApp/TransportBar.swift | head -1",
+  "where:Sources/DAWControl/Commands.swift:case \"transport.play\":": "grep -n 'case \"transport.play\":' Sources/DAWControl/Commands.swift | head -1",
+  "where:Sources/DAWCore/ProjectStore.swift:public func play() {": "grep -n 'public func play() {' Sources/DAWCore/ProjectStore.swift | head -1",
+  "where:Sources/DAWCore/ProjectStore.swift:engine.startPlayback(transport)": "grep -n 'engine.startPlayback(transport)' Sources/DAWCore/ProjectStore.swift | head -1"
+ }
+}

@@ -1,0 +1,13 @@
+import { open, cmd, close } from "../../session/build.mjs";
+await open();
+await cmd("transport.seek", { beats: 0 });
+const m = (await cmd("project.overview", {})).master.volume;
+await cmd("mixer.setMasterVolume", { volume: 0 });
+await cmd("transport.play", {});
+console.log("playing");
+await new Promise(r => setTimeout(r, 9000));
+const ov = await cmd("project.overview", {});
+console.log("positionBeats after 9s:", ov.transport.positionBeats, "isPlaying", ov.transport.isPlaying);
+await cmd("transport.stop", {}); await cmd("transport.seek", { beats: 0 });
+await cmd("mixer.setMasterVolume", { volume: m });
+await close(); process.exit(0);

@@ -1,0 +1,23 @@
+{
+ "results": {
+  "together": {
+   "path": "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-4/audio/flam-together.wav",
+   "offsetBeats": 0,
+   "offsetSeconds": 0
+  },
+  "apart": {
+   "path": "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-4/audio/flam-apart.wav",
+   "offsetBeats": 0.14222222222222222,
+   "offsetSeconds": 0.08533333333333333
+  }
+ },
+ "offsetSeconds": 0.08533333333333333,
+ "latencySamples": 4096,
+ "sampleRate": 48000,
+ "bpm": 100,
+ "pitch": 76,
+ "velocity": 110,
+ "hits": 6,
+ "program": 115,
+ "programName": "Woodblock"
+}

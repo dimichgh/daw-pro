@@ -1,0 +1,55 @@
+
+V1-bass-thin-tall-lit-not-emitting
+  rods/bars that appear at all: 6  (born inside the window: 4)
+  frames with anything visible: 434/480
+   z= -219.63  visible 0.20s  ON SCREEN 0.00s  t 124.00..124.17
+   z= -223.23  visible 2.17s  ON SCREEN 1.33s  t 124.03..126.17
+   z= -226.83  visible 2.17s  ON SCREEN 1.33s  t 126.03..128.17
+   z= -230.43  visible 2.80s  ON SCREEN 1.33s  t 128.03..130.80
+   z= -237.63  visible 3.67s  ON SCREEN 2.87s  t 132.03..135.67
+   z= -244.83  visible 3.97s  ON SCREEN 3.97s  t 136.03..139.97
+  MEAN on-screen life (born in window): 2.38 s
+
+V1h-thin-tall-with-a-hole
+  rods/bars that appear at all: 6  (born inside the window: 4)
+  frames with anything visible: 434/480
+   z= -219.63  visible 0.20s  ON SCREEN 0.00s  t 124.00..124.17
+   z= -223.23  visible 2.17s  ON SCREEN 1.33s  t 124.03..126.17
+   z= -226.83  visible 2.17s  ON SCREEN 1.33s  t 126.03..128.17
+   z= -230.43  visible 2.80s  ON SCREEN 1.33s  t 128.03..130.80
+   z= -237.63  visible 3.67s  ON SCREEN 2.87s  t 132.03..135.67
+   z= -244.83  visible 3.97s  ON SCREEN 3.97s  t 136.03..139.97
+  MEAN on-screen life (born in window): 2.38 s
+
+V4-bass-height-from-duration
+  rods/bars that appear at all: 6  (born inside the window: 4)
+  frames with anything visible: 433/480
+   z= -219.63  visible 0.20s  ON SCREEN 0.00s  t 124.00..124.17
+   z= -223.23  visible 2.17s  ON SCREEN 1.33s  t 124.03..126.17
+   z= -226.83  visible 2.17s  ON SCREEN 1.33s  t 126.03..128.17
+   z= -230.43  visible 2.80s  ON SCREEN 1.33s  t 128.03..130.80
+   z= -237.63  visible 3.63s  ON SCREEN 2.83s  t 132.03..135.63
+   z= -244.83  visible 3.97s  ON SCREEN 3.97s  t 136.03..139.97
+  MEAN on-screen life (born in window): 2.37 s
+
+V8-standing-ahead-at-V5-colour
+  rods/bars that appear at all: 6  (born inside the window: 2)
+  frames with anything visible: 480/480
+   z= -219.63  visible 0.20s  ON SCREEN 0.00s  t 124.00..124.17
+   z= -223.23  visible 2.20s  ON SCREEN 1.37s  t 124.00..126.17
+   z= -226.83  visible 4.20s  ON SCREEN 3.37s  t 124.00..128.17
+   z= -230.43  visible 6.87s  ON SCREEN 5.37s  t 124.00..130.83
+   z= -237.63  visible 10.53s  ON SCREEN 9.73s  t 125.17..135.67
+   z= -244.83  visible 10.83s  ON SCREEN 10.83s  t 129.17..139.97
+  MEAN on-screen life (born in window): 10.28 s
+
+V9-horizontal-duration-bar
+  rods/bars that appear at all: 6  (born inside the window: 4)
+  frames with anything visible: 480/480
+   z= -219.63  visible 0.37s  ON SCREEN 0.37s  t 124.00..124.33  maxLen 3.6 units = 2.00s of road
+   z= -223.23  visible 2.33s  ON SCREEN 2.33s  t 124.03..126.33  maxLen 3.6 units = 2.00s of road
+   z= -226.83  visible 2.33s  ON SCREEN 2.33s  t 126.03..128.33  maxLen 3.6 units = 2.00s of road
+   z= -230.43  visible 4.33s  ON SCREEN 4.33s  t 128.03..132.33  maxLen 7.2 units = 4.00s of road
+   z= -237.63  visible 4.33s  ON SCREEN 4.33s  t 132.03..136.33  maxLen 7.2 units = 4.00s of road
+   z= -244.83  visible 3.97s  ON SCREEN 3.97s  t 136.03..139.97  maxLen 0.0 units = 0.01s of road
+  MEAN on-screen life (born in window): 3.74 s

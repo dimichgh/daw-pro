@@ -146,7 +146,12 @@ differently, and the TTS reads them better.
 P=${CLAUDE_PLUGIN_ROOT}
 V=$P/.venv/bin
 
-$V/omlx serve --port 8000 &        # leave running; see the warning below
+# ⚠️ PICK YOUR OWN PORT. Port 8000 is the default and therefore the collision.
+# Two film builds have now killed each other's speech server on it, in both
+# directions. Derive a port nobody else will pick and carry it in OMLX_BASE.
+export OMLX_PORT=$((8000 + ($$ % 900) + 1))     # 8001-8900, yours
+export OMLX_BASE=http://127.0.0.1:$OMLX_PORT
+$V/omlx serve --port $OMLX_PORT & OMLX_PID=$!   # remember the PID YOU started
 
 # 1. narration — one wav per stage id
 OUT_DIR=./vo MANIFEST=./manifest.json LANG_CODE=en $V/python $P/scripts/narrate.py
@@ -161,15 +166,26 @@ $V/python $P/scripts/verify.py --film ./film.mp4 --manifest ./manifest.json
 ```
 
 ⚠️ **Stop the speech server when you finish.** It holds tens of gigabytes while
-reporting about 1 GB resident. Find it **by port, never by name**, and kill that
-pid only:
+reporting about 1 GB resident. Kill **the pid you started**, and prove the port
+went free afterwards — a no-op kill is silent:
 
 ```bash
-lsof -nP -iTCP:8000 -sTCP:LISTEN     # add -t for just the pid
+kill $OMLX_PID && lsof -nP -iTCP:$OMLX_PORT -sTCP:LISTEN   # must print nothing
 ```
 
-If something already owns port 8000, serve elsewhere and set
-`OMLX_BASE=http://127.0.0.1:<port>`.
+⛔⛔ **NEVER KILL A SPEECH SERVER YOU DID NOT START.** Identifying it by port
+proves *what* it is, not *whose* it is — and that distinction has cost real
+work twice. A sibling build's server looks exactly like a leftover of your own.
+If the pid on your port is not `$OMLX_PID`, **leave it alone**, move to another
+port, and say so in your report.
+
+⚠️ **What it costs when this goes wrong is not obvious.** Synthesis fails
+loudly, which is fine. The content check does not: with the server gone
+`verify.py` reports **BROKEN**, and the build does **not** block on BROKEN — so
+a run silently drops from "8 checks ok" to "7 ok + 1 BROKEN" and still reports
+success. **A BROKEN content check is not a passing content check.** If a build
+lost its server partway, re-run `verify.py` with a live one before believing
+any result from it.
 
 ---
 
@@ -232,7 +248,34 @@ that each shipped as a defect once:
 streams and duration · **A/V drift** (a padded concat join) · **distinct
 frames** (a stuck slideshow) · **audio present** throughout · **loudness and
 true peak** · **join seams** against a peak-to-inverted-peak control ·
-**transcribe-back** scored against its own script *and a different stage's*.
+**A/B separation** (below) · **transcribe-back** scored against its own script
+*and a different stage's*.
+
+⚠️⚠️ **A/B separation is the newest check and it exists because a DOCUMENTED
+TRAP WITH NO GATE IS NOT FIXED.** `assemble.py` normalises each half of an A/B
+separately unless the stage opts out; measured on one film, three chapters
+shipped at `+0.00`, `+0.00` and `−2.20 LU` where their sources differed by
+`−8.90`, `−1.60` and `+9.60`. The opt-out flag already existed *and its
+docstring warned about exactly this in capitals* — three later chapters simply
+never set it, and nothing measured the result. The check is a **comparison, not
+a threshold**: it judges the film's delta against the SOURCE wavs' delta, so a
+pair that genuinely does not differ still passes.
+
+⚠️⚠️ **AND IT CHECKS THE AUDIO, NOT ONLY THE LEVEL — because a level test
+cannot see two halves that are the SAME FILE.** MEASURED on a real film: a stage
+whose BEFORE and AFTER both resolved to one wav passed GREEN at `+0.00 LU`,
+correctly by the level test's own logic, because identical halves genuinely do
+not differ in loudness. **The demonstration never happened and every gate said
+ok**; a human reading `timeline.json` caught it. `assemble.py` takes BEFORE from
+`ab["before"]` and AFTER from the stage's own `loop`, so pointing both at one
+file is a one-character spec mistake whose only symptom is that the badge
+changes. The check now also fails when the halves are the same audio (>40 dB
+below signal), and reports a content figure for every pair — which is the ONLY
+evidence available for a deliberately level-matched comparison (a beat-rate or
+timbre demo), where loudness can never be evidence at all. It reads a
+`.timeline.json`
+sidecar the assembler writes, so it measures the **deliverable**, not the work
+dir. Proven red on a flattened pair AND on an inverted one.
 
 ⭐ **Every check that could pass by doing nothing carries a positive control,
 and a check whose control fails reports `BROKEN`, not `ok`.** Two of these were
@@ -269,3 +312,132 @@ adjusted, show the panel and the control, as a person doing it would.
 
 ⭐ **If a difference is subtle, say so.** A viewer who is told to expect a small
 change hears it; a viewer promised a dramatic one hears a broken video.
+
+---
+
+## ⭐⭐ THE HOUSE STANDARD FOR A LESSON (adopted 2026-09-05)
+
+The user watched the compressor lesson, said the format was right, and asked for
+it to be the standard for every film that gets re-generated and every new one.
+The worked example is `docs/research/design-b3-recut.md`; this is the method.
+
+### Length is decided by the explanation, not the clock
+
+> *"The time is not a hard constraint, the quality is what should define how much
+> time we need for learning."* — the user, 2026-09-05
+
+Let a lesson run as long as a balanced explanation needs. **If something has to
+go, cut a demonstration — never the introduction.** The compressor lesson runs
+10:07 and is better for it.
+
+### Explainability is the goal; correctness is only the floor
+
+> *"re-do with focus on explainability and quality, not fixed time, use all your
+> nice tools and screen captures to make it better"* — the user, 2026-09-05
+
+⭐ **Use the visual toolset generously.** manim for a mechanism or a curve,
+matplotlib for a set of measurements, screen captures for the app doing the
+actual work, and `scripts/video/screenrec/` (ScreenCaptureKit, built 2026-09-05)
+for anything that MOVES — a control being dragged, a playhead sweeping. ⚠️ A
+headless `captureUI` still photographs at ~3.5 fps and cannot film motion; that
+is the ONLY reason to reach for the recorder, and it stays the exception. ⚠️ **A static frame with a voice over it is the failure mode** — if
+a passage asserts something over a still, build the picture instead. A chapter
+that is correct but that a novice could not follow is not finished.
+
+### Open for a novice, every time
+
+Assume someone learning the subject who has never used the control. Before any
+demonstration: **what it does · why you would want that · how the demo will
+work.** ⚠️ Never open as though continuing from something the viewer missed —
+the first cut began "This is a compressor…" and read as the second half of a
+video that does not exist. Define each term of art in plain words at first use,
+in **every** chapter, not just the opening one.
+
+### ⚠️⚠️ Check that what you claim is audible CAN BE HEARD
+
+A viewer reported hearing no difference in two chapters. Both complaints were
+measured afterwards and **both were correct, and neither was a speaker fault.**
+
+⭐⭐ **A DIFFERENCE IN dB IS NOT A DIFFERENCE YOU CAN HEAR. Check the ABSOLUTE
+LEVEL the difference lives at, not just its size.** One chapter's settings
+differed by 11.5 dB and were inaudible, because the difference lived at −39.9 vs
+−51.5 dBFS — 25–35 dB below the film's own level, under a laptop speaker's floor.
+
+⭐ **Ask whether the effect is BOUNDED before you shoot a chapter about it.** The
+other chapter's difference was capped by the plugin's own arithmetic at ~2.85 dB
+against a ~1 dB loudness JND: **no signal and no setting could ever have made it
+audible**, and that was derivable from the source in minutes.
+
+In order of preference:
+
+1. **Fix the source material.** Ducking is heard on something that *sits under*
+   the hits, so a held pad moved that chapter's information up out of the floor.
+2. **Carry it visually** — see the marker below.
+3. **Say plainly that it cannot be heard, and make that the lesson** ("a soft
+   knee is called gentle because it is gentle"). ⚠️ Never soften this into
+   "listen closely" and never imply the viewer's ears or speakers are at fault.
+
+**Headphones get a courtesy card, never a gate.** The visuals must carry it.
+
+### ⚠️⚠️ Two mechanical traps that have now cost four films between them
+
+**1. A CARD MUST BE ON SCREEN WHEN THE WORDS THAT READ ITS VALUE ARE SPOKEN —
+and the still timer is NOT "evenly spread".** It is
+`n = round(total / cut); each = total / n`, with `holdLast` clamping the list.
+Guessing at this put a drum grid under the words "this is the lead melody", a
+chart off screen while its numbers were read, and a card on screen 18 seconds
+before the value it carries. ⭐ **The only reliable check is to pull the frame at
+the moment the number is spoken and look at it** — use `silencedetect` to find
+where each phrase actually runs. No gate sees this.
+
+**2. A SPEECH-SERVER STALL IS NOT ABOUT LENGTH — and the retracted version of
+this rule is a better lesson than the rule was.** A ~1,500-char stage once hung
+Whisper for 20 minutes at 0 % CPU, ignored SIGTERM and needed `kill -9`. That
+looked conclusive: it was the longest narration in the film and the only one that
+hung, so "cap a stage at ~1,100 characters" was written down as a law. ⭐ **It was
+FALSE.** Re-synthesising a 1,432-char text of the same shape on a quiet machine:
+**38 s to speak, 1.0 s to transcribe.** The length was innocent; the stall was
+resource contention.
+
+⚠️⚠️ **THE SHAPE TO REMEMBER: a stall hands you a correlation and no mechanism,
+and the biggest item is the most tempting thing to blame.** One confirming
+instance, no control, and it was nearly installed as a rule that would have
+shortened every future stage for nothing. **Do not write a law from a single
+observation you have not tried to falsify.**
+
+If a stage stalls: `lsof -nP -iTCP:$OMLX_PORT -sTCP:LISTEN` to see who is
+there. **Kill it only if the pid is `$OMLX_PID` — the one you started.** Then
+re-run the same command to prove the port is free — **a no-op kill is silent.**
+`kill -9` only if SIGTERM is ignored. Never `pkill`/`pgrep`; this machine runs
+other Python servers, and one of them may be another film build's.
+
+### The attention marker — say WHEN to listen and WHERE
+
+A playhead sweeping a **measured** chart at **real time** against the audio the
+viewer is hearing, with the listen-windows shaded. ⚠️ The shaded windows are
+**DERIVED from where the settings actually differ**, never chosen by eye — done
+that way, the unshaded slivers land exactly on the moments where both settings
+behave identically and there is nothing to hear. ⚠️ The animation's `run_time`
+MUST equal the span of audio laid under it; a playhead on the wrong instant is
+worse than no marker. Have the scene PRINT its sweep offsets and use those.
+
+### Charts are MEASURED, not drawn
+
+Divide the processed render by the dry one and plot the result. A hand-drawn
+exponential looks identical to a viewer and is a lie in a film whose premise is
+predict-then-measure. State the prediction and the measurement side by side —
+one of ours predicted 1.5625 dB where the render measured 1.52.
+
+⚠️ manim on this machine has **no LaTeX**: `Axes(include_numbers=True)` renders
+through MathTex and crashes — place tick labels by hand as `Text`. A measurement
+chart that refuses to say what its own scale is shipped in the first render of
+both scenes. ⚠️ `Text("")` has no points and silently collapses a
+`VGroup.arrange` into one overlapping stack — space with `buff`.
+
+### ⚠️⚠️ `normalize: false` on any A/B whose level difference IS the lesson
+
+`assemble.py` loudnorm-normalises **each half of an A/B separately** by default.
+Three chapters shipped their entire demonstration flattened or inverted before
+anyone measured it. **`check_ab_separation` in `verify.py` now gates this** — but
+set the flag deliberately rather than waiting for the gate to catch you, and
+pre-gain the pair with ONE shared static gain so the relative levels survive.

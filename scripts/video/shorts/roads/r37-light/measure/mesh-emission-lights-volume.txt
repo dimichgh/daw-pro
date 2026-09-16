@@ -1,0 +1,13 @@
+Does the engine light anything from an EMISSIVE MESH? mean RGB 0-255
+
+  haze beside Lead shaft
+    cycles  mesh-as-lamp=  86.51   point-lamp CONTROL=  92.22
+    eevee   mesh-as-lamp=  54.51   point-lamp CONTROL=  78.16
+
+  floor under Lead rod
+    cycles  mesh-as-lamp=  87.21   point-lamp CONTROL=  82.82
+    eevee   mesh-as-lamp=  58.76   point-lamp CONTROL=  64.63
+
+  far corner (ambient ref)
+    cycles  mesh-as-lamp=  66.63   point-lamp CONTROL=  66.60
+    eevee   mesh-as-lamp=  54.29   point-lamp CONTROL=  55.16

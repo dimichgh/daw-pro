@@ -1,0 +1,113 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>ROADS — live look tuning</title>
+<!--
+  ⭐ THE PREVIEW DRIVES road.html ITSELF, in an iframe, through window.__setLook.
+  It does NOT re-implement the scene. A preview that forks the renderer tunes
+  something you do not ship, and every value read off it would be a guess about
+  the real thing.
+
+  Serve it (module imports will not load over file://):
+      cd scripts/video/shorts/roads && python3 -m http.server 8765
+      open http://127.0.0.1:8765/lib/preview.html
+  It loads 00-sample/out/payload.json by default; ?payload=<url> overrides.
+-->
+<style>
+  body { margin:0; background:#0b0d12; color:#dfe6f2; font:13px ui-monospace,monospace;
+         display:flex; height:100vh; overflow:hidden }
+  #stage { flex:0 0 auto; padding:12px }
+  iframe { width:405px; height:720px; border:1px solid #2a3140; background:#000 }
+  #panel { flex:1; padding:16px 20px; overflow:auto }
+  h1 { font-size:15px; margin:0 0 4px; letter-spacing:.08em }
+  .sub { color:#7f8 da3; color:#7f8da3; margin-bottom:14px }
+  .row { margin:9px 0 }
+  label { display:inline-block; width:150px; color:#9fb0c8 }
+  input[type=range] { width:230px; vertical-align:middle }
+  .v { display:inline-block; width:58px; text-align:right; color:#ffd9a0 }
+  #json { width:100%; height:120px; margin-top:14px; background:#11141c; color:#bfe6a0;
+          border:1px solid #2a3140; font:12px ui-monospace,monospace; padding:8px }
+  button { background:#1b2230; color:#dfe6f2; border:1px solid #35405a; padding:6px 12px;
+           margin-right:8px; cursor:pointer }
+  .note { color:#6f7d93; margin-top:10px; line-height:1.5 }
+</style>
+<div id="stage"><iframe id="f" src="road.html"></iframe></div>
+<div id="panel">
+  <h1>ROADS — live look tuning</h1>
+  <div class="sub">drives road.html through __setLook · values here are the values the film gets</div>
+  <div id="rows"></div>
+  <div class="row" style="margin-top:16px">
+    <button id="play">play / pause</button>
+    <button id="copy">copy look JSON</button>
+  </div>
+  <textarea id="json" readonly></textarea>
+  <div class="note">Paste the JSON into <code>song.py</code>'s <code>"look"</code>, or hand it to
+  <code>lib/ladder.sh &lt;name&gt; '&lt;json&gt;'</code> to render a full rung.</div>
+</div>
+<script type="module">
+const CTL = [
+  ['overhead',       0,   3,   0.05, 0.80],
+  ['bloomStrength',  0,   2,   0.05, 0.55],
+  ['bloomThreshold', 0,   1,   0.01, 0.82],
+  ['arcG',           0,  12,   0.1,  2.80],
+  ['afterDecay',     0.1, 6,   0.1,  1.60],
+  ['afterGain',      0,   2,   0.05, 0.85],
+  ['exposure',       0.2, 2,   0.05, 0.85],
+  ['idleFade',       0.05, 2,  0.05, 0.45],
+];
+const look = {}; for (const [k,,,,d] of CTL) look[k] = d;
+const rows = document.getElementById('rows');
+const out  = document.getElementById('json');
+const f    = document.getElementById('f');
+const paint = () => out.value = JSON.stringify(look);
+
+for (const [k, lo, hi, st, d] of CTL) {
+  const r = document.createElement('div'); r.className = 'row';
+  r.innerHTML = `<label>${k}</label><input type=range min=${lo} max=${hi} step=${st} value=${d}>
+                 <span class=v>${d}</span>`;
+  const [inp, span] = [r.querySelector('input'), r.querySelector('.v')];
+  inp.oninput = () => {
+    look[k] = parseFloat(inp.value); span.textContent = inp.value; paint();
+    // ⚠ arcG changes GEOMETRY, not just a uniform, so it needs a re-frame to
+    // be seen -- __setLook re-renders the current t for exactly this reason.
+    f.contentWindow.__setLook && f.contentWindow.__setLook({ [k]: look[k] });
+  };
+  rows.appendChild(r);
+}
+paint();
+
+// time scrubber
+const tr = document.createElement('div'); tr.className = 'row';
+tr.innerHTML = `<label>t (seconds)</label><input type=range min=0 max=13.8 step=0.0333 value=0>
+                <span class=v>0.00</span>`;
+rows.appendChild(tr);
+const [tin, tsp] = [tr.querySelector('input'), tr.querySelector('.v')];
+const at = t => { tsp.textContent = t.toFixed(2); f.contentWindow.__frame && f.contentWindow.__frame(t); };
+tin.oninput = () => at(parseFloat(tin.value));
+
+let playing = false, raf = 0, t0 = 0, base = 0;
+document.getElementById('play').onclick = () => {
+  playing = !playing;
+  if (playing) { t0 = performance.now(); base = parseFloat(tin.value);
+    const step = () => { if (!playing) return;
+      let t = base + (performance.now() - t0) / 1000; if (t > 13.8) { t = 0; base = 0; t0 = performance.now(); }
+      tin.value = t; at(t); raf = requestAnimationFrame(step); };
+    step();
+  } else cancelAnimationFrame(raf);
+};
+document.getElementById('copy').onclick = () => navigator.clipboard.writeText(out.value);
+
+// ⚠ the scene only exposes __init once its module has run; poll for __ready
+const url = new URLSearchParams(location.search).get('payload')
+          || '../00-sample/out/payload.json';
+f.onload = async () => {
+  const P = await (await fetch(url)).json();
+  P.look = { ...(P.look || {}), ...look };
+  const w = f.contentWindow;
+  const t = setInterval(() => {
+    if (!w.__init) return;
+    clearInterval(t); w.__init(P);
+    const r = setInterval(() => { if (w.__ready) { clearInterval(r); at(0); }
+                                  if (w.__err) { clearInterval(r); alert(w.__err); } }, 60);
+  }, 60);
+};
+</script>

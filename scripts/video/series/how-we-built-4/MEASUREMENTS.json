@@ -1,0 +1,125 @@
+{
+ "plantGreenBeforeTests": 4,
+ "plantGreenAfterTests": 4,
+ "plantTests": 4,
+ "plantIssues": 5,
+ "plantErrors": [
+  96,
+  256,
+  256,
+  4096
+ ],
+ "plantMixValue": 0.5,
+ "plantRedTests": [
+  "IN THE MIX: PDC turns a ~85 ms flam into one coherent transient",
+  "THE PIN: a latent hosted AU insert is compensated to sample-exact alignment"
+ ],
+ "plantGreenTests": [
+  "NEGATIVE CONTROL: a 0-latency hosted AU (AULowpass) gets no compensation at all",
+  "POSITIVE CONTROL + SURVEY: every render makes signal; dry onset is exactly the impulse frame"
+ ],
+ "plantRedCount": 2,
+ "plantGreenCount": 2,
+ "pdcOffFrames": [
+  4800,
+  8896
+ ],
+ "pdcOffAmps": [
+  0.5,
+  0.49999997
+ ],
+ "pdcOnAmps": [
+  0.0,
+  1.0
+ ],
+ "pdcGapSamples": 4096,
+ "pdcGapMs": 85.333,
+ "plantFile": "Sources/DAWEngine/PlaybackGraph.swift",
+ "plantLine": 1393,
+ "plantMarkerLeft": 1,
+ "plantMarkerGone": 0,
+ "plantGitClean": 0,
+ "suiteTests": 7924,
+ "suiteSuites": 709,
+ "suiteSeconds": 270.297,
+ "suiteFailedNames": [],
+ "sourceLines": 209766,
+ "testLines": 224005,
+ "testFiles": 594,
+ "gateScripts": 148,
+ "commits": 105,
+ "openRoadmapItems": 131,
+ "live_gm_centroids": [
+  2165.1,
+  2167.1,
+  2165.1,
+  2167.1
+ ],
+ "live_gm_rms": [
+  -51.6,
+  -36.4,
+  -28.4,
+  -23.3
+ ],
+ "live_gm_spread": 0.09,
+ "live_gm_groups": 1,
+ "live_gm_verdict": "static",
+ "live_gu_centroids": [
+  2370.7,
+  2489.0,
+  2556.8,
+  2557.3
+ ],
+ "live_gu_rms": [
+  -52.5,
+  -37.3,
+  -29.3,
+  -24.3
+ ],
+ "live_gu_spread": 7.87,
+ "live_gu_groups": 3,
+ "live_gu_verdict": "live",
+ "liveRmsSpreadDb": 28.2,
+ "centroidTestsBlind": 26,
+ "centroidBrokenSpread": 0.295,
+ "centroidTrueSpread": 6.59,
+ "vacuityEmptyEvery": true,
+ "vacuityLive": "true false",
+ "gateSelfControl": 8,
+ "gateExit": 0,
+ "gateOutput": [
+  "\u2714 claude-plugin/skills/daw-wire-reference/SKILL.md \u2014 wire-reference command count agrees (215)",
+  "",
+  "\u2714 every scored documentation claim agrees with the measured wire."
+ ],
+ "open_m23_av_1": 1,
+ "open_m23_av_2": 1,
+ "open_m23_av_3": 1,
+ "open_m23_cb": 1,
+ "captureFps": 3.02,
+ "captureMs": 331.6,
+ "captureFrames": 37,
+ "captureSpan": 11.936,
+ "captureRecordFps": 3.5,
+ "uiCaptures": 5,
+ "uiDefectsFound": 3,
+ "flamOffsetMs": 85.333,
+ "flamIdentical": false,
+ "flamCorr": 0.7071,
+ "flamPeakDb": [
+  -11.75,
+  -11.75
+ ],
+ "flamOnsetsTogether": 6,
+ "flamOnsetsApart": 12,
+ "flamMeasuredGapMs": 85.33,
+ "demo_tracks": 4,
+ "demo_notes": 318,
+ "demo_tempoBPM": 100,
+ "demoNames": [
+  "Pad",
+  "Bass",
+  "Drums",
+  "Lead"
+ ]
+}

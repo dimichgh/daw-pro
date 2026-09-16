@@ -305,3 +305,49 @@ removes. `shortsmith.py` now prints a warning naming the stage and the missing
 path at build time. The rain chapter is the one stage that keeps a still, and
 says why in the spec: its two attempts were built by an ad-hoc script that is
 not in this directory, so there is no builder to photograph.
+
+## The fourth cut — the roll finds its notes, and a meter in the corner
+
+Two of the previous cut's bursts were photographing an empty grid, and the grid
+was not lying. A heartbeat lives at C1, a 49 Hz sine; the piano roll opens
+anchored high in the 128-row pitch stack, so those notes were drawn in the
+minimap and in the velocity lane and nowhere the camera was pointed.
+
+The obvious lever was zoom, and it does not work. **Measured at the 10 pt
+row-height floor — the clamp, which is where a request for 5 lands — the grid
+still bottomed out at F2**, with the notes below it —
+shrinking rows fits more keys and keeps the same anchor. So the pitch axis got a
+way to be *pointed*: `debug.panelLayout {pianoRollCenterPitch}`, and `burst()`
+sends the clip's own **median** pitch, which is right for every chapter and
+special-cases none of them.
+
+⚠ Two orderings matter and neither is guessable: the roll has to be OPEN before
+the request lands (the scroller must exist for it to scroll), and the focus has
+to come AFTER any row-height change (a row-height change re-pins the axis and
+would quietly undo it).
+
+The other half of the cut is a small live spectrum meter in the bottom-right,
+in the intro sting's palette. A narrated film is mostly static frames and a
+viewer has no way to tell "this is playing" from "this is paused" except by
+listening. It is a real 16-band analysis of the film's own audio, not a wiggle:
+**at the heartbeat, bands 0–6 stand at full height and 7–15 at zero** — which is
+the whole thesis of that chapter, drawn in the corner while it plays.
+
+Three things it cost:
+
+- ⚠ **One global dB scale killed the top half of the meter.** A magnitude
+  spectrum falls steeply with frequency, so scaled together every bar above
+  600 Hz pinned to zero for the whole film — eight dead bars that looked like a
+  design choice. Each band is now scaled against its own loud end, and the whole
+  display is gated by how loud the frame actually is, so silence stays silence.
+- ⚠ **It shipped an 872 ms a/v drift on its first run.** The meter is generated
+  from the AUDIO, which in an assembled film runs slightly longer than the
+  video; `overlay=…:shortest=0` makes the output as long as the LONGER input, so
+  the overlay extended the video by the difference and nothing else. The gate
+  caught it, which is why the meter runs BEFORE the gates and not after them.
+- ⭐ **Two instruments disagreed and neither was broken.** The meter read flat
+  where `ffmpeg astats` read −16 dB. `ffmpeg -ss` placed before `-i` is a FAST
+  seek and does not land on the second you asked for: they were reading
+  different moments, and the audio at that instant really is a −37 dB gap
+  between words. Check that two instruments are pointed at the same sample
+  before believing either.

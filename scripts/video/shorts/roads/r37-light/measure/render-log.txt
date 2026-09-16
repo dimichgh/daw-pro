@@ -1,0 +1,66 @@
+=== A. SAMPLE LADDERS on the LOW pose (the heaviest: most volume in frame)
+[cyc-spp32-r1] ALIGNMENT: worst cap delta = 0.00 px  over 6 rods
+[cyc-spp32-r1] CYCLES: device=GPU samples=32 denoise=False
+[cyc-spp32-r1] RENDERTIME 2.623 s  engine=CYCLES sigma=haze(0.07000) samples=32 vol=64 out=measure/lad/cyc-32.png
+[cyc-spp32-r2] ALIGNMENT: worst cap delta = 0.00 px  over 6 rods
+[cyc-spp32-r2] CYCLES: device=GPU samples=32 denoise=False
+[cyc-spp32-r2] RENDERTIME 2.515 s  engine=CYCLES sigma=haze(0.07000) samples=32 vol=64 out=measure/lad/cyc-32.png
+[cyc-spp64-r1] ALIGNMENT: worst cap delta = 0.00 px  over 6 rods
+[cyc-spp64-r1] CYCLES: device=GPU samples=64 denoise=False
+[cyc-spp64-r1] RENDERTIME 4.343 s  engine=CYCLES sigma=haze(0.07000) samples=64 vol=64 out=measure/lad/cyc-64.png
+[cyc-spp64-r2] ALIGNMENT: worst cap delta = 0.00 px  over 6 rods
+[cyc-spp64-r2] CYCLES: device=GPU samples=64 denoise=False
+[cyc-spp64-r2] RENDERTIME 4.395 s  engine=CYCLES sigma=haze(0.07000) samples=64 vol=64 out=measure/lad/cyc-64.png
+[cyc-spp128-r1] ALIGNMENT: worst cap delta = 0.00 px  over 6 rods
+[cyc-spp128-r1] CYCLES: device=GPU samples=128 denoise=False
+[cyc-spp128-r1] RENDERTIME 8.484 s  engine=CYCLES sigma=haze(0.07000) samples=128 vol=64 out=measure/lad/cyc-128.png
+[cyc-spp128-r2] ALIGNMENT: worst cap delta = 0.00 px  over 6 rods
+[cyc-spp128-r2] CYCLES: device=GPU samples=128 denoise=False
+[cyc-spp128-r2] RENDERTIME 8.843 s  engine=CYCLES sigma=haze(0.07000) samples=128 vol=64 out=measure/lad/cyc-128.png
+[cyc-spp256-r1] ALIGNMENT: worst cap delta = 0.00 px  over 6 rods
+[cyc-spp256-r1] CYCLES: device=GPU samples=256 denoise=False
+[cyc-spp256-r1] RENDERTIME 17.920 s  engine=CYCLES sigma=haze(0.07000) samples=256 vol=64 out=measure/lad/cyc-256.png
+[cyc-spp256-r2] ALIGNMENT: worst cap delta = 0.00 px  over 6 rods
+[cyc-spp256-r2] CYCLES: device=GPU samples=256 denoise=False
+[cyc-spp256-r2] RENDERTIME 19.146 s  engine=CYCLES sigma=haze(0.07000) samples=256 vol=64 out=measure/lad/cyc-256.png
+[cyc-spp512-r1] ALIGNMENT: worst cap delta = 0.00 px  over 6 rods
+[cyc-spp512-r1] CYCLES: device=GPU samples=512 denoise=False
+[cyc-spp512-r1] RENDERTIME 39.769 s  engine=CYCLES sigma=haze(0.07000) samples=512 vol=64 out=measure/lad/cyc-512.png
+[cyc-spp512-r2] ALIGNMENT: worst cap delta = 0.00 px  over 6 rods
+[cyc-spp512-r2] CYCLES: device=GPU samples=512 denoise=False
+[cyc-spp512-r2] RENDERTIME 40.332 s  engine=CYCLES sigma=haze(0.07000) samples=512 vol=64 out=measure/lad/cyc-512.png
+[eev-vol32-r1] ALIGNMENT: worst cap delta = 0.00 px  over 6 rods
+[eev-vol32-r1] EEVEE: taa=64 volsamples=32 tile=4 volshadow=True
+[eev-vol32-r1] RENDERTIME 0.613 s  engine=EEVEE sigma=haze(0.07000) samples=64 vol=32 out=measure/lad/eev-v32.png
+[eev-vol32-r2] ALIGNMENT: worst cap delta = 0.00 px  over 6 rods
+[eev-vol32-r2] EEVEE: taa=64 volsamples=32 tile=4 volshadow=True
+[eev-vol32-r2] RENDERTIME 0.609 s  engine=EEVEE sigma=haze(0.07000) samples=64 vol=32 out=measure/lad/eev-v32.png
+[eev-vol64-r1] ALIGNMENT: worst cap delta = 0.00 px  over 6 rods
+[eev-vol64-r1] EEVEE: taa=64 volsamples=64 tile=4 volshadow=True
+[eev-vol64-r1] RENDERTIME 0.688 s  engine=EEVEE sigma=haze(0.07000) samples=64 vol=64 out=measure/lad/eev-v64.png
+[eev-vol64-r2] ALIGNMENT: worst cap delta = 0.00 px  over 6 rods
+[eev-vol64-r2] EEVEE: taa=64 volsamples=64 tile=4 volshadow=True
+[eev-vol64-r2] RENDERTIME 0.702 s  engine=EEVEE sigma=haze(0.07000) samples=64 vol=64 out=measure/lad/eev-v64.png
+[eev-vol128-r1] ALIGNMENT: worst cap delta = 0.00 px  over 6 rods
+[eev-vol128-r1] EEVEE: taa=64 volsamples=128 tile=4 volshadow=True
+[eev-vol128-r1] RENDERTIME 0.955 s  engine=EEVEE sigma=haze(0.07000) samples=64 vol=128 out=measure/lad/eev-v128.png
+[eev-vol128-r2] ALIGNMENT: worst cap delta = 0.00 px  over 6 rods
+[eev-vol128-r2] EEVEE: taa=64 volsamples=128 tile=4 volshadow=True
+[eev-vol128-r2] RENDERTIME 0.966 s  engine=EEVEE sigma=haze(0.07000) samples=64 vol=128 out=measure/lad/eev-v128.png
+[eev-vol256-r1] ALIGNMENT: worst cap delta = 0.00 px  over 6 rods
+[eev-vol256-r1] EEVEE: taa=64 volsamples=256 tile=4 volshadow=True
+[eev-vol256-r1] RENDERTIME 1.594 s  engine=EEVEE sigma=haze(0.07000) samples=64 vol=256 out=measure/lad/eev-v256.png
+[eev-vol256-r2] ALIGNMENT: worst cap delta = 0.00 px  over 6 rods
+[eev-vol256-r2] EEVEE: taa=64 volsamples=256 tile=4 volshadow=True
+[eev-vol256-r2] RENDERTIME 1.631 s  engine=EEVEE sigma=haze(0.07000) samples=64 vol=256 out=measure/lad/eev-v256.png
+=== A2. Cycles with the OIDN denoiser at 128
+[cyc-128-denoise-r1] ALIGNMENT: worst cap delta = 0.00 px  over 6 rods
+[cyc-128-denoise-r1] CYCLES: device=GPU samples=128 denoise=True
+[cyc-128-denoise-r1] RENDERTIME 15.467 s  engine=CYCLES sigma=haze(0.07000) samples=128 vol=64 out=measure/lad/cyc-128-den.png
+[cyc-128-denoise-r2] ALIGNMENT: worst cap delta = 0.00 px  over 6 rods
+[cyc-128-denoise-r2] CYCLES: device=GPU samples=128 denoise=True
+[cyc-128-denoise-r2] RENDERTIME 13.717 s  engine=CYCLES sigma=haze(0.07000) samples=128 vol=64 out=measure/lad/cyc-128-den.png
+=== A3. Cycles on the CPU at 128 — the positive control that the GPU is engaged
+[cyc-128-CPU] ALIGNMENT: worst cap delta = 0.00 px  over 6 rods
+[cyc-128-CPU] CYCLES: device=CPU samples=128 denoise=False
+[cyc-128-CPU] RENDERTIME 107.781 s  engine=CYCLES sigma=haze(0.07000) samples=128 vol=64 out=measure/lad/cyc-128-cpu.png

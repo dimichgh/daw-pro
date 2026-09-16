@@ -1,0 +1,448 @@
+{
+ "_generated": "measure.py",
+ "_note": "every figure re-derived from renders",
+ "prediction": {
+  "markHalf": 108,
+  "markQuarterBpm": 216,
+  "driftHalf": 96,
+  "driftQuarterBpm": 192,
+  "eroicaHalf": 76,
+  "eroicaQuarterBpm": 152,
+  "tickMs": {
+   "mark216": 555.5555555555555,
+   "drift192": 625.0,
+   "unit108": 555.5555555555555,
+   "eroica152": 789.4736842105264
+  },
+  "tickIdenticalMs": 0.0,
+  "statementSec": {
+   "mark": 2.2222222222222223,
+   "drift": 2.5,
+   "unit": 4.444444444444445
+  },
+  "statementGapMs": 277.77777777777766,
+  "unitRatio": 2.0,
+  "driftMs": [
+   0.0,
+   277.77777777777766,
+   555.5555555555553,
+   833.333333333333,
+   1111.1111111111106
+  ],
+  "abSeconds": 10.0,
+  "unitSeconds": 8.88888888888889,
+  "statementsIn10s": {
+   "mark": 4.5,
+   "drift": 4.0
+  },
+  "statementsInUnitWindow": {
+   "mark": 4.0,
+   "unit": 2.0
+  },
+  "hypotheses": {
+   "marks": {
+    "fifth": 108,
+    "eroica": 76
+   },
+   "constantOffset": {
+    "fifth": 96,
+    "eroica": 64
+   },
+   "halved": {
+    "fifth": 54.0,
+    "eroica": 38.0
+   },
+   "asWritten": {
+    "fifth": 108,
+    "eroica": 76
+   }
+  }
+ },
+ "probeControl": {
+  "syntheticMaxErrMs": 0.8958,
+  "syntheticSwingMs": 14.0,
+  "syntheticSwingTruthMs": 14.0,
+  "jitterProjectMaxAbsMs": 5.4172,
+  "jitterProjectMeanAbsMs": 2.8139,
+  "jitterAudioMaxAbsMs": 5.4236,
+  "jitterProjectVsAudioMaxDiffMs": 0.0097,
+  "jitterBoundMs": 5.5556,
+  "jitterSeed": 20260906
+ },
+ "clicks": {
+  "mark216": {
+   "file": "click-mark-216",
+   "bpm": 216,
+   "ticks": 16,
+   "predictedIoiMs": 555.5556,
+   "meanIoiMs": 555.5556,
+   "sdIoiMs": 0.0102,
+   "spreadMs": 0.0208,
+   "errorMs": 0.0,
+   "measuredBpm": 216.0,
+   "measuredTicksPerMinute": 108.0
+  },
+  "drift192": {
+   "file": "click-drift-192",
+   "bpm": 192,
+   "ticks": 16,
+   "predictedIoiMs": 625.0,
+   "meanIoiMs": 625.0,
+   "sdIoiMs": 0.0,
+   "spreadMs": 0.0,
+   "errorMs": 0.0,
+   "measuredBpm": 192.0,
+   "measuredTicksPerMinute": 96.0
+  },
+  "unit108": {
+   "file": "click-unit-108",
+   "bpm": 108,
+   "ticks": 32,
+   "predictedIoiMs": 555.5556,
+   "meanIoiMs": 555.5558,
+   "sdIoiMs": 0.0099,
+   "spreadMs": 0.0208,
+   "errorMs": 0.0002,
+   "measuredBpm": 108.0,
+   "measuredTicksPerMinute": 108.0
+  },
+  "eroica152": {
+   "file": "click-eroica-152",
+   "bpm": 152,
+   "ticks": 16,
+   "predictedIoiMs": 789.4737,
+   "meanIoiMs": 789.4736,
+   "sdIoiMs": 0.0095,
+   "spreadMs": 0.0208,
+   "errorMs": -0.0001,
+   "measuredBpm": 152.0,
+   "measuredTicksPerMinute": 76.0
+  }
+ },
+ "tickIdentity": {
+  "markTicksPerMinute": 108.0,
+  "unitTicksPerMinute": 108.0,
+  "differenceMs": -0.0002,
+  "differencePercent": 4e-05
+ },
+ "stringEnvelope": {
+  "file": "motif-mark-216-dry",
+  "fromSec": 0.6,
+  "toSec": 1.1,
+  "rangeDb": 9.72,
+  "localMaxima": 38,
+  "localMaximaPerSecond": 76.0,
+  "riseOnsetsFoundFor32Notes": {
+   "note": "a rise-based onset probe over the strings-only render, swept over floor fractions 0.15-0.45 and guards 100-125 ms, returned between 64 and 90 candidate onsets for 32 notes; a spectral-flux detector swept the same way returned 57 to 98.",
+   "min": 57,
+   "max": 98,
+   "notes": 32
+  }
+ },
+ "motif": {
+  "mark216": {
+   "file": "motif-mark-216-click",
+   "bpm": 216,
+   "ticksFound": 24,
+   "ticksPerStatement": 4,
+   "meanIoiMs": 555.5553,
+   "spreadMs": 0.0208,
+   "statementStarts": [
+    -0.000125,
+    2.222104,
+    4.444312,
+    6.666542
+   ],
+   "statementSec": 2.222229,
+   "predictedStatementSec": 2.222222
+  },
+  "drift192": {
+   "file": "motif-drift-192-click",
+   "bpm": 192,
+   "ticksFound": 24,
+   "ticksPerStatement": 4,
+   "meanIoiMs": 625.0,
+   "spreadMs": 0.0,
+   "statementStarts": [
+    -0.000125,
+    2.499875,
+    4.999875,
+    7.499875
+   ],
+   "statementSec": 2.5,
+   "predictedStatementSec": 2.5
+  },
+  "unit108": {
+   "file": "motif-unit-108-click",
+   "bpm": 108,
+   "ticksFound": 48,
+   "ticksPerStatement": 8,
+   "meanIoiMs": 555.5554,
+   "spreadMs": 0.0208,
+   "statementStarts": [
+    -0.000125,
+    4.444312
+   ],
+   "statementSec": 4.444437,
+   "predictedStatementSec": 4.444444
+  }
+ },
+ "drift": {
+  "predictedMs": [
+   0.0,
+   277.778,
+   555.556,
+   833.333
+  ],
+  "measuredMs": [
+   0.0,
+   277.771,
+   555.563,
+   833.333
+  ],
+  "maxErrMs": 0.007,
+  "perStatementPredictedMs": 277.778,
+  "perStatementMeasuredMs": 277.778,
+  "afterFourStatementsMs": 833.333
+ },
+ "tickDrift": {
+  "markSec": [
+   0.0,
+   0.555563,
+   1.111104,
+   1.666667,
+   2.222229,
+   2.777771,
+   3.333333,
+   3.888896,
+   4.444437,
+   5.0,
+   5.555562,
+   6.111104,
+   6.666667,
+   7.222229,
+   7.777771,
+   8.333333,
+   8.888896
+  ],
+  "driftSec": [
+   0.0,
+   0.625,
+   1.25,
+   1.875,
+   2.5,
+   3.125,
+   3.75,
+   4.375,
+   5.0,
+   5.625,
+   6.25,
+   6.875,
+   7.5,
+   8.125,
+   8.75,
+   9.375,
+   10.0
+  ],
+  "perTickMs": 69.444,
+  "perTickPredictedMs": 69.444
+ },
+ "unit": {
+  "markStatementSec": 2.222229,
+  "unitStatementSec": 4.444437,
+  "measuredRatio": 1.99999,
+  "predictedRatio": 2.0,
+  "windowSec": 8.8889,
+  "statementsInWindow": {
+   "mark": 4.0,
+   "unit": 2.0
+  }
+ },
+ "ab": {
+  "tempo": {
+   "tag": "tempo",
+   "a": "motif-mark-216",
+   "b": "motif-drift-192",
+   "seconds": 10.0,
+   "fadeOutMs": 40.0,
+   "sharedGainDb": -0.48,
+   "aRmsDb": -21.128,
+   "bRmsDb": -21.166,
+   "rmsDeltaDb": -0.038,
+   "aTailDbOfPeakBeforeFade": -14.66,
+   "bTailDbOfPeakBeforeFade": -15.23
+  },
+  "unit": {
+   "tag": "unit",
+   "a": "motif-mark-216",
+   "b": "motif-unit-108",
+   "seconds": 8.88888888888889,
+   "fadeOutMs": 40.0,
+   "sharedGainDb": -0.48,
+   "aRmsDb": -21.134,
+   "bRmsDb": -21.566,
+   "rmsDeltaDb": -0.432,
+   "aTailDbOfPeakBeforeFade": -14.31,
+   "bTailDbOfPeakBeforeFade": -12.98
+  },
+  "eroica": {
+   "tag": "eroica",
+   "a": "click-mark-216",
+   "b": "click-eroica-152",
+   "seconds": 8.6,
+   "fadeOutMs": 0.0,
+   "sharedGainDb": -1.925,
+   "aRmsDb": -25.851,
+   "bRmsDb": -27.478,
+   "rmsDeltaDb": -1.627,
+   "aTailDbOfPeakBeforeFade": -238.93,
+   "bTailDbOfPeakBeforeFade": -238.93
+  }
+ },
+ "sameClick": {
+  "file": "demo-sameclick",
+  "halfSeconds": 4.7,
+  "gapSeconds": 0.5,
+  "seconds": 9.9
+ },
+ "bothClicks": {
+  "file": "demo-bothclicks",
+  "seconds": 10.0,
+  "distinctOnsetsHeard": 32,
+  "ticksInMarkAlone": 18,
+  "ticksInDriftAlone": 16,
+  "coincidencePeriodSec": 5.0,
+  "coincidenceTicks": [
+   9,
+   8
+  ],
+  "coincidencesSec": [
+   0.0,
+   5.0
+  ],
+  "predictedDistinctOnsets": 32,
+  "note": "one file, two metronomes. If they fused into single events the onset count would be that of the faster one alone."
+ },
+ "audibility": {
+  "perTickMs": 69.444,
+  "fusionThresholdMs": 30,
+  "firstTickOver30ms": 1,
+  "firstTickOver30msAtSec": 0.5556,
+  "afterOneStatementMs": 277.77,
+  "afterFourStatementsMs": 1111.1,
+  "abTempoRmsDeltaDb": -0.038,
+  "abUnitRmsDeltaDb": -0.432,
+  "unitStatementDifferenceMs": 2222.21,
+  "stringEnvelopeRangeDb": 9.72
+ },
+ "softLift": [
+  {
+   "file": "demo-bothclicks",
+   "gainDb": 8.0,
+   "ceilDb": -1.0,
+   "peakDbfs": -1.321,
+   "ticks": 32,
+   "maxTimingShiftMs": 0.0,
+   "nonlinearResidualDb": -18.68
+  },
+  {
+   "file": "demo-sameclick",
+   "gainDb": 8.0,
+   "ceilDb": -1.0,
+   "peakDbfs": -1.321,
+   "ticks": 18,
+   "maxTimingShiftMs": 0.0,
+   "nonlinearResidualDb": -14.8
+  },
+  {
+   "file": "demo-click",
+   "gainDb": 8.0,
+   "ceilDb": -1.0,
+   "peakDbfs": -1.321,
+   "ticks": 16,
+   "maxTimingShiftMs": 0.0,
+   "nonlinearResidualDb": -14.81
+  },
+  {
+   "file": "ab-eroica-a",
+   "gainDb": 8.0,
+   "ceilDb": -1.0,
+   "peakDbfs": -1.321,
+   "ticks": 16,
+   "maxTimingShiftMs": 0.0,
+   "nonlinearResidualDb": -14.81
+  },
+  {
+   "file": "ab-eroica-b",
+   "gainDb": 8.0,
+   "ceilDb": -1.0,
+   "peakDbfs": -1.321,
+   "ticks": 11,
+   "maxTimingShiftMs": 0.0,
+   "nonlinearResidualDb": -14.81
+  }
+ ],
+ "_chart": {
+  "driftSeconds": 10.0,
+  "markTicks": [
+   0.0,
+   0.555563,
+   1.111104,
+   1.666667,
+   2.222229,
+   2.777771,
+   3.333333,
+   3.888896,
+   4.444437,
+   5.0,
+   5.555562,
+   6.111104,
+   6.666667,
+   7.222229,
+   7.777771,
+   8.333333,
+   8.888896
+  ],
+  "driftTicks": [
+   0.0,
+   0.625,
+   1.25,
+   1.875,
+   2.5,
+   3.125,
+   3.75,
+   4.375,
+   5.0,
+   5.625,
+   6.25,
+   6.875,
+   7.5,
+   8.125,
+   8.75,
+   9.375,
+   10.0
+  ],
+  "perTickMs": 69.444,
+  "fusionMs": 30,
+  "unitSeconds": 9.9,
+  "unitHalfSeconds": 4.7,
+  "unitGapSeconds": 0.5,
+  "tickMs": 555.5556,
+  "markHalf": 108,
+  "driftHalf": 96,
+  "markQuarterBpm": 216,
+  "unitQuarterBpm": 108,
+  "statementSecMark": 2.222229,
+  "statementSecUnit": 4.444437
+ },
+ "crosscheck": {
+  "tempiAgree": true,
+  "notesPerStatement": 8
+ },
+ "counts": {
+  "notesPerStatement": 8,
+  "statements": 4,
+  "motifNotes": 32,
+  "distinctPitches": 4
+ }
+}

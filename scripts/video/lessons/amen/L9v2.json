@@ -1,0 +1,854 @@
+{
+ "id": "L9v2",
+ "theme": "remix",
+ "size": "1920x1080",
+ "filename": "DAW Pro Lesson 9 - The Amen Break (rebuild)",
+ "title": "The Amen break, programmed by hand — 53 notes, nothing sampled",
+ "playlist": "Music, measured",
+ "categoryId": "27",
+ "cut": 5.4,
+ "playMax": 9.0,
+ "introSeconds": 4,
+ "outroSeconds": 3,
+ "meter": "br",
+ "bursts": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/amen/bursts",
+ "cards": [
+  {
+   "type": "statement",
+   "size": 70,
+   "y": 250,
+   "lines": [
+    "THE MOST SAMPLED",
+    "SIX SECONDS IN MUSIC.",
+    "WE ARE NOT GOING TO SAMPLE IT."
+   ],
+   "sub": [
+    "Every sound in this video is a note typed in by hand.",
+    "The 1969 recording is never touched, and that limit is the lesson."
+   ]
+  },
+  {
+   "type": "list",
+   "title": "FOUR WORDS, IN PLAIN ENGLISH",
+   "step": 88,
+   "items": [
+    [
+     "a break",
+     "the moment a band stops and the drums play alone"
+    ],
+    [
+     "a breakbeat",
+     "that passage, looped, as the floor of a new record",
+     "hot"
+    ],
+    [
+     "a ghost note",
+     "a deliberately quiet hit, between the loud ones"
+    ],
+    [
+     "quantise",
+     "to snap every note onto an exact grid position"
+    ]
+   ]
+  },
+  {
+   "type": "list",
+   "title": "THE RECORD",
+   "step": 84,
+   "items": [
+    [
+     "\"Amen, Brother\"",
+     "The Winstons, 1969 — a B-side"
+    ],
+    [
+     "the drummer",
+     "Gregory Coleman"
+    ],
+    [
+     "the break",
+     "about seven seconds, four bars, around one minute twenty six"
+    ],
+    [
+     "the tempo",
+     "commonly given as one hundred and thirty six to one hundred and forty beats per minute"
+    ],
+    [
+     "what happened next",
+     "it became the backbone of jungle and drum and bass",
+     "hot"
+    ]
+   ]
+  },
+  {
+   "type": "list",
+   "title": "WHY WE ARE PROGRAMMING IT, NOT SAMPLING IT",
+   "step": 94,
+   "items": [
+    [
+     "the recording",
+     "a 1969 US sound recording — in copyright into the 2060s",
+     "hot"
+    ],
+    [
+     "who was paid",
+     "neither Coleman nor bandleader Richard Spencer, ever"
+    ],
+    [
+     "2015",
+     "a fan-run fundraiser gave Spencer about eighteen thousand pounds — a gift, not a settlement"
+    ],
+    [
+     "so",
+     "we type the notes in. Nothing here is lifted from the record."
+    ]
+   ]
+  },
+  {
+   "type": "bignumber",
+   "label": "ONE SIXTEENTH NOTE AT 136 BPM",
+   "value": "110.3",
+   "unit": "MILLISECONDS",
+   "size": 180,
+   "notes": [
+    "the grid the whole pattern is written on",
+    "a whole beat is 441 ms; a bar is 1.76 s",
+    "remember this number — everything later is measured against it"
+   ]
+  },
+  {
+   "type": "list",
+   "title": "WHAT IS ACTUALLY IN THE FOUR BARS",
+   "step": 96,
+   "items": [
+    [
+     "kick",
+     "7 hits"
+    ],
+    [
+     "snare",
+     "9 accents and 5 ghost notes"
+    ],
+    [
+     "ride cymbal",
+     "31 — straight eighths, all the way through"
+    ],
+    [
+     "crash",
+     "1, in bar four"
+    ],
+    [
+     "total",
+     "53 notes, every one typed in by hand",
+     "hot"
+    ]
+   ]
+  },
+  {
+   "type": "bignumber",
+   "label": "A GHOST NOTE, AGAINST AN ACCENT",
+   "value": "-13.72",
+   "unit": "DB QUIETER",
+   "size": 170,
+   "notes": [
+    "predicted from the velocity law BEFORE rendering: -13.70 dB",
+    "velocity 50 against velocity 110",
+    "the two agree to 0.02 of a decibel"
+   ]
+  },
+  {
+   "type": "statement",
+   "size": 92,
+   "y": 430,
+   "rule": false,
+   "lines": [
+    "BAR THREE"
+   ],
+   "sub": [
+    "the snare arrives one sixteenth late, and the loop stops repeating itself"
+   ]
+  },
+  {
+   "type": "statement",
+   "size": 92,
+   "y": 430,
+   "rule": false,
+   "lines": [
+    "BAR FOUR"
+   ],
+   "sub": [
+    "no kick on the downbeat at all, then a crash between beats three and four"
+   ]
+  },
+  {
+   "type": "bignumber",
+   "label": "LARGEST DISTANCE FROM THE GRID",
+   "value": "8.60",
+   "unit": "MILLISECONDS",
+   "size": 170,
+   "notes": [
+    "average 4.65 ms, across 106 hits",
+    "that is 7.8 % and 4.2 % of one sixteenth note",
+    "read off the project, then confirmed in the rendered audio to 0.50 ms"
+   ]
+  },
+  {
+   "type": "statement",
+   "size": 58,
+   "y": 300,
+   "lines": [
+    "A FEW MILLISECONDS IS",
+    "AT THE EDGE OF WHAT ANYONE HEARS."
+   ],
+   "sub": [
+    "On laptop speakers, in isolation, you will probably not hear it.",
+    "That is not your ears and it is not your speakers — it is the size of it.",
+    "So the film also plays a version dragged far enough to be unmissable,",
+    "and puts the real number on the same chart, at the same scale."
+   ]
+  },
+  {
+   "type": "list",
+   "title": "THE CONTROLS",
+   "step": 94,
+   "items": [
+    [
+     "the velocity law",
+     "predicted -13.70 dB, measured -13.72 dB",
+     "hot"
+    ],
+    [
+     "the timing",
+     "read off the project, then found in the audio to 0.50 ms"
+    ],
+    [
+     "the listen windows",
+     "6 derived windows; the ghost demo has exactly 6 ghost notes"
+    ],
+    [
+     "the drag",
+     "asked for 28 ms, cross-correlated back out at 28.0 ms"
+    ]
+   ]
+  },
+  {
+   "type": "list",
+   "title": "WHAT TO TAKE AWAY",
+   "step": 96,
+   "items": [
+    [
+     "velocity is not a volume knob",
+     "it is the difference between a groove and a drum machine",
+     "hot"
+    ],
+    [
+     "one bar that breaks the pattern",
+     "is worth more than three that do not"
+    ],
+    [
+     "off the grid is not sloppy",
+     "it is the part a grid cannot store"
+    ],
+    [
+     "and if you sample",
+     "know whose recording it is",
+     "hot"
+    ]
+   ]
+  },
+  {
+   "type": "closing",
+   "size": 56,
+   "y": 560,
+   "lines": [
+    "Built, programmed and measured in DAW Pro.",
+    "Fifty three notes, nothing sampled.",
+    "The build scripts, the measurements and the charts are reproducible."
+   ],
+   "kicker": "Gregory Coleman, 1944–2006."
+  },
+  {
+   "type": "bignumber",
+   "label": "WHAT A LOUDNESS METER SAW",
+   "value": "+0.0",
+   "unit": "LU",
+   "size": 180,
+   "notes": [
+    "…for a version in which every one of the 106 hits moved",
+    "the signal itself changed by +2.9 dB",
+    "a meter measures level. None of this lesson is about level."
+   ]
+  }
+ ],
+ "stages": [
+  {
+   "id": "00-open",
+   "shots": [
+    0,
+    "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/amen/shots/arrange.png"
+   ],
+   "cut": 4.4,
+   "brandCheck": "DAW Pro",
+   "factCheck": [
+    [
+     "nineteen sixty nine",
+     "1969"
+    ]
+   ],
+   "narration": "If you have listened to any dance music made in the last thirty years, you have heard this drum pattern, probably hundreds of times, and you may never have known it had a name. It is called the Amen break. It is about seven seconds of drumming, recorded in nineteen sixty nine, and it is very likely the most sampled piece of music that exists. This lesson is about what is actually inside it: which drum lands where, why one bar of it changed pop music, and what makes a drum part feel like a person playing rather than a machine ticking. And we are going to build the whole thing from nothing, in DAW Pro, by typing notes in one at a time. We will not sample the record, and the reason we will not is one of the things this lesson is about. Everything here was predicted first and then measured off the audio, and both numbers go on the screen together."
+  },
+  {
+   "id": "01-vocabulary",
+   "shots": [
+    1
+   ],
+   "cut": 5.6,
+   "factCheck": [
+    [
+     "ghost note",
+     "ghost notes"
+    ],
+    [
+     "quantise",
+     "quantize"
+    ]
+   ],
+   "narration": "Four words first, because I am going to use them constantly and none of them are obvious. A break is a moment in a song where the band stops and the drums keep going on their own. It is a very old idea in soul and funk — you take everything away for a few seconds so that when the band comes back it hits harder. A breakbeat is what happens when somebody takes that few seconds of drums, loops it round and round, and builds an entirely new record on top of it. A ghost note is a deliberately quiet hit, played in between the loud ones, so soft that you feel it more than you hear it. And to quantise means to snap every note onto an exact grid position, perfectly in time. Hold on to that last one, because by the end of this lesson we are going to deliberately undo it."
+  },
+  {
+   "id": "02-history",
+   "shots": [
+    2
+   ],
+   "cut": 5.6,
+   "factCheck": [
+    [
+     "nineteen sixty nine",
+     "1969"
+    ],
+    [
+     "Winstons"
+    ],
+    [
+     "Coleman"
+    ]
+   ],
+   "narration": "So, the record. In nineteen sixty nine, a soul group from Washington called The Winstons released a single. The song they were promoting was called Color Him Father, and it did well. On the other side of that record was a faster instrumental called Amen, Brother, and about a minute and a half into it the band drops out and the drummer, Gregory Coleman, plays alone for four bars. That is roughly seven seconds long. The tempo is usually given as somewhere between one hundred and thirty six and one hundred and forty beats per minute, and it is worth saying why that is a range rather than a number: it is a human being playing, not a click track, so the tempo genuinely moves. Twenty years later, producers started looping those four bars. Hip hop first, then British hardcore, then jungle and drum and bass, which were built on this break almost the way rock music was built on the twelve bar blues."
+  },
+  {
+   "id": "03-copyright",
+   "shots": [
+    3
+   ],
+   "cut": 6.0,
+   "factCheck": [
+    [
+     "sixties",
+     "2060s"
+    ],
+    [
+     "eighteen thousand",
+     "18,000",
+     "18000"
+    ]
+   ],
+   "narration": "Now here is why we are typing this in rather than sampling it, and I want to be plain about it rather than putting it in the small print. That nineteen sixty nine recording is still in copyright. A sound recording from that year is protected in the United States into the twenty sixties. It is not old music that has become free to use; it is somebody's record, and it has an owner. And the history around it is genuinely uncomfortable. Neither Gregory Coleman nor the band's leader, Richard Spencer, was ever paid anything for any of the thousands of records built on those four bars. Spencer only found out how widely it had been used in the nineteen nineties, by which point it was far too late to do anything legally. Coleman died in two thousand and six. In two thousand and fifteen a fan-run fundraiser in Britain raised around eighteen thousand pounds and gave it to Spencer — which was a gift from strangers, not a settlement, and not anything the law made happen. So this lesson does the thing that is both legally clean and, honestly, more useful to you: we work out what is in the pattern, and we build our own."
+  },
+  {
+   "id": "04-grid",
+   "shots": [
+    4,
+    {
+     "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/amen/shots/grid-bars12.png",
+     "zoom": [
+      0.008,
+      0.443,
+      0.6669999999999999,
+      0.465
+     ]
+    }
+   ],
+   "cut": 5.4,
+   "holdLast": true,
+   "factCheck": [
+    [
+     "sixteenth",
+     "16th"
+    ],
+    [
+     "one hundred and thirty six",
+     "136"
+    ],
+    [
+     "one hundred and ten",
+     "110"
+    ]
+   ],
+   "narration": "Before the first note, the grid. Almost all drum programming is written on sixteenth notes: you divide each beat into four, which gives you sixteen possible positions in a bar, and every hit goes on one of them. We are going to build at one hundred and thirty six beats per minute, the lower end of the range people give for the original. At that tempo one sixteenth note lasts one hundred and ten milliseconds. Please keep that number, because it is the ruler for everything that comes later — when I tell you a drummer landed a few milliseconds off the grid, the thing that makes that meaningful is how long one step actually is. On screen now is DAW Pro's drum grid. Each row is one drum, named down the left, and each column is one of those sixteenth note positions."
+  },
+  {
+   "id": "05-skeleton",
+   "shots": [
+    {
+     "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/amen/shots/grid-plain.png",
+     "zoom": [
+      0.008,
+      0.443,
+      0.6669999999999999,
+      0.465
+     ]
+    },
+    5
+   ],
+   "cut": 5.0,
+   "loop": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/amen/audio/ab-s3-skeleton.wav",
+   "burst": "b-skeleton",
+   "playMax": 9.0,
+   "normalize": false,
+   "factCheck": [
+    [
+     "two and four",
+     "2 and 4"
+    ],
+    [
+     "eighths",
+     "eighth notes"
+    ]
+   ],
+   "narration": "Start with the skeleton, which is the part that is not surprising at all. The ride cymbal plays straight eighth notes right through, one on every half beat, so it is a constant pulse you can count along to. The snare drum plays the backbeat: beats two and four of every bar, which is the clap in almost every pop record ever made. And the kick drum plays on the downbeat and then once more late in the bar. That is it so far, and here is what it sounds like. Listen to how mechanical it is. Nothing is wrong with it. It is also not the Amen break, and everything that makes it the Amen break is what we add from here."
+  },
+  {
+   "id": "06-velocity",
+   "shots": [
+    "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/amen/shots/chart-velocity.png"
+   ],
+   "cut": 6.4,
+   "factCheck": [
+    [
+     "velocity"
+    ],
+    [
+     "one hundred and twenty seven",
+     "127"
+    ],
+    [
+     "thirteen point seven",
+     "13.7"
+    ]
+   ],
+   "narration": "The next ingredient is loudness, note by note, and in a sequencer that is called velocity. Every MIDI note carries a number from one to one hundred and twenty seven that says how hard the drum was hit. A novice mistake — and it was mine for years — is to leave every note at the same velocity, which is exactly what makes a programmed drum part sound like a machine. But velocity is not decibels, and the difference matters. This chart is what the sound bank actually does. The dashed line is a prediction, written down before anything was rendered: a General MIDI instrument scales the loudness of a note with the square of the velocity, which in decibels is forty times the logarithm of velocity divided by one hundred and twenty seven. The coloured lines are the measurements, one for each drum. Where I am going to put the ghost notes, the prediction says thirteen point seven decibels below the accents, and the render measured thirteen point seven as well. But look at the shaded band in the middle. Around the middle of the range the snare jumps several decibels off the curve, because the instrument stops using one recording of the drum and starts using a louder one. Real sampled kits do that, and I only know it because I measured it rather than assuming."
+  },
+  {
+   "id": "07-ghosts",
+   "shots": [
+    {
+     "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/amen/shots/grid-ghosts.png",
+     "zoom": [
+      0.008,
+      0.443,
+      0.6669999999999999,
+      0.465
+     ]
+    },
+    6
+   ],
+   "cut": 5.2,
+   "holdLast": true,
+   "loop": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/amen/audio/ab-s4-ghosts.wav",
+   "playMax": 9.0,
+   "normalize": false,
+   "ab": {
+    "before": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/amen/audio/ab-s3-skeleton.wav",
+    "beforeShots": [
+     {
+      "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/amen/shots/grid-plain.png",
+      "zoom": [
+       0.008,
+       0.443,
+       0.6669999999999999,
+       0.465
+      ]
+     }
+    ],
+    "afterShots": [
+     {
+      "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/amen/shots/grid-ghosts.png",
+      "zoom": [
+       0.008,
+       0.443,
+       0.6669999999999999,
+       0.465
+      ]
+     }
+    ],
+    "cycles": 2,
+    "seconds": 8.4
+   },
+   "factCheck": [
+    [
+     "ghost notes"
+    ],
+    [
+     "thirteen point seven",
+     "13.7"
+    ],
+    [
+     "not loudness matched"
+    ]
+   ],
+   "narration": "So here are the ghost notes. Between the loud backbeats, the drummer's stick is still moving, and it touches the snare very quietly on the way past. Those quiet touches are what turn a beat into a groove. I have put them in at velocity fifty against the accents at one hundred and ten, which the chart says will be thirteen point seven decibels quieter, and that is what it measured. Now listen to the same four bars twice: first without them, then with them. These two are not loudness matched, deliberately, because the level difference is part of what you are supposed to hear. Same tempo, same drums, same accents. The only change is a few very quiet snare hits."
+  },
+  {
+   "id": "08-marker",
+   "shots": [
+    "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/amen/shots/ghostchart-mid.png"
+   ],
+   "cut": 6.0,
+   "loop": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/amen/audio/bed-ghosts.wav",
+   "burst": "ghostchart",
+   "playMax": 22.0,
+   "normalize": false,
+   "bedEligible": false,
+   "factCheck": [
+    [
+     "shaded"
+    ],
+    [
+     "six",
+     "6"
+    ],
+    [
+     "twenty two",
+     "22"
+    ]
+   ],
+   "narration": "If you found that hard to pick out, that is fair, and here is where to look. This chart is the measured level of the kit across those four bars, and there are two lines on it: the version without ghost notes, and the version with them. The shaded bars are not chosen by eye. They are every moment where the two versions differ by more than six decibels, worked out from the measurements themselves — and there are six of them, which is exactly the number of ghost notes in this four bar excerpt. That match is the check that the shading is really marking what it claims to. A playhead now crosses the chart at real speed while you hear each version in turn. When the playhead is inside a shaded bar, that is the moment to listen: inside those bars the ghosted version is up to twenty two decibels louder, and everywhere else the two files are identical."
+  },
+  {
+   "id": "09-bar3",
+   "shots": [
+    7,
+    {
+     "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/amen/shots/grid-bar3str.png",
+     "zoom": [
+      0.008,
+      0.443,
+      0.367,
+      0.465
+     ]
+    },
+    {
+     "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/amen/shots/grid-bar3.png",
+     "zoom": [
+      0.008,
+      0.443,
+      0.367,
+      0.465
+     ]
+    }
+   ],
+   "cut": 5.0,
+   "holdLast": true,
+   "loop": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/amen/audio/ab-s6-full4.wav",
+   "playMax": 9.0,
+   "normalize": false,
+   "ab": {
+    "before": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/amen/audio/ab-s5-bar3straight.wav",
+    "beforeShots": [
+     {
+      "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/amen/shots/grid-bar3str.png",
+      "zoom": [
+       0.008,
+       0.443,
+       0.367,
+       0.465
+      ]
+     }
+    ],
+    "afterShots": [
+     {
+      "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/amen/shots/grid-bar3.png",
+      "zoom": [
+       0.008,
+       0.443,
+       0.367,
+       0.465
+      ]
+     }
+    ],
+    "cycles": 2,
+    "seconds": 8.4
+   },
+   "factCheck": [
+    [
+     "bar three",
+     "bar 3"
+    ],
+    [
+     "one sixteenth",
+     "1 sixteenth",
+     "one 16th"
+    ],
+    [
+     "last snare"
+    ]
+   ],
+   "narration": "Now the part that makes this four bars rather than one bar played four times. In bar three, the snare that you are expecting on beat four does not arrive on beat four. It arrives one sixteenth note later — one hundred and ten milliseconds late — and everything else in the bar stays exactly where it was. That is one note moved by one step. Listen to it against the version where that snare is left on the beat, and notice what it does to you: the pattern stops being predictable, and you start waiting for the next thing instead of settling into it. In the grid on screen, look at the last snare in the bar: it now sits between two ride cymbals instead of directly underneath one."
+  },
+  {
+   "id": "10-bar4",
+   "shots": [
+    8,
+    {
+     "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/amen/shots/grid-bar4.png",
+     "zoom": [
+      0.008,
+      0.443,
+      0.367,
+      0.465
+     ]
+    }
+   ],
+   "cut": 5.4,
+   "holdLast": true,
+   "loop": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/amen/audio/ab-s6-full4.wav",
+   "burst": "b-bar3",
+   "playMax": 9.0,
+   "normalize": false,
+   "factCheck": [
+    [
+     "bar four",
+     "bar 4"
+    ],
+    [
+     "crash"
+    ],
+    [
+     "downbeat"
+    ],
+    [
+     "slot"
+    ]
+   ],
+   "narration": "And then bar four, which is the bar that producers actually chopped up and built records out of. Two things happen in it. The first is a hole: there is no kick drum on the downbeat at all. The strongest beat in the bar, the one your body is counting on, is simply empty, and your ear fills it in. The second is a crash cymbal landing between beats three and four rather than on a beat, which throws the whole thing forward into the repeat. Look at the grid: the bass drum row is empty at the left-hand edge, and the crash has taken over the slot where a ride cymbal would otherwise have been. Here is the complete four bars, with bar three and bar four doing their work."
+  },
+  {
+   "id": "11-full",
+   "shots": [
+    {
+     "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/amen/shots/grid-all.png",
+     "zoom": [
+      0.008,
+      0.443,
+      0.984,
+      0.465
+     ]
+    },
+    5,
+    "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/amen/shots/roll-snare.png"
+   ],
+   "cut": 5.0,
+   "loop": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/amen/audio/ab-q-quant.wav",
+   "burst": "b-loop",
+   "playMax": 13.0,
+   "normalize": false,
+   "factCheck": [
+    [
+     "fifty three",
+     "53"
+    ],
+    [
+     "nothing sampled",
+     "nothing is sampled"
+    ]
+   ],
+   "narration": "That is the whole pattern, and it is fifty three notes: seven kick drum hits, fourteen snares of which five are ghosts, thirty one ride cymbals and one crash. Nothing sampled, nothing generated, nothing downloaded. Every one of those fifty three is a note that was typed into this project, and you can see them all in the grid on screen. And I want to be honest about what this is and is not. This is the skeleton that producers program — it is not a note perfect transcription of what Gregory Coleman played, and nobody's grid version is, because he was not playing on a grid. Which is exactly where we go next."
+  },
+  {
+   "id": "12-humanize",
+   "shots": [
+    9,
+    "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/amen/shots/chart-humanize.png"
+   ],
+   "cut": 6.2,
+   "holdLast": true,
+   "brandCheck": "DAW Pro",
+   "factCheck": [
+    [
+     "eight point six",
+     "8.6"
+    ],
+    [
+     "four point six",
+     "4.6"
+    ],
+    [
+     "one hundred and six",
+     "106"
+    ],
+    [
+     "halfway"
+    ],
+    [
+     "has a feel"
+    ]
+   ],
+   "narration": "Here is the thing a grid cannot store. A real drummer does not hit exactly on the beat. Every hit lands slightly early or slightly late, and the pattern of those small errors is a large part of what we mean when we say a player has a feel. So let us do it deliberately, and measure it. DAW Pro has a humanise command that nudges every note by a small random amount, from a seed, so the same numbers come back every time you run it. I ran it across the whole loop and then read the result back out of the project, hit by hit. This chart is every one of those one hundred and six hits and how far off the grid it landed. The largest is eight point six milliseconds. The average is four point six. And now that number I asked you to keep is worth something: one sixteenth note is one hundred and ten milliseconds, so the very worst hit in this take is under eight percent of one step out of place. The red line near the top of the chart is the halfway point to the next grid position — past that line a hit would be closer to the wrong step than to its own. Nothing here comes anywhere near it."
+  },
+  {
+   "id": "13-shift",
+   "shots": [
+    "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/amen/shots/shiftchart-mid.png",
+    10
+   ],
+   "cut": 6.0,
+   "loop": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/amen/audio/bed-shift.wav",
+   "burst": "shiftchart",
+   "playMax": 19.5,
+   "normalize": false,
+   "bedEligible": false,
+   "factCheck": [
+    [
+     "twenty eight",
+     "28"
+    ],
+    [
+     "magnifying glass"
+    ],
+    [
+     "laptop speakers"
+    ]
+   ],
+   "narration": "And now the honest part, because a few milliseconds is right at the edge of what anybody can hear, and on laptop speakers, listening to one version on its own, you very probably will not hear it. That is not your ears and it is not your speakers. It is the size of the thing. So this chart shows both scales at once. First the real one: every hit of the humanised take, plotted by how far off the grid it is, with the playhead crossing at real speed while you hear it. Then the same pattern again with the snare deliberately dragged twenty eight milliseconds late — more than three times the largest real shift, and far enough that you cannot miss it. That second one is not a better version. It is a magnifying glass. Listen to how heavy and behind the beat the snare feels when it is dragged, and then remember that the real thing is the small cluster of dots near the middle line, doing a much gentler version of the same job."
+  },
+  {
+   "id": "14-audibility",
+   "shots": [
+    "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/amen/shots/chart-audibility.png",
+    14
+   ],
+   "cut": 6.2,
+   "holdLast": true,
+   "factCheck": [
+    [
+     "loudness meter"
+    ],
+    [
+     "nothing",
+     "none"
+    ],
+    [
+     "twenty point five",
+     "20.5"
+    ]
+   ],
+   "narration": "Which brings me to a chart I think is the most useful thing in this video. Every one of the four changes we have made is on it. The coloured bar is how much of the audio signal actually changed, measured by subtracting one version from the other. The grey bar next to it is what an ordinary loudness meter says about the same pair. And the grey bars are all essentially zero. Adding the ghost notes changed the signal by minus twenty point five decibels and moved the loudness by nothing. Moving every hit by a few milliseconds changed the signal by nearly three decibels — more than the ghost notes did — and moved the loudness by nothing at all. This is worth sitting with, because loudness is what most people reach for when they check their work. A meter measures level. Groove is not level. If you are judging a drum part by looking at a number, you are looking at the one thing that cannot see any of this."
+  },
+  {
+   "id": "15-tempo",
+   "shots": [
+    {
+     "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/amen/shots/grid-all.png",
+     "zoom": [
+      0.008,
+      0.443,
+      0.984,
+      0.465
+     ]
+    },
+    12
+   ],
+   "cut": 5.6,
+   "loop": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/amen/audio/ab-j-170.wav",
+   "playMax": 11.0,
+   "normalize": false,
+   "ab": {
+    "before": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/amen/audio/ab-q-quant.wav",
+    "beforeShots": [
+     {
+      "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/amen/shots/grid-all.png",
+      "zoom": [
+       0.008,
+       0.443,
+       0.984,
+       0.465
+      ]
+     }
+    ],
+    "afterShots": [
+     {
+      "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/amen/shots/grid-all.png",
+      "zoom": [
+       0.008,
+       0.443,
+       0.984,
+       0.465
+      ]
+     }
+    ],
+    "cycles": 1,
+    "seconds": 7.0588235294117645
+   },
+   "factCheck": [
+    [
+     "one hundred and seventy",
+     "170"
+    ],
+    [
+     "jungle"
+    ],
+    [
+     "eighty eight",
+     "88"
+    ]
+   ],
+   "narration": "One last thing, because it explains why this particular break took over dance music. Jungle and drum and bass run at roughly one hundred and seventy beats per minute. Here is our pattern at one hundred and thirty six, and then the identical notes at one hundred and seventy, where one sixteenth note shrinks from one hundred and ten milliseconds to eighty eight. Listen to how much busier the same pattern becomes. But there is an important difference between what you just heard and what those producers did, and it is worth understanding. We changed the tempo of a sequence of notes, so the drums sound the same and only arrive faster. They sped up a tape, which raises the pitch of everything on it as well — so their break also became smaller, brighter and tighter as it got faster. That side effect is a real part of why the sped-up Amen break sounds the way it does, and it is something you only get from a recording, not from notes."
+  },
+  {
+   "id": "16-controls",
+   "shots": [
+    11
+   ],
+   "cut": 6.0,
+   "factCheck": [
+    [
+     "control",
+     "controls"
+    ],
+    [
+     "cross",
+     "correlat"
+    ]
+   ],
+   "narration": "Four controls, because a measurement without a control is just a claim. The velocity prediction was written down before anything was rendered, and the render agreed with it to two hundredths of a decibel. The timing shifts were read off the project and then found again in the finished audio, agreeing to half a millisecond. The shaded listen windows were derived from the measurements rather than drawn by eye, and the number of windows came out equal to the number of ghost notes in that excerpt, which is what it had to be if the method works. And the dragged snare was asked for at twenty eight milliseconds and measured back out of the audio, by cross correlation, at twenty eight milliseconds."
+  },
+  {
+   "id": "17-close",
+   "shots": [
+    12,
+    13
+   ],
+   "cut": 5.4,
+   "brandCheck": "DAW Pro",
+   "factCheck": [
+    [
+     "fifty three",
+     "53"
+    ]
+   ],
+   "narration": "So, four things to take with you. Velocity is not a volume control; it is the difference between a groove and a drum machine, and ghost notes are where most of that lives. One bar that breaks the pattern is worth more than three that keep it. Being off the grid is not sloppiness — it is the part of a performance that a grid cannot store, and you can put it back on purpose. And if you do reach for somebody's recording rather than programming your own, know whose it is, because the story of this particular six seconds is a man who played the most influential four bars in modern music and never received a penny for it. Everything in this video was programmed and measured in DAW Pro. Fifty three notes, nothing sampled. Thanks for watching."
+  }
+ ],
+ "tags": [
+  "amen break",
+  "drum programming",
+  "breakbeat",
+  "jungle",
+  "drum and bass",
+  "music production",
+  "midi",
+  "ghost notes",
+  "groove",
+  "sampling"
+ ],
+ "description": "The Amen break is probably the most sampled piece of music that exists. This takes it apart and rebuilds it from nothing — 53 MIDI notes typed in by hand — and measures every claim it makes.\n\n⛔ THE 1969 RECORDING IS NEVER TOUCHED\n\"Amen, Brother\" (The Winstons, 1969) is a sound recording still in copyright in the US into the 2060s. Neither drummer Gregory Coleman nor bandleader Richard Spencer was ever paid for its use; a 2015 fan-run fundraiser gave Spencer about £18,000 as a gift, not a settlement. So this video programs the pattern instead. That is the legally clean route and it is also the one that teaches you something.\n\nWHAT IS IN THE FOUR BARS\n· 7 kick hits\n· 9 snare accents and 5 ghost notes\n· 31 ride cymbals, straight eighths\n· 1 crash, in bar four\n· 53 notes total, at 136 BPM, where one sixteenth = 110.29 ms\n\nPREDICTED, THEN MEASURED\nA General MIDI bank scales note amplitude with (velocity/127)^2, i.e. 40*log10(v/127) dB. Ghost notes at velocity 50 against accents at 110 were predicted at -13.70 dB and measured at -13.72 dB. Away from one sample-layer switch the snare tracks that law to 0.02 dB; inside the switch it is 4.67 dB off, which is the bank changing to a different recording of the drum.\n\nHUMANISING, MEASURED\nAcross 106 hits the largest distance from the grid is 8.60 ms and the average is 4.65 ms — 7.8 % and 4.2 % of one sixteenth note. Read off the project, then confirmed in the rendered audio to 0.50 ms.\n\nWHAT A LOUDNESS METER SEES\nAdding the ghost notes changed the signal by -20.5 dB and the integrated loudness by +0.0 LU. Humanising changed the signal by +2.9 dB and the loudness by +0.0 LU. A meter measures level; none of this lesson is about level.\n\nAUDIBILITY, SAID PLAINLY\nA few milliseconds is at the edge of what anyone hears, and on laptop speakers you probably will not hear the humanised version on its own. The film says so, shows the measurement, and plays an exaggerated version at 28 ms next to it at the same scale rather than pretending.\n\nSOURCES\nFacts on the recording, the pattern and the royalties come from Wikipedia's \"Amen break\" and Ethan Hein's \"Building the Amen Break\" (2023), whose caveat that a 16th-grid transcription cannot capture the original is stated on screen.\n\nDISCLOSURE\nThe narration is a synthetic voice, generated locally. No music-generation model was used; every note was written by hand.\n\n#amenbreak #drumandbass #jungle #breakbeat #musicproduction #midi"
+}

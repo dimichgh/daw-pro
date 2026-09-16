@@ -1,0 +1,230 @@
+{
+ "bpm": 128,
+ "bars": 16,
+ "seconds": 30,
+ "notes": 402,
+ "riffNotes": 64,
+ "drumHits": 134,
+ "subNotes": 12,
+ "parts": [
+  {
+   "name": "Violins",
+   "group": "orch",
+   "volume": 0.47,
+   "pan": -0.12,
+   "notes": 64
+  },
+  {
+   "name": "Celli",
+   "group": "orch",
+   "volume": 0.55,
+   "pan": 0.1,
+   "notes": 64
+  },
+  {
+   "name": "Basses",
+   "group": "orch",
+   "volume": 0.65,
+   "pan": 0,
+   "notes": 64
+  },
+  {
+   "name": "Riff",
+   "group": "tech",
+   "volume": 0.34,
+   "pan": 0,
+   "notes": 64
+  },
+  {
+   "name": "Kick",
+   "group": "tech",
+   "volume": 0.8,
+   "pan": 0,
+   "notes": 60
+  },
+  {
+   "name": "Hats",
+   "group": "tech",
+   "volume": 0.42,
+   "pan": 0.18,
+   "notes": 52
+  },
+  {
+   "name": "Clap",
+   "group": "tech",
+   "volume": 0.55,
+   "pan": -0.15,
+   "notes": 22
+  },
+  {
+   "name": "Sub",
+   "group": "tech",
+   "volume": 0.62,
+   "pan": 0,
+   "notes": 12
+  }
+ ],
+ "orch": {
+  "maxShortTermLufs": -19.29256904503351,
+  "integratedLufs": -19.89081663455963,
+  "maxMomentaryLufs": -16.623401075927756,
+  "loudnessRangeLu": 1.291054927814983,
+  "truePeakDbtp": -8.880636544831619
+ },
+ "techno": {
+  "maxShortTermLufs": -19.28296097019258,
+  "integratedLufs": -20.92239774673101,
+  "maxMomentaryLufs": -18.26245179727336,
+  "loudnessRangeLu": 3.3003941261585226,
+  "truePeakDbtp": -3.941781822021052
+ },
+ "stems": {
+  "Violins": {
+   "maxShortTermLufs": -24.29663062918913,
+   "integratedLufs": -25.25551156431553,
+   "maxMomentaryLufs": -22.693105637934078,
+   "loudnessRangeLu": 1.5908944366759457,
+   "truePeakDbtp": -15.304489727995447
+  },
+  "Celli": {
+   "maxShortTermLufs": -23.613415394449518,
+   "integratedLufs": -24.230793633406766,
+   "maxMomentaryLufs": -20.684990370949983,
+   "loudnessRangeLu": 1.3200132834319547,
+   "truePeakDbtp": -15.490649116614959
+  },
+  "Basses": {
+   "maxShortTermLufs": -24.31832335128879,
+   "integratedLufs": -25.18226475064558,
+   "maxMomentaryLufs": -21.65829803077723,
+   "loudnessRangeLu": 1.721632050495817,
+   "truePeakDbtp": -17.4557904706331
+  },
+  "Riff": {
+   "maxShortTermLufs": -29.835693338811893,
+   "integratedLufs": -30.266066406164644,
+   "maxMomentaryLufs": -29.083263331779275,
+   "loudnessRangeLu": 0.7173333232385346,
+   "truePeakDbtp": -18.087094041351772
+  },
+  "Kick": {
+   "maxShortTermLufs": -23.196172458274937,
+   "integratedLufs": -23.432675921739776,
+   "maxMomentaryLufs": -22.896305727819822,
+   "loudnessRangeLu": 0.6695663659024156,
+   "truePeakDbtp": -10.615069643951554
+  },
+  "Hats": {
+   "maxShortTermLufs": -43.55669293500762,
+   "integratedLufs": -43.997772833925126,
+   "maxMomentaryLufs": -41.83779816755035,
+   "loudnessRangeLu": 2.0240885296164564,
+   "truePeakDbtp": -22.363486050346456
+  },
+  "Clap": {
+   "maxShortTermLufs": -34.22951091750833,
+   "integratedLufs": -32.40281518129153,
+   "maxMomentaryLufs": -31.49723348184772,
+   "loudnessRangeLu": 2.9976583767207856,
+   "truePeakDbtp": -15.121631087892332
+  },
+  "Sub": {
+   "maxShortTermLufs": -23.906313971881477,
+   "integratedLufs": -25.26961914717748,
+   "maxMomentaryLufs": -22.935730843055534,
+   "loudnessRangeLu": 3.2582256175832,
+   "truePeakDbtp": -14.271280055039748
+  }
+ },
+ "layers": [
+  {
+   "tag": "l1-riff",
+   "keep": [
+    "Riff"
+   ],
+   "out": {
+    "maxShortTermLufs": -29.835693338811893,
+    "integratedLufs": -30.266066406164644,
+    "maxMomentaryLufs": -29.083263331779275,
+    "loudnessRangeLu": 0.7173333232385346,
+    "truePeakDbtp": -18.087094041351772
+   }
+  },
+  {
+   "tag": "l2-kick",
+   "keep": [
+    "Riff",
+    "Kick"
+   ],
+   "out": {
+    "maxShortTermLufs": -22.140648754221772,
+    "integratedLufs": -22.81097206461664,
+    "maxMomentaryLufs": -21.453030589371725,
+    "loudnessRangeLu": 0.8296631285744382,
+    "truePeakDbtp": -7.723298335007759
+   }
+  },
+  {
+   "tag": "l3-hats",
+   "keep": [
+    "Riff",
+    "Kick",
+    "Hats"
+   ],
+   "out": {
+    "maxShortTermLufs": -22.11628933430585,
+    "integratedLufs": -22.786130949187683,
+    "maxMomentaryLufs": -21.438756494110656,
+    "loudnessRangeLu": 0.8232442835536773,
+    "truePeakDbtp": -7.723298335007759
+   }
+  },
+  {
+   "tag": "l4-clap",
+   "keep": [
+    "Riff",
+    "Kick",
+    "Hats",
+    "Clap"
+   ],
+   "out": {
+    "maxShortTermLufs": -21.839499214200682,
+    "integratedLufs": -22.603301909479605,
+    "maxMomentaryLufs": -20.99503689318333,
+    "loudnessRangeLu": 0.9696646965188052,
+    "truePeakDbtp": -5.806128974031282
+   }
+  },
+  {
+   "tag": "l5-sub",
+   "keep": [
+    "Riff",
+    "Kick",
+    "Hats",
+    "Clap",
+    "Sub"
+   ],
+   "out": {
+    "maxShortTermLufs": -19.28296097019258,
+    "integratedLufs": -20.92239774673101,
+    "maxMomentaryLufs": -18.26245179727336,
+    "loudnessRangeLu": 3.3003941261585226,
+    "truePeakDbtp": -3.941781822021052
+   }
+  }
+ ],
+ "subUp": {
+  "maxMomentaryLufs": -19.163369094693188,
+  "loudnessRangeLu": 1.8309628007480931,
+  "truePeakDbtp": -14.293337668563757,
+  "integratedLufs": -19.514759521780924,
+  "maxShortTermLufs": -19.2975860573012
+ },
+ "subDown": {
+  "maxMomentaryLufs": -22.935730843055534,
+  "loudnessRangeLu": 3.2582256175832,
+  "truePeakDbtp": -14.271280055039748,
+  "integratedLufs": -25.26961914717748,
+  "maxShortTermLufs": -23.906313971881477
+ }
+}

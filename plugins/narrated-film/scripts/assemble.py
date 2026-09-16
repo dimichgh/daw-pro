@@ -102,13 +102,22 @@ class Film:
             z = to = None
             if isinstance(s, dict):
                 z, to, s = s.get("zoom"), s.get("to"), s["path"]
-            ins += ["-loop", "1", "-t", f"{each:.3f}", "-i", s]
+            # ⚠ THE LAST STILL IS DELIBERATELY OVER-LONG, and the output is
+            # then trimmed to `total` below. libx264 at -r FPS emits
+            # round(each*FPS) frames per input, so each still is up to half a
+            # frame short or long; over the eighteen stages of the compressor
+            # lesson those roundings summed to 521 ms of video-shorter-than-
+            # audio and verify.py's a/v drift gate REFUSED THE FILM. `burst()`
+            # has always trimmed to an exact `total`; this path never did.
+            ins += ["-loop", "1", "-t", f"{(each + 0.5) if i == n - 1 else each:.3f}",
+                    "-i", s]
             pre = (self._crop_expr(z, to, each) + ",") if z else ""
             filt.append(f"[{i}:v]{pre}{self.VF}[v{i}]")
             labels.append(f"[v{i}]")
         filt.append("".join(labels) + f"concat=n={n}:v=1:a=0[o]")
         run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *ins,
-             "-filter_complex", ";".join(filt), "-map", "[o]", "-c:v", "libx264",
+             "-filter_complex", ";".join(filt), "-map", "[o]",
+             "-t", f"{total:.3f}", "-c:v", "libx264",
              "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p",
              "-r", str(self.FPS), out])
 
@@ -175,15 +184,38 @@ class Film:
         run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *ins,
              "-filter_complex", ";".join(filt), "-map", "[o]",
              "-c:a", "pcm_s16le", "-ac", "2", out])
-        return vlen
+        # ⚠ RETURN WHAT WAS WRITTEN, NOT WHAT WAS ASKED FOR. This used to return
+        # `vlen`, the narration wav's own duration -- but loudnorm is a dynamic
+        # filter with lookahead and the MIXED file it writes here is reliably
+        # 20-130 ms LONGER. The still track was then built to the shorter figure,
+        # so every talk segment came out video-short, and across the compressor
+        # lesson's eighteen stages that summed to 865 ms of a/v drift and
+        # verify.py refused the film. Measure the artefact.
+        return dur(out)
 
-    def play_audio(self, wav, out):
+    def play_audio(self, wav, out, normalize=True):
+        """Trim, fade and level one play segment.
+
+        ⚠ `normalize=False` EXISTS BECAUSE loudnorm DESTROYS A LOUDNESS LESSON.
+        self.NORM is a SINGLE-PASS loudnorm, which is dynamic: MEASURED on the
+        compressor lesson's makeup A/B, a pair that really differed by 2.1 LU
+        (-26.7 vs -24.6) came out of it at -17.3 vs -18.8 -- the difference was
+        not merely flattened, it was INVERTED, so the quieter take played back
+        louder. A film whose whole point is "the compressed one is louder, and
+        louder wins every blind A/B" cannot be assembled through that.
+
+        A stage sets "normalize": false and pre-gains its own wavs with ONE
+        static gain shared across the pair, so the relative levels that ARE the
+        measurement survive to the viewer. Default stays true: every other film
+        wants its segments levelled.
+        """
         n = min(dur(wav), self.PLAY_MAX)
+        tail = self.NORM if normalize else "aresample=48000,aformat=channel_layouts=stereo"
         run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", wav,
              "-af", f"atrim=0:{n:.3f},asetpts=PTS-STARTPTS,afade=t=in:st=0:d=0.15,"
-                    f"afade=t=out:st={max(n - 1.0, 0):.3f}:d=1.0,{self.NORM}",
+                    f"afade=t=out:st={max(n - 1.0, 0):.3f}:d=1.0,{tail}",
              "-c:a", "pcm_s16le", "-ac", "2", out])
-        return n
+        return dur(out)          # same reason as talk_audio: measure, don't assume
 
     def mux(self, v, a, out):
         run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", v, "-i", a,
@@ -240,6 +272,13 @@ def main():
         return s["path"] if isinstance(s, dict) else s
 
     parts, prev_loop, missing = [], None, []
+    # ⚠ WHERE EACH A/B HALF LANDS IN THE FINISHED FILM. verify.py's A/B
+    # separation gate needs to find the halves in the DELIVERABLE, not in the
+    # work dir -- a check that only fires while intermediates happen to still
+    # exist is exactly the documented-but-not-gated shape that let cut 1 of the
+    # compressor lesson ship. Keyed by segment path; offsets are computed from
+    # the REAL durations after concat, never from the requested ones.
+    ab_marks = {}
     for st in man["stages"]:
         sid = st["id"]
         vo = os.path.join(a.vo, f"{sid}.wav")
@@ -279,7 +318,7 @@ def main():
                     pa, pv, pl, pm = (stem + ".wav", stem + ".mp4",
                                       stem + "-lab.mp4", stem + "-mux.mp4")
                     saved, film.PLAY_MAX = film.PLAY_MAX, half
-                    n = film.play_audio(wav, pa)
+                    n = film.play_audio(wav, pa, st.get("normalize", True))
                     film.PLAY_MAX = saved
                     bdir = os.path.join(a.bursts, bname) if bname else None
                     if bdir and os.path.exists(os.path.join(bdir, "meta.json")):
@@ -301,6 +340,9 @@ def main():
                     film.labelled(pv, tag, col, pl)
                     film.mux(pl, pa, pm)
                     parts.append(pm)
+                    ab_marks[pm] = {"stage": sid, "tag": tag, "cycle": cycle,
+                                    "wav": os.path.abspath(wav),
+                                    "normalize": bool(st.get("normalize", True))}
                     plen += n
             prev_loop = after_wav if st.get("bedEligible", True) else None
             print(f"  {sid:22s} talk {tlen:6.1f}s + A/B {plen:5.1f}s  "
@@ -312,7 +354,15 @@ def main():
             pa = os.path.join(a.work, f"{sid}-play.wav")
             pv = os.path.join(a.work, f"{sid}-play.mp4")
             pm = os.path.join(a.work, f"{sid}-play-mux.mp4")
-            plen = film.play_audio(loop, pa)
+            # ⚠ PER-STAGE playMax. The film-wide cap exists to stop a long
+            # loop droning; a stage whose play segment is a RENDERED CHART is
+            # the opposite case — its length is fixed by the chart, and the
+            # global cap silently truncates it mid-sweep, leaving a playhead
+            # that stops moving while the audio keeps going. The A/B path
+            # already borrows PLAY_MAX this way.
+            saved, film.PLAY_MAX = film.PLAY_MAX, float(st.get("playMax", film.PLAY_MAX))
+            plen = film.play_audio(loop, pa, st.get("normalize", True))
+            film.PLAY_MAX = saved
             bdir = os.path.join(a.bursts, st.get("burst", sid))
             if os.path.exists(os.path.join(bdir, "meta.json")):
                 film.burst(st.get("burst", sid), plen, pv)
@@ -363,6 +413,51 @@ def main():
     run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "concat",
          "-safe", "0", "-i", lst, "-c", "copy", a.out])
 
+    # Offsets accumulated from each part's MEASURED duration, in final order,
+    # so intro cards and any inserted clip are counted like everything else.
+    if ab_marks:
+        tl, t = [], 0.0
+        for pth in parts:
+            d = dur(pth)
+            if pth in ab_marks:
+                tl.append(dict(ab_marks[pth], startSec=round(t, 3),
+                               endSec=round(t + d, 3)))
+            t += d
+        json.dump({"film": os.path.abspath(a.out), "abHalves": tl},
+                  open(a.out + ".timeline.json", "w"), indent=1)
+        print(f"  timeline               {len(tl)} A/B halves -> {a.out}.timeline.json")
+
+    # ⚠ LOCK THE TWO STREAMS TOGETHER, and do it HERE rather than per segment.
+    # `mux` uses -shortest with -c:v copy, so every segment's video is truncated
+    # to a FRAME BOUNDARY at or before its audio end. That bias is small and it
+    # is ALWAYS THE SAME SIGN, so it accumulates: MEASURED across the compressor
+    # lesson's 44 segments it ran -6.7 to -126.7 ms each and summed to 875 ms,
+    # and verify.py's a/v drift gate refused to ship the film.
+    #
+    # Two earlier fixes to this failed and are worth not repeating: trimming the
+    # STILLS track to an exact `total` (the truncation happens after that, in
+    # mux) and having talk_audio return the written file's duration instead of
+    # the vo's (they are equal — loudnorm does not change length here). The
+    # fault is in mux, and the cheapest correct place to repair it is once, on
+    # the finished concat, by CLONING THE LAST FRAME out to the audio end rather
+    # than cutting the audio — the tail of the outro card is real audio and
+    # truncating it would be trading a gate failure for a content loss.
+    def _sdur(stream):
+        return float(run(["ffprobe", "-v", "error", "-select_streams", stream,
+                          "-show_entries", "stream=duration",
+                          "-of", "default=nw=1:nk=1", a.out]).strip())
+    vd, ad = _sdur("v:0"), _sdur("a:0")
+    if ad - vd > 1.0 / film.FPS:
+        tmp = a.out + ".sync.mp4"
+        run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", a.out,
+             "-vf", f"tpad=stop_mode=clone:stop_duration={ad - vd + 0.5:.3f}",
+             "-t", f"{ad:.3f}", "-c:v", "libx264", "-preset", "medium",
+             "-crf", "20", "-pix_fmt", "yuv420p", "-r", str(film.FPS),
+             "-c:a", "copy", tmp])
+        os.replace(tmp, a.out)
+        print(f"  a/v sync     video {vd:.3f}s -> audio {ad:.3f}s "
+              f"(padded {(ad - vd) * 1000:.0f} ms of held last frame)")
+
     # ⚠ TRUE-PEAK BACKSTOP. `loudnorm`'s single-pass TP= is a target, not a
     # guarantee: percussive material sails past it. The Amen lesson came out of
     # the concat at -0.3 dBTP against a -1.0 ceiling, and the only reason anyone
@@ -370,19 +465,38 @@ def main():
     # The fix is a STATIC trim, not a limiter -- if the peak is 0.7 dB too high,
     # turn the whole film down 0.7 dB. Nothing is compressed, no transient is
     # reshaped, and the film that ships is the film that was mixed.
+    # ⚠⚠ TWO DEFECTS FIXED HERE, BOTH MEASURED ON A REAL BUILD (HWB2, 2026-09-05),
+    # where this loop OSCILLATED and then failed the build outright:
+    #   +0.60 -> -0.80 -> -0.70 -> -0.90 -> -0.40, the peak RISING after a
+    #   downward trim.
+    # ① It aimed at EXACTLY the ceiling. AAC is lossy and its decoded
+    #    inter-sample peaks are not the peaks you encoded, so a file trimmed to
+    #    land on -1.00 comes back over it about half the time -- forever. Aim
+    #    BELOW the ceiling and one pass converges.
+    # ② Every retry re-encoded the ALREADY-TRIMMED file, so attempt n was the
+    #    nth AAC generation, each adding its own error to the thing being
+    #    measured. The trim is now always applied ONCE to a kept pristine copy
+    #    with a running total, so the film that ships is one generation from the
+    #    concat no matter how many attempts it took.
+    CEIL, MARGIN = -1.0, 0.5
     tp = true_peak(a.out)
-    for attempt in range(4):
-        if tp is None or tp <= -1.0:
-            break
-        trim = -1.0 - tp
-        tmp = a.out + ".tp.mp4"
-        run(["ffmpeg", "-v", "error", "-y", "-i", a.out,
-             "-af", f"volume={trim:.2f}dB", "-c:v", "copy", "-c:a", "aac",
-             "-b:a", "192k", tmp])
-        os.replace(tmp, a.out)
-        was, tp = tp, true_peak(a.out)
-        print(f"  true peak   {was:+.2f} -> trim {trim:.2f} dB -> {tp:+.2f} dBTP"
-              f"{'' if tp <= -1.0 else '  (still over — retrying)'}")
+    if tp is not None and tp > CEIL:
+        pristine = a.out + ".pretrim.mp4"
+        os.replace(a.out, pristine)
+        total = 0.0
+        for attempt in range(4):
+            total += (CEIL - MARGIN) - tp
+            tmp = a.out + ".tp.mp4"
+            run(["ffmpeg", "-v", "error", "-y", "-i", pristine,
+                 "-af", f"volume={total:.2f}dB", "-c:v", "copy", "-c:a", "aac",
+                 "-b:a", "192k", tmp])
+            os.replace(tmp, a.out)
+            was, tp = tp, true_peak(a.out)
+            print(f"  true peak   {was:+.2f} -> total trim {total:.2f} dB -> {tp:+.2f} dBTP"
+                  f"{'' if tp is not None and tp <= CEIL else '  (still over — retrying)'}")
+            if tp is None or tp <= CEIL:
+                break
+        os.remove(pristine)
     if tp is not None and tp > -0.95:
         raise SystemExit(f"true-peak trim would not converge: {tp:+.2f} dBTP")
 
