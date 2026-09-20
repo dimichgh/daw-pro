@@ -118,11 +118,22 @@ function lastLogLine(): any {
 // Instrumentation coverage (both registration paths)
 // ---------------------------------------------------------------------------
 
-test("both registration paths are instrumented: 216 total, empty symmetric difference vs tools/list", async () => {
+test("both registration paths are instrumented: 232 total, empty symmetric difference vs tools/list", async () => {
   const instrumented = instrumentedToolNames();
   // m34-l: 208 -> 209 with `play_sustain`.
   // m34-h-1: 209 -> 216 with the seven-verb `looper_*` LIVE LOOPING family.
-  assert.equal(instrumented.length, 220, `expected 220 instrumented registrations, got ${instrumented.length}`);
+  // m35-g: 216 -> 220 with the four `view_*` tools.
+  // m23-cw MCP mirror: 220 -> 222 with `au_list_presets`/`au_load_preset`.
+  // m39-f/g MCP mirror: 222 -> 223 with `instrument_describe_synth` (rides
+  // the strict-schema wrapper, the `instrument_describe_sampler` precedent);
+  // the same close's fifteen `track_set_instrument` richness parameters add
+  // zero, being new params on an already-instrumented tool.
+  // m39-e MCP mirror: 223 -> 232 with the nine `mod_*` tools — both
+  // `installMcpLogging`'s patched `server.registerTool` and the local
+  // `registerTool` wrapper call through it, so `mod_describe_kinds`/
+  // `mod_describe` (direct) and the other seven (wrapper) are ALL
+  // instrumented the same way the m23-cw/m39-f pair already proved.
+  assert.equal(instrumented.length, 232, `expected 232 instrumented registrations, got ${instrumented.length}`);
 
   const listed = await client.listTools();
   const listedNames = new Set(listed.tools.map((t) => t.name));

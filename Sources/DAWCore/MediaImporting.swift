@@ -601,7 +601,7 @@ public enum ProjectError: Error, LocalizedError {
         case .masterChainBuiltInOnly:
             // Exact wording is contract (design-m13d §4; control protocol +
             // MCP surface it verbatim, gate-checked in C6).
-            return "the master chain hosts built-in effects only in v1 — pick one of gain|eq|compressor|limiter|reverb|delay|saturator|gate|chorus|bassEnhancer|bitCrusher"
+            return "the master chain hosts built-in effects only in v1 — pick one of gain|eq|compressor|limiter|reverb|delay|saturator|gate|chorus|bassEnhancer|bitCrusher|djFilter|ringMod|flanger|hallReverb|tapeDelay|stereoWidth"
         case .sidechainMasterUnsupported:
             // Exact wording is contract (design-m13d §4; surfaced verbatim over
             // the wire on `fx.setSidechain {trackId:"master"}`, gate-checked in

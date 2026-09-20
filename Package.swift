@@ -225,6 +225,13 @@ let package = Package(
         // reserves the right to transform resources, and a transformed fixture
         // is no longer evidence of anything. `.copy` preserves the directory
         // verbatim, so they load at `Fixtures/SMF/…` inside `Bundle.module`.
+        // `scripts/demos/render-variants.mjs`'s headless render engine
+        // (demo harness, not a product feature). Dependency floor is
+        // DELIBERATELY DAWCore + DAWEngine only — never DAWControl, never
+        // DAWApp — so it keeps building while DAWControl is mid-edit by a
+        // concurrent agent, and so a demo render never needs a window
+        // server or the control port. See Sources/DemoRender/DemoRender.swift.
+        .executableTarget(name: "DemoRender", dependencies: ["DAWCore", "DAWEngine"]),
         .testTarget(name: "DAWCoreTests", dependencies: ["DAWCore"],
                     resources: [.copy("Fixtures")]),
         // DAWEngine is a TEST-ONLY dependency here (the DAWControl module

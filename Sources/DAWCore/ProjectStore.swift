@@ -86,6 +86,14 @@ public final class ProjectStore {
     /// omit-when-empty — the `masterEffects` triple-mirror discipline (store +
     /// snapshot + disk DTO, m12-f).
     public private(set) var masterAutomation: [AutomationLane] = []
+    /// MASTER modulation (m39-e) — the `masterEffects` / `masterAutomation`
+    /// twin, and the strip an agent reaches with `trackId: "master"`. Rides
+    /// `EditState`, persists additively, omit-when-empty.
+    /// Setters are module-`internal` so `ProjectStore+Modulation` mutates them
+    /// inside `performEdit` (the `grooveTemplates` precedent) while callers
+    /// outside DAWCore stay read-only.
+    public internal(set) var masterModulationSources: [ModulationSource] = []
+    public internal(set) var masterModulationRoutes: [ModulationRoute] = []
     /// Project-level GROOVE palette (M5 iii-g, spec §6): extracted templates,
     /// referenced BY VALUE at quantize time (so deleting one never dangles a
     /// reference). Default empty; undo covers add/remove (it rides `EditState`).
@@ -3245,6 +3253,11 @@ public final class ProjectStore {
         case .eq: return "EQ"
         case .bassEnhancer: return "Bass Enhancer"
         case .bitCrusher: return "Bit Crusher"
+        case .djFilter: return "DJ Filter"
+        case .ringMod: return "Ring Mod"
+        case .hallReverb: return "Hall Reverb"
+        case .tapeDelay: return "Tape Delay"
+        case .stereoWidth: return "Stereo Width"
         default: return kind.rawValue.prefix(1).uppercased() + kind.rawValue.dropFirst()
         }
     }
@@ -3499,6 +3512,22 @@ public final class ProjectStore {
                 throw ProjectError.automationTargetNotSupported(
                     "Audio Unit effect-parameter automation is not supported in v0")
             }
+        case .instrumentParam:
+            // m39-b lands the TARGET (addressing, persistence, wire shape) and
+            // shares m39-e's delivery slot for MODULATION. A hand-drawn
+            // instrument automation LANE is a third thing and needs a
+            // render-side lane-delivery path that does not exist:
+            // `AutomationRenderer.storeEffectParams` walks the effect chain
+            // snapshot and there is no equivalent for `track.instrument`
+            // (design §10 H3 — "the delivery path is the larger half").
+            // Refused HONESTLY rather than stored as a lane that would look
+            // live and do nothing, which is this tree's characteristic failure
+            // mode. Modulating an instrument param works TODAY: `mod.addRoute`.
+            throw ProjectError.automationTargetNotSupported(
+                "instrument-parameter automation lanes are not supported yet — "
+                + "there is no render-side lane delivery for track.instrument. "
+                + "To modulate an instrument parameter now, use mod.addRoute "
+                + "with target {type:\"instrumentParam\", param:\"…\"}.")
         case .volume, .pan:
             break
         }
@@ -3763,6 +3792,104 @@ public final class ProjectStore {
             default: return
             }
             effect.bitCrusher = params
+        case .djFilter:
+            var params = effect.resolvedDJFilter
+            switch name {
+            case "position": params.position = value
+            case "resonance": params.resonance = value
+            // Numeric-but-discrete: the rebuild routes through the clamping
+            // init so the 12/24 snap happens here, exactly where a bare field
+            // write would have left an un-snapped 17 in the model (the
+            // `bitCrusher.bits` precedent, same shape, same reason).
+            case "slopeDbPerOct": params = DJFilterParams(
+                position: params.position, resonance: params.resonance,
+                slopeDbPerOct: value, deadZoneWidth: params.deadZoneWidth,
+                resonanceTrack: params.resonanceTrack)
+            case "deadZoneWidth": params.deadZoneWidth = value
+            case "resonanceTrack": params.resonanceTrack = value
+            default: return
+            }
+            effect.djFilter = params
+        case .ringMod:
+            var params = effect.resolvedRingMod
+            switch name {
+            case "carrierHz": params.carrierHz = value
+            case "mix": params.mix = value
+            // Numeric-but-discrete: the rebuild routes through the clamping
+            // init so the 0/1/2/3 snap happens HERE, exactly where a bare
+            // field write would have left an un-snapped 1.7 in the model that
+            // `fx.describe` would then report as the setting (the
+            // `bitCrusher.bits` / `djFilter.slopeDbPerOct` precedent).
+            case "waveform": params = RingModParams(
+                carrierHz: params.carrierHz, mix: params.mix, waveform: value,
+                inputHighCutHz: params.inputHighCutHz,
+                stereoSpreadDeg: params.stereoSpreadDeg)
+            case "inputHighCutHz": params.inputHighCutHz = value
+            case "stereoSpreadDeg": params.stereoSpreadDeg = value
+            default: return
+            }
+            effect.ringMod = params
+        case .flanger:
+            var params = effect.resolvedFlanger
+            switch name {
+            case "rateHz": params.rateHz = value
+            case "depthMs": params.depthMs = value
+            case "delayMs": params.delayMs = value
+            case "feedback": params.feedback = value
+            case "mix": params.mix = value
+            case "stereoPhaseDeg": params.stereoPhaseDeg = value
+            default: return
+            }
+            effect.flanger = params
+        case .hallReverb:
+            var params = effect.resolvedHallReverb
+            switch name {
+            case "mix": params.mix = value
+            case "decaySeconds": params.decaySeconds = value
+            case "sizeMeters": params.sizeMeters = value
+            case "preDelayMs": params.preDelayMs = value
+            case "width": params.width = value
+            case "diffusion": params.diffusion = value
+            case "earlyLateBalance": params.earlyLateBalance = value
+            case "lowDecayMultiplier": params.lowDecayMultiplier = value
+            case "highDecayMultiplier": params.highDecayMultiplier = value
+            case "lowCrossoverHz": params.lowCrossoverHz = value
+            case "highCrossoverHz": params.highCrossoverHz = value
+            case "modRateHz": params.modRateHz = value
+            case "modDepthMs": params.modDepthMs = value
+            // `freeze` is a SWITCH on a numeric surface, but unlike
+            // `bitCrusher.antiAlias` it is stored as the raw 0...1 number
+            // rather than a Bool, so a bare field write is exactly right here
+            // and there is nothing to snap: `HallReverbParams.isFrozen`
+            // interprets it at the ONE place that cares (the DSP).
+            case "freeze": params.freeze = value
+            default: return
+            }
+            effect.hallReverb = params
+        case .tapeDelay:
+            var params = effect.resolvedTapeDelay
+            switch name {
+            case "timeMs": params.timeMs = value
+            case "feedback": params.feedback = value
+            case "mix": params.mix = value
+            case "wowDepthMs": params.wowDepthMs = value
+            case "wowRateHz": params.wowRateHz = value
+            case "flutterDepthMs": params.flutterDepthMs = value
+            case "saturationDrive": params.saturationDrive = value
+            case "highCutHz": params.highCutHz = value
+            default: return
+            }
+            effect.tapeDelay = params
+        case .stereoWidth:
+            var params = effect.resolvedStereoWidth
+            switch name {
+            case "width": params.width = value
+            case "spread": params.spread = value
+            case "bassMonoHz": params.bassMonoHz = value
+            case "bassMonoAmount": params.bassMonoAmount = value
+            default: return
+            }
+            effect.stereoWidth = params
         case .audioUnit:
             // Unreachable: specs(for: .audioUnit) is empty, so name validation
             // in setEffectParam rejects every name first. AU params are not
@@ -3805,6 +3932,28 @@ public final class ProjectStore {
         resonance: Double? = nil,
         gain: Double? = nil,
         pedalHoldLimit: Int? = nil,
+        // m39-g richness pass. ⛔⛔ EVERY ONE OF THESE MUST BE PASSED THROUGH IN
+        // THE REBUILD BELOW, AND THE REBUILD IS AN EXPLICIT INITIALISER CALL
+        // THAT COMPILES FINE WITHOUT THEM. A field accepted here and not named
+        // there is not "ignored" — it is DESTROYED on every unrelated call,
+        // with a success response. See the overlay block for the full note and
+        // `InstrumentStoreTests.richnessSurvivesAnUnrelatedKnobEdit` for the
+        // pin. Adding a sixteenth field means editing BOTH lists.
+        unisonVoices: Int? = nil,
+        unisonDetuneCents: Double? = nil,
+        unisonStereoSpread: Double? = nil,
+        subLevel: Double? = nil,
+        subOctave: Int? = nil,
+        subWaveform: PolySynthParams.Waveform? = nil,
+        noiseLevel: Double? = nil,
+        noiseColor: Double? = nil,
+        drift: Double? = nil,
+        resonanceBoost: Double? = nil,
+        drive: Double? = nil,
+        velocityToCutoff: Double? = nil,
+        keyToCutoff: Double? = nil,
+        voiceJitter: Double? = nil,
+        envelopeCurve: Double? = nil,
         sampler: SamplerParams? = nil,
         audioUnit: AudioUnitConfig? = nil,
         soundBank: SoundBankConfig? = nil
@@ -3850,7 +3999,43 @@ public final class ProjectStore {
                 // m34-q: the same overlay rule as the seven above — omitting it
                 // keeps whatever cap the track already had, so tuning one knob
                 // never quietly lifts a limit the user set.
-                pedalHoldLimit: pedalHoldLimit ?? p.pedalHoldLimit
+                pedalHoldLimit: pedalHoldLimit ?? p.pedalHoldLimit,
+                // ⛔⛔ m39-g — THE FIFTEEN RICHNESS FIELDS, AND WHY EVERY ONE OF
+                // THEM IS SPELLED OUT HERE RATHER THAN LEFT TO A DEFAULT.
+                //
+                // This is an EXPLICIT initialiser call, so a field omitted here
+                // does not inherit `p`'s value — it takes `PolySynthParams`'
+                // own `nil` default, on EVERY call, and the method returns
+                // success. While these fields were unsettable that was
+                // invisible (nothing could put a value there to lose). The
+                // moment the wire could set them it became DATA LOSS with a
+                // success response: a user brightens the filter and their
+                // unison stack, sub-oscillator and drive are gone. That is
+                // m33-j's shape exactly (`clip.addAudio` deleted the clips it
+                // overlapped and answered OK), and it is the reason
+                // `InstrumentStoreTests.richnessSurvivesAnUnrelatedKnobEdit`
+                // was written BEFORE this block and watched to fail: all
+                // fifteen reddened, the `cutoffHz` control passed.
+                //
+                // ⚠️ A SIXTEENTH FIELD ADDED TO `PolySynthParams` AND NOT ADDED
+                // HERE WILL COMPILE, SHIP, AND DELETE ITSELF. The whole-struct
+                // equality assertion in that test is the only thing that
+                // catches it; keep it.
+                unisonVoices: unisonVoices ?? p.unisonVoices,
+                unisonDetuneCents: unisonDetuneCents ?? p.unisonDetuneCents,
+                unisonStereoSpread: unisonStereoSpread ?? p.unisonStereoSpread,
+                subLevel: subLevel ?? p.subLevel,
+                subOctave: subOctave ?? p.subOctave,
+                subWaveform: subWaveform ?? p.subWaveform,
+                noiseLevel: noiseLevel ?? p.noiseLevel,
+                noiseColor: noiseColor ?? p.noiseColor,
+                drift: drift ?? p.drift,
+                resonanceBoost: resonanceBoost ?? p.resonanceBoost,
+                drive: drive ?? p.drive,
+                velocityToCutoff: velocityToCutoff ?? p.velocityToCutoff,
+                keyToCutoff: keyToCutoff ?? p.keyToCutoff,
+                voiceJitter: voiceJitter ?? p.voiceJitter,
+                envelopeCurve: envelopeCurve ?? p.envelopeCurve
             ),
             sampler: sampler ?? current.sampler,
             audioUnit: audioUnit ?? current.audioUnit,
@@ -3993,9 +4178,70 @@ public final class ProjectStore {
         }
     }
 
-    /// Target validation for the AU parameter surface — the
-    /// `requirePluginTarget` (plugin.openUI) taxonomy with AU-parameters
-    /// wording: track exists; a named effect must exist ON that track with
+    // MARK: - Hosted-AU preset surface (au.listPresets / au.loadPreset, m23-cw)
+
+    /// Everything the hosted AU behind a track slot says about its own presets.
+    /// Same target model and validation as `describeAudioUnitParams` —
+    /// `effectID` names an `.audioUnit` insert ON `trackID`, nil targets the
+    /// track's `.audioUnit` INSTRUMENT — and the same status-naming teaching
+    /// error for a target with no `.ready` instance. Returns the list plus the
+    /// selection's display name for the wire's `componentName` echo. Pure read:
+    /// no model mutation, no undo entry, no `tracksDidChange`.
+    public func listAudioUnitPresets(trackID: UUID, effectID: UUID?) throws
+        -> (componentName: String, presets: HostedAUPresetList) {
+        let resolved = try resolveHostedAUTarget(trackID: trackID, effectID: effectID)
+        guard let engine else { throw ProjectError.engineUnavailable }
+        guard let presets = try engine.listHostedAUPresets(resolved.target) else {
+            throw hostedAUNotReadyError(resolved.target)
+        }
+        return (resolved.componentName, presets)
+    }
+
+    /// Load one of the hosted AU's OWN presets, live.
+    ///
+    /// ⚠️ THE m23-bx-1 LAW, and this verb is the one most likely to be
+    /// "optimised" into breaking it: a hosted plug-in's live state lives in
+    /// `AUHostRegistry`, NEVER in the model. This method deliberately writes
+    /// NOTHING to `tracks` — not `stateData`, not anything. Two independent
+    /// reasons, either one fatal:
+    ///   • a `stateData` write goes stale the moment the user turns a knob in
+    ///     the vendor's window, which is precisely the split that made an
+    ///     export render a patch nobody had heard (see
+    ///     `tracksWithLiveAudioUnitState`, MEASURED −39.0 vs −70.0 LUFS);
+    ///   • `stateData` is part of `AUHostRegistry.prepareKey`, so writing it
+    ///     would change the prepare identity and force a re-instantiate that
+    ///     DISCARDS the very preset being loaded.
+    /// Save, render, bounce and stem export all already read the live state
+    /// through `tracksWithLiveAudioUnitState()`, and a preset load is MEASURED
+    /// to change the AU's `fullStateForDocument`, so the preset survives
+    /// save/reload by composition rather than by a second mechanism.
+    ///
+    /// Deliberately NO undo step, for the same reason `setAudioUnitParam` has
+    /// none: this is parity with picking a preset in the vendor's own window,
+    /// which the model never sees either. Returns the preset ACTUALLY in
+    /// effect afterwards (the engine's read-back, not the request).
+    @discardableResult
+    public func loadAudioUnitPreset(trackID: UUID, effectID: UUID?,
+                                    selector: HostedAUPresetSelector) throws
+        -> (componentName: String, preset: HostedAUCurrentPreset) {
+        let resolved = try resolveHostedAUTarget(trackID: trackID, effectID: effectID)
+        guard let engine else { throw ProjectError.engineUnavailable }
+        do {
+            let preset = try engine.loadHostedAUPreset(resolved.target, selector: selector)
+            return (resolved.componentName, preset)
+        } catch HostedAUPresetError.noHostedAU {
+            throw hostedAUNotReadyError(resolved.target)
+        }
+    }
+
+    /// Target validation for BOTH hosted-AU surfaces — the parameter pair and
+    /// (m23-cw) the preset pair, which share this ONE home deliberately rather
+    /// than growing a second, drifting copy of the taxonomy. The wording says
+    /// "AU parameters" throughout because that is where it was born; every
+    /// message still teaches the right thing for a preset call (the target is
+    /// not a hosted Audio Unit, and here is the built-in surface to use
+    /// instead). It is the `requirePluginTarget` (plugin.openUI) taxonomy:
+    /// track exists; a named effect must exist ON that track with
     /// kind `.audioUnit`; no effectID targets the track's `.audioUnit`
     /// instrument. `.soundBank` REDIRECTS (LAW L3: `SoundBankConfig` is the
     /// single source of truth — AUSampler tree edits would be silently lost

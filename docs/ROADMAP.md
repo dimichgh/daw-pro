@@ -4,7 +4,39 @@ Work top-to-bottom; `/dev-cycle` picks the first unchecked item. Check items off
 
 > ## ⭐⭐⭐ CURRENT WORK ORDER — READ BEFORE PICKING AN ITEM. THIS OVERRIDES "top-to-bottom".
 >
-> **Take items from `## M25` FIRST, then `## M24`. Do NOT default into M23.**
+> **Take items from `## M39` FIRST, then `## M25`, then `## M24`. Do NOT default into M23.**
+>
+> ⭐⭐⭐ **M39 WAVE ORDER — USER RULING 2026-09-19, ASKED AND ANSWERED DIRECTLY. FOLLOW THIS ORDER.**
+> Offered a choice of next waves, the user answered verbatim: *"recommended is ok, but all of them
+> eventually, we need rich features and finish effects suite first."* So:
+> **(1) FINISH THE EFFECTS SUITE** — `.hallReverb`, echo freeze, then the remaining ranked set (tape
+> delay, phaser, stereo width, transient shaper, freq shifter, clipper + `Oversampler`, saturator v2,
+> de-esser, dynamic EQ). **(2) A DRUM MACHINE OF OUR OWN** — an 808/909-style synthesised kit as a NEW
+> instrument kind, every parameter MCP-exposed and automatable. **(3) MULTI-INSTRUMENT TEMPLATES** —
+> one call that instantiates tracks + instruments + effect chains + routing together (`mixer.applyPreset`
+> is mixer-ONLY and `macro.songSkeleton` scaffolds STRUCTURE, not sounds; **measured 2026-09-19: ZERO
+> session/track-set template commands exist**, against 239 distinct commands, so this is a real gap and
+> not a rediscovery). **(4) LOOP/DRUM WORKFLOW DEPTH** — choke groups, kit-aware slicing, a drum step
+> sequencer on the modulation layer.
+> ⚠️ **"ALL OF THEM EVENTUALLY" IS PART OF THE RULING** — 2/3/4 are SEQUENCED, not declined. Do not
+> re-ask whether they are wanted; the answer is yes, after the effects suite.
+> ⭐ **The instruments half has been UNDER-SERVED and the user's question surfaced it:** by 2026-09-19
+> this milestone had shipped FIVE effects (`djFilter`, `ringMod`, `flanger`, + the modulation layer and
+> the delay-line primitive) and ZERO new instruments. The brief said *"instruments with various
+> effects"*. (2) is the correction.
+> ⚠️ **Drum palette ceiling, MEASURED:** a stock Mac returns exactly ONE sound bank (Apple GM DLS) with
+> a single "Standard" percussion kit — a brief asking for brushes or jazz CANNOT be honoured from it.
+> That is a LIBRARY limit today, fixable only by the user importing a .sf2; (2) removes the dependency.
+>
+> ⭐⭐⭐ **M39 IS THE ACTIVE MILESTONE — USER AUTHORISATION 2026-09-19**, verbatim: *"do in waves, but
+> do not stop after each, just continue"*, following the brief to build our own instruments and
+> effects *"easily controllable via MCP for AI Agent"*. The user also ruled the wave ORDER that same
+> night: the modulation layer first, **and then creative effects in the following cycles** — *"Modulation
+> is good, but then also in the next cycles Creative effects should be done as well. We have plenty of
+> tokens."* ⚠️ **"Do not stop after each wave" is an instruction to CONTINUE, not a licence to skip the
+> per-wave verification** — each wave still builds, tests, and renders audio variants for the user to
+> hear. ⚠️ **M39's wave-1 items are PREREQUISITES for everything after them**: take them in order
+> (a → f), and read `docs/research/2026-09-19-plugin-program-inventory.md` before picking any of them.
 >
 > **USER AUTHORISATION 2026-08-13**, verbatim: *"write it and start working on it"*, in a message that
 > supplied six user-visible defects. This SUSPENDS the "earliest incomplete milestone" rule and the
@@ -525,6 +557,43 @@ Seeded 2026-07-26 from the user's hands-on session against **`dist/DAWPro.app` b
   - [x] (m23-ab-1) **(3) `ReferenceLaneTransparencyTests:390/425` — the DETERMINISTIC rate-dependence bug misfiled as a flake. FIRST, per the umbrella's own ordering: cheap, real, and removing it shrinks the flake set to three.** `:425` divides by the LIVE `engine.graph.graphSampleRate` but hardcodes the numerator 240, so it LOOKS rate-aware and is not; `:390` hardcodes 240 outright. Truth is `LimiterEffect.swift:137` `delaySamples = max(1, Int((LimiterParams.lookaheadSeconds * sampleRate).rounded()))` — 240 only because 5 ms × 48 kHz. At 44.1 kHz the engine yields 221 and the test demands 240/44100, off by 0.43 ms against a `1e-12` tolerance. **⚠️ THE VERIFICATION TRAP: this machine's device is at 48000 Hz TODAY, where the bug and its fix produce the SAME number — a fix "verified" only at 48 kHz proves nothing.** The gate therefore CANNOT rest on a full-suite run. GATE: a rate-PARAMETERIZED leg that exercises the derivation at ≥3 rates (44100 / 48000 / 96000) **without touching the machine's audio device**, plus a mutation restoring the literal `240` that reddens it. **NEVER change the user's audio device** (ZoomAudioDevice / ParrotAudioPlugin are theirs). Route: `qa-test-engineer`.
   - [x] (m23-ab-2) **(2) `EQCurveEditorModelTests:753` + (4) `InsertSpectrumTapTests` — ONE root cause: a process-global/wall-clock measurement taken under full-parallel load.** (2) asserts `best-of-5 < 1 ms` on a `ContinuousClock`; (4) reads `malloc_zone_statistics`, a PROCESS-GLOBAL counter. **`.serialized` is NECESSARY AND NOT SUFFICIENT and the repo already contains the disproof** — (4) has it (`InsertSpectrumTapTests.swift:22-27`) and still fires, because `.serialized` orders tests WITHIN a suite and does not stop other suites loading the machine. **Do not "fix" (2) by adding `.serialized` and declaring victory.** Preferred shape (a): assert a RATIO against a calibration operation of known cost timed in the SAME process in the SAME run, so the assertion is load-invariant by construction. Fallbacks, in descending value: (b) move both to a benchmark target that runs alone, accepting they then gate nothing by default; (c) keep them and stop counting them as suite failures. GATE: a leg that reddens on the old behaviour, or a written MEASURED characterization. Route: `qa-test-engineer`.
   - [x] (m23-ab-3) **(1) `SoundBankHostingTests` T1 — AU preparation times out at 10 s and the render goes silent, so `bodyRMS`/`postOnsetRMS` fail DOWNSTREAM of one root cause (one test, three assertions, not three problems).** Suspected environmental — it fired on a machine independently observed to freeze — but that is a HYPOTHESIS TO MEASURE, not to assume. **m23-y sharpened it: the implementer's run had 6 `✘` here and MY run of the SAME tree had ZERO, with the device at 24000 Hz for BOTH — so this is a TIMING/LOAD intermittent that a low rate aggravates, NOT the deterministic device effect that explains ab-1.** GATE: a WRITTEN, MEASURED characterization — failure rate over N consecutive full runs, whether it reproduces under `--filter` isolation, whether it correlates with parallel load or machine state — so the next cycle inherits evidence instead of folklore. Where it can, the test should DETECT the condition and fail with that diagnosis rather than as a bare assertion. Route: `qa-test-engineer`.
+  - [ ] (m23-ab-4) ⛔⛔ **SIX *NEW* LOAD-SENSITIVE INTERMITTENTS, ALL FIRST-OBSERVED 2026-09-19, NONE
+    IN THE REGISTRY — and the umbrella above was ticked, so this re-opens the problem it closed.**
+    Observed across **eight** full Swift runs during the m39-m, m39-j-0 and m39-aa cycles, on a
+    machine also running builds and audio renders:
+    | test | runs seen | isolated result |
+    |---|---|---|
+    | `GaplessLoopSpikeTests` | 1 of 8 (2 issues) | 3/3 green |
+    | `PlayboxCommandTests` | 1 of 8 (1 issue) | 3/3 green |
+    | `RecoveryPlayheadTests` "watchdogRestart must not freeze the playhead" | 1 of 8 (delta 0.1406 vs a 0.1 beat budget) | 3/3 green, **5 tests executed** |
+    | `AuditionEngineTests` C12 (`queuedAuditionEvents.count → 0) == 1`) | 1 of 8 | green, **17 tests executed** |
+    | `AUPrepareRenegotiationStressTests` (**added m39-aa**) | in-run **162.660 s** for the suite, median 4.39 s/test, `under1s` **1** | isolated by TYPE name: **1.799 s wall**, median **0.00076 s/test**, `under1s` **32** |
+    ⭐ **The sixth is the clearest datum yet that this is CONTENTION, not slowness** — a ~90× wall-clock
+    gap on the same code, and `under1s` moving 1 → 32. It joins `PlayboxCommandTests`' 0.013 s isolated
+    vs 103 s in-run. **Neither test got slower; the machine got busier.**
+    ⭐ **Each is the SAME SHAPE the umbrella already diagnosed** — a wall-clock or process-global
+    measurement taken under parallel load — which is evidence the class was never fixed, only its
+    four *named instances* were. **m23-ab-2's ratio-against-a-same-run-calibration shape is the
+    prescription; it was applied to two tests, not to the pattern.**
+    ⚠️⚠️ **ATTRIBUTION HONESTY, and I am the one who broke it:** on the run where
+    `RecoveryPlayheadTests` fired, **I was running ffmpeg decodes and Goertzel loops concurrently** —
+    I supplied the load and then had to disentangle my own contamination from the result.
+    **Do not measure a load-sensitive test while doing CPU work; the run is then evidence about the
+    machine, not about the code.** Re-run clean: 3/3 green.
+    ⭐ **Non-reachability was established properly, and my FIRST probe was worthless:** I grepped
+    `RecoveryPlayheadTests.swift` for effect terms and got 0 — but my positive control
+    (`EffectDescriptor` in `RingModTests.swift`) ALSO returned 0, so the probe could not distinguish
+    "no match" from "broken pattern". Re-probed with `ringMod` (fires 3×); only then did the zero
+    mean anything. **A negative result from a hand-built probe is the weakest evidence there is.**
+    GATE: a written, MEASURED characterization per name — failure rate over N consecutive full runs,
+    reproduces under `--filter <TypeName>` isolation?, correlates with parallel load? — **or a fix
+    carrying a leg that reddens on the old behaviour.** ⛔ **Do NOT loosen an assertion or add a
+    retry** — a retry turns a real regression into a merely slow test. ⚠️ **Isolate by TYPE name and
+    CHECK THE EXECUTED COUNT: a display-string `--filter` silently runs 0 tests at exit 0**, which is
+    indistinguishable from a pass. Route: `qa-test-engineer`.
+    ⚠️ **m23-ab (umbrella) should be UNTICKED or explicitly re-scoped** — it reads as closed while
+    its own failure class is still producing new instances.
+
 - [x] (m23-ac) **35 of 36 staging gates can silently certify a STALE OR UNKNOWN BINARY — and the dominant failure mode is NOT the one this line was filed with.** **⚠️ RE-MEASURED 2026-07-29 AND THE ORIGINAL FILING WAS WRONG ON BOTH THE NUMBERS AND THE MECHANISM.** The first sweep matched the bare token `.build/debug/DAWApp` anywhere in the file and the bare token `swift build` anywhere in the file — so it counted gates whose only mention of either sits in a `//` usage comment, in BOTH directions at once. Three gates were scored "builds first" purely on the strength of a `// swift build && node scripts/gates/…` usage note (`m23g1`, `m23g2`, `m23g3`), and several were scored "launches" on a comment too. **[[A-TOKEN-SEARCH-FINDS-THE-TOKEN-NOT-THE-BEHAVIOUR]], committed while filing an item about false verification.** Strip `//` comments before matching and require an EXECUTED call, and the corpus splits into THREE classes, not two: **CLASS 1 — launches the binary AND builds first: exactly ONE, `m23p2-bass-enhancer.mjs`.** **CLASS 2 — `spawn`s `.build/debug/DAWApp` and never builds: TWO, `m23o1-frequency-reference` and `m23o2-guide-smoke`.** **CLASS 3 — never launches anything; opens a WebSocket and drives WHATEVER INSTANCE IS ALREADY LISTENING ON THE PORT: THIRTY-THREE**, i.e. every other gate in the directory. **Class 3 is strictly worse than the hazard this line was filed about.** A class-2 gate at least runs a binary built from this checkout at some point; a class-3 gate certifies an instance of unknown provenance, launched by hand at an unknown commit, and it cannot even detect that it did — the operator has to remember to rebuild AND relaunch, and nothing in the script says so. Running one after a source edit returns a confident, meaningless green either way. This is not hypothetical: the orchestrator hit it TWICE in the m23-o2 cycle, and the second time it returned the CORRECT conclusion from evidence that established nothing, which is the dangerous shape. **FIX — and the re-measurement changes it from "add a guard to 18 files" to a SHARED HARNESS, because 33 of the 35 do not launch at all and cannot be fixed by adding a build line.** Class 2 (2 files) takes the mechanical guard: `spawnSync("swift", ["build"], …)` before the spawn, ABORTING with an explicit message on non-zero — copy `m23p2-bass-enhancer.mjs:31-33` verbatim, including its ⚠️ comment. **Class 3 (33 files) needs the build+launch+pidfile-kill harness EXTRACTED from `m23p2-bass-enhancer.mjs` into one importable module** (`scripts/gates/_staging.mjs` or similar) that every gate calls instead of assuming an instance exists — one home, so the next gate cannot re-invent a version without the build step. **A cheaper interim that is honest and takes minutes: have each class-3 gate REFUSE to run unless the instance it connects to reports a build fingerprint matching the current tree** (mtime of the newest `Sources/**` file vs the binary's, echoed over the wire), so a stale run fails loudly instead of passing quietly. That is strictly better than a comment telling the operator to rebuild. **Whichever route: pick ONE and pin it, because the reason this line needed correcting is that a rule stated in a comment is enforced by nothing.** **⚠️ RE-MEASURED A SECOND TIME 2026-07-29 (m23-ac cycle) AND THE NUMBERS ABOVE ARE ALSO WRONG. The MECHANISM described above is right; every count in it is stale or mis-derived.** Real corpus: **42 gates**, not 36. Real split: **CLASS 1 (builds + launches) = 7** — `m23p2`, `m23s`, `m23t`, `m23v`, `m23w`, `m23x`, `m23y`; **CLASS 2 (launches, never builds) = 11** — `m23a2`, `m23c2`, `m23d`, `m23e`, `m23f`, `m23g1`, `m23g2`, `m23g3`, `m23k4b`, `m23o1`, `m23o2`; **CLASS 3 (never launches, drives whatever is on the port) = 24**. All 24 open a WebSocket, so all 24 genuinely need an instance — none is a source-only gate. Not one gate touches 17600 (verified: the single `17600` in the corpus is a trailing comment reading `// staging. NEVER 17600.`). **Two reasons the old figures were wrong.** (1) The corpus GREW: `m23-s/t/v/w/x/y` each added a gate AFTER the filing, and each COPY-PASTED the build+launch+pidfile block — so class 1 went 1 → 7 and the divergence this line proposes to fix has been accelerating the whole time. Seven verbatim copies of `m23p2:29-58` now exist. (2) **My own first re-derivation this cycle was ALSO wrong** (5/2/35): I matched `spawn(...DAWApp)` on ONE line and missed the dominant idiom `const BINARY = process.env.X || ".build/debug/DAWApp"; … spawn(BINARY, …)`, which 11 gates use. **That is the THIRD time a token-shaped search has produced a confident wrong answer on this very item** — first the filing, then me. The classifier that produced the numbers above is `scratchpad/classify-gates.py`: it strips comments WITHOUT eating `ws://`, resolves binary-holding variables, and requires an EXECUTED call. **Do not re-measure this by grep.** **BASELINE RECORDED 2026-07-29 for the conversion work — 6 of 7 class-1 gates green; `m23t-baroperand` was RED** on a clean tree: its `W1` cross-cycle tripwire still pinned `allCommands === 163` while the tree has 165 (m23-w added `clip.removeMany`/`clip.moveMany`). Fixed per the gate's own written protocol (bumped + a BUMP LOG appended). **It had been red since m23-w and nobody noticed — a gate nobody runs is indistinguishable from one that passes, which is this item's hazard wearing its other face.** It is the ONLY count-pinned gate in the corpus (audited). SPLIT into ac-1/ac-2/ac-3 below; this line stays open as the umbrella. **PARENT CLOSED 2026-08-05 on a CORPUS-WIDE MEASUREMENT, not on its children's say-so.** Measured myself: of the **67** non-harness gates (73 `.mjs` − 6 `_` harnesses), **65 route through `_staging.mjs`**. The only two that do not — `m23aq-data-dir-leak.mjs` and `m23aw-prepare-headroom.mjs` — are LEGITIMATELY exempt and say so in their own headers (*"pure `swift test` + filesystem check, no staging"* / *"Never touches control port 17600/17695"*): both shell out to `./scripts/test.sh`, which builds, so neither can adopt a stale binary. **The substantive property is verified at the source, not assumed:** `_staging.mjs:75` runs `swift build` and aborts with *"the gate would have tested the previous binary"* on failure — that IS the defect this item was filed for — and `:257` calls `assertStagingPort`. ⚠️ **SHARPENED 2026-08-05 (next cycle, m23-dq): 'routes through `_staging.mjs`' is WEAKER than 'builds first', and I originally conflated them.** `startStaging` is itself a `_staging.mjs` export and does NOT build; only `launchStaging` calls `buildOrAbort` internally (`_staging.mjs:587`). Re-measured precisely: **exactly 1** gate calls `startStaging` directly with no `launchStaging` and no `buildOrAbort` — `m23ai-automation-nudge-guard.mjs`, which is already tracked as **m23-dq**. So the family close stands and hid nothing, but the property it proved is 'routed through the ONE home', not 'every gate builds'. ⚠️ **WHAT I DID NOT DO: I did not re-run all 67 gates.** Each child was verified when it closed; this parent adds the structural sweep that no child could see, and nothing more. ⚠️ Two prose arithmetic discrepancies noted and NOT papered over — ac-2 names 11 gates while ac-2a+ac-2b describe 8+2, and ac-3's children describe 4+14+2+2+3=25 against a stated 24. **Both are resolved by direct measurement of the FILES rather than by reconciling the prose**, which is the safer direction: I confirmed all 11 named class-2 gates individually.
   - [x] (m23-ac-1) **Extract the ONE home: `scripts/gates/_staging.mjs`, and convert the 7 class-1 gates to it.** Today `m23p2-bass-enhancer.mjs:29-58` is copy-pasted verbatim into six other gates (`m23s`, `m23t`, `m23v`, `m23w`, `m23x`, `m23y`) — build-or-abort, `spawn` on 17695 with `DAW_CONTROL_PORT`, pidfile write, SIGTERM-by-exact-pid, retrying `connect()`. **Export exactly the staging LIFECYCLE and nothing else** — `buildOrAbort()`, `startStaging({gate})`, `stopStaging()`, `connect()`. Do NOT absorb each gate's `cmd()`/`ck()`: they carry per-gate id prefixes and timeouts, they are not the filed hazard, and folding them in turns a mechanical refactor into a rewrite of 42 assertion harnesses. **Take class 1 FIRST precisely because these 7 already pass** — a green baseline is what makes the refactor falsifiable; convert a broken gate and you cannot tell a conversion bug from the bug it was already carrying. **Verification bar: all 7 green AND the same assertion TOTAL as the recorded baseline** (a conversion that breaks setup can skip assertions and still print zero FAILs — count them). Recorded baseline: `m23v` 27/27, `m23w` 23/23, `m23t` 71/71 after the W1 bump; `m23p2`/`m23s`/`m23x`/`m23y` print `N/M checks passed` with no gate-name prefix, so capture their totals before touching them. ⚠️ The summary-line format is NOT uniform across the corpus — do not write one regex and trust it. **DONE 2026-07-30 — all 7 class-1 gates converted.** (Recorded PARTIAL at 5/7 earlier the same day; the remaining two landed in the next cycle and the record below keeps both halves.) SHIPPED: `scripts/gates/_staging.mjs`, exporting `buildOrAbort` / `startStaging` / `stopStaging` / `connect` / `launchStaging` plus `ROOT`/`STAGING_PORT`/`sleep`. It makes the rule structural: **you cannot obtain a connection to a staging instance without having built the tree first.** It also enforces the 17600 refusal in ONE place (`assertStagingPort` exits 2 rather than trusting each caller to remember), clears a stale pidfile from a crashed prior run before launching, and keeps SIGTERM-by-exact-pid. **CONVERTED + VERIFIED IDENTICAL to a pre-recorded baseline: `m23p2` 51/51, `m23s` 33/33, `m23t` 71/71, `m23w` 23/23, `m23y` 52/52.** **"Family B" (`m23v`, `m23x`) took a DIFFERENT conversion, and the harness grew to fit them rather than the other way round.** Their `connect()` returns `{ws, req}` — it IS their request plumbing — so only `buildOrAbort`/`startStaging`/`stopStaging` were lifted and their connect was left alone. They also launch **`detached: true` + `unref()`** with output to a real log FILE and a pidfile OUTSIDE the out-dir, so `startStaging` gained `detached` / `pidfile` / `outDir` / `logPath` options and `buildOrAbort` gained `skip` (m23v honours `M23V_SKIP_BUILD`). **Attached remains the DEFAULT and detached is opt-in**, because an attached child dies with a crashing gate whereas a detached one is left running for the pidfile to find. A shared home that cannot express real variation gets bypassed, which is how the seven copies happened in the first place. Both verified IDENTICAL: `m23v` 27/27, `m23x` 55/55. **⚠️ THE COSTLY LESSON, RECORDED BECAUSE IT NEARLY DESTROYED TWO GATES: the scripted conversion deleted a REGION (`const ROOT` → end of `connect()`), and in `m23s`/`m23t` that region also held GATE-SPECIFIC CONSTANTS** — `BUILT_INS`, `EXPECTED_NAME`, `CHANNEL_LINE`, `MASTER_LINE`, `EPS`, and m23t's `READOUT`/`NEUTRAL_CHIP`/`CYAN_CONTROL` crop rectangles and cyan thresholds. My dangling-reference check listed symbols I REMEMBERED (`startStaging`, `connect`, `child.pid`, `PIDFILE`) instead of deriving what the region actually DEFINED, so it passed both files. **These gates are UNTRACKED (`??`), so there was no `git show HEAD:` copy, no APFS snapshot, and no editor backup — git is not a safety net for files it has never seen, and I ran a scripted multi-file edit without backing them up first.** RECOVERED BY MEASUREMENT, not by taste: the last known-good run's artefacts survived in `/tmp/daw-gate-out/m23t` — the crop PNGs fix each w×h exactly, and a purpose-built Swift template matcher (`scratchpad/findcrop.swift`) located each crop inside its parent capture with a UNIQUE exact-byte match, recovering the origins; the two cyan thresholds (80 / 30) were read back off that run's own printed output, and `MASTER_LINE` was re-MEASURED live (118, uniform across all ten kinds; the channel strip is 98) rather than inferred from the channel value. **The first recovery attempt was WRONG and the gate caught it**: top-left origins put CYAN_CONTROL's cyan at 11.1 where the good run recorded 118.4 — while the paired 'no cyan over the readout' leg still PASSED at 6.4 < 30, i.e. **a mislocated crop passes the absence leg vacuously, and only the anti-vacuity partner leg exposed it.** That is exactly why m23-t was built with both. Bottom-left origins reproduce the good run's numbers exactly (118.0 / 118.4 / ceiling 12.0), independently corroborated by that run's leftover `t-off-861.png` filenames. Baseline transcripts preserved at `scratchpad/ac1-baseline-preserved/` — they are the ONLY surviving spec for these two gates and must not be deleted until the gates are committed. **Also fixed en route: `m23t`'s `W1` cross-cycle tripwire had been RED since m23-w** (pinned `allCommands === 163`, tree has 165); bumped per the gate's own written protocol with a BUMP LOG appended, and it is the only count-pinned gate in the corpus (audited). **ALL 7 VERIFIED IDENTICAL TO BASELINE on a final full-set run against the exact final tree** (m23t's one differing line is a redraw COUNT — 116 vs 118 reports in 2 s against its own floor of 40 — i.e. timing, not behaviour). **The second conversion used the orphan check the first one lacked**: instead of a hand-listed set of symbols, it diffs the declarations present in the pre-edit backup against those in the result and greps the survivor for each one that vanished. It reported exactly one candidate per file (`log`), both false positives from `console.log`. **And this time the untracked files were COPIED FIRST** — all 13 `??` gates, not just the two being edited. NEXT: m23-ac-2 (11 class-2 gates, the mechanical case), then m23-ac-3 (24 class-3, which needs its own split).
   - [x] (m23-ac-2) **Convert the 11 class-2 gates — they launch a binary and never build it.** `m23a2`, `m23c2`, `m23d`, `m23e`, `m23f`, `m23g1`, `m23g2`, `m23g3`, `m23k4b`, `m23o1`, `m23o2`. Each spawns `.build/debug/DAWApp` (nine via a `BINARY` env-override variable, two via the literal) with no `swift build` first, so each tests **whatever was compiled last** — and restoring a mutated source leaves the mutant binary on disk for the next run to adopt, which is how a mutation test passes for the wrong reason. Route them through `_staging.mjs` from ac-1. **Preserve the `M23x_BINARY` env override** where it exists — it is deliberate (it lets a gate be pointed at a bundle), but make the DEFAULT path build first. Three of these (`g1`, `g2`, `g3`) carry a `// swift build && node …` usage comment that the ORIGINAL filing mistook for an executed build step; the comment is not a build and deleting it is part of the fix. **SPLIT 2026-07-30 into ac-2a / ac-2b below; this line stays open as the umbrella.** The reason is that "11 mechanical conversions" was not accurate. Inspection at the start of the ac-2 cycle found the set is NOT uniform: **nine** (`m23a2`, `c2`, `d`, `e`, `f`, `g1`, `g2`, `g3`, `k4b`) share one idiom — `PORT`/`OUT`/`PIDFILE`/`BINARY` consts, a TOP-LEVEL `spawn(BINARY, …)`, and an inline teardown several hundred lines further down — while **two** (`o1`, `o2`) use the literal path with no `BINARY` var and already wrap launch/stop in their own functions. ⚠️ **The scattered shape is the ac-1 hazard wearing a worse face:** in class 1 the block to replace was contiguous, and a region delete still ate `m23s`/`m23t`'s gate-specific constants. Here the launch and the teardown are separated by the entire gate body, so a region-based edit is not available at all — convert ONE FILE AT A TIME, never a scripted multi-file pass. ⚠️ **`m23a2`'s teardown does MORE than kill**: it cleans up the `session.lock` that SIGTERM leaves behind by skipping the app's clean-exit path. `stopStaging` does not do that. Keep it as a gate-local step after the shared stop, or widen the home — do not silently drop it, and do not make `stopStaging` do lock cleanup for all its callers without checking the other seventeen want it. **PARENT CLOSED 2026-08-05 on a CORPUS-WIDE MEASUREMENT, not on its children's say-so.** Measured myself: of the **67** non-harness gates (73 `.mjs` − 6 `_` harnesses), **65 route through `_staging.mjs`**. The only two that do not — `m23aq-data-dir-leak.mjs` and `m23aw-prepare-headroom.mjs` — are LEGITIMATELY exempt and say so in their own headers (*"pure `swift test` + filesystem check, no staging"* / *"Never touches control port 17600/17695"*): both shell out to `./scripts/test.sh`, which builds, so neither can adopt a stale binary. **The substantive property is verified at the source, not assumed:** `_staging.mjs:75` runs `swift build` and aborts with *"the gate would have tested the previous binary"* on failure — that IS the defect this item was filed for — and `:257` calls `assertStagingPort`. ⚠️ **SHARPENED 2026-08-05 (next cycle, m23-dq): 'routes through `_staging.mjs`' is WEAKER than 'builds first', and I originally conflated them.** `startStaging` is itself a `_staging.mjs` export and does NOT build; only `launchStaging` calls `buildOrAbort` internally (`_staging.mjs:587`). Re-measured precisely: **exactly 1** gate calls `startStaging` directly with no `launchStaging` and no `buildOrAbort` — `m23ai-automation-nudge-guard.mjs`, which is already tracked as **m23-dq**. So the family close stands and hid nothing, but the property it proved is 'routed through the ONE home', not 'every gate builds'. ⚠️ **WHAT I DID NOT DO: I did not re-run all 67 gates.** Each child was verified when it closed; this parent adds the structural sweep that no child could see, and nothing more. ⚠️ Two prose arithmetic discrepancies noted and NOT papered over — ac-2 names 11 gates while ac-2a+ac-2b describe 8+2, and ac-3's children describe 4+14+2+2+3=25 against a stated 24. **Both are resolved by direct measurement of the FILES rather than by reconciling the prose**, which is the safer direction: I confirmed all 11 named class-2 gates individually.
@@ -1073,7 +1142,35 @@ Seeded 2026-07-26 from the user's hands-on session against **`dist/DAWPro.app` b
   ⚠️ **ONE CLAIM THE SPIKE FLAGGED AS ASSERTED AND NOT VERIFIED: that Cocoa suppresses `keyUp` while ⌘ is held.** Mitigations are designed to hold either way (five independent stuck-note backstops), but **the first hands-on session must specifically try ⌘-chording mid-hold and report whether a note sticks.**
 - [ ] (m23-cu) **`LimiterEffect.process()` WAS ALLOCATING ON THE RENDER THREAD IN DEBUG BUILDS WHILE ITS OWN HEADER PROMISED IT DID NOT — found 2026-08-04 by the `audio-dsp-engineer` closing m23-ch, OUTSIDE ITS BRIEF, and reported rather than quietly fixed.** The malloc probe's OFF arm initially reported **10,240,000 malloc/free events over 2000 quanta** — identical to ON, i.e. nothing to do with the new true-peak path. Cause: `for … in 0..<n` Range iteration, ~10 heap events per frame at `-Onone`, in a file whose header states *"process()/reset() allocate nothing, take no locks, log nothing, touch no ObjC"*. **FIXED for the limiter** — frame loop and both per-channel loops converted to `while`, and the conversion is proven arithmetic-neutral by the L1 oracle (0 differing samples of 48,000), which is a stronger check than the fix needed. ⚠️⚠️ **THE OPEN PART, AND WHY THIS IS FILED RATHER THAN CLOSED: EVERY OTHER EFFECT IN `Sources/DAWEngine/Effects/` IS UNAUDITED.** ⚠️ **AND THE OBVIOUS GREP DOES NOT DISCRIMINATE — DO NOT FILE OR FIX FROM A COUNT. `grep -c 'for .* in 0\.\.<'` reports 2 for `LimiterEffect.swift` ITSELF, which is now CLEAN: one hit is in `prepare` (main actor, allocation is fine there) and the other is a COMMENT. A count conflates render-thread loops, setup loops and prose. Each file needs the loop's ENCLOSING FUNCTION identified — the same failure that made my m23-aw-3 probe report 0 for its own positive control.** ⚠️⚠️ **AND THE DEBUG-vs-RELEASE QUESTION IS UNRESOLVED, which changes what this item even IS: `scripts/test.sh` runs `swift test` at `-Onone`, but `scripts/bundle.sh` builds `-c release`, where Swift plausibly specialises Range iteration to nothing. So the 10.24M may be a DEBUG-ONLY artefact.** ⭐ **THAT DOES NOT MAKE IT HARMLESS, AND THIS IS THE PART TO ACT ON: `swift run DAWApp` — the dev-run command CLAUDE.md documents — IS a debug build, so anyone running the dev app for live audio IS allocating on the render thread, and every RT-safety malloc probe in this repo measures debug code rather than what ships.** ⚠️ **THE DECIDING EXPERIMENT, cheap and not yet run: put the same malloc probe on an UNFIXED effect and run it BOTH ways (`swift test` vs `swift test -c release`). Until someone does, do not state either that the shipped app allocates or that it does not.** Route: `audio-dsp-engineer`.
 - [x] (m23-cv) **`project.overview` CARRIES NO LEVELS, SO THE ONLY WAY AN AGENT CAN SEE A TRACK'S LOUDNESS IS THE ~100 k-TOKEN `project.snapshot` — the plumbing and the light projection both exist and are simply not connected.** Filed 2026-08-04 from the Codex composing-session report (`/Users/dsemenov/Views/daw-pro-test/report.md`), verified in tree before filing. ⭐ **THIS IS THE CHEAPEST HIGH-VALUE ITEM IN THE WHOLE BATCH AND SHOULD GO FIRST.** `ProjectStore.trackMeters: [UUID: MeterFrame]` ALREADY EXISTS (`Sources/DAWCore/ProjectStore.swift:109`) and is ALREADY populated live by `engine?.trackMeteringHandler` (`:247-248`). `ProjectOverview.Track` (`Sources/DAWCore/ProjectOverview.swift:89-107`) carries `id, name, kind, muted, soloed, armed, volume, pan, output, instrument, sends, fx, clips, automation` — and `grep -inc 'meter\|peak\|rms'` on that whole file returns **0**. So this is ADDING FIELDS TO A TYPE THAT ALREADY SHIPS, fed from a dictionary that is already maintained, not new engine work. ⚠️⚠️ **THE ONE REAL DESIGN CONSTRAINT, AND IT IS EASY TO SHIP A USELESS VERSION WITHOUT NOTICING: `ProjectStore` DELIBERATELY ZEROES `trackMeters` WHEN TRANSPORT STOPS (`:539-545`, *"Meters read as dark the instant transport stops"*). An agent calls `project.overview` between actions, i.e. exactly when transport is stopped, so a naive `trackMeters[id]` read returns `.silence` FOR EVERY TRACK and the feature looks wired while conveying nothing. The field must be a RETAINED last-non-silent frame (or an explicitly-timestamped one), and the test must assert a NON-ZERO value read AFTER a stop — a test that reads during playback would pass on the broken version.** ⭐ **Ship the number an agent can act on, not the raw frame: peak and RMS in dBFS per track. That is what turns "the kick is 31 dB over the lead" from something only the user's ears can catch into something the projection states.** Weight S. Route: `swift-app-engineer`. ⭐⭐ **CLOSED 2026-08-05, verified by the orchestrator FIRST-HAND, not on the agent's report: `swift build` clean; `./scripts/test.sh` **4821 tests / 498 suites, `grep -c '✘'` = 0 on a run that PRINTED `passed`, 101.922 s** (4807/496 → +14/+2, exactly the new file); `Sources/DAWControl/` UNTOUCHED per `git status --porcelain` so allCommands stays 171; catalog 74; MCP `registerTool(` 176 at HEAD **and** 176 in the working tree (equality is the check — the raw 176-vs-pinned-174 gap is the known decomposition artefact, not movement).** ⭐ **SHIPPED: `DAWCore.MeterLevel` — a new ONE HOME for linear-amplitude→dBFS whose floor is `Double(MasterAnalysisSnapshot.floorDB)` REFERENCED, NOT RE-DECLARED (verified: `floorDB: Float = -80` declared once at `Model.swift:2211`, referenced by `MasterMixAnalyzer:72` and now here — one declaration, three users). `ProjectStore.lastNonSilentTrackMeters` retains the last frame with signal, pruned at all five sites that drop `trackMeters` entries; `ProjectOverview.Track` gains `peakDb`/`rmsDb` (`Double?`, omitted when never heard — `nil` means NOTHING OBSERVED, which is honestly different from silence).** ⚠️⚠️ **THE STOP-ZEROING WAS NOT TOUCHED, AND I CHECKED THAT SPECIFICALLY — `stop()`'s `for key in trackMeters.keys { trackMeters[key] = .silence }` is byte-identical and `lastNonSilentTrackMeters` appears NOWHERE in that region. The UI's dark-at-rest behaviour is intact.** ⭐⭐ **THE TEST DISCRIMINATES, PROVEN TWO WAYS: it asserts `trackMeters[id] == .silence` AT READ TIME (embedding its own positive control) before asserting `peakDb ≈ −6.02`, and the agent mutation-tested the naive `trackMeters[$0.id]` projection — 4 tests failed, the critical one reporting −80 where −6.02 was required. A test that read during PLAYBACK would have passed on the broken version, which is the whole trap.** ⚠️ **KNOWN-STALE AFTER THIS: `dist/DAWPro.app` predates the change, so the bundled app's `project.overview` lacks the fields until rebuilt; and `claude-plugin/server/index.mjs` was regenerated, so it no longer matches the Codex copy (expected — m23-da).**
-- [ ] (m23-cw) **NO WAY TO BROWSE OR LOAD AN AU'S OWN FACTORY/USER PRESETS — a hosted instrument can only be driven parameter-by-parameter.** Filed 2026-08-04 from the Codex report; CONFIRMED in tree: there is no `*.preset*` wire verb at all, and all 16 'preset' hits across `Sources/DAWControl` are `mixer.applyPreset`, which is a MIXER-CHANNEL preset and unrelated. ⭐ **Why this matters more than it reads: we ALREADY have `au.describeParams` / `au.setParam` (M21), so an agent can tune a patch but cannot START from one. Every real instrument's usable sound space is reached through its preset list — asking an agent to dial a supersaw from a default patch parameter-by-parameter is the expensive path to a worse result.** ⚠️ **AND IT IS ENTANGLED WITH m23-bx-1'S ROOT CAUSE, WHICH ANY IMPLEMENTATION MUST RESPECT: a hosted plug-in's live state lives in `AUHostRegistry`, NEVER in the model. A preset-load verb that writes `stateData` into the model without going through the registry would reintroduce exactly the stale-state class that cost eight cycles. Route through `ProjectStore.tracksWithLiveAudioUnitState()`'s world, not around it.** Implementation surface is `AUAudioUnit.factoryPresets` / `.userPresets` / `.currentPreset`. Weight M. Route: `audio-dsp-engineer` (registry-adjacent), wire by `mcp-integration-engineer`.
+- [x] (m23-cw) ✅ **SHIPPED 2026-09-19 — engine → store → wire → MCP → regenerated plugin bundle.**
+  `au.listPresets` / `au.loadPreset`; MCP `au_list_presets` / `au_load_preset`. Wire 217 commands
+  (`doc-count-drift.mjs` exit 0, re-run BY ME), MCP 220 → **222 tools**, Swift 7943 → **7972 / 713
+  suites / 0 failures** (+29, **zero retired** — verified by set-diffing every started-test name,
+  not by trusting the net delta), mcp-server **765 / 765**. ⭐ **Bundle regenerated AND
+  stdio-verified, with a negative control** — I re-checked the shipped `claude-plugin/server/index.mjs`
+  myself: both tool names present, `zzz_not_a_tool` absent. This tree once shipped an 18-day-stale
+  bundle, so a passing unit test is NOT evidence the artifact contains the feature.
+  ⭐ **The entangled constraint below was HONOURED and is now pinned by a test:** `au.loadPreset`
+  writes **nothing** to the model — a `stateData` write would go stale AND change
+  `AUHostRegistry.prepareKey`, forcing a re-instantiate that discards the very preset being loaded.
+  Persistence composes through `tracksWithLiveAudioUnitState()`; **measured**, not assumed (state
+  bytes 325 → 327 on load, and restoring into a fresh prepared AU reproduced all 17 parameter values).
+  ⚠️ **Three things learned that outlive this item:** ① a bogus preset number is a **silent no-op** on
+  a real AU — it changes nothing and raises nothing, so the engine validates against the live list
+  *before* assigning and re-reads after, refusing with `presetDidNotTake`; ② **the AU rewrites the
+  name** (loading #6 as "JUNK NAME" reads back "Medium Chamber"), so the read-back is authoritative
+  and comparison is **by number only**; ③ `fullStateForDocument` round-trips all values exactly but
+  **loses the preset number** (factory 8 "Cathedral" → `-1 "Cathedral"`), which is why
+  `source: "unlisted"` exists — a test documents it so nobody later "fixes" it.
+  ⚠️ **15 of 23 Apple built-ins return NO factory presets, so graceful degradation is the MAJORITY
+  path, not an edge case. And `supportsUserPresets` is false for all 23 — the user-preset paths are
+  contract tests against the fake engine, NOT evidence about a real plugin.**
+  ⛔ **`/plugin update` IS OWED** — the user's own agents reach these two tools only through it.
+  Audible proof: late-tail energy through a real AUMatrixReverb measured **3.6e-05 ("Small Room") vs
+  5.6e-02 ("Cathedral")**, a ~1500× gap, finite-sample-asserted on every frame.
+  ---
+  *Original filing below, retained as the record of why this was built:*
+  **NO WAY TO BROWSE OR LOAD AN AU'S OWN FACTORY/USER PRESETS — a hosted instrument can only be driven parameter-by-parameter.** Filed 2026-08-04 from the Codex report; CONFIRMED in tree: there is no `*.preset*` wire verb at all, and all 16 'preset' hits across `Sources/DAWControl` are `mixer.applyPreset`, which is a MIXER-CHANNEL preset and unrelated. ⭐ **Why this matters more than it reads: we ALREADY have `au.describeParams` / `au.setParam` (M21), so an agent can tune a patch but cannot START from one. Every real instrument's usable sound space is reached through its preset list — asking an agent to dial a supersaw from a default patch parameter-by-parameter is the expensive path to a worse result.** ⚠️ **AND IT IS ENTANGLED WITH m23-bx-1'S ROOT CAUSE, WHICH ANY IMPLEMENTATION MUST RESPECT: a hosted plug-in's live state lives in `AUHostRegistry`, NEVER in the model. A preset-load verb that writes `stateData` into the model without going through the registry would reintroduce exactly the stale-state class that cost eight cycles. Route through `ProjectStore.tracksWithLiveAudioUnitState()`'s world, not around it.** Implementation surface is `AUAudioUnit.factoryPresets` / `.userPresets` / `.currentPreset`. Weight M. Route: `audio-dsp-engineer` (registry-adjacent), wire by `mcp-integration-engineer`.
 - [ ] (m23-cx) **ANALYSIS IS INSTANTANEOUS OR WHOLE-SONG, NEVER SECTION-SCOPED — you cannot ask "how does the drop measure" without rendering the drop yourself first.** Filed 2026-08-04 from the Codex report. `mixer.masterAnalysis` / `mixer.liveLoudness` are momentary; `render.measureLoudness` is whole-file. Markers already exist (`marker.add/list/move`), so the song HAS named sections — nothing consumes them for measurement. ⭐ **The wanted shape: measure LUFS-S / peak / band balance between two beats or between two markers, and return per-track contributions, so "the chorus is 4 LU under the verse" is one call.** ⚠️ **DO NOT FILE THIS AS "WE NEED FAST EXCERPT RENDERING" — the report says that, and IT IS WRONG: `render.bounce` ALREADY takes `fromBeat` + `durationSeconds`, verified 2026-08-04. The excerpt primitive exists; what is missing is (a) measurement scoped to it without a manual round-trip through a file, and (b) any skill telling an agent the parameter is there (see m23-da).** Weight M. Route: `audio-dsp-engineer`. ⭐⭐ **RE-SCOPED 2026-08-05 (roadmap already-done audit) — THE HEADLINE PREMISE IS FALSE AND THE ITEM IS MUCH SMALLER THAN FILED.** `render.measureLoudness` **ALREADY takes a beat range end-to-end**: `rejectUnknownKeys(["fromBeat", "durationSeconds"], verb: "render.measureLoudness")` (`Commands.swift:2947`), validated and forwarded to `store.measureLoudness(fromBeat:durationSeconds:)` (`ProjectStore+Render.swift:23`), and the MCP tool passes BOTH through (`server.ts:5095`). ⚠️ **And it is not recent work — `git log -S 'fromBeat: measureFromBeat'` dates it to `69d32d3` (2026-07-06), a MONTH BEFORE this item was filed on 2026-08-04.** Verified by the orchestrator directly, not taken from the agent's report. **So "analysis is instantaneous or whole-song, never section-scoped" is wrong for the loudness half — LUFS/true-peak over an arbitrary beat range ships today.** ⚠️ WHAT GENUINELY REMAINS, and it is the smaller half: **marker-to-marker naming** (no `markerId`/`fromMarker` param anywhere — the only marker keys on the wire are `marker.remove/rename/move`), **per-track contributions** (zero `perTrack`/`trackContributions`), and **band balance** — plus `mixer.masterAnalysis` taking `rejectUnknownKeys([])`, i.e. no params at all, master-only and instantaneous. **Re-scope before anyone works this: clause (b) — telling agents the parameter exists — may now be the single highest-value part of the item, since the capability is there and undiscoverable.**
 - [ ] (m23-cy) **`macro.songSkeleton` KNOWS FIVE GENRES AND TRANCE IS NOT ONE OF THEM** — `pop`, `house`, `hip-hop`, `rock`, `ballad` (`Sources/DAWCore/SongSkeleton.swift`, enumerated 2026-08-04). Filed from the Codex report, whose session was an EDM/trance track and therefore fell back to a `house` skeleton and hand-corrected the arrangement afterwards. ⭐ **Cheap and self-contained: a skeleton is section lengths + track roles + a tempo hint.** ⚠️ **The generalisable point is worth more than the one genre: the fallback is SILENT. Asking for an unknown genre does not say "I don't know trance, using house" — it just returns a house skeleton, and the agent builds on a premise it was never told it was given. Whatever genres get added, the UNKNOWN-GENRE RESPONSE SHOULD NAME THE SUBSTITUTION.** Weight S. Route: `swift-app-engineer`. ⭐ **HALF-REFUTED 2026-08-05 (roadmap already-done audit): THE GENRE GAP IS REAL, THE SILENT-FALLBACK CLAIM IS NOT.** There is no silent substitution to name, because there is no substitution: `SongSkeleton.swift:312-315` **THROWS** `ProjectError.songSkeletonGenreNotFound` on an unknown genre, and the message **already lists every valid genre** (`let valid = SongSkeletonCatalog.names.joined(separator: ", ")`) — the teaching-error shape this item asks for. The MCP layer refuses even earlier, at the schema: `server.ts:4629` pins `.enum(["pop","house","hip-hop","rock","ballad"])`. Both verified directly by the orchestrator. ⭐ **SO THE CODEX SESSION'S "fell back to a house skeleton" WAS THE AGENT PICKING `house` OFF THE ENUM — NOT THE CODE SUBSTITUTING BEHIND ITS BACK.** That matters for triage: the generalisable complaint ("never silently substitute") is ALREADY SATISFIED at both layers and needs no code change, so **the remaining work is purely additive — add trance (and whatever else) to `SongSkeletonCatalog.v1` (`SongSkeleton.swift:77-83`) and to the MCP enum, which must be kept in lockstep or the schema will refuse a genre the domain now knows.** Weight drops accordingly.
 - [ ] (m23-cz) **NO TRACK-ROLE METADATA AND NO GAIN-STAGING SURFACE — the report's central complaint, and the one item here whose diagnosis is GENUINELY AMBIGUOUS.** Filed 2026-08-04 from the Codex report. What it observed: the first export measured **−14.13 LUFS-I / −1.00 dBTP** — *"technically a successful master, musically not a successful balance"* — with a **31–34 dB kick-to-lead gap**, because the GM drum kit ran far hotter than the AU instruments and nothing in the loop noticed until the USER LISTENED. ⚠️⚠️ **BEFORE ANY CYCLE ACTS ON THIS, RESOLVE THE CONFOUND, BECAUSE THE REPORT CANNOT: an AU instrument reading 30–50 dB under a GM kit is ALSO the exact signature of m23-bx-1 — renders prepared from stale `stateData` rendered DEFAULT PATCHES. That bug is fixed; this session's build is unknown, and its numbers do not match the project state on disk (report says makeup `8.2 → 0.5`, the project.json holds `makeupDb: 8.8`), so it is a DIFFERENT session on a DIFFERENT state. So "AU instruments are quiet" is either a real gain-staging gap or an artefact of a bug we already closed, AND THE REPORT HAS NO WAY TO TELL THEM APART. The settling experiment: re-measure the same instrument tracks on the CURRENT build. Do that first; the item's scope depends on the answer.** ⚠️⚠️ **THIS BEARS ON m23-bx-3 BUT DOES NOT SETTLE IT — m23-bx-3 REMAINS A USER RULING AND NO CYCLE MAY RESOLVE IT.** ⭐ **The part that stands regardless of the confound: nothing in the model says what a track is FOR. There is no `role` (kick / bass / lead / pad / vocal), so no tool can say "your lead is 30 dB under your kick" even in principle — it does not know which is which. A role field is the enabling primitive for m23-cv's numbers to become advice.** Weight M. Route: `daw-architect` to scope, then `swift-app-engineer`.
@@ -1090,7 +1187,44 @@ Seeded 2026-07-26 from the user's hands-on session against **`dist/DAWPro.app` b
   - [ ] (m23-di-2) **Third-party voice-model IMPORT (②) — the one genuinely absent capability.** Zero `voiceImport|importVoiceModel` anywhere; `VoicePanelModel`'s `importSamples`/`addClipAsSample` import training AUDIO, not model files. ⭐ **THE SEAM IS ALREADY ON SCREEN: `VoicePanel.swift:208` renders a "NEEDS PREP" chip for the facade's `needsConversion` state — a voice folder holding `model.pth` but no `model.npz` (`scripts/rvc/server.py:165`). The panel already SHOWS the third-party-model case and nothing can act on it — so this is a file picker plus a `.pth`→`.npz` step, NOT a new pipeline.** ⭐ **POLICY, so no cycle re-refuses it: third-party/celebrity voice models are ALLOWED (the user withdrew that prohibition 2026-07-27, re-affirmed for TRAINING 2026-07-29); provenance and licensing are THEIRS. The one surviving limit is that we wire up IMPORTING user-supplied files and do NOT build scrapers that go FIND celebrity models at scale — which is exactly what this is.** ⚠️ **Never touch `scripts/rvc/`.** Blocked-ish on di-3 only in the sense that di-3 may widen the scope. Route: `mcp-integration-engineer`. ⭐⭐ **SPLIT 2026-08-10 AFTER A PREMISE CHECK THAT FOUND A HARD WALL IN THE SECOND HALF — di-2a (the import, doable now) and di-2b (resolving `needsConversion`, WHICH NEEDS THE USER'S WORD). Do the children.** ⚠️⚠️ **THE WALL, MEASURED: the RVC sidecar exposes exactly FIVE routes — `GET /health`, `GET /v1/voice/list`, `GET /v1/voice/{id}/status`, `POST /v1/voice/convert`, `POST /v1/voice/train` — and NONE of them converts `.pth`→`.npz`. So `needsConversion` is a state the sidecar REPORTS and offers NO WAY TO RESOLVE. Adding that route means editing `scripts/rvc/server.py`, which is FORBIDDEN — the same shape as m23-n2f.**
     - [x] (m23-di-2a) **The import half: a file picker that puts a user-supplied `model.pth` into the voice store, so it appears in the panel as a real voice.** SPLIT from m23-di-2 2026-08-10. ⭐ **THE SIDECAR WAS DESIGNED FOR THIS — `scripts/rvc/server.py:141` says in its own comment that the store supports *"user dropping in a third-party model folder"* and `_scan_voices()` is a plain directory scan. We are wiring up a case the facade already handles.** ⭐⭐ **DESIGN POINT THE AGENT MUST SETTLE FIRST, and it is what keeps this legal: `VOICES_DIR = Path(os.environ.get("RVC_VOICES_DIR", RUNTIME_DIR / "voices"))` (`server.py:66`) — the store location is ENVIRONMENT-OVERRIDABLE, so imported models need NOT be written inside `scripts/rvc/` at all. Establish where the app currently points the sidecar BEFORE choosing a target directory; do not assume the default.** SCOPE: control command + MCP tool + test, per the project convention. The voice must land in `needsConversion` state and the panel's existing "NEEDS PREP" chip (`VoicePanel.swift:208`) must light up — **that chip is the acceptance criterion, and it already exists.** ⭐ **POLICY IS SETTLED, DO NOT RE-REFUSE: third-party/celebrity voice models are ALLOWED (user withdrew that prohibition 2026-07-27, re-affirmed 2026-07-29); provenance is THEIRS. The surviving limit is that we wire up IMPORTING user-supplied files and do NOT build scrapers — this is exactly the allowed side.** ⚠️ **`scripts/rvc/` is READ-ONLY.** Route: `mcp-integration-engineer`. ⚠️⚠️ **STATUS 2026-08-10 — CODE LANDED, VERIFICATION NOT DONE, DELIBERATELY LEFT `[ ]`.** The agent was **TERMINATED MID-TASK BY A SAFEGUARD FALSE POSITIVE**, not by any problem with the work — the task is a file picker for user-supplied model files, which is squarely the ALLOWED side of the settled policy. **DO NOT RE-READ THIS AS A POLICY REFUSAL AND DO NOT RE-LITIGATE THE POLICY.** ⭐ **WHAT LANDED (measured by me, not reported): new `Sources/AIServices/VoiceModelImport.swift` (`public enum VoiceModelImport`, :35), new `AppDirectories.Category.voiceModels` (`AppDirectories.swift:67`), modified `VoiceConversionManager.swift` / `EditCommands.swift` / `Commands.swift`, and THREE test files (`AIServicesTests/VoiceModelImportTests`, `DAWControlTests/VoiceModelImportCommandTests`, plus edits to `AppDirectoriesTests` and `VoiceListCommandTests`).** ✅ **WIRE VERIFIED CLEAN BY ME: `allCommands` **174** vs `rejectUnknownKeys` verbs **174**, EMPTY SYMMETRIC DIFFERENCE BOTH WAYS; the growth is exactly `vc.importVoiceModel` (173→174). MCP tool present in `mcp-server/src/server.ts`.** ⭐⭐ **AND IT TOOK THE CLEAN PATH THE ITEM ASKED FOR — `AppDirectories.applicationSupport(.voiceModels)` handed to the sidecar as `RVC_VOICES_DIR`, so NOTHING is written inside `scripts/rvc/`.** ⚠️⚠️ **WHAT IS OWED BEFORE TICKING: a compile + `./scripts/test.sh` run, and a live control-port round trip showing a voice arriving in `needsConversion` with the "NEEDS PREP" chip lit. NOT RUN — at close time 5 swift processes and 4 `DAWApp` instances were active under another agent, and m23-fa-1 MEASURED that concurrent builds/staging manufacture genuine-looking failures (`TIMEOUT debug.arrangeZoom`, `masterCapture start failed`). Verifying into that contention would have produced a verdict I could not trust either way.** ✅✅✅ **VERIFIED AND TICKED 2026-08-10, SEQUENTIALLY, ON A QUIET TREE.** **① TESTS: `5300 tests in 539 suites passed`, `grep -c ✘` = 0, off a COMPLETE 13079-line log with a 5829 `✔` positive control (up from 5275/537).** ⚠️ **17 lines matched `error:` and I classified them rather than waving them off — ALL are test NAMES and measurement labels (`worst per-frame error: 0.0`); `grep -cE '\.swift:[0-9]+:[0-9]+: error:'` = **0**, so no compiler diagnostic.** **② WIRE: `allCommands` 174 vs `rejectUnknownKeys` verbs 174, EMPTY SYMMETRIC DIFFERENCE BOTH WAYS; growth is exactly `vc.importVoiceModel` (173→174). MCP tool present.** **③ LIVE CONTROL-PORT ROUND TRIP on staging 17695: 5/5, exit 0.** C1 import returns `state:"needsConversion"` with `voiceId` sanitised `"My Test Voice"`→`"my-test-voice"` and `hasIndex:true`. ⭐ **C2/C3 ARE THE DISCRIMINATING LEGS — A SETTER'S RETURN IS NOT PROOF IT TOOK — and the directory really holds `model.pth`, `model.index`, `voice.json` (`{"createdAt":…,"name":"My Test Voice"}`).** ⭐ **TWO NEGATIVE CONTROLS PASSED: reserved id `base` refused, and a nonexistent source refused, each with a legible message.** ✅ **PROFILE ISOLATION CONFIRMED BY THE PATH ITSELF: `…/dawpro-staging-profile-CaL4FH/DAWPro/VoiceModels/my-test-voice` — NOT the user's real Application Support, and NOT inside `scripts/rvc/`.** ⚠️ **MY OWN PROBE FAILED FIRST AND THE FEATURE WAS FINE: C2 read `r.directory`/`r.path` when the response field is `directoryPath`. A red leg whose message CONTAINS the value it says is missing is a broken CHECK, not a broken feature.** ⚠️ **NOT COVERED, STATED PLAINLY: the "NEEDS PREP" chip was not observed rendering — that needs the RVC sidecar up, and the wire state (`needsConversion`) is what the chip binds to. Probe kept at `<scratchpad>/di2a-roundtrip.mjs`; NOT added to `scripts/gates/` — the corpus has 61 vacuous verdicts and m23-fa-2 has not migrated them yet.**
     - [ ] (m23-di-2b) ⛔ **NEEDS THE USER'S WORD — resolving `needsConversion` has no legal path that I can choose unilaterally.** SPLIT from m23-di-2 2026-08-10. An imported `.pth` is inert until converted to `.npz`, and the three options are not equivalent: **(i) add a `POST /v1/voice/{id}/prepare` route to the sidecar — the clean design, and FORBIDDEN, because it edits `scripts/rvc/server.py`; (ii) invoke the vendored converter as a SUBPROCESS from the app — `scripts/rvc/runtime/src/tools/convert_pth_to_mlx.py` EXISTS and is a plain 91-line CLI taking `input .pth` / `output .npz`, so this RUNS a file without MODIFYING one and is arguably within the constraint, but it couples us to the vendored tree's internal layout AND to its pinned commit, and it needs that tree's `uv` environment (torch + mlx) rather than system python; (iii) leave imported models inert and document it.** ⭐ **(ii) is the only one that both works and stays inside the rules, but it is the user's call because it deliberately reaches into a directory they fenced off — ASK, do not assume the fence was only about edits.** ⚠️ **Do not start di-2b before di-2a lands: an unconverted import is still a visible, honest capability, and the question is easier to ask with the picker working.** Route: none until answered.
-- [ ] (m23-dj) **NO MONO→STEREO WIDENING OF ANY KIND — `grep -rniE 'widener|stereoWidth|monoToStereo|midSide' Sources/DAWEngine/` returns ZERO (verified 2026-08-04).** Raised by the user 2026-08-04, who asked for *"true stereo"* rather than a fake width trick. ⭐ **THE DISTINCTION THEY DREW IS THE RIGHT ONE AND SHOULD DRIVE THE DESIGN. What most plug-ins do is CHEAP AND PHASE-DAMAGING: a Haas delay (5–30 ms on one side) or a polarity-flipped duplicate — both widen on speakers and COLLAPSE OR HOLLOW OUT IN MONO, which is exactly the failure a club PA or a phone speaker exposes.** ⭐ **The honest approaches, in ascending cost:** ① **decorrelation by short randomised all-pass / diffuse networks** — width without a comb filter, mono-safe if the all-pass is energy-preserving; ② **band-split widening** — leave the bass mono (below ~120 Hz) and decorrelate only the highs, which is what mastering practice actually does; ③ **true pseudo-stereo via mid/side synthesis** from a decorrelated side channel. ⚠️⚠️ **WHATEVER IS BUILT, MONO COMPATIBILITY IS THE ACCEPTANCE TEST, NOT A NICE-TO-HAVE: sum the output to mono and assert the level and spectrum against the dry input. A widener that loses 3 dB of vocal when summed is a bug that ships silently and is only found on someone else's speaker. This project already has the measurement discipline for that — reuse the m23-ch limiter oracle's shape.** ⚠️ Also decide where it lives: an insert effect (per track, automatable) or a clip property. Insert is the conventional answer. Weight M. Route: `audio-dsp-engineer`.
+- [x] (m23-dj) ✅ **SHIPPED 2026-09-19 as the `.stereoWidth` insert kind — rank 5.** Verified by me,
+  not accepted from the agent: Swift **8326 / 728 / zero failures** (own run, 278.8 s), MCP
+  **878 / 0**, wire **227**, 17 kinds × 5 surfaces exit 0, 18 demo specs, six persistence sites
+  (counted, positive-controlled against `tapeDelay`'s six), and the chorus byte gate **IDENTICAL 3/3**
+  with hash `80aa1afd8618…` and a **2 619 028**-byte positive control.
+  ⭐⭐⭐ **THE USER'S DISTINCTION WAS RIGHT AND IT IS A THEOREM, NOT A PREFERENCE.** Out of a mono
+  source you cannot have both a flat mono sum and flat individual channels: `L = M(1 ± s·A)` gives a
+  flat sum with per-channel ripple `1 ± s`, while two different all-passes give flat channels and a
+  COMBED sum. There is no third arrangement. **This kind always takes the flat mono sum** and reports
+  the cost per instance as `channelPeakDb`/`channelNotchDb` rather than hiding it. Measured mono
+  fold-down at width 1.8 / spread 0.8: level **−7.9e-10 dB**, worst band **−3.7e-9 dB**, residual
+  **−145.8 dB**. The Haas control the item warned about, on the same instrument: **−10.257 dB** at
+  440 Hz and a residual **+4.26 dB — LOUDER than dry**. The item's own stated failure, reproduced on
+  demand.
+  ⛔⛔ **A PLANT REDDENED NOTHING AND THE CAUSE WAS THE FIXTURE, TWICE OVER.** Removing the endpoint
+  SNAP was invisible because (a) the leg used a BALANCED fixture, on which the M/S round trip is
+  accidentally bit-exact, and (b) the ride value landed the accumulator on exactly 1.0 — only
+  **99 of 1650** three-decimal widths in [0.3, 1.95] leave any residue at all. ⭐ **A fixture can be
+  the reason a test cannot fail.** Fixed with an asymmetric fixture (L = 1e-7, R = 0.9) and a ride of
+  0.33; the plant now reddens with 512/1024 samples mismatching.
+  ⭐⭐ **MONO-SAFE ≠ DECORRELATED, and the oracle alone cannot tell them apart.** A plain delayed copy
+  in the side path PASSES the mono-compatibility oracle — any `S' = F(M)` is mono-safe, so a Haas
+  trick hidden in the side channel would have cleared the item's own acceptance test. A separate leg
+  measures impulse-response DISPERSION (745 samples above 1 % of peak, largest single sample 4.07 %
+  of energy; a plain delay gives 1 sample / 100 %).
+  ⛔ **The agent shipped a false recipe into four places and caught it itself at review:** `width: 0`
+  ALONE is not a mono-maker, because the default `spread` 0.3 keeps synthesizing a side channel — on
+  a MONO source it emits one where none existed. An agent told to "make this mono" would have sent
+  `width: 0`, received `ok: true` with `width: 0` echoed back, and reported success. Measured: mono
+  source `width 0` → width figure **0.0 → 0.0748**; with `spread: 0` too → **0.0 exactly**, channels
+  bit-identical. Prose corrected in all four sites and pinned behaviourally (`StereoWidthTests` L2c).
+  ⚠️ **Found while verifying: `fxAddAndSetParamWorkForNewKinds` was a hand-written LIST that READ as
+  a census and had silently omitted `.tapeDelay`.** I rewrote it to be driven by `Kind.allCases` so a
+  kind with no wire probe FAILS rather than being skipped, added a non-vacuity floor, and
+  positive-controlled it by planting the omission (reddens: `kinds with no entry in this census:
+  ["tapeDelay"]`). ⚠️ The rewrite immediately exposed a second thing the list had hidden — 17 kinds
+  on one track exceeds the **16-effect cap**, so the census now uses one fresh track per kind.
+  ⚠️ Original item text follows. **NO MONO→STEREO WIDENING OF ANY KIND — `grep -rniE 'widener|stereoWidth|monoToStereo|midSide' Sources/DAWEngine/` returns ZERO (verified 2026-08-04).** Raised by the user 2026-08-04, who asked for *"true stereo"* rather than a fake width trick. ⭐ **THE DISTINCTION THEY DREW IS THE RIGHT ONE AND SHOULD DRIVE THE DESIGN. What most plug-ins do is CHEAP AND PHASE-DAMAGING: a Haas delay (5–30 ms on one side) or a polarity-flipped duplicate — both widen on speakers and COLLAPSE OR HOLLOW OUT IN MONO, which is exactly the failure a club PA or a phone speaker exposes.** ⭐ **The honest approaches, in ascending cost:** ① **decorrelation by short randomised all-pass / diffuse networks** — width without a comb filter, mono-safe if the all-pass is energy-preserving; ② **band-split widening** — leave the bass mono (below ~120 Hz) and decorrelate only the highs, which is what mastering practice actually does; ③ **true pseudo-stereo via mid/side synthesis** from a decorrelated side channel. ⚠️⚠️ **WHATEVER IS BUILT, MONO COMPATIBILITY IS THE ACCEPTANCE TEST, NOT A NICE-TO-HAVE: sum the output to mono and assert the level and spectrum against the dry input. A widener that loses 3 dB of vocal when summed is a bug that ships silently and is only found on someone else's speaker. This project already has the measurement discipline for that — reuse the m23-ch limiter oracle's shape.** ⚠️ Also decide where it lives: an insert effect (per track, automatable) or a clip property. Insert is the conventional answer. Weight M. Route: `audio-dsp-engineer`.
 - [ ] (m23-dk) ⭐⭐ **REINSTATED 2026-08-05 — the user dropped this on 2026-08-04 and then asked *"does it mean we do have some constant frequency and if yes, then let's make it configurable with the ones I mentioned as well as existing one or is it hard?"* They dropped it on MY assessment, and that assessment was WRONG IN THEIR DISFAVOUR TWICE — so this reinstatement is a correction, not a reversal.** ⚠️⚠️ **CORRECTION ①: I said 528/174 Hz were *"single tones with no tuning-system meaning"*. FALSE. Each is an exact note at some A4, so ALL THREE are reachable through ONE configurable setting — this is one feature, not three: **432 Hz = A4 itself (A4=432.000, −31.77 ¢)**; **528 Hz = C5 exactly (A4=443.993, +15.64 ¢; C5 is 523.251 Hz at A440)**; **174 Hz = F3 exactly (A4=438.453, −6.10 ¢; F3 is 174.614 Hz at A440)**. ⚠️ **THEY ARE MUTUALLY EXCLUSIVE — at A4=432, C5 is 513.74 Hz and F3 is 171.44 Hz. No tuning hits all three. "A 528 Hz track" is a DIFFERENT project setting from "a 432 Hz track", and any UI that implies otherwise is lying.** ⚠️⚠️ **CORRECTION ②: I said "four A440 sites", implying a uniform fix. THE SITES ARE NOT THE SAME KIND, and the most important one has no 440 in it at all:** **(a) `PolySynthInstrument:360` + `TestToneInstrument:109`** — literal `440.0 * exp2((pitch − 69)/12)`; read it from a project setting. Trivial. **(b) `SamplerInstrument:832` — RELATIVE, NO 440 ANYWHERE:** `exp2((pitch − zone.rootPitch)/12) * zone.tuneFactor * zone.fileRate / sampleRate`, absolute pitch coming from the recorded sample. ⭐ **BUT `zone.tuneFactor` IS ALREADY `exp2(tuneCents/1200)` ON THAT SAME MULTIPLY CHAIN (m19-b), so a global cents offset FOLDS INTO AN EXISTING MECHANISM — no new render-thread math, no new allocation.** ⭐⭐ **AND THIS IS THE COVERAGE ARGUMENT THAT CHANGES THE ITEM'S VALUE: THE USER'S GM SOUND BANKS GO THROUGH THE SAMPLER, and they are steered to GM banks anyway by the m23-av Surge XT wedge. So the sampler leg covers where their music ACTUALLY comes from — my earlier "yes for built-in synths only" undersold it.** **(c) `AudioContentAnalyzer:164` — the INVERSE (Hz→MIDI, chroma fold). Judgment call, and the default should be NO: analysing an imported A440 track against a 432 project would mislabel every note. Tuning is a SYNTHESIS setting, not an analysis one.** **(d) `InstrumentFrequencyReference:156` — display; SHOULD follow, or the chart contradicts what you hear.** ⚠️⚠️ **THE ONE REAL LIMIT, UNCHANGED AND MUST BE VISIBLE IN THE UI: HOSTED AU PLUGINS COMPUTE THEIR OWN PITCH AND CANNOT BE REACHED. Some expose a master-tune param drivable via `au.setParam`; many do not. A project mixing our instruments with an untuned hosted AU is OUT OF TUNE WITH ITSELF — worse than not offering the feature. Ship the scope indicator with the setting, not after it.** ⭐ **Do it as a `TuningReference` ONE HOME (`fileprivate init`, `ArrangeDropSnap` mould) storing A4 in Hz, with cents derived — that also discharges the four-way duplicated constant, which was the one finding kept alive when this item was dropped.** ⚠️ **Acceptance test must be AUDIO, not arithmetic: render a known note at each preset and MEASURE the fundamental (the m23-ch limiter-oracle shape). A unit test asserting `440*2^x` only proves the formula was retyped.** ⭐⭐ **SCOPE + DEFAULT RULED BY THE USER 2026-08-05: *"per project is good and default should be the one other DAW use if they do."* So: **PER-PROJECT**, defaulting to **A4 = 440 Hz**. 440 is ISO 16 and the universal default across every major DAW — there is no ambiguity to research here, and no cycle should spend time re-deriving it.** ⭐ **PER-PROJECT IS ALSO RIGHT ON THE MERITS, not just by preference: tuning is a property of THE MUSIC, not of the machine. A global app preference would silently retune every project you open, and a 432 Hz project sent to another machine must still play at 432 — which only works if the value travels IN the project file.** ⚠️⚠️ **THE PERSISTENCE SHAPE IS ALREADY DICTATED BY THIS CODEBASE — FOLLOW IT, DO NOT INVENT ONE.** `ProjectSnapshot` (`Model.swift:1984`) documents the **m12-f TRIPLE-MIRROR discipline** verbatim: *"descriptor Codable alone proves nothing; snapshot AND disk each carry the field explicitly"* — so the field lands in **`ProjectStore` + `ProjectSnapshot` + the disk DTO**, three places, each explicit, each tested. ⭐ **And it must be OPTIONAL, per the stated `grooveTemplates` rule: `public var tuningA4Hz: Double?`, nil = key omitted = 440 Hz — so EVERY PRE-TUNING PROJECT STAYS BYTE-IDENTICAL ON SAVE. A non-optional `Double = 440` would look equivalent and would add a key to every project file in existence; that is the trap this rule exists to prevent.** ⚠️ **Decode with `decodeIfPresent(Double.self, forKey: .tuningA4Hz)` — same pattern as the m23-ch `truePeak` param added 2026-08-04, which is the freshest worked example in the tree.** ⚠️ **Per convention this ships a control command + an MCP tool + a test; the wire is ADDITIVE-ONLY and the counts are pinned (171/174/74), so update them at close.** ⚠️ **VALIDATE THE RANGE AND VALIDATE BEFORE MUTATING (m23-ah-6's lesson): reject non-finite, zero, and negative A4 BEFORE writing anything, or a bad value lands half-applied. A sane band is ~380–500 Hz; anything outside it is a typo, not a preference.** Weight M. Route: `audio-dsp-engineer`. **Original filing follows.** ⚠️⚠️ **ONE FINDING SURVIVES THE DROP AND SHOULD NOT BE LOST WITH IT: A440 IS HARDCODED AT FOUR INDEPENDENT SITES** — `PolySynthInstrument.swift:360`, `TestToneInstrument.swift:109`, `AudioContentAnalyzer.swift:164`, `InstrumentFrequencyReference.swift:156` (which declares itself *"THE ONLY Hz source in this file"* — true of the file, false of the codebase). **That is a four-way duplicated physical constant, i.e. exactly the class this project keeps paying for, and it stays wrong whether or not anyone ever wants 432 Hz. If a `TuningReference` ONE HOME is ever built, it should be justified as duplicate-removal, NOT as reviving this feature.** **Original filing follows.** **ALTERNATE TUNING REFERENCE (432 Hz) — POSSIBLE FOR OUR OWN INSTRUMENTS, NOT UNIVERSALLY, AND THE SPLIT IS THE ANSWER.** Asked by the user 2026-08-04. ⚠️ **A440 IS HARDCODED AT FOUR SITES (verified 2026-08-04): `PolySynthInstrument.swift:360`, `TestToneInstrument.swift:109`, `AudioContentAnalyzer.swift:164`, `InstrumentFrequencyReference.swift:156` — the last of which already declares itself *"THE ONLY Hz source in this file"*, which is true of the file and false of the codebase.** ⭐ **So step one is a `TuningReference` ONE HOME that all four repoint to, with a `fileprivate init` in the `ArrangeDropSnap` mould. That is worth doing for its own sake — four independent copies of a physical constant is exactly the class this project keeps paying for.** ⚠️⚠️ **BUT THE HONEST ANSWER TO THE USER IS PARTIAL, AND MUST BE SAID PLAINLY RATHER THAN DISCOVERED LATER: HOSTED AU INSTRUMENTS COMPUTE THEIR OWN PITCH. A global tuning setting CANNOT reach them. The only route is each plug-in's own tuning parameter (via `au.setParam`), and not every plug-in has one. So "can we output at 432 Hz" = YES for built-in instruments, NO in general, and a project mixing both would be OUT OF TUNE WITH ITSELF — which is worse than not offering it. Any UI must make the scope visible.** ⚠️⚠️ **AND 528 / 174 Hz ARE A DIFFERENT REQUEST THAT MUST NOT BE FOLDED IN: 432 Hz is a TUNING REFERENCE (it retunes every note); the solfeggio figures are SINGLE TONES with no tuning-system meaning — "a 174 Hz drone" is not a tuning at all. That capability ALREADY EXISTS as `AudioEngine.startTestTone(frequency:)`, and exposing a tone generator is a separate, much smaller item. ⭐ The wellness claims are the user's to hold, not ours to adjudicate — we ship the tuning control and the tone generator and stay out of the therapeutic framing, in the app's own copy as well as here.** Weight M (tuning one-home) + S (tone generator). Route: `audio-dsp-engineer`. ⚠️⚠️ **FILE PATHS CORRECTED 2026-08-05 (roadmap already-done audit) — TWO OF THE THREE PATHS QUOTED ABOVE ARE WRONG, and this is the failure mode this project has paid for repeatedly: a cycle that greps the literal paths gets a CONFIDENT ZERO and concludes the finding rotted.** The files are nested one directory deeper than quoted. The four A440 sites are all still live at the exact LINE numbers filed — only the paths are wrong: **`Sources/DAWEngine/Instruments/PolySynthInstrument.swift:360`** (`440.0 * exp2((Double(event.pitch) - 69.0) / 12.0)`), **`Sources/DAWEngine/Instruments/TestToneInstrument.swift:109`** (identical), **`Sources/DAWEngine/Analysis/AudioContentAnalyzer.swift:164`** (the inverse, `69.0 + 12.0 * log2(frequency / 440.0)`), and **`Sources/DAWCore/InstrumentFrequencyReference.swift:156`** — ⚠️ **that last one is in `DAWCore`, NOT `DAWAppKit` as filed.** ⭐ **The load-bearing feasibility claim is CONFIRMED and is what makes this cheap: `SamplerInstrument.swift:120` `var tuneFactor: Double // exp2(tuneCents/1200)` is built at `:393` and consumed on the pitch multiply chain at `:833` (`* zone.tuneFactor * zone.fileRate / sampleRate`) — so a global cents offset folds into an EXISTING multiply and adds NO new render-thread math.** All five sub-claims verified line-for-line; `tuningA4|TuningReference|a4Hz` is zero across `Sources/`, `Tests/` and `mcp-server/src/`. **The item is ready to build as written, once the paths above are used instead of the ones in its body.**
 - [x] (m23-dl) **MODEL LIFECYCLE MANAGER — UNLOAD A LOCAL MODEL WHEN ITS WORK IS DONE, AND ALWAYS BEFORE LOADING ANOTHER.** Requested by the user 2026-08-04 alongside m23-dg: *"We should also manage model loading and should unload ACE once we are done with song generation or when we attempt to load other model."* ⭐⭐ **THIS PROMOTES AN EXISTING MANUAL DISCIPLINE INTO A PRODUCT FEATURE, AND THAT IS THE RIGHT MOVE: the standing rule today is *kill the ACE sidecar pid-exact after every test that no longer needs the model* — a USER RULE from 2026-08-03, enforced by hand because ACE holds ~75 GB WHILE RSS REPORTS ~1 GB. A rule that only works when a human or an agent remembers it is one forgotten step from filling the disk.** ⚠️⚠️ **HARD BLOCKER, AND IT MUST BE FIXED FIRST: `ai.sidecarStop` CANNOT STOP A RUNNING SIDECAR — m23-bb, measured 2026-07-30, still OPEN [⚠️ **STALE AS OF 2026-08-05 — SEE THE BLOCKER-CLEARED NOTE AT THE END OF THIS LINE; m23-bb IS NOW `[x]` AND THIS ITEM IS UNBLOCKED**]. With the ACE sidecar plainly healthy it reports success-ish and LEAVES IT RUNNING; clearing it needs a literal `kill <pid>`. YOU CANNOT BUILD AUTOMATIC UNLOADING ON A STOP VERB THAT DOES NOT STOP THINGS — and worse, a manager built on it would report "unloaded" while 75 GB stayed resident, which is strictly worse than the manual rule it replaces because it removes the human who would have checked. **m23-bb IS A PREREQUISITE, NOT A RELATED ITEM.** ⚠️ **AND THE VERIFICATION MUST BE RESIDENT MEMORY, NOT THE PROCESS TABLE OR RSS: this whole area's defining trap is that RSS reports ~1 GB for a 75 GB hold, and `kill -0` succeeds on a zombie. "Unloaded" means the memory came back and the port is free — assert both, with a POSITIVE CONTROL proving the check can fail.** ⭐ **Scope, smallest useful first:** ① fix m23-bb so stop actually stops; ② unload-on-idle after a generation job reaches a terminal state; ③ **unload-before-load — mutual exclusion between large models, which is the leg m23-dg makes mandatory** (ACE ~75 GB plus a second model on one machine is not a configuration to discover at runtime); ④ surface which model is resident, so the answer is observable rather than inferred. ⚠️ **Design it for N models, not two — ACE (8001) and RVC (8002) already coexist and Music Flamingo would be the third. A pairwise special case will not survive the third.** ⭐ **Follow the nonce lesson from m23-ah: a monotonic counter in the response turns *"did this actually unload?"* from inference into observation, and that is what made every ah-2/ah-5/ah-6 verification conclusive.** Weight M. Route: `mcp-integration-engineer` (sidecar control) with `daw-architect` on the exclusion policy. ⭐ **BLOCKER CLEARED — VERIFIED 2026-08-05 by the roadmap already-done audit.** This line asserts twice, in capitals, that `m23-bb` is a hard PREREQUISITE and *"still OPEN"*. **It is not: `m23-bb` is `[x]` (roadmap line 508) and its implementation `Sources/AIServices/SidecarStopPlanner.swift` (34.5 KB) is in the tree — both re-checked directly, not taken from an agent's report.** So this item is **UNBLOCKED AND MACHINE-WORKABLE**, not blocked; the prerequisite prose above is historical and a triager reading it will wrongly skip the item. ⚠️ **The rest of the item's own claim IS still true and was re-measured the same day:** `unload` appears exactly ONCE as a real primitive in the whole tree (`WhisperTranscriber.swift:200 public func unload()` — the other three hits are comments), `mcp-server/src/` has ZERO, and `modelLifecycle|residentModel|ModelManager` is zero across both Swift and TS. So ① stop-actually-stops has landed and ②/③ (unload-on-idle, mutual exclusion before loading another model) have not. ⚠️ Note this sits directly downstream of the standing USER RULE that the ACE sidecar must be killed pid-exact after every test that no longer needs the model (~75 GB held while RSS reports ~1 GB) — **this item is the mechanism that would make that rule automatic instead of manual.** ⭐⭐ **DONE 2026-08-05 — BUT READ THE SCOPE CUT FIRST, BECAUSE THE DESIGN DOCUMENT ON DISK DESCRIBES A LARGER FEATURE THAN WHAT SHIPPED.** `docs/research/2026-08-05-m23dl-model-lifecycle-design.md` specified an **admission gate**: sample system-wide available memory, compare it against a per-model hold requirement, and REFUSE a boot that would not fit, with `force: true` as the override and a seven-clause refusal message as "the most important surface in this feature". ⭐ **THE USER CUT ALL OF THAT on 2026-08-05:** *"let's not check for memory then, let it fail if this happens, but still good to clean it up."* So **no verb in DAW Pro refuses a boot for memory, there is no `force` parameter on any start verb, there is no hard floor, and a model that does not fit fails exactly the way it did before this item existed.** Design §2, §3.3, §6.3, §15 (the whole `EnsureSidecar`/`SketchpadModel.canGenerate` phase) and §16 are OBSOLETE on that point and must not be re-derived; ⚠️ **F18/F19/F20 no longer exist as risks** — they existed only because a refusal had to reach two app-side `try?` callers, and there is no refusal. `DAWProApp`'s auto-start and the sketchpad banner were deliberately NOT touched. **WHAT SHIPPED, against this item's own ①-④:** ① m23-bb was already `[x]`; ② **idle unload, ON** — ACE-Step ships `idleUnloadSeconds: 600`, armed when the model becomes resident AND re-armed whenever a generation job reaches a terminal state (armed on residency too, deliberately: a timer that only ever arms behind a job hook is one missed hook away from never arming at all); RVC ships `nil`, since ~3 GB is not worth a reload the user waits for — and that keeps BOTH polarities live in the product rather than only in a fixture. Plus **unload on app quit**; ③ **unload-before-load, UNCONDITIONAL** — booting one model unloads every other resident one, not because memory is short, which is the user's own *"or when we attempt to load other model"*; ④ **`ai.modelResidency`** makes residency observable. Plus **global single-flight** (actor state + a `flock`ed file under `DAWPRO_PROFILE_ROOT`, so staging cannot block the user's app) — the ONE thing that can still refuse a start, and it is not a memory check. ⚠️⚠️ **`activeJobs > 0` IS AN ABSOLUTE VETO ON EVERY AUTOMATIC UNLOAD, and it is now the most important guard in the feature** — an idle timer firing during a long generation would be far worse than the leaked memory it replaces. It is enforced at three points (the pure planner, the schedule, and a re-check after the timer's suspension, since the actor is reentrant across it) and **the production job hooks were wired in the same pass** — `noteJobStarted` on all five ACE submit verbs and `noteJobEnded` in `ai.generationStatus` on a terminal state and on the errors that PROVE the job is over (see the CORRECTION addendum at the end of this record — closing on *any* thrown error was a defect, found in review and fixed). Without those hooks `activeJobs` would be permanently 0, F8 would be structurally dead, and starting RVC mid-render would SIGTERM ACE; **a timer test with a hand-inserted resident would have passed forever while production scheduled nothing.** Jobs are KEYED BY JOB ID, not counted, because `ai.generationStatus` is polled in a loop and every poll after the first sees the same terminal state — a decrementing counter would run to zero and un-protect a model that is still rendering — and a job nobody ever closed stops vetoing after `policy.jobLeaseSeconds` (1 h). ⭐ **"UNLOADED" IS AN OBSERVABLE WITH THREE AUTHORITY LIMBS** (port free, health probe unreachable, no pid alive in the PRE-KILL captured tree) **and memory return is CORROBORATION that can never fail a verb** — this item's own line above demanded "the verification must be resident memory", and that premise is HALF WRONG and was corrected by measurement: system-available memory drifts ±0.3 GB between adjacent idle samples, so a memory-gated verdict reports failed unloads that did not fail. It is reported (`memoryReturnedBytes`/`memoryVerdict`) and never decides. ⚠️ The pidfile pid is the WRONG process for ACE-Step: `run.sh` ends in `exec uv run --no-sync acestep-api`, so the pidfile pid is the `uv` supervisor while the python child holds the ~80 GB — hence the captured TREE. ACE's measured ~80 GB survives only as the yardstick `memoryVerdict` grades against; drop it and every verdict collapses to `inconclusive`. **Wire 171→173** (`ai.modelResidency` with `includeProcessDetail?`, `ai.modelUnload` with `modelId` XOR `all`; both appended at the END, count decomposed two ways and cross-checked against `rejectUnknownKeys(…, verb:)` — 173 of 173 array entries are guarded). **MCP 174→176** (34 direct reads + 142 strict wrappers) — ⚠️ named **`ai_model_residency`/`ai_model_unload`**, NOT the design's `model_residency`/`model_unload`, because `audit-tools.test.ts` enforces the mechanical name rule and the design's names failed the bijection. **Copilot catalog stays 74, deliberately**: `ai.sidecarStart` is in it while status/stop are not — an operate-don't-administer split — and unloading is now automatic, so handing the copilot a verb that can stop a model mid-render would add a footgun for no capability. ⚠️ `ai.sidecarStop`/`vc.sidecarStop` are NOT re-routed through `coordinator.unload` as §6.2 suggested (it would have changed their response type and their m23-bb stop-honesty error); the router calls a new `noteStoppedExternally` after a successful stop instead — from the ROUTER, never a manager, since a manager-side call arrives from inside the coordinator's own eviction and would violate F7. ⚠️ `ModelMemory.Snapshot`'s three DERIVED figures (`usedBytes`/`availableBytes`/`vmStatFreeBytes`) are now explicitly ENCODED — they are computed properties, so synthesised `Codable` left the only three numbers anyone reads off the wire entirely; **caught by a test, not by reading.** **VERIFIED: `swift build` clean, 0 `warning:` (via `rtk proxy`, since the hook strips warning lines); full suite 5090 tests / 526 suites, `grep -c '✘'` ANYWHERE = 0, positive control 5606 ✔, 102.3 s — over a 5077/525 baseline. The +13/+1 reconciles in BOTH directions: −8 admission-gate tests DELETED from `ModelAdmissionTests` (27→19; they tested a decision that no longer exists, and softening them into something that still passed would have left the suite asserting a gate the user removed), +12 in `ModelLifecycleCoordinatorTests` (24→36, mostly the idle timer and the job bookkeeping), +10 in the new `ModelLifecycleCommandTests`; two full runs on this tree bracket it exactly (5077 → 5080 after the AIServices rewrite → 5090 after the wire suite). MCP suite 318 → 329, 0 fail.** ⚠️ **NO SIDECAR WAS EVER STARTED** — every test uses spy evictors or the fake-`/health` responder, and `lsof` on 8001/8002 stayed empty throughout. ⚠️ **A load-dependent flake was found and fixed rather than re-run until green:** `ModelMemoryLiveTests`' 2 GiB positive control passes alone in 0.5 s and recorded a delta of EXACTLY 0 GB inside a full run — `host_statistics64` reports the whole MACHINE and ~500 parallel tests churn it. It now retries the measurement up to four times at FULL strength (the retry is a contention guard, not a relaxed threshold; a broken metric still fails every attempt). ⚠️ **`claude-plugin/server/index.mjs` regenerated** (`cd mcp-server && npm run bundle:plugin`) and `docs/ARCHITECTURE.md` updated — headline 171→173, the m23-dl row, and a "Key future decisions" entry that states the memory gate was CUT and names the obsolete design sections. **STILL OPEN, and it is the one thing this item did NOT deliver:** design §6.5 wants an idle eviction to `ControlServer.broadcast` so a model vanishing is OBSERVED rather than discovered — `AIServices` cannot import `DAWControl`, so it needs a callback/stream seam. Skipped deliberately, not dropped silently; the fallback is the `generation` nonce plus a poll of `ai.modelResidency`. ⭐⭐ **CORRECTION ADDENDUM (same day, post-implementation review) — FOUR DEFECTS FOUND AFTER THE RECORD ABOVE WAS WRITTEN, INCLUDING ONE THAT INVERTED THIS ITEM'S MOST IMPORTANT GUARD.** ① **F8 WAS INVERTED IN `ai.generationStatus`.** The success path was careful (close only on `.succeeded`/`.failed`; `.running` keeps the job open) but the `catch` closed the job on ANY thrown error — so a dropped connection or an HTTP timeout mid-render dropped `activeJobs` to 0 and let the next boot SIGTERM ACE in the middle of the render it was protecting. *The hook written to enforce F8 introduced F8's own failure mode.* Fixed with `CommandRouter.errorProvesJobIsOver(_:)`: close ONLY on `.jobFailed`/`.jobNotFound`; `.sidecarUnreachable`, `.requestFailed`, `.malformedResponse`, `.modelSlotUnavailable` and any non-`ACEStepError` leave the job OPEN for `jobLeaseSeconds` to self-heal — leaking protection for an hour is the cheap side, evicting a live render is not. The `default` direction is deliberately *transient*, so a new error case added later keeps protecting the render until someone decides otherwise. ② **THE PRODUCTION JOB HOOKS HAD ZERO TEST COVERAGE** — the very hooks this record boasts of wiring. Every existing generate test builds its router over the unregistered `.shared` coordinator, where `noteJobStarted` is a no-op; MEASURED: all five call sites could be deleted and 5090/5090 still passed. The claim *'without those hooks F8 would be structurally dead'* was true and untested, which is the same shape as the bug. Now covered by a full chain test (open → `.running` keeps → terminal closes → idle re-arms), a transient-vs-terminal regression, and a unit on the classifier. ③ **`abandon(_:)` WAS DEAD PUBLIC API** — its only caller was its own test, while both managers release through `admitted(_:healthy: false)`. Deleted; the test retargeted onto the real path. Dead API that LOOKS load-bearing is worse than none. ④ **`includeProcessDetail: true` HAD NEVER EXECUTED IN SWIFT** — every test asserted `portBusy == nil`, so the `lsof`-per-model branch, added specifically to stop `resident: false` from lying about a hand-started sidecar, was never run. Now pinned against a port nothing listens on (49731, deliberately NOT 8001/8002 — an `lsof` against a real sidecar port makes the verdict depend on the developer's machine). ⚠️⚠️ **AND A GATE PIN WAS MISSED: `scripts/gates/m23t-baroperand.mjs` carries its own `EXPECTED_VERBS = 171`.** The cycle bumped 17 Swift count pins and the MCP tool pin and never grepped `scripts/gates/` for a wire count — one unrun gate away from repeating the m23-w → m23-ac failure that gate's own BUMP LOG already records. Now 173, cross-checked two ways (the gate's own regex over the array body = 173; a comment-stripped count = 173; 173 UNIQUE, 0 duplicates). ⭐⭐⭐ **AND THE FIRST TEST THAT EVER ARMED A *REAL* IDLE TIMER EXPOSED A PROCESS ABORT.** Cancelling a timer task suspended in the real `Task.sleep` aborts out of the Swift concurrency runtime — `freed pointer was not the last allocation`, from `swift_task_dealloc`, through the `@isolated(any)` thunks — deterministically, 3/3 runs, across four different structural variants of the surrounding code. **It was invisible because EVERY test injected a `SleepGate` stub (`func wait() async`); the real `Task.sleep` branch had never been executed by any test**, and the path into it is frequent rather than rare (every generation start disarms a live timer). FIX: `cancelIdleUnload` now drops the task handle WITHOUT cancelling — the epoch guard already rejects a stale wake-up, which is exactly what it was built for, and the orphan holds only `[weak self]` and a `Double`. ⚠️ **THE ROOT CAUSE IS UNEXPLAINED** — a standalone Swift 6 program of the same shape does NOT reproduce it — so the constraint is recorded as empirical, not understood, at `ModelLifecycleCoordinator.cancelIdleUnload`. Two changes made while hunting it (sleeping outside the actor; `Task.detached`) did NOT fix it and are kept only on their own merits, labelled as such in-source so nobody reads them as the fix. ⚠️ A THIRD candidate (making `sleepSeconds` non-throwing) also did not fix it and its originally-written *'this crashed the process'* comments were FALSE and have been corrected — a wrong comment outlives a wrong fix. ⚠️ **One further contention flake surfaced and was hardened, not re-run until green:** the F23 anti-vacuity eviction test clears its condition in 0.007 s alone (a ~400x margin) yet timed out at 3.0 s inside the full parallel run; `eventually`'s deadline is now 30 s, which changes no assertion — a wake-up that never fires still fails. **RE-VERIFIED AFTER ALL OF THE ABOVE: `swift package clean && swift build --build-tests` — 0 `error:`, 0 `warning:`; full suite 5094 tests / 526 suites, `grep -c '✘'` ANYWHERE = 0, positive control 5561 ✔, 104.9 s (5090 → 5094: +4 new tests, 0 removed — `abandon`'s test was retargeted, not deleted). MCP 329 pass / 0 fail. `claude-plugin/server/index.mjs` regenerated and DECOMPOSED: 176 unique named registrations, 0 duplicates, both new tools present (a raw `registerTool(` grep reads 180 — 4 are the wrapper definition and SDK internals, which is exactly why the count is decomposed rather than eyeballed). NO SIDECAR STARTED; ports 8001/8002 never listened, port 17600 never connected to.**
 - [x] (m23-dm) **THE MASTER BUS HAS NO LEVEL IN `project.overview` EITHER — m23-cv fixed the tracks and left the master out.** Filed 2026-08-05 by the orchestrator at m23-cv close, from the implementing agent's own flag (reported rather than silently widening its brief — the right call). `ProjectOverview.Master` carries **only `volume`**, and `ProjectStore.masterMeter` is zeroed by the SAME `stop()` path (`ProjectStore.swift:575`, `masterMeter = .silence`) that made the per-track case misleading. ⭐ **So this is m23-cv's exact shape one level up, and the design is already decided and already proven: retain the last non-silent `masterMeter` alongside the live one, project it as `peakDb`/`rmsDb` through `DAWCore.MeterLevel` (the ONE home m23-cv shipped), optional and omitted when never heard.** ⚠️ **Reuse `MeterLevel` — do NOT re-type `20*log10`. That single home is the entire point of m23-cv's design and a second copy here would be the fastest possible way to undo it.** ⚠️ **And reuse the TEST SHAPE, which is the part that actually caught the bug: assert a non-zero master level AFTER `stop()`, with `masterMeter == .silence` asserted at read time as the embedded positive control. A test that reads during playback passes on the broken version.** ⭐ **Why it is worth its own item rather than a footnote: master level is what turns per-track numbers into a JUDGEMENT — "the kick is 8 dB under the master" is actionable, "the kick is −14 dBFS" needs a reference. It is also the cheapest remaining step toward the balance assertion m23-da wants (the loudness gate that passed while balance was the defect).** Weight S. Route: `swift-app-engineer`. ⭐⭐ **CLOSED 2026-08-05, orchestrator-verified FIRST-HAND: `swift build` clean; MY OWN `./scripts/test.sh` **4830 tests / 499 suites, `grep -c '✘'` = 0 on a run that PRINTED `passed`, 101.784 s** (4821/498 → +9/+1, exactly the new suite); `Sources/DAWControl/` untouched so allCommands stays 171; catalog 74; MCP `registerTool(` 176 at HEAD **and** 176 in the working tree.** ⚠️ **`stop()` VERIFIED BYTE-IDENTICAL with the dumb pattern — NEITHER `lastNonSilentMasterMeter` NOR `lastNonSilentTrackMeters` appears anywhere in that region, so meters still read dark at rest.** ⭐ **THE ONE-HOME HELD: `grep -c log10` over `ProjectOverview.swift` and `ProjectStore.swift` = 0 and 0, with a POSITIVE CONTROL on `MeterLevel.swift` = 4 proving the pattern works. No second conversion grew.** ⭐⭐ **THE MUTATION TEST IS THE REAL EVIDENCE and it was stronger than m23-cv's: projecting from `masterMeter` directly failed **8 of 9 tests, 16 issues**, the critical one reporting −80 where −6.0206 was required. The single passing test (`stopZeroesLiveMeterOnly`) correctly survived because it reads store fields rather than the projection — which is itself a check that the mutation was correctly scoped.** ⭐ **`stopZeroesLiveMeterOnly` is worth noting as a design: it pins BOTH directions of a future "fix" — `stop()` clearing the retained value (restores the bug) and `stop()` no longer zeroing the live meter (leaves the UI lit at rest).** ⚠️ **`dist/DAWPro.app` is now one change staler still.**
@@ -3323,3 +3457,873 @@ better, so the app can ROUTE to the right one instead of picking a winner.
   whole class of defect. ⚠️ **Keep the content gate regardless** — a better
   synthesiser is a reason to trust the transcript less, not more, because the
   errors get rarer without getting less damaging. Route: `demo-director`.
+
+## M39 — Instruments and effects of our own: a modulation layer, creative FX, synthesis engines, and presets (seeded 2026-09-19 by the user)
+
+> **The user's brief, 2026-09-19:** *"Should we try to build our own plugins for various instruments
+> with various effects and parameters that can tune/modify sounds or produce entirely different
+> synthetic/electronic/musical sounds… they should be easily controllable via MCP for AI Agent to
+> manipulate it. It should be complete set that can bring music to the next level."*
+>
+> **User rulings the same night:** ship in **WAVES**, and **do not stop between them** — keep going.
+> Modulation layer first, **and then creative effects in the following cycles** (*"Modulation is
+> good, but then also in the next cycles Creative effects should be done as well"*). The user is
+> asleep during the run and asked for **audio variants they can listen to afterwards**, with a
+> handoff describing what landed and how to hear it.
+>
+> ⭐ **THE THESIS, and the reason this milestone exists rather than "host more plugins":** a
+> third-party AU answers an agent with **opaque decimal parameter addresses and no semantics** — an
+> AI can turn its knobs but cannot understand them. Plugins we build ourselves can publish named,
+> unit-bearing, curve-declaring, documented parameters and preset catalogues a model can reason
+> about. Every item below is scored on musical payoff **and** on whether it makes the surface more
+> legible to an agent.
+>
+> ⚠️ **PREMISE CORRECTION, measured 2026-09-19 with a positive control.** The brief said our plugins
+> expose neither parameters nor presets. **Parameters already are exposed** (`au.describeParams` /
+> `au.setParam` for hosted AUs, `fx.describe` / `fx.setParam` for built-ins). **Presets are not** —
+> `factoryPresets` / `currentPreset` / `AUAudioUnitPreset` return ZERO across `Sources/`, while the
+> control `AUAudioUnit` returns 10 files. That gap was already filed as **m23-cw**; do not file it
+> twice.
+>
+> **Measured cost base (2026-09-19, first-hand):** a new EFFECT kind = **6 exhaustive switch sites**
+> (blast radius 29 files); a new INSTRUMENT kind = **8 switch sites** (blast radius 84). Those two
+> numbers mean different things and must not be conflated. Full inventory, constraints and prior art:
+> `docs/research/2026-09-19-plugin-program-inventory.md` — **read it before picking an M39 item.**
+>
+> ⚠️ **ADOPT, DO NOT DUPLICATE:** `m23-cw` (AU presets), `m23-cl` (multiband/dynamic EQ — needs a
+> design spike first), `m23-dj` (true stereo widening — mono compatibility is the acceptance test),
+> `m23-ci` (export dither) are already filed and already routed. M39 items must reference them, not
+> re-file them. Precedent: `m27-n` duplicated `m26-a` and had to be merged.
+
+### Wave 1 — foundation (these are prerequisites; every later wave depends on them)
+
+- [x] (m39-a) ✅ **SHIPPED 2026-09-19 — `ParamCurve` declared in `Sources/DAWCore/ParamCurve.swift`,
+  both duplicated tapers lifted to it.** 64 effect specs + the poly-synth table now declare
+  `linear` (54+6) or `logarithmic` (10+1); `decibel` exists for the depth law but is adopted by
+  **nothing**, with a tripwire test pinning that — adopting it for an existing param would move a
+  shipping control. `curve:` is **required** on both inits, no default: a defaulted `.linear` is
+  inference-by-omission, the exact shape this item removes, and it would make a future frequency
+  param silently linear. `Scale` survives as a `typealias`, so every existing caller compiles
+  unchanged.
+  ⭐⭐ **Conformance proved over EVERY spec, not a sample** — the pre-lift inference was
+  re-implemented as a frozen oracle and asserted across 12 kinds / 64 specs, with non-vacuity pins
+  (logarithmic census `== 10`, **named individually**). **Deliberate-failure control observed:**
+  mis-declaring `peak1Freq` as `.linear` reddened three tests, the legible one being *at 10 % slider
+  travel the EQ peak lands on 2018 Hz instead of 39.9 Hz*. ⭐ The control also **discriminated** —
+  the effect-table test reddened while the instrument-table test correctly did not.
+  ⭐ **Append-only law verified, not assumed:** spec name sequence extracted from
+  `git show HEAD:…Effects.swift` and from the tree — **byte-identical, 64 before and 64 after**.
+  ⚠️ **One-home law checked rather than assumed:** both call sites resolved identically before and
+  after (`unit == "Hz" && lo > 0`), so the shared home needed no widening.
+  ⚠️ **A `git diff` probe reported a false zero** — the shell hook rewrites `git` to `rtk git`,
+  which summarises the diff; re-running under `rtk proxy` made the positive control fire. **The
+  earlier zero was a broken probe, not an absence** — the standing lesson, hit again.
+  ⛔ **OWED FOLLOW-UPS, deliberately stopped at the fence** (another agent held those files):
+  ① `Sources/DAWControl/Commands.swift` `fx.describe` — add `"curve": .string(spec.curve.rawValue)`
+  after `"unit"`; raw values are already the wire spellings. ② `fx_describe`'s param schema in
+  `mcp-server/src/server.ts`. ③ `claude-plugin/skills/daw-wire-reference/SKILL.md` — in the SAME
+  sequenced change, since documenting a field the wire does not carry would be a false record.
+  ⚠️ **Until ① lands, the defect this item names is fixed in the domain but NOT VISIBLE ON THE
+  WIRE** — our knob knows `cutoffHz` is logarithmic and an agent driving it still does not.
+  ⚠️ **A THIRD copy of the linear math exists** at `Sources/DAWAppKit/SamplerEditorModel.swift:854-864`
+  (`SamplerParamSpec`, linear-only). Outside this item's fence; cheap follow-up.
+  ⚠️ `PolySynthParamSpec.curve` is a **bridge, not a destination** — that table lives in DAWAppKit;
+  m39-b's `InstrumentParamSpec` (DAWCore, engine-free) should absorb it or the UI copy becomes the
+  next duplicate.
+
+- [ ] (m39-a-2) ⭐⭐ **DECIDE: are the synth's attack/decay/release knobs logarithmic? A REAL
+  USABILITY DEFECT, MEASURED, surfaced by m39-a's conformance oracle.**
+  `docs/design/2026-09-19-modulation-layer.md` §4 declares `attack`/`decay`/`release` as
+  `.logarithmic`. **They are LINEAR today.** m39-a preserved linear because its correctness bar
+  forbade moving a shipping control, and pinned the disagreement with a named assertion so it
+  cannot be closed by accident.
+  ⭐ **The measurement that should decide it:** `PolySynthParams.attackRange` is `0.0005...5` s. On
+  today's **linear** knob a 50 ms attack sits at **0.99 % of travel** — the entire musically useful
+  attack region is crushed into the first one percent, which is why fine attack control feels
+  impossible. Under `.logarithmic` it sits at **exactly 50 %**. All three envelope ranges have
+  `lo > 0` (0.0005, 0.001, 0.001), so logarithmic is **mathematically valid**; the only question is
+  whether to move three shipping knobs.
+  ⚠️ **This is a user-facing behaviour change to a control they may have muscle memory for** — it
+  is exactly the class the bend-range ruling says to decide deliberately, not to slip in under a
+  refactor. **Offer it; do not act unilaterally.** Weight S once ruled. Route: `swift-app-engineer`.
+
+- [x] ~~(m39-a) ⭐⭐ **HARD PREREQUISITE FOR m39-e — DO THIS FIRST, IT IS NOT A PARALLEL NICETY.**~~
+  Established by the `daw-architect` pass 2026-09-19: the modulation layer's **depth law is defined
+  in terms of `curve`**. Without a declared curve, a modulation depth applied to `cutoffHz` cannot
+  mean *octaves* — it can only mean a raw linear fraction of a 40–18 000 Hz span, which is
+  musically meaningless and is exactly the kind of parameter an agent would drive confidently and
+  wrongly. ⭐ The architect records this as the strongest available evidence for H5, and notes H5
+  was written before that evidence existed. **Sequencing is already correct** (a sorts before e and
+  `/dev-cycle` picks top-to-bottom) — this note exists so nobody reorders or skips it.
+  **`EffectParamSpec` gains a declared `curve`, and the duplicated taper logic is lifted
+  into it.** MEASURED 2026-09-19: the log-taper mapping is implemented independently in
+  `Sources/DAWAppKit/EffectEditorModel.swift:458,470` **and again** in
+  `Sources/DAWAppKit/PolySynthEditorModel.swift:287,299`, in both cases *inferred from the free-text
+  unit string* — `PolySynthEditorModel.swift:268` states the rule outright: *"only Hz-unit params get
+  the log taper."* ⭐ **So our own knob knows `cutoffHz` is logarithmic and an AI agent driving the
+  same parameter over the wire does not**, because the wire carries only name/range/unit/note. Three
+  defects in one: duplicated logic, a string heuristic standing in for a declared property, and a UI
+  strictly better informed than the agent. Add `curve` to `EffectParamSpec`
+  (`Sources/DAWCore/Effects.swift:929-947`), make both editors read it, and expose it on
+  `fx.describe`. ⚠️ **Adding FIELDS to the struct is safe; adding or reordering ENTRIES in a param
+  array is NOT — position is the automation slot (see m39-c).** Do this while the roster is still 11
+  effects. Weight S. Route: `swift-app-engineer`, wire by `mcp-integration-engineer`.
+
+- [x] (m39-b) ✅ **SHIPPED 2026-09-19 — `AutomationTarget` reaches instrument parameters.**
+  `.instrumentParam(paramName:)` resolves through `InstrumentParamSpec`, and the filter sweep on a
+  synth — "the most basic gesture in electronic music", impossible in this product that morning — is
+  now reachable both by a hand-drawn automation lane and by a modulation route. ⚠️ **Routes to
+  `.volume`/`.pan` were inert until the m39-e anchor fix later the same day; instrument-param routes
+  were NOT affected by that defect** (their synthetic hold tracks make `effectParams` non-empty, so
+  those strips always had a schedule). Original item text:
+  ⭐⭐ **`AutomationTarget` reaches instrument parameters — one change, two features.**
+  MEASURED: `AutomationTarget` (`Sources/DAWCore/Automation.swift:18-27`) has exactly four cases
+  (`.volume`, `.pan`, `.sendLevel`, `.effectParam`), and `.effectParam` resolves strictly against
+  `track.effects` (`:86-101`). There is **no code path from any automation target to
+  `track.instrument`**. ⭐ **Consequence worth stating plainly: a filter sweep on a synth — the most
+  basic gesture in electronic music — is impossible in this product today.** Adding an instrument
+  case unblocks hand-drawn automation of a synth *and* gives the modulation layer (m39-e) the same
+  reach, from one edit. **Likely the highest value-per-unit-of-work item in the milestone.**
+  Weight M. Route: `daw-architect` to settle the target shape, then `swift-app-engineer`.
+  ⚠️⚠️ **"ONE CHANGE" UNDERCOUNTS — CORRECTED 2026-09-19 by the `daw-architect` pass, and it was my
+  phrase.** Adding the enum case unblocks **addressing** only. `AutomationRenderer` has **no
+  instrument delivery path at all** — effect params go through `storeEffectParams`, and nothing
+  equivalent exists for instruments. So this is one domain change **plus one render-side delivery
+  path**, not one edit. ⭐ **The consequence is a sequencing change, not a cost complaint:** build
+  m39-b *with* m39-e so both share the same `publishModulation` delivery slot, rather than building
+  one path now and a second one weeks later. A milestone boundary is not a dependency boundary.
+
+- [ ] (m39-c) **Generalise the tempo-sync resolver — once, before any synced effect exists.**
+  MEASURED: `NoteDivision` (18 cases, straight/dotted/triplet) and `milliseconds(atBPM:)` live in
+  `Sources/DAWCore/TempoMap.swift:266-315` and are already general. But the resolver that substitutes
+  the synced time before it reaches the render thread is hardwired —
+  `guard effect.kind == .delay` (`Sources/DAWCore/DelayTempoSync.swift:36-37`) — and is invoked at
+  **five intake seams**: `OfflineRenderer.swift:272,274`; `AudioEngine.swift:1105`, `:2374`,
+  `:3925-3932`. A new synced effect also needs its own refusal added by hand to
+  `Automation.swift:90-97`, which names `.delay` explicitly to stop a lane being drawn on a
+  `sync`/`division` param. ⚠️ **Every tempo-synced creative effect AND every synced LFO needs this.
+  Doing it once is far cheaper than per-effect, and doing it after two synced effects ship means
+  retrofitting both.** Weight M. Route: `audio-dsp-engineer`.
+
+- [ ] (m39-d) 🚨 **MEASURE whether live and offline modulation rates diverge — BEFORE any
+  tempo-synced effect ships.** `Sources/DAWCore/RenderBlockSize.swift` documents that the **offline**
+  render block is 512 frames, making block-rate modulation **93.75 Hz (Nyquist 46.875 Hz)** at
+  48 kHz — and that this number was measured into place after 4096 frames produced alias images
+  *louder than the fundamental* (a commanded 11.72 Hz vibrato bounced as a **static −17.9 ¢
+  detune**). ⚠️ **But that 512 is the OFFLINE pull size. The live block is the hardware buffer, and
+  that file states plainly it is "device-dependent and user-changeable, and live playback has never
+  been measured here."** So a tempo-synced gater may audibly differ between monitoring and bouncing
+  — the class of defect that ships silently and is found on someone else's machine. **Measure it;
+  do not reason about it.** If it diverges, the modulation layer needs a block-size-independent
+  control rate. Weight S (measurement), unknown (fix). Route: `audio-dsp-engineer`.
+
+  ⛔⛔ **PREMISE CORRECTED 2026-09-19 — THE PARAGRAPH ABOVE IS STALE AND I WROTE IT. DO NOT EXECUTE
+  IT AS WRITTEN.** Surfaced by the `daw-architect` pass, verified by me against both files.
+  **The divergence was ALREADY MEASURED**, at breath-pad P6 on **2026-08-19** —
+  `Sources/DAWCore/MIDIControllerRouting.swift` ~`:431-441`: a real `AudioEngine` prepared against
+  this machine's default output and left rendering 400 ms reported **quantumFrames = 512 at 48 kHz
+  ⇒ 93.75 Hz, Nyquist 46.875 Hz**, `renderedFrames` an exact multiple of 512 (38912 = 76 × 512).
+  `EnginePerformance.lastQuantumFrames` already records it and
+  `EnginePerformanceStats.quantumFrames` already surfaces it.
+  ⚠️ **`RenderBlockSize.swift` said "never measured here" while a file beside it held the
+  measurement — and the measurement is the OLDER of the two.** ⭐⭐ **This is this tree's
+  characteristic failure in its purest form: the record says X, the source says Y, and nothing
+  compares them.** I filed a 🚨 gate on the record without checking the source, which is the exact
+  mistake the "CHECK AN ITEM'S PREMISE BEFORE EXECUTING ITS METHOD" law exists to prevent.
+  ✅ **`RenderBlockSize.swift` HAS BEEN CORRECTED IN PLACE** (2026-09-19) so the two files agree and
+  nobody re-derives this gate from the stale sentence a third time.
+  ⭐ **THE ITEM'S REAL JOB, WHICH IS STILL WORTH DOING:** on this machine at its default device,
+  live and offline now agree **by measurement**. What has *never* been measured is **the case where
+  the hardware buffer is NOT 512** — it is device-dependent and user-changeable, and nothing has
+  asked what happens at 64, 128 or 1024 frames. Measure that, and **positive-control the
+  instrument** by forcing a known-different buffer and proving the probe reports the difference —
+  a divergence probe that has never reported one is indistinguishable from a probe that cannot.
+  ⛔ The gating force of this item **stands**: no tempo-synced effect ships until the non-512 case
+  is measured. Only its premise changed, not its authority.
+
+- [x] (m39-e) ✅ **SHIPPED 2026-09-19 — and then FIXED, because it shipped inert. Read the close-out
+  below before trusting any modulation claim.** All nine `mod.*` commands, the snapshot/stage render
+  path, and the MCP mirror (223 → **232 tools**; bundle regenerated and stdio-verified) are in.
+  ⛔⛔ **THE HEADLINE CAPABILITY DID NOT WORK WHEN IT "SHIPPED": an LFO routed to `.volume`/`.pan`
+  had ZERO effect on rendered audio, LIVE AND OFFLINE.** A trance gate rendered BYTE-IDENTICAL to an
+  ungated render; the master fader was broken by the identical mechanism. **Mechanism:**
+  `startAllPlayers` (and `extendLoopAutomation`, and both master twins) rebuilt each strip's
+  schedule from `activeAutomationLanes`, which carried lanes but NOT the anchor requirement — so a
+  modulation-only strip rebuilt to `nil` and WIPED the anchor `applyParameters` had just published.
+  `applyParameters` could not recover: it consulted `requireAnchor` only in the branch guarded by
+  `publishedAutomationLanes[id] == nil`, which the wipe had just made non-nil — **a dead state no
+  later pass could escape.** With no anchor the render path takes
+  `applyModulationWithoutSchedule`, where position-dependent sources hold NEUTRAL, so the LFO
+  contributed exactly zero — which is why the failure was byte-identical rather than merely quiet.
+  ⭐⭐⭐ **WHY 24 TESTS PASSED: every one published a hand-built snapshot STRAIGHT to an
+  `AutomationRenderer`. That tests the STAGE; the defect was in the PUBLICATION, in a function none
+  of them called. A hand-published snapshot tests the stage, not the publication — and a test that
+  only calls `applyParameters` passes BOTH before and after the fix, because that pass was always
+  correct.** ⭐ **Fix:** `requireAnchor` is now carried in the lane bookkeeping (one truth for all
+  three publish sites) AND in the change detection (the dead state cannot form); the `= false`
+  default was REMOVED from `publishAutomation`/`buildRollSchedule`/`publishMasterAutomation`,
+  because **both wipe sites were call sites that simply omitted the argument.** ⭐ **Gate:**
+  `AutomationEngineTests.volumeModulationSurvivesRollStartInOfflineRender` — a REAL
+  `OfflineRenderer.render` (the only path that reaches `startAllPlayers`), with a not-silence
+  positive control, an unrouted-source bit-identity assertion, and the routed assertion the old code
+  failed. **Falsified by reverting the fix: 2 issues on the original code.** Measured after:
+  48,760 differing samples, RMS 0.354 → 0.250. Full suite **8090 / 718 / ZERO failures** (+1, mine;
+  zero retired; suites unchanged so the 380/380 `@MainActor` cap is untouched).
+  ⭐ **Listenable:** `scripts/demos/out/mod-gater/` — gate rate measured from the rendered envelope
+  at 0.32 / 1.92 / 3.84 / 7.36 Hz against 0 / 2 / 4 / 8 requested (control flat, ratios exactly
+  1:2:4). Diagnostic set: `scripts/demos/specs/mod-diagnose.json`. Erratum:
+  `docs/design/2026-09-19-modulation-layer.md` §14.
+  <details><summary>Original item text</summary>
+
+  **The modulation layer itself — sources, routing, and an agent-legible wire surface.**
+  ⚠️ **CONFIRMED ABSENT 2026-09-19 with a positive control:** `envelopeFollower` and `modMatrix`
+  return zero hits across `Sources/`; the only `LFO` hits are `ChorusEffect`'s internal fixed
+  oscillator, which no other parameter can read; every `macro` hit is unrelated. This is genuinely
+  new capability, not a rebuild. **Design is gated on the `daw-architect` pass over the five
+  2026-09-19 research reports plus the inventory doc.** ⭐ **Known constraint that splits the design
+  in two (see m39-d): smooth modulators (LFO→filter/amp/pitch, envelope follower, macro) ride the
+  existing per-block automation delivery path and are cheap; RHYTHMIC modulators (trance gate, step
+  sequencer, beat repeat) need sample-accurate edge scheduling, because at 93.75 Hz an edge
+  quantises to ~10.7 ms against a 117 ms sixteenth at 128 BPM — ~9 % slop, and inconsistent slop.**
+  Borrow from the existing sample-accurate MIDI event scheduler rather than inventing a second one.
+  ⭐ Reusable precedent: `EffortField.hostedAUOfflineModulationSamplingHz` already drives
+  **user-facing capability warnings** when an authored rate exceeds what the block rate can carry —
+  if an agent asks for a 30 Hz LFO on a hosted AU, the honest answer is a warning, not a silently
+  aliased result.
+  ⚠️⚠️ **SCOPE CORRECTION 2026-09-19 — block-rate modulation is NOT free, and my first scoping of
+  this item said it was.** `docs/research/2026-09-19-synthesis-engines.md` §8: stepping filter
+  coefficients once per block rather than continuously produces **audible zipper noise** on fast
+  filter-envelope attacks and quick LFO rates, because cutoff jumps discretely at each block
+  boundary. The standard mitigation is interpolating the target coefficient across the block — or
+  across 32–64-sample sub-blocks for fast modulation — which is real extra per-block work. **The
+  architect pass must price the interpolation explicitly; a design that budgets only "one `tan()`
+  per quantum" has costed the wrong thing.** This is also why the richness pass (m39-g) was split
+  out and sent ahead: everything in it avoids this cost entirely.
+  Weight L. Route: `daw-architect` then `audio-dsp-engineer`.
+  </details>
+
+- [x] (m39-f) ✅ **SHIPPED 2026-09-19 — `instrument.describeSynth` + MCP `instrument_describe_synth`.**
+  Wire **217 → 218** (`doc-count-drift` exit 0, re-run BY ME), MCP **222 → 223 tools**, bundle
+  regenerated and **stdio-verified against the spawned artifact with BOTH controls** (new tool
+  present; `zzz_not_a_tool` absent). Swift **8043 / 717 / ZERO failures** — byte-identical to the
+  pre-change baseline, so zero drift. mcp-server **777 / 777**.
+  ⭐ **It describes 24 parameters, not the 23 I briefed** — 8 legacy + 15 richness + `pedalHoldLimit`,
+  which is also settable. A bijection test proves **described-set == settable-set** by provoking a
+  live `rejectUnknownKeys` refusal, parsing the "valid keys are …" list out of the error, and
+  comparing. A 25th parameter added to one side and not the other fails loudly. **That is a
+  behavioural gate, not a source-shape gate** — the kind this tree has repeatedly found to be worth
+  more.
+  ⭐ Nil-resolution values come from `fresh.effectiveX` on a default-constructed `PolySynthParams`,
+  **not hand-written literals** — a literal `0` would have been right thirteen times and quietly
+  wrong for `noiseColor` (0.5) and `subOctave` (−1).
+  ⭐ `Sources/DAWControl/PolySynthDescription.swift` holds the `meanings` table as ONE HOME shared by
+  the verb and by `track.setInstrument`'s range-error prose, pinned by `Set(meanings.keys) == Set(order)`.
+  ⚠️ **`instrument.describeSynth` emits NO `curve` key**, so an agent still cannot learn from that
+  tool alone that the synth's `cutoffHz` travel is logarithmic — the motivating defect is fixed on
+  `fx.describe` and **only half-fixed here**. Filed as m39-f-2.
+  ⚠️ **`CopilotCatalog.swift` deliberately NOT updated — needs a ruling.** `describeSampler` and
+  `probeLiveness` are both absent from the curated catalog and m34-q skipped it too, so precedent
+  says skip; but "new capabilities visible to the in-app copilot" is a cited law. **This is now the
+  second consecutive item on this command to skip it** — decide whether precedent or the law wins
+  before it becomes a third.
+  ⚠️ **Pre-existing staleness found, NOT introduced here:** `docs/ARCHITECTURE.md`'s "Wire surface —
+  CURRENT TOTALS" ledger still reads 204/209 (last entry m34-l, 2026-08-31) against a measured
+  218/223 — four closes behind, spanning untouched milestones.
+
+- [ ] (m39-e-2) ⛔⛔ **MASTER-STRIP MODULATION NEVER REACHES A BOUNCE — works live, silently
+  absent offline. MEASURED 2026-09-19, and the source claims the opposite in writing.**
+  `graph.masterModulationSources/Routes` are assigned in exactly two places
+  (`Sources/DAWEngine/AudioEngine.swift:712-713` on rebuild-republish, `:2410-2411` in
+  `masterModulationChanged`) and **both target `AudioEngine.graph`, the LIVE graph**.
+  `OfflineRenderer` builds its OWN `PlaybackGraph` (`OfflineRenderer.swift:279`) and **contains
+  zero occurrences of `masterModulation`** — verified with a positive control: the same probe finds
+  `masterAutomation` 9 times in that file, because master automation and master effects ARE
+  threaded through the render signature. Master modulation has no such parameter.
+  ⛔ **`AudioEngine.swift:2403-2405` states, verbatim: "the pass runs the same way live and
+  offline, so the two paths agree by construction." For the master strip that is FALSE** — the
+  offline graph is never given the sources or routes, so the pass has nothing to publish.
+  ⭐ **Consequence for a user: a macro or LFO on the MASTER fader moves while they play and is gone
+  the moment they export.** Reachable today — `mod.addSource` accepts `strip: "master"`.
+  ⚠️ **TRACK modulation is NOT affected and must not be lumped in**: it rides inside `Track`, which
+  IS passed to the renderer — which is exactly why the trance-gate bench renders correctly.
+  ⭐ **Fix shape:** thread `masterModulationSources`/`masterModulationRoutes` through
+  `OfflineRenderer.render` / `renderCooperatively` / `beginSession` alongside the `masterAutomation`
+  parameter they should have shadowed from the start, set them on the offline graph before the
+  pre-start pass, and carry them from `ProjectStore`'s render entry points through
+  `AudioEngine.renderOffline`. **Gate: a master `.volume` route must change a bounce** — and note
+  the m39-e trap, that the assertion has to go through a REAL render, since that is the only path
+  that reaches roll start. Weight S/M. Route: `audio-dsp-engineer`.
+  ⚠️ Deliberately NOT fixed in the same breath as it was found: an `audio-dsp-engineer` agent was
+  mid-flight in `Commands.swift`/`Effects.swift` on m39-i, and a concurrent multi-file signature
+  change through `AudioEngine`/`ProjectStore` risked colliding with it.
+- [ ] (m39-f-3) ⚠️ **`fx.describe` does not emit `modulatable` — and `mod.describeKinds` TELLS
+  AGENTS IT DOES.** `EffectParamSpec.modulatable` is declared (`Sources/DAWCore/Effects.swift:964`)
+  and `ModulationSnapshotBuilder.resolveTarget` REFUSES a route against a `.refused` param, but
+  `fx.describe`'s `paramObj` (`Sources/DAWControl/Commands.swift:2765-2776`) never puts the verdict
+  on the wire. Meanwhile `mod.describeKinds`' own help text (`Commands.swift:11167`) points agents
+  at "`fx.describe`'s modulatable verdict" for it. ⭐ **That is a FALSE CLAIM ON THE WIRE, which is
+  strictly worse than an absent one: an agent that believes it can only learn the verdict by being
+  REFUSED, one route at a time.** Exactly this tree's characteristic failure — the record says X,
+  the source says Y, and nothing compares them. Found by the MCP mirror agent, which correctly
+  declined to repeat the claim in its own tool descriptions rather than propagate it.
+  ⭐ Fix is additive and small: emit `modulatable` from `paramObj`, mirror it in `fx_describe`'s
+  MCP description, and pin it with a test that asserts a `.refused` param reports as refused
+  (positive control: a permitted param reports permitted). Weight S. Route:
+  `mcp-integration-engineer`. ⚠️ Touches `Commands.swift` — do not run this concurrently with an
+  agent adding an effect kind.
+- [ ] (m39-f-2) **Add `curve` to `instrument.describeSynth`'s payload.** Small, additive, and it
+  closes m39-a's motivating example on the surface that matters most for this milestone: `fx.describe`
+  now reports `curve`, but the **synth** describe verb does not — so an agent reading the synth's own
+  description still cannot tell that `cutoffHz` travels logarithmically and will sweep a filter
+  linearly across 40–18 000 Hz. ⚠️ Pairs naturally with m39-a-2's ruling on the envelope knobs, since
+  both concern what curve the synth's parameters declare. Weight S. Route: `mcp-integration-engineer`.
+
+  ---
+  *Original filing below, retained as the record of why this was built:*
+  **`instrument.describeSynth` — the built-in synth is the only sound source that cannot
+  describe itself.** Effects have `fx.describe`; the sampler has `instrument.describeSampler`
+  (`Sources/DAWControl/Commands.swift:1772`). PolySynth has **no describe verb at all** — its legal
+  ranges and units exist only as static Swift constants and as prose baked into `server.ts`, so an
+  agent cannot ask the running app what they are. Small, self-contained, and squarely on this
+  milestone's thesis. Weight S. Route: `mcp-integration-engineer`.
+
+- [x] (m39-g) ✅ **SHIPPED 2026-09-19 — 8 of 9 features, 15 additive-optional fields, render contract
+  untouched.** `unisonVoices/DetuneCents/StereoSpread`, `subLevel/Octave/Waveform`,
+  `noiseLevel/Color`, `drift`, `resonanceBoost`, `drive`, `velocityToCutoff`, `keyToCutoff`,
+  `voiceJitter`, `envelopeCurve`. Every one `nil`-defaults to musically neutral. Suite
+  **8008 / 716 / ZERO failures**, zero retired, zero renamed.
+  ⭐⭐ **THE BYTE-IDENTICAL GATE PASSED *AND* ITS DELIBERATE-FAILURE CONTROL WAS OBSERVED** — four
+  fixtures, goldens captured against pristine pre-change source; defaulting `subLevel` to 0.3
+  reddened all four on both digests and per-sample bit probes, then restored green. ⭐ **And the
+  gate caught a REAL regression before that control ever ran:** hoisting
+  `amp * velocityAmp * voiceAmplitude` into a common sub-expression re-associated the float multiply
+  and moved the default render by **one ULP**. Float multiplication is not associative; the
+  left-to-right order in the mono branch is now load-bearing and commented as such. **This is the
+  single best argument for byte-identity gates in this tree — no ear and no RMS check would have
+  caught it.**
+  ⭐ **Feature #5 took the separate-field branch the brief allowed,** rather than widening
+  `resonanceRange`: widening would have rescaled what every stored `resonance` *sounds like* and
+  silently moved every UI slider, since `PolySynthEditorModel` reads the range verbatim.
+  `effectiveQ` returns the legacy `0.5 + resonance * 9.5` verbatim at boost 0.
+  ⭐⭐ **DRIVE SHIPPED, WITH ADAA-1 — after the implementer found its own verdict INVERTED.** Its
+  first comparison said ADAA was *worse* and it was about to drop the feature; the comparison was
+  broken (the rendered buffer already carries `voiceAmplitude` 0.25, so it was comparing a
+  hard-driven ADAA against a soft-driven reference). Corrected to equal input scale, ADAA wins
+  **4.8×–14.4× (13–23 dB)** at every folding pitch — at pitch 120 the naive alias is **−1.9 dB**,
+  nearly as loud as the fundamental, versus −25.1 dB shipped. ⚠️ **Documented limit:** audible-band
+  foldback stays under −40 dB through C7 and first crosses it at C8, reaching ≈−15 dB at 126 —
+  first-order ADAA loses its advantage near Nyquist; inherent, not a tuning miss.
+  ⚠️ Two real bugs found en route: the shaper shared **one ADAA history pair across both channels**,
+  and the `Float` quotient carried ~10 % error at small Δx (ln cosh ≈ 7.3 at |x|=8 where a Float ULP
+  is ~5e-7) — now computed in `Double`. ⭐ The probe itself was fixed twice, and the suite now
+  carries an **anti-vacuity guard** because the probe once returned a **blind zero that looked like
+  a clean pass**.
+  ⚠️ **COST MOVED: 663.67 → 745.09 ms per second of audio** (74.5 % of one core, DEBUG, worst case
+  16 voices × 8 unison + sub + noise + drift + drive + jitter + stereo). The ~12 % rise is the
+  Double-precision ADAA. Not a blocker; a number to watch.
+
+  ⛔⛔⛔ **BLOCKING GATE ON WHOEVER PLUMBS THESE 15 FIELDS TO THE WIRE — READ BEFORE STARTING.**
+  **`Sources/DAWCore/ProjectStore.swift:3841` IS A LATENT DATA-LOSS TRAP.** VERIFIED BY ME
+  2026-09-19: `setInstrument` rebuilds `PolySynthParams` through an **explicit nine-field
+  initialiser** (`waveform, attack, decay, sustain, release, cutoffHz, resonance, gain,
+  pedalHoldLimit`). The 15 richness fields are not passed, so they take their `nil` default on
+  **every call** — meaning any project carrying richness values **silently loses them on the next
+  unrelated knob edit**.
+  ✅ **NOT REACHABLE TODAY — verified, not assumed:** no surface can set these fields yet.
+  `PolySynthEditorModel`'s own contract states it uses "the SAME `ProjectStore.setInstrument`
+  partial-update the wire's `track.setInstrument` calls (UI == wire, ZERO new wire surface)", so
+  neither UI nor wire can reach them.
+  ⛔ **IT MUST BE FIXED IN THE SAME CHANGE AS THE PLUMBING.** The implementer deliberately did NOT
+  fix it separately — whoever adds the 15 wire parameters rewrites exactly those lines, and a
+  pre-emptive edit is a guaranteed conflict in a 7.4k-line file. **The first agent to expose these
+  fields without fixing `:3841` ships silent data loss.** ⚠️ Same shape as m33-j (`clip.addAudio`
+  silently deleting overlapped clips): it returns success and destroys data.
+
+  ---
+  *Original filing below, retained as the record of why this was built:*
+  **PolySynth richness pass — the cheapest audible win in the whole programme, and
+  it does NOT touch the render contract.** Shipped 2026-09-19, `audio-dsp-engineer`.
+  `docs/research/2026-09-19-synthesis-engines.md` §3 and §7.2 identify nine features that make the
+  difference between a thin preset and a rich one — unison/detune/spread, sub-oscillator, noise
+  layer, oscillator drift, filter self-oscillation headroom, filter-path saturation, velocity/key
+  tracking on cutoff, per-voice jitter, and non-linear envelope curves — **every one of which fits
+  inside PolySynth's existing "recompute coefficients only on parameter-generation change"
+  contract.** That is the whole reason this is cheap and the whole reason it can run *parallel to*
+  m39-e rather than behind it.
+  ⭐ **Sequencing rationale, recorded because it reverses my first call:** I originally ordered the
+  modulation layer (m39-e) first and this nowhere. The research flipped it — m39-e is the one item
+  that requires an actual render-path redesign, while this closes most of the literal "thin preset"
+  gap in the brief for the instrument we ALREADY ship, at near-zero marginal cost. Both proceed;
+  only the order changed.
+  ⛔⛔ **THE GATE IS BYTE-IDENTICAL DEFAULT RENDER.** Every field additive-optional and defaulting
+  to musically neutral, so a project saved before this change renders byte-identically after it —
+  same precedent and same gate as the bend-range-stays-2.0 ruling. ⚠️ **The test must be
+  positive-controlled** by defaulting one field non-neutral and watching the comparison redden; a
+  byte-comparison that has never failed is indistinguishable from one that compares nothing.
+  ⚠️ Extending `resonanceRange` past Q 10 for self-oscillation **changes what an existing stored
+  `resonance` value sounds like** — that specific row may have to become a separate field instead
+  of a widened range, and the gate above is what decides it.
+  ⛔ **Out of scope on purpose: filter envelopes and LFOs.** They are the rows §7.2 marks High
+  complexity precisely because they break the contract above; they belong to m39-e. An
+  implementation that quietly adds one here collides with the in-flight architecture pass.
+  Weight M. Route: `audio-dsp-engineer`.
+
+- [ ] (m39-h) ⛔⛔ **THE @MainActor OCCUPANCY GATE CAN NO LONGER BE VALIDATED BY ANYONE — its
+  campaign precondition has become unreachable.** Discovered at m23-cw, 2026-09-19. Not plugin
+  work; filed here because M39 is the active milestone and this now blocks *every* future
+  main-actor suite, not just the one that surfaced it.
+  **The mechanism.** `Tests/DAWEngineTests/MainActorOccupancySiteTests.swift:1328` caps
+  `mainActorSuites <= 380`. Raising that cap is supposed to be ratified by a campaign whose
+  VALIDITY leg requires a **median full-suite wall ≤ 248 s**. The suite no longer runs that fast:
+  measured at m23-cw, **272.0 s on the PRE-change baseline and 276.4 s POST-change** — both reject
+  as contaminated (exit 2).
+  ⭐⭐ **The load-bearing detail is that the PRE-change run also failed.** The precondition is
+  therefore unreachable *independent of any individual change* — no author of a legitimate
+  main-actor suite can discharge it, however careful they are. The gate has quietly stopped being
+  a gate and become a formality that records its own violation.
+  ⚠️ **This is the SECOND consecutive unbacked bump: 375 → 377 → 380, zero campaigns behind any of
+  it** (m35-f still owes the first). Three in a row is the point at which a pin stops being
+  evidence and starts being a rubber stamp that costs review attention without buying control.
+  ⭐ **The file's own history shows the limit was already marginal, not newly broken:** one campaign
+  passed by **0.134 s** (`:1086`), another "by only 10.7 s, and TWO runs were 280+ s" (`:1059-1060`).
+  The suite has been growing into this ceiling for months; m23-cw is where it crossed.
+  **The decision owed is which of these, and it is NOT "bump it again":**
+  ⓐ re-derive the 248 s validity limit against measured present-day reality — noting the limit and
+  the threshold were last derived TOGETHER (`:1119`, validity 120 → 248 s), so re-deriving one
+  alone is the mistake to avoid; ⓑ make the suite fast enough to clear 248 s again, which is real
+  work and would benefit every gate; or ⓒ retire the campaign requirement and say plainly what the
+  cap now means without it.
+  ⛔ **The evasion to keep refusing:** folding new main-actor tests into sibling suites to avoid
+  raising the census. The bound's own comment (`:1284`) names that as "the one move this bound
+  exists to make unattractive," and the m23-cw author correctly declined it. Whichever option is
+  taken, that refusal stands.
+  ⛔⛔ **URGENCY ESCALATED 2026-09-19, SAME DAY: THE SLACK IS NOW ENTIRELY SPENT — Leg C sits at
+  380 AGAINST A CAP OF 380.** m39-g's identity suite is main-actor by necessity (`OfflineRenderer`
+  is `@MainActor`). ⭐ **Its author did the right thing and it is the behaviour to copy: rather than
+  bumping the cap a THIRD time, it reduced the census honestly** — dropped the `@MainActor`
+  annotation from the richness suite (which touches no main-actor type) and marked
+  `TestSignals.rms`/`peak` `nonisolated` (pure arithmetic; only the cached fixtures need isolation).
+  That is a real reduction, not an evasion, and it is why the cap did not move today.
+  ⚠️ **But it means the very next `@MainActor` suite anyone adds trips this gate with no slack and
+  no runnable campaign.** The decision below is no longer deferrable to "some time"; it is due
+  before the next item that needs a main-actor test.
+  ✅ **m23-cw's 377 → 380 bump is ACCEPTED, not reverted** — both its suites are main-actor by
+  necessity (`CommandRouter` and `AudioEngine` are each `@MainActor`), the author escalated rather
+  than bumping silently, and the alternative was the sanctioned evasion. The debt is the gate's,
+  not that item's. Weight M. Route: `qa-test-engineer` for ⓑ, `daw-architect` for ⓐ/ⓒ.
+
+---
+
+### ⭐⭐⭐ M39 CREATIVE EFFECTS — design frozen 2026-09-19
+
+**Contract: `docs/design/2026-09-19-creative-effects.md` (§6–§7 frozen, §11 build plan, §12 nine test
+gates). Read §2 and §3 BEFORE quoting a cost from §11 — the document carries a hard stop saying so.**
+
+⛔⛔ **STOP: FOUR OF THE FIVE HIGHEST-PAYOFF CAPABILITIES IN THIS DOMAIN COST NOTHING TO BUILD.**
+Do not open an item below without reading this block first. Building any of these as an effect kind
+is wasted work on already-shipping mechanism:
+
+- **Ducked reverb — ALREADY POSSIBLE, RENDERED AND MEASURED BY ME 2026-09-19.** Reverb on a bus +
+  sidechained compressor keyed off the kick. Isolated-bus momentary-loudness swing went **0.5 LU
+  (sidechain cleared) → 1.6 / 1.2 / 2.7 LU** as ducking deepened. ⚠️ **But in the FULL MIX it
+  vanishes** — all variants ~1 LU, ducked no higher than control, because the reverb bus sits ~11 dB
+  under the mix. **The feature works; the usage is what makes it audible.** Ships as preset + docs +
+  a usage warning. ⛔ `duckAmount` was CUT from `HallReverbParams` on this measurement.
+- **Filter sweep — ALREADY POSSIBLE** via `automation.addLane` on `eq.lowPassFreq` (no resonance).
+- **Tremolo / auto-pan / free-Hz gater — ZERO COST BEYOND m39-e.** They fall out of the modulation
+  layer's per-sample `.volume`/`.pan` takeover. Presets + demos only.
+- **TEMPO-SYNCED TRANCE GATE — NO EFFECT KIND AT ALL.** It is `stepSequencer → .volume`.
+  ⭐⭐ **The DJ research ranked it #1 TO BUILD; the honest answer is it is #1 TO DOCUMENT.** Same
+  shape as M32, where the engine proved already capable and the milestone halved on measurement.
+  ⚠️ Gated on m39-d + m39-c (sync).
+
+⭐ **One correction in the OTHER direction — do not over-apply the above.** An **echo freeze is NOT
+already possible**: `DelayParams.feedbackRange` is `0...0.95` and a freeze needs ≈1.0. Filed as
+m39-k with its risk named (any test asserting the 0.95 clamp reddens, and `highCutHz` becomes
+load-bearing at high feedback).
+
+⚠️ **GATING.** Nothing tempo-synced ships before **m39-d** (live-vs-offline measured only at a
+512-frame buffer; the non-512 case never measured) and **m39-c** (the sync resolver is hardwired to
+`.delay` at five intake seams). **Gated:** synced trance gate, `.tapeDelay` synced mode, beat
+repeat/stutter/half-time, granular freeze. **NOT gated:** everything in the top tier below — which
+is why the top tier can proceed now. `.hallReverb` deliberately CUT `preDelaySync` to stay ungated.
+
+⚠️ **DSP LAW from the primitive extraction: the denormal flush belongs to the CALLER, not to the
+home.** `ChorusEffect` is feedback-free and carries no flushing, but **three of the extracted
+`InterpolatedDelayLine`'s four new callers are feedback structures** (flanger, tape delay, FDN
+recirculation). A home-side flush would tax every tap-only caller forever to protect callers that
+must handle it anyway.
+
+- [x] (m39-i) ✅ **SHIPPED 2026-09-19 — `.djFilter`, the first creative effect of our own.**
+  Bipolar single-knob resonant multimode, slots 0–4 `position`/`resonance`/`slopeDbPerOct`/
+  `deadZoneWidth`/`resonanceTrack`; `position` is **the first bipolar param on any built-in kind**
+  and `position: 0` is a BIT-EXACT bypass. Full vertical slice: DSP → domain → persistence → UI →
+  wire → MCP → 27-leg suite → two demo specs. **Swift 8123 / 719 / ZERO failures (re-measured BY ME,
+  exit 0) · MCP 826 / 0 fail · wire 227 (`doc-count-drift` exit 0).** +33 tests, +1 suite, ZERO
+  retired; the new suite is deliberately NOT `@MainActor` (the 380/380 cap has no slack).
+  ⭐⭐ **THE KNOB TURNED THE WRONG WAY, AND THE AGENT WAS RIGHT TO SHIP IT ANYWAY.** My brief and
+  frozen §6.1.1 disagreed on direction; it built the FROZEN contract and filed erratum **E4**
+  rather than treat a brief as an amendment. **I then ruled the frozen text WRONG and reversed it**:
+  this effect's own doc calls it "the club-mixer / DJ-mixer sweep", and a Pioneer DJM's
+  centre-detented filter knob is **low-pass LEFT, high-pass RIGHT** — §6.1.1 asserted the opposite
+  with no rationale. ⚠️ **Reversed NOW because it is a ONE-WAY DOOR**: `position` is persisted and
+  is automation slot 0, so the first saved project turns four edits into a migration that silently
+  re-voices existing work. Ruling + the case against it: the errata doc, E4.
+  ⛔⛔ **THE REVERSAL EXPOSED A SECOND HOME FOR THE DIRECTION** — `DJFilterEffect.swift:314` read
+  `position < 0` instead of calling `DJFilterParams.isHighPass`, in a file whose own header claims
+  the rule has ONE HOME. Flipping the law left cutoff and mode disagreeing and **the filter measured
+  nearly FLAT at its own corner** (29 failing assertions). Now routed through the law. ⭐ **A
+  "ONE HOME" comment is a claim, not a mechanism — grep for re-derivations before trusting it.**
+  ⭐⭐ **Its best test was one the advisor forced: the per-sample smoothing had NO gate** — all 25
+  original legs passed with the interpolation deleted outright, and the agent proved the two new
+  legs discriminate by PLANTING that deletion. My E4 reversal then moved L14b's window (the sweep
+  now starts at a 20 Hz high-pass, which settles over thousands of samples where a 20 kHz low-pass
+  settles at once), so I **restated the claim instead of loosening the bound**: assert the residual
+  DECAYS (8.5e-3 → 9.3e-4 → 1.7e-6) against an uncompensated 0.475. Re-falsified: under the planted
+  deletion it is **0.419 at every window, identical** — a staircase cannot be shifted onto another
+  staircase, so decay is positive evidence a bare threshold never was.
+  ⚠️ **TWO HAND-MAINTAINED MIRRORS the compiler does not enforce**, both found the hard way and now
+  pinned: `ProjectDocument.swift` carries a hand-written `EffectDescriptor` mirror (params silently
+  dropped on save without its 6 sites), and `MixerStripView.addableEffectKinds` (the kind is
+  invisible in the "+" menu without it).
+  ⭐ **Listenable:** `scripts/demos/out/djfilter/` (knob axis — treble −44.1 dB one way, bass
+  −68.0 dB the other) and `out/dj-filter-sweep/` (resonance axis, loudness-matched to −22 LUFS, so
+  the 8.8 dB of resonant lift is character and not level). Route was `audio-dsp-engineer`.
+  <details><summary>Original item text</summary>
+
+  **`.djFilter` — BUILD FIRST.** Bipolar single-knob resonant multimode; the highest
+  identity-per-cost item in the suite and the only high-identity one with nothing in front of it.
+  ⛔ Rejected alternative, do not re-open: extending `EQParams` — it is at 22 params with frozen
+  positional slots and Butterworth cascades with no Q, and the DJ filter's identity is *one knob*.
+  Not m39-d gated (continuous sweep, no edges). Weight M. Route: `audio-dsp-engineer`.
+  </details>
+
+- [x] (m39-j-0) ✅ **SHIPPED 2026-09-19 — extracted, migrated, BIT-EXACT, and the gate earned its
+  keep on its first real use.**
+  ⭐⭐⭐ **THE RESULT THAT JUSTIFIES THE WHOLE BYTE-IDENTITY DISCIPLINE.** Planting the reassociated
+  tap — `s0 * (1 - f) + s1 * f` in place of `s0 + (s1 - s0) * fraction`, algebraically identical and
+  numerically different — **left ALL 15 UNIT TESTS GREEN** and was caught **ONLY by the byte gate**:
+  348,140 differing bytes in the chorus render while `dry-control` stayed identical, proving the
+  change reached the chorus and nothing else. §4.1's "worse than a bug, because someone will then
+  weaken the gate" paragraph is now reproduced experimentally rather than argued. ⛔ **Never weaken
+  this gate. A known-signal test CANNOT see this class of defect.**
+  **Verified by me, not accepted:** `cmp` against the three renders I preserved BEFORE the agent
+  started — all three byte-identical, and the built-in positive control still moves exactly
+  **2,619,028 bytes**. ⭐ **The engineer added a check I had not asked for and should have:** before
+  editing, it re-rendered the UNEDITED tree and confirmed all three hashes reproduce. **Sensitivity
+  and reproducibility are different properties** — `control-perturbed` proves the gate can detect a
+  difference; only a repeat render proves a red result would have been diagnosable.
+  **Other plants each hit exactly their own leg:** `i1 = i0 + 1` → both wrap legs · `return s0` →
+  both fractional-delay tests · `minDelaySamples = 0` allowed → exactly the two refusal tests ·
+  a wrong cubic `c2` → only the new degree-2 test, which is why a ramp fixture is not enough (a ramp
+  cannot pin `c2`; a wrong coefficient set reproduced it exactly and collapsed cubic into linear).
+  ⚠️⚠️ **ADDENDUM TO §4.1, and the next caller WILL trip on it: the minimum-delay floor is
+  INTERPOLATION-DEPENDENT — 1 sample for `.linear`, 2 for `.cubicHermite`.** §4.1 says "1 sample"
+  flatly. Hermite's stencil reads `whole − 1`, one sample NEWER than the tap, so at a 1-sample
+  minimum it reads the write head. **The tape-delay author will read §4.1, declare
+  `minDelaySamples: 1` with `.cubicHermite`, and be refused at prepare.** The refusal names both
+  numbers; the design should say it.
+  Other decisions §4.1 left open: `prepare(...) throws` (not a precondition — a predicate helper
+  would have SURVIVED the "allow 0" plant) and carries no `@MainActor` (it inherits
+  `EffectRendering.prepare`'s main-actor-by-caller convention; annotating will not compile through
+  the conformance chain) · a refusal leaves the line inert and the caller passes **dry**, matching
+  the old `guard let line else { return }` degrade · `capacitySeconds` non-optional in the
+  initialiser, consumed at `prepare()` · the **+4 stencil margin lives in the home**, so the chorus's
+  capacity arithmetic stays bit-identical (1200 → 1204 at 48 kHz, 1103 → 1107 at 44.1 kHz).
+  ⚠️ **One behaviour delta the byte gate cannot see:** below ~200 Hz sample rate (5 ms under one
+  sample) or at rate ≤ 0, the old code built a 4-sample line and rendered whatever fell out; the new
+  code refuses at prepare and passes bit-exact dry. Unreachable through CoreAudio — but it is a delta.
+  ⚠️ **§4.1's own positive control has GROWN, not rotted:** "9 of the files in
+  `Sources/DAWEngine/Effects/` mention denormals" is **12** today (`RingModEffect`, `DJFilterEffect`,
+  and one more shipped since). The search still works.
+  Swift **8177 / 721 / ZERO failures** (+15, +1 suite, none retired) · MCP **837 / 0** · wire **227**
+  — all re-measured by me. Three files touched, nothing else.
+
+  <details><summary>The contract as filed, kept because m39-j and three later callers depend on it</summary>
+
+  ⛔⛔ **HARD PREREQUISITE FOR m39-j — AND IT IS TWO CHANGES, NOT ONE.**
+  Extract `InterpolatedDelayLine` to `Sources/DAWEngine/Effects/Primitives/` (new directory) out of
+  `ChorusEffect.swift`, then migrate `ChorusEffect` onto it. Contract frozen at design §4.1: the home
+  is a **delay line, not a modulated delay line** (no depth, no rate, no LFO — those stay in the
+  caller, which is the whole reason four callers can share it); capacity declared in **seconds at
+  `prepare()` with NO default**; `minDelaySamples` checked once **in `prepare()` on the main actor**,
+  never on the render thread; and the tap arithmetic is frozen **expression-by-expression** —
+  `s0 + (s1 - s0) * fraction`, ⛔ *not* the algebraically identical `s0 * (1 - f) + s1 * f`, because
+  Float addition is not associative and the gate below is byte-identical.
+  ⛔ **The home carries NO denormal flushing and must not grow any** — the lifted chorus code is
+  feedback-free and provably cannot generate denormals, but three of the four new callers (flanger,
+  tape delay, FDN) are feedback structures, so **each feedback caller flushes its own state**, matching
+  `DelayEffect.swift:217-218` rather than inventing a second approach.
+  ⭐ **Gate: a byte-identical chorus render across the migration, positive-controlled** by perturbing
+  `depthMs` by a hair in a throwaway run and watching the comparison redden. A byte-comparison that has
+  never failed is indistinguishable from one that cannot — this tree has now shipped two features whose
+  whole test suite could not fail (m39-e's modulation, m39-i's smoothing), so the control is the item.
+  ⚠️ **Do NOT migrate `ChorusEffect` and build the flanger in one change** (design §4.1, verbatim): if
+  the gate reddens you will not know which half did it. Weight M. Route: `audio-dsp-engineer`.
+  ⚠️ **Id erratum:** the design's build table (§1479) calls this `m39-n`; `m39-n` was already spent on
+  the remaining-suite bucket below. **This id, `m39-j-0`, is authoritative** — it is filed here, directly
+  above its dependent, because that is the only place the picker actually arrives.
+  </details>
+- [x] (m39-j) ✅ **SHIPPED 2026-09-19 — and the home passed its real test: `InterpolatedDelayLine`
+  took a FEEDBACK caller WITHOUT A SINGLE BYTE CHANGING.** The two things the flanger had to supply
+  itself — a denormal flush and its own modulation — are exactly the two §4.1 predicted a caller
+  would bring. ⭐ **A contract that correctly predicts its second caller was DESIGNED, not merely
+  extracted**, and that is the only test that distinguishes the two.
+  ⭐⭐ **§6.3.2 IS A MEMORY-SAFETY LAW, NOT A SONIC PREFERENCE — now measured.** Planting the classic
+  bipolar sweep (`delayMs + depthMs·sin φ` instead of upward-only) **did not clamp and did not trap**:
+  it produced non-finite output, because `Int(negative)` walked the tap off the channel block. The
+  delay line carries no bounds check BY DESIGN (§4.1), so the caller-side law is what stands between
+  a plausible-looking edit and an out-of-bounds read.
+  ⛔⛔ **TWO PLANTS REDDENED NOTHING, AND BOTH ARE FINDINGS.** (1) Rule 6.0.6's **mandatory** parameter
+  smoothing was deletable with the suite staying **24/24 GREEN** — the THIRD time in one night a
+  required behaviour had no instrument on it (cf. m39-e's inert modulation, m39-i's smoothing). Legs
+  L12a/L12b added, each verified by re-planting. (2) ⭐⭐⭐ **ALL 26 FLANGER LEGS SURVIVED THE
+  REASSOCIATED-TAP PLANT — a second caller did NOT buy a second check on the shared primitive.** The
+  chorus byte gate remains the ONLY instrument that can see that defect class. ⚠️ **Do not let anyone
+  argue "two callers now, it's well covered" — it is measured false.**
+  ⚠️ **The `feedback` note contradicted ITSELF and then the render contradicted BOTH.** It stated two
+  different figures for one setting a sentence apart (11 dB / 14.8 dB), and the three tokens
+  `FXCommandTests` asserts all sat on the correct half, so nothing could see it — this tree's named
+  silent-success shape inside a single teaching string. Worse, its flat claim that negative feedback
+  is quieter is **true of the DC arithmetic and FALSE on real material**: MEASURED on a saw pad (EBU
+  R128 integrated), `feedback -0.5` landed **1.0 LU LOUDER** than `feedback 0` — independently
+  re-measured by me at −17.2 vs −18.2 LUFS. The note now carries both and marks which is which.
+  ⭐ **That correction exists ONLY because the demo was rendered and measured** — the formula and the
+  prose agreed with each other perfectly, so no test could ever have found it.
+  Also: `firstNotchHzAtSweepFloor` is the first **numeric** extra key in `fx.describe`'s params object
+  (closed by inspection — `effectParamsJSON` has exactly one consumer and nothing iterates those keys
+  as settable knobs); `FlangerParams.sweptDelayMs` is the first DAWCore law invoked **per sample** from
+  the render loop; and a fixture cap crash (the 15th kind pushed `rowsFollowSpecs` to 18 inserts against
+  `maxEffectsPerChain = 16`, `try!` killing the process so the run printed **no totals at all**) is
+  fixed by decoupling the fixtures from roster size permanently.
+  Swift **8209 / 722 / ZERO failures** (+32, none retired) · MCP **848 / 0** · wire **227** — all
+  re-measured by me, plus chorus byte-identity re-verified against the preserved renders.
+
+  <details><summary>The contract as filed</summary>
+
+  **`.flanger` — BUILD SECOND, on the cheapest caller, to prove
+  `InterpolatedDelayLine` is a real home** before three more callers depend on it.
+  ⛔ **BLOCKED ON m39-j-0** — the flanger is chosen as the second caller precisely because it is the
+  cheapest way to find out the home is wrong, which only works if the home exists first. Weight S.
+  </details>
+- [x] (m39-k) ✅ **SHIPPED 2026-09-19 — bound set at `0...0.999`, and the measurement is what chose it.**
+  ⭐⭐ **1.0 IS NOT REACHABLE, AND THE REASON IS EXACT.** The loop's one-pole low-pass has magnitude
+  **exactly 1 at DC at every corner frequency**, so loop gain at DC *is* the feedback — at 1.0 the
+  structure is an INTEGRATOR and the "damped" setting does not save you. MEASURED (DC 0.1 into a 10 ms
+  delay, peak per 10 s window), at **both** ends of `highCutHz`:
+  | feedback | `highCutHz` | 10 s | 20 s | 30 s | 40 s | converges? |
+  |---|---|---|---|---|---|---|
+  | 1.0 | 500 (most damped) | 96.97 | 193.94 | 290.94 | 388.02 | **no** — step constant to 3 figures |
+  | 1.0 | 20 000 | 99.90 | 199.90 | 299.91 | 399.90 | **no** — step exactly 0.1 × 100 repeats/s × 10 s |
+  | 0.999 | 500 | 62.10 | 85.64 | 94.56 | 97.95 | yes → 1/(1−f)·0.1 = 100 |
+  | 0.999 | 20 000 | 63.19 | 86.47 | 95.02 | 98.17 | yes → the same 100 |
+  At 0.999 a decaying tail falls only **3.19 dB over 110 s** (0.029 dB/s) and loses 0.0087 dB per
+  repeat — a freeze by any musical measure, bounded by arithmetic.
+  ⛔ **NO discrete "freeze" affordance**, deliberately: the measurement did not force one and the slot
+  table is append-only forever. The only thing a hardware freeze button adds over max feedback is
+  muting the loop's INPUT, already reachable (delay on a bus, send to 0) — now written in the note.
+  ⭐ **`highCutHz` becomes the load-bearing control at the ceiling, with numbers:** 20 kHz → 3.19 dB
+  down after 110 s; 500 Hz → **gone in ~20 s** (0.845 dB/s). Both in the param notes, so both in
+  `fx.describe`.
+  ⭐⭐ **THE NAMED RISK EVAPORATED ON INSPECTION: ZERO tests pinned the delay's 0.95 clamp.** The item
+  warned "any test asserting the 0.95 clamp reddens". All six `0.95` sites were ruled on individually —
+  two are the **flanger's** ±0.95 (different effect), one is a **percent-formatting** assertion that
+  still holds because `isPercentParam` needs `upperBound <= 1` and 0.999 ≤ 1, one is a param NAME-ORDER
+  check, one a JSON fixture at 0.35, the rest unrelated domains. **0 tests modified, 0 retired** — and
+  nothing was bulk-updated, which is the point. ⚠️ **CHECK AN ITEM'S NAMED RISK BEFORE BUDGETING FOR IT.**
+  **Byte identity for saved work:** a project at `feedback: 0.95` renders byte-for-byte as before
+  (`50a5b3d4…` unchanged); the `freeze-999` variant differs (`25602dcc…`) and is the built-in positive
+  control proving the comparison could detect a change and the render binary was not stale.
+  ⚠️ **Honest limit volunteered:** the in-suite FNV-1a render pin was captured from this machine's
+  `-Onone` build; Swift does not enable fast-math so IEEE semantics hold across opt levels, but `exp()`
+  is a libm call — **it is not a cross-platform invariant.**
+  ⭐ **A provenance probe gave a FALSE NEGATIVE and the agent caught it:** tracing a figure through the
+  session jsonl returned zero hits, so it concluded the number was unmeasured and removed it — then
+  positive-controlled the probe and found **the jsonl does not contain that session's tool outputs at
+  all**. The suite's own `[measured]` printout settled it and the number was restored. *The probe was
+  the weak instrument* — the tree's own lore, re-earned.
+  Erratum **E11** carries the measurement tables. Swift **8251 / 724 / zero failures** (+9, none
+  retired or modified) · MCP **858 / 0** · wire **227** · 16 specs — all re-measured by me.
+
+  <details><summary>The contract as filed</summary>
+
+  **Echo freeze: raise `DelayParams.feedbackRange` toward 1.0.** ⚠️ Not free — see the
+  correction above. Weight S.
+  </details>
+- [x] (m39-l) ✅ **SHIPPED 2026-09-19 — and the anti-metallic claim is MEASURED, with a level control
+  that makes it evidence.** Discriminator: **spectral flatness** (Wiener entropy), 500 Hz–6 kHz,
+  131 072-pt Hann FFT, on the 1.0–3.73 s window of an impulse response at `decaySeconds: 8`,
+  `sizeMeters: 12`. Flatness is scale-free, so it reads RINGING rather than level.
+  | `modDepthMs` | flatness | tail RMS |
+  |---|---|---|
+  | 0 (frozen LFOs) | **−29.36 dB** | 0.0014056 |
+  | **0.15 (default)** | **−7.96 dB** | 0.0014058 |
+  | 1.0 | −2.95 dB | — |
+  **+21.39 dB of flatness while the tail level moves 0.0015 dB.** ⭐ **The level control is what makes
+  it evidence rather than a number** — it proves the measure cannot be reading loudness.
+  ⭐⭐ **HONEST LIMIT THE AGENT VOLUNTEERED, UNASKED:** with all 8 lines sharing ONE phase, the flatness
+  leg stayed GREEN — common-mode modulation smears the modes just as well by this measure. So
+  "independent phases" is pinned **STRUCTURALLY** (a `@testable` read of the eight phases), **not
+  audibly**, and no output measure tried separates them at the default depth. **A green test that
+  proves less than its name suggests, said out loud.**
+  ⛔⛔ **A PLANT REDDENED NOTHING, TWICE, AND THE REASONS ARE BOTH SUBTLE — THIS IS THE THIRD AND
+  FOURTH SUCH FINDING TONIGHT.** (1) Removing the diffuser denormal flush reddened *nothing* — not the
+  two existing flush legs, not even a state read at the end of the silence — because **an allpass
+  decays by its coefficient once per loop length, crosses the whole subnormal band in ~0.25 s, and is
+  EXACTLY ZERO afterwards**, so a single end-of-silence read sees 0 and passes. Caught only by sampling
+  state at **every quantum boundary**: 578 786 subnormal words across 562 boundaries, smallest 1e-45.
+  The header claimed three flushed words; only two had a gate. (2) The first denormal plant survived
+  because `decaySeconds: 0.5` + 3 s silence never *reaches* the subnormal band (~1.2e-24 vs 1.18e-38) —
+  **"zero subnormals" meant "zero samples in range"**. Retuned to 0.1 s + 5 s: 13 225 subnormal samples.
+  ⭐ **AND ITS OWN HOUSEHOLDER TEST WAS WRONG, WHICH IT FOUND BY PLANTING:** the leg written to catch
+  "no inter-line mixing" SURVIVED (early-window occupancy 297 mixed vs 152 unmixed against a threshold
+  of 120; autocorrelation at the line lags also failed, 0.180 vs 0.191). Rewritten on LATE-window
+  (0.30–0.50 s) occupancy and crest — **and both failed discriminators are recorded IN the test**, so
+  the next person does not retry them.
+  ⭐ **`InterpolatedDelayLine` took a THIRD caller with NO change of any kind** — nine simultaneous
+  instances (8 tank at `.cubicHermite`, 1 pre-delay at `.linear`, forced because its floor is 1).
+  ⛔ `.reverb` LEFT ALONE and **not deprecated in prose either**, per the ruling.
+  **Four errata filed rather than guessed:** E7 (§6.2.3's "0.100 s capacity" has no referent under a
+  one-line-per-tank topology; actual **0.2557288629737609 s**, **≈439 KiB per insert** at 48 kHz) ·
+  **E8 — §5.2's honest-`note` obligations were assigned to `m39-m`, WHICH SHIPPED WITHOUT THEM** (a gap
+  in an item I had already closed out and verified; landed here) · E9 (`.cubicHermite` on the tank,
+  with the RT60 table) · E10 (`diffusion` as an equal-power crossfade — driving the allpass coefficient
+  added **35 ms of unaccounted pre-delay** at `diffusion: 0`).
+  ⚠️ **Plate budget: the two sides are labelled DIFFERENTLY on purpose.** MEASURED: the FDN reserves
+  **2.0458 s** of tank storage per insert. **NOT measured:** the plate side — Dattorro's published tank
+  size is the design's own prior restated, not a number produced here. Conclusion is CONDITIONAL.
+  ⚠️ **NOT VERIFIED, and it said so:** the 5-group / 14-param editor layout is pinned only as DATA.
+  **Nobody has rendered or looked at it.** A UI phase isn't done until someone looked — that is a UI
+  pass, not this item's instrument set.
+  Swift **8242 / 723 / zero failures** (+33, none retired) · MCP **858 / 0** · wire **227** · 15 kinds ×
+  5 surfaces · 15 specs — all re-measured by me, chorus byte-identity re-verified.
+
+  <details><summary>The contract as filed</summary>
+
+  **`.hallReverb` — 8-line FDN, Householder mixing, per-line two-band absorption, small
+  length modulation. NEW ADDITIVE KIND; `.reverb` is LEFT ALONE and documented honestly.**
+  ⛔ `.reverb` is structurally unfixable: `roomSize` is frozen at automation slot 0 forever and the
+  comb lengths are compile-time constants (VERIFIED — inventory §7). ⛔ Not deprecated in prose
+  either: that creates a second-class effect agents avoid while real projects still render through
+  it, and Freeverb's small-bright-room character is genuinely useful. ⭐ A Dattorro plate becomes a
+  `topology` MODE on this machinery **if and only if its delay-line budget fits inside the FDN's
+  prepare-time allocation** — decided at plate-build time, on a measurement, because a mode whose
+  state does not fit forces render-thread reallocation (forbidden) or permanent oversizing for
+  every hall user. ⛔ `shimmerMix`/`shimmerIntervalSemitones` CUT from v1 — shimmer is a pitch
+  shifter inside a feedback loop and the pitch shifter does not exist. Weight L.
+  </details>
+- [x] (m39-m) ✅ **SHIPPED 2026-09-19 — `.ringMod`, and the sidebands are where theory says.**
+  The user named "frequency modulation" by name; this is its close relative and the one that makes
+  the recognisable sounds. ⭐ The DJ report's "needs its own audio-rate oscillator primitive, budget
+  for it" was **RETIRED BY CITATION** before a line was written: `ChorusEffect` already ran a
+  per-sample oscillator inside `process()`.
+  ⭐⭐ **VERIFIED BY ME INDEPENDENTLY, not accepted from the report** — own decode path, own Goertzel,
+  own code: each parent partial splits into `|f−fc|` and `f+fc` landing within **0.11 dB** of the
+  A/4 prediction across twelve probes; the dry term drops **−5.99…−6.03 dB** against a predicted
+  −6.02; and **the carrier does not appear in the output** (200 Hz bin: control −78.19, ringmod
+  −78.72; 800 Hz: −87.00 vs −90.09 — both at or BELOW the control). That absence is the whole
+  difference between ring modulation and amplitude modulation, and it is measured, not asserted.
+  ⭐⭐⭐ **THE CORRECTION IS THE KEEPER, AND I MADE THE SAME MISTAKE INDEPENDENTLY.** The engineer had
+  written in **five places** that a 2 Hz carrier gives *four* pulses a second, reasoning that a
+  bipolar carrier inverts the signal twice per cycle. Reading its report I predicted the same number
+  for the same reason. **Both wrong at the default `mix 0.5`:** the output is
+  `x·(mix·c + (1−mix))`, so the multiplier is `0.5 + 0.5c`, which never goes negative — nothing
+  rectifies, and the rate is 1×. Doubling appears only above `mix 0.5`. Measured on the rendered
+  file: the 2 Hz envelope component is **+21.0 dB** above the control while 4 Hz is **−3.8 dB**,
+  i.e. not raised at all. The engineer caught its own error, **pinned the real number with a test
+  (L4f, across mix 0.25/0.5/1.0) BEFORE correcting the prose**, then fixed all five homes.
+  **Two plausible people reasoning from the same correct principle reached the same wrong answer;
+  only the measurement broke the tie.**
+  **Params (new positional table, nothing renumbered):** 0 `carrierHz` (0.5…5000, def 440, log) ·
+  1 `mix` · 2 `waveform` (modulation `.refused`) · 3 `inputHighCutHz` · 4 `stereoSpreadDeg`.
+  **Errata raised, both against MY OWN frozen text:** **E5** — §6.4.2's "integrated band-limited
+  triangle" shipped as stateless **PolyBLAMP** instead, because an integrator has state, `carrierHz`
+  spans 13 octaves so no single leak coefficient serves both ends, and `carrierHz` is modulatable, so
+  `dt` changes *while the integrator runs* — which on a carrier amplitude-modulates everything the
+  effect multiplies. Measured worst audible-band alias at a 2917 Hz carrier: naive **−41.66 dB**,
+  PolyBLAMP **−57.00 dB**, threshold −48. **E6** — §9.3's "every variant within 1.0 LU of the set
+  median" **cannot include a no-effect control**, and two ALREADY-SHIPPED sets prove it: `djfilter`'s
+  control sits **+5.85 LU** off its median and `mod-tremolo` spreads **4.3 LU**. The three on-axis
+  ringmod variants sit within **0.2 LU**, so the rule's actual purpose is met; the control's offset is
+  arithmetic (at `mix 0.5` half the output is `x·sin`, and a sine's RMS is 0.707) and normalising it
+  would MANUFACTURE a confound rather than remove one. Amendment drafted, **not** adopted.
+  ⭐ **Nine plants, each reddening only its own leg** — including one that first reddened NOTHING:
+  removing the denormal flush was invisible because an 8192-frame silence lets Double state reach
+  1e-165 and Float32 underflows to zero either way. Shortened to 2048 frames checking the last 384,
+  it caught it. **A plant that fires nothing is a finding about the test, not about the code.**
+  ⭐ **Found and closed an unpinned surface the brief never named:** `CopilotCatalog.swift`'s `fx.add`
+  kind enum, a pre-existing hole ruled on in §11.0.1 but never gated — now pinned by a test derived
+  from `Kind.allCases`.
+  Swift **8162 / 720 / 0** · MCP **837 / 0** · wire **227** — all three re-measured by me.
+- [ ] (m39-o) ⛔⛔ **NO EXHAUSTIVE PIN ON EFFECT PERSISTENCE — each kind's save/load is hand-tested,
+  one at a time, and the next kind that forgets a site LOSES USER DATA SILENTLY.** MEASURED
+  2026-09-19: `EffectDescriptor.Kind` is `CaseIterable` with 13 cases, and persisting one requires
+  **six** hand-written sites in `Sources/DAWCore/ProjectDocument.swift` (stored property · `CodingKeys`
+  · init-from-effect · `decodeIfPresent` · `encodeIfPresent` · the rebuild call). `djFilter` has all
+  six *and* 15 mentions in `Tests/DAWCoreTests/PersistenceTests.swift`; **`bitCrusher` has all six and
+  ZERO test mentions.** So the mirror is currently correct by luck of attention, not by construction:
+  nothing fails if site 4 or 5 is skipped — the project saves, reports success, and the parameters are
+  simply gone on reopen. ⭐ **This is the tree's characteristic failure shape** (a silent success that
+  looks like a valid answer), and it is exhaustively testable *because* the enum is `CaseIterable`.
+  **Fix:** one test that loops `EffectDescriptor.Kind.allCases`, builds a descriptor whose params for
+  that kind are all NON-default, round-trips it through `ProjectDocument`, and asserts they survive.
+  ⚠️ **A loop over `allCases` passes if every case builds an empty descriptor** — the same trap
+  `ParamCurveConformanceTests.swift:15` already warns about in its own header. So the test must assert
+  a per-kind non-default was actually set, and be positive-controlled by deleting one
+  `encodeIfPresent` line and watching exactly that kind redden. Weight S. Route: `qa-test-engineer`.
+  ⭐ **PARTLY PINNED ALREADY, 2026-09-19:** `node scripts/gates/effect-kind-surface.mjs` now fails if a
+  kind in the enum never reaches any of 5 complete-list surfaces — including `ProjectDocument.swift`
+  (silent data loss) and `MixerStripView.swift` (invisible in the mixer's `+` menu). ⚠️ It is
+  **whole-file presence, deliberately**: it catches "the kind never reached this file at all" — the
+  failure that had happened three times — and NOT "the kind reached five of the six sites". m39-o is
+  still owed for the latter. Falsifiability proved by `GATE_SELFTEST_EXTRA_KIND=<name>`, which injects
+  a kind present nowhere and must redden all 5 surfaces.
+- [x] (m39-aa) ✅ **SHIPPED 2026-09-19 — `.tapeDelay`, free-ms mode. The echo whose repeats WOBBLE,
+  which `.delay` structurally cannot do.** Verified independently by me, not accepted from the
+  agent's report: Swift **8289 / 726 / zero failures** (my own run, 279.4 s), MCP **867 / 0**, wire
+  **227**, all six hand-written persistence sites present (counted, and positive-controlled against
+  `flanger`'s known-good six), and the chorus byte gate **IDENTICAL 3/3 against the preserved
+  pre-migration renders** with the pinned hash `80aa1afd8618…` matching and the positive control
+  showing **2 619 028** differing bytes.
+  ⚠️ **Id note:** the design's build table (§1480) calls this `m39-n`, which was already spent on the
+  remaining-suite bucket below; the design's own leg table (§1550) calls it **`m39-aa`**, which is
+  inside that bucket's range. **`m39-aa` is authoritative.** Same erratum shape as `m39-j-0`.
+  ⭐⭐⭐ **§4.1'S ADDENDUM PREDICTED A SPECIFIC FUTURE FAILURE AND THE PREDICTION CAME TRUE.** It said
+  the tape-delay author would read the "1 sample" row, declare `minDelaySamples: 1` with
+  `.cubicHermite`, and be refused. The author declared exactly that **deliberately, as the
+  experiment**, and got `minimumDelayBelowStencil(minDelaySamples: 1.0, required: 2.0)` — a refusal
+  that names BOTH numbers, which is the standard a refusal has to meet. The §4.1 row itself is now
+  corrected; the shipped floor is **derived** (11.0 ms from the param ranges), not literal, so the
+  refusal is structurally unreachable on valid params.
+  ⛔⛔ **A DENORMAL PLANT REDDENED NOTHING, AND THAT IS THE FINDING.** Removing the **tap** denormal
+  flush was invisible to every leg — because the record-path filter is the last stage before the
+  write, so nothing subnormal is ever stored and the tap cannot read one. The two flushes are
+  **mutually redundant at the output**, and **no gate in this tree can see the tap flush removed.**
+  It was KEPT (§4.1 obliges a feedback caller; it survives a future bypassable high cut) and the
+  blindness is documented in the source header rather than left for someone to "clean up".
+  ⚠️ **The sibling plant nearly hid too:** at the 6 kHz default the one-pole crosses the whole
+  6.93-decade subnormal band in **20 samples**, so a leg sampling at 512-frame boundaries missed it
+  almost always. Rewritten to render at `highCutHz` 500 in 32-frame quanta, **with an assertion
+  pinning the sampling density itself** so the leg cannot silently stop being able to fail.
+  ⛔⛔ **THE CONSUMER PROSE WAS SPLICED, AND NO GATE COULD SEE IT — FOUND BY ME IN REVIEW.** The whole
+  `hallReverb` paragraph had been inserted INTO THE MIDDLE of the flanger's, cutting it mid-sentence
+  at "…50 Hz at 10 ms - and " and re-attaching the flanger's tail after hallReverb's `freeze`
+  sentence. Every agent reading `fx_add`'s kind list got flanger law attributed to the reverb.
+  ⭐ **`effect-kind-surface.mjs` passed throughout, CORRECTLY — it asks whether a kind is PRESENT.
+  Presence is not contiguity.** Repaired and verified by paragraph ORDER plus a duplication count.
+  ⛔ **And a false wire claim in THREE places, where searching by phrasing found ONE.** "fx_describe
+  echoes `firstNotchHzAtSweepFloor`" is false — it is built by `Commands.effectParamsJSON` (10598)
+  and `fx.describe` is a different case entirely (2733). Fixed in `fxKindSchema` (**shared** by
+  `fx_add` and `fx_describe`, so the wording had to name the tool), in `fx_describe`'s own
+  description, and in the MCP README's `fx_describe` row. ⭐ **Search by FIELD NAME, not by phrasing.**
+- [ ] (m39-n … m39-ab) **The remaining ranked suite** — ✅ ~~`.stereoWidth`~~ **SHIPPED as `m23-dj`**
+  (that item was the home, exactly as "ADOPT m23-dj, do not mint beside it" required),
+  ✅ ~~`.tapeDelay` free-ms~~ **SHIPPED as `m39-aa` above**, `.phaser`,
+  `.transientShaper` (⚠️ **price the DETECTOR, not the shaper** —
+  `TransientAnalyzer` is offline, file-in, allocates freely, not reusable short of a rewrite),
+  `.freqShifter`, `.clipper` + `Oversampler`, Saturator v2 (**the second `Oversampler` caller — this
+  is when it gets extracted**), de-esser as a `.compressor` mode, dynamic EQ (⚠️ **ADOPT m23-cl**).
+  ⛔ **DEFERRED to their own spikes, do not let one absorb another:** beat repeat / tape stop /
+  backspin / half-time (need a capture ring buffer + the frozen-but-unbuilt position-delivery API),
+  granular freeze (a grain scheduler is a different primitive again), shimmer/pitch shifter.
+  Full per-item contracts, weights and rejected alternatives: the design doc §11.

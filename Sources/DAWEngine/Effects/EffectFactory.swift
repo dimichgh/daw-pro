@@ -45,6 +45,18 @@ enum EffectFactory {
             return BassEnhancerEffect(params: descriptor.resolvedBassEnhancer)
         case .bitCrusher:
             return BitCrusherEffect(params: descriptor.resolvedBitCrusher)
+        case .djFilter:
+            return DJFilterEffect(params: descriptor.resolvedDJFilter)
+        case .ringMod:
+            return RingModEffect(params: descriptor.resolvedRingMod)
+        case .flanger:
+            return FlangerEffect(params: descriptor.resolvedFlanger)
+        case .hallReverb:
+            return HallReverbEffect(params: descriptor.resolvedHallReverb)
+        case .tapeDelay:
+            return TapeDelayEffect(params: descriptor.resolvedTapeDelay)
+        case .stereoWidth:
+            return StereoWidthEffect(params: descriptor.resolvedStereoWidth)
         case .audioUnit:
             // Reached only when the registry has no prepared instance yet
             // (the chain state consults its provider first): bit-exact
@@ -79,6 +91,18 @@ enum EffectFactory {
             (instance as? BassEnhancerEffect)?.apply(params: descriptor.resolvedBassEnhancer)
         case .bitCrusher:
             (instance as? BitCrusherEffect)?.apply(params: descriptor.resolvedBitCrusher)
+        case .djFilter:
+            (instance as? DJFilterEffect)?.apply(params: descriptor.resolvedDJFilter)
+        case .ringMod:
+            (instance as? RingModEffect)?.apply(params: descriptor.resolvedRingMod)
+        case .flanger:
+            (instance as? FlangerEffect)?.apply(params: descriptor.resolvedFlanger)
+        case .hallReverb:
+            (instance as? HallReverbEffect)?.apply(params: descriptor.resolvedHallReverb)
+        case .tapeDelay:
+            (instance as? TapeDelayEffect)?.apply(params: descriptor.resolvedTapeDelay)
+        case .stereoWidth:
+            (instance as? StereoWidthEffect)?.apply(params: descriptor.resolvedStereoWidth)
         case .audioUnit:
             // AU params are not on the generic surface in v0 — no-op.
             break

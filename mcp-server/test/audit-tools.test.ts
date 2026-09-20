@@ -380,6 +380,24 @@ test("no tool name contains a capital letter or a dot", () => {
   assert.deepEqual(violations, [], `tool names with capitals or dots: ${violations.join(", ")}`);
 });
 
+test("fx_describe teaches the m39-a curve field (linear/logarithmic/decibel, and how to step each)", () => {
+  // m39-a rides an ADDITIVE field on fx.describe's existing paramObj instead
+  // of a new command, so the bijection above can't see it — pin the teaching
+  // here, the project_snapshot/gainReductionDb precedent immediately below.
+  const fxDescribe = tools.find((t) => t.name === "fx_describe");
+  assert.ok(fxDescribe, "fx_describe tool exists");
+  const description = fxDescribe!.description ?? "";
+  assert.match(description, /curve/, "teaches the curve field exists");
+  assert.match(description, /logarithmic/, "names the logarithmic curve");
+  assert.match(description, /decibel/, "names the decibel curve");
+  assert.match(description, /octave/i, "explains logarithmic means even steps in octaves");
+  assert.match(
+    description,
+    /step the fraction/i,
+    "tells the caller to step the 0...1 fraction, not the Hz, for a logarithmic parameter"
+  );
+});
+
 test("project_snapshot teaches the m22-e per-effect gainReductionDb meter (additive wire field)", () => {
   // m22-e rides an ADDITIVE field on the existing snapshot poll path instead
   // of a new command, so the bijection above can't see it — pin the teaching

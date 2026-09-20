@@ -152,4 +152,10 @@ bursts/
 scripts/video/publish/client_secret.json
 scripts/video/publish/token.json
 
+# Demo-render harness output (scripts/demos/render-variants.mjs): rendered
+# .wav variants + manifest.json for a listen-later review set. Regenerable
+# from the spec + the tree at render time; *.wav is already caught above but
+# manifest.json and any staging-mode .dawproj are not, so this is explicit.
+/scripts/demos/out/
+
 .venv/

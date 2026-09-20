@@ -362,6 +362,46 @@ final class PlaybackGraph {
     /// stopped the mixer previews `value(atBeat:)` (stopped WYSIWYG).
     var masterAutomation: [AutomationLane] = []
 
+    // MARK: Modulation (m39-e)
+
+    /// The project's MASTER modulation sources/routes — the `masterEffects` /
+    /// `masterAutomation` twin, pushed by `AudioEngine` (live) /
+    /// `OfflineRenderer.render` (offline).
+    var masterModulationSources: [ModulationSource] = []
+    var masterModulationRoutes: [ModulationRoute] = []
+    /// Monotonic; the render side re-seeks nothing (every source is
+    /// position-absolute) but the generation still gates snapshot adoption in
+    /// the instrument, exactly as `ParamSnapshot.generation` does.
+    private var modulationGeneration: UInt64 = 0
+    /// Last published modulation input per strip (`nil` UUID key = master), so
+    /// an unchanged strip does not churn the retire bin, and a MACRO-ONLY
+    /// change takes the one-atomic-store path §7.2 specifies instead of a
+    /// republish.
+    private var publishedModulation: [UUID: ModulationPublishKey] = [:]
+    private var publishedMasterModulation: ModulationPublishKey?
+
+    /// Everything a strip's snapshot is derived from. Equatable so the publish
+    /// pass can tell "nothing changed" from "a macro moved" from "rebuild".
+    struct ModulationPublishKey: Equatable {
+        var strip: ModulationSnapshotBuilder.Strip
+        var originSample: Int64
+        var positionValid: Bool
+
+        /// The same key with every macro VALUE zeroed — equal keys under this
+        /// normalisation mean the graph is structurally identical and only a
+        /// macro moved.
+        var structural: ModulationPublishKey {
+            var copy = self
+            copy.strip.sources = copy.strip.sources.map { source in
+                guard case .macro = source.params else { return source }
+                var normalised = source
+                normalised.params = .macro(MacroSourceParams(value: 0))
+                return normalised
+            }
+            return copy
+        }
+    }
+
     // MARK: Per-insert spectrum arms (m23-r2a)
 
     /// MIRROR of `AudioEngine.spectrumArms`, which is the ONE HOME of the arm
@@ -483,12 +523,16 @@ final class PlaybackGraph {
     /// the no-restart republish.
     private var activeAutomationLanes:
         [UUID: (volume: AutomationLane?, pan: AutomationLane?,
-                effectParams: [AutomationSchedule.EffectParamLaneSpec])] = [:]
+                effectParams: [AutomationSchedule.EffectParamLaneSpec],
+                requireAnchor: Bool)] = [:]
     /// Lanes behind each strip's currently PUBLISHED schedule (main-actor
-    /// bookkeeping only).
+    /// bookkeeping only). `requireAnchor` rides along because the roll-start
+    /// and loop-extend publishes rebuild from THIS record, and a strip can
+    /// need a schedule for its anchor alone (m39-e).
     private var publishedAutomationLanes:
         [UUID: (volume: AutomationLane?, pan: AutomationLane?,
-                effectParams: [AutomationSchedule.EffectParamLaneSpec])] = [:]
+                effectParams: [AutomationSchedule.EffectParamLaneSpec],
+                requireAnchor: Bool)] = [:]
     /// The last tracks `applyParameters` saw — `startAllPlayers` re-runs the
     /// parameter pass with them so the override pin lands at roll start.
     private var lastParameterTracks: [Track] = []
@@ -1502,7 +1546,8 @@ final class PlaybackGraph {
         let rolling = automationRollContext != nil
         var newActiveLanes:
             [UUID: (volume: AutomationLane?, pan: AutomationLane?,
-                    effectParams: [AutomationSchedule.EffectParamLaneSpec])] = [:]
+                    effectParams: [AutomationSchedule.EffectParamLaneSpec],
+                    requireAnchor: Bool)] = [:]
         for track in tracks {
             let mixer: AVAudioMixerNode?
             switch track.kind {
@@ -1528,15 +1573,53 @@ final class PlaybackGraph {
             // While STOPPED the knobs rule (no schedule → no render stores),
             // and a lane disabled/removed while ROLLING reverts the effect
             // to its knob params render-side on the next quantum.
-            let effectParams = AutomationSchedule.resolveEffectParamLanes(
+            let lanes = AutomationSchedule.resolveEffectParamLanes(
                 automation: track.automation, effects: track.effects)
-            newActiveLanes[track.id] = (volumeLane, panLane, effectParams)
+            // m39-e P3: a modulated-but-UNAUTOMATED effect param needs a
+            // synthetic one-point hold track carrying the knob value, or
+            // `storeEffectParams` never visits it and the route is silently
+            // inert (§3.3). Appended AFTER the real lanes, so no real lane's
+            // position — and therefore no cursor — moves.
+            let syntheticLanes = ModulationSnapshotBuilder.syntheticEffectParamLanes(
+                routes: track.modulationRoutes, effects: track.effects,
+                automation: track.automation)
+            let effectParams = lanes + syntheticLanes
+            // m39-e §3.3: a route joins the `activeLane` neutralisation
+            // EXACTLY as a lane does, or the knob applies TWICE — once on the
+            // mixer node and once in the stage that carries the base.
+            let modulatesVolume = ModulationSnapshotBuilder.modulates(
+                .volume, routes: track.modulationRoutes)
+            let modulatesPan = ModulationSnapshotBuilder.modulates(
+                .pan, routes: track.modulationRoutes)
+            // ⭐ THE ANCHOR REQUIREMENT IS BOOKKEPT, NOT RECOMPUTED PER SITE.
+            // A strip whose only automation is a volume/pan ROUTE still needs
+            // a schedule — not for its points (it has none) but for its
+            // ANCHOR, which is how the render side learns the transport
+            // position. Before this was carried here, `startAllPlayers` and
+            // `extendLoopAutomation` rebuilt their publishes from
+            // `activeAutomationLanes` alone, saw a lanes-free strip, and
+            // published NIL — wiping the anchor `applyParameters` had just
+            // published, at roll start, LIVE AND OFFLINE. With no anchor the
+            // render path takes `applyModulationWithoutSchedule`, where
+            // position-dependent sources hold NEUTRAL, so every LFO→volume
+            // route rendered byte-identical to no modulation at all.
+            let requireAnchor = modulatesVolume || modulatesPan
+            newActiveLanes[track.id] = (volumeLane, panLane, effectParams, requireAnchor)
+            // The value the mixer WOULD carry with no modulation — the base
+            // the stage offsets when no lane is in control at that position.
+            let baseVolume = volumeLane?.value(atBeat: playheadBeat) ?? track.volume
+            let basePan = panLane?.value(atBeat: playheadBeat) ?? track.pan
             var pan = Float(track.pan)
             if let panLane {
                 // Override rule: rolling → the render stage pans, the mixer
                 // sits at center; stopped → WYSIWYG preview of the lane.
                 pan = rolling ? 0 : Float(panLane.value(atBeat: playheadBeat) ?? track.pan)
             }
+            // A pan ROUTE neutralises the node rolling OR stopped: the
+            // modulation snapshot lives across stop (§7.8), so a macro on pan
+            // keeps working with the transport parked and the node must not
+            // also be panning.
+            if modulatesPan { pan = 0 }
             // Same-value pan writes are swallowed by the property cache even
             // when engine.start() has just reset the underlying AU parameter
             // to 0 (measured) — route through the adjacent float so the write
@@ -1565,20 +1648,52 @@ final class PlaybackGraph {
                 // supplies the lane gain); stopped → WYSIWYG lane preview.
                 gain = rolling ? 1 : (volumeLane.value(atBeat: playheadBeat) ?? track.volume)
             }
+            // A volume ROUTE pins the node to unity rolling OR stopped — the
+            // stage supplies base × modulation. MUTE/SOLO GATING STAYS ON THE
+            // NODE: `gated ? 0` survives, and 0 × anything is still 0, so a
+            // muted strip with a tremolo is silent rather than quietly pulsing.
+            if modulatesVolume, !gated { gain = 1 }
             mixer.outputVolume = Float(gain)
             // No-restart republish: lanes changed under a rolling transport →
             // rebuild THIS strip's schedule against the same anchor/epoch.
             // Player schedules and reconcile signatures are untouched.
+            //
+            // m39-e: a strip whose ONLY automation is a volume/pan route still
+            // needs a schedule — not for its points (it has none) but for its
+            // ANCHOR. `quantumStart` is how the render side learns the
+            // transport position, and without it an LFO on the fader would
+            // never move. `requireAnchor` builds the empty-point schedule that
+            // carries it; effect-param routes are already covered, because
+            // their synthetic hold tracks make `effectParams` non-empty.
+            // ⚠️ THE ANCHOR IS PART OF THE CHANGE DETECTION, and it has to be.
+            // Comparing lanes alone leaves a DEAD STATE no later pass can
+            // escape: once any publish records (nil, nil, []) for a strip, a
+            // modulation-only strip matches on every lane, so the first branch
+            // never fires — and the second is unreachable because the entry is
+            // no longer nil. The anchor requirement then can never be
+            // satisfied, however many parameter passes run.
             if rolling, let published = publishedAutomationLanes[track.id],
                published.volume != volumeLane || published.pan != panLane
-                   || published.effectParams != effectParams {
+                   || published.effectParams != effectParams
+                   || published.requireAnchor != requireAnchor {
                 publishAutomation(for: track.id, volume: volumeLane, pan: panLane,
-                                  effectParams: effectParams)
+                                  effectParams: effectParams, requireAnchor: requireAnchor)
             } else if rolling, publishedAutomationLanes[track.id] == nil,
-                      volumeLane != nil || panLane != nil || !effectParams.isEmpty {
+                      volumeLane != nil || panLane != nil || !effectParams.isEmpty
+                          || requireAnchor {
                 publishAutomation(for: track.id, volume: volumeLane, pan: panLane,
-                                  effectParams: effectParams)
+                                  effectParams: effectParams, requireAnchor: requireAnchor)
             }
+            // The modulation snapshot publishes on EVERY pass (stopped
+            // included) — it is the seam that gives live/offline parity for
+            // free, and §7.8 requires it to live across stop.
+            publishModulation(
+                forTrack: track.id,
+                strip: ModulationSnapshotBuilder.Strip(
+                    sources: track.modulationSources, routes: track.modulationRoutes,
+                    effects: track.effects, instrument: track.instrument,
+                    isInstrumentTrack: track.kind == .instrument,
+                    baseVolume: baseVolume, basePan: basePan))
             // Send levels land in place on the dedicated gain nodes — never
             // structural (level is excluded from RoutingKey by design). Pan
             // on send nodes is never touched: start() resets it to 0, which
@@ -1641,12 +1756,24 @@ final class PlaybackGraph {
         // automation is in no reconcile signature by construction.
         if rolling {
             let activeMasterLane = masterAutomation.activeLane(for: .volume)
+            let masterAnchor = ModulationSnapshotBuilder.modulates(
+                .volume, routes: masterModulationRoutes)
             if let published = publishedMasterVolumeLane {
-                if published != activeMasterLane { publishMasterAutomation(activeMasterLane) }
-            } else if activeMasterLane != nil {
-                publishMasterAutomation(activeMasterLane)
+                if published != activeMasterLane {
+                    publishMasterAutomation(activeMasterLane, requireAnchor: masterAnchor)
+                }
+            } else if activeMasterLane != nil || masterAnchor {
+                publishMasterAutomation(activeMasterLane, requireAnchor: masterAnchor)
             }
         }
+        // m39-e: the master strip's modulation snapshot, published on every
+        // pass exactly like the strips' (§7.8 — it lives across stop).
+        publishMasterModulation(strip: ModulationSnapshotBuilder.Strip(
+            sources: masterModulationSources, routes: masterModulationRoutes,
+            effects: masterEffects, instrument: nil, isInstrumentTrack: false,
+            baseVolume: masterAutomation.activeLane(for: .volume)?
+                .value(atBeat: playheadBeat) ?? manualMasterVolume,
+            basePan: 0))
         // Per-insert spectrum arms (m23-r2a) — the ONE re-application point,
         // and it must be HERE, at the TAIL: an arm can only land on a unit
         // that exists, and this is the only place where every strip's chain
@@ -1710,17 +1837,104 @@ final class PlaybackGraph {
     /// unrolled shape. Without a loop the build is the linear one, verbatim.
     private func publishAutomation(
         for trackID: UUID, volume: AutomationLane?, pan: AutomationLane?,
-        effectParams: [AutomationSchedule.EffectParamLaneSpec]
+        effectParams: [AutomationSchedule.EffectParamLaneSpec],
+        // ⛔ NO DEFAULT, DELIBERATELY. Both roll-start publishes omitted this
+        // argument and silently wiped modulation anchors; a default is what
+        // let them. Every call site states it.
+        requireAnchor: Bool
     ) {
         guard let context = automationRollContext,
               let renderer = automationRenderer(for: trackID) else { return }
         var schedule: AutomationSchedule?
-        if volume != nil || pan != nil || !effectParams.isEmpty {
+        if volume != nil || pan != nil || !effectParams.isEmpty || requireAnchor {
             schedule = buildRollSchedule(context: context, volume: volume,
-                                         pan: pan, effectParams: effectParams)
+                                         pan: pan, effectParams: effectParams,
+                                         requireAnchor: requireAnchor)
         }
         renderer.publish(schedule)
-        publishedAutomationLanes[trackID] = (volume, pan, effectParams)
+        publishedAutomationLanes[trackID] = (volume, pan, effectParams, requireAnchor)
+    }
+
+    // MARK: - Modulation publish (m39-e)
+
+    /// Project-absolute sample position of the roll anchor, and whether there
+    /// IS one. `AutomationSchedule`'s `t = 0` is the transport beat the
+    /// schedule was built from, so every modulation source is evaluated at
+    /// `origin + p` — or an LFO would restart its phase on every play press
+    /// and §3.2's position-absolute determinism would be false in exactly the
+    /// case it exists to guarantee.
+    private func modulationOrigin() -> (sample: Int64, valid: Bool) {
+        guard let context = automationRollContext else { return (0, false) }
+        let rate = graphFormat().sampleRate
+        let seconds = context.tempoMap.seconds(from: 0, to: context.fromBeat)
+        return (Int64((seconds * rate).rounded()), true)
+    }
+
+    /// Builds and publishes one strip's modulation snapshot to its automation
+    /// renderer (P2/P3) and — on an instrument strip — to the instrument (P1).
+    ///
+    /// ⭐ A MACRO-ONLY change takes the one-atomic-store path §7.2 specifies:
+    /// no rebuild, no republish, no retire-bin churn. Anything else rebuilds.
+    private func publishModulation(forTrack trackID: UUID,
+                                   strip: ModulationSnapshotBuilder.Strip) {
+        let origin = modulationOrigin()
+        let key = ModulationPublishKey(strip: strip, originSample: origin.sample,
+                                       positionValid: origin.valid)
+        guard let renderer = automationRenderer(for: trackID) else { return }
+        if let previous = publishedModulation[trackID], previous == key { return }
+        if let previous = publishedModulation[trackID],
+           previous.structural == key.structural,
+           let live = renderer.currentModulation {
+            storeMacros(of: strip, into: live)
+            instrumentNodes[trackID]?.renderer.publishModulation(live)
+            publishedModulation[trackID] = key
+            return
+        }
+        modulationGeneration &+= 1
+        let snapshot = ModulationSnapshotBuilder.build(
+            strip: strip, generation: modulationGeneration,
+            timelineID: automationRollTimelineID, sampleRate: graphFormat().sampleRate,
+            originSample: origin.sample, positionValid: origin.valid)
+        renderer.publishModulation(snapshot)
+        // P1: the instrument evaluates the same snapshot inside the per-frame
+        // loop it already runs. Non-participating instruments inherit the
+        // protocol's default no-op, so Sampler/TestTone/EventCapture need no edit.
+        instrumentNodes[trackID]?.renderer.publishModulation(snapshot)
+        publishedModulation[trackID] = key
+    }
+
+    /// The MASTER twin — same builder, same generation counter, same timeline.
+    private func publishMasterModulation(strip: ModulationSnapshotBuilder.Strip) {
+        guard let renderer = masterAutomationRenderer else { return }
+        let origin = modulationOrigin()
+        let key = ModulationPublishKey(strip: strip, originSample: origin.sample,
+                                       positionValid: origin.valid)
+        if let previous = publishedMasterModulation, previous == key { return }
+        if let previous = publishedMasterModulation,
+           previous.structural == key.structural,
+           let live = renderer.currentModulation {
+            storeMacros(of: strip, into: live)
+            publishedMasterModulation = key
+            return
+        }
+        modulationGeneration &+= 1
+        renderer.publishModulation(ModulationSnapshotBuilder.build(
+            strip: strip, generation: modulationGeneration,
+            timelineID: automationRollTimelineID, sampleRate: graphFormat().sampleRate,
+            originSample: origin.sample, positionValid: origin.valid))
+        publishedMasterModulation = key
+    }
+
+    /// `mod.setMacro`'s delivery: one atomic store per macro slot, in the same
+    /// slot order the builder assigns.
+    private func storeMacros(of strip: ModulationSnapshotBuilder.Strip,
+                             into snapshot: ModulationSnapshot) {
+        var slot = 0
+        for source in strip.sources.prefix(ModulationLimits.maxSources) {
+            guard case .macro(let params) = source.params else { continue }
+            snapshot.storeMacro(slot: slot, value: Float(params.value))
+            slot += 1
+        }
     }
 
     /// ONE schedule build for the current roll, shared by the strip and the
@@ -1732,7 +1946,8 @@ final class PlaybackGraph {
     private func buildRollSchedule(
         context: (fromBeat: Double, tempoMap: TempoMap, mode: AutomationSchedule.Mode),
         volume: AutomationLane?, pan: AutomationLane?,
-        effectParams: [AutomationSchedule.EffectParamLaneSpec]
+        effectParams: [AutomationSchedule.EffectParamLaneSpec],
+        requireAnchor: Bool
     ) -> AutomationSchedule? {
         automationGeneration += 1
         if let state = loopUnroll {
@@ -1752,14 +1967,16 @@ final class PlaybackGraph {
                 tempoMap: state.tempoMap,
                 sampleRate: graphFormat().sampleRate,
                 generation: automationGeneration, mode: context.mode,
-                timelineID: automationRollTimelineID)
+                timelineID: automationRollTimelineID,
+                requireAnchor: requireAnchor)
         }
         return AutomationSchedule.build(
             volumeLane: volume, panLane: pan, effectParamLanes: effectParams,
             fromBeat: context.fromBeat, tempoMap: context.tempoMap,
             sampleRate: graphFormat().sampleRate,
             generation: automationGeneration, mode: context.mode,
-            timelineID: automationRollTimelineID)
+            timelineID: automationRollTimelineID,
+            requireAnchor: requireAnchor)
     }
 
     // MARK: - Master volume automation (m15-c)
@@ -1775,13 +1992,15 @@ final class PlaybackGraph {
     /// Builds and publishes the MASTER schedule against the current roll
     /// context (nil lane → unpublish) — `publishAutomation` for the master
     /// owner, same generation counter, same timeline, same (shared) builder.
-    private func publishMasterAutomation(_ volumeLane: AutomationLane?) {
+    private func publishMasterAutomation(_ volumeLane: AutomationLane?,
+                                         requireAnchor: Bool) {
         guard let context = automationRollContext,
               let renderer = masterAutomationRenderer else { return }
         var schedule: AutomationSchedule?
-        if volumeLane != nil {
+        if volumeLane != nil || requireAnchor {
             schedule = buildRollSchedule(context: context, volume: volumeLane,
-                                         pan: nil, effectParams: [])
+                                         pan: nil, effectParams: [],
+                                         requireAnchor: requireAnchor)
         }
         renderer.publish(schedule)
         publishedMasterVolumeLane = .some(volumeLane)
@@ -1796,11 +2015,19 @@ final class PlaybackGraph {
     /// the node — the null path's `mainMixerNode.outputVolume` ownership
     /// (AudioEngine/OfflineRenderer) is byte-identical to pre-m15-c.
     private func applyMasterVolume(playheadBeat: Double) {
+        // m39-e: a master volume ROUTE joins the override rule exactly as a
+        // lane does — the pre-walk stage in the master chain host carries base
+        // × modulation, so the node must sit at unity or the knob applies twice.
+        let modulated = ModulationSnapshotBuilder.modulates(
+            .volume, routes: masterModulationRoutes)
         if let lane = masterAutomation.activeLane(for: .volume) {
-            let gain = automationRollContext != nil
+            let gain = (automationRollContext != nil || modulated)
                 ? 1.0
                 : (lane.value(atBeat: playheadBeat) ?? manualMasterVolume)
             engine.mainMixerNode.outputVolume = Float(gain)
+            masterFaderUnderLaneAuthority = true
+        } else if modulated {
+            engine.mainMixerNode.outputVolume = 1
             masterFaderUnderLaneAuthority = true
         } else if masterFaderUnderLaneAuthority {
             engine.mainMixerNode.outputVolume = Float(manualMasterVolume)
@@ -2957,15 +3184,18 @@ final class PlaybackGraph {
         for trackID in trackIDs {
             guard let lanes = activeAutomationLanes[trackID],
                   lanes.volume != nil || lanes.pan != nil || !lanes.effectParams.isEmpty
+                      || lanes.requireAnchor
             else { continue }
             publishAutomation(for: trackID, volume: lanes.volume, pan: lanes.pan,
-                              effectParams: lanes.effectParams)
+                              effectParams: lanes.effectParams,
+                              requireAnchor: lanes.requireAnchor)
         }
         // The master lane extends with the strips (m15-c): same unrolled
         // blocks, same timeline, so its values stay correct across every
         // pre-queued cycle.
         if let lane = masterAutomation.activeLane(for: .volume) {
-            publishMasterAutomation(lane)
+            publishMasterAutomation(lane, requireAnchor: ModulationSnapshotBuilder.modulates(
+                .volume, routes: masterModulationRoutes))
         }
     }
 
@@ -3203,11 +3433,15 @@ final class PlaybackGraph {
         for trackID in trackIDs {
             let lanes = activeAutomationLanes[trackID]
             publishAutomation(for: trackID, volume: lanes?.volume, pan: lanes?.pan,
-                              effectParams: lanes?.effectParams ?? [])
+                              effectParams: lanes?.effectParams ?? [],
+                              requireAnchor: lanes?.requireAnchor ?? false)
         }
         // The MASTER lane rolls with the strips (m15-c): same context, same
         // anchor/epoch, same builder.
-        publishMasterAutomation(masterAutomation.activeLane(for: .volume))
+        publishMasterAutomation(
+            masterAutomation.activeLane(for: .volume),
+            requireAnchor: ModulationSnapshotBuilder.modulates(
+                .volume, routes: masterModulationRoutes))
         // Re-run the parameter pass so the override pins (gain 1 / pan 0)
         // land now that the context is rolling. Live, the anchor lead-in
         // absorbs the mixer's internal ramp before schedule t=0; offline,

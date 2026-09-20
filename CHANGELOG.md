@@ -1,5 +1,635 @@
 # Changelog
 
+## 2026-09-19i — Width you can take to a club PA, and the theorem that says what it costs
+
+`.stereoWidth` (m23-dj) ships: a mid/side widener and mono-maker whose headline
+is a **guarantee rather than a sound**. Four parameters — `width`, `spread`,
+`bassMonoHz`, `bassMonoAmount` — one new effect kind, **zero new wire
+commands**; it rides `fx.add` / `fx.setParam` / `fx.describe` like every other
+built-in, and `doc-count-drift` still measures **227**, which is the tripwire
+design rule 6.0.11 asks for.
+
+The item was raised by the user on 2026-08-04, who asked for *"true stereo"*
+rather than a fake width trick. That distinction **is** the design.
+
+⛔ **WHAT MOST PLUG-INS DO IS PHASE-DAMAGING, AND THIS DOES NOT DO IT.** A Haas
+delay (5–30 ms on one side) or a polarity-flipped duplicate both widen
+convincingly on headphones and then comb, collapse or hollow out the moment
+anything sums to mono — a club PA, a phone, a Bluetooth speaker, a car door.
+Here every operation happens to the SIDE channel and the MID is passed through
+untouched, so `L' + R' = 2·M = L + R` at every setting of every parameter. Mono
+compatibility is a **structural property**, not a tuning.
+
+⭐⭐ **THE ACCEPTANCE TEST IS AN ORACLE WITH TWO BUILT-IN POSITIVE CONTROLS,
+because a passing oracle would otherwise prove nothing.** Any side-only design
+satisfies this by construction — including an inert one. So the same
+measurement runs over two wideners written in the test file that the item names
+as wrong, and it must redden on both:
+
+| widener | mono level | worst band | mono residual |
+|---|---:|---:|---:|
+| **`.stereoWidth`** at width 1.8 / spread 0.8 | **−7.9e-10 dB** | **−3.7e-9 dB** | **−145.8 dB** |
+| Haas, right side delayed 15 ms | −2.58 dB | **−10.26 dB** @ 440 Hz | +4.26 dB |
+| mid normalised by 1/√2 | **−3.0103 dB** | −3.0103 dB, flat | — |
+
+The third row is the item's own stated failure — *"a widener that loses 3 dB of
+vocal when summed"* — reproduced on demand so the instrument is known to be able
+to see it.
+
+⚠️⚠️ **THE TRADE IS A THEOREM AND IT IS NAMED ON EVERY SURFACE RATHER THAN
+HIDDEN.** Out of a MONO source you cannot have both a flat mono sum and flat
+individual channels: `L = M(1 ± s·A)` gives a flat sum and complementary
+per-channel ripple of `1 ± s`, while two different all-passes per channel give
+flat channels and a combed sum. There is no third arrangement. This kind always
+takes the flat sum and reports the cost per instance as `channelPeakDb` /
+`channelNotchDb`, **measured out of a render at +2.2789 / −3.0975 dB against the
+law's +2.2789 / −3.0980** at the 0.3 default. In the same measurement the summed
+response is flat to **0.0 exactly** at all 463 probe frequencies while each
+channel alone ripples 5.4 dB peak-to-notch.
+
+⚠️ **`width` IS A SILENT NO-OP ON A MONO SOURCE** — it is a gain on the
+left-minus-right difference, and that difference is zero — so `fx.add {kind:
+"stereoWidth", params: {width: 2}}` on a mono track reports success, echoes
+`width: 2`, and changes not one byte. `spread` is the control that widens a mono
+source. That trap is in the param note, in `fxKindSchema`, in the MCP README and
+in the wire-reference skill, because it is the wrong answer to the most likely
+request.
+
+⚠️ **A TEST THAT READ AS A CENSUS WAS A HAND-WRITTEN LIST, AND IT HAD ALREADY
+LOST A KIND.** `fxAddAndSetParamWorkForNewKinds` enumerated kind/param pairs in a
+literal array — so it looked like "every kind round-trips on the wire" while
+silently omitting `.tapeDelay`, which had shipped hours earlier. Nothing failed,
+because a list cannot miss what it never mentions. It is now driven by
+`Kind.allCases`: a kind with no probe entry **fails** rather than being skipped,
+with a non-vacuity floor in case `allCases` ever stops enumerating. Falsified by
+planting the omission — it reddens with `kinds with no entry in this census:
+["tapeDelay"]`.
+⭐ **Converting it immediately exposed a second thing the list had hidden:** 17
+kinds on one track exceeds the **16-effect cap**, so the last kinds failed with
+"effect chain is full" — a cap artifact that reads exactly like a wire defect.
+The census now uses one fresh track per kind. **A list does not just fail to
+cover; it conceals what full coverage would have revealed.**
+
+⛔⛔ **AND THE SECOND TRAP WAS ONE WE SHIPPED INTO THE PROSE OURSELVES, IN FOUR
+PLACES AT ONCE, BEFORE REVIEW CAUGHT IT.** The `width` param note, `fxKindSchema`,
+the MCP README and the wire-reference skill's recipe table all said *"`width: 0`
+is a real mono-maker"*. It is not. The side path is `side·width +
+decorrelated·spread` and **`spread` defaults to 0.3**, so `width: 0` on a freshly
+added insert still emits a synthesized side channel — and on a **mono** source it
+emits one where there was none, i.e. it does the **opposite** of the request that
+recipe was written for. Measured: a mono fixture goes in at a width figure of
+**0.0** and comes out at **0.0748**; a stereo fixture at 0.4100 comes out at
+**0.0798** rather than 0. The corrected recipe, now in all four places, is
+**`width: 0` AND `spread: 0` together** — which measures **0.0** and is
+bit-identical between channels. The mono-compatibility guarantee was never
+affected; what was wrong was a recipe an agent would have followed verbatim,
+received `ok: true` for, and reported done on. It is now pinned behaviourally
+(engine leg L2c), on the wire-adjacent param note (`ModulationTests`) and in the
+MCP text (`fx-stereo-width.test.ts`), so the words and the samples cannot drift
+apart again.
+
+⭐ **The derived ripple fields now have a wire test, and did not before.**
+`channelPeakDb` / `channelNotchDb` are emitted by `Commands.effectParamsJSON`
+and appeared in no test that could see the emission — only in a unit test of the
+closed form. `FXCommandTests` now asserts them through the running router on
+`fx.add` and `fx.setParam`, asserts they TRACK `spread` (6.0206 dB peak and a
+**−120 dB floor rather than −inf or NaN** at spread 1), and asserts they are
+**absent** from `fx.describe` with a positive control for the absence.
+
+⛔ **NO `mix` PARAMETER, DELIBERATELY.** A dry/wet blend on a mid/side widener is
+algebraically another `width` and another `spread`, so it would be a lie in
+`fx.describe`. The named neutral position is `width 1 / spread 0 /
+bassMonoAmount 0`, and at exactly that position the render path **never writes
+the buffer** — the bypass cannot be an arithmetic identity, because a mid/side
+round trip is not bit-exact in IEEE floating point.
+
+**Two defects were caught by planting them, and one of them was mine before the
+plant.** The bass-mono crossover shipped in its first draft as
+`x − lowpass²(x)`, which factors as `(1 − LP)(1 + LP)` — a SIX dB/oct high-pass
+with a +6 dB lift, not the twelve the control claims. It is identical in the
+source to the correct structure and identical in the output above 1 kHz; at
+40 Hz against a 120 Hz corner it removes **4.3 dB where the shipped one removes
+20.1 dB**. And planting "remove the interpolation-endpoint snap" reddened
+**nothing** until L7's fixture and ride value were both changed: the accumulated
+`width` lands on 0.9999999999999956, which narrows to exactly `1.0f`, so the
+effect computes `M ± S` — and on balanced material that round trip happens to be
+bit-exact. It takes a deliberately asymmetric fixture (one channel 1e-7, the
+other 0.9) AND a ride value whose delta is not a binary fraction (0.33, found by
+search — only 99 of 1650 three-decimal widths leave any residue at all).
+
+**Demo:** `scripts/demos/specs/stereowidth.json`, one axis (`spread` 0.25 →
+0.45 → 0.65) on an identical mono pad, plus a no-effect control. Per design §9.6
+a width demo **ships a measurement alongside the audio**, because a width change
+is close to inaudible on one speaker by construction — so
+`render-variants.mjs` gained an additive `monoCompatibility` measurement type
+that reports, per variant: stereo width **0.0000 → 0.0449 → 0.1321 → 0.2411**,
+L/R correlation **1.0000 → 0.9199 → 0.7571 → 0.5425**, and a mono fold-down that
+moved **0.000 dB** with residuals of **−158.6 / −156.1 / −154.3 dB**. The
+listening note opens by telling the listener to use headphones or two speakers.
+All four variants sit within **0.8 LU** of the set's median with no level
+compensation applied.
+
+## 2026-09-19h — An echo that wobbles, and the erratum that was waiting for it
+
+`.tapeDelay` (m39-n) ships, **FREE-MS MODE ONLY**: a tape echo read through a
+fractional delay line whose position is pushed around by wow (a slow motor
+drift) and flutter (two fixed fast components), with the repeat path saturated
+and rolled off. Eight parameters, one new effect kind, **zero new wire
+commands** — it rides `fx.add` / `fx.setParam` / `fx.describe` like every other
+built-in, and `doc-count-drift` still measures **227**, which is the tripwire
+design rule 6.0.11 asks for.
+
+⛔ **`.delay` IS NOT REPLACED, AND THE SPLIT IS STRUCTURAL.** `DelayEffect`
+holds its delay in an `Int` and reads `line[index - delaySamples]`, so the
+fractional part of every requested time is discarded at assignment: a drift of
+a tenth of a sample is not a tuning problem there, it is **unrepresentable**.
+`.delay` keeps tempo sync; `.tapeDelay` has none in v1 (the sync resolver is
+hardwired to `.delay` at five intake seams, generalising it is m39-c, and a
+second hand-rolled resolver is a frozen prohibition).
+
+⭐⭐⭐ **THE §4.1 ERRATUM WAS CONFIRMED BY THE CALLER IT WAS WRITTEN ABOUT.**
+The capability table in the design's §4.1 states the minimum-delay floor as
+"1 sample" flatly; the addendum under it predicted that the tape-delay author
+would declare `minDelaySamples: 1` alongside `.cubicHermite` — the interpolation
+that same section recommends to this effect **by name** — and be refused at
+`prepare()`. The first draft did exactly that and was refused with
+`minimumDelayBelowStencil(minDelaySamples: 1.0, required: 2.0)`. The message
+names both numbers and is actionable. ⚠️ **But the observable symptom is
+silence, not a message:** the worked example the brief points at
+(`FlangerEffect.prepare`) catches the refusal into an empty block, so the
+refusal reaches nobody and the effect renders bit-exact dry. `TapeDelayEffect`
+keeps the error in `lastPrepareRefusal` for exactly that reason, and the floor
+it ships is DERIVED from the ranges (11 ms = 528 samples at 48 kHz), pinned by
+an inequality test so widening a depth range without widening the time floor
+fails loudly.
+
+⭐⭐ **The wow is a MEASURED number, not a description.** Peak pitch deviation
+is `1200·log2(1 + π·rateHz·depthMs/1000)` and does not depend on `timeMs`.
+Rendered a 1 kHz tone through the effect and recovered the instantaneous pitch
+from interpolated zero crossings:
+
+| depth / rate | predicted | measured |
+|---|---:|---:|
+| 5.0 ms @ 1.5 Hz | ±40.32 cents | +40.32 / −41.28 |
+| 2.5 ms @ 0.8 Hz (defaults) | ±10.84 cents | +10.85 / −10.92 |
+| 0 ms (control) | 0 | 0.000 |
+
+The measured asymmetry is not noise and not a defect: the pitch ratio is
+`1 - d'(t)`, so the upward peak is `1200*log2(1 + pi*f*D)` and the downward one
+is `-1200*log2(1 - pi*f*D)`, which is always slightly larger. At 5 ms / 1.5 Hz
+the closed forms are 40.318 and 41.279 — the two measured numbers, to two
+decimals. `wowCents` documents the upward peak because one number goes on the
+wire; the arithmetic for the other is in its doc comment and pinned in
+`TapeDelayParamsTests.quotedCentsFiguresAreReal`.
+
+Every `fx.add` / `fx.setParam` result — and `project.snapshot` — echoes
+`wowCents` and `flutterCents` in that insert's `params` object, so an agent can
+ask for a stated amount of wobble instead of guessing at milliseconds. ⚠️ They
+are **per-instance echoes and are NOT in `fx.describe`**, which returns schemas
+and no values; the first draft of this entry, of `server.ts`, of the skill and
+of the MCP README all said "fx.describe echoes" — copied from the flanger's
+`firstNotchHzAtSweepFloor` wording, which says the same thing and is wrong in
+the same way. Caught in review before it shipped.
+
+The flanger's pre-existing copy is **now fixed too**, and chasing it turned up a
+second, larger defect in the same prose. Searching by FIELD NAME rather than by
+phrasing found three sites, not one: `fxKindSchema` (shared by `fx_add` and
+`fx_describe`, so the wording there had to name the tool explicitly),
+`fx_describe`'s own description — where "the response echoes
+`firstNotchHzAtSweepFloor`" reads as *this* tool's response and is therefore
+false — and the `fx_describe` row of the MCP README. ⭐ **The lesson is the
+search key: "fx_describe echoes" found one of the three.**
+
+⛔⛔ **AND THE PROSE WAS SPLICED.** The entire `hallReverb` paragraph had been
+inserted INTO THE MIDDLE of the flanger's, severing it mid-sentence at "…50 Hz
+at 10 ms - and " and re-attaching the flanger's tail (`feedback` is bipolar,
+`mix: 0.5`, `stereoPhaseDeg`, through-zero) after hallReverb's `freeze`
+sentence. Every agent reading `fx_add`'s kind list got flanger law attributed to
+the reverb, and a flanger paragraph that stopped mid-clause. Repaired by moving
+the hallReverb block whole to after the flanger's closing line; verified by
+paragraph ORDER (ringMod → flanger → hallReverb → tapeDelay) and by a
+duplication count of exactly 1 on three marker phrases.
+⭐ **`effect-kind-surface.mjs` passed throughout, correctly: it asks whether a
+kind is PRESENT on a surface. Presence is not contiguity, and no gate in this
+tree reads prose for coherence.**
+
+⚠️ **THE DENORMAL PLANTS TAUGHT MORE THAN THE CODE DID.** Removing the tap
+flush reddened **nothing**; removing the record-filter flush also reddened
+nothing at first. Two separate findings. (1) The two flushes are **mutually
+redundant at the output** — the filter is the last stage before the write, so
+either one alone keeps every rendered sample clean. (2) The filter's own state
+crosses the entire subnormal band in **20 samples** at the default 6 kHz
+corner, so sampling it at 512-frame quantum boundaries misses the window
+almost always. The gate now renders at `highCutHz` 500 (a 244-sample crossing)
+in 32-frame quanta, and asserts the sampling density itself so a future reader
+cannot quietly restore a stride that cannot see anything. The tap flush stays —
+§4.1 obliges it and it costs one compare — but the code says plainly that no
+gate in this tree can see it go.
+
+Five plants, each named against the leg that caught it: frozen wow LFO → the
+cents leg (plus three others); `.linear` for `.cubicHermite` → the
+interpolation-response leg **only**, which separates the two closed forms by
+1.94 dB at 12 kHz; zero feedback → the second-echo leg; the filter moved to the
+feedback path → the first-repeat-brightness leg; both flushes removed → the
+subnormal legs. A sixth plant, added in review, is about the DOCS: putting
+`125.5 cents` back into the shipped `wowDepthMs` note reddens the new
+`paramNotesQuoteTheRealFigures` and **nothing else** — `quotedCentsFiguresAreReal`
+stays green, because it compares the arithmetic to a hand-copied LITERAL rather
+than to the sentence a user reads. That is how 125.5 and 51.1 shipped past a
+green pin in the first place. The new test formats the closed form with `%.1f`
+and asserts the note CONTAINS it, so there is no copy left to rot.
+
+Swift **8289 / 726 / zero failures** (+38, +2 suites, none retired); MCP
+**867 / 0** (+9); wire unchanged at **227**; demo specs 16 → 17; effect-kind
+surface 15 × 5 → 16 × 5; chorus **and** flanger renders byte-identical (all
+eleven files re-rendered after the review edits and compared byte-for-byte),
+chorus positive control still separating baseline from perturbed by
+2 619 028 bytes.
+
+## 2026-09-19g — The echo freezes, and the number it stops at is the whole item
+
+The delay's `feedback` ceiling moves **0.95 → 0.999** (m39-k), which is the echo
+freeze: at 0.95 each repeat loses 0.45 dB and the tail is gone in about four
+seconds; at 0.999 it loses **0.0087 dB** and simply holds. No new parameter, no
+new command, no new effect kind — one range, and the notes that make it usable.
+
+⭐⭐ **The ceiling stops one repeat short of 1.0 ON A MEASUREMENT, and the design
+document's own text was the thing it corrected.** §3.1 said a freeze "needs
+feedback at or fractionally above 1.0". Rendered, feedback 1.0 does not sit at
+the edge of stability — it **diverges without bound on anything the loop cannot
+lose**. A DC offset of 0.1 into a 10 ms delay measured **9.66 / 96.97 / 193.94 /
+290.94** after 1 / 10 / 20 / 30 s: a straight line, steps constant to three
+figures, no ceiling at all. The same input at 0.999 **settled at 94.56** against
+the predicted 1/(1−f)·0.1 = 100. So 0.999 is the largest value that still cannot
+run away, and it is a freeze by any musical measure — a 350 ms tail is **3.19 dB
+down after 110 seconds**. Filed as ERRATUM E11.
+
+⭐ **`highCutHz` was described as the thing that keeps a near-unity loop from
+ringing forever. It is not, and the false half is the safety half.** The loop
+filter is a one-pole low-pass whose gain at DC is **exactly 1 at every setting**
+— the 1.0 divergence above was measured at `highCutHz` 500, the most damped
+setting there is. What it really does up there is decide **how long the hold
+lasts**: at feedback 0.999 on a 350 ms delay, a tail was 3.19 dB down after 110 s
+at 20 kHz and **gone in about 20 s at 500 Hz**. Both parameters' `note`s now
+carry those numbers, and the `feedback` note says how to actually use a freeze —
+put the delay on a bus and pull the send to 0, because a loop that loses nothing
+adds everything it is given (sustained input builds toward 1/(1−feedback)).
+
+⚠️ **No discrete freeze button.** At the ceiling the continuous knob already
+holds, so a boolean would duplicate "feedback at maximum" while spending an
+automation slot that is append-only forever.
+
+⭐ **Existing projects are byte-identical, and that was proved by rendering one
+before and after**: a four-variant demo set rendered on the pre-change build and
+again after it, with `no-echo`, `feedback-40` and `feedback-95` hashing
+identically both times — and `freeze-999`, which clamped to 0.95 before the
+change, hashing **differently**, which is what proves the comparison could have
+caught something. A pre-change FNV-1a pin over a feedback-0.95 render now lives
+in the suite as the permanent guard.
+
+⚠️ **The demo set breaks the 1 LU house rule on purpose and says so.** The three
+on-axis variants read −32.0 / −32.1 / −27.7 LUFS. Integrated loudness is a gated
+mean: `feedback-95` is fuller than `feedback-40` (true peak 2.0 dB higher) and
+still reads 0.1 LU *quieter*, because its dying tail contributes quiet blocks;
+the freeze reads louder because its tail never gets quiet. Matching them would
+mean lowering `mix` as feedback rises, hiding the axis behind a second one.
+
+Nine new legs (`EchoFreezeTests`), five plants, each reddening a named leg —
+including the one that matters: restoring the ceiling to 1.0 makes the
+unbounded-growth leg fail with constant increments. Swift **8251 / 724 / zero
+failures** (+9, +1 suite, none retired or modified); MCP **858 / 0**; wire
+unchanged at **227**; chorus/flanger renders byte-identical, positive control
+still separating baseline from perturbed by 2 619 028 bytes.
+
+## 2026-09-19f — A reverb that has a SIZE, and the old one gets an honest label
+
+`.hallReverb` (m39-l) ships: an 8-line Feedback Delay Network with Householder
+mixing, per-line two-band absorption, a smoothly-moving pre-delay and a small
+independently-phased tail modulation. Fourteen parameters, one new effect kind,
+**zero new wire commands** — it rides `fx.add` / `fx.setParam` / `fx.describe`
+like every other built-in.
+
+⭐⭐ **The anti-metallic claim is MEASURED, not asserted.** A reverb built from
+fixed-length recirculating lines rings at a fixed set of modal frequencies, which
+the ear reports as a metallic, pitched tail. Sliding each line's length
+independently smears those modes. The instrument that sees exactly that and
+nothing else is **spectral flatness** — the geometric mean of the power spectrum
+over its arithmetic mean, which is scale-free and so cannot be fooled by a level
+change. Measured on the late tail (1.0–3.7 s of an impulse response,
+`decaySeconds: 8`, 500 Hz–6 kHz):
+
+| `modDepthMs` | spectral flatness | spectral crest | tail RMS |
+|---|---:|---:|---:|
+| 0 (modulation off) | **−29.36 dB** | 18.58 dB | 0.001406 |
+| **0.15 — the DEFAULT** | **−7.96 dB** | 16.89 dB | 0.001406 |
+| 1.0 | −2.95 dB | 14.73 dB | 0.001417 |
+
+**+21.39 dB of flatness at the shipped default**, with the tail level moving
+**0.0015 dB** — so the measure is reading ringing, not loudness. Freezing the
+LFOs reddens that leg and **nothing else in the suite**.
+
+⛔ **`.reverb` is untouched and NOT deprecated.** Not one byte of `ReverbEffect`
+changes. What it gets is honest metadata, on both surfaces that can disagree
+(`EffectParamSpec` and the MCP tool text): **`roomSize` controls how long the tail
+RINGS, not how big the space is.** It scales the feedback of eight comb filters
+whose lengths are compile-time constants, so that room has exactly one shape
+forever. Deprecating it in prose was considered and rejected — that creates a
+second-class effect agents route around while real projects still render through
+it, and Freeverb's small, bright, dense room is a genuinely good sound the hall
+does not replicate. An MCP test pins the **absence** of the word "deprecated".
+
+⭐ **Two measurements changed the design mid-build, and both are filed as errata.**
+`.cubicHermite` replaced the shared line's `.linear` default on the tank lines
+(E9): a chorus passes its line once, but each of these is re-read ~50 times a
+second, so the interpolator's loss compounds — with `.linear` the measured RT60
+fell to **0.775×** the requested value at `decaySeconds: 4` and the 8 kHz tail
+lasted **2.23 s instead of 4.70**, which made `highDecayMultiplier: 1`
+("no damping, bright") a lie. And `diffusion` became an equal-power crossfade
+rather than the allpass coefficient (E10): a Schroeder allpass at `g == 0` is a
+**pure delay**, so `diffusion: 0` was silently adding **35 ms of pre-delay no
+parameter accounted for** — measured as a first arrival at 56.6 ms where the
+closed form says 19.8 ms.
+
+⚠️ **Two plants reddened nothing on the first pass, and both were real gaps in the
+tests rather than proof the code was safe.** Removing the denormal flush from the
+recirculating tap left the whole suite green — because the leg used
+`decaySeconds: 0.5` and 3 s of silence, and at 120 dB/s the tank only reaches
+~1.2e-24 in that time, fourteen orders of magnitude above the subnormal boundary.
+At `decaySeconds: 0.1` and 5 s the same plant produces **13 225 subnormal output
+samples**. And the first Householder leg (counting arrivals in the first 150 ms)
+passed with identity mixing planted: 297 with mixing, **152 without**, against a
+threshold of 120. Late-window occupancy separates them 0.0550 vs 0.0202. Both
+legs were rewritten and both plants now redden.
+
+⭐ **Third caller, home unchanged.** `InterpolatedDelayLine` needed no
+modification for nine simultaneous instances. The chorus and flanger renders are
+**byte-identical** — all three hashes unmoved, with the built-in positive control
+still separating `baseline` from `control-perturbed` by 2 619 028 bytes.
+
+## 2026-09-19e — The flanger, and a note that argued with its own measurement
+
+`.flanger` (m39-j) — the jet-plane whoosh: the signal mixed with a copy of
+itself delayed by a few thousandths of a second, that delay sliding slowly, so
+the cancellation notches sweep the spectrum. Axis params: `rateHz`, `depthMs`,
+`delayMs`, `feedback` (bipolar), `mix`, `stereoPhaseDeg`.
+
+⭐ **It exists to prove `InterpolatedDelayLine` is a real home, and it did — the
+primitive took a FEEDBACK caller without a single byte changing.** The two things
+the flanger had to bring itself, a denormal flush and its own modulation, are
+exactly the two §4.1 said a caller would bring. A contract that correctly predicts
+its second caller was designed rather than merely extracted.
+
+⭐⭐ **The most informative result was a memory-safety one.** §6.3.2 mandates an
+upward-only sweep rather than a bipolar one. Planting the classic bug
+(`delayMs + depthMs·sin φ`) did not clamp and did not trap — it produced
+non-finite output, because `Int(negative)` walked the tap off the channel block.
+The delay line has no bounds check by design, so §6.3.2 is a **memory-safety law,
+not a sonic preference**, and that is now measured rather than asserted.
+
+⛔ **Two plants reddened NOTHING, and both were findings.** Rule 6.0.6's mandatory
+parameter smoothing could be deleted outright with the suite staying **24/24
+green** — the third time in one night that a required behaviour had no instrument
+on it. Two legs added, each verified by re-planting. And every one of the
+flanger's 26 legs survived the reassociated-tap plant: **a second caller did NOT
+buy a second check on the shared primitive.** The chorus byte gate is still the
+only thing that can see that defect class, and nobody should assume otherwise.
+
+⚠️ **The parameter note contradicted itself and then contradicted the render.**
+It stated two different figures for the same setting one sentence apart (11 dB and
+14.8 dB), and the three tokens the tests assert all sat on the correct half, so
+nothing could see it. Worse, its plain claim that negative feedback is quieter is
+**true of the arithmetic at DC and false on real material**: measured on a saw pad,
+EBU R128 integrated, `feedback -0.5` landed **1.0 LU LOUDER** than `feedback 0`.
+The comb is what you hear, not the DC term. The note now says both, and marks which
+is which. That correction exists only because the demo was rendered and measured —
+the formula and the prose agreed with each other perfectly.
+
+Swift **8209 / 722 / zero failures**; MCP **848 / 0**; wire unchanged at **227**.
+
+## 2026-09-19d — A shared delay line, and the defect no test could see
+
+`InterpolatedDelayLine` (m39-j-0) is extracted out of `ChorusEffect` into
+`Sources/DAWEngine/Effects/Primitives/`, and the chorus now runs through it —
+**bit-exactly**. Four callers were waiting on it: the flanger, tape wow/flutter,
+BBD pitch wobble, and FDN tail modulation. The home is a **delay line, not a
+modulated delay line** — no depth, no rate, no LFO — which is the whole reason
+four callers with four different modulation ranges can share it. There is nothing
+for them to disagree about.
+
+⭐⭐⭐ **The plant result is the reason this shipped as its own change.** Rewriting
+the tap as `s0 * (1 - f) + s1 * f` instead of `s0 + (s1 - s0) * fraction` is
+algebraically identical and numerically different, because Float addition is not
+associative. Planted deliberately, it left **all 15 unit tests green** and was
+caught **only** by the byte-identical chorus render: 348,140 differing bytes,
+while the dry control stayed identical — proving the change reached the chorus and
+nothing else. A known-signal test cannot see this class of defect. That is why the
+gate exists and why it must never be weakened.
+
+Every other plant hit exactly its own leg: the wrap off-by-one hit both wrap
+tests, dropping the fractional term hit both fractional-delay tests, and allowing
+`minDelaySamples = 0` hit exactly the two prepare-time refusal tests. A wrong
+cubic `c2` hit only the new degree-2 fixture — a ramp cannot pin `c2`, because a
+wrong coefficient set reproduces a ramp exactly while collapsing cubic into
+linear.
+
+⭐ **The engineer added a check nobody asked for, and it was the right one.**
+Before editing, it re-rendered the *unedited* tree and confirmed all three hashes
+reproduce. Sensitivity and reproducibility are different properties: the
+`depthMs 7.5 → 7.501` control variant proves the gate can *detect* a difference;
+only a repeat render proves a red result afterwards would have been diagnosable.
+
+⚠️ **Addendum to the frozen §4.1: the minimum-delay floor is
+interpolation-dependent — 1 sample for `linear`, 2 for `cubicHermite`.** Hermite's
+stencil reads one sample newer than the tap. The design says "1 sample" flatly, so
+the tape-delay author would declare 1 with `cubicHermite` — the pairing §4.1
+recommends to them by name — and be refused at prepare.
+
+⛔ The home carries **no denormal flushing** and must not grow any: the chorus is
+feedback-free and provably cannot generate denormals, so each feedback caller
+flushes its own state.
+
+Swift **8177 / 721 / zero failures**; MCP **837 / 0**; wire unchanged at **227**.
+
+## 2026-09-19c — The ring modulator, and a number two people got wrong
+
+`.ringMod` (m39-m) — the user asked for frequency modulation by name; this is the
+close relative that makes the sounds you recognise. It multiplies the audio by a
+tone, and every partial is replaced by a **pair** of new ones at `f − fc` and
+`f + fc`. Params: `carrierHz` (0.5…5000, logarithmic), `mix`, `waveform`,
+`inputHighCutHz`, `stereoSpreadDeg`.
+
+Measured from the rendered files, independently, with a separate decode path and
+separate code: the new partials land within **0.11 dB** of the predicted A/4
+across twelve probes, the dry term drops **−5.99…−6.03 dB** against a predicted
+−6.02, and **the carrier does not appear in the output** — its bin measures *at or
+below* the untouched control (−78.72 vs −78.19 at 200 Hz; −90.09 vs −87.00 at
+800 Hz). That absence is the entire difference between ring modulation and
+amplitude modulation, and it is measured rather than asserted.
+
+⭐⭐⭐ **Two people reasoned from the same correct principle to the same wrong
+answer, and only the measurement broke the tie.** The docs claimed in **five
+places** that a 2 Hz carrier gives *four* pulses a second — the reasoning being
+that a bipolar carrier inverts the signal twice per cycle. Reviewing it, the same
+prediction was made independently, for the same reason. Both wrong at the default
+`mix 0.5`: the output is `x·(mix·c + (1−mix))`, so the multiplier is `0.5 + 0.5c`,
+which never goes negative. Nothing rectifies; the rate is 1×. Doubling appears only
+above `mix 0.5`. Measured: the 2 Hz envelope component sits **+21.0 dB** above the
+control while 4 Hz is **−3.8 dB** — not raised at all. The real number was pinned
+with a test across mix 0.25/0.5/1.0 **before** the prose was corrected.
+
+**Two errata, both against previously-frozen text.** *E5*: the specified
+"integrated band-limited triangle" shipped as stateless **PolyBLAMP** instead — an
+integrator has state, `carrierHz` spans 13 octaves so no single leak coefficient
+serves both ends, and `carrierHz` is modulatable, so `dt` changes *while the
+integrator runs*, which on a carrier amplitude-modulates everything the effect
+touches. Worst audible-band alias at a 2917 Hz carrier: naive **−41.66 dB**,
+PolyBLAMP **−57.00 dB**. *E6*: the rule "every demo variant within 1.0 LU of the
+set median" **cannot include a no-effect control**, and two already-shipped sets
+prove it — the DJ filter's control sits **+5.85 LU** off its median. The offset is
+arithmetic, and normalising it would manufacture a confound rather than remove one.
+
+⭐ **One plant initially reddened nothing, and that was the finding.** Removing the
+denormal flush was invisible because an 8192-frame silence lets Double state reach
+1e-165, where Float32 underflows to zero either way. Shortened to 2048 frames
+checking the last 384, it caught it. A plant that fires nothing is evidence about
+the test, not about the code.
+
+⭐ **A consumer-facing gap, found and gated.** `.djFilter` had shipped invisible in
+the `sound-designer` agent's own description — the text that routes a user to the
+agent that builds insert chains — and `.bassEnhancer` and `.bitCrusher` had been
+missing from the same lists since *they* shipped. Three kinds, unnoticed.
+`scripts/gates/effect-kind-surface.mjs` now fails if a kind in the enum never
+reaches any of five complete-list surfaces, including `ProjectDocument.swift`,
+where a miss is silent data loss on save.
+
+Swift **8162 / 720 / zero failures**; MCP **837 / 0**; wire unchanged at **227**.
+
+## 2026-09-19b — One knob: the DJ filter, and which way it turns
+
+`.djFilter` (m39-i) — the club-mixer sweep, and the first creative effect built
+for this app rather than borrowed. One bipolar knob and the knob IS the effect:
+`position` −1…+1 where **0 is a bit-exact bypass**, plus `resonance`,
+`slopeDbPerOct` (12 or 24), `deadZoneWidth` (the do-nothing detent at the
+centre, so a sweep passing through hands over cleanly) and `resonanceTrack`
+(resonance only near the extremes — the isolator feel). `position` is the first
+bipolar parameter on any built-in kind. Deliberately **no `mix`**: blending a
+resonant filter with its own dry signal is comb filtering, not a gentler filter.
+
+Measured: at the sweep extreme, treble down **44.1 dB** one way, bass down
+**68.0 dB** the other; resonance adds **8.8 dB** of lift at the corner, measured
+after loudness-matching so it reads as character and not level. High resonance
+makes the whole filter quieter on purpose — the resonant section is scaled by
+`sqrt(0.707/Q)` so a Q-10 peak cannot slam the mix, costing ~11.5 dB of passband
+at `resonance: 1`. That is the protection working, and `fx.describe` says so.
+
+**The knob was turning the wrong way, and the disagreement was the useful part.**
+The frozen spec said a negative position should remove *bass*; the brief I wrote
+said the opposite. The engineer built the frozen spec and filed an erratum rather
+than treat a brief as an amendment — correct, and the reason the conflict
+surfaced at all instead of being quietly split. The spec was then the one that
+was wrong: this effect is defined by imitating a hardware control, and on a
+Pioneer DJM the filter knob is low-pass to the left, high-pass to the right. An
+imitation that inverts what it imitates is wrong by its own definition, so the
+direction was reversed.
+
+⚠️ **Reversed now, deliberately, because it was a one-way door.** `position` is
+persisted in project files and is automation slot 0. The first project saved with
+a non-zero position, or one automation lane drawn on that slot, turns a four-line
+sign change into a migration that silently re-voices existing work.
+
+⭐ **The reversal found a real bug the tests could not have.** The DSP re-derived
+`position < 0` itself instead of calling the law in `DAWCore` — in a file whose
+own header claims that rule has one home. With the law flipped and the copy not,
+the filter was handed a low-pass corner and told to run a high-pass: it measured
+nearly **flat at its own corner**. A "one home" comment is a claim, not a
+mechanism.
+
+⭐ **And a test that could not fail was made able to.** The per-sample parameter
+smoothing — the thing that earns `position` and `resonance` their modulation
+verdicts — had no gate: all 25 original legs passed with the interpolation
+deleted outright. Two legs were added and *verified by planting that deletion*.
+The reversal then moved one leg's settling window (the sweep now starts at a
+20 Hz high-pass, which settles over thousands of samples where a 20 kHz low-pass
+settles at once), so its claim was restated rather than its bound loosened: the
+residual must **decay** (8.5e-3 → 9.3e-4 → 1.7e-6) against an uncompensated
+0.475. Under the planted deletion it is 0.419 at *every* window — a staircase
+cannot be shifted onto another staircase, which makes the decay positive evidence
+where a bare threshold was only a number.
+
+Two hand-maintained mirrors the compiler does not enforce were found and pinned:
+`ProjectDocument`'s hand-written `EffectDescriptor` copy (parameters silently
+dropped on save without it) and `MixerStripView.addableEffectKinds` (the kind
+invisible in the "+" menu without it).
+
+Swift **8123 / 719 / zero failures**; MCP **826 / 0**; wire unchanged at **227**.
+
+## 2026-09-19 — Sounds that move: a modulation layer, and the day it shipped doing nothing
+
+LFOs, step sequencers, envelope followers and macros, routed to volume, pan,
+effect parameters and — new with m39-b — **instrument** parameters. Nine `mod.*`
+commands, mirrored as nine MCP tools (223 → **232**; wire unchanged at **227**,
+`doc-count-drift` exit 0 with both routes agreeing). This is what makes a filter
+sweep, a tremolo, an auto-pan and a trance gate possible, none of which any
+amount of parameter-setting could produce, because they are all one thing:
+a value that changes while the music plays.
+
+**It shipped inert, and the honest version of that is worth more than the
+feature.** An LFO routed to `.volume` or `.pan` changed the rendered audio by
+nothing at all — **live and offline** — while 24 engine tests passed. A trance
+gate at four different rates rendered four **byte-identical** files.
+
+The mechanism. A strip whose only automation is a modulation *route* still needs
+a schedule — not for its points, it has none, but for its **anchor**, which is
+how the render side learns the transport position. `applyParameters` built and
+published that anchor correctly. Then roll start destroyed it: `startAllPlayers`
+rebuilt every strip's schedule from a record that carried lanes but not the
+anchor requirement, decided a lanes-free strip needed no schedule, and published
+`nil` over the anchor that had just been set up. `applyParameters` could not
+recover, because it consulted the anchor requirement **only** in the branch
+guarded by "nothing published yet" — which the wipe had just falsified. A dead
+state no later pass could escape. With no anchor the render path takes
+`applyModulationWithoutSchedule`, where position-dependent sources hold neutral
+by design, so every LFO sat perfectly still. **A still LFO multiplies by exactly
+1**, which is why the result was not wrong but identical — and identical is the
+one failure a loudness check cannot see.
+
+⭐ **Why the tests were green.** Every one of the 24 published a hand-built
+snapshot *straight to the renderer* and asserted on what the stage did with it.
+The stage was always correct. The defect was one step earlier, in the delivery,
+in a function no test called. **A hand-published snapshot tests the stage, not
+the publication.** And the obvious regression test does not work either: a test
+that calls `applyParameters` and checks the schedule passes both before and
+after the fix, because that pass was never the problem. The gate had to go
+through a **real render**, the only path that reaches roll start.
+
+**The fix is in two independent places**, either of which alone would have
+caught it: the anchor requirement now rides in the lane bookkeeping, so all
+three publish sites read one truth, and it is part of the change detection, so
+the dead state cannot form. The `= false` default was **removed** from
+`publishAutomation`, `buildRollSchedule` and `publishMasterAutomation` —
+both wipe sites were call sites that simply omitted the argument, and a default
+is what let them. Every call site must now state it, including the next one
+anyone adds.
+
+Verified by reverting: the new test fails on the original code and passes on the
+fixed one; 48,760 differing samples, RMS 0.354 → 0.250. Full suite **8090 tests
+/ 718 suites / zero failures**. Routeless tracks are untouched — the byte-identity
+claim holds, pinned by an assertion that a modulation *source* with no route
+still renders bit-identically.
+
+⭐ **What actually caught it was the demo harness**, which refuses to hand over a
+set of variants when two of them come back byte-identical — it asks whether the
+axis you claim to vary changed the audio, which no unit test in this tree asks.
+It fired twice the same night: once on 15 synth parameters being silently
+dropped before the renderer, once on this.
+
+⛔ **Known, filed, not yet fixed: master-strip modulation never reaches a bounce**
+(m39-e-2). `masterModulationSources`/`Routes` are only ever set on the live
+graph; `OfflineRenderer` builds its own and is never given them, so a macro on
+the master fader moves while you play and is absent from every export. Track
+modulation is unaffected — it rides inside `Track`, which *is* passed to the
+renderer.
+
 ## 2026-09-06 — The mixer gets its Ø: polarity invert on the gain insert
 
 `GainParams.invertPolarity` (m38-a). A boolean, default `false`, appended at

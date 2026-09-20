@@ -1,0 +1,547 @@
+{
+  "set": "dj-filter-sweep",
+  "description": "m39-i, the .djFilter insert \u2014 THE PRIMARY DEMO, and the ONE AXIS IS `resonance`. Every variant plays the identical sustained saw-pad chord through the identical automated sweep: `position` runs from -0.8 (a low-pass down at ~56 Hz, so it opens MUFFLED) continuously through 0 (the bit-exact bypass, at bar 5) to +0.8 (a high-pass up at ~7 kHz, so it closes THIN) over 8 bars. Only the resonance differs: 0.0, 0.3, 0.6, 0.9.\n\nWHAT YOU ARE BEING ASKED: which sweep has the right amount of WHISTLE? At 0.0 the filter is a clean Butterworth with no peak at all \u2014 the band just leaves, politely. As resonance climbs, a tone grows that rides along just above the moving cutoff: a hollow ring at 0.3, a clear singing edge at 0.6, and at 0.9 a whistle on the verge of taking off by itself. That whistle is the whole reason this is a new effect rather than an EQ sweep \u2014 the built-in EQ's filters are Butterworth with no Q, so 0.0 is very close to what the DAW could already do and everything above it is new.\n\n\u26a0\ufe0f LOUDNESS-MATCHED ON PURPOSE (creative-effects design \u00a79.3), and the numbers are worth knowing before you judge. Raising resonance makes this filter QUIETER: the resonant section is scaled by sqrt(0.707/Q) so a Q-10 peak cannot slam the mix, which costs about 11.5 dB of passband at full resonance. Measured uncompensated, the four variants landed at -17.5 / -21.5 / -22.5 / -22.9 LUFS \u2014 a 5.4 LU spread that a listener would reliably hear as 'the first one is best' for entirely the wrong reason. Each variant therefore carries a plain `gain` insert AFTER the filter, trimming it to the set's median of -22.0 LUFS, so what differs between these four files is CHARACTER and nothing else. The trims are 0.0: x0.5957, 0.3: x0.9441, 0.6: x1.0593, 0.9: x1.1092.\n\nWHAT WOULD MAKE THIS INAUDIBLE: very little \u2014 the sweep itself is dramatic on any system. But the DIFFERENCE between 0.6 and 0.9 is a narrow resonant tone, and on a phone speaker that cannot reproduce the low half of the sweep you may hear the four as nearly identical during the closed section. Headphones or speakers, and listen around bars 6-8 as the high-pass closes in. ERRATA E4, RULED 2026-09-19: the knob direction was reversed to match the hardware (low-pass LEFT, high-pass RIGHT). The sweep crosses BOTH sides either way, so the rendered resonance axis is unaffected \u2014 only which end is named 'muffled' and which 'thin' moved.",
+  "variants": [
+    {
+      "name": "resonance-0.0",
+      "axis": "resonance 0.0 \u2014 Butterworth, NO peak at all. The control: this is what the shipped EQ could already do.",
+      "render": {
+        "durationSeconds": 17
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pad",
+            "kind": "instrument"
+          },
+          "as": "pad"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pad",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.02,
+            "decay": 0.4,
+            "sustain": 0.85,
+            "release": 0.6,
+            "cutoffHz": 16000,
+            "resonance": 0.08,
+            "gain": 0.7,
+            "unisonVoices": 6,
+            "unisonDetuneCents": 14,
+            "unisonStereoSpread": 0.7,
+            "subLevel": 0.35,
+            "subOctave": -1,
+            "subWaveform": "sine"
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$pad",
+            "kind": "djFilter",
+            "params": {
+              "position": 0,
+              "resonance": 0.0,
+              "slopeDbPerOct": 24,
+              "deadZoneWidth": 0.04,
+              "resonanceTrack": 0
+            }
+          },
+          "as": "filter"
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$pad",
+            "kind": "gain",
+            "params": {
+              "gainLinear": 0.5957
+            }
+          },
+          "as": "trim"
+        },
+        {
+          "command": "automation.addLane",
+          "params": {
+            "trackId": "$pad",
+            "target": "effectParam",
+            "effectId": "$filter",
+            "paramName": "position"
+          },
+          "as": "lane"
+        },
+        {
+          "command": "automation.setPoints",
+          "params": {
+            "trackId": "$pad",
+            "laneId": "$lane",
+            "points": [
+              {
+                "beat": 0,
+                "value": -0.8
+              },
+              {
+                "beat": 32,
+                "value": 0.8
+              }
+            ]
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pad",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 36,
+                "startBeat": 0,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 48,
+                "startBeat": 0,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 55,
+                "startBeat": 0,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 60,
+                "startBeat": 0,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 64,
+                "startBeat": 0,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 67,
+                "startBeat": 0,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 72,
+                "startBeat": 0,
+                "lengthBeats": 32
+              }
+            ]
+          }
+        }
+      ],
+      "role": "control"
+    },
+    {
+      "name": "resonance-0.3",
+      "axis": "resonance 0.3 (Q 3.5) \u2014 a hollow ring follows the cutoff",
+      "render": {
+        "durationSeconds": 17
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pad",
+            "kind": "instrument"
+          },
+          "as": "pad"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pad",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.02,
+            "decay": 0.4,
+            "sustain": 0.85,
+            "release": 0.6,
+            "cutoffHz": 16000,
+            "resonance": 0.08,
+            "gain": 0.7,
+            "unisonVoices": 6,
+            "unisonDetuneCents": 14,
+            "unisonStereoSpread": 0.7,
+            "subLevel": 0.35,
+            "subOctave": -1,
+            "subWaveform": "sine"
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$pad",
+            "kind": "djFilter",
+            "params": {
+              "position": 0,
+              "resonance": 0.3,
+              "slopeDbPerOct": 24,
+              "deadZoneWidth": 0.04,
+              "resonanceTrack": 0
+            }
+          },
+          "as": "filter"
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$pad",
+            "kind": "gain",
+            "params": {
+              "gainLinear": 0.9441
+            }
+          },
+          "as": "trim"
+        },
+        {
+          "command": "automation.addLane",
+          "params": {
+            "trackId": "$pad",
+            "target": "effectParam",
+            "effectId": "$filter",
+            "paramName": "position"
+          },
+          "as": "lane"
+        },
+        {
+          "command": "automation.setPoints",
+          "params": {
+            "trackId": "$pad",
+            "laneId": "$lane",
+            "points": [
+              {
+                "beat": 0,
+                "value": -0.8
+              },
+              {
+                "beat": 32,
+                "value": 0.8
+              }
+            ]
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pad",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 36,
+                "startBeat": 0,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 48,
+                "startBeat": 0,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 55,
+                "startBeat": 0,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 60,
+                "startBeat": 0,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 64,
+                "startBeat": 0,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 67,
+                "startBeat": 0,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 72,
+                "startBeat": 0,
+                "lengthBeats": 32
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "resonance-0.6",
+      "axis": "resonance 0.6 (Q 6.3) \u2014 a clear singing edge",
+      "render": {
+        "durationSeconds": 17
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pad",
+            "kind": "instrument"
+          },
+          "as": "pad"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pad",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.02,
+            "decay": 0.4,
+            "sustain": 0.85,
+            "release": 0.6,
+            "cutoffHz": 16000,
+            "resonance": 0.08,
+            "gain": 0.7,
+            "unisonVoices": 6,
+            "unisonDetuneCents": 14,
+            "unisonStereoSpread": 0.7,
+            "subLevel": 0.35,
+            "subOctave": -1,
+            "subWaveform": "sine"
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$pad",
+            "kind": "djFilter",
+            "params": {
+              "position": 0,
+              "resonance": 0.6,
+              "slopeDbPerOct": 24,
+              "deadZoneWidth": 0.04,
+              "resonanceTrack": 0
+            }
+          },
+          "as": "filter"
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$pad",
+            "kind": "gain",
+            "params": {
+              "gainLinear": 1.0593
+            }
+          },
+          "as": "trim"
+        },
+        {
+          "command": "automation.addLane",
+          "params": {
+            "trackId": "$pad",
+            "target": "effectParam",
+            "effectId": "$filter",
+            "paramName": "position"
+          },
+          "as": "lane"
+        },
+        {
+          "command": "automation.setPoints",
+          "params": {
+            "trackId": "$pad",
+            "laneId": "$lane",
+            "points": [
+              {
+                "beat": 0,
+                "value": -0.8
+              },
+              {
+                "beat": 32,
+                "value": 0.8
+              }
+            ]
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pad",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 36,
+                "startBeat": 0,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 48,
+                "startBeat": 0,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 55,
+                "startBeat": 0,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 60,
+                "startBeat": 0,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 64,
+                "startBeat": 0,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 67,
+                "startBeat": 0,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 72,
+                "startBeat": 0,
+                "lengthBeats": 32
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "resonance-0.9",
+      "axis": "resonance 0.9 (Q 9.1) \u2014 a whistle on the verge of self-oscillation",
+      "render": {
+        "durationSeconds": 17
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pad",
+            "kind": "instrument"
+          },
+          "as": "pad"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pad",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.02,
+            "decay": 0.4,
+            "sustain": 0.85,
+            "release": 0.6,
+            "cutoffHz": 16000,
+            "resonance": 0.08,
+            "gain": 0.7,
+            "unisonVoices": 6,
+            "unisonDetuneCents": 14,
+            "unisonStereoSpread": 0.7,
+            "subLevel": 0.35,
+            "subOctave": -1,
+            "subWaveform": "sine"
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$pad",
+            "kind": "djFilter",
+            "params": {
+              "position": 0,
+              "resonance": 0.9,
+              "slopeDbPerOct": 24,
+              "deadZoneWidth": 0.04,
+              "resonanceTrack": 0
+            }
+          },
+          "as": "filter"
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$pad",
+            "kind": "gain",
+            "params": {
+              "gainLinear": 1.1092
+            }
+          },
+          "as": "trim"
+        },
+        {
+          "command": "automation.addLane",
+          "params": {
+            "trackId": "$pad",
+            "target": "effectParam",
+            "effectId": "$filter",
+            "paramName": "position"
+          },
+          "as": "lane"
+        },
+        {
+          "command": "automation.setPoints",
+          "params": {
+            "trackId": "$pad",
+            "laneId": "$lane",
+            "points": [
+              {
+                "beat": 0,
+                "value": -0.8
+              },
+              {
+                "beat": 32,
+                "value": 0.8
+              }
+            ]
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pad",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 36,
+                "startBeat": 0,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 48,
+                "startBeat": 0,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 55,
+                "startBeat": 0,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 60,
+                "startBeat": 0,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 64,
+                "startBeat": 0,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 67,
+                "startBeat": 0,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 72,
+                "startBeat": 0,
+                "lengthBeats": 32
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

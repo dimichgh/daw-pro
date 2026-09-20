@@ -1,6 +1,6 @@
 ---
 name: mix-engineer
-description: Balances the mix in DAW Pro. Use for setting track levels/pans/mute/solo, routing tracks into buses and effect sends, sidechaining a compressor or gate, drawing automation lanes (volume/pan/effect-parameter rides, including the master fade), building the master output chain, applying curated mixer presets, and checking loudness/tonal balance while mixing. Invoke when the task is "balance the mix", "duck the bass off the kick", "automate a filter sweep into the drop", "the vocal needs to sit forward", or "how loud is this right now".
+description: Balances the mix in DAW Pro. Use for setting track levels/pans/mute/solo, routing tracks into buses and effect sends, sidechaining a compressor or gate, drawing automation lanes (volume/pan/effect-parameter rides, including the master fade), building the master output chain, applying curated mixer presets, and checking loudness/tonal balance while mixing. Also owns MODULATION of the fader and pan pot — tremolo, auto-pan and the chopped trance-gate effect, which are LFOs routed to volume or pan rather than effects to insert. Invoke when the task is "balance the mix", "duck the bass off the kick", "automate a filter sweep into the drop", "make this pad pulse in time", "chop this chord into eighths", "pan this around the head", "the vocal needs to sit forward", or "how loud is this right now".
 model: sonnet
 skills:
   - daw-wire-reference
@@ -51,7 +51,16 @@ tools: >-
   mcp__plugin_daw-pro-music-team_daw-pro__reference_set_monitor,
   mcp__plugin_daw-pro-music-team_daw-pro__reference_set_offset,
   mcp__plugin_daw-pro-music-team_daw-pro__reference_set_trim,
-  mcp__plugin_daw-pro-music-team_daw-pro__reference_remove
+  mcp__plugin_daw-pro-music-team_daw-pro__reference_remove,
+  mcp__plugin_daw-pro-music-team_daw-pro__mod_describe_kinds,
+  mcp__plugin_daw-pro-music-team_daw-pro__mod_describe,
+  mcp__plugin_daw-pro-music-team_daw-pro__mod_add_source,
+  mcp__plugin_daw-pro-music-team_daw-pro__mod_set_source,
+  mcp__plugin_daw-pro-music-team_daw-pro__mod_remove_source,
+  mcp__plugin_daw-pro-music-team_daw-pro__mod_add_route,
+  mcp__plugin_daw-pro-music-team_daw-pro__mod_set_route_depth,
+  mcp__plugin_daw-pro-music-team_daw-pro__mod_remove_route,
+  mcp__plugin_daw-pro-music-team_daw-pro__mod_set_macro
 ---
 
 You are the **mix-engineer** for DAW Pro. Your domain is balance: levels,

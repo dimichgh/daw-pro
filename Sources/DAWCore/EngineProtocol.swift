@@ -178,6 +178,176 @@ public enum HostedAUParameterError: Error, Sendable, Equatable, LocalizedError {
     }
 }
 
+/// One preset of a hosted Audio Unit exactly as the unit publishes it
+/// (au.listPresets / au.loadPreset, m23-cw). `number` is
+/// `AUAudioUnitPreset.number`; Apple's contract (AUAudioUnit.h,
+/// `saveUserPreset:error:`) is that FACTORY preset numbers are >= 0 and USER
+/// preset numbers are < 0. Numbers are per-COMPONENT identity in the same
+/// spirit as parameter addresses — take them from a live `au.listPresets`,
+/// never guess one, never carry one across components.
+public struct HostedAUPresetInfo: Sendable, Equatable, Codable {
+    public var number: Int
+    public var name: String
+
+    public init(number: Int, name: String) {
+        self.number = number
+        self.name = name
+    }
+}
+
+/// Which list the AU's CURRENT preset was found in (m23-cw).
+///
+/// `.unlisted` is not a defect — it is the honest and COMMON answer, and two
+/// MEASURED cases produce it on this machine:
+///   1. A unit that was never put on a numbered preset reads `-1 / "Untitled"`
+///      (every preset-less Apple built-in: AUDelay, AULowpass, …). -1 is a
+///      NEGATIVE number, so Apple's "user presets are < 0" rule would call it
+///      a user preset — it is not; `userPresets` is empty.
+///   2. After a `fullStateForDocument` save/restore round trip, a unit that
+///      was on factory preset 8 "Cathedral" comes back reporting
+///      `-1 / "Cathedral"`: the parameter values are restored EXACTLY, but the
+///      unit no longer claims to be sitting on a numbered preset.
+/// So `.unlisted` means "these values came from somewhere the preset lists
+/// cannot name", which is exactly what a caller needs to know. We classify by
+/// NUMBER against the live lists and never back-match by name — Apple's header
+/// is explicit that `currentPreset` "does not reflect whether parameters may
+/// have been modified since the preset was selected", so a name match would be
+/// a guess dressed as a fact.
+public enum HostedAUPresetSource: String, Sendable, Equatable, Codable {
+    /// The number appears in the unit's `factoryPresets`.
+    case factory
+    /// The number appears in the unit's `userPresets`.
+    case user
+    /// The number is in neither list — see the cases above.
+    case unlisted
+}
+
+/// The AU's `currentPreset`, plus the classification above (m23-cw). nil ⇔ the
+/// unit reports no current preset at all.
+public struct HostedAUCurrentPreset: Sendable, Equatable, Codable {
+    public var number: Int
+    public var name: String
+    public var source: HostedAUPresetSource
+
+    public init(number: Int, name: String, source: HostedAUPresetSource) {
+        self.number = number
+        self.name = name
+        self.source = source
+    }
+}
+
+/// Everything one hosted AU can say about its own presets (m23-cw).
+///
+/// A unit with NO presets answers with empty arrays and
+/// `hasFactoryPresets: false` — SUCCESS, never an error. That mirrors
+/// `HostedAUParameterPage.hasParameterTree`: a plugin that publishes nothing
+/// is a healthy host, not a failure. MEASURED here: 15 of Apple's 23 built-in
+/// `aufx` units return a nil `factoryPresets`, so this is the majority path,
+/// not an edge case.
+public struct HostedAUPresetList: Sendable, Equatable, Codable {
+    /// false ⇔ `factoryPresets` was nil (the unit publishes no factory list at
+    /// all), as opposed to publishing an empty one. `factoryPresets` is `[]`
+    /// either way — this flag is the only place the distinction survives.
+    public var hasFactoryPresets: Bool
+    /// `AUAudioUnit.supportsUserPresets`. MEASURED: false for all 23 Apple
+    /// built-in effects (the v2 bridge implements no user-preset store), so a
+    /// `true` here means a v3 unit with its own store.
+    public var supportsUserPresets: Bool
+    /// Factory presets in the unit's own published order (numbers >= 0).
+    public var factoryPresets: [HostedAUPresetInfo]
+    /// User presets in the unit's own published order (numbers < 0).
+    public var userPresets: [HostedAUPresetInfo]
+    /// What the unit currently reports, classified — nil when it reports none.
+    public var currentPreset: HostedAUCurrentPreset?
+
+    public init(hasFactoryPresets: Bool, supportsUserPresets: Bool,
+                factoryPresets: [HostedAUPresetInfo],
+                userPresets: [HostedAUPresetInfo],
+                currentPreset: HostedAUCurrentPreset?) {
+        self.hasFactoryPresets = hasFactoryPresets
+        self.supportsUserPresets = supportsUserPresets
+        self.factoryPresets = factoryPresets
+        self.userPresets = userPresets
+        self.currentPreset = currentPreset
+    }
+}
+
+/// How `au.loadPreset` names the preset to load (m23-cw). Exactly one of the
+/// two reaches the engine; the wire rejects both-or-neither.
+public enum HostedAUPresetSelector: Sendable, Equatable {
+    /// By `AUAudioUnitPreset.number` — the canonical, unambiguous form.
+    case number(Int)
+    /// By display name. AMBIGUITY RULE: an exact, case-SENSITIVE match wins
+    /// outright (factory list searched before user list). Only if no exact
+    /// match exists is a case-INSENSITIVE pass tried. At either stage, more
+    /// than one match refuses with `.ambiguousPresetName` naming the candidate
+    /// numbers rather than silently picking one — a plugin is free to ship two
+    /// presets called "Default".
+    case name(String)
+}
+
+/// Engine-side failures of the hosted-AU preset surface (m23-cw), worded as
+/// teaching messages the wire surfaces verbatim — the
+/// `HostedAUParameterError` precedent. `noHostedAU` normally never reaches the
+/// wire: `ProjectStore` maps it to the status-naming error.
+public enum HostedAUPresetError: Error, Sendable, Equatable, LocalizedError {
+    /// No `.ready` hosted instance for the target.
+    case noHostedAU
+    /// A LOAD against a unit with no factory and no user presets. (The LIST
+    /// side answers such a unit with empty arrays and success.)
+    case noPresets
+    /// The number names no preset in either live list. Carries the numbers the
+    /// unit actually has, so the caller can retry without a second round trip.
+    case unknownPresetNumber(Int, available: [Int])
+    /// The name matched nothing, exactly or case-insensitively.
+    case unknownPresetName(String, available: [String])
+    /// The name matched more than one preset — refuse, never guess.
+    case ambiguousPresetName(String, numbers: [Int])
+    /// A user preset (number < 0) on a unit whose `supportsUserPresets` is
+    /// false. Apple: assigning one "may result in incorrect behavior".
+    case userPresetsUnsupported(Int)
+    /// THE SILENT-NO-OP GUARD. MEASURED on AUMatrixReverb: assigning a
+    /// `currentPreset` the unit does not recognise changes NOTHING and raises
+    /// NOTHING — `currentPreset` keeps its previous value and every parameter
+    /// holds. A host that trusted the setter would report a load that never
+    /// happened. So every load re-READS `currentPreset` afterwards and refuses
+    /// here when the number did not move. Compared by NUMBER only: MEASURED
+    /// that the unit REWRITES the name (assigning number 6 with the name
+    /// "JUNK NAME NOT THE REAL ONE" read back as "Medium Chamber"), which is
+    /// also why the wire echoes the read-back rather than the request.
+    case presetDidNotTake(requested: HostedAUPresetInfo, observed: String)
+
+    /// At most this many numbers/names are listed in a refusal — AUDistortion
+    /// ships 22 presets and a wall of them buries the instruction.
+    private static let maxListed = 12
+
+    private static func brief(_ items: [String]) -> String {
+        guard !items.isEmpty else { return "none" }
+        if items.count <= maxListed { return items.joined(separator: ", ") }
+        return items.prefix(maxListed).joined(separator: ", ")
+            + ", … (\(items.count) total)"
+    }
+
+    public var errorDescription: String? {
+        switch self {
+        case .noHostedAU:
+            return "no hosted Audio Unit is ready for that target"
+        case .noPresets:
+            return "this Audio Unit publishes no presets (no factory presets, no user presets) — set its parameters directly with au.describeParams/au.setParam, or open its own window with plugin.openUI"
+        case .unknownPresetNumber(let number, let available):
+            return "no preset numbered \(number) on this Audio Unit — it publishes \(Self.brief(available.map(String.init))); call au.listPresets for names"
+        case .unknownPresetName(let name, let available):
+            return "no preset named '\(name)' on this Audio Unit — it publishes \(Self.brief(available.map { "'\($0)'" })); call au.listPresets for the full list"
+        case .ambiguousPresetName(let name, let numbers):
+            return "'\(name)' names \(numbers.count) different presets on this Audio Unit (numbers \(numbers.map(String.init).joined(separator: ", "))) — pass presetNumber to choose one"
+        case .userPresetsUnsupported(let number):
+            return "preset \(number) is a user preset and this Audio Unit reports supportsUserPresets:false — loading it could corrupt the unit's state, so it is refused; its factory presets (number >= 0) still load"
+        case .presetDidNotTake(let requested, let observed):
+            return "the Audio Unit silently refused preset \(requested.number) '\(requested.name)' — it still reports \(observed), and nothing was changed"
+        }
+    }
+}
+
 /// Render state of one audio clip's offline stretch render (M5 ii-d), as the
 /// engine reports it at snapshot-build time (pull-based — never persisted).
 /// `.rendering` = the clip is scheduled as SILENCE until the render lands
@@ -623,6 +793,12 @@ public protocol AudioEngineControlling: AnyObject {
     /// like the master chain.
     func masterAutomationChanged(_ lanes: [AutomationLane])
 
+    /// MASTER modulation changed (m39-e) — the `masterAutomationChanged` twin.
+    /// Push the strip to the graph and run one parameter pass, which is where
+    /// the modulation snapshot is rebuilt and published. Pushed on every master
+    /// modulation mutation AND every undo/redo/project-boundary restore.
+    func masterModulationChanged(sources: [ModulationSource], routes: [ModulationRoute])
+
     /// Bounce the given project state to a WAV file, offline (no hardware).
     /// Async so hosted Audio Unit instruments can be instantiated/prepared for
     /// the offline graph first; the render itself still stalls the main actor
@@ -871,6 +1047,36 @@ public protocol AudioEngineControlling: AnyObject {
     @discardableResult
     func setHostedAUParameter(_ target: HostedAUTarget, address: String,
                               value: Double) throws -> HostedAUParameterInfo
+
+    /// Everything a hosted Audio Unit says about its own presets
+    /// (au.listPresets, m23-cw): factory list, user list, user-preset support,
+    /// and the classified `currentPreset`. nil ⇒ no `.ready` instance for the
+    /// target (the store maps that to the status-naming teaching error); a
+    /// healthy AU with NO presets is SUCCESS — empty arrays and
+    /// `hasFactoryPresets: false`, the `hasParameterTree: false` precedent.
+    /// Control-plane only — the render thread is never involved.
+    func listHostedAUPresets(_ target: HostedAUTarget) throws -> HostedAUPresetList?
+
+    /// Load one of the AU's OWN presets, live (au.loadPreset, m23-cw).
+    ///
+    /// Deliberately mutates ONLY the live `AUAudioUnit` held by the engine's
+    /// registry — it never writes `stateData` into the model. m23-bx-1's root
+    /// cause (eight cycles) was exactly that split: a hosted plug-in's live
+    /// state lives in `AUHostRegistry`, and a model write would both go stale
+    /// and change the registry's prepare identity, forcing a re-instantiate
+    /// that discards the preset it was trying to save. Save/render/bounce pick
+    /// the new state up through `ProjectStore.tracksWithLiveAudioUnitState()`'s
+    /// existing `fullStateForDocument` capture — MEASURED to change after a
+    /// load, so this composes rather than bypasses.
+    ///
+    /// Returns the preset ACTUALLY in effect afterwards (a re-read, not the
+    /// request). Throws `HostedAUPresetError` for every refusal — including
+    /// `.presetDidNotTake` when the unit accepted the assignment and did
+    /// nothing, which is MEASURED behaviour, not a theoretical guard.
+    @discardableResult
+    func loadHostedAUPreset(_ target: HostedAUTarget,
+                            selector: HostedAUPresetSelector) throws
+        -> HostedAUCurrentPreset
 
     /// Current microphone permission as the OS reports it.
     var recordPermission: RecordPermission { get }
@@ -1453,6 +1659,13 @@ extension AudioEngineControlling {
     /// conformers compile unchanged.
     public func masterAutomationChanged(_ lanes: [AutomationLane]) {}
 
+    /// Master modulation is optional capability (m39-e, the
+    /// `masterAutomationChanged` precedent): fakes and headless engines have no
+    /// master strip to modulate, so the default is a no-op and existing
+    /// conformers compile unchanged.
+    public func masterModulationChanged(sources: [ModulationSource],
+                                        routes: [ModulationRoute]) {}
+
     /// Engine notices are optional capability (m15-e): engines without
     /// schedule-time degradation reporting (fakes, headless) discard the
     /// installed handler, so existing conformers compile unchanged.
@@ -1590,6 +1803,18 @@ extension AudioEngineControlling {
     public func setHostedAUParameter(_ target: HostedAUTarget, address: String,
                                      value: Double) throws -> HostedAUParameterInfo {
         throw HostedAUParameterError.noHostedAU
+    }
+
+    /// The hosted-AU PRESET surface is optional capability too (m23-cw): an
+    /// engine without AU hosting reports no hosted instance, so every existing
+    /// conformer — the app's real engine aside — compiles unchanged.
+    public func listHostedAUPresets(_ target: HostedAUTarget) throws
+        -> HostedAUPresetList? { nil }
+    @discardableResult
+    public func loadHostedAUPreset(_ target: HostedAUTarget,
+                                   selector: HostedAUPresetSelector) throws
+        -> HostedAUCurrentPreset {
+        throw HostedAUPresetError.noHostedAU
     }
 
     /// Default: audio-only engines forward audio takes to the legacy

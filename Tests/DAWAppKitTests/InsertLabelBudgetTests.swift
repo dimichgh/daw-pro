@@ -84,14 +84,44 @@ struct InsertLabelBudgetTests {
 
     /// The sweep above passes vacuously if the vocabulary is empty or the budget
     /// is enormous. This states what it is actually holding back.
-    @Test("The sweep is not vacuous: eleven names, and the widest is Bass Enhancer")
+    // ⚠️ TITLE DELIBERATELY CARRIES NO COUNT (m39-n). It said "thirteen names"
+    // while the assertion below read 15 — the title had rotted through two
+    // kinds because nothing compares a test's NAME to its own expectation. The
+    // count lives in the `#expect`, which is the thing that can actually fail.
+    @Test("The sweep is not vacuous: every built-in name is swept, and the widest is Bass Enhancer")
     func sweepIsNotVacuous() {
-        // 11 since m32-e added `bitCrusher`. This count is the whole point of
-        // the test — it is what makes the sweep above non-vacuous, and it fired
-        // exactly as its doc comment promised ("the eleventh built-in effect
-        // somebody adds") the moment the kind landed. Bump it deliberately,
-        // having checked the new name against the budget, never to quiet a red.
-        #expect(builtInKinds.count == 11)
+        // 11 since m32-e added `bitCrusher`, 12 since m39-i added `djFilter`,
+        // 13 since m39-m added `ringMod`.
+        // This count is the whole point of the test — it is what makes the
+        // sweep above non-vacuous, and it has now fired exactly as its doc
+        // comment promised TWICE, on the eleventh and twelfth built-ins, the
+        // moment each kind landed. Bump it deliberately, having checked the new
+        // name against the budget, never to quiet a red. ⭐ CHECKED for m39-i:
+        // "DJ Filter" is nine characters against "Bass Enhancer"'s thirteen, so
+        // the widest name is unmoved and the budget sweep above still passes on
+        // its own rather than because the new name happened to be short.
+        // ⭐ CHECKED for m39-m: "Ring Mod" is eight characters against "Bass
+        // Enhancer"'s thirteen, so the widest name is unmoved and the budget
+        // sweep above still passes on its own rather than because the new name
+        // happened to be short.
+        // ⭐ CHECKED for m39-j: "Flanger" is seven characters against "Bass
+        // Enhancer"'s thirteen, so the widest name is unmoved and the budget
+        // sweep above still passes on its own rather than because the new name
+        // happened to be short.
+        // ⭐ CHECKED for m39-l: "Hall Reverb" is eleven characters against "Bass
+        // Enhancer"'s thirteen, so the widest name is unmoved and the budget
+        // sweep above still passes on its own rather than because the new name
+        // happened to be short.
+        // ⭐ CHECKED for m39-n: "Tape Delay" is ten characters against "Bass
+        // Enhancer"'s thirteen, so the widest name is unmoved and the budget
+        // sweep above still passes on its own rather than because the new name
+        // happened to be short.
+        // ⭐ CHECKED for m23-dj: "Stereo Width" is twelve characters against
+        // "Bass Enhancer"'s thirteen — the CLOSEST any new name has come, and
+        // it still does not displace it, so the budget sweep above still
+        // passes on its own rather than because the new name happened to be
+        // short.
+        #expect(builtInKinds.count == 17)
         let widest = builtInKinds
             .map { MixerFormat.effectDisplayName(EffectDescriptor(kind: $0)) }
             .max { width($0) < width($1) }

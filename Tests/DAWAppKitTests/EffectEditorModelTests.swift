@@ -76,6 +76,14 @@ struct EffectEditorModelTests {
             #expect(model.specs.map(\.name) == EffectParamSpec.specs(for: kind).map(\.name),
                     "\(kind) rows must be the fx.describe schema, in schema order")
         }
+        // ⚠️ EACH SWEEP INSERT IS REMOVED AGAIN, and that is load-bearing
+        // rather than tidy: `ProjectStore.maxEffectsPerChain` is 16, this test
+        // already spent 3 slots above, and m39-j's `.flanger` took the kind
+        // roster to 14 built-ins — 3 + 14 = 17, which threw `chainFull(16)`
+        // through a `try!` and CRASHED THE WHOLE TEST PROCESS mid-run rather
+        // than failing one test. (The run reported no totals at all, which is
+        // a worse failure than a red leg.) Holding the chain at length 4
+        // decouples this fixture from the roster size permanently.
         for kind in Self.builtInKinds {
             let fx = try! store.addEffect(toTrack: track.id, kind: kind)
             model.prepare(trackID: track.id, effectID: fx.id, targetLabel: "on Test")
@@ -85,7 +93,12 @@ struct EffectEditorModelTests {
                 #expect(model.value(for: spec) == spec.defaultValue,
                         "\(kind).\(spec.name) fresh value must be the spec default")
             }
+            try! store.removeEffect(trackID: track.id, effectID: fx.id)
         }
+        // Non-vacuity: the sweep ran over the WHOLE roster, and the chain is
+        // back to the three explicit inserts it started the sweep with.
+        #expect(Self.builtInKinds.count >= 14)
+        #expect(store.tracks[0].effects.count == 3)
     }
 
     @Test("a closed or vanished target yields no rows and no descriptor")
@@ -140,7 +153,12 @@ struct EffectEditorModelTests {
                 #expect(model.value(for: spec) == probe,
                         "\(kind).\(spec.name) did not round-trip via setEffectParam")
             }
+            // Same reason as `rowsFollowSpecs`: 14 built-ins against a
+            // 16-insert cap is two kinds from a `chainFull` crash, and the
+            // crash takes the whole process rather than one leg.
+            try! store.removeEffect(trackID: track.id, effectID: fx.id)
         }
+        #expect(store.tracks[0].effects.isEmpty)
     }
 
     @Test("every param of every kind round-trips on the MASTER chain")
@@ -156,7 +174,9 @@ struct EffectEditorModelTests {
                 #expect(model.value(for: spec) == probe,
                         "master \(kind).\(spec.name) did not round-trip via setMasterEffectParam")
             }
+            try! store.removeMasterEffect(effectID: fx.id)
         }
+        #expect(store.masterEffects.isEmpty)
     }
 
     @Test("the reader's names are exactly the fx.describe schema names, per kind")
@@ -216,6 +236,112 @@ struct EffectEditorModelTests {
         // Fractions clamp.
         #expect(EffectEditorModel.value(forFraction: -1, spec: gain) == gain.range.lowerBound)
         #expect(EffectEditorModel.value(forFraction: 2, spec: gain) == gain.range.upperBound)
+    }
+
+    /// m39-a — the VALUE-level half of the conformance proof.
+    ///
+    /// `ParamCurveConformanceTests` (DAWCoreTests) proves every DECLARED curve
+    /// equals the one the old `unit == "Hz"` inference produced. That is the
+    /// declaration; this is the SLIDER. For every shipping param of every kind
+    /// it re-computes the pre-m39-a inline formula — the exact arithmetic that
+    /// stood at `EffectEditorModel.swift:458,470` before the lift — and
+    /// requires the delegating implementation to return bit-for-bit the same
+    /// number at eleven points of travel. If any on-screen control moved, this
+    /// reddens.
+    @Test("m39-a: every slider lands on the same value it did before the taper lift")
+    func taperLiftMovesNoSlider() {
+        // The pre-lift bodies, verbatim.
+        func legacyValue(_ f: Double, _ spec: EffectParamSpec) -> Double {
+            let lo = spec.range.lowerBound, hi = spec.range.upperBound
+            let f = f.clamped(to: 0...1)
+            if spec.unit == "Hz" && lo > 0 { return lo * pow(hi / lo, f) }
+            return lo + f * (hi - lo)
+        }
+        func legacyFraction(_ v: Double, _ spec: EffectParamSpec) -> Double {
+            let lo = spec.range.lowerBound, hi = spec.range.upperBound
+            guard hi > lo else { return 0 }
+            let v = v.clamped(to: spec.range)
+            if spec.unit == "Hz" && lo > 0 {
+                return (log(v / lo) / log(hi / lo)).clamped(to: 0...1)
+            }
+            return (v - lo) / (hi - lo)
+        }
+
+        // ⚠️ THE ORACLE ONLY BINDS PARAMS THAT EXISTED BEFORE THE LIFT. A
+        // param declared against it AFTER m39-a cannot have "moved an
+        // on-screen control", because it had none. m39-j's `flanger.depthMs`
+        // and `flanger.delayMs` are the first two: both are 0.1…10 ms — 6.6
+        // octaves — and both take `.logarithmic` deliberately, because a delay
+        // TIME is the reciprocal of the comb frequency the user actually
+        // hears. The DAWCore home for that decision, with the full reasoning,
+        // is `ParamCurveConformanceTests.deliberateExemptions`.
+        //
+        // ⭐ THE DIVERGENCE IS DERIVED AND THEN PINNED, rather than skipped by
+        // name: anything whose declared curve disagrees with the oracle is
+        // collected below and the SET is asserted. So a third divergence
+        // reddens this test instead of slipping through a hand-written skip
+        // list, and the two lists cannot drift apart silently.
+        var divergent: Set<String> = []
+        var checked = 0
+        for kind in EffectDescriptor.Kind.allCases {
+            for spec in EffectParamSpec.specs(for: kind) {
+                let oracleIsLogarithmic = spec.unit == "Hz" && spec.range.lowerBound > 0
+                if (spec.curve == .logarithmic) != oracleIsLogarithmic {
+                    divergent.insert("\(kind.rawValue).\(spec.name)")
+                    continue
+                }
+                for step in 0...10 {
+                    let f = Double(step) / 10
+                    let lifted = EffectEditorModel.value(forFraction: f, spec: spec)
+                    #expect(lifted == legacyValue(f, spec),
+                            "\(kind.rawValue).\(spec.name) at f=\(f): \(lifted) vs \(legacyValue(f, spec))")
+                    #expect(EffectEditorModel.fraction(forValue: lifted, spec: spec)
+                            == legacyFraction(lifted, spec),
+                            "\(kind.rawValue).\(spec.name) inverse at f=\(f)")
+                    checked += 1
+                }
+                // Out-of-range both sides still clamps identically.
+                #expect(EffectEditorModel.value(forFraction: -5, spec: spec) == legacyValue(-5, spec))
+                #expect(EffectEditorModel.value(forFraction: 5, spec: spec) == legacyValue(5, spec))
+                #expect(EffectEditorModel.fraction(forValue: -1e9, spec: spec)
+                        == legacyFraction(-1e9, spec))
+                #expect(EffectEditorModel.fraction(forValue: 1e9, spec: spec)
+                        == legacyFraction(1e9, spec))
+            }
+        }
+        // The recorded divergences, and ONLY those. An unexpected name here
+        // means a param was declared against the frozen oracle without the
+        // decision being written down.
+        // ⭐ m39-l ADDED FOUR, and every one has a written reason in
+        // `deliberateExemptions`: `decaySeconds` (7.6 octaves of TIME),
+        // `sizeMeters` (5.9 octaves of DISTANCE) and the two decay
+        // MULTIPLIERS (symmetric in octaves, not in units). They are the first
+        // exemptions whose unit is neither Hz nor ms, which is the finding
+        // rather than an oversight: the pre-m39-a inference keyed on
+        // `unit == "Hz"` because in 2026-08 every wide-span param happened to
+        // be a frequency.
+        // ⭐ m39-n ADDED ONE: `tapeDelay.timeMs`, 20…4000 ms — 7.6 octaves of
+        // delay time, the flanger's argument on a much wider span. ⚠️ Note
+        // that `delay.timeMs` is NOT here: it ships today and a declared curve
+        // must not MOVE an existing control, so the two kinds deliberately
+        // disagree about the same parameter name.
+        #expect(divergent == ["flanger.depthMs", "flanger.delayMs",
+                              "hallReverb.decaySeconds", "hallReverb.sizeMeters",
+                              "hallReverb.lowDecayMultiplier",
+                              "hallReverb.highDecayMultiplier",
+                              "tapeDelay.timeMs"],
+                Comment(rawValue: "params declared against the pre-m39-a oracle: "
+                    + "\(divergent.sorted()) — each needs an entry in "
+                    + "ParamCurveConformanceTests.deliberateExemptions with its reason"))
+        // …and the two that ARE exempt still behave as `.logarithmic` sliders
+        // rather than silently falling back to linear.
+        let depth = EffectParamSpec.specs(for: .flanger).first { $0.name == "depthMs" }!
+        let mid = EffectEditorModel.value(forFraction: 0.5, spec: depth)
+        #expect(abs(mid - (0.1 * 10).squareRoot()) < 1e-12,
+                "half travel on flanger.depthMs is \(mid), not the geometric mean")
+        // Non-vacuity: a loop over an empty roster would also pass silently.
+        // 64 specs x 11 travel points, measured 2026-09-19; append-only.
+        #expect(checked >= 704, "only \(checked) travel points compared")
     }
 
     // MARK: - Presentation
@@ -424,7 +550,7 @@ struct EffectEditorModelTests {
 
     // MARK: - Knob fill style (unipolar sweep vs bipolar center-out)
 
-    @Test("only genuinely zero-spanning dB gains are bipolar; anchors match")
+    @Test("only genuinely zero-spanning params are bipolar; anchors match")
     func knobStyles() {
         var bipolar: Set<String> = []
         for kind in Self.builtInKinds {
@@ -440,12 +566,49 @@ struct EffectEditorModelTests {
                 }
             }
         }
-        // Exactly the ±dB gain params — a -60…0 threshold or -24…0 ceiling
-        // is unipolar (zero is an endpoint, not a detent).
+        // The ±dB gain params — a -60…0 threshold or -24…0 ceiling is
+        // unipolar (zero is an endpoint, not a detent) — PLUS m39-i's
+        // `djFilter.position`.
+        //
+        // ⭐ THAT ONE BROADENS THE RULE THIS TEST STATES, and it is worth
+        // saying so rather than just appending a name. Until m39-i every
+        // bipolar param was a dB GAIN, so "zero-spanning" and "dB gain" were
+        // the same set and the title could use either word. `position` is
+        // -1…+1 LINEAR and its zero is the most literal detent in the app: a
+        // bit-exact bypass. `knobStyle(for:)` is purely range-based
+        // (`lowerBound < 0 && upperBound > 0`), so the centre-out knob it
+        // already draws is correct with no UI change — which is the point of
+        // deriving the style from the range instead of from the unit.
+        // ⭐ m39-j ADDS THE THIRD SHAPE, and it confirms the broadening above
+        // was the right read rather than a one-off: `flanger.feedback` is
+        // -0.95…+0.95 LINEAR, it is neither a dB gain nor a filter position,
+        // and its zero is a genuine detent — feedback 0 is the plain comb, and
+        // the two sides of it are different characters rather than more and
+        // less of one. Three unrelated kinds now share the centre-out knob
+        // purely because `knobStyle(for:)` reads the RANGE, which is exactly
+        // the payoff of not deriving style from the unit.
+        // ⭐ CHECKED for m39-l: `hallReverb.earlyLateBalance` is -1…+1 and its
+        // zero IS a detent — an even blend of early reflections and late tail,
+        // with the two sides being "closer to the source" and "further into
+        // the hall" rather than more and less of one thing. A FOURTH unrelated
+        // kind earns the centre-out knob purely because `knobStyle(for:)`
+        // reads the RANGE. ⚠️ `hallReverb.width` (0…1.2) is deliberately NOT
+        // here: its neutral is 1.0, which is not the centre of its range, so a
+        // centre-out knob would put the detent in the wrong place.
         #expect(bipolar == [
             "eq.lowShelfGainDb", "eq.peak1GainDb", "eq.peak2GainDb",
-            "eq.highShelfGainDb", "saturator.outputDb",
+            "eq.highShelfGainDb", "saturator.outputDb", "djFilter.position",
+            "flanger.feedback", "hallReverb.earlyLateBalance",
         ])
+        // The flanger's detent also sits at exactly half travel, because its
+        // range is symmetric about zero like the DJ filter's.
+        let feedback = EffectParamSpec.specs(for: .flanger).first { $0.name == "feedback" }!
+        #expect(abs(EffectEditorModel.knobFillAnchor(for: feedback) - 0.5) < 1e-12)
+        // The DJ filter's detent sits at exactly half travel on a symmetric
+        // -1…+1 range, so the knob's fill grows out of the centre in both
+        // directions — the club-mixer affordance, for free.
+        let position = EffectParamSpec.specs(for: .djFilter).first { $0.name == "position" }!
+        #expect(EffectEditorModel.knobFillAnchor(for: position) == 0.5)
         // The symmetric ranges put the detent at half travel.
         let eqGain = EffectParamSpec.specs(for: .eq).first { $0.name == "peak1GainDb" }!
         #expect(EffectEditorModel.knobFillAnchor(for: eqGain) == 0.5)

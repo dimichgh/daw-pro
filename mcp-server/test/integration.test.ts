@@ -469,7 +469,58 @@ test("tools/list returns exactly the audit-enforced tool count", { skip: SKIP_RE
   // mechanical (`looper.begin` -> `looper_begin`,
   // `looper.setLayerMuted` -> `looper_set_layer_muted`, ...), so no
   // exception-table entry is needed for any of them.
-  assert.equal(result.tools.length, 220);
+  //
+  // 220 -> 222 at m23-cw's MCP mirror (2026-09-19): `au_list_presets` (a
+  // pure READ of a hosted AU's own factory/user preset lists, so it joined
+  // the DIRECT `server.registerTool` count like its `au_describe_params`
+  // sibling) and `au_load_preset` (LOADS a preset onto the live plugin
+  // instance, so it joined the strict-schema wrapper count like its
+  // `au_set_param` sibling). `au.listPresets`/`au.loadPreset` themselves
+  // shipped engine+wire+catalog earlier at the same m23-cw close — this is
+  // just the MCP half that closes the "215 mirrored of 217 wire" gap
+  // `claude-plugin/skills/daw-wire-reference/SKILL.md` flagged as sanctioned.
+  // Command<->tool bijection stays mechanical (`au.listPresets` ->
+  // `au_list_presets`, `au.loadPreset` -> `au_load_preset`), no
+  // exception-table entry needed. RE-MEASURED, not derived, by the same two
+  // name-capturing regexes: **39 direct + 183 wrapper = 222**, 0 duplicates
+  // in either set, 0 names in both sets, and the same bogus-name negative
+  // control (`"zzz_not_a_tool"`) returning 0.
+  //
+  // 222 -> 223 at m39-f/g's MCP mirror (2026-09-19): `instrument_describe_synth`
+  // — the Poly Synth's twin of `instrument_describe_sampler`, closing the gap
+  // `claude-plugin/skills/daw-wire-reference/SKILL.md` flagged as sanctioned
+  // when `instrument.describeSynth` shipped wire-only earlier the same day.
+  // It is a pure READ but rides the strict-schema wrapper anyway, the
+  // `instrument_describe_sampler` precedent (real params — just `trackId` —
+  // worth typo-catching), so it joined the WRAPPER count, not the direct
+  // count. The same close also mirrored m39-g's fifteen Poly Synth richness
+  // parameters into `track_set_instrument`'s EXISTING schema — new
+  // parameters on an existing tool, so that half adds zero to this total on
+  // its own. Command<->tool bijection stays mechanical
+  // (`instrument.describeSynth` -> `instrument_describe_synth`), no
+  // exception-table entry needed. RE-MEASURED, not derived, by the same two
+  // name-capturing regexes: **39 direct + 184 wrapper = 223**, 0 duplicates
+  // in either set, 0 names in both sets, and the same bogus-name negative
+  // control (`"zzz_not_a_tool"`) returning 0.
+  //
+  // 223 -> 232 at m39-e's MCP mirror (2026-09-19): the nine `mod_*` tools —
+  // `mod_describe_kinds`, `mod_add_source`, `mod_set_source`,
+  // `mod_remove_source`, `mod_add_route`, `mod_set_route_depth`,
+  // `mod_remove_route`, `mod_set_macro`, `mod_describe` — closing the gap
+  // this same total left OPEN since `mod.*` shipped wire-only at m39-e's own
+  // engine close earlier the same day (`Commands.swift` went 218 -> 227
+  // there; this file stayed at 223 until now). `mod_describe_kinds` and
+  // `mod_describe` are pure READS with only OPTIONAL params (the
+  // `fx_describe` precedent — `kind`/`trackId`+`atBeat` are both optional,
+  // unlike `instrument_describe_synth`'s REQUIRED `trackId`), so both joined
+  // the DIRECT `server.registerTool` count; the other seven mutate and rode
+  // the strict-schema wrapper. Command<->tool bijection stays mechanical
+  // (`mod.addSource` -> `mod_add_source`, etc.), no exception-table entry
+  // needed. RE-MEASURED, not derived, by the same two name-capturing
+  // regexes: **41 direct + 191 wrapper = 232**, 0 duplicates in either set,
+  // 0 names in both sets, and the same bogus-name negative control
+  // (`"zzz_not_a_tool"`) returning 0.
+  assert.equal(result.tools.length, 232);
 });
 
 // ---------------------------------------------------------------------------

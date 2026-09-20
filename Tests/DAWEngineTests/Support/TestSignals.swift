@@ -143,7 +143,13 @@ enum TestSignals {
 
     // MARK: - Analysis helpers
 
-    static func rms(_ samples: [Float], in range: Range<Int>) -> Float {
+    // `nonisolated` (m39-g): these two are PURE arithmetic over a `[Float]`.
+    // Only the cached fixture files below need `TestSignals`' `@MainActor`, and
+    // inheriting it here forced any suite that merely wanted to measure a buffer
+    // to become main-actor isolated too — which inflates the census
+    // `MainActorOccupancySiteTests` Leg C polices for no actual occupancy.
+    // Widening a pure static cannot break an existing main-actor caller.
+    nonisolated static func rms(_ samples: [Float], in range: Range<Int>) -> Float {
         guard !range.isEmpty else { return 0 }
         var sum: Double = 0
         for index in range {
@@ -152,7 +158,7 @@ enum TestSignals {
         return Float((sum / Double(range.count)).squareRoot())
     }
 
-    static func peak(_ samples: [Float], in range: Range<Int>) -> Float {
+    nonisolated static func peak(_ samples: [Float], in range: Range<Int>) -> Float {
         var maximum: Float = 0
         for index in range {
             maximum = max(maximum, abs(samples[index]))

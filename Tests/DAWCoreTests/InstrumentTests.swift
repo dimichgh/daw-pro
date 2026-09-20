@@ -268,6 +268,130 @@ struct InstrumentStoreTests {
         #expect(store.snapshot().tracks[0].instrument == .default)
     }
 
+    // 12. m39-g PLUMBING — THE DATA-LOSS TRAP, PINNED.
+    //
+    // ⛔⛔ THE FAILURE THIS EXISTS TO PREVENT, IN ONE SENTENCE: a user brightens
+    // a filter and their unison collapses. `setInstrument` rebuilds
+    // `PolySynthParams` through an EXPLICIT initialiser call, so every field it
+    // does not name takes that field's `nil` default on EVERY call — silently,
+    // reporting success. That was harmless while the fifteen richness fields
+    // were unsettable (nothing could put a value there to lose); the moment
+    // they became settable it turned into m33-j's shape, where `clip.addAudio`
+    // deleted the clips it overlapped and answered OK.
+    //
+    // ⭐ THIS TEST WAS WRITTEN BEFORE THE FIX AND WATCHED TO FAIL against the
+    // nine-field initialiser — MEASURED, not asserted: all fifteen `#expect`s
+    // below reddened, e.g. `unisonVoices → nil` and `envelopeCurve → nil`,
+    // while the `cutoffHz` control passed. A preservation test that has never
+    // failed is indistinguishable from one that asserts nothing.
+    //
+    // The seed is written straight onto the track rather than through
+    // `setInstrument`, deliberately: that is the state a PROJECT FILE ON DISK
+    // produces (`Codable` assigns stored properties directly — see
+    // `PolySynthRichnessCodableTests`), and it keeps this test honest about
+    // what it measures even if the writing path changes.
+    @Test("m39-g: a one-knob edit preserves ALL fifteen richness fields (the overlay rule)")
+    func richnessSurvivesAnUnrelatedKnobEdit() throws {
+        let store = ProjectStore()
+        let inst = store.addTrack(kind: .instrument)
+        // Every richness field NON-DEFAULT and distinguishable from its own
+        // nil-resolution, so "preserved" cannot be confused with "re-defaulted".
+        let seeded = PolySynthParams(
+            waveform: .square, attack: 0.02, decay: 0.2, sustain: 0.4, release: 0.5,
+            cutoffHz: 3_000, resonance: 0.3, gain: 0.6, pedalHoldLimit: 6,
+            unisonVoices: 5, unisonDetuneCents: 18, unisonStereoSpread: 0.8,
+            subLevel: 0.4, subOctave: -2, subWaveform: .square,
+            noiseLevel: 0.2, noiseColor: 0.9, drift: 0.35,
+            resonanceBoost: 0.7, drive: 0.45, velocityToCutoff: 0.6,
+            keyToCutoff: 0.25, voiceJitter: 0.15, envelopeCurve: -0.5)
+        store.tracks[0].instrument = InstrumentDescriptor(kind: .polySynth, polySynth: seeded)
+
+        // The unrelated knob edit: brighten the filter, say nothing else.
+        let after = try #require(try store.setInstrument(id: inst.id, cutoffHz: 9_000))
+
+        // CONTROL FIRST: the edit that WAS sent landed. Without this, fifteen
+        // preserved fields could mean "setInstrument did nothing at all".
+        #expect(after.polySynth.cutoffHz == 9_000, "control: the requested edit must land")
+
+        // Field by field, so a regression NAMES the field it dropped rather
+        // than printing two opaque struct descriptions.
+        #expect(after.polySynth.unisonVoices == 5)
+        #expect(after.polySynth.unisonDetuneCents == 18)
+        #expect(after.polySynth.unisonStereoSpread == 0.8)
+        #expect(after.polySynth.subLevel == 0.4)
+        #expect(after.polySynth.subOctave == -2)
+        #expect(after.polySynth.subWaveform == .square)
+        #expect(after.polySynth.noiseLevel == 0.2)
+        #expect(after.polySynth.noiseColor == 0.9)
+        #expect(after.polySynth.drift == 0.35)
+        #expect(after.polySynth.resonanceBoost == 0.7)
+        #expect(after.polySynth.drive == 0.45)
+        #expect(after.polySynth.velocityToCutoff == 0.6)
+        #expect(after.polySynth.keyToCutoff == 0.25)
+        #expect(after.polySynth.voiceJitter == 0.15)
+        #expect(after.polySynth.envelopeCurve == -0.5)
+        // m34-q's field rides the same rule and is re-pinned here, because a
+        // rewrite of this initialiser could drop it and every pedal test would
+        // still pass (they all SET the cap in the same call).
+        #expect(after.polySynth.pedalHoldLimit == 6)
+
+        // WHOLE-STRUCT equality: catches a field added to `PolySynthParams`
+        // tomorrow and forgotten in the overlay, which the per-field list above
+        // structurally cannot.
+        var expected = seeded
+        expected.cutoffHz = 9_000
+        #expect(after.polySynth == expected,
+                "every field except the one edited must come through untouched")
+        // And what was STORED is what was returned — a setter's return is not
+        // proof it took.
+        #expect(store.tracks[0].instrument?.polySynth == expected)
+    }
+
+    // 13. The same rule the other way round: setting a richness field must not
+    // disturb the legacy eight, and must not disturb a DIFFERENT richness
+    // field.
+    @Test("m39-g: setting one richness field leaves every other field alone")
+    func settingOneRichnessFieldDisturbsNothingElse() throws {
+        let store = ProjectStore()
+        let inst = store.addTrack(kind: .instrument)
+        let seeded = PolySynthParams(
+            waveform: .triangle, attack: 0.03, decay: 0.3, sustain: 0.5, release: 0.6,
+            cutoffHz: 4_000, resonance: 0.4, gain: 0.7, pedalHoldLimit: 9,
+            unisonVoices: 3, unisonDetuneCents: 12, drift: 0.2, envelopeCurve: 0.8)
+        store.tracks[0].instrument = InstrumentDescriptor(kind: .polySynth, polySynth: seeded)
+
+        let after = try #require(try store.setInstrument(id: inst.id, drive: 0.9))
+        var expected = seeded
+        expected.drive = 0.9
+        #expect(after.polySynth == expected)
+        // Fields never set stay nil — "preserved" must not quietly mean
+        // "resolved to its neutral value and written back", which would destroy
+        // the unset/explicit-zero distinction the whole design rests on.
+        #expect(after.polySynth.noiseLevel == nil,
+                "an untouched optional must stay nil, not become an explicit 0")
+        #expect(after.polySynth.subWaveform == nil)
+    }
+
+    // 14. Out-of-range richness values re-clamp through the init on overlay,
+    // the same way the legacy eight do (test 7 above pins that for gain). The
+    // unison clamp in particular is a memory-safety boundary: the engine
+    // allocates `16 × maxUnisonVoices` sub-voice slots and indexes them on the
+    // render thread.
+    @Test("m39-g: an out-of-range richness overlay re-clamps at the store boundary")
+    func richnessOverlayReclamps() throws {
+        let store = ProjectStore()
+        let inst = store.addTrack(kind: .instrument)
+        let clamped = try #require(try store.setInstrument(
+            id: inst.id, unisonVoices: 99, unisonDetuneCents: 500, subOctave: -9,
+            drift: 4, envelopeCurve: -7))
+        #expect(clamped.polySynth.unisonVoices == PolySynthParams.maxUnisonVoices,
+                "the unison clamp is a memory-safety boundary, not a niceness")
+        #expect(clamped.polySynth.unisonDetuneCents == 50)
+        #expect(clamped.polySynth.subOctave == -2)
+        #expect(clamped.polySynth.drift == 1)
+        #expect(clamped.polySynth.envelopeCurve == -1)
+    }
+
     // 11.
     @Test("TrackDocument decodes without the instrument key (additive-optional field)")
     func trackDocumentLegacyDecode() throws {

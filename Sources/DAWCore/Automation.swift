@@ -25,6 +25,19 @@ public enum AutomationTarget: Hashable, Sendable, Codable {
     case sendLevel(sendID: UUID)
     /// One built-in effect parameter; resolves through `EffectParamSpec.specs`.
     case effectParam(effectID: UUID, paramName: String)
+    /// One built-in instrument parameter on this track's instrument (m39-b);
+    /// resolves through `InstrumentParamSpec.specs`.
+    ///
+    /// ⭐ **NO id: a track has at most one instrument, so the target is
+    /// unambiguous.** The flat object is `{type:"instrumentParam",
+    /// param:"cutoffHz"}`, reusing the EXISTING `param` coding key — no new
+    /// key, no new id field.
+    ///
+    /// This case is the mechanism by which m39-b and m39-e agree BY
+    /// CONSTRUCTION rather than by coincidence: there is no modulation target
+    /// type at all, so modulation and automation address the same targets
+    /// through the same enum (`docs/design/2026-09-19-modulation-layer.md` §4).
+    case instrumentParam(paramName: String)
 
     private enum CodingKeys: String, CodingKey {
         case type, sendId, effectId, param
@@ -33,7 +46,7 @@ public enum AutomationTarget: Hashable, Sendable, Codable {
     /// The discriminator written to `type`. A String raw enum so an unknown
     /// discriminator on decode is a hard error (not a silent misread).
     private enum Discriminator: String, Codable {
-        case volume, pan, sendLevel, effectParam
+        case volume, pan, sendLevel, effectParam, instrumentParam
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -49,6 +62,9 @@ public enum AutomationTarget: Hashable, Sendable, Codable {
         case .effectParam(let effectID, let paramName):
             try c.encode(Discriminator.effectParam, forKey: .type)
             try c.encode(effectID, forKey: .effectId)
+            try c.encode(paramName, forKey: .param)
+        case .instrumentParam(let paramName):
+            try c.encode(Discriminator.instrumentParam, forKey: .type)
             try c.encode(paramName, forKey: .param)
         }
     }
@@ -66,6 +82,8 @@ public enum AutomationTarget: Hashable, Sendable, Codable {
             self = .effectParam(
                 effectID: try c.decode(UUID.self, forKey: .effectId),
                 paramName: try c.decode(String.self, forKey: .param))
+        case .instrumentParam:
+            self = .instrumentParam(paramName: try c.decode(String.self, forKey: .param))
         }
     }
 
@@ -97,6 +115,18 @@ public enum AutomationTarget: Hashable, Sendable, Codable {
             }
             // `.audioUnit` yields an empty spec table → `first(where:)` is nil.
             return EffectParamSpec.specs(for: effect.kind)
+                .first(where: { $0.name == paramName })?.range
+        case .instrumentParam(let paramName):
+            // m39-b: resolves through the ONE HOME, `InstrumentParamSpec.specs`
+            // (`Sources/DAWCore/InstrumentParams.swift`). nil — an unresolvable
+            // target, exactly like an unknown effect param — when the track
+            // carries no instrument at all (audio/bus tracks and the master
+            // strip), when the instrument is HOSTED (`.soundBank`/`.audioUnit`
+            // have an empty spec surface, the `.audioUnit` effect rule
+            // verbatim), or when the name is not in the kind's table.
+            guard !paramName.isEmpty, track.kind == .instrument else { return nil }
+            let descriptor = track.instrument ?? .default
+            return InstrumentParamSpec.specs(for: descriptor.kind)
                 .first(where: { $0.name == paramName })?.range
         }
     }

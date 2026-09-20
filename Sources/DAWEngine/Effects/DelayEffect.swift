@@ -13,6 +13,12 @@ import Foundation
 /// mix == 0 is BIT-EXACT dry: the buffer is never written (lines still
 /// advance so a later mix raise has coherent repeats).
 ///
+/// ECHO FREEZE (m39-k): `feedback` reaches 0.999, one repeat's worth under the
+/// unity that makes this structure diverge — the loop then loses 0.0087 dB per
+/// repeat and the echo holds instead of fading. The ceiling stops short of 1.0
+/// on a MEASUREMENT (`DelayParams.feedbackRange` carries the numbers), and at
+/// that ceiling `highCutHz` — not `feedback` — is what bounds the tail.
+///
 /// Parameter updates follow the GainEffect atomic-POD-publish convention;
 /// derived constants recompute only on generation change. Lines are
 /// preallocated in `prepare` for the MAX 2 s time, so a time change is a
@@ -140,14 +146,35 @@ final class DelayEffect: EffectRendering, @unchecked Sendable {
     /// Recomputes the derived render constants from `p` — generation change,
     /// automation stores, and the automation revert route through the SAME
     /// math (pure libm, no allocation; render-thread safe).
+    ///
+    /// ⚠️ **`feedback` and `highCutHz` ARE RE-CLAMPED HERE, AND SINCE m39-k
+    /// THAT IS A STABILITY REQUIREMENT, NOT TIDINESS** (the `FlangerEffect`
+    /// precedent, same shape). A field-by-field overlay poke
+    /// (`storeAutomatedParam`) bypasses `DelayParams.init`, so the init's
+    /// clamping is NOT in force on this path. With the ceiling now at 0.999 —
+    /// deliberately just under the unity that makes this loop diverge — a
+    /// feedback that slipped past 1.0 here would be exactly the unbounded
+    /// growth the measured bound exists to prevent, and a `highCutHz` ≤ 0
+    /// would put the loop filter's own pole outside the unit circle. The clamp
+    /// is the IDENTITY for every in-range value, so nothing an existing
+    /// project can hold renders differently because of it (byte-identity
+    /// re-verified on a feedback-0.95 render).
     private func deriveRenderParams(_ p: DelayParams) {
+        // ⚠️ `timeMs` is guarded BEFORE the `Int(_:)` conversion because
+        // `Int(Double.nan)` traps outright (the `FlangerEffect.delayMs`
+        // precedent). Identity for every in-range value: a 2 000 ms time
+        // already lands on `capacityPerChannel - 1`.
+        let timeMs = (p.timeMs.isFinite ? p.timeMs : 350).clamped(to: DelayParams.timeRange)
         delaySamples = min(capacityPerChannel - 1,
-                           max(1, Int((p.timeMs * 0.001 * sampleRate).rounded())))
-        feedback = Float(p.feedback)
-        mix = Float(p.mix)
+                           max(1, Int((timeMs * 0.001 * sampleRate).rounded())))
+        feedback = Float((p.feedback.isFinite ? p.feedback : 0.35)
+            .clamped(to: DelayParams.feedbackRange))
+        mix = Float((p.mix.isFinite ? p.mix : 0.3).clamped(to: DelayParams.mixRange))
         pingPong = p.pingPong >= 0.5
         // One-pole low-pass y += a·(x − y): a = 1 − e^(−2π·fc/fs).
-        lowpassCoeff = Float(1.0 - exp(-2.0 * .pi * p.highCutHz / sampleRate))
+        let highCut = (p.highCutHz.isFinite ? p.highCutHz : 8_000)
+            .clamped(to: DelayParams.highCutRange)
+        lowpassCoeff = Float(1.0 - exp(-2.0 * .pi * highCut / sampleRate))
     }
 
     /// RENDER-THREAD automation store (M4 vii-c). Slot order =

@@ -1,0 +1,116 @@
+{
+  "set": "polysynth-richness",
+  "description": "m39-g richness pass, cumulative: the SAME arpeggio and the SAME filter as polysynth-cutoff's 'singing' variant, with richness layers stacked one at a time. The axis here is 'how much richness', not a single parameter — stated plainly because every other bench in this harness moves exactly one knob and this one does not. Variant 1 is byte-comparable in intent to today's shipping synth.",
+  "variants": [
+    {
+      "name": "plain",
+      "role": "control",
+      "axis": "every richness field left unset — this is exactly what the synth sounded like before m39-g",
+      "commands": [
+        { "command": "track.add", "params": { "name": "Lead", "kind": "instrument" }, "as": "lead" },
+        { "command": "track.setInstrument", "params": {
+          "trackId": "$lead", "kind": "polySynth", "waveform": "saw",
+          "attack": 0.005, "decay": 0.15, "sustain": 0.8, "release": 0.2,
+          "cutoffHz": 2500, "resonance": 0.15, "gain": 0.8
+        } },
+        { "command": "clip.addMIDI", "params": {
+          "trackId": "$lead", "atBeat": 0,
+          "notes": [
+            { "pitch": 60, "startBeat": 0, "lengthBeats": 0.9 },
+            { "pitch": 64, "startBeat": 1, "lengthBeats": 0.9 },
+            { "pitch": 67, "startBeat": 2, "lengthBeats": 0.9 },
+            { "pitch": 72, "startBeat": 3, "lengthBeats": 0.9 },
+            { "pitch": 76, "startBeat": 4, "lengthBeats": 0.9 },
+            { "pitch": 72, "startBeat": 5, "lengthBeats": 0.9 },
+            { "pitch": 67, "startBeat": 6, "lengthBeats": 0.9 },
+            { "pitch": 60, "startBeat": 7, "lengthBeats": 1.8 }
+          ]
+        } }
+      ]
+    },
+    {
+      "name": "plus-unison",
+      "axis": "+ 8 detuned voices spread across the stereo field (18 cents, spread 0.8)",
+      "commands": [
+        { "command": "track.add", "params": { "name": "Lead", "kind": "instrument" }, "as": "lead" },
+        { "command": "track.setInstrument", "params": {
+          "trackId": "$lead", "kind": "polySynth", "waveform": "saw",
+          "attack": 0.005, "decay": 0.15, "sustain": 0.8, "release": 0.2,
+          "cutoffHz": 2500, "resonance": 0.15, "gain": 0.8,
+          "unisonVoices": 8, "unisonDetuneCents": 18, "unisonStereoSpread": 0.8
+        } },
+        { "command": "clip.addMIDI", "params": {
+          "trackId": "$lead", "atBeat": 0,
+          "notes": [
+            { "pitch": 60, "startBeat": 0, "lengthBeats": 0.9 },
+            { "pitch": 64, "startBeat": 1, "lengthBeats": 0.9 },
+            { "pitch": 67, "startBeat": 2, "lengthBeats": 0.9 },
+            { "pitch": 72, "startBeat": 3, "lengthBeats": 0.9 },
+            { "pitch": 76, "startBeat": 4, "lengthBeats": 0.9 },
+            { "pitch": 72, "startBeat": 5, "lengthBeats": 0.9 },
+            { "pitch": 67, "startBeat": 6, "lengthBeats": 0.9 },
+            { "pitch": 60, "startBeat": 7, "lengthBeats": 1.8 }
+          ]
+        } }
+      ]
+    },
+    {
+      "name": "plus-weight",
+      "axis": "+ a sine sub-oscillator an octave down and a touch of noise — low-end body and attack texture",
+      "commands": [
+        { "command": "track.add", "params": { "name": "Lead", "kind": "instrument" }, "as": "lead" },
+        { "command": "track.setInstrument", "params": {
+          "trackId": "$lead", "kind": "polySynth", "waveform": "saw",
+          "attack": 0.005, "decay": 0.15, "sustain": 0.8, "release": 0.2,
+          "cutoffHz": 2500, "resonance": 0.15, "gain": 0.8,
+          "unisonVoices": 8, "unisonDetuneCents": 18, "unisonStereoSpread": 0.8,
+          "subLevel": 0.45, "subOctave": -1, "subWaveform": "sine",
+          "noiseLevel": 0.08, "noiseColor": 0.6
+        } },
+        { "command": "clip.addMIDI", "params": {
+          "trackId": "$lead", "atBeat": 0,
+          "notes": [
+            { "pitch": 60, "startBeat": 0, "lengthBeats": 0.9 },
+            { "pitch": 64, "startBeat": 1, "lengthBeats": 0.9 },
+            { "pitch": 67, "startBeat": 2, "lengthBeats": 0.9 },
+            { "pitch": 72, "startBeat": 3, "lengthBeats": 0.9 },
+            { "pitch": 76, "startBeat": 4, "lengthBeats": 0.9 },
+            { "pitch": 72, "startBeat": 5, "lengthBeats": 0.9 },
+            { "pitch": 67, "startBeat": 6, "lengthBeats": 0.9 },
+            { "pitch": 60, "startBeat": 7, "lengthBeats": 1.8 }
+          ]
+        } }
+      ]
+    },
+    {
+      "name": "full-stack",
+      "axis": "+ analog drift, per-voice jitter and filter drive — everything the richness pass added, at musical settings",
+      "commands": [
+        { "command": "track.add", "params": { "name": "Lead", "kind": "instrument" }, "as": "lead" },
+        { "command": "track.setInstrument", "params": {
+          "trackId": "$lead", "kind": "polySynth", "waveform": "saw",
+          "attack": 0.005, "decay": 0.15, "sustain": 0.8, "release": 0.2,
+          "cutoffHz": 2500, "resonance": 0.15, "gain": 0.8,
+          "unisonVoices": 8, "unisonDetuneCents": 18, "unisonStereoSpread": 0.8,
+          "subLevel": 0.45, "subOctave": -1, "subWaveform": "sine",
+          "noiseLevel": 0.08, "noiseColor": 0.6,
+          "drift": 0.35, "voiceJitter": 0.25, "drive": 0.4,
+          "velocityToCutoff": 0.3, "envelopeCurve": -0.3
+        } },
+        { "command": "clip.addMIDI", "params": {
+          "trackId": "$lead", "atBeat": 0,
+          "notes": [
+            { "pitch": 60, "startBeat": 0, "lengthBeats": 0.9 },
+            { "pitch": 64, "startBeat": 1, "lengthBeats": 0.9 },
+            { "pitch": 67, "startBeat": 2, "lengthBeats": 0.9 },
+            { "pitch": 72, "startBeat": 3, "lengthBeats": 0.9 },
+            { "pitch": 76, "startBeat": 4, "lengthBeats": 0.9 },
+            { "pitch": 72, "startBeat": 5, "lengthBeats": 0.9 },
+            { "pitch": 67, "startBeat": 6, "lengthBeats": 0.9 },
+            { "pitch": 60, "startBeat": 7, "lengthBeats": 1.8 }
+          ]
+        } }
+      ]
+    }
+  ]
+}

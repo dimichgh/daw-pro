@@ -54,9 +54,30 @@ import Foundation
 /// five rates (5.1–12.5 ¢), and its rate ceiling of 9.375 Hz leaves half the
 /// authorable tremor range aliasing. The *design* argument — that 512 is also
 /// the typical live hardware buffer, so a bounce and a monitor agree by
-/// construction — is a design argument only: the hardware buffer is
-/// device-dependent and user-changeable, and live playback has never been
-/// measured here.
+/// construction — rests on a measurement that this file used to deny.
+///
+/// ⛔⛔ **CORRECTED 2026-09-19 (m39-d). THIS PARAGRAPH USED TO END "and live
+/// playback has never been measured here." THAT WAS FALSE WHEN WRITTEN.**
+/// `MIDIControllerRouting.swift` (~`:431-441`) records the measurement, taken at
+/// breath-pad P6 on **2026-08-19** — earlier than this sentence: a real
+/// `AudioEngine`, prepared against this machine's default output and left
+/// rendering for 400 ms, reported **quantumFrames = 512 at 48 kHz ⇒ 93.75 Hz,
+/// Nyquist 46.875 Hz**, with `renderedFrames` an exact multiple of 512
+/// (38912 = 76 × 512) — every quantum the same size. `EnginePerformance`
+/// already records `lastQuantumFrames` per quantum and it is surfaced as
+/// `EnginePerformanceStats.quantumFrames`, so the number was free for the asking.
+///
+/// ⚠️ **Why this mattered enough to fix in place:** a 🚨 roadmap gate (m39-d)
+/// was filed against the false sentence, proposing to measure something already
+/// measured. **This tree's characteristic failure is exactly this shape — the
+/// record says X, the source says Y, and nothing compares them.** Two files
+/// disagreeing IS the signal; the fix is to make them agree, not to pick one.
+///
+/// ✅ **So ON THIS MACHINE, AT ITS DEFAULT DEVICE, live and offline now agree by
+/// measurement, not by hope.** ⚠️ **What remains genuinely unmeasured is the
+/// case where the hardware buffer is NOT 512** — it is device-dependent and
+/// user-changeable, and nothing here has ever asked what happens at 64, 128 or
+/// 1024 frames. That, and only that, is what m39-d should measure.
 ///
 /// ⚠️ **COST, MEASURED, not estimated** (8 hosted sound-bank tracks, 120 s,
 /// dense parts with bend lanes — the block-sensitive case): 4096 → **0.449 s**,

@@ -53,6 +53,12 @@ extension EffectDescriptor {
             chorus: chorus,
             bassEnhancer: bassEnhancer,
             bitCrusher: bitCrusher,
+            djFilter: djFilter,
+            ringMod: ringMod,
+            flanger: flanger,
+            hallReverb: hallReverb,
+            tapeDelay: tapeDelay,
+            stereoWidth: stereoWidth,
             audioUnit: audioUnit)
     }
 }

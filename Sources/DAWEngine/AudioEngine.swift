@@ -458,6 +458,11 @@ public final class AudioEngine: AudioEngineControlling {
     /// `lastMasterEffects` for the rebuild republish.
     private var lastMasterAutomation: [AutomationLane] = []
 
+    /// The project's MASTER modulation (m39-e), cached for the rebuild
+    /// republish exactly like `lastMasterAutomation`.
+    private var lastMasterModulationSources: [ModulationSource] = []
+    private var lastMasterModulationRoutes: [ModulationRoute] = []
+
     // MARK: Reference monitor state (m22-g P2 — cached like the metronome)
 
     /// The project's reference slot, cached from `referenceChanged` pushes
@@ -701,6 +706,11 @@ public final class AudioEngine: AudioEngineControlling {
         // Master volume automation (m15-c): same republish, same reason; the
         // manual gain rides along so the override rule can hand back.
         graph.masterAutomation = lastMasterAutomation
+        // Master modulation (m39-e): the same republish, the same reason — a
+        // fresh graph must carry the strip's sources and routes or a macro the
+        // user is holding would silently stop working after a rebuild.
+        graph.masterModulationSources = lastMasterModulationSources
+        graph.masterModulationRoutes = lastMasterModulationRoutes
         graph.manualMasterVolume = masterVolume
         // Per-insert spectrum arms (m23-r2a): the `masterEffects` republish
         // twin. The intent lives HERE (`spectrumArms`) and the graph only
@@ -2390,6 +2400,18 @@ public final class AudioEngine: AudioEngineControlling {
         graph.applyParameters(tracks: lastTracks, playheadBeat: lastKnownBeats)
     }
 
+    /// m39-e — the master modulation twin. One parameter pass republishes the
+    /// master strip's snapshot; the pass runs the same way live and offline, so
+    /// the two paths agree by construction.
+    public func masterModulationChanged(sources: [ModulationSource],
+                                        routes: [ModulationRoute]) {
+        lastMasterModulationSources = sources
+        lastMasterModulationRoutes = routes
+        graph.masterModulationSources = sources
+        graph.masterModulationRoutes = routes
+        graph.applyParameters(tracks: lastTracks, playheadBeat: lastKnownBeats)
+    }
+
     /// `masterEffects` defaults `[]` on the CONCRETE class only (the
     /// OfflineRenderer class-level-default rationale, design §2.1): the
     /// render-class decision (MASTERED vs STEM) is forced at the PROTOCOL
@@ -2703,6 +2725,153 @@ public final class AudioEngine: AudioEngineControlling {
             parameter.value = AUValue(clamped)
             return Self.hostedParameterInfo(parameter)   // post-set read-back echo
         }
+    }
+
+    // MARK: - Hosted-AU preset surface (m23-cw, CONTROL-PLANE ONLY)
+
+    /// Everything the hosted AU says about its own presets. Same contract as
+    /// the parameter surface above: fresh registry resolve, main-actor only,
+    /// every ObjC property touch inside the C8 barrier, no `dlsBankQueue` hop
+    /// (the m18-d/m19-j law covers LoadInstrument/initialize/dispose, not
+    /// preset access), render thread never involved.
+    ///
+    /// A unit with no presets is SUCCESS, not an error — MEASURED, 15 of
+    /// Apple's 23 built-in effects return a nil `factoryPresets`.
+    public func listHostedAUPresets(_ target: HostedAUTarget) throws
+        -> HostedAUPresetList? {
+        guard let au = hostedAudioUnit(for: target) else { return nil }
+        return try withObjCExceptionBarrier("AU preset read") { () -> HostedAUPresetList in
+            Self.presetList(of: au)
+        }
+    }
+
+    /// Load one of the AU's own presets onto the LIVE instance.
+    ///
+    /// Order is the whole point, and each step exists because of a measurement:
+    ///   1. resolve the selector against the unit's CURRENT lists — a number
+    ///      the unit does not publish is refused BEFORE the AU is touched,
+    ///      because assigning an unknown one is a silent no-op (MEASURED:
+    ///      `currentPreset = #999` on AUMatrixReverb left preset 6 and every
+    ///      parameter exactly as they were, and raised nothing);
+    ///   2. refuse a user preset on a unit that disclaims user-preset support
+    ///      (Apple: "may result in incorrect behavior");
+    ///   3. assign the LIVE `AUAudioUnitPreset` OBJECT from the unit's own
+    ///      list, never a reconstructed one — the object the unit vended is
+    ///      the only one guaranteed to carry whatever private identity it
+    ///      attached;
+    ///   4. RE-READ `currentPreset` and refuse if the number did not move.
+    ///      Step 4 is not defensive padding: step 1 cannot see a unit that
+    ///      publishes a preset and then declines to select it, and this tree's
+    ///      characteristic failure is a call that returns a valid-looking
+    ///      answer for work that never happened.
+    ///
+    /// NOTHING is written to the model — see the protocol doc for why
+    /// (m23-bx-1). Playback is not interrupted: this is a property assignment
+    /// on the AU, the same class of live control as `au.setParam`.
+    @discardableResult
+    public func loadHostedAUPreset(_ target: HostedAUTarget,
+                                   selector: HostedAUPresetSelector) throws
+        -> HostedAUCurrentPreset {
+        guard let au = hostedAudioUnit(for: target) else {
+            throw HostedAUPresetError.noHostedAU
+        }
+        return try withObjCExceptionBarrier("AU preset load") { () -> HostedAUCurrentPreset in
+            let factory = au.factoryPresets ?? []
+            let user = au.userPresets
+            guard !factory.isEmpty || !user.isEmpty else {
+                throw HostedAUPresetError.noPresets
+            }
+            let chosen = try Self.resolvePreset(selector, factory: factory, user: user)
+            // A user preset on a unit that disclaims support — refuse rather
+            // than risk the "incorrect behavior" Apple's header warns about.
+            if chosen.number < 0, !au.supportsUserPresets {
+                throw HostedAUPresetError.userPresetsUnsupported(chosen.number)
+            }
+            let requested = HostedAUPresetInfo(number: chosen.number, name: chosen.name)
+            au.currentPreset = chosen
+
+            // THE READ-BACK. Compared by NUMBER: the unit is free to rewrite
+            // the name, and MEASURED does (assigning #6 under a junk name read
+            // back as "Medium Chamber").
+            guard let now = au.currentPreset, now.number == chosen.number else {
+                let observed = au.currentPreset
+                    .map { "\($0.number) '\($0.name)'" } ?? "no current preset"
+                throw HostedAUPresetError.presetDidNotTake(requested: requested,
+                                                           observed: observed)
+            }
+            return Self.classify(now, factory: factory, user: user)
+        }
+    }
+
+    /// Selector → the live `AUAudioUnitPreset` the unit vended. Factory list is
+    /// searched before the user list at every stage; see
+    /// `HostedAUPresetSelector.name` for the ambiguity rule this implements.
+    private static func resolvePreset(_ selector: HostedAUPresetSelector,
+                                      factory: [AUAudioUnitPreset],
+                                      user: [AUAudioUnitPreset]) throws
+        -> AUAudioUnitPreset {
+        let all = factory + user
+        switch selector {
+        case .number(let number):
+            guard let hit = all.first(where: { $0.number == number }) else {
+                throw HostedAUPresetError.unknownPresetNumber(
+                    number, available: all.map(\.number))
+            }
+            return hit
+        case .name(let name):
+            // Exact, case-sensitive first — a plugin that ships both "Bright"
+            // and "bright" means them to be different presets.
+            let exact = all.filter { $0.name == name }
+            if exact.count == 1 { return exact[0] }
+            if exact.count > 1 {
+                throw HostedAUPresetError.ambiguousPresetName(
+                    name, numbers: exact.map(\.number))
+            }
+            let loose = all.filter { $0.name.lowercased() == name.lowercased() }
+            if loose.count == 1 { return loose[0] }
+            if loose.count > 1 {
+                throw HostedAUPresetError.ambiguousPresetName(
+                    name, numbers: loose.map(\.number))
+            }
+            throw HostedAUPresetError.unknownPresetName(
+                name, available: all.map(\.name))
+        }
+    }
+
+    /// Read both lists plus the classified current preset in one pass, so the
+    /// classification can never be computed against a list the caller did not
+    /// see. Every property here is an ObjC call — the caller holds the barrier.
+    private static func presetList(of au: AUAudioUnit) -> HostedAUPresetList {
+        let rawFactory = au.factoryPresets
+        let factory = rawFactory ?? []
+        let user = au.userPresets
+        return HostedAUPresetList(
+            hasFactoryPresets: rawFactory != nil,
+            supportsUserPresets: au.supportsUserPresets,
+            factoryPresets: factory.map { HostedAUPresetInfo(number: $0.number, name: $0.name) },
+            userPresets: user.map { HostedAUPresetInfo(number: $0.number, name: $0.name) },
+            currentPreset: au.currentPreset.map {
+                Self.classify($0, factory: factory, user: user)
+            })
+    }
+
+    /// `AUAudioUnitPreset` → the wire DTO, with `source` decided by NUMBER
+    /// membership in the live lists — never by name (see
+    /// `HostedAUPresetSource.unlisted` for the two measured cases that land
+    /// there, and for why a name match would be a guess).
+    private static func classify(_ preset: AUAudioUnitPreset,
+                                 factory: [AUAudioUnitPreset],
+                                 user: [AUAudioUnitPreset]) -> HostedAUCurrentPreset {
+        let source: HostedAUPresetSource
+        if factory.contains(where: { $0.number == preset.number }) {
+            source = .factory
+        } else if user.contains(where: { $0.number == preset.number }) {
+            source = .user
+        } else {
+            source = .unlisted
+        }
+        return HostedAUCurrentPreset(number: preset.number, name: preset.name,
+                                     source: source)
     }
 
     /// The live AU for a parameter-surface target — a FRESH registry resolve

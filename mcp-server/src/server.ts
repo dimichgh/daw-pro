@@ -2065,8 +2065,27 @@ registerTool(
       "= darker/muffled, higher = brighter/more open); `resonance` is filter " +
       "emphasis right at the cutoff, 0-1 (higher adds a resonant peak/whine, " +
       "0 is a plain filter); `gain` is the instrument's own output level, 0-1 " +
-      "(separate from the track fader set by track_set_volume). All numeric " +
-      "params are clamped to their safe range if you pass a value outside it. " +
+      "(separate from the track fader set by track_set_volume). Those seven numeric params " +
+      "(`waveform` is a string enum, not numeric), like `resonance`/`cutoffHz` above, are " +
+      "CLAMPED to their safe range if you pass a value outside it. " +
+      "m39-g adds FIFTEEN further, OPTIONAL 'richness' polySynth knobs, below: a detuned " +
+      "unison stack (`unisonVoices`/`unisonDetuneCents`/`unisonStereoSpread`), a sub-" +
+      "oscillator layer (`subLevel`/`subOctave`/`subWaveform`), a pre-filter noise layer " +
+      "(`noiseLevel`/`noiseColor`), analog pitch instability (`drift`), extra filter " +
+      "character (`resonanceBoost`/`drive`), performance-linked filter tracking " +
+      "(`velocityToCutoff`/`keyToCutoff`), per-note randomisation (`voiceJitter`), and " +
+      "envelope ramp shape (`envelopeCurve`). ⭐⭐ EVERY ONE IS ADDITIVE-NIL-SAFE: omitting " +
+      "a richness field PRESERVES whatever this track already had — it is never reset to " +
+      "neutral, even when this same call only touches an unrelated field like `cutoffHz`. " +
+      "⚠️ UNLIKE THE LEGACY SYNTH PARAMS ABOVE, WHICH CLAMP SILENTLY, an out-of-range " +
+      "richness value (and `pedalHoldLimit`, below) is REFUSED with a readable error rather " +
+      "than clamped — a typo cannot land as a silently-different setting. See each " +
+      "parameter's own description for its exact range, and instrument_describe_synth for " +
+      "what the engine is applying RIGHT NOW, including the two whose 'unset' neutral is NOT " +
+      "zero (`noiseColor` unset is 0.5, `subOctave` unset is -1) and the four settings that " +
+      "are accepted, stored, and SILENT until a second field is also set (unisonDetuneCents/" +
+      "unisonStereoSpread need unisonVoices > 1; subOctave/subWaveform need subLevel > 0; " +
+      "noiseColor needs noiseLevel > 0). " +
       "`audioUnit` (see its own description) selects a specific installed AU " +
       "by component triple, is only meaningful for `kind` `audioUnit`, and " +
       "implies that kind even if `kind` is omitted. `soundBank` (see its own " +
@@ -2189,6 +2208,181 @@ registerTool(
             "unlimited. REFUSED (not clamped) outside 1-128, so a typo cannot land as a " +
             "silently-different setting. The Sampler has its own, under `sampler`."
         ),
+      unisonVoices: z
+        .number()
+        .int()
+        .min(1)
+        .max(8)
+        .optional()
+        .describe(
+          "polySynth (m39-g): how many detuned copies of the oscillator each note plays. 1 " +
+            "(the default, and what an omitted key PRESERVES — it never resets to 1) is one " +
+            "clean oscillator; more makes the classic wide supersaw. Multiplies OSCILLATOR " +
+            "cost per note, not the 16-note polyphony budget, and does nothing audible alone " +
+            "— pair it with unisonDetuneCents. REFUSED (not clamped) outside 1-8, a whole " +
+            "number only. Omit to keep the current value."
+        ),
+      unisonDetuneCents: z
+        .number()
+        .min(0)
+        .max(50)
+        .optional()
+        .describe(
+          "polySynth (m39-g): total pitch SPREAD across the unison stack, in cents (100 = " +
+            "one semitone); the outermost copies sit at plus/minus half of it. INERT while " +
+            "unisonVoices is 1 — there is nothing to detune against. REFUSED (not clamped) " +
+            "outside 0-50. Omit to keep the current value — omitting NEVER resets it to 0."
+        ),
+      unisonStereoSpread: z
+        .number()
+        .min(0)
+        .max(1)
+        .optional()
+        .describe(
+          "polySynth (m39-g): how wide the unison stack sits across the stereo field — 0 " +
+            "(the default) is dead centre, 1 puts the outermost copies hard left/right. " +
+            "INERT while unisonVoices is 1. The ONLY field that changes this instrument's " +
+            "channel behaviour (every other patch renders one channel and copies it). " +
+            "REFUSED (not clamped) outside 0-1. Omit to keep the current value."
+        ),
+      subLevel: z
+        .number()
+        .min(0)
+        .max(1)
+        .optional()
+        .describe(
+          "polySynth (m39-g): level of a sub-oscillator mixed underneath the main one, for " +
+            "low-end weight. 0 (the default) means NO sub-oscillator at all — not a silent " +
+            "one, the engine skips it entirely. REFUSED (not clamped) outside 0-1. Omit to " +
+            "keep the current value."
+        ),
+      subOctave: z
+        .number()
+        .int()
+        .min(-2)
+        .max(-1)
+        .optional()
+        .describe(
+          "polySynth (m39-g): how far BELOW the played note the sub-oscillator sounds — -1 " +
+            "(the default, and what an omitted key resolves to — NOT 0) is one octave down, " +
+            "-2 is two. ⚠️ NEGATIVE-ONLY RANGE — there is no octave-UP option, so -2..-1 is " +
+            "the full legal domain, not a typo. INERT while subLevel is 0. REFUSED (not " +
+            "clamped) outside -2..-1 — 0 or a positive value is rejected outright, never " +
+            "clamped into range. Omit to keep the current value."
+        ),
+      subWaveform: z
+        .enum(["saw", "square", "triangle", "sine"])
+        .optional()
+        .describe(
+          "polySynth (m39-g): the SUB-oscillator's shape — NOT the main oscillator's (that's " +
+            "`waveform`, above). Omitted resolves to sine, the house default for a sub: it " +
+            "adds weight without harmonics that fight the main oscillator. INERT while " +
+            "subLevel is 0. Omit to keep the current value."
+        ),
+      noiseLevel: z
+        .number()
+        .min(0)
+        .max(1)
+        .optional()
+        .describe(
+          "polySynth (m39-g): level of a noise layer mixed in BEFORE the filter, so the " +
+            "filter and its resonance shape it — breath on a flute patch, air on a pad. 0 " +
+            "(the default) means no noise source at all. REFUSED (not clamped) outside 0-1. " +
+            "Omit to keep the current value."
+        ),
+      noiseColor: z
+        .number()
+        .min(0)
+        .max(1)
+        .optional()
+        .describe(
+          "polySynth (m39-g): the tilt of the noise layer — 0 dark/rumbly, 0.5 plain white " +
+            "noise, 1 bright/hissy. ⚠️ AN OMITTED VALUE RESOLVES TO 0.5, NOT 0 — the one " +
+            "richness field whose neutral is not its floor. INERT while noiseLevel is 0. " +
+            "REFUSED (not clamped) outside 0-1. Omit to keep the current value."
+        ),
+      drift: z
+        .number()
+        .min(0)
+        .max(1)
+        .optional()
+        .describe(
+          "polySynth (m39-g): analog-style pitch instability — each voice wanders slowly by " +
+            "up to a small plus/minus-cents bound at 1 (see instrument_describe_synth's " +
+            "`constants.driftMaxCents` for the exact figure). 0 (the default) is perfectly " +
+            "stable pitch. A shimmer, not a vibrato. REFUSED (not clamped) outside 0-1. Omit " +
+            "to keep the current value."
+        ),
+      resonanceBoost: z
+        .number()
+        .min(0)
+        .max(1)
+        .optional()
+        .describe(
+          "polySynth (m39-g): EXTRA filter resonance ABOVE the `resonance` knob's own " +
+            "ceiling, for screaming self-oscillating peaks (see instrument_describe_synth's " +
+            "`constants.maxBoostedQ`). 0 (the default) leaves the legacy `resonance` mapping " +
+            "bit-identical — a deliberately separate knob so stored projects keep their " +
+            "sound. REFUSED (not clamped) outside 0-1. Omit to keep the current value."
+        ),
+      drive: z
+        .number()
+        .min(0)
+        .max(1)
+        .optional()
+        .describe(
+          "polySynth (m39-g): waveshaper drive into the filter — grit and harmonic " +
+            "saturation. 0 (the default) takes the waveshaper OUT of the signal path " +
+            "entirely, not just down to zero gain. REFUSED (not clamped) outside 0-1. Omit " +
+            "to keep the current value."
+        ),
+      velocityToCutoff: z
+        .number()
+        .min(0)
+        .max(1)
+        .optional()
+        .describe(
+          "polySynth (m39-g): how much harder playing opens the filter, applied once at " +
+            "note-on (see instrument_describe_synth's `constants.cutoffTrackMaxOctaves` for " +
+            "how many octaves a value of 1 means). 0 is the default. REFUSED (not clamped) " +
+            "outside 0-1. Omit to keep the current value."
+        ),
+      keyToCutoff: z
+        .number()
+        .min(0)
+        .max(1)
+        .optional()
+        .describe(
+          "polySynth (m39-g): how much the filter follows the note's PITCH, so high notes " +
+            "stay as bright as low ones instead of dulling; 1 is full 1:1 tracking measured " +
+            "from middle C (see instrument_describe_synth's `constants.keyTrackCenterPitch`). " +
+            "0 is the default. REFUSED (not clamped) outside 0-1. Omit to keep the current " +
+            "value."
+        ),
+      voiceJitter: z
+        .number()
+        .min(0)
+        .max(1)
+        .optional()
+        .describe(
+          "polySynth (m39-g): per-note-on randomisation of pan, detune and cutoff, so no two " +
+            "notes sound quite alike — what stops a repeated chord sounding photocopied. 0 " +
+            "is the default. REFUSED (not clamped) outside 0-1. Omit to keep the current " +
+            "value."
+        ),
+      envelopeCurve: z
+        .number()
+        .min(-1)
+        .max(1)
+        .optional()
+        .describe(
+          "polySynth (m39-g): the SHAPE of the attack/decay/release ramps, not their length " +
+            "— 0 (the default) is the straight lines this synth has always drawn; positive " +
+            "bends toward a snappy exponential curve, negative bends the other way. Segment " +
+            "DURATIONS are unaffected either way (a 0.15s release still reaches exact " +
+            "silence at exactly 0.15s). REFUSED (not clamped) outside -1..1. Omit to keep " +
+            "the current value."
+        ),
       sampler: samplerSchema.optional(),
       audioUnit: audioUnitSchema.optional(),
       soundBank: soundBankSchema.optional(),
@@ -2206,6 +2400,21 @@ registerTool(
     resonance,
     gain,
     pedalHoldLimit,
+    unisonVoices,
+    unisonDetuneCents,
+    unisonStereoSpread,
+    subLevel,
+    subOctave,
+    subWaveform,
+    noiseLevel,
+    noiseColor,
+    drift,
+    resonanceBoost,
+    drive,
+    velocityToCutoff,
+    keyToCutoff,
+    voiceJitter,
+    envelopeCurve,
     sampler,
     audioUnit,
     soundBank,
@@ -2223,6 +2432,21 @@ registerTool(
         resonance,
         gain,
         pedalHoldLimit,
+        unisonVoices,
+        unisonDetuneCents,
+        unisonStereoSpread,
+        subLevel,
+        subOctave,
+        subWaveform,
+        noiseLevel,
+        noiseColor,
+        drift,
+        resonanceBoost,
+        drive,
+        velocityToCutoff,
+        keyToCutoff,
+        voiceJitter,
+        envelopeCurve,
         sampler,
         audioUnit,
         soundBank,
@@ -3630,6 +3854,81 @@ registerTool(
 );
 
 registerTool(
+  "instrument_describe_synth",
+  {
+    title: "Read a track's Poly Synth configuration (read-only)",
+    description:
+      "Read the built-in Poly Synth's configuration on an instrument track — every one of " +
+      "its parameters' range, unit, default, stored value, and the value the ENGINE actually " +
+      "applies, without paying for project_snapshot's whole-project cost. The direct mirror " +
+      "of instrument_describe_sampler for the OTHER built-in sound source, and — with the " +
+      "m39-g richness pass — the end of guessing being viable: this instrument now has " +
+      "**24 parameters, not 23** (8 legacy — waveform/attack/decay/sustain/release/cutoffHz/" +
+      "resonance/gain — plus pedalHoldLimit plus FIFTEEN richness knobs: unisonVoices/" +
+      "unisonDetuneCents/unisonStereoSpread for a detuned supersaw stack, subLevel/subOctave/" +
+      "subWaveform for a sub-oscillator layer, noiseLevel/noiseColor for a pre-filter noise " +
+      "layer, drift for analog pitch instability, resonanceBoost/drive for extra filter " +
+      "character, velocityToCutoff/keyToCutoff for performance-linked filter tracking, " +
+      "voiceJitter for per-note randomisation, and envelopeCurve for ramp shape) — a " +
+      "bijection test on the Swift side proves described-set == settable-set, so 24 is " +
+      "correct and NOT a rounding error. Works even when the track's ACTIVE instrument is " +
+      "something else right now — Poly Synth settings are carried across kind switches " +
+      "exactly like the Sampler's, so you can inspect a previously-built patch before " +
+      "switching back to it; the response's own `kind` and `isActiveInstrument` fields say " +
+      "whether this patch is the one actually sounding. Refuses readably for an audio/bus " +
+      "track (only instrument tracks carry an instrument) and an unknown trackId — there is " +
+      "deliberately NO 'never configured' refusal, unlike the Sampler: every instrument " +
+      "track HAS a Poly Synth (`.default`'s) even untouched, and that is exactly the patch " +
+      "track_set_instrument would overlay onto. " +
+      "Returns {trackId, kind, isActiveInstrument, parameterCount (24), order (the 24 names " +
+      "in a sensible read order — oscillator, envelope, filter, output, then the m39-g " +
+      "richness groups), parameters (an object keyed by name), derived, constants, " +
+      "warnings?}. Every entry in `parameters` carries `unit` and `meaning` (one sentence — " +
+      "the SAME sentence track_set_instrument's own out-of-range error uses for that " +
+      "parameter, so the two can never drift apart), plus `effective` (what the engine " +
+      "actually applies right now) and `default`. " +
+      "⭐⭐ THE SIXTEEN ADDITIVE-OPTIONAL PARAMETERS (pedalHoldLimit + all fifteen m39-g " +
+      "knobs) additionally carry `optional: true`, `isSet` (was this ever written on this " +
+      "track), `value` (present ONLY when isSet — omitted, never null, when unset), and " +
+      "`nilResolvesTo` (what the engine treats an unset field as; equal to `default` here). " +
+      "EVERY ONE OF THOSE FIFTEEN IS NIL-SAFE ON WRITE THROUGH track_set_instrument: " +
+      "omitting a richness field there PRESERVES whatever this track already had — it does " +
+      "NOT reset it to neutral, even when the same call is only touching an unrelated field " +
+      "like cutoffHz. " +
+      "⚠️ 'UNSET' DOES NOT ALWAYS MEAN 0 — TWO OF THE FIFTEEN RESOLVE ELSEWHERE: an unset " +
+      "noiseColor resolves to 0.5 (plain white noise, not silence-adjacent darkness) and an " +
+      "unset subOctave resolves to -1 (one octave down — there is no octave-UP option at " +
+      "all, the range is -2...-1). An agent assuming 'unset means zero' is wrong for both. " +
+      "⚠️ pedalHoldLimit IS THE ONE FIELD WHOSE value/effective/nilResolvesTo/default ARE A " +
+      "STRING (\"unlimited\") RATHER THAN A NUMBER WHEN UNSET — doing arithmetic on it will " +
+      "throw; check `isSet` (or compare to the literal string) before reading it as a number. " +
+      "waveform and subWaveform are the two enums: no min/max, instead a `values` array of " +
+      "the four legal waveforms (saw/square/triangle/sine); subWaveform is additionally " +
+      "optional, and its `nilResolvesTo`/`default` read \"sine\". " +
+      "`derived` answers questions a caller would otherwise have to recompute from raw " +
+      "values: `effectiveQ`, and eight *IsEffective booleans (unisonIsEffective, " +
+      "stereoSpreadIsEffective, subIsEffective, noiseIsEffective, driftIsEffective, " +
+      "driveIsEffective, envelopeCurveIsEffective, cutoffIsPerVoice). " +
+      "`constants` gives the engine constants needed to turn a 0-1 depth into a musical " +
+      "quantity: maxUnisonVoices (8), driftMaxCents, cutoffTrackMaxOctaves, " +
+      "keyTrackCenterPitch, maxBoostedQ. The 16-note polyphony figure is deliberately NOT " +
+      "here — it is a private engine constant this verb cannot read without risking the two " +
+      "disagreeing, so it is absent rather than plausible. " +
+      "⚠️ FOUR SETTINGS ARE GATED BY A SECOND SETTING AND DO NOTHING ALONE — the exact " +
+      "'accepted, stored, silent' failure class instrument_describe_sampler's glide warnings " +
+      "guard against: unisonDetuneCents/unisonStereoSpread need unisonVoices > 1, subOctave/" +
+      "subWaveform need subLevel > 0, and noiseColor needs noiseLevel > 0. `warnings` (a " +
+      "string array, present ONLY when at least one of those fires OR this track's active " +
+      "instrument is not polySynth) names exactly which and how to fix it — read it rather " +
+      "than assuming a stored value is audible.",
+    inputSchema: {
+      trackId: z.string().min(1).describe("Id of the instrument track to describe, from project_snapshot."),
+    },
+  },
+  async ({ trackId }) => toToolResult(() => bridge.send("instrument.describeSynth", { trackId }))
+);
+
+registerTool(
   "instrument_probe_liveness",
   {
     title: "Measure whether velocity changes an instrument's TONE, not just its volume",
@@ -3994,6 +4293,12 @@ const fxKindSchema = z
     "chorus",
     "bassEnhancer",
     "bitCrusher",
+    "djFilter",
+    "ringMod",
+    "flanger",
+    "hallReverb",
+    "tapeDelay",
+    "stereoWidth",
     "audioUnit",
   ])
   .describe(
@@ -4032,6 +4337,17 @@ const fxKindSchema = z
       "meter there (positive dB, held-peak, −20 dB/s release) — poll project_snapshot " +
       "during playback to verify a compressor is actually working. " +
       "`reverb` is a Freeverb-style room simulation: `roomSize`, `damping`, `mix`, " +
+      "⚠️ READ THIS BEFORE REACHING FOR `roomSize`: IT CONTROLS HOW LONG THE " +
+      "TAIL RINGS (the decay), NOT HOW BIG THE SPACE IS. The name is " +
+      "historical and cannot change without breaking saved projects that " +
+      "automate it; under the hood it scales the feedback of eight " +
+      "fixed-length comb filters, whose lengths are compile-time constants no " +
+      "parameter reaches, so this room has exactly one shape forever. There " +
+      "is also one damping setting for the whole spectrum and no crossover. " +
+      "For a REAL size control, a decay in seconds, or different decay times " +
+      "for bass and treble, use the `hallReverb` kind instead. `reverb` is " +
+      "NOT deprecated - its small, bright, dense room is a distinct and " +
+      "genuinely useful sound. " +
       "`preDelayMs`, `width`. `delay` is a stereo echo: `timeMs`, `feedback`, `mix`, " +
       "`pingPong` (0 or 1 — 1 alternates repeats left/right), `highCutHz`, plus tempo " +
       "sync — `sync` (0 or 1; 1 derives the effective time from the project tempo, " +
@@ -4065,6 +4381,241 @@ const fxKindSchema = z
       "reducing depth for DELIVERY rather than for character. `downsampleHz: 40000` " +
       "is the Akai MPC60, which is why MPC60 chops read as cleaner. Reach for it on a " +
       "chopped sample or a whole drum bus. `mix: 0` is a bit-exact bypass. " +
+      "`djFilter` is the CLUB / DJ-MIXER SWEEP - one bipolar knob, and the one " +
+      "knob IS the effect: `position` (-1 to +1), `resonance` (0-1), " +
+      "`slopeDbPerOct` (12 or 24), `deadZoneWidth` (0-0.2), `resonanceTrack` " +
+      "(0-1). `position: 0` is the centre and is a BIT-EXACT BYPASS. NEGATIVE " +
+      "sweeps a LOW-pass downward from 20 kHz so the TREBLE leaves first " +
+      "(muffled, underwater); POSITIVE sweeps a HIGH-pass upward from 20 Hz so " +
+      "the BASS leaves first (thin, radio-like). The travel is log-symmetric - " +
+      "cutoff = 20000 * 0.001^|position| for a NEGATIVE position and 20 * " +
+      "1000^position for a POSITIVE one (the low-pass corner FALLS as the knob " +
+      "goes more negative; the high-pass corner RISES as it goes more positive) - " +
+      "so equal knob movement is equal musical movement at both ends. " +
+      "THE EFFECT IS A MOTION, NOT A SETTING: the thing users mean by 'DJ " +
+      "filter' is an AUTOMATED SWEEP, so reach for automation_add_lane on " +
+      "`position` (a build-up is -0.8 to +0.8 over 8 bars) rather than parking " +
+      "it at one value. `resonance` is the whistle at the edge of the sweep " +
+      "and is the character knob: Q = 0.707 + resonance * 9.293, so 0 is a " +
+      "clean Butterworth with no peak and 0.9 is a singing riser. ⚠️ HIGH " +
+      "RESONANCE MAKES THE WHOLE FILTER QUIETER, on purpose: the resonant " +
+      "section is scaled by sqrt(0.707/Q) so a Q-10 peak cannot slam the mix, " +
+      "which costs about 11.5 dB of passband at `resonance: 1`. That is the " +
+      "protection working - compensate with a gain insert if you need the " +
+      "level back, do not read it as a bug. `slopeDbPerOct` snaps to 12 or 24 " +
+      "(24 = tight modern club, 12 = gentler and more vintage) and does NOT " +
+      "change the resonant peak's height. `deadZoneWidth` is the do-nothing " +
+      "detent at the centre, so a sweep passing THROUGH the middle hands over " +
+      "cleanly instead of jumping. `resonanceTrack` adds resonance only near " +
+      "the extremes (the isolator feel). MODULATION: full depth on `position` " +
+      "is +/-2.0 - the entire sweep in BOTH directions - so depth 0.25 is a " +
+      "half-range wobble and 1.0 is a full-throw slam. Deliberately has NO " +
+      "`mix`: blending a resonant filter with its own dry signal is comb " +
+      "filtering, not a gentler filter. " +
+      "`ringMod` is a RING MODULATOR - the metallic / bell / sci-fi-voice sound, " +
+      "and the one the user means by \"frequency modulation\" on an effect: " +
+      "`carrierHz` (0.5-5000, default 440), `mix` (0-1, default 0.5), `waveform` " +
+      "(0 sine / 1 triangle / 2 square / 3 saw, whole numbers, others round), " +
+      "`inputHighCutHz` (500-20000), `stereoSpreadDeg` (0-180). WHAT IT DOES, " +
+      "and it is NOT a filter or a distortion: it multiplies the signal by a tone " +
+      "at `carrierHz`, and the result contains NEITHER of them - every partial at " +
+      "f becomes a PAIR of new tones at |f - carrierHz| and f + carrierHz. A " +
+      "harmonic series in comes out INHARMONIC, which is why it sounds like a " +
+      "bell or a robot rather than like EQ. THREE REGIONS: below ~20 Hz it is a " +
+      "TREMOLO (and note a 2 Hz SINE carrier gives FOUR pulses per second, not " +
+      "50-300 Hz growls; " +
+      "above ~500 Hz it goes clangorous. ⚠️ THE TREMOLO RATE DEPENDS ON `mix`, " +
+      "which is the first thing a user reports as a bug: the output is " +
+      "signal x (mix*carrier + (1-mix)), so at mix 0.5 (the DEFAULT) or below it " +
+      "pulses at the CARRIER rate - 2 Hz is two pulses a second - while above " +
+      "mix 0.5 the carrier swings the signal negative and the pulse DOUBLES " +
+      "(2 Hz at mix 1 is four a second). MEASURED, not inferred. " +
+      "`mix: 0` is a BIT-EXACT BYPASS and " +
+      "`mix: 1` loses the original pitch entirely (the Dalek setting); 0.5 keeps " +
+      "the source recognisable under the metal. ⚠️ FOLD-BACK IS THE FEATURE, NOT " +
+      "A BUG: f + carrierHz often exceeds what the sample rate can represent and " +
+      "FOLDS BACK DOWN as an extra inharmonic tone. High carrier settings on " +
+      "bright material produce clangorous fold-back tones - that IS the ring-mod " +
+      "sound and it is deliberately not oversampled away. Pull `inputHighCutHz` " +
+      "down to around 4000 for a cleaner, bell-like result; it is a PRE-filter, " +
+      "so it tames the metallic layer without dulling the dry signal. The " +
+      "carrier's own harmonics ARE band-limited (worst audible alias measured " +
+      "about -36 dB for square and saw, -57 for triangle), so 1/2/3 add no " +
+      "audible aliasing of their own. `carrierHz` is logarithmic and safe to AUTOMATE or MODULATE at " +
+      "any rate - its phase is continuous across a change, so a carrier sweep is " +
+      "a frequency glide and never a click. `stereoSpreadDeg: 0` (the default) is " +
+      "mono-safe; 180 is widest but cancels most in a mono fold-down. " +
+      "`flanger` is a FEEDBACK FLANGER - the jet-plane whoosh: `rateHz` " +
+      "(0.02-10, default 0.3, logarithmic), `depthMs` (0.1-10, default 3), " +
+      "`delayMs` (0.1-10, default 1.0 - the sweep's FLOOR, a hardware " +
+      "'manual' knob), `feedback` (-0.95-0.95, default 0.5), `mix` (0-1, " +
+      "default 0.5), `stereoPhaseDeg` (0-180, default 90). HOW IT DIFFERS " +
+      "FROM `chorus`, because they are both short modulated delays: the " +
+      "chorus sits at a fixed ~15 ms with no feedback, which makes its comb " +
+      "too dense to hear AS a comb (it reads as detuning); the flanger sweeps " +
+      "0.1-20 ms, which puts only a handful of notches in the audible band, " +
+      "and its feedback sharpens the peaks between them into resonances. " +
+      "⭐ THE SWEEP IS UPWARD-ONLY AND THAT IS DELIBERATE: the delay covers " +
+      "`delayMs` to `delayMs + depthMs` and never dips below the floor, so " +
+      "`depthMs` larger than `delayMs` is SAFE rather than a broken sweep. " +
+      "Think of `delayMs` as WHERE the effect sits and `depthMs` as HOW FAR " +
+      "it swings from there. The first comb notch is at 1/(2*delay) - 500 Hz " +
+      "at the 1.0 ms default, 5000 Hz at 0.1 ms, 50 Hz at 10 ms - and the " +
+      "`params` object in EVERY fx_add and fx_set_param RESULT, and in " +
+      "project_snapshot, carries it back as `firstNotchHzAtSweepFloor` so " +
+      "you never have to keep your own copy of that law. ⚠️ It is a " +
+      "PER-INSTANCE echo and is NOT in fx_describe, which returns the " +
+      "static schema (name/min/max/default/curve) and no values at all. " +
+      "⚠️ `feedback` IS BIPOLAR AND " +
+      "IT CHANGES LEVEL: on a steady tone the unit's gain is " +
+      "(1-mix) + mix/(1-feedback), so at mix 0.5 feedback 0.5 is +3.5 dB " +
+      "against feedback 0, feedback 0.9 is +14.8 dB, and feedback -0.5 is " +
+      "-1.6 dB. Negative feedback inverts the response (peaks and notches " +
+      "swap) for a hollow, metallic character - it is half the reason the " +
+      "range crosses zero, not a mistake. Match levels or add a limiter " +
+      "after it before deciding which side you prefer. `mix: 0` is a " +
+      "BIT-EXACT BYPASS; 0.5 (the default) is where the notches are deepest, " +
+      "because they are cancellation between the dry signal and its delayed " +
+      "copy and that is strongest when the two are equal - moving away from " +
+      "0.5 in EITHER direction makes the effect subtler, not different. " +
+      "`stereoPhaseDeg: 0` is mono-safe; 90 (the default) is the classic " +
+      "wide sweep; 180 is widest and cancels most in a mono fold-down. " +
+      "THROUGH-ZERO flanging is NOT this effect and is not available: it " +
+      "needs a second delayed dry path, and the delay floor cannot reach 0. " +
+      "`hallReverb` is an 8-LINE FDN HALL and it is the one with a SIZE: " +
+      "`mix` (0-1, default 0.3), `decaySeconds` (0.1-20, default 1.8, " +
+      "logarithmic - a REAL RT60 in seconds, the time the tail takes to fall " +
+      "60 dB), `sizeMeters` (1-60, default 12, logarithmic), `preDelayMs` " +
+      "(0-250, default 20), `width` (0-1.2, default 1), `diffusion` (0-1, " +
+      "default 0.7), `earlyLateBalance` (-1 close to +1 far, default 0), " +
+      "`lowDecayMultiplier` (0.25-4, default 1) and `highDecayMultiplier` " +
+      "(0.1-1, default 0.5) with `lowCrossoverHz` (50-1000, default 200) and " +
+      "`highCrossoverHz` (1000-16000, default 6000), `modRateHz` (0.05-5, " +
+      "default 0.3) and `modDepthMs` (0-5, default 0.15), and `freeze` " +
+      "(>=0.5 = infinite hold). HOW IT DIFFERS FROM `reverb`, because you " +
+      "now have two: `reverb` is Freeverb, a fixed-size, fixed-tuning bright " +
+      "room whose `roomSize` actually controls HOW LONG THE TAIL RINGS " +
+      "rather than how big the space is (its comb lengths are compile-time " +
+      "constants, so its room has one shape forever), with one damping " +
+      "control for the whole spectrum and no tail modulation. `hallReverb` " +
+      "has an ACTUAL size in metres, a decay in SECONDS, separate decay " +
+      "multipliers for bass and treble with their own crossovers, and an " +
+      "anti-metallic modulated tail. NEITHER IS DEPRECATED - Freeverb's " +
+      "small, bright, dense room is a good sound this hall does not " +
+      "replicate. ⭐ `highDecayMultiplier` defaults to 0.5, NOT 1, and " +
+      "that is the most important number in the effect: real air absorbs " +
+      "highs as sound travels, and a reverb with no HF damping is exactly " +
+      "what 'sounds like a metal tank' means. ⚠️ `sizeMeters` is safe to " +
+      "automate but gives a DOPPLER GLIDE while a tail is sounding - the " +
+      "read offsets slide under recirculating audio, so the existing tail " +
+      "pitch-shifts like a varispeed tape. It is smooth, not a click; for a " +
+      "clean size change, change it between sounds. `freeze` is a SWITCH on " +
+      "a numeric surface: drive it from an automation lane with `hold` " +
+      "interpolation, never a ramp. " +
+      "`tapeDelay` IS A TAPE ECHO AND IT IS NOT A BETTER `delay`; the two " +
+      "differ on two things that are decisions, not taste. (1) ⛔ IT HAS NO " +
+      "TEMPO SYNC in v1 - no `sync`, no `division`. If the user asked for a " +
+      "dotted-eighth delay in time with the project, use `delay`. (2) ⛔ " +
+      "`delay` CANNOT WOW, at any setting: it holds its delay as a WHOLE " +
+      "NUMBER OF SAMPLES, so a drift of a fraction of a sample is not a " +
+      "tuning problem there, it is unrepresentable. If the user asked for " +
+      "tape, vintage, warble, wobble or lo-fi character, this is the kind. " +
+      "Params: `timeMs` (20-4000, default 350, logarithmic), `feedback` " +
+      "(0-0.999, default 0.4), `mix` (0-1, default 0.3, 0 is a BIT-EXACT " +
+      "BYPASS), `wowDepthMs` (0-8, default 2.5) and `wowRateHz` (0.1-3, " +
+      "default 0.8) for the slow motor drift, `flutterDepthMs` (0-1, " +
+      "default 0.25) for the faster capstan jitter at two fixed rates " +
+      "(7.3 and 11.7 Hz), `saturationDrive` (0-1, default 0.3) and " +
+      "`highCutHz` (500-20000, default 6000) for the tape stage. " +
+      "⭐ ASK FOR A STATED AMOUNT OF WOBBLE RATHER THAN GUESSING: the " +
+      "`params` object in EVERY fx_add and fx_set_param RESULT - and in " +
+      "project_snapshot - carries `wowCents` and `flutterCents`, the actual " +
+      "PEAK PITCH DEVIATION this instance's current settings produce, so you " +
+      "never have to keep your own copy of that law. ⚠️ They are PER-INSTANCE " +
+      "echoes and are NOT in fx_describe, which returns the static schema " +
+      "(name/min/max/default/curve) and no values at all. The arithmetic, " +
+      "if you want it, is " +
+      "cents = 1200*log2(1 + pi*wowRateHz*wowDepthMs/1000), which does NOT " +
+      "depend on `timeMs` - a 20 ms slapback and a 4 s throw wow by the " +
+      "same musical interval. The defaults give about 10.8 cents (a tenth " +
+      "of a semitone: obvious on a sustained pad, inaudible on a drum hit); " +
+      "the maximum is over a semitone, which is a broken machine and is " +
+      "what the top of the range is for. The two wow controls MULTIPLY - " +
+      "doubling either doubles the deviation. ⚠️ `timeMs` IS SAFE TO " +
+      "AUTOMATE BUT BENDS THE PITCH of repeats that are already sounding, " +
+      "the same DOPPLER GLIDE `hallReverb.sizeMeters` carries. It is SMOOTH, " +
+      "not a click - this is NOT the `delay` kind's whole-sample stepping " +
+      "defect - and riding it by hand is a real dub gesture; for a clean " +
+      "time change, change it between phrases or drop `mix` to 0 first. " +
+      "⚠️ `highCutHz` AND `saturationDrive` SIT IN THE RECORD PATH, not the " +
+      "feedback path, so unlike `delay` the FIRST repeat is already rolled " +
+      "off and saturated and every later one is duller again - that is what " +
+      "makes a 0.9 feedback dissolve instead of piling up. " +
+      "`saturationDrive: 0` is EXACTLY linear, not merely gentle, so it is " +
+      "the setting for a clean repeat with only the wow. " +
+      "`stereoWidth` IS A MID/SIDE WIDENER AND A MONO-MAKER, AND IT IS THE " +
+      "ONE EFFECT HERE WHOSE HEADLINE IS A GUARANTEE RATHER THAN A SOUND: " +
+      "the mono fold-down of its output is ARITHMETICALLY the mono fold-down " +
+      "of its input, at every setting of every parameter. It gets that by " +
+      "construction - it only ever touches the SIDE channel (left minus " +
+      "right) and passes the MID through untouched, so `L + R` is unchanged " +
+      "- which is exactly what the two common tricks cannot do: delaying one " +
+      "side by 5-30 ms (a Haas widener) or adding a polarity-flipped " +
+      "duplicate both widen on speakers and then comb, collapse or hollow " +
+      "out on a phone, a club PA or anything summed to mono. If the user " +
+      "asked to make something WIDER, or to keep the bass tight and centred, " +
+      "or to turn a mono synth into a stereo one, this is the kind. " +
+      "Params: `width` (0-2, default 1) scales the stereo difference that is " +
+      "ALREADY THERE - 0 removes it, 1 changes nothing, 2 is the " +
+      "widest - and it is FREE: a plain gain on the difference, no filtering, " +
+      "no delay, no colouration. ⛔ `width: 0` ALONE IS NOT A MONO-MAKER, AND " +
+      "THIS IS THE ONE TRAP IN THIS KIND: `spread` defaults to 0.3 and " +
+      "MANUFACTURES a new side channel AFTER `width` has scaled the old one, " +
+      "so `width: 0` on a default insert still comes out stereo - and on a " +
+      "MONO source it comes out WIDER than it went in, which is the opposite " +
+      "of what was asked. TO FOLD A TRACK TO DEAD CENTRE SEND `width: 0` AND " +
+      "`spread: 0` TOGETHER; for bass specifically, prefer `bassMonoAmount` " +
+      "with a `bassMonoHz` corner, which centres only the low end. " +
+      "⚠️ `width` DOES NOTHING ON A MONO SOURCE, " +
+      "because there is no difference to scale; that is what `spread` is " +
+      "for. `spread` (0-1, default 0.3) MANUFACTURES a new side channel by " +
+      "running the centre through four all-pass stages (2.9-13.1 ms) and " +
+      "adding it to one side while subtracting it from the other - this is " +
+      "the true-pseudo-stereo control, and the only one here that costs " +
+      "anything. ⚠️ THE COST, STATED BECAUSE IT IS ARITHMETIC AND NOT A " +
+      "TUNING: each channel ON ITS OWN ripples between 20*log10(1 + spread) " +
+      "and 20*log10(1 - spread) dB across the spectrum (+2.3 / -3.1 dB at " +
+      "the default; a complete null at 1.0). The two channels' ripples are " +
+      "complementary, which is what makes it sound wide, and they CANCEL " +
+      "EXACTLY in the mono sum, so nothing is lost when it folds down. You " +
+      "cannot have both a flat mono sum and flat individual channels out of " +
+      "a mono source - that is a theorem, not a limitation of this " +
+      "implementation - and this effect always chooses the flat mono sum. " +
+      "⭐ ASK FOR A STATED AMOUNT OF RIPPLE RATHER THAN GUESSING: the " +
+      "`params` object in EVERY fx_add and fx_set_param RESULT - and in " +
+      "project_snapshot - carries `channelPeakDb` and `channelNotchDb`, the " +
+      "actual per-channel ripple this instance's `spread` produces. ⚠️ They " +
+      "are PER-INSTANCE echoes and are NOT in fx_describe, which returns the " +
+      "static schema (name/min/max/default/curve) and no values at all. " +
+      "`bassMonoHz` (20-500, default 120, logarithmic) and `bassMonoAmount` " +
+      "(0-1, default 1) are the low-end protection: below that corner the " +
+      "stereo difference is removed at 12 dB/oct, which is what mastering " +
+      "practice actually does - low frequencies carry most of the energy, a " +
+      "wandering bass is the commonest way a mix falls apart on a big " +
+      "system, and human hearing cannot localise much under 120 Hz anyway. " +
+      "It is ON by default because the setting that protects you should be " +
+      "the one you turn off, not the one you discover. ⚠️ `bassMonoHz` does " +
+      "NOTHING while `bassMonoAmount` is 0. ⛔ THERE IS NO `mix` PARAMETER, " +
+      "deliberately: a dry/wet blend on a mid/side widener is algebraically " +
+      "just another `width` and another `spread`, so it would be a lie in " +
+      "fx_describe. The equivalent NEUTRAL position is `width: 1`, " +
+      "`spread: 0`, `bassMonoAmount: 0`, and at exactly that position the " +
+      "effect is a BIT-EXACT passthrough (the decorrelator keeps running " +
+      "underneath, so raising `spread` later opens into a settled image). " +
+      "⚠️ AUDIBILITY WARNING WORTH PASSING ON TO THE USER: a width change is " +
+      "close to INAUDIBLE on a single speaker or a phone - by construction, " +
+      "since the mono sum is unchanged. Tell them to use headphones or two " +
+      "speakers, or show them the numbers above instead. " +
       "`audioUnit` hosts an " +
       "installed Audio Unit EFFECT plugin — third-party or Apple effects registered " +
       "with the system — selected via fx_add's `audioUnit` param (REQUIRED when this " +
@@ -4136,7 +4687,7 @@ registerTool(
       "mix's master output chain (post-fader, the last stop before the speakers) instead " +
       "of a track/bus. The master chain hosts BUILT-IN effects only in v1 — `kind: " +
       "\"audioUnit\"` on \"master\" is rejected (pick one of gain|eq|compressor|limiter|" +
-      "reverb|delay|saturator|gate|chorus|bassEnhancer|bitCrusher). Classic mastering move: fx_add {trackId: " +
+      "reverb|delay|saturator|gate|chorus|bassEnhancer|bitCrusher|djFilter|ringMod|flanger|hallReverb|tapeDelay|stereoWidth). Classic mastering move: fx_add {trackId: " +
       "\"master\", kind: \"eq\"} then {trackId: \"master\", kind: \"limiter\"}, then " +
       "render_measure_loudness to check the level. Returns " +
       "`{effectId, effects}`: the new effect's server-minted id, and the track's full " +
@@ -4600,6 +5151,132 @@ registerTool(
     toToolResult(() => bridge.send("au.setParam", { trackId, effectId, address, value }))
 );
 
+server.registerTool(
+  "au_list_presets",
+  {
+    title: "List the patches a hosted Audio Unit ships with",
+    description:
+      "List the presets a hosted Audio Unit instrument or insert effect ships " +
+      "WITH — its developer's own factory patches, plus any the user has saved. " +
+      "Same target model as au_describe_params/au_set_param: targets a track's " +
+      "AU INSTRUMENT (omit effectId) or one of its AU insert effects (pass " +
+      "effectId); trackId \"master\" is rejected (the master chain hosts " +
+      "built-in effects only). Call this BEFORE au_load_preset to see what a " +
+      "plugin actually has, and before dialling a sound up from scratch with " +
+      "au_describe_params/au_set_param — loading a close preset first is " +
+      "usually cheaper than authoring one knob at a time.\n\n" +
+      "GRACEFUL DEGRADATION IS THE MAJORITY PATH HERE, not an edge case: " +
+      "`hasFactoryPresets:false` with empty `factoryPresets`/`userPresets` " +
+      "arrays is a SUCCESSFUL answer for a plugin that simply publishes no " +
+      "preset list (measured: 15 of Apple's 23 built-in effects) — treat it as " +
+      "healthy, not broken, and fall back to au_describe_params/au_set_param or " +
+      "plugin_open_ui. `hasFactoryPresets:false` specifically means the unit " +
+      "published NO factory list at all, which is distinct from publishing an " +
+      "empty one.\n\n" +
+      "Preset `number` is the unit's own identity for that preset — FACTORY " +
+      "presets are always >= 0, USER presets are always < 0 (Apple's contract, " +
+      "not a convention this tool imposes). Numbers are per-plugin-INSTANCE: " +
+      "take them from this call, never guess one, never reuse one captured " +
+      "from a different track or a different plugin.\n\n" +
+      "`currentPreset` (null if the unit reports none) carries a `source` of " +
+      "\"factory\", \"user\", or \"unlisted\", classified by matching its " +
+      "number against the two live lists above — never by name. \"unlisted\" " +
+      "is NORMAL, not corruption: it's what a unit that was never assigned a " +
+      "numbered preset reports (typically `-1 \"Untitled\"`), and also what a " +
+      "unit restored from a saved project reports even when its parameter " +
+      "values are exactly right — a project reload of factory preset 8 " +
+      "\"Cathedral\" reads back as `-1 \"Cathedral\"`: the sound is intact, the " +
+      "unit simply no longer claims to sit on a numbered slot. Returns " +
+      "{trackId, effectId?, componentName, supportsUserPresets, " +
+      "hasFactoryPresets, factoryPresets: [{number, name}], userPresets: " +
+      "[{number, name}], currentPreset: {number, name, source} | null}.",
+    inputSchema: {
+      trackId: auTrackIdSchema,
+      effectId: auEffectIdSchema,
+    },
+  },
+  async ({ trackId, effectId }) =>
+    toToolResult(() => bridge.send("au.listPresets", { trackId, effectId }))
+);
+
+registerTool(
+  "au_load_preset",
+  {
+    title: "Load one of a hosted Audio Unit's own patches",
+    description:
+      "Load ONE of a hosted Audio Unit's own presets onto the live plugin " +
+      "instance — call au_list_presets first to see what's available and get " +
+      "valid numbers/names. Same target model as au_describe_params/" +
+      "au_set_param: targets a track's AU INSTRUMENT (omit effectId) or one of " +
+      "its AU insert effects (pass effectId); trackId \"master\" is rejected.\n\n" +
+      "Pass EXACTLY ONE of `presetNumber` or `presetName` — they name the same " +
+      "preset two ways. Both, or neither, is a readable error. `presetNumber` " +
+      "is a plain integer and NEGATIVE VALUES ARE LEGAL AND EXPECTED — Apple's " +
+      "contract is that user presets are numbered < 0 and factory presets " +
+      ">= 0, so rejecting negatives would make every user preset unreachable " +
+      "by number. `presetName` resolution: an exact, case-SENSITIVE match wins " +
+      "outright (the factory list is searched before the user list); only if " +
+      "no exact match exists is a case-INSENSITIVE pass tried. If either stage " +
+      "matches more than one preset, the call REFUSES rather than guessing, " +
+      "naming the candidate preset numbers in the error — retry with one of " +
+      "those numbers via `presetNumber`.\n\n" +
+      "Applies LIVE without interrupting playback. The response's `preset` is " +
+      "the plugin's post-load READ-BACK, not an echo of the request, and the " +
+      "two can genuinely differ: MEASURED behavior is that some units REWRITE " +
+      "the preset name they were handed (loading preset 6 while it was " +
+      "labelled \"JUNK NAME\" read back as its real name, \"Medium Chamber\") " +
+      "— so always trust `preset.name`/`preset.number` from the response, " +
+      "never what you passed in. A unit that silently ignores the load " +
+      "(measured real behavior on some plugins, not theoretical) is caught by " +
+      "re-reading `currentPreset` afterwards and erroring rather than " +
+      "reporting a load that never happened.\n\n" +
+      "Deliberately NOT undoable — parity with picking a preset by hand in the " +
+      "plugin's own window (plugin_open_ui), which this app never sees as an " +
+      "edit either; the sound persists through the project's normal save. " +
+      "Errors you may see: no presets at all on this unit (use " +
+      "au_describe_params/au_set_param or plugin_open_ui instead), an unknown " +
+      "preset number or name (both list what the unit actually has), an " +
+      "ambiguous name (lists the candidate numbers), a negative-numbered " +
+      "preset on a unit that doesn't support user presets, or the silent-" +
+      "no-op guard above. Returns {trackId, effectId?, componentName, preset: " +
+      "{number, name, source}} — `source` is \"factory\", \"user\", or " +
+      "\"unlisted\" (normal for a preset restored via project save/reload; " +
+      "see au_list_presets for what that means).",
+    inputSchema: {
+      trackId: auTrackIdSchema,
+      effectId: auEffectIdSchema,
+      presetNumber: z
+        .number()
+        .int()
+        .optional()
+        .describe(
+          "The preset's number, exactly as returned by au_list_presets. " +
+            "Factory presets are always >= 0; user presets are always < 0 — " +
+            "negative values are legal and required for addressing a user " +
+            "preset, so none is rejected here. Mutually exclusive with " +
+            "`presetName`; pass exactly one of the two."
+        ),
+      presetName: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "The preset's display name, exactly as returned by au_list_presets " +
+            "(exact case-sensitive match wins; falls back to a case-" +
+            "insensitive match only if no exact match exists). If more than " +
+            "one preset matches at either stage the call refuses and lists " +
+            "the candidate numbers — retry with `presetNumber` instead. " +
+            "Mutually exclusive with `presetNumber`; pass exactly one of the " +
+            "two."
+        ),
+    },
+  },
+  async ({ trackId, effectId, presetNumber, presetName }) =>
+    toToolResult(() =>
+      bridge.send("au.loadPreset", { trackId, effectId, presetNumber, presetName })
+    )
+);
+
 registerTool(
   "fx_remove",
   {
@@ -4847,21 +5524,46 @@ server.registerTool(
     description:
       "Look up the parameter schema for one or every available effect kind — the " +
       "reference for fx_add's `params` and fx_set_param's `name`/`value`. Returns, per " +
-      "kind, its parameter list as `{name, min, max, default, unit}` (`unit` is a short " +
-      "human label, e.g. \"linear gain\", \"dB\", \"Hz\", \"ms\", \"seconds\"), plus a " +
+      "kind, its parameter list as `{name, min, max, default, unit, curve}` (`unit` is a " +
+      "short human label, e.g. \"linear gain\", \"dB\", \"Hz\", \"ms\", \"seconds\"), plus a " +
       "teaching `note` on parameters whose bare range hides semantics (the eq's " +
-      "nil-means-off high/low-pass, 12/24 slope snapping, 0/1 per-band bypass). Omit `kind` " +
+      "nil-means-off high/low-pass, 12/24 slope snapping, 0/1 per-band bypass). " +
+      "⭐ `curve` (m39-a) is how the parameter's 0...1 knob travel actually maps onto " +
+      "`[min, max]`, and matters whenever you are computing a SWEEP or a MODULATION STEP " +
+      "rather than setting one absolute value: `linear` (the default, and every non-" +
+      "frequency parameter here — times, ratios, dB-valued ranges, 0-1 amounts) means an " +
+      "even step in the parameter's OWN UNITS. `logarithmic` (every frequency parameter on " +
+      "this surface — cutoff/shelf/band/high-pass/low-pass corners) means even steps in " +
+      "OCTAVES instead: `value = min · (max/min)^f` for a 0...1 fraction `f`. Stepping a " +
+      "logarithmic parameter in equal Hz is the classic mistake — a 20 Hz-20 kHz sweep in " +
+      "equal-Hz steps buries the entire low half of the range in the first tenth of the " +
+      "sweep, and a modulation depth sized in Hz means a different musical move at 200 Hz " +
+      "than at 8000 Hz. Step the FRACTION `f`, not the Hz, for an even-sounding result. " +
+      "`decibel` is the same multiplicative curve read in dB rather than octaves (no " +
+      "shipping parameter uses it yet — reserved for one that should read evenly in dB from " +
+      "birth). Omit `kind` " +
       "to list every available kind at once. Available kinds: `gain` (simple linear " +
       "gain stage), `eq` (parametric — low shelf, two peaking bands, high shelf, plus " +
       "optional high/low-pass filters, shelf Q, and per-band `*Enabled` bypass), " +
       "`compressor` (soft-knee, stereo-linked dynamics), `limiter` (lookahead " +
       "brick-wall, adds 5 ms latency — see project_snapshot's per-effect `latencySamples`), " +
-      "`reverb` (Freeverb-style room — roomSize/damping/mix/preDelayMs/width), `delay` " +
+      "`reverb` (Freeverb-style room — roomSize/damping/mix/preDelayMs/width; ⚠️ `roomSize` " +
+      "is really a DECAY control - the comb lengths are fixed constants, so " +
+      "this room has one shape forever - and there is one damping setting for " +
+      "the whole spectrum; use `hallReverb` when you need an actual size, a " +
+      "decay in seconds, or separate bass/treble decay. Not deprecated: its " +
+      "small bright room is its own sound), `delay` " +
       "(stereo echo — timeMs/feedback/mix/pingPong/highCutHz, plus m22-f tempo sync: " +
       "`sync` 0/1 and `division` in beats, snapped to 1/1…1/32 straight/dotted/triplet " +
       "— their `note`s teach the exact semantics; when synced the effective time is " +
       "division × 60000 / tempo BPM and follows tempo changes, `timeMs` staying the " +
-      "unsync fallback), `saturator` (tanh drive " +
+      "unsync fallback. m39-k: `feedback` reaches 0.999, which is an ECHO FREEZE — " +
+      "0.0087 dB lost per repeat, so the echo holds instead of fading (measured 3.19 dB " +
+      "down after 110 s on a 350 ms delay). It stops short of 1.0 because at exactly 1.0 " +
+      "the loop grows without bound, measured; at the ceiling `highCutHz` is what bounds " +
+      "the tail, and anything you keep feeding it builds toward 1/(1-feedback) times " +
+      "itself — to USE a freeze, put the delay on a bus and pull the send to 0), " +
+      "`saturator` (tanh drive " +
       "color — driveDb/mix/outputDb), `gate` (noise gate — thresholdDb/attackMs/holdMs/" +
       "releaseMs), `chorus` (2-voice modulated thickener — rateHz/depthMs/mix), and " +
       "`bassEnhancer` (psychoacoustic bass enhancer — crossoverHz/amount/mix: it " +
@@ -4871,7 +5573,66 @@ server.registerTool(
       "sample-rate reduction - bits/downsampleHz/antiAlias/dither/mix, defaulting to " +
       "the SP-1200's 12 bits at 26040 Hz with anti-aliasing and dither deliberately " +
       "OFF because the aliasing IS the character; read its notes before turning " +
-      "either switch on).",
+      "either switch on), and `djFilter` (the club/DJ-mixer sweep - one bipolar " +
+      "`position` knob where 0 is a bit-exact bypass, negative sweeps a low-pass " +
+      "down so the treble goes first and positive sweeps a high-pass up so the bass " +
+      "goes first, plus the `resonance` that is its whole character; automate " +
+      "`position` rather than parking it - the effect is a motion), and `ringMod` " +
+      "(a ring modulator - carrierHz/mix/waveform/inputHighCutHz/stereoSpreadDeg: " +
+      "it multiplies your signal by a tone, turning every partial f into the pair " +
+      "|f - carrierHz| and f + carrierHz, so a harmonic sound comes out " +
+      "inharmonic and metallic; under ~20 Hz it is a tremolo instead; the " +
+      "clangorous fold-back at high carrier settings is the character, and " +
+      "inputHighCutHz around 4000 is how you get a cleaner bell), and " +
+      "`flanger` (the feedback flanger, the jet-plane whoosh - rateHz/depthMs/" +
+      "delayMs/feedback/mix/stereoPhaseDeg: one swept comb filter, where " +
+      "`delayMs` is the sweep's FLOOR and the sweep only ever moves UPWARD " +
+      "from it, so a `depthMs` bigger than `delayMs` is safe; `feedback` is " +
+      "bipolar and negative inverts the response into a hollow metallic " +
+      "character, but it also changes LEVEL - and every fx_add/fx_set_param " +
+      "RESULT, not this schema, echoes `firstNotchHzAtSweepFloor` in that " +
+      "insert's `params` so you can see where the comb sits), and " +
+      "`hallReverb` (an 8-line FDN hall - mix/decaySeconds/sizeMeters/" +
+      "preDelayMs/width/diffusion/earlyLateBalance/lowDecayMultiplier/" +
+      "highDecayMultiplier/lowCrossoverHz/highCrossoverHz/modRateHz/" +
+      "modDepthMs/freeze: the reverb that has an actual SIZE in metres and a " +
+      "decay in SECONDS, with separate bass and treble decay multipliers and " +
+      "an anti-metallic modulated tail; `reverb` is the older Freeverb room " +
+      "and is NOT deprecated, but its `roomSize` is really a decay control " +
+      "and its room has one fixed shape), and " +
+      "`tapeDelay` (a TAPE ECHO, free-ms only - timeMs/feedback/mix/" +
+      "wowDepthMs/wowRateHz/flutterDepthMs/saturationDrive/highCutHz: the " +
+      "echo whose repeats WOBBLE IN PITCH, which the `delay` kind " +
+      "structurally cannot do because it reads its line at whole-sample " +
+      "offsets only. `wowDepthMs` is the slow motor drift and is the " +
+      "identity of the effect - every fx_add / fx_set_param result echoes " +
+      "the pitch deviation it causes as `wowCents` in that effect's `params` " +
+      "(NOT here in fx_describe, which carries schemas and no values), so " +
+      "you can ask for a specific amount of wobble " +
+      "instead of guessing; `flutterDepthMs` is the faster capstan jitter, " +
+      "echoed the same way as `flutterCents`. " +
+      "`saturationDrive` 0 is EXACTLY linear and " +
+      "up drives each pass into tape compression; `highCutHz` sits in the " +
+      "RECORD path, so unlike `delay` even the FIRST repeat is already " +
+      "rolled off and every later one is duller again. \u26d4 NO TEMPO SYNC " +
+      "on this kind - `delay` is the one with `sync`/`division`), and " +
+      "`stereoWidth` (a MID/SIDE WIDENER and MONO-MAKER - width/spread/" +
+      "bassMonoHz/bassMonoAmount: the one effect whose headline is a " +
+      "GUARANTEE rather than a sound, because it only ever touches the side " +
+      "channel and so its mono fold-down is arithmetically identical to its " +
+      "input's at every setting - unlike a Haas delay or a flipped " +
+      "duplicate, which widen on speakers and then collapse on a phone. " +
+      "`width` scales the stereo difference you already have and costs " +
+      "nothing, but does nothing at all on a mono source; `spread` " +
+      "manufactures a new side channel out of the centre through an all-pass " +
+      "chain and is the true-pseudo-stereo control, at the cost of a " +
+      "per-channel ripple that every fx_add / fx_set_param result echoes as " +
+      "`channelPeakDb`/`channelNotchDb` in that effect's `params` (NOT here " +
+      "in fx_describe, which carries schemas and no values); `bassMonoHz` " +
+      "and `bassMonoAmount` keep the low end centred at 12 dB/oct. \u26d4 NO " +
+      "`mix` on this kind - a dry/wet blend on a mid/side widener is " +
+      "algebraically just another width; the neutral bit-exact position is " +
+      "width 1, spread 0, bassMonoAmount 0).",
     inputSchema: {
       kind: fxKindSchema.optional().describe("Effect kind to describe. Omit to list every available kind."),
     },
@@ -9400,7 +10161,25 @@ const automationTargetSchema = z
       "BUILT-IN effect already in the track's insert chain — use it for filter sweeps, " +
       "reverb-mix rises, delay-feedback build-ups, etc.; built-in kinds (gain, eq, " +
       "compressor, limiter, reverb, delay, saturator, gate, chorus, bassEnhancer, " +
-      "bitCrusher) work today. " +
+      "bitCrusher, djFilter, ringMod, flanger, hallReverb, tapeDelay, stereoWidth) " +
+      "work today. \u2b50 `stereoWidth`'s `width` is a lane worth drawing - " +
+      "narrow in the verse, open out on the chorus - and it is one of the " +
+      "few automatable params with NO caveat at all: it is a plain gain on " +
+      "the stereo difference, so a ramp cannot click, cannot glide the pitch " +
+      "and cannot change the mono fold-down. " +
+      "\u2b50 `tapeDelay`'s `wowDepthMs` is a lane worth drawing - a slow rise " +
+      "into a wobblier machine across a section - and its `timeMs` is " +
+      "automatable but bends the PITCH of repeats that are already sounding, " +
+      "the same Doppler caveat `hallReverb.sizeMeters` carries. " +
+      "⭐ `hallReverb`'s `decaySeconds` and `mix` are the two reverb lanes " +
+      "worth drawing; ⚠️ its `sizeMeters` is automatable but gives a " +
+      "Doppler glide on any tail that is already sounding, and its `freeze` " +
+      "needs a `hold` lane rather than a ramp. ⭐ `ringMod`'s `carrierHz` is " +
+      "the other lane worth drawing: its phase stays continuous across a change, " +
+      "so a carrier sweep glides instead of clicking. ⭐ `djFilter`'s `position` is the " +
+      "canonical lane to draw: one bipolar knob from -0.8 to +0.8 over 8 bars IS " +
+      "the DJ filter sweep, and that effect smooths its own coefficients " +
+      "internally so the sweep does not zipper. " +
       "`effectParam` is REJECTED in v0 when the effect is a hosted Audio Unit " +
       "(`kind: \"audioUnit\"` from fx_add), since its generic parameter surface is empty."
   );
@@ -9613,6 +10392,582 @@ registerTool(
   },
   async ({ trackId, laneId, enabled }) =>
     toToolResult(() => bridge.send("automation.setLaneEnabled", { trackId, laneId, enabled }))
+);
+
+// ---------------------------------------------------------------------------
+// Modulation (m39-e) — LFOs, step sequencers, envelope followers and macros,
+// routed onto volume/pan/effect/instrument params on the SAME per-sample/
+// per-quantum delivery paths automation already rides. `mod_describe_kinds`
+// is the discovery entry point, named in every other tool below — the
+// `fx_describe` precedent. There is deliberately NO `mod_trigger` tool:
+// every source is a pure function of transport position, so there is no
+// phase register to reset.
+// ---------------------------------------------------------------------------
+
+const modulationTargetSchema = z
+  .discriminatedUnion("type", [
+    // `.strict()` on each member (the m30-c precedent, automationTargetSchema
+    // above): a typo'd field would otherwise be silently stripped rather than
+    // rejected.
+    z
+      .object({
+        type: z
+          .literal("volume")
+          .describe(
+            "Modulate the track's fader volume. Delivered PER SAMPLE (the same stage " +
+              "automation's volume ramp uses), so edges are sample-accurate — this is the " +
+              "target for trance gates, sidechain-style pumping, and tremolo. Full depth is " +
+              "±48 dB; the fader itself only has +6.02 dB of headroom, so a gate/tremolo " +
+              "MUST use the source's bipolar:false and a NEGATIVE depth on mod_add_route " +
+              "(see that tool's description for the full polarity convention)."
+          ),
+      })
+      .strict(),
+    z
+      .object({
+        type: z
+          .literal("pan")
+          .describe(
+            "Modulate the track's pan position. Delivered PER SAMPLE, same stage as volume. " +
+              "Full depth is ±1.0 (hard left to hard right)."
+          ),
+      })
+      .strict(),
+    z
+      .object({
+        type: z
+          .literal("sendLevel")
+          .describe(
+            "One send's level. REFUSED in v1 (modulationTargetUnsupported, reason " +
+              "sendLevelUnsupported) — there is no render-side send stage to compose into " +
+              "yet. Modulate the source track's volume instead: sends are POST-fader, so " +
+              "they follow it. The shape is accepted now so projects round-trip forward-" +
+              "compatibly once sends are supported."
+          ),
+        sendId: z
+          .string()
+          .min(1)
+          .describe("Id of the send to modulate, from track_add_send's result or project_snapshot."),
+      })
+      .strict(),
+    z
+      .object({
+        type: z
+          .literal("effectParam")
+          .describe(
+            "One parameter of a built-in effect already in the track's insert chain. Re-" +
+              "derived ONCE per render block (~93.75 Hz at the offline block size), so " +
+              "source rates above ~18.75 Hz alias (mod_add_route warns with the image " +
+              "ratio). Per-parameter honesty, checked when the route is created: PERMITTED " +
+              "and smooth (e.g. gain/compressor/limiter — internally smoothed); PERMITTED " +
+              "but WARNED (e.g. every eq.* frequency/gain/Q param — no internal smoothing, " +
+              "so it zippers at any rate; `delay.timeMs` — an integer sample-offset read, " +
+              "so every step jumps whole samples; `reverb.roomSize` — actually scales decay, " +
+              "not size); or REFUSED with reason `discrete` (a boolean, an enum, or a " +
+              "`.rounded()` param like an eq slope, a bypass, or `delay.pingPong` — an LFO " +
+              "cannot meaningfully drive a topology switch)."
+          ),
+        effectId: z
+          .string()
+          .min(1)
+          .describe("Id of the effect to modulate, from fx_add's result or project_snapshot."),
+        param: z
+          .string()
+          .min(1)
+          .describe("Exact parameter name, as listed by fx_describe for the effect's kind."),
+      })
+      .strict(),
+    z
+      .object({
+        type: z
+          .literal("instrumentParam")
+          .describe(
+            "One built-in instrument parameter on this track's instrument (e.g. cutoffHz, " +
+              "resonance, gain, attack/decay/sustain/release on a Poly Synth — see " +
+              "instrument_describe_synth for the live, per-track table of names/ranges). NO " +
+              "effectId/sendId: a track has at most one instrument, so the target is " +
+              "unambiguous. Delivered PER SAMPLE inside the instrument's own per-frame loop " +
+              "— this is how you build a filter sweep or vibrato with sample-accurate edges. " +
+              "⚠️ `automation_add_lane` REFUSES an `instrumentParam` target and points here " +
+              "— modulation (this tool family) is currently the ONLY way to move a synth " +
+              "parameter over time; hand-drawn automation lanes don't reach instrument " +
+              "params yet. Hosted instruments (sampler/soundBank/audioUnit) have an EMPTY " +
+              "modulatable table in v1 and are REFUSED with reason `hostedInstrument` " +
+              "(carrying the alias-image ratio), never silently aliased."
+          ),
+        param: z
+          .string()
+          .min(1)
+          .describe("Exact parameter name (e.g. \"cutoffHz\"), from instrument_describe_synth."),
+      })
+      .strict(),
+  ])
+  .describe(
+    "What this route drives, by discriminator `type` — the SAME flat object " +
+      "automation_add_lane's `target` takes (this family reuses that exact shape by " +
+      "construction), plus `instrumentParam`, which automation lanes cannot address yet. " +
+      "`sendId`/`effectId`/`param` only apply to their own `type` (see each member's own " +
+      "description)."
+  );
+
+const modulationSourceParamsSchema = z
+  .object({
+    // lfo
+    waveform: z
+      .enum(["sine", "triangle", "sawUp", "sawDown", "square", "sampleHold"])
+      .optional()
+      .describe(
+        "lfo only. Default \"sine\". sawUp RISES then resets; sawDown falls. \"sampleHold\" " +
+          "holds a new random value each cycle (see `seed`)."
+      ),
+    rateHz: z
+      .number()
+      .optional()
+      .describe(
+        "Free-running rate, 0.01-40 (out-of-range clamps and returns a warning). For lfo: " +
+          "cycles/second (default 1.0). For stepSequencer: steps/second (default 4.0 — a " +
+          "1/16 at 60 BPM). Ignored once `syncDivision`/`stepDivision` land (NOT AVAILABLE " +
+          "yet — see those fields)."
+      ),
+    syncDivision: z
+      .string()
+      .nullable()
+      .optional()
+      .describe(
+        "lfo only. NOT AVAILABLE IN v1 — any non-null value is REFUSED " +
+          "(modulationTempoSyncUnavailable), naming m39-c (the generalised tempo-sync " +
+          "resolver every other tempo-synced verb shares) as the prerequisite. The field " +
+          "exists and persists now so the wire/save shape never changes when sync lands; " +
+          "use `rateHz` for a free-running rate today. Omit or pass null."
+      ),
+    phaseDeg: z
+      .number()
+      .optional()
+      .describe(
+        "lfo only, 0-360, default 0 (clamps and warns). Phase at PROJECT position 0 " +
+          "(beat 0), not at play start — a seek lands where a full playthrough would have " +
+          "been."
+      ),
+    pulseWidth: z
+      .number()
+      .optional()
+      .describe(
+        "lfo only, 0.01-0.99, default 0.5 (clamps and warns; stored and reported ignored " +
+          "when the waveform isn't \"square\"). The fraction of the cycle at the HIGH " +
+          "value. POLARITY: on a `.volume` route (which MUST use a NEGATIVE depth), the " +
+          "HIGH value is the CUT, so pulseWidth is the CLOSED fraction, not the open one — " +
+          "see mod_add_route's description for the full convention."
+      ),
+    edgeMs: z
+      .number()
+      .optional()
+      .describe(
+        "0-100 ms, default 2.0 (clamps and warns). Raised-cosine edge width, CENTRED on " +
+          "the transition, that softens \"square\"/\"sampleHold\" (lfo) or the gap between " +
+          "steps (stepSequencer) — softening a gate does not move it off the beat."
+      ),
+    bipolar: z
+      .boolean()
+      .optional()
+      .describe(
+        "lfo only, default true (output -1...1). Set FALSE to map the output to 0...1 — " +
+          "the attenuation-only idiom a trance gate or tremolo on `.volume` MUST use, " +
+          "together with a NEGATIVE `depth` on mod_add_route: the fader only has +6.02 dB " +
+          "of headroom above unity, so a bipolar source routed to `.volume` earns a " +
+          "`modulationVolumeCeiling` warning rather than silently clipping."
+      ),
+    seed: z
+      .number()
+      .int()
+      .optional()
+      .describe(
+        "lfo only, 0-65535, default 0 (clamps and warns; ignored when the waveform isn't " +
+          "\"sampleHold\"). Makes the random step sequence reproducible."
+      ),
+    // stepSequencer
+    steps: z
+      .array(z.number())
+      .min(1)
+      .max(64)
+      .optional()
+      .describe(
+        "stepSequencer only, 1-64 values (REFUSED outright if empty, over 64, or non-" +
+          "finite — NOT clamped; each individual value clamps to -1...1 with a warning). " +
+          "Default [1,0,1,0]. ⚠️⚠️ POLARITY — these are OFFSETS, not levels: on a `.volume` " +
+          "route (which MUST use a NEGATIVE depth) the source's HIGH value (1) is the CUT " +
+          "and 0 is OPEN (the knob value). So the default [1,0,1,0] gates the DOWNBEAT " +
+          "SILENT — closed-open-closed-open, the inverse of how it reads. A gate that " +
+          "OPENS on the downbeat is [0,1,0,1]. This is the single most likely way to wire " +
+          "a trance gate backwards — see mod_describe_kinds' `polarity` field, and mod_" +
+          "add_route's description, before shipping one."
+      ),
+    stepDivision: z
+      .string()
+      .nullable()
+      .optional()
+      .describe(
+        "stepSequencer only. NOT AVAILABLE IN v1 — same refusal and m39-c prerequisite as " +
+          "`syncDivision`. Omit or pass null; use `rateHz` (steps/second) today."
+      ),
+    // envelopeFollower
+    source: z
+      .string()
+      .optional()
+      .describe(
+        "envelopeFollower only. v1 accepts \"self\" ONLY (this strip's own post-insert " +
+          "audio, at the fader) — default \"self\". Any other value is REFUSED (reason " +
+          "crossStripKeyUnsupported) rather than silently self-keyed, so a sidechain-style " +
+          "cross-strip key you thought you built cannot go unnoticed."
+      ),
+    detector: z.enum(["rms", "peak"]).optional().describe("envelopeFollower only, default \"rms\"."),
+    attackMs: z
+      .number()
+      .optional()
+      .describe("envelopeFollower only, 0.1-500 ms, default 10 (clamps and warns)."),
+    releaseMs: z
+      .number()
+      .optional()
+      .describe("envelopeFollower only, 1-2000 ms, default 100 (clamps and warns)."),
+    floorDb: z
+      .number()
+      .optional()
+      .describe(
+        "envelopeFollower only, -90...-20 dB, default -60 (clamps and warns). Input level " +
+          "that maps to output 0."
+      ),
+    gainDb: z
+      .number()
+      .optional()
+      .describe(
+        "envelopeFollower only, -24...24 dB, default 0 (clamps and warns). Pre-detector trim."
+      ),
+    // macro
+    value: z
+      .number()
+      .optional()
+      .describe(
+        "macro only, 0...1, default 0 (clamps and warns). Set here at creation, or LIVE " +
+          "afterward with mod_set_macro — the one modulation edit meant to be called " +
+          "repeatedly, not just at setup."
+      ),
+  })
+  .strict()
+  .describe(
+    "Per-kind parameters — pass only the keys that apply to the source's `kind` (see " +
+      "mod_describe_kinds for the full per-kind table with ranges/units/defaults/curves). " +
+      "A key valid for a DIFFERENT kind (e.g. `steps` on an `lfo`) is REFUSED here at the " +
+      "wire, naming the valid keys for this one; a MISSPELLED key is rejected already at " +
+      "this MCP boundary. Every numeric field out of range clamps and returns a warning " +
+      "rather than failing the call, EXCEPT `steps`' length/finiteness and `syncDivision`/" +
+      "`stepDivision`'s value (any non-null value), which are refused outright."
+  );
+
+server.registerTool(
+  "mod_describe_kinds",
+  {
+    title: "List modulation source kinds, targets, and the polarity/depth rules",
+    description:
+      "The discovery entry point for the whole mod_* family — call this FIRST, before " +
+      "mod_add_source or mod_add_route. Returns: `polarity` (the convention every gate/" +
+      "tremolo route must follow — READ THIS before wiring a step sequencer or LFO onto " +
+      "`.volume`, or the gate comes out backwards); `depthLaw` (what `depth` MEANS per " +
+      "target curve, with the cutoffHz/resonance/volume/pan worked examples); `limits` " +
+      "(16 sources/strip, 64 routes/strip SHARED with automation lanes, 64 steps per " +
+      "stepSequencer); `kinds` (all four source kinds — lfo, stepSequencer, " +
+      "envelopeFollower, macro — each with its own param table: name/type/range/default/" +
+      "unit/curve/notes); and `targets` (per-target delivery path and honesty notes for " +
+      "volume/pan/effectParam/instrumentParam/sendLevel). No params. " +
+      "There is deliberately NO mod_trigger tool: every modulation source is a pure " +
+      "function of transport position (an LFO's phase, a step index) with no phase " +
+      "register to reset, so live and offline renders always agree and a seek always " +
+      "lands where a full playthrough would have been — a note-triggered envelope, if it " +
+      "ever ships, would be triggered by note-ons, not by a wire verb.",
+  },
+  async () => toToolResult(() => bridge.send("mod.describeKinds"))
+);
+
+registerTool(
+  "mod_add_source",
+  {
+    title: "Create a modulation source (LFO, step sequencer, envelope follower, or macro)",
+    description:
+      "Create a modulation source on a track's (or the master's) strip — a first-class, " +
+      "UUID-addressed generator you then point at one or more targets with mod_add_route " +
+      "(one LFO driving three destinations is the common idiom; sources are never created " +
+      "inline on a route, so changing one later doesn't mean finding every route that " +
+      "copied it). Four kinds (`kind`): `lfo` (a cyclical wave — sine/triangle/saw/square/" +
+      "sample&hold), `stepSequencer` (an authored step pattern), `envelopeFollower` " +
+      "(tracks this strip's OWN audio level — the ONE source whose output depends on " +
+      "render history: renders that START at the same transport position are bit-" +
+      "identical, but a render starting part-way through differs from a full playthrough " +
+      "for roughly attackMs+releaseMs), and `macro` (a plain 0...1 control written live by " +
+      "mod_set_macro — a knob, not a timeline; it STAYS LIVE while the transport is " +
+      "stopped, unlike lfo/stepSequencer sources, which hold neutral (0) then). See " +
+      "mod_describe_kinds for the full per-kind param table, defaults, and the POLARITY/" +
+      "depth-law teaching. Cap: 16 sources per strip. Returns `{sourceId, source, " +
+      "warnings}` — `warnings` names any param that was clamped into range.",
+    inputSchema: {
+      trackId: z
+        .string()
+        .min(1)
+        .describe(
+          "Id of the track to add the source to, from project_snapshot, OR the exact " +
+            "string \"master\" for the whole-mix master strip."
+        ),
+      kind: z
+        .enum(["lfo", "stepSequencer", "envelopeFollower", "macro"])
+        .describe("Which generator this source is. See mod_describe_kinds for each kind's params."),
+      params: modulationSourceParamsSchema
+        .optional()
+        .describe(
+          "Initial per-kind param values — see this schema's own field descriptions (and " +
+            "mod_describe_kinds) for ranges, defaults, and the POLARITY convention on " +
+            "`steps`/`pulseWidth`/`bipolar`. Omitted params start at the kind's default."
+        ),
+      name: z
+        .string()
+        .optional()
+        .describe(
+          "Display label, e.g. \"Filter LFO\". Defaults to a name derived from `kind` " +
+            "(\"LFO\", \"Step\", \"Follower\", \"Macro\")."
+        ),
+    },
+  },
+  async ({ trackId, kind, params, name }) =>
+    toToolResult(() => bridge.send("mod.addSource", { trackId, kind, params, name }))
+);
+
+registerTool(
+  "mod_set_source",
+  {
+    title: "Update a modulation source's name or params (e.g. an LFO's rate)",
+    description:
+      "Change an existing source's `params` and/or `name` WITHOUT deleting and recreating " +
+      "it — recreating would invalidate every route pointing at its old id. The source's " +
+      "`kind` cannot change this way (mod_remove_source it and mod_add_source a new one " +
+      "instead). Omitted param keys keep their current value; see mod_describe_kinds for " +
+      "each kind's param table and mod_add_source's `params` field for the POLARITY " +
+      "convention on `steps`/`pulseWidth`/`bipolar`. Returns `{source, warnings}`.",
+    inputSchema: {
+      trackId: z.string().min(1).describe("Id of the track that owns the source, or the exact string \"master\"."),
+      sourceId: z
+        .string()
+        .min(1)
+        .describe("Id of the source to update, from mod_add_source's result or project_snapshot."),
+      params: modulationSourceParamsSchema
+        .optional()
+        .describe(
+          "Per-kind param values to change — only keys valid for THIS source's EXISTING " +
+            "kind are accepted (a key from a different kind is refused, naming the valid " +
+            "ones). Omitted keys are left unchanged."
+        ),
+      name: z.string().optional().describe("New display label. Omit to leave the current name unchanged."),
+    },
+  },
+  async ({ trackId, sourceId, params, name }) =>
+    toToolResult(() => bridge.send("mod.setSource", { trackId, sourceId, params, name }))
+);
+
+registerTool(
+  "mod_remove_source",
+  {
+    title: "Delete a modulation source",
+    description:
+      "Permanently delete a modulation source. CASCADES: every route that pointed at it " +
+      "is deleted too, and their ids are named in the response so the cascade is never a " +
+      "surprise. Reversible with edit_undo. See mod_describe_kinds for the source-kind " +
+      "reference. Returns `{removedSourceId, removedRouteIds}`.",
+    inputSchema: {
+      trackId: z.string().min(1).describe("Id of the track that owns the source, or the exact string \"master\"."),
+      sourceId: z
+        .string()
+        .min(1)
+        .describe("Id of the source to remove, from mod_add_source's result or project_snapshot."),
+    },
+  },
+  async ({ trackId, sourceId }) => toToolResult(() => bridge.send("mod.removeSource", { trackId, sourceId }))
+);
+
+registerTool(
+  "mod_add_route",
+  {
+    title: "Route a modulation source onto a target (volume, pan, an effect, or instrument param)",
+    description:
+      "Connect an existing source (mod_add_source) to a `target` at a `depth` — the " +
+      "primitive behind filter sweeps, trance gates, auto-pan, vibrato, sidechain-style " +
+      "pumping, and rhythmic parameter stepping. mod_describe_kinds carries this same " +
+      "teaching as its `polarity`/`depthLaw` fields; read it first if you haven't.\n\n" +
+      "DEPTH LAW: `depth` is ALWAYS a unitless number in -1...1 (out-of-range clamps and " +
+      "warns) — what FULL depth (±1.0) MEANS is declared by the target's curve, not a raw " +
+      "fraction. Worked examples: `cutoffHz` is 40-18000 Hz on a LOGARITHMIC curve " +
+      "spanning log2(18000/40) = 8.81 octaves, so depth 0.1 is ±0.88 octaves — the SAME " +
+      "musical gesture at 200 Hz as at 8 kHz (a linear-Hz depth would not be). `resonance` " +
+      "is 0-1 LINEAR, so depth 0.25 is ±0.25. `.volume`'s domain is DECIBELS, full depth " +
+      "±48 dB, so depth 0.125 is a ±6 dB tremolo. `.pan`'s full depth is ±1.0 (hard left " +
+      "to hard right).\n\n" +
+      "⚠️⚠️ POLARITY on `.volume` — a source value is an OFFSET from the current value, " +
+      "0 meaning \"leave it alone\", never a level. The fader has only +6.02 dB of " +
+      "headroom against 48 dB of cut, so gates and tremolos MUST take a NEGATIVE `depth` " +
+      "(with the source's `bipolar:false`) — and under a negative depth the source's HIGH " +
+      "value is the CUT: a step of 0 is OPEN (the knob value) and a step of 1 is CLOSED, " +
+      "so the stepSequencer default [1,0,1,0] gates the DOWNBEAT SILENT (closed-open-" +
+      "closed-open) — the inverse of how it reads. A gate that OPENS on the downbeat is " +
+      "[0,1,0,1]. A square LFO's `pulseWidth` is likewise the CLOSED fraction on " +
+      "`.volume`. A bipolar source routed to `.volume` earns the `modulationVolumeCeiling` " +
+      "warning rather than silently clipping.\n\n" +
+      "REFUSALS name a `reason` you can branch on: `discrete` (a boolean/enum/rounded " +
+      "param — an LFO can't drive it), `hostedAudioUnit`/`hostedInstrument` (no hosted-AU " +
+      "or hosted-instrument delivery path yet — refused with the alias-image ratio rather " +
+      "than silently aliased), `controlPlaneOnly` (e.g. delay.sync/division — resolved " +
+      "off the render thread), `noInstrument` (an `instrumentParam` target on a track " +
+      "with no instrument), `crossStripKeyUnsupported`, `sendLevelUnsupported`. WARNINGS " +
+      "never block: `modulationTargetSteps` names the artefact (zipper / integer read " +
+      "offset / quantized steps) for a `warned` effectParam target (e.g. every eq.* " +
+      "frequency/gain/Q param); `modulationRateAlias` fires when the source's rate is too " +
+      "fast for the target's delivery rate.\n\n" +
+      "Cap: 64 routes per strip, SHARED with automation lanes (a modulated-but-" +
+      "unautomated effect param costs a synthetic lane) — mod_add_route REFUSES past the " +
+      "cap and names both contributors rather than silently dropping. Returns " +
+      "`{routeId, route, warnings}`.",
+    inputSchema: {
+      trackId: z
+        .string()
+        .min(1)
+        .describe("Id of the track that owns the source and target, or the exact string \"master\"."),
+      sourceId: z
+        .string()
+        .min(1)
+        .describe("Id of the source to route, from mod_add_source's result or project_snapshot."),
+      target: modulationTargetSchema,
+      depth: z
+        .number()
+        .describe(
+          "Unitless -1...1 (out-of-range clamps and warns). See this tool's own " +
+            "description for the depth law's worked examples and the volume/gate polarity " +
+            "convention BEFORE picking a sign."
+        ),
+      enabled: z
+        .boolean()
+        .optional()
+        .describe("Default true. False creates the route disabled — wired but silent until toggled on."),
+    },
+  },
+  async ({ trackId, sourceId, target, depth, enabled }) =>
+    toToolResult(() => bridge.send("mod.addRoute", { trackId, sourceId, target, depth, enabled }))
+);
+
+registerTool(
+  "mod_set_route_depth",
+  {
+    title: "Change a route's depth and/or enable or disable it",
+    description:
+      "Update an existing route's `depth` and/or `enabled` without deleting and " +
+      "recreating it. Omit a field to leave it unchanged. Same depth law as " +
+      "mod_add_route (unitless -1...1, out-of-range clamps and warns; see mod_add_route's " +
+      "or mod_describe_kinds' description for the worked examples and the `.volume` " +
+      "polarity convention — a gate needs a NEGATIVE depth). Disabling a route " +
+      "(`enabled:false`) is the A/B-without-deleting move — the target returns to its " +
+      "base value (the knob, or an active automation lane) while disabled. Returns " +
+      "`{route, warnings}`.",
+    inputSchema: {
+      trackId: z.string().min(1).describe("Id of the track that owns the route, or the exact string \"master\"."),
+      routeId: z
+        .string()
+        .min(1)
+        .describe("Id of the route to update, from mod_add_route's result or project_snapshot."),
+      depth: z
+        .number()
+        .optional()
+        .describe("New depth, -1...1 (out-of-range clamps and warns). Omit to leave unchanged."),
+      enabled: z.boolean().optional().describe("Omit to leave unchanged."),
+    },
+  },
+  async ({ trackId, routeId, depth, enabled }) =>
+    toToolResult(() => bridge.send("mod.setRouteDepth", { trackId, routeId, depth, enabled }))
+);
+
+registerTool(
+  "mod_remove_route",
+  {
+    title: "Delete a modulation route",
+    description:
+      "Permanently delete one route (the source it pointed from, and any other routes " +
+      "from that source, are untouched). Reversible with edit_undo. See mod_describe_kinds " +
+      "for the target reference. Returns `{removedRouteId}`.",
+    inputSchema: {
+      trackId: z.string().min(1).describe("Id of the track that owns the route, or the exact string \"master\"."),
+      routeId: z
+        .string()
+        .min(1)
+        .describe("Id of the route to remove, from mod_add_route's result or project_snapshot."),
+    },
+  },
+  async ({ trackId, routeId }) => toToolResult(() => bridge.send("mod.removeRoute", { trackId, routeId }))
+);
+
+registerTool(
+  "mod_set_macro",
+  {
+    title: "Set a macro source's live value",
+    description:
+      "Write a `macro` source's current value — the ONE modulation edit meant to be " +
+      "called repeatedly, e.g. once every few seconds while dialling in a sound or riding " +
+      "a live control, not just at setup. A macro STAYS LIVE across a stopped transport " +
+      "(unlike lfo/stepSequencer sources, which hold neutral while stopped) — it is a " +
+      "control, not a timeline. See mod_describe_kinds for the macro kind's reference. " +
+      "REFUSES, naming the source's ACTUAL kind, if `sourceId` is not a `macro` source " +
+      "(create one with mod_add_source `kind: \"macro\"`, or route the lfo/stepSequencer/" +
+      "envelopeFollower you already have instead of trying to drive it live). Returns " +
+      "`{source, warnings}` — `warnings` names it if `value` was outside 0...1 and clamped.",
+    inputSchema: {
+      trackId: z.string().min(1).describe("Id of the track that owns the source, or the exact string \"master\"."),
+      sourceId: z
+        .string()
+        .min(1)
+        .describe("Id of the macro source, from mod_add_source's result or project_snapshot."),
+      value: z.number().describe("New value, 0...1 (out-of-range clamps and warns)."),
+    },
+  },
+  async ({ trackId, sourceId, value }) =>
+    toToolResult(() => bridge.send("mod.setMacro", { trackId, sourceId, value }))
+);
+
+server.registerTool(
+  "mod_describe",
+  {
+    title: "Read a strip's modulation sources, routes, and their CURRENT effective values",
+    description:
+      "The legibility tool: for one strip (or every strip with modulation, if `trackId` " +
+      "is omitted) returns its sources, its routes, and an `effective` entry per route — " +
+      "the source's value at `atBeat`, the target's base value (the knob, or an active " +
+      "automation lane's value — modulation OFFSETS whichever is in control, never " +
+      "competes with it), and the resulting MODULATED value — so you can answer \"what is " +
+      "this actually doing right now\" in one call instead of hand-computing the depth " +
+      "law (see mod_describe_kinds for that law's reference). Warnings (e.g. a `warned` " +
+      "effectParam target's artefact) are repeated here so they stay visible after " +
+      "creation, not just at creation time. A stopped transport reports each source's " +
+      "STOPPED value (lfo/stepSequencer hold neutral; envelopeFollower/macro stay live) " +
+      "so this call, the UI, and the render always agree. An envelopeFollower source's " +
+      "value is reported `null` (with a note) — it depends on render history, not " +
+      "transport position, so it has no meaningful value outside a running render.",
+    inputSchema: {
+      trackId: z
+        .string()
+        .optional()
+        .describe(
+          "Id of the track to read, or the exact string \"master\". Omit to read EVERY " +
+            "strip that currently has any modulation source or route."
+        ),
+      atBeat: z
+        .number()
+        .optional()
+        .describe(
+          "Timeline position in beats to evaluate sources at. Omit to use the current " +
+            "transport position."
+        ),
+    },
+  },
+  async ({ trackId, atBeat }) => toToolResult(() => bridge.send("mod.describe", { trackId, atBeat }))
 );
 
 // ---------------------------------------------------------------------------

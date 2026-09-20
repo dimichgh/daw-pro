@@ -279,6 +279,19 @@ public final class CommandRouter {
         "fx.setSidechain",
         "fx.describe",
         "fx.listAudioUnits",
+        // m39-e — the modulation layer. Placed BESIDE `fx.*` rather than at the
+        // tail so every `dropLast(N)` window and suffix assertion in the
+        // reference suites stays true by construction (the placement law every
+        // recent family followed: view.*, looper.*, au.listPresets).
+        "mod.describeKinds",
+        "mod.addSource",
+        "mod.setSource",
+        "mod.removeSource",
+        "mod.addRoute",
+        "mod.setRouteDepth",
+        "mod.removeRoute",
+        "mod.setMacro",
+        "mod.describe",
         "instrument.listAudioUnits",
         "instrument.listSoundBanks",
         "instrument.listSoundBankPrograms",
@@ -305,6 +318,23 @@ public final class CommandRouter {
         "instrument.cancelSoundBankDownload",
         "instrument.importSampleLibrary",
         "instrument.describeSampler",
+        // m39-f: the Poly Synth's twin of the verb directly above. Until this
+        // landed, PolySynth was the ONLY sound source in the app that could not
+        // describe itself — effects have their describe verb, the Sampler has
+        // the one above, and the synth's legal ranges existed only as Swift
+        // constants and as prose in a different process. With m39-g it has 24
+        // parameters, which makes guessing strictly worse than asking.
+        //
+        // ⚠️ PLACED HERE, NEXT TO ITS SIBLING, AND NOT AT THE TAIL — the
+        // clip.getNotes / describeSampler / probeLiveness precedent recorded at
+        // length further down this array. Every end-relative assertion in the
+        // tree is a dropLast/suffix window measured from the END, so an
+        // insertion this far from it leaves all of them true by construction
+        // and only the explicit count pins move. Verified before inserting:
+        // nothing pins the verb below to this one's index (unlike
+        // PadPreviewCommandTests, which pins a verb at note.audition + 1).
+        // NOTE: no quoted string in this comment, deliberately (the m25-d rule).
+        "instrument.describeSynth",
         "instrument.probeLiveness",
         "mixer.setMasterVolume",
         "mixer.applyPreset",
@@ -367,12 +397,19 @@ public final class CommandRouter {
         // only the explicit count pins move. ⚠️ THAT PIN COUNT HAS BEEN WRONG
         // IN THIS COMMENT AND IN ARCHITECTURE.md: both said "16" (and
         // ARCHITECTURE.md said "across 15 files"). MEASURED 2026-08-19 at the
-        // breath-pad P1 close: **19 lines across 18 files**, because three
+        // breath-pad P1 close: 19 lines across 18 files, because three
         // spell it `all.count == N` rather than `allCommands.count == N`.
         // GREP THE LITERAL VALUE, NOT THE IDIOM — a brief built on "16" sent
-        // an agent looking for three sites. (A bare `.count ==` sweep returns
-        // 21/20: two are unrelated local arrays in AuditionRenderTests and
-        // LiveThruRenderTests. 19 is the number that moves.)
+        // an agent looking for three sites. RE-MEASURED 2026-09-19: the AU
+        // preset pin (`AUPresetCommandTests.swift`) added a nineteenth file,
+        // so it is now **20 lines across 19 files** (17 spell it
+        // `allCommands.count == N`, 3 `all.count == N`) — this comment had
+        // rotted stale again, caught the same way as the first time: by
+        // re-running the grep rather than trusting the old prose. (A bare
+        // `.count ==` sweep now returns 24 lines across 23 files: FOUR are
+        // unrelated local arrays — ChordVoicingTests, SliceBoundariesTests,
+        // AuditionRenderTests, LiveThruRenderTests, not the two this comment
+        // used to name. 20 is the number that moves.)
         // Verified before moving it:
         // there is not one absolute `allCommands[i]` index anywhere in
         // Tests/ or Sources/ (0 hits, positive-controlled against the 46
@@ -533,6 +570,13 @@ public final class CommandRouter {
         "vc.listVoices",
         "au.describeParams",
         "au.setParam",
+        // m23-cw: the AU's OWN presets. Placed HERE, next to their two au.*
+        // siblings and ~60 entries from the END rather than at the tail, so
+        // every `dropLast(N)` window and end-relative suffix assertion in the
+        // test suites stays true by construction (the m23-ct precedent — a
+        // tail append reddened 19 assertions across 7 files).
+        "au.listPresets",
+        "au.loadPreset",
         "clip.fitToContent",
         "clip.analyzeAudio",
         "mixer.liveLoudness",
@@ -1503,9 +1547,25 @@ public final class CommandRouter {
             // surface `sourcePath`/`name` in `instrument_describe_sampler`;
             // `instrument_set_sampler_param` covers the single-global write.
             // See ROADMAP m26-i for the agreed tool names.
+            //
+            // m39-g: FIFTEEN richness knobs join the list below. They follow
+            // the m34-q rule, not the legacy eight's: an out-of-range value is
+            // REFUSED with a readable error rather than clamped, because an
+            // agent that asked for 20 unison voices and silently got 8 has no
+            // way to find out. Omitting a key keeps whatever the track already
+            // had — `ProjectStore.setInstrument`'s overlay rule, which had to
+            // be extended to all fifteen at this item or this very command
+            // would have DESTROYED them on the next unrelated knob edit (see
+            // the block at the `pedalHoldLimit:` argument there). Reading them
+            // back: `instrument.describeSynth`.
             try params.rejectUnknownKeys(
                 ["trackId", "kind", "waveform", "sampler", "attack", "decay", "sustain",
                     "release", "cutoffHz", "resonance", "gain", "pedalHoldLimit",
+                    "unisonVoices", "unisonDetuneCents", "unisonStereoSpread",
+                    "subLevel", "subOctave", "subWaveform",
+                    "noiseLevel", "noiseColor", "drift",
+                    "resonanceBoost", "drive", "velocityToCutoff", "keyToCutoff",
+                    "voiceJitter", "envelopeCurve",
                     "audioUnit", "soundBank"], verb: "track.setInstrument")
             let instTrackID = try params.requireTrackID()
             let kind = try parseInstrumentKind(params["kind"])
@@ -1566,14 +1626,76 @@ public final class CommandRouter {
                 // `bendRangeSemitones` rule: an agent that asked for a cap of
                 // 300 and silently got 128 has no way to find out. Omitting the
                 // key keeps the track's current cap.
+                // ⭐ m39-f MOVED THIS SENTENCE, VERBATIM, INTO
+                // `PolySynthDescription.meanings` — the ONE HOME for what a
+                // Poly Synth parameter means. The error a caller gets here and
+                // the answer `instrument.describeSynth` gives are now the SAME
+                // string, so they cannot drift into saying different things.
                 pedalHoldLimit: try Self.optionalBoundedInteger(
                     params["pedalHoldLimit"], "pedalHoldLimit",
                     PolySynthParams.pedalHoldLimitRange,
-                    "how many notes the sustain pedal (CC 64) keeps ringing on the built-in Poly "
-                        + "Synth; omit for unlimited, which is what it has always done. The oldest "
-                        + "pedal-held note is RELEASED through the patch's own release when the cap "
-                        + "is exceeded; a key you are still holding is never taken. Any value above "
-                        + "the 16-voice pool is unreachable and so means unlimited"),
+                    PolySynthDescription.meaning("pedalHoldLimit")),
+                // m39-g — the richness pass. EVERY range is read from the
+                // model's own `static let …Range`, never re-typed here: the
+                // engine allocates a fixed `16 × maxUnisonVoices` block of
+                // sub-voice state and indexes it on the render thread, so a
+                // number spelled twice is a number that can eventually
+                // disagree with the allocation.
+                //
+                // ⚠️ `unisonVoices` and `subOctave` go through the INTEGER
+                // helper, which also refuses a fractional value outright
+                // rather than truncating it — `Int(2.9)` is 2, silently.
+                unisonVoices: try Self.optionalBoundedInteger(
+                    params["unisonVoices"], "unisonVoices",
+                    PolySynthParams.unisonVoicesRange,
+                    PolySynthDescription.meaning("unisonVoices")),
+                unisonDetuneCents: try Self.optionalBoundedNumber(
+                    params["unisonDetuneCents"], "unisonDetuneCents",
+                    PolySynthParams.unisonDetuneCentsRange,
+                    PolySynthDescription.meaning("unisonDetuneCents")),
+                unisonStereoSpread: try Self.optionalBoundedNumber(
+                    params["unisonStereoSpread"], "unisonStereoSpread",
+                    PolySynthParams.unisonStereoSpreadRange,
+                    PolySynthDescription.meaning("unisonStereoSpread")),
+                subLevel: try Self.optionalBoundedNumber(
+                    params["subLevel"], "subLevel", PolySynthParams.subLevelRange,
+                    PolySynthDescription.meaning("subLevel")),
+                subOctave: try Self.optionalBoundedInteger(
+                    params["subOctave"], "subOctave", PolySynthParams.subOctaveRange,
+                    PolySynthDescription.meaning("subOctave")),
+                subWaveform: try parseWaveform(
+                    params["subWaveform"], field: "subWaveform",
+                    hint: " — " + PolySynthDescription.meaning("subWaveform")),
+                noiseLevel: try Self.optionalBoundedNumber(
+                    params["noiseLevel"], "noiseLevel", PolySynthParams.noiseLevelRange,
+                    PolySynthDescription.meaning("noiseLevel")),
+                noiseColor: try Self.optionalBoundedNumber(
+                    params["noiseColor"], "noiseColor", PolySynthParams.noiseColorRange,
+                    PolySynthDescription.meaning("noiseColor")),
+                drift: try Self.optionalBoundedNumber(
+                    params["drift"], "drift", PolySynthParams.driftRange,
+                    PolySynthDescription.meaning("drift")),
+                resonanceBoost: try Self.optionalBoundedNumber(
+                    params["resonanceBoost"], "resonanceBoost",
+                    PolySynthParams.resonanceBoostRange,
+                    PolySynthDescription.meaning("resonanceBoost")),
+                drive: try Self.optionalBoundedNumber(
+                    params["drive"], "drive", PolySynthParams.driveRange,
+                    PolySynthDescription.meaning("drive")),
+                velocityToCutoff: try Self.optionalBoundedNumber(
+                    params["velocityToCutoff"], "velocityToCutoff",
+                    PolySynthParams.velocityToCutoffRange,
+                    PolySynthDescription.meaning("velocityToCutoff")),
+                keyToCutoff: try Self.optionalBoundedNumber(
+                    params["keyToCutoff"], "keyToCutoff", PolySynthParams.keyToCutoffRange,
+                    PolySynthDescription.meaning("keyToCutoff")),
+                voiceJitter: try Self.optionalBoundedNumber(
+                    params["voiceJitter"], "voiceJitter", PolySynthParams.voiceJitterRange,
+                    PolySynthDescription.meaning("voiceJitter")),
+                envelopeCurve: try Self.optionalBoundedNumber(
+                    params["envelopeCurve"], "envelopeCurve",
+                    PolySynthParams.envelopeCurveRange,
+                    PolySynthDescription.meaning("envelopeCurve")),
                 sampler: sampler,
                 audioUnit: audioUnit,
                 soundBank: soundBank
@@ -1992,6 +2114,83 @@ public final class CommandRouter {
                 describeSamplerResult["zones"] = .array(describeSamplerPage.map(Self.samplerZoneJSON))
             }
             return .success(request.id, .object(describeSamplerResult))
+
+        case "instrument.describeSynth":
+            // m39-f — the Poly Synth's self-description: every parameter's
+            // range, unit, default, stored value, and the value the ENGINE
+            // actually applies. Read-only; it changes nothing.
+            //
+            // Three things make this more than a snapshot slice:
+            //
+            // ① `nilResolvesTo`. Fifteen of the 24 parameters are
+            //    additive-optional, and "not set" is not the same fact as "set
+            //    to its neutral value" — a caller reading back what it wrote
+            //    needs both. Two of the fifteen do NOT resolve to zero
+            //    (noiseColor → 0.5, subOctave → -1), which is exactly the kind
+            //    of thing an agent guesses wrong.
+            // ② `warnings`. Four settings are gated by a SECOND setting and do
+            //    nothing on their own (detune and spread at one voice, octave
+            //    and shape at zero sub level, colour at zero noise). A setting
+            //    that is accepted, stored, echoed back and silent is this
+            //    tree's characteristic failure; describeSampler grew the same
+            //    warnings for glide, and this verb inherits the rule.
+            // ③ `isActiveInstrument`. Poly-synth settings are CARRIED across
+            //    instrument-kind switches (InstrumentDescriptor's contract), so
+            //    a track can hold a fully-voiced patch while playing a sound
+            //    bank. The verb answers for the patch either way and says which
+            //    it is, rather than refusing — the same rule describeSampler
+            //    follows for a sampler that is not the active kind.
+            //
+            // Refusals mirror track.setInstrument's OWN guards, so both verbs
+            // explain the same track the same way: noTrack for an unknown id,
+            // instrumentRequiresInstrumentTrack for an audio/bus track. There
+            // is deliberately NO third refusal for "never configured": unlike
+            // the sampler (whose zones can genuinely be absent), every
+            // instrument track HAS a poly synth — `.default`'s — and that is
+            // precisely the patch track.setInstrument would overlay onto.
+            //
+            // Response: {trackId, kind, isActiveInstrument, parameterCount,
+            // order:[…], parameters:{<name>:{value?, effective, default,
+            // nilResolvesTo?, min?, max?, values?, unit, meaning, optional,
+            // isSet?, integer?}}, derived:{…}, constants:{…}, warnings?}.
+            //
+            // DONE (m39-f, MCP, 2026-09-19): exposed as `instrument_describe_synth`
+            // — a DIRECT mirror of this command's name (the
+            // `instrument_describe_sampler` precedent), mechanical name rule, no
+            // exception-table entry needed. Registered through the SAME local
+            // `registerTool` wrapper as its Sampler sibling, so it joined the
+            // WRAPPER count, not the direct-read count: 222 -> 223 (39 direct +
+            // 184 wrapper). `audit-tools.test.ts`'s command/tool bijection is
+            // whole again.
+            // DONE (m39-g, MCP, 2026-09-19): `track_set_instrument`'s schema in
+            // server.ts gained the fifteen richness parameters. ⚠️ A static zod
+            // schema cannot call this verb at RUNTIME, so — being honest about
+            // what the original TODO asked for and could not literally get —
+            // the min/max bounds are re-typed (not re-derived) from the SAME
+            // source this verb itself reads: `PolySynthParams`'s `static let
+            // …Range` constants in Model.swift, and the prose is re-typed from
+            // `PolySynthDescription.meanings` in this file, the ONE HOME
+            // `track.setInstrument`'s own range-error text already reads from.
+            // This verb (`instrument_describe_synth` over MCP) stays the
+            // RUNTIME authority a caller should read back against if the two
+            // ever need reconciling.
+            try params.rejectUnknownKeys(["trackId"], verb: "instrument.describeSynth")
+            let describeSynthTrackID = try params.requireTrackID()
+            guard let describeSynthTrack = store.tracks.first(where: {
+                $0.id == describeSynthTrackID
+            }) else {
+                throw ControlError.noTrack(describeSynthTrackID)
+            }
+            guard describeSynthTrack.kind == .instrument else {
+                throw ProjectError.instrumentRequiresInstrumentTrack(describeSynthTrack.kind)
+            }
+            // `?? .default` is not a convenience: it is the SAME fallback
+            // `ProjectStore.setInstrument` uses to build its overlay base, so
+            // what this verb describes for an untouched track is exactly what a
+            // one-knob edit would start from.
+            return .success(request.id, .object(PolySynthDescription.payload(
+                trackID: describeSynthTrackID,
+                descriptor: describeSynthTrack.instrument ?? .default)))
 
         case "instrument.probeLiveness":
             // m31-f ② — "does this instrument have more than one timbre?", as
@@ -2535,9 +2734,19 @@ public final class CommandRouter {
             // params: kind? (omit for every kind). Returns the parameter schemas
             // from EffectParamSpec — MCP discoverability. Unknown kind lists valid
             // kinds. Wire shape: {"kinds": [{"kind", "params": [{name, min, max,
-            // default, unit, note?}]}]}. `note` (m22-a, additive) teaches the
-            // semantics a bare range can't: the EQ's nil-means-off HP/LP corners,
-            // 12/24 slope snapping, and 0/1 per-band bypass.
+            // default, unit, curve, note?}]}]}. `note` (m22-a, additive) teaches
+            // the semantics a bare range can't: the EQ's nil-means-off HP/LP
+            // corners, 12/24 slope snapping, and 0/1 per-band bypass. `curve`
+            // (m39-a, additive) is `ParamCurve`'s ONE HOME for how a 0...1 knob
+            // position maps onto this range: `linear` (even steps in the
+            // parameter's own units — the default, and every non-frequency
+            // param), `logarithmic` (even steps in OCTAVES — every frequency
+            // param on this surface, e.g. lowShelfFreq/highPassFreq/highCutHz —
+            // so a caller computing a sweep or a modulation step should step the
+            // 0...1 FRACTION, not the Hz, or the sweep buries its whole low half
+            // in the first tenth of the travel), or `decibel` (the same
+            // multiplicative curve read in dB rather than octaves; no shipping
+            // param uses it yet).
             try params.rejectUnknownKeys(["kind"], verb: "fx.describe")
             let fxKinds: [EffectDescriptor.Kind]
             if let rawKind = params["kind"]?.stringValue {
@@ -2560,6 +2769,7 @@ public final class CommandRouter {
                                 "max": .number(spec.range.upperBound),
                                 "default": .number(spec.defaultValue),
                                 "unit": .string(spec.unit),
+                                "curve": .string(spec.curve.rawValue),
                             ]
                             // Omitted when nil (additive m22-a teaching line).
                             if let note = spec.note { paramObj["note"] = .string(note) }
@@ -2584,6 +2794,161 @@ public final class CommandRouter {
                         "version": .string(info.versionString),
                         "isV3": .bool(info.isV3),
                     ])
+                }),
+            ]))
+
+        // MARK: - m39-e — the modulation layer (mod.*)
+        //
+        // Nine verbs. `trigger` was REJECTED by the frozen contract (§7.1):
+        // every source is a pure function of transport position, so there is
+        // no phase register to reset and a verb implying hidden state would
+        // invite exactly the state this design exists to avoid.
+        //
+        // ⚠️ TEMPO SYNC IS NOT IN v1. `syncDivision` / `stepDivision` refuse
+        // with `modulationTempoSyncUnavailable`; free-running `rateHz` ships
+        // alone. m39-c generalises the one tempo-sync resolver, and
+        // hand-rolling a second one here is the duplication it exists to
+        // remove. The FIELDS persist, so m39-c adds sync additively — it only
+        // has to resolve a division to samples-per-cycle at the ONE seam,
+        // `ModulationSnapshotBuilder.resolve(_:sampleRate:steps:macros:)`,
+        // and delete the two `refuseSync` calls in
+        // `ModulationSourceParams.apply`.
+        //
+        // TODO(m39-e, MCP): the MCP mirror is dispatched separately. Nine
+        // tools, one per verb: mod_describe_kinds, mod_add_source,
+        // mod_set_source, mod_remove_source, mod_add_route,
+        // mod_set_route_depth, mod_remove_route, mod_set_macro, mod_describe.
+        // Tool descriptions must carry §7.3's depth-law worked examples
+        // VERBATIM and the §7.2.0 polarity amendment — an agent that cannot
+        // see `curve` guesses linear Hz, and the guess is silently wrong.
+        case "mod.describeKinds":
+            // No params. The discovery entry point, named in every other
+            // mod.* description the way fx.describe is.
+            try params.rejectUnknownKeys([], verb: "mod.describeKinds")
+            return .success(request.id, Self.modulationKindsCatalogue())
+
+        case "mod.addSource":
+            try params.rejectUnknownKeys(
+                ["trackId", "kind", "params", "name"], verb: "mod.addSource")
+            let addSourceStrip = try params.parseModulationStrip()
+            let addSourceKindRaw = try params.require("kind", \.stringValue)
+            guard let addSourceKind = ModulationSourceKind(rawValue: addSourceKindRaw) else {
+                throw ModulationError.unknownModulationSourceKind(kind: addSourceKindRaw)
+            }
+            let added = try store.addModulationSource(
+                on: addSourceStrip, kind: addSourceKind,
+                params: try Self.modulationParams(params["params"]),
+                name: params["name"]?.stringValue)
+            return .success(request.id, .object([
+                "sourceId": .string(added.source.id.uuidString),
+                "source": try JSONValue(encoding: added.source),
+                "warnings": .array(added.warnings.map { .string($0) }),
+            ]))
+
+        case "mod.setSource":
+            // Exists so changing an LFO's rate does not mean delete-and-
+            // recreate, which would invalidate every route pointing at it.
+            try params.rejectUnknownKeys(
+                ["trackId", "sourceId", "params", "name"], verb: "mod.setSource")
+            let setSourceStrip = try params.parseModulationStrip()
+            let updatedSource = try store.setModulationSource(
+                on: setSourceStrip,
+                sourceID: try params.requireUUID("sourceId"),
+                params: try Self.modulationParams(params["params"]),
+                name: params["name"]?.stringValue)
+            return .success(request.id, .object([
+                "source": try JSONValue(encoding: updatedSource.source),
+                "warnings": .array(updatedSource.warnings.map { .string($0) }),
+            ]))
+
+        case "mod.removeSource":
+            // CASCADES its routes and NAMES them: a silent cascade is how a
+            // caller ends up with a model it did not predict.
+            try params.rejectUnknownKeys(["trackId", "sourceId"], verb: "mod.removeSource")
+            let removeSourceStrip = try params.parseModulationStrip()
+            let removedSource = try store.removeModulationSource(
+                on: removeSourceStrip, sourceID: try params.requireUUID("sourceId"))
+            return .success(request.id, .object([
+                "removedSourceId": .string(removedSource.removedSourceID.uuidString),
+                "removedRouteIds": .array(
+                    removedSource.removedRouteIDs.map { .string($0.uuidString) }),
+            ]))
+
+        case "mod.addRoute":
+            // `target` is the SAME flat {type, sendId?, effectId?, param?}
+            // object automation.* takes, decoded by the SAME AutomationTarget.
+            // m39-b and m39-e agree by construction because they are one enum.
+            try params.rejectUnknownKeys(
+                ["trackId", "sourceId", "target", "depth", "enabled"], verb: "mod.addRoute")
+            let addRouteStrip = try params.parseModulationStrip()
+            let addedRoute = try store.addModulationRoute(
+                on: addRouteStrip,
+                sourceID: try params.requireUUID("sourceId"),
+                target: try parseAutomationTarget(params["target"]),
+                depth: try params.require("depth", \.doubleValue),
+                enabled: params["enabled"]?.boolValue ?? true)
+            return .success(request.id, .object([
+                "routeId": .string(addedRoute.route.id.uuidString),
+                "route": try JSONValue(encoding: addedRoute.route),
+                "warnings": .array(addedRoute.warnings.map { .string($0) }),
+            ]))
+
+        case "mod.setRouteDepth":
+            try params.rejectUnknownKeys(
+                ["trackId", "routeId", "depth", "enabled"], verb: "mod.setRouteDepth")
+            let setDepthStrip = try params.parseModulationStrip()
+            let updatedRoute = try store.setModulationRouteDepth(
+                on: setDepthStrip,
+                routeID: try params.requireUUID("routeId"),
+                depth: params["depth"]?.doubleValue,
+                enabled: params["enabled"]?.boolValue)
+            return .success(request.id, .object([
+                "route": try JSONValue(encoding: updatedRoute.route),
+                "warnings": .array(updatedRoute.warnings.map { .string($0) }),
+            ]))
+
+        case "mod.removeRoute":
+            try params.rejectUnknownKeys(["trackId", "routeId"], verb: "mod.removeRoute")
+            let removeRouteStrip = try params.parseModulationStrip()
+            let removedRoute = try store.removeModulationRoute(
+                on: removeRouteStrip, routeID: try params.requireUUID("routeId"))
+            return .success(request.id, .object([
+                "removedRouteId": .string(removedRoute.uuidString),
+            ]))
+
+        case "mod.setMacro":
+            // The live control. One atomic store reaches the render thread:
+            // the graph's publish pass recognises a macro-only change and
+            // writes the preallocated slot instead of republishing.
+            try params.rejectUnknownKeys(["trackId", "sourceId", "value"], verb: "mod.setMacro")
+            let macroStrip = try params.parseModulationStrip()
+            let macroSource = try store.setModulationMacro(
+                on: macroStrip,
+                sourceID: try params.requireUUID("sourceId"),
+                value: try params.require("value", \.doubleValue))
+            return .success(request.id, .object([
+                "source": try JSONValue(encoding: macroSource.source),
+                "warnings": .array(macroSource.warnings.map { .string($0) }),
+            ]))
+
+        case "mod.describe":
+            // `effective` is what makes this layer legible: for each route it
+            // returns the source's value at `atBeat`, the target's base value,
+            // and the resulting modulated value — so an agent can answer "what
+            // is this actually doing right now" with ONE call instead of
+            // inferring it from the depth law.
+            try params.rejectUnknownKeys(["trackId", "atBeat"], verb: "mod.describe")
+            let describeBeat = params["atBeat"]?.doubleValue
+                ?? store.transport.positionBeats
+            let describeStrips: [ModulationStrip]
+            if params["trackId"] != nil {
+                describeStrips = [try params.parseModulationStrip()]
+            } else {
+                describeStrips = store.modulatedStrips
+            }
+            return .success(request.id, .object([
+                "strips": .array(try describeStrips.map {
+                    try modulationStripDescription($0, atBeat: describeBeat)
                 }),
             ]))
 
@@ -7893,6 +8258,103 @@ public final class CommandRouter {
             }
             return .success(request.id, .object(setResult))
 
+        case "au.listPresets":
+            // Lists the presets a hosted Audio Unit ships WITH — the patches
+            // its own developer authored, plus any the user saved (m23-cw).
+            // Target model is au.describeParams': effectId names an
+            // .audioUnit insert on that track, OMIT it for the track's
+            // .audioUnit instrument; trackId:"master" rejects (the master
+            // chain hosts built-ins only).
+            //
+            // GRACEFUL DEGRADATION, and it is the MAJORITY path here, not an
+            // edge case: a unit with no presets answers with EMPTY ARRAYS and
+            // hasFactoryPresets:false — SUCCESS, never an error (the
+            // au.describeParams hasParameterTree:false precedent). MEASURED on
+            // this machine: 15 of Apple's 23 built-in effects publish a nil
+            // factoryPresets.
+            //
+            // Numbers are the unit's own AUAudioUnitPreset.number: factory
+            // presets are >= 0 and user presets are < 0 (Apple's contract).
+            // They are per-component identity — take them from here, never
+            // guess one, never carry one to a different plugin.
+            //
+            // currentPreset.source classifies by NUMBER against the two live
+            // lists: "factory", "user", or "unlisted". "unlisted" is honest
+            // and common — a unit that was never put on a numbered preset
+            // reads -1 "Untitled", and a unit restored from a saved project
+            // reads -1 with the preset's NAME but no number (its parameter
+            // values are exact; it simply no longer claims to sit on a
+            // numbered preset). Response: {trackId, effectId?, componentName,
+            // supportsUserPresets, hasFactoryPresets, factoryPresets:
+            // [{number, name}], userPresets: [{number, name}], currentPreset:
+            // {number, name, source} | null}.
+            try params.rejectUnknownKeys(["trackId", "effectId"], verb: "au.listPresets")
+            let listTarget = try Self.requireHostedAUTarget(params)
+            let listed = try store.listAudioUnitPresets(
+                trackID: listTarget.trackID, effectID: listTarget.effectID)
+            var listResult: [String: JSONValue] = [
+                "trackId": .string(listTarget.trackID.uuidString),
+                "componentName": .string(listed.componentName),
+                "supportsUserPresets": .bool(listed.presets.supportsUserPresets),
+                "hasFactoryPresets": .bool(listed.presets.hasFactoryPresets),
+                "factoryPresets": .array(listed.presets.factoryPresets.map(Self.auPresetJSON)),
+                "userPresets": .array(listed.presets.userPresets.map(Self.auPresetJSON)),
+                "currentPreset": listed.presets.currentPreset
+                    .map(Self.auCurrentPresetJSON) ?? .null,
+            ]
+            if let effectID = listTarget.effectID {
+                listResult["effectId"] = .string(effectID.uuidString)
+            }
+            return .success(request.id, .object(listResult))
+
+        case "au.loadPreset":
+            // Loads ONE of the hosted AU's own presets onto the live instance
+            // (m23-cw). params: trackId (required; "master" rejects),
+            // effectId? (omit ⇒ the track's AU instrument), and EXACTLY ONE of
+            // presetNumber (integer — negative is legal and means a user
+            // preset) or presetName (string). Passing both, or neither,
+            // rejects readably.
+            //
+            // presetName AMBIGUITY: an exact case-SENSITIVE match wins
+            // (factory list searched before user list); only if there is no
+            // exact match is a case-insensitive pass tried. If either stage
+            // matches more than one preset the call REFUSES and names the
+            // candidate numbers — a plugin may legally ship two presets called
+            // "Default", and silently picking one would be a coin flip
+            // presented as an answer.
+            //
+            // Applies live; playback is not interrupted. NOT undoable — parity
+            // with choosing a preset in the vendor's own window via
+            // plugin.openUI, which the model never sees either. The loaded
+            // sound persists with the project through the same save-time
+            // fullStateForDocument capture that au.setParam relies on; nothing
+            // is written into the project model at load time, deliberately
+            // (m23-bx-1 — see ProjectStore.loadAudioUnitPreset).
+            //
+            // The response's `preset` is the unit's post-load READ-BACK, not
+            // an echo of the request, and the two genuinely differ: a unit may
+            // rewrite the name it was handed. If the unit SILENTLY REFUSES the
+            // load — measured real behaviour, not a theoretical case — this
+            // errors rather than reporting a load that never happened.
+            // Response: {trackId, effectId?, componentName, preset: {number,
+            // name, source}}.
+            try params.rejectUnknownKeys(
+                ["trackId", "effectId", "presetNumber", "presetName"], verb: "au.loadPreset")
+            let loadTarget = try Self.requireHostedAUTarget(params)
+            let selector = try Self.requireAUPresetSelector(params)
+            let loaded = try store.loadAudioUnitPreset(
+                trackID: loadTarget.trackID, effectID: loadTarget.effectID,
+                selector: selector)
+            var loadResult: [String: JSONValue] = [
+                "trackId": .string(loadTarget.trackID.uuidString),
+                "componentName": .string(loaded.componentName),
+                "preset": Self.auCurrentPresetJSON(loaded.preset),
+            ]
+            if let effectID = loadTarget.effectID {
+                loadResult["effectId"] = .string(effectID.uuidString)
+            }
+            return .success(request.id, .object(loadResult))
+
         case "vc.sidecarStatus":
             // No params. Health-probes the local RVC voice-conversion sidecar
             // (GET /health on 127.0.0.1:8002, loopback only — see
@@ -9661,6 +10123,66 @@ public final class CommandRouter {
         ])
     }
 
+    // MARK: - au.* helpers (hosted-AU preset surface, m23-cw)
+
+    /// `presetNumber` XOR `presetName` for `au.loadPreset`. Neither and both
+    /// are BOTH refusals: "neither" has no defensible default (there is no
+    /// "the first preset" that means anything musically), and "both" would
+    /// force us to invent a precedence the caller did not ask for.
+    ///
+    /// `presetNumber` must be an integer but is deliberately NOT range-checked
+    /// for sign — user presets are NEGATIVE by Apple's contract, so the
+    /// `parseAUOffset` "must be >= 0" shape would reject every legal user
+    /// preset. Membership is checked against the unit's live lists by the
+    /// engine, which is the only place that knows them.
+    private static func requireAUPresetSelector(_ params: [String: JSONValue]) throws
+        -> HostedAUPresetSelector {
+        let rawNumber = params["presetNumber"]
+        let rawName = params["presetName"]
+        if rawNumber != nil, rawName != nil {
+            throw ControlError(
+                "pass 'presetNumber' OR 'presetName', not both — they are two ways to name the same preset")
+        }
+        if let rawNumber {
+            guard let value = rawNumber.doubleValue, value.isFinite,
+                  value == value.rounded(.towardZero),
+                  value >= -1_000_000_000, value <= 1_000_000_000 else {
+                throw ControlError(
+                    "'presetNumber' must be an integer from au.listPresets (factory presets are >= 0, user presets are < 0)")
+            }
+            return .number(Int(value))
+        }
+        if let rawName {
+            guard let name = rawName.stringValue, !name.isEmpty else {
+                throw ControlError(
+                    "'presetName' must be a non-empty preset name from au.listPresets")
+            }
+            return .name(name)
+        }
+        throw ControlError(
+            "one of 'presetNumber' or 'presetName' is required — call au.listPresets to see what this plugin ships")
+    }
+
+    /// Wire shape of one listed preset — `{number, name}`.
+    private static func auPresetJSON(_ info: HostedAUPresetInfo) -> JSONValue {
+        .object([
+            "number": .number(Double(info.number)),
+            "name": .string(info.name),
+        ])
+    }
+
+    /// Wire shape of a CURRENT preset — the listed shape plus `source`
+    /// (factory | user | unlisted). Shared by `au.listPresets`'s
+    /// `currentPreset` and the `au.loadPreset` read-back so the two can never
+    /// drift apart.
+    private static func auCurrentPresetJSON(_ current: HostedAUCurrentPreset) -> JSONValue {
+        .object([
+            "number": .number(Double(current.number)),
+            "name": .string(current.name),
+            "source": .string(current.source.rawValue),
+        ])
+    }
+
     /// Syntax-only target for `plugin.closeUI`: trackId (required) + optional
     /// effectId, both validated for UUID SHAPE only. No store lookup — the
     /// target may have just been removed, and idempotent close is the agent-
@@ -10032,6 +10554,123 @@ public final class CommandRouter {
                 "dither": .number(crusher.dither ? 1 : 0),
                 "mix": .number(crusher.mix),
             ])
+        case .djFilter:
+            let filter = effect.resolvedDJFilter
+            return .object([
+                "position": .number(filter.position),
+                "resonance": .number(filter.resonance),
+                "slopeDbPerOct": .number(filter.slopeDbPerOct),
+                "deadZoneWidth": .number(filter.deadZoneWidth),
+                "resonanceTrack": .number(filter.resonanceTrack),
+            ])
+        case .ringMod:
+            let ring = effect.resolvedRingMod
+            return .object([
+                "carrierHz": .number(ring.carrierHz),
+                "mix": .number(ring.mix),
+                // Numeric-but-discrete (the bitCrusher/djFilter precedent): the
+                // value is already SNAPPED by RingModParams' init, so what is
+                // reported here is the index actually in force, never the 1.7
+                // someone sent. `waveformLabel` is the additive human echo, the
+                // `delay.divisionLabel` shape — an agent never has to keep its
+                // own copy of the 0/1/2/3 mapping.
+                "waveform": .number(ring.waveform),
+                "waveformLabel": .string(
+                    RingModParams.waveform(at: ring.waveform).displayName),
+                "inputHighCutHz": .number(ring.inputHighCutHz),
+                "stereoSpreadDeg": .number(ring.stereoSpreadDeg),
+            ])
+        case .flanger:
+            let flanger = effect.resolvedFlanger
+            return .object([
+                "rateHz": .number(flanger.rateHz),
+                "depthMs": .number(flanger.depthMs),
+                "delayMs": .number(flanger.delayMs),
+                "feedback": .number(flanger.feedback),
+                "mix": .number(flanger.mix),
+                "stereoPhaseDeg": .number(flanger.stereoPhaseDeg),
+                // Additive human echo, the `ringMod.waveformLabel` /
+                // `delay.divisionLabel` shape: where the comb's FIRST notch
+                // sits at the bottom of the sweep, so an agent never has to
+                // keep its own copy of the 1/(2*delay) law to answer "what
+                // will this sound like". Read through `FlangerParams`, the one
+                // home, never re-derived here.
+                "firstNotchHzAtSweepFloor": .number(
+                    FlangerParams.combNotchHz(delayMs: flanger.delayMs, index: 0)),
+            ])
+        case .hallReverb:
+            let hall = effect.resolvedHallReverb
+            return .object([
+                "mix": .number(hall.mix),
+                "decaySeconds": .number(hall.decaySeconds),
+                "sizeMeters": .number(hall.sizeMeters),
+                "preDelayMs": .number(hall.preDelayMs),
+                "width": .number(hall.width),
+                "diffusion": .number(hall.diffusion),
+                "earlyLateBalance": .number(hall.earlyLateBalance),
+                "lowDecayMultiplier": .number(hall.lowDecayMultiplier),
+                "highDecayMultiplier": .number(hall.highDecayMultiplier),
+                "lowCrossoverHz": .number(hall.lowCrossoverHz),
+                "highCrossoverHz": .number(hall.highCrossoverHz),
+                "modRateHz": .number(hall.modRateHz),
+                "modDepthMs": .number(hall.modDepthMs),
+                "freeze": .number(hall.freeze),
+                // Additive human echoes, the `ringMod.waveformLabel` /
+                // `flanger.firstNotchHzAtSweepFloor` shape — read through
+                // `HallReverbParams`, the one home, never re-derived here.
+                // `freezeOn` spells out the >= 0.5 rule so an agent never has
+                // to guess where the switch flips, and `firstArrivalMs` is the
+                // closed form that makes `sizeMeters` legible: it is the gap
+                // before the FIRST wet sound, pre-delay included.
+                "freezeOn": .bool(HallReverbParams.isFrozen(hall.freeze)),
+                "firstArrivalMs": .number(
+                    HallReverbParams.firstArrivalSeconds(
+                        sizeMeters: hall.sizeMeters,
+                        preDelayMs: hall.preDelayMs) * 1_000),
+            ])
+        case .tapeDelay:
+            let tape = effect.resolvedTapeDelay
+            return .object([
+                "timeMs": .number(tape.timeMs),
+                "feedback": .number(tape.feedback),
+                "mix": .number(tape.mix),
+                "wowDepthMs": .number(tape.wowDepthMs),
+                "wowRateHz": .number(tape.wowRateHz),
+                "flutterDepthMs": .number(tape.flutterDepthMs),
+                "saturationDrive": .number(tape.saturationDrive),
+                "highCutHz": .number(tape.highCutHz),
+                // DERIVED, through `TapeDelayParams`, the one home, never
+                // re-derived here. An agent asked to "make it wobble like an
+                // old tape" cannot judge `wowDepthMs` = 2.5 without knowing
+                // what it does to the pitch; these two are the closed forms
+                // that make the wobble legible in a unit a musician has
+                // (cents), and they are what the param notes quote.
+                "wowCents": .number(
+                    TapeDelayParams.wowCents(depthMs: tape.wowDepthMs,
+                                             rateHz: tape.wowRateHz)),
+                "flutterCents": .number(
+                    TapeDelayParams.flutterCents(depthMs: tape.flutterDepthMs)),
+            ])
+        case .stereoWidth:
+            let stereo = effect.resolvedStereoWidth
+            return .object([
+                "width": .number(stereo.width),
+                "spread": .number(stereo.spread),
+                "bassMonoHz": .number(stereo.bassMonoHz),
+                "bassMonoAmount": .number(stereo.bassMonoAmount),
+                // DERIVED, through `StereoWidthParams`, the one home, never
+                // re-derived here. The `tapeDelay.wowCents` shape: an agent
+                // asked to "make the pad wide" cannot judge `spread` = 0.3
+                // without knowing what it costs, and the cost of this effect
+                // is NOT a mono problem (the mono sum is untouched by
+                // construction) but a per-channel ripple. These two are the
+                // closed forms that make that ripple legible, and they are
+                // what the param notes quote.
+                "channelPeakDb": .number(
+                    StereoWidthParams.channelPeakDb(spread: stereo.spread)),
+                "channelNotchDb": .number(
+                    StereoWidthParams.channelNotchDb(spread: stereo.spread)),
+            ])
         case .audioUnit:
             // Hosted AU: the component triple + display name. AU parameters
             // are not on the generic surface in v0, and captured state never
@@ -10311,6 +10950,350 @@ public final class CommandRouter {
     /// already reads/writes on disk and everywhere else, so this file carries
     /// no hand-parsed duplicate of that shape. A missing/malformed target is a
     /// readable error naming the expected shape.
+
+    // MARK: - m39-e modulation helpers
+
+    /// Converts a `params` object into the typed values `DAWCore` validates.
+    /// Deliberately DUMB: it converts shapes, it does not know ranges, names
+    /// or defaults. Every rule lives in `ModulationSourceParams.apply`, next to
+    /// the ranges it enforces, so the store and the wire cannot disagree.
+    private static func modulationParams(_ value: JSONValue?)
+        throws -> [String: ModulationParamValue] {
+        guard let value else { return [:] }
+        guard let object = value.objectValue else {
+            throw ControlError("'params' must be an object of source parameters — "
+                + "call mod.describeKinds for the parameter table of each kind")
+        }
+        var result: [String: ModulationParamValue] = [:]
+        for (key, element) in object {
+            switch element {
+            case .number(let n): result[key] = .number(n)
+            case .string(let s): result[key] = .string(s)
+            case .bool(let b): result[key] = .bool(b)
+            case .null: result[key] = .null
+            case .array(let items):
+                var numbers: [Double] = []
+                numbers.reserveCapacity(items.count)
+                for item in items {
+                    guard let n = item.doubleValue else {
+                        throw ControlError("'params.\(key)' must be an array of numbers")
+                    }
+                    numbers.append(n)
+                }
+                result[key] = .numbers(numbers)
+            case .object:
+                throw ControlError("'params.\(key)' must be a number, string, boolean or "
+                    + "array — nested objects are not a modulation parameter shape")
+            }
+        }
+        return result
+    }
+
+    /// One strip's `mod.describe` entry, including the `effective` block.
+    private func modulationStripDescription(_ strip: ModulationStrip,
+                                            atBeat beat: Double) throws -> JSONValue {
+        let state = try store.modulationState(of: strip)
+        var effective: [JSONValue] = []
+        // The evaluation position. `sampleRate` CANCELS for every closed-form
+        // source (an LFO's phase is seconds × rateHz, and seconds is p ÷ rate),
+        // so any consistent rate gives the same answer — this is a read, not a
+        // render, and it does not have to match the graph.
+        let sampleRate = 48_000.0
+        let seconds = store.transport.tempoMap.seconds(from: 0, to: beat)
+        let position = Int64((seconds * sampleRate).rounded())
+        let rolling = store.transport.isPlaying
+        for route in state.routes {
+            guard let source = state.sources.first(where: { $0.id == route.sourceID })
+            else { continue }
+            var entry: [String: JSONValue] = [
+                "routeId": .string(route.id.uuidString),
+                "sourceId": .string(source.id.uuidString),
+                "sourceName": .string(source.name),
+                "target": try JSONValue(encoding: route.target),
+                "depth": .number(route.depth),
+                "enabled": .bool(route.enabled),
+            ]
+            // §7.8 — a position-dependent source reports its STOPPED value
+            // while stopped, so the agent, the UI and the render agree about
+            // what is happening rather than three different things.
+            let sourceValue: Double?
+            if source.kind == .envelopeFollower {
+                sourceValue = nil
+            } else if source.kind.isPositionDependent, !rolling {
+                sourceValue = 0
+            } else {
+                sourceValue = ModulationMath.value(of: source.params, atSample: position,
+                                                   sampleRate: sampleRate)
+            }
+            if let sourceValue {
+                entry["sourceValue"] = .number(sourceValue)
+            } else {
+                entry["sourceValue"] = .null
+                entry["sourceValueNote"] = .string(
+                    "an envelope follower's value exists only while audio is rendering; "
+                    + "it is not a function of transport position")
+            }
+            if let base = try modulationBaseValue(of: route.target, on: strip) {
+                entry["baseValue"] = .number(base)
+                if let sourceValue, route.enabled {
+                    entry["modulatedValue"] = .number(
+                        Self.modulatedValue(base: base, target: route.target,
+                                            sum: route.depth * sourceValue,
+                                            strip: strip, store: store))
+                } else {
+                    entry["modulatedValue"] = .number(base)
+                }
+            }
+            // Warnings are REPEATED here, not only at creation, so a `warned`
+            // verdict stays visible in the surface an agent inspects later.
+            let warnings = (try? store.validate(target: route.target, on: strip)) ?? []
+            if !warnings.isEmpty {
+                entry["warnings"] = .array(warnings.map { .string($0) })
+            }
+            effective.append(.object(entry))
+        }
+        var object: [String: JSONValue] = [
+            "sources": .array(try state.sources.map { try JSONValue(encoding: $0) }),
+            "routes": .array(try state.routes.map { try JSONValue(encoding: $0) }),
+            "effective": .array(effective),
+            "atBeat": .number(beat),
+            "transport": .string(rolling ? "rolling" : "stopped"),
+        ]
+        switch strip {
+        case .master: object["trackId"] = .string("master")
+        case .track(let id): object["trackId"] = .string(id.uuidString)
+        }
+        return .object(object)
+    }
+
+    /// The value a target currently carries — the `base` the depth law offsets.
+    private func modulationBaseValue(of target: AutomationTarget,
+                                     on strip: ModulationStrip) throws -> Double? {
+        switch strip {
+        case .master:
+            switch target {
+            case .volume: return store.masterVolume
+            case .effectParam(let id, let name):
+                return store.masterEffects.first(where: { $0.id == id })?.paramValue(name)
+            default: return nil
+            }
+        case .track(let trackID):
+            guard let track = store.tracks.first(where: { $0.id == trackID }) else { return nil }
+            switch target {
+            case .volume: return track.volume
+            case .pan: return track.pan
+            case .sendLevel(let sendID):
+                return track.sends.first(where: { $0.id == sendID })?.level
+            case .effectParam(let id, let name):
+                return track.effects.first(where: { $0.id == id })?.paramValue(name)
+            case .instrumentParam(let name):
+                return InstrumentParamSpec.currentValue(
+                    of: name, in: track.instrument ?? .default)
+            }
+        }
+    }
+
+    /// The depth law, applied for the READ path. The same functions the render
+    /// thread runs — `mod.describe` must not re-derive the arithmetic, or the
+    /// number it reports and the number you hear would be two different things.
+    private static func modulatedValue(base: Double, target: AutomationTarget,
+                                       sum: Double, strip: ModulationStrip,
+                                       store: ProjectStore) -> Double {
+        switch target {
+        case .volume: return ModulationDepthLaw.volumeGain(base: base, sum: sum)
+        case .pan: return ModulationDepthLaw.pan(base: base, sum: sum)
+        case .sendLevel: return base
+        case .effectParam(let id, let name):
+            let effects: [EffectDescriptor]
+            switch strip {
+            case .master: effects = store.masterEffects
+            case .track(let trackID):
+                effects = store.tracks.first(where: { $0.id == trackID })?.effects ?? []
+            }
+            guard let effect = effects.first(where: { $0.id == id }),
+                  let spec = EffectParamSpec.specs(for: effect.kind)
+                      .first(where: { $0.name == name }) else { return base }
+            return ModulationDepthLaw.value(base: base, sum: sum,
+                                            range: spec.range, curve: spec.curve)
+        case .instrumentParam(let name):
+            guard case .track(let trackID) = strip,
+                  let track = store.tracks.first(where: { $0.id == trackID }),
+                  let spec = InstrumentParamSpec
+                      .specs(for: (track.instrument ?? .default).kind)
+                      .first(where: { $0.name == name }) else { return base }
+            return ModulationDepthLaw.value(base: base, sum: sum,
+                                            range: spec.range, curve: spec.curve)
+        }
+    }
+
+    /// `mod.describeKinds` — the static catalogue, and the ONE place an agent
+    /// is told the polarity convention before it writes a gate backwards.
+    private static func modulationKindsCatalogue() -> JSONValue {
+        func param(_ name: String, _ type: String, _ range: ClosedRange<Double>?,
+                   _ defaultValue: JSONValue, _ unit: String, _ curve: String,
+                   _ note: String) -> JSONValue {
+            var object: [String: JSONValue] = [
+                "name": .string(name), "type": .string(type),
+                "default": defaultValue, "unit": .string(unit),
+                "curve": .string(curve), "note": .string(note),
+            ]
+            if let range {
+                object["min"] = .number(range.lowerBound)
+                object["max"] = .number(range.upperBound)
+            }
+            return .object(object)
+        }
+        let syncNote = "NOT AVAILABLE IN v1 — any non-null value is refused with "
+            + "modulationTempoSyncUnavailable. Tempo-synced rates need m39-c's generalised "
+            + "resolver; until it lands, use the free-running rateHz. The field exists so "
+            + "the shape never changes when sync arrives."
+        let polarity = "POLARITY — a source value is an OFFSET from the parameter's current "
+            + "value, not a level. 0 means 'leave it alone'. On volume the fader has only "
+            + "+6.02 dB of headroom against 48 dB of cut, so gates and tremolos take a "
+            + "NEGATIVE depth — and under a negative depth the source's HIGH value is the "
+            + "CUT. A step of 0 is OPEN (the knob value) and a step of 1 is CLOSED, so "
+            + "[1,0,1,0] gates the DOWNBEAT silent and a gate that opens on the downbeat is "
+            + "[0,1,0,1]. A square's pulseWidth is the CLOSED fraction on volume for the "
+            + "same reason. On a target whose useful direction is up (cutoffHz, resonance, "
+            + "an effect parameter) use a POSITIVE depth and it reads the intuitive way."
+        let depthLaw = "DEPTH — always a unitless number in -1...1. What FULL depth MEANS is "
+            + "declared by the target's curve. cutoffHz is 40-18000 Hz on a LOGARITHMIC "
+            + "curve, which spans log2(18000/40) = 8.81 octaves, so depth 0.1 is +/-0.88 "
+            + "octaves and it means the SAME musical gesture at 200 Hz as at 8 kHz — a "
+            + "linear-Hz depth would not. resonance is 0-1 LINEAR, so depth 0.25 is "
+            + "+/-0.25. volume's domain is DECIBELS with full depth = +/-48 dB, so depth "
+            + "0.125 is a +/-6 dB tremolo. pan's full depth is +/-1.0, hard left to hard "
+            + "right."
+        return .object([
+            "polarity": .string(polarity),
+            "depthLaw": .string(depthLaw),
+            "limits": .object([
+                "sourcesPerStrip": .number(Double(ModulationLimits.maxSources)),
+                "routesPerStrip": .number(Double(ModulationLimits.maxRoutes)),
+                "stepsPerSequencer": .number(Double(ModulationLimits.maxSteps)),
+                "note": .string("Automation lanes and modulated EFFECT parameters share one "
+                    + "\(ModulationLimits.maxRoutes)-slot budget per strip; mod.addRoute "
+                    + "refuses past it and names both contributors rather than dropping "
+                    + "silently."),
+            ]),
+            "kinds": .array([
+                .object([
+                    "kind": .string(ModulationSourceKind.lfo.rawValue),
+                    "output": .string("bipolar -1...1 by default; bipolar:false maps to 0...1"),
+                    "stopped": .string("holds NEUTRAL (0) — it is a function of transport "
+                        + "position and a stopped transport has none"),
+                    "params": .array([
+                        param("waveform", "string", nil, .string("sine"), "", "",
+                              "one of " + LFOWaveform.allCases.map(\.rawValue)
+                                  .joined(separator: ", ")
+                                  + ". sawUp RISES then resets; sawDown falls."),
+                        param("rateHz", "number", LFOSourceParams.rateRange, .number(1.0),
+                              "Hz", "logarithmic", "free-running rate"),
+                        param("syncDivision", "string|null", nil, .null, "", "", syncNote),
+                        param("phaseDeg", "number", LFOSourceParams.phaseRange, .number(0),
+                              "deg", "linear", "phase at PROJECT position 0, not at play "
+                                  + "start — the phase is computed from the transport "
+                                  + "position, so a seek lands where a full playthrough "
+                                  + "would have been"),
+                        param("pulseWidth", "number", LFOSourceParams.pulseWidthRange,
+                              .number(0.5), "", "linear",
+                              "square only; the fraction of the cycle at the HIGH value, "
+                                  + "which on volume is the CLOSED fraction"),
+                        param("edgeMs", "number", LFOSourceParams.edgeRange, .number(2.0),
+                              "ms", "logarithmic",
+                              "raised-cosine edge width for square/sampleHold; the edge is "
+                                  + "CENTRED on the transition, so softening a gate does "
+                                  + "not move it off the beat"),
+                        param("bipolar", "boolean", nil, .bool(true), "", "",
+                              "false maps the output to 0...1 — the attenuation-only "
+                                  + "idiom for tremolo and gates"),
+                        param("seed", "integer", LFOSourceParams.seedRange, .number(0), "",
+                              "", "sampleHold only; makes the random sequence reproducible"),
+                    ]),
+                ]),
+                .object([
+                    "kind": .string(ModulationSourceKind.stepSequencer.rawValue),
+                    "output": .string("bipolar -1...1"),
+                    "stopped": .string("holds NEUTRAL (0)"),
+                    "params": .array([
+                        param("steps", "array of number",
+                              StepSequencerSourceParams.stepValueRange,
+                              .array([.number(1), .number(0), .number(1), .number(0)]), "",
+                              "linear",
+                              "1 to \(ModulationLimits.maxSteps) OFFSETS, not levels — read "
+                                  + "the polarity note. A gate that opens on the downbeat "
+                                  + "is [0,1,0,1]."),
+                        param("stepDivision", "string|null", nil, .null, "", "", syncNote),
+                        param("rateHz", "number", StepSequencerSourceParams.rateRange,
+                              .number(4.0), "steps/s", "logarithmic",
+                              "free-running step rate in STEPS PER SECOND (4 is a 1/16 at "
+                                  + "60 BPM). The tempo-relative spelling arrives with m39-c."),
+                        param("edgeMs", "number", StepSequencerSourceParams.edgeRange,
+                              .number(2.0), "ms", "logarithmic",
+                              "raised-cosine edge between steps"),
+                    ]),
+                ]),
+                .object([
+                    "kind": .string(ModulationSourceKind.envelopeFollower.rawValue),
+                    "output": .string("unipolar 0...1"),
+                    "stopped": .string("STAYS LIVE — it follows audio, and audio exists "
+                        + "while monitoring a stopped transport"),
+                    "note": .string("The ONE source whose output depends on render history. "
+                        + "Renders that START at the same transport position are "
+                        + "bit-identical; a render that starts part-way through differs from "
+                        + "a full playthrough for roughly attackMs + releaseMs. It follows "
+                        + "this strip's POST-INSERT audio, at the fader."),
+                    "params": .array([
+                        param("source", "string", nil, .string("self"), "", "",
+                              "v1 accepts 'self' only. Keying off another strip is refused "
+                                  + "with crossStripKeyUnsupported rather than silently "
+                                  + "self-keyed."),
+                        param("detector", "string", nil, .string("rms"), "", "",
+                              "rms or peak"),
+                        param("attackMs", "number", EnvelopeFollowerSourceParams.attackRange,
+                              .number(10), "ms", "logarithmic", ""),
+                        param("releaseMs", "number",
+                              EnvelopeFollowerSourceParams.releaseRange, .number(100), "ms",
+                              "logarithmic", ""),
+                        param("floorDb", "number", EnvelopeFollowerSourceParams.floorRange,
+                              .number(-60), "dB", "linear",
+                              "input level that maps to output 0"),
+                        param("gainDb", "number", EnvelopeFollowerSourceParams.gainRange,
+                              .number(0), "dB", "linear", "pre-detector trim"),
+                    ]),
+                ]),
+                .object([
+                    "kind": .string(ModulationSourceKind.macro.rawValue),
+                    "output": .string("unipolar 0...1"),
+                    "stopped": .string("STAYS LIVE — it is a control, not a timeline"),
+                    "params": .array([
+                        param("value", "number", MacroSourceParams.valueRange, .number(0),
+                              "", "linear", "written live by mod.setMacro"),
+                    ]),
+                ]),
+            ]),
+            "targets": .object([
+                "shape": .string("mod.addRoute takes the SAME flat target object automation "
+                    + "takes: {type:\"volume\"|\"pan\"|\"effectParam\"|\"instrumentParam\", "
+                    + "effectId?, param?}. There is no separate modulation target type."),
+                "volume": .string("per-sample delivery; full depth +/-48 dB; see the "
+                    + "polarity note before writing a gate"),
+                "pan": .string("per-sample delivery; full depth +/-1.0"),
+                "effectParam": .string("re-derived ONCE per render block, so rates above "
+                    + "about 18.75 Hz alias and mod.addRoute warns with the image ratio. "
+                    + "Per-parameter honesty is in fx.describe's modulatable verdict: 'yes' "
+                    + "is smooth, 'warned' names the artefact, 'refused' throws."),
+                "instrumentParam": .string("per-sample delivery on the built-in synth, "
+                    + "addressed BY NAME with no id (a track has at most one instrument). "
+                    + "Hosted instruments are REFUSED with their alias figure rather than "
+                    + "silently aliased."),
+                "sendLevel": .string("REFUSED in v1 (sendLevelUnsupported) — there is no "
+                    + "render-side send stage to compose into. Modulate the source strip's "
+                    + "volume instead; sends are POST-fader, so they follow it."),
+            ]),
+        ])
+    }
+
     private func parseAutomationTarget(_ value: JSONValue?) throws -> AutomationTarget {
         guard let value else {
             throw ControlError("missing or invalid required param 'target'")
@@ -10319,8 +11302,9 @@ public final class CommandRouter {
             return try JSONDecoder().decode(AutomationTarget.self, from: JSONEncoder().encode(value))
         } catch {
             throw ControlError(
-                "'target' must be {type: \"volume\"|\"pan\"|\"sendLevel\"|\"effectParam\", "
-                + "sendId?, effectId?, param?} — \(Self.decodingMessage(error))")
+                "'target' must be {type: \"volume\"|\"pan\"|\"sendLevel\"|\"effectParam\""
+                + "|\"instrumentParam\", sendId?, effectId?, param?} — "
+                + "\(Self.decodingMessage(error))")
         }
     }
 
@@ -10845,12 +11829,40 @@ public final class CommandRouter {
     /// → nil (keep the current value); a present-but-invalid string names the
     /// valid values verbatim.
     private func parseWaveform(_ value: JSONValue?) throws -> PolySynthParams.Waveform? {
-        guard let raw = value?.stringValue else { return nil }
-        guard let waveform = PolySynthParams.Waveform(rawValue: raw) else {
-            let valid = PolySynthParams.Waveform.allCases.map(\.rawValue).joined(separator: "|")
-            throw ControlError("waveform must be one of \(valid)")
+        // Delegates so the legal set has ONE home. The message is BYTE-IDENTICAL
+        // to the one this verb has always thrown ("waveform must be one of …") —
+        // that string is a live contract (pinned in ControlTests) and is
+        // deliberately not reworded, and its LENIENCE toward a non-string value
+        // is left exactly as it was: tightening a live verb is not this item's
+        // to do, and nothing here depends on it.
+        try parseWaveform(value, field: "waveform", strict: false)
+    }
+
+    /// The same parse, for a wave-shape field that is NOT called `waveform`
+    /// (m39-g's `subWaveform`). Named-field errors matter once ONE command
+    /// takes two of them: "waveform must be one of …" thrown at a bad
+    /// `subWaveform` sends a caller to the wrong key — the
+    /// `parseFadeCurve(_:field:)` rule.
+    ///
+    /// `strict` refuses a present-but-non-string value (`subWaveform: 3`)
+    /// instead of ignoring it. A new field starts strict because a setting
+    /// accepted and then silently dropped is this tree's characteristic
+    /// failure; an existing one keeps whatever it promised.
+    private func parseWaveform(
+        _ value: JSONValue?, field: String, strict: Bool = true, hint: String = ""
+    ) throws -> PolySynthParams.Waveform? {
+        let valid = PolySynthParams.Waveform.allCases.map(\.rawValue).joined(separator: "|")
+        switch value {
+        case .none, .some(.null): return nil
+        case .some(.string(let raw)):
+            guard let waveform = PolySynthParams.Waveform(rawValue: raw) else {
+                throw ControlError("\(field) must be one of \(valid)\(hint)")
+            }
+            return waveform
+        case .some:
+            guard strict else { return nil }
+            throw ControlError("\(field) must be a string — one of \(valid)\(hint)")
         }
-        return waveform
     }
 
     /// Resolves an optional clip fade-curve param (`fadeInCurve`/`fadeOutCurve`,
@@ -12331,12 +13343,57 @@ public final class CommandRouter {
         if let pedalHoldLimit = poly.pedalHoldLimit {
             polyObject["pedalHoldLimit"] = .number(Double(pedalHoldLimit))
         }
+        // m39-g — the fifteen richness fields, every one on the same
+        // only-when-SET rule the line above states: a patch that never opted in
+        // keeps its pre-m39-g wire shape byte-for-byte, and "unset" stays
+        // distinguishable from "explicitly 0" on a round trip. That distinction
+        // is not cosmetic — `subLevel: 0` and an absent `subLevel` mean the same
+        // SOUND but different things to a caller reading back what it wrote.
+        //
+        // ⚠️ THIS IS A READ-BACK, NOT A DESCRIPTION. What the engine actually
+        // applies (the nil-resolved value), what each range is, and which
+        // settings are stored-but-INERT are `instrument.describeSynth`'s job;
+        // this object stays exactly what the caller sent.
+        Self.mergePolySynthRichnessJSON(poly, into: &polyObject)
         return .object([
             "kind": .string(d.kind.rawValue),
             "polySynth": .object(polyObject),
             "sampler": .object(samplerObject),
             "honoredControllers": .object(supportObject),
         ])
+    }
+
+    /// m39-g — the fifteen richness fields as only-when-SET wire keys, merged
+    /// into a `polySynth` object. ONE HOME for that emission: `instrumentJSON`
+    /// (the `track.setInstrument` echo) and `instrument.describeSynth`'s
+    /// `stored` block both call it, so the two can never disagree about what a
+    /// patch is set to — and a sixteenth field is added in one place.
+    ///
+    /// ⚠️ nil emits NO KEY. Emitting `null`, or emitting the resolved value,
+    /// would both destroy the unset/explicit-zero distinction the model's whole
+    /// additive-optional design rests on.
+    private static func mergePolySynthRichnessJSON(
+        _ poly: PolySynthParams, into object: inout [String: JSONValue]
+    ) {
+        if let unisonVoices = poly.unisonVoices {
+            object["unisonVoices"] = .number(Double(unisonVoices))
+        }
+        if let value = poly.unisonDetuneCents { object["unisonDetuneCents"] = .number(value) }
+        if let value = poly.unisonStereoSpread { object["unisonStereoSpread"] = .number(value) }
+        if let value = poly.subLevel { object["subLevel"] = .number(value) }
+        if let subOctave = poly.subOctave { object["subOctave"] = .number(Double(subOctave)) }
+        if let subWaveform = poly.subWaveform {
+            object["subWaveform"] = .string(subWaveform.rawValue)
+        }
+        if let value = poly.noiseLevel { object["noiseLevel"] = .number(value) }
+        if let value = poly.noiseColor { object["noiseColor"] = .number(value) }
+        if let value = poly.drift { object["drift"] = .number(value) }
+        if let value = poly.resonanceBoost { object["resonanceBoost"] = .number(value) }
+        if let value = poly.drive { object["drive"] = .number(value) }
+        if let value = poly.velocityToCutoff { object["velocityToCutoff"] = .number(value) }
+        if let value = poly.keyToCutoff { object["keyToCutoff"] = .number(value) }
+        if let value = poly.voiceJitter { object["voiceJitter"] = .number(value) }
+        if let value = poly.envelopeCurve { object["envelopeCurve"] = .number(value) }
     }
 
     /// Wire JSON for ONE sampler zone. Split out of `instrumentJSON` at m26-h
@@ -12917,6 +13974,17 @@ extension [String: JSONValue] {
             throw ControlError("'trackId' is not a valid UUID: \(raw)")
         }
         return .track(id)
+    }
+
+    /// m39-e: which strip a `mod.*` verb addresses. Reuses `parseFXTarget`'s
+    /// exact vocabulary — a track UUID or the literal `"master"` — so the
+    /// modulation family cannot drift from the FX family on what `trackId`
+    /// means.
+    func parseModulationStrip() throws -> ModulationStrip {
+        switch try parseFXTarget() {
+        case .master: return .master
+        case .track(let id): return .track(id)
+        }
     }
 
     /// A required filesystem path param: `~`-expanded, and refused unless it is

@@ -88,6 +88,461 @@ struct PersistenceTests {
         return Set(files.map(\.lastPathComponent))
     }
 
+    // MARK: - 0. The hand-mirrored effect-params surface (m39-i)
+
+    /// ⚠️⚠️ **THE COMPILER DOES NOT FORCE THIS AND IT IS THE QUIET FAILURE THIS
+    /// TREE IS CHARACTERISED BY.** `EffectDocument` (ProjectDocument.swift) is a
+    /// HAND-MIRRORED copy of `EffectDescriptor` with its own field list,
+    /// `CodingKeys`, decode, encode and rebuild. A new per-kind params optional
+    /// added to the descriptor but missed in any one of those five places
+    /// renders perfectly, edits perfectly, reports perfectly over the wire —
+    /// and is SILENTLY DROPPED the moment the project is saved and reopened.
+    /// "Byte-identical for pre-existing projects" (§12 gate 7) does NOT catch
+    /// it: that gate asserts the new key is ABSENT.
+    ///
+    /// So this asserts the opposite direction: a non-default value in EVERY
+    /// field of the newest kind survives save → open. Its own positive control
+    /// is built in — each expectation uses a value that differs from the
+    /// default, so a dropped mirror restores defaults and every line reddens.
+    @Test("m39-i: every djFilter parameter survives save -> open (the hand-mirrored EffectDocument)")
+    func djFilterParamsSurviveTheDocumentMirror() throws {
+        let dir = tempDir()
+        let store = ProjectStore()
+        store.media = FakeMedia()
+        let track = store.addTrack(name: "Sweep", kind: .audio)
+        let effect = try store.addEffect(toTrack: track.id, kind: .djFilter)
+        for (name, value) in [("position", -0.62), ("resonance", 0.81),
+                              ("slopeDbPerOct", 12.0), ("deadZoneWidth", 0.17),
+                              ("resonanceTrack", 0.44)] {
+            _ = try store.setEffectParam(trackID: track.id, effectID: effect.id,
+                                         name: name, value: value)
+        }
+
+        let path = dir.appendingPathComponent("Filter Sweep").path
+        try store.saveProject(to: path)
+
+        let reopened = ProjectStore()
+        reopened.media = FakeMedia()
+        try reopened.openProject(at: path)
+
+        let restored = try #require(reopened.tracks.first?.effects.first)
+        #expect(restored.kind == .djFilter)
+        let params = try #require(restored.djFilter,
+                                  "the djFilter params object was dropped by the document mirror")
+        #expect(abs(params.position - (-0.62)) < 1e-9)
+        #expect(abs(params.resonance - 0.81) < 1e-9)
+        #expect(params.slopeDbPerOct == 12)
+        #expect(abs(params.deadZoneWidth - 0.17) < 1e-9)
+        #expect(abs(params.resonanceTrack - 0.44) < 1e-9)
+    }
+
+    /// m39-m, the same five sites and the same hazard — and the reason this is
+    /// a SECOND test rather than a parameterisation of the first is that the
+    /// mirror is per-FIELD: a kind can be wired at four of the five sites and
+    /// fail only on save, which a loop over kinds would still catch but a
+    /// reader would not be able to read the failure of.
+    @Test("m39-m: every ringMod parameter survives save -> open (the hand-mirrored EffectDocument)")
+    func ringModParamsSurviveTheDocumentMirror() throws {
+        let dir = tempDir()
+        let store = ProjectStore()
+        store.media = FakeMedia()
+        let track = store.addTrack(name: "Clang", kind: .audio)
+        let effect = try store.addEffect(toTrack: track.id, kind: .ringMod)
+        for (name, value) in [("carrierHz", 137.5), ("mix", 0.82), ("waveform", 2.0),
+                              ("inputHighCutHz", 3_300.0), ("stereoSpreadDeg", 120.0)] {
+            _ = try store.setEffectParam(trackID: track.id, effectID: effect.id,
+                                         name: name, value: value)
+        }
+
+        let path = dir.appendingPathComponent("Ring Mod").path
+        try store.saveProject(to: path)
+
+        let reopened = ProjectStore()
+        reopened.media = FakeMedia()
+        try reopened.openProject(at: path)
+
+        let restored = try #require(reopened.tracks.first?.effects.first)
+        #expect(restored.kind == .ringMod)
+        let params = try #require(restored.ringMod,
+                                  "the ringMod params object was dropped by the document mirror")
+        #expect(abs(params.carrierHz - 137.5) < 1e-9)
+        #expect(abs(params.mix - 0.82) < 1e-9)
+        #expect(params.waveform == 2)
+        #expect(abs(params.inputHighCutHz - 3_300) < 1e-9)
+        #expect(abs(params.stereoSpreadDeg - 120) < 1e-9)
+    }
+
+    /// m39-j — the same hand-mirrored hazard, the same shape, a THIRD time.
+    /// ⚠️ This kind has SIX fields, and the ProjectDocument mirror has six
+    /// hand-written sites; nothing in the compiler connects the two numbers.
+    /// Every field is set to a NON-DEFAULT value here on purpose: a leg that
+    /// round-trips defaults passes even when the mirror drops the object
+    /// entirely, because `resolvedFlanger` manufactures defaults from nil.
+    @Test("m39-j: every flanger parameter survives save -> open (the hand-mirrored EffectDocument)")
+    func flangerParamsSurviveTheDocumentMirror() throws {
+        let dir = tempDir()
+        let store = ProjectStore()
+        store.media = FakeMedia()
+        let track = store.addTrack(name: "Jet", kind: .audio)
+        let effect = try store.addEffect(toTrack: track.id, kind: .flanger)
+        // Every value differs from the default (0.3 / 3 / 1.0 / 0.5 / 0.5 / 90),
+        // and `feedback` is NEGATIVE so a sign lost in the mirror shows up.
+        for (name, value) in [("rateHz", 4.25), ("depthMs", 7.5), ("delayMs", 0.35),
+                              ("feedback", -0.72), ("mix", 0.93),
+                              ("stereoPhaseDeg", 150.0)] {
+            _ = try store.setEffectParam(trackID: track.id, effectID: effect.id,
+                                         name: name, value: value)
+        }
+
+        let path = dir.appendingPathComponent("Flanger").path
+        try store.saveProject(to: path)
+
+        let reopened = ProjectStore()
+        reopened.media = FakeMedia()
+        try reopened.openProject(at: path)
+
+        let restored = try #require(reopened.tracks.first?.effects.first)
+        #expect(restored.kind == .flanger)
+        let params = try #require(restored.flanger,
+                                  "the flanger params object was dropped by the document mirror")
+        #expect(abs(params.rateHz - 4.25) < 1e-9)
+        #expect(abs(params.depthMs - 7.5) < 1e-9)
+        #expect(abs(params.delayMs - 0.35) < 1e-9)
+        #expect(abs(params.feedback - -0.72) < 1e-9)
+        #expect(abs(params.mix - 0.93) < 1e-9)
+        #expect(abs(params.stereoPhaseDeg - 150) < 1e-9)
+    }
+
+    /// m39-l — the same hand-mirrored hazard, and the WORST case of it so far.
+    /// ⚠️ This kind has FOURTEEN fields riding on SIX hand-written sites in
+    /// `ProjectDocument` (property, `CodingKeys`, `init(from effect:)`,
+    /// `decodeIfPresent`, `encodeIfPresent`, `effectDescriptor()`), and nothing
+    /// in the compiler connects the two numbers: miss one site and the project
+    /// saves, reports success, and reopens with the hall reset to defaults.
+    /// EVERY field is set to a NON-DEFAULT value on purpose — a leg that
+    /// round-trips defaults passes even when the mirror drops the object
+    /// entirely, because `resolvedHallReverb` manufactures defaults from nil.
+    @Test("m39-l: all 14 hallReverb parameters survive save -> open (the hand-mirrored mirror)")
+    func hallReverbParamsSurviveTheDocumentMirror() throws {
+        let dir = tempDir()
+        let store = ProjectStore()
+        store.media = FakeMedia()
+        let track = store.addTrack(name: "Strings", kind: .audio)
+        let effect = try store.addEffect(toTrack: track.id, kind: .hallReverb)
+        // Defaults are 0.3 / 1.8 / 12 / 20 / 1.0 / 0.7 / 0 / 1.0 / 0.5 / 200 /
+        // 6000 / 0.3 / 0.15 / 0 — not one value below is any of them, and
+        // `earlyLateBalance` is NEGATIVE so a sign lost in the mirror shows up.
+        let expected: [(String, Double)] = [
+            ("mix", 0.62), ("decaySeconds", 6.5), ("sizeMeters", 34.0),
+            ("preDelayMs", 85.0), ("width", 1.15), ("diffusion", 0.42),
+            ("earlyLateBalance", -0.55), ("lowDecayMultiplier", 2.75),
+            ("highDecayMultiplier", 0.22), ("lowCrossoverHz", 140.0),
+            ("highCrossoverHz", 9_500.0), ("modRateHz", 1.9),
+            ("modDepthMs", 2.4), ("freeze", 1.0),
+        ]
+        #expect(expected.count == EffectParamSpec.specs(for: .hallReverb).count,
+                "this leg stopped covering every parameter")
+        for (name, value) in expected {
+            _ = try store.setEffectParam(trackID: track.id, effectID: effect.id,
+                                         name: name, value: value)
+        }
+
+        let path = dir.appendingPathComponent("Hall").path
+        try store.saveProject(to: path)
+
+        let reopened = ProjectStore()
+        reopened.media = FakeMedia()
+        try reopened.openProject(at: path)
+
+        let restored = try #require(reopened.tracks.first?.effects.first)
+        #expect(restored.kind == .hallReverb)
+        let params = try #require(
+            restored.hallReverb,
+            "the hallReverb params object was dropped by the document mirror")
+        for (name, value) in expected {
+            let actual = try #require(restored.paramValue(name),
+                                      "\(name) is not on the paramValue surface")
+            #expect(abs(actual - value) < 1e-9,
+                    "\(name) came back \(actual), not \(value)")
+        }
+        // Read one field directly too, so the leg does not depend ONLY on
+        // `paramValue`'s own switch being right.
+        #expect(abs(params.sizeMeters - 34.0) < 1e-9)
+    }
+
+    /// m39-n — the same hand-mirrored hazard, checked BY HAND because m39-o's
+    /// exhaustive pin is still open. Six sites in `ProjectDocument` and eight
+    /// fields riding on them; every value below is a NON-DEFAULT, because a
+    /// leg that round-trips defaults passes even when the mirror drops the
+    /// object entirely (`resolvedTapeDelay` manufactures defaults from nil).
+    @Test("m39-n: all 8 tapeDelay parameters survive save -> open (the hand-mirrored mirror)")
+    func tapeDelayParamsSurviveTheDocumentMirror() throws {
+        let dir = tempDir()
+        let store = ProjectStore()
+        store.media = FakeMedia()
+        let track = store.addTrack(name: "Dub", kind: .audio)
+        let effect = try store.addEffect(toTrack: track.id, kind: .tapeDelay)
+        // Defaults are 350 / 0.4 / 0.3 / 2.5 / 0.8 / 0.25 / 0.3 / 6000 — not
+        // one value below is any of them.
+        let expected: [(String, Double)] = [
+            ("timeMs", 812.5), ("feedback", 0.72), ("mix", 0.55),
+            ("wowDepthMs", 5.25), ("wowRateHz", 1.7), ("flutterDepthMs", 0.62),
+            ("saturationDrive", 0.85), ("highCutHz", 3_150.0),
+        ]
+        #expect(expected.count == EffectParamSpec.specs(for: .tapeDelay).count,
+                "this leg stopped covering every parameter")
+        for (name, value) in expected {
+            _ = try store.setEffectParam(trackID: track.id, effectID: effect.id,
+                                         name: name, value: value)
+        }
+
+        let path = dir.appendingPathComponent("Tape").path
+        try store.saveProject(to: path)
+
+        let reopened = ProjectStore()
+        reopened.media = FakeMedia()
+        try reopened.openProject(at: path)
+
+        let restored = try #require(reopened.tracks.first?.effects.first)
+        #expect(restored.kind == .tapeDelay)
+        let params = try #require(
+            restored.tapeDelay,
+            "the tapeDelay params object was dropped by the document mirror")
+        for (name, value) in expected {
+            let actual = try #require(restored.paramValue(name),
+                                      "\(name) is not on the paramValue surface")
+            #expect(abs(actual - value) < 1e-9,
+                    "\(name) came back \(actual), not \(value)")
+        }
+        // Read one field directly too, so the leg does not depend ONLY on
+        // `paramValue`'s own switch being right.
+        #expect(abs(params.wowDepthMs - 5.25) < 1e-9)
+    }
+
+    /// m23-dj — the same hand-mirrored hazard, checked BY HAND because m39-o's
+    /// exhaustive pin is still open. Six sites in `ProjectDocument` and four
+    /// fields riding on them; every value below is a NON-DEFAULT, because a
+    /// leg that round-trips defaults passes even when the mirror drops the
+    /// object entirely (`resolvedStereoWidth` manufactures defaults from nil).
+    @Test("m23-dj: all 4 stereoWidth parameters survive save -> open (the hand-mirrored mirror)")
+    func stereoWidthParamsSurviveTheDocumentMirror() throws {
+        let dir = tempDir()
+        let store = ProjectStore()
+        store.media = FakeMedia()
+        let track = store.addTrack(name: "Pad", kind: .audio)
+        let effect = try store.addEffect(toTrack: track.id, kind: .stereoWidth)
+        // Defaults are 1 / 0.3 / 120 / 1 — not one value below is any of them.
+        let expected: [(String, Double)] = [
+            ("width", 1.63), ("spread", 0.71),
+            ("bassMonoHz", 87.5), ("bassMonoAmount", 0.42),
+        ]
+        #expect(expected.count == EffectParamSpec.specs(for: .stereoWidth).count,
+                "this leg stopped covering every parameter")
+        for (name, value) in expected {
+            _ = try store.setEffectParam(trackID: track.id, effectID: effect.id,
+                                         name: name, value: value)
+        }
+
+        let path = dir.appendingPathComponent("Width").path
+        try store.saveProject(to: path)
+
+        let reopened = ProjectStore()
+        reopened.media = FakeMedia()
+        try reopened.openProject(at: path)
+
+        let restored = try #require(reopened.tracks.first?.effects.first)
+        #expect(restored.kind == .stereoWidth)
+        let params = try #require(
+            restored.stereoWidth,
+            "the stereoWidth params object was dropped by the document mirror")
+        for (name, value) in expected {
+            let actual = try #require(restored.paramValue(name),
+                                      "\(name) is not on the paramValue surface")
+            #expect(abs(actual - value) < 1e-9,
+                    "\(name) came back \(actual), not \(value)")
+        }
+        // Read one field directly too, so the leg does not depend ONLY on
+        // `paramValue`'s own switch being right.
+        #expect(abs(params.spread - 0.71) < 1e-9)
+    }
+
+    /// §12 gate 7 for m23-dj. Same shape as the tapeDelay/hallReverb legs,
+    /// same built-in positive control.
+    @Test("m23-dj: a pre-stereoWidth effect encodes byte-identically, and the control fires")
+    func absentStereoWidthParamsAddNoBytes() throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let id = UUID(uuidString: "19191919-2828-3737-4646-555555555555")!
+
+        let legacy = EffectDocument(from: EffectDescriptor(
+            id: id, kind: .gain, gain: GainParams(gainLinear: 1.5)))
+        let legacyBytes = try encoder.encode(legacy)
+        #expect(!String(decoding: legacyBytes, as: UTF8.self).contains("stereoWidth"),
+                "a nil stereoWidth must be OMITTED, not encoded as null")
+
+        // POSITIVE CONTROL: the same comparison, with the field populated.
+        var populated = legacy
+        populated.stereoWidth = StereoWidthParams(width: 1.63, spread: 0.71)
+        let populatedBytes = try encoder.encode(populated)
+        #expect(populatedBytes != legacyBytes, """
+                the encoder is ignoring stereoWidth entirely — the omission proof above \
+                is vacuous
+                """)
+        #expect(String(decoding: populatedBytes, as: UTF8.self).contains("stereoWidth"))
+
+        let decoded = try JSONDecoder().decode(EffectDocument.self, from: populatedBytes)
+        #expect(abs((decoded.stereoWidth?.spread ?? 0) - 0.71) < 1e-9)
+        #expect(decoded.effectDescriptor()?.stereoWidth?.width == decoded.stereoWidth?.width)
+    }
+
+    /// §12 gate 7 for m39-n. Same shape as the hallReverb/flanger legs, same
+    /// built-in positive control.
+    @Test("m39-n: a pre-tapeDelay effect encodes byte-identically, and the control fires")
+    func absentTapeDelayParamsAddNoBytes() throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let id = UUID(uuidString: "14141414-2525-3636-4747-585858585858")!
+
+        let legacy = EffectDocument(from: EffectDescriptor(
+            id: id, kind: .gain, gain: GainParams(gainLinear: 1.5)))
+        let legacyBytes = try encoder.encode(legacy)
+        #expect(!String(decoding: legacyBytes, as: UTF8.self).contains("tapeDelay"),
+                "a nil tapeDelay must be OMITTED, not encoded as null")
+
+        // POSITIVE CONTROL: the same comparison, with the field populated.
+        var populated = legacy
+        populated.tapeDelay = TapeDelayParams(timeMs: 812.5, wowDepthMs: 5.25)
+        let populatedBytes = try encoder.encode(populated)
+        #expect(populatedBytes != legacyBytes, """
+                the encoder is ignoring tapeDelay entirely — the omission proof above \
+                is vacuous
+                """)
+        #expect(String(decoding: populatedBytes, as: UTF8.self).contains("tapeDelay"))
+
+        let decoded = try JSONDecoder().decode(EffectDocument.self, from: populatedBytes)
+        #expect(abs((decoded.tapeDelay?.wowDepthMs ?? 0) - 5.25) < 1e-9)
+        #expect(decoded.effectDescriptor()?.tapeDelay?.timeMs == decoded.tapeDelay?.timeMs)
+    }
+
+    /// §12 gate 7 for m39-l. Same shape as the flanger/ringMod/djFilter legs,
+    /// same built-in positive control.
+    @Test("m39-l: a pre-hallReverb effect encodes byte-identically, and the control fires")
+    func absentHallReverbParamsAddNoBytes() throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let id = UUID(uuidString: "13131313-2424-3535-4646-575757575757")!
+
+        let legacy = EffectDocument(from: EffectDescriptor(
+            id: id, kind: .gain, gain: GainParams(gainLinear: 1.5)))
+        let legacyBytes = try encoder.encode(legacy)
+        #expect(!String(decoding: legacyBytes, as: UTF8.self).contains("hallReverb"),
+                "a nil hallReverb must be OMITTED, not encoded as null")
+
+        // POSITIVE CONTROL: the same comparison, with the field populated.
+        var populated = legacy
+        populated.hallReverb = HallReverbParams(sizeMeters: 34, earlyLateBalance: -0.55)
+        let populatedBytes = try encoder.encode(populated)
+        #expect(populatedBytes != legacyBytes, """
+                the encoder is ignoring hallReverb entirely — the omission proof above \
+                is vacuous
+                """)
+        #expect(String(decoding: populatedBytes, as: UTF8.self).contains("hallReverb"))
+
+        // And it decodes back through the clamping init — sign intact.
+        let decoded = try JSONDecoder().decode(EffectDocument.self, from: populatedBytes)
+        #expect(abs((decoded.hallReverb?.earlyLateBalance ?? 0) - -0.55) < 1e-9)
+        #expect(decoded.effectDescriptor()?.hallReverb?.sizeMeters
+                == decoded.hallReverb?.sizeMeters)
+    }
+
+    /// §12 gate 7 for m39-j. Same shape as the ringMod/djFilter legs, same
+    /// built-in positive control.
+    @Test("m39-j: a pre-flanger effect encodes byte-identically, and the control fires")
+    func absentFlangerParamsAddNoBytes() throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let id = UUID(uuidString: "12121212-3434-5656-7878-909090909090")!
+
+        let legacy = EffectDocument(from: EffectDescriptor(
+            id: id, kind: .gain, gain: GainParams(gainLinear: 1.5)))
+        let legacyBytes = try encoder.encode(legacy)
+        #expect(!String(decoding: legacyBytes, as: UTF8.self).contains("flanger"),
+                "a nil flanger must be OMITTED, not encoded as null")
+
+        // POSITIVE CONTROL: the same comparison, with the field populated.
+        var populated = legacy
+        populated.flanger = FlangerParams(feedback: -0.72)
+        let populatedBytes = try encoder.encode(populated)
+        #expect(populatedBytes != legacyBytes,
+                "the encoder is ignoring flanger entirely — the omission proof above is vacuous")
+        #expect(String(decoding: populatedBytes, as: UTF8.self).contains("flanger"))
+
+        // And it decodes back through the clamping init — sign intact.
+        let decoded = try JSONDecoder().decode(EffectDocument.self, from: populatedBytes)
+        #expect(abs((decoded.flanger?.feedback ?? 0) - -0.72) < 1e-9)
+        #expect(decoded.effectDescriptor()?.flanger?.feedback == decoded.flanger?.feedback)
+    }
+
+    /// §12 gate 7 for m39-m. Same shape as the djFilter leg below, same
+    /// built-in positive control.
+    @Test("m39-m: a pre-ringMod effect encodes byte-identically, and the control fires")
+    func absentRingModParamsAddNoBytes() throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let id = UUID(uuidString: "66666666-7777-8888-9999-aaaaaaaaaaaa")!
+
+        let legacy = EffectDocument(from: EffectDescriptor(
+            id: id, kind: .gain, gain: GainParams(gainLinear: 1.5)))
+        let legacyBytes = try encoder.encode(legacy)
+        #expect(!String(decoding: legacyBytes, as: UTF8.self).contains("ringMod"),
+                "a nil ringMod must be OMITTED, not encoded as null")
+
+        // POSITIVE CONTROL: the same comparison, with the field populated.
+        var populated = legacy
+        populated.ringMod = RingModParams(carrierHz: 120)
+        let populatedBytes = try encoder.encode(populated)
+        #expect(populatedBytes != legacyBytes,
+                "the encoder is ignoring ringMod entirely — the omission proof above is vacuous")
+        #expect(String(decoding: populatedBytes, as: UTF8.self).contains("ringMod"))
+
+        // And it decodes back through the clamping init.
+        let decoded = try JSONDecoder().decode(EffectDocument.self, from: populatedBytes)
+        #expect(abs((decoded.ringMod?.carrierHz ?? 0) - 120) < 1e-9)
+        #expect(decoded.effectDescriptor()?.ringMod?.carrierHz == decoded.ringMod?.carrierHz)
+    }
+
+    /// §12 gate 7, the other direction: a project saved BEFORE `.djFilter`
+    /// existed must stay byte-identical, because the new descriptor field is
+    /// nil and therefore OMITTED (the `startOffsetSeconds` precedent).
+    /// ⭐ Positive-controlled in the same test: setting the new field non-nil
+    /// must make the same comparison redden, or "the bytes are unchanged" and
+    /// "the encoder ignores this field entirely" print the same green.
+    @Test("m39-i: a pre-djFilter effect encodes byte-identically, and the control fires")
+    func absentDJFilterParamsAddNoBytes() throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let id = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
+
+        let legacy = EffectDocument(from: EffectDescriptor(
+            id: id, kind: .gain, gain: GainParams(gainLinear: 1.5)))
+        let legacyBytes = try encoder.encode(legacy)
+        #expect(!String(decoding: legacyBytes, as: UTF8.self).contains("djFilter"),
+                "a nil djFilter must be OMITTED, not encoded as null")
+
+        // POSITIVE CONTROL: the same comparison, with the field populated.
+        var populated = legacy
+        populated.djFilter = DJFilterParams(position: 0.3)
+        let populatedBytes = try encoder.encode(populated)
+        #expect(populatedBytes != legacyBytes,
+                "the encoder is ignoring djFilter entirely — the omission proof above is vacuous")
+        #expect(String(decoding: populatedBytes, as: UTF8.self).contains("djFilter"))
+
+        // And it decodes back through the clamping init.
+        let decoded = try JSONDecoder().decode(EffectDocument.self, from: populatedBytes)
+        #expect(abs((decoded.djFilter?.position ?? 0) - 0.3) < 1e-9)
+        #expect(decoded.effectDescriptor()?.djFilter?.position == decoded.djFilter?.position)
+    }
+
     // MARK: - 1. Round-trip persisted state
 
     @Test("save then open restores every persisted field; transient state stays out")

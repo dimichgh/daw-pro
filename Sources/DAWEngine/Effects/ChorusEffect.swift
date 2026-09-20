@@ -14,12 +14,20 @@ import Foundation
 /// mix == 0 is BIT-EXACT dry: the buffer is never written (the lines and LFO
 /// still advance so a later mix raise is phase-coherent).
 ///
+/// The line itself is `InterpolatedDelayLine` (m39-j-0) — the shared home in
+/// `Effects/Primitives/`, which owns the flat two-channel block, the write
+/// head and the frozen linear tap arithmetic. Modulation stays HERE: the home
+/// has no depth, no rate and no LFO, which is what lets the flanger, the tape
+/// delay and the FDN share it.
+///
 /// Parameter updates follow the GainEffect atomic-POD-publish convention;
-/// derived constants recompute only on generation change. Lines are
+/// derived constants recompute only on generation change. The line is
 /// preallocated in `prepare` for the MAX depth range. Render-path contract:
 /// `process()`/`reset()` allocate nothing, take no locks, log nothing, touch
 /// no ObjC. The chorus path is feedback-free (taps only), so it can neither
-/// generate denormals nor blow up on finite input.
+/// generate denormals nor blow up on finite input — which is exactly why the
+/// shared home carries no denormal flush and each FEEDBACK caller must add
+/// its own (design §4.1).
 final class ChorusEffect: EffectRendering, @unchecked Sendable {
     /// Fixed center delay the LFO modulates around.
     private static let centerDelayMs = 15.0
@@ -40,10 +48,12 @@ final class ChorusEffect: EffectRendering, @unchecked Sendable {
 
     // Prepared storage (main-actor allocated, render-thread used).
     private var sampleRate: Double = 48_000
-    /// Two channel lines in one flat block: [channel][capacityPerChannel].
-    private var line: UnsafeMutablePointer<Float>?
-    private var capacityPerChannel = 0
-    private var writeIndex = 0
+    /// Two channel lines in one flat block, one shared write head, linear
+    /// fractional taps — sized in `prepare` for centre + MAX depth (25 ms),
+    /// so any published depth is math, never an allocation.
+    private let line = InterpolatedDelayLine(
+        capacitySeconds: (ChorusEffect.centerDelayMs + ChorusParams.depthRange.upperBound) * 0.001,
+        interpolation: .linear)
 
     // Render-thread-only state.
     private var lastGeneration = UInt64.max
@@ -75,7 +85,6 @@ final class ChorusEffect: EffectRendering, @unchecked Sendable {
             Unmanaged<ParamSnapshot>.fromOpaque(raw).release()
         }
         paramsSlot.deallocate()
-        line?.deallocate()
     }
 
     // MARK: - Main-actor surface
@@ -101,14 +110,23 @@ final class ChorusEffect: EffectRendering, @unchecked Sendable {
     func prepare(sampleRate: Double, maxFramesPerQuantum: Int, channelCount: Int) {
         self.sampleRate = sampleRate
         centerSamples = Self.centerDelayMs * 0.001 * sampleRate
-        // Sized for center + MAX depth (25 ms) + interpolation/rounding
-        // margin, so any published depth is math, never an allocation.
-        let needed = Int(((Self.centerDelayMs + ChorusParams.depthRange.upperBound)
-                          * 0.001 * sampleRate).rounded(.up)) + 4
-        if capacityPerChannel != needed || line == nil {
-            line?.deallocate()
-            line = .allocate(capacity: needed * 2)
-            capacityPerChannel = needed
+        // The SHALLOWEST delay the LFO can ever reach — 15 ms centre minus the
+        // 10 ms maximum depth — is the invariant the home checks once, here,
+        // off the render thread. At any rate CoreAudio delivers it is hundreds
+        // of samples; a refusal can only mean a nonsense rate, and it leaves
+        // the line unprepared so `process` passes the buffer through bit-exact
+        // dry rather than reading its own write head.
+        let minDelaySamples = (Self.centerDelayMs - ChorusParams.depthRange.upperBound)
+            * 0.001 * sampleRate
+        // ALWAYS two channels: the render path duplicates a mono input into
+        // the right line so a later stereo quantum is phase-coherent.
+        do {
+            try line.prepare(sampleRate: sampleRate, minDelaySamples: minDelaySamples,
+                             channelCount: 2)
+        } catch {
+            // Unreachable above ~200 Hz (5 ms is then ≥ 1 sample). The refusal
+            // is not swallowed: it IS `line.isPrepared == false`, which the
+            // render path reads every quantum.
         }
         clearRuntimeState()
         lastGeneration = .max  // re-derive at the new rate
@@ -123,24 +141,8 @@ final class ChorusEffect: EffectRendering, @unchecked Sendable {
 
     /// Render-thread safe: bounded clears of preallocated memory.
     private func clearRuntimeState() {
-        line?.update(repeating: 0, count: capacityPerChannel * 2)
-        writeIndex = 0
+        line.reset()
         phase = 0
-    }
-
-    /// Linearly interpolated tap `delay` samples behind `write` in the
-    /// channel region starting at `base`.
-    private func tap(_ line: UnsafeMutablePointer<Float>, base: Int, write: Int,
-                     delay: Double) -> Float {
-        let whole = Int(delay)               // delay ≥ 5 ms, so never 0
-        let fraction = Float(delay - Double(whole))
-        var i0 = write - whole
-        if i0 < 0 { i0 += capacityPerChannel }
-        var i1 = i0 - 1
-        if i1 < 0 { i1 += capacityPerChannel }
-        let s0 = line[base + i0]
-        let s1 = line[base + i1]
-        return s0 + (s1 - s0) * fraction
     }
 
     /// Adopts a newly published main-actor snapshot (borrowed — retire bin
@@ -188,7 +190,7 @@ final class ChorusEffect: EffectRendering, @unchecked Sendable {
         if overlay.endQuantum() {
             deriveRenderParams(overlay.base)
         }
-        guard let line else { return }
+        guard line.isPrepared else { return }
 
         let strideBytes = MemoryLayout<Float>.stride
         var channelData = InlineChannelPointers()
@@ -208,38 +210,34 @@ final class ChorusEffect: EffectRendering, @unchecked Sendable {
         let mixGain = mix
         let center = centerSamples
         let depth = depthSamples
-        var index = writeIndex
         var lfo = phase
 
         for frame in 0..<minFrames {
             let dryL = left[frame]
             let dryR = right?[frame] ?? dryL
-            line[index] = dryL
-            line[capacityPerChannel + index] = dryR
+            line.write(channel: 0, dryL)
+            line.write(channel: 1, dryR)
 
             if wetWrite {
                 // Voices 180° apart; right channel leads by 90°.
                 let delayL0 = center + depth * sin(lfo)
                 let delayL1 = center + depth * sin(lfo + .pi)
-                let wetL = (tap(line, base: 0, write: index, delay: delayL0)
-                            + tap(line, base: 0, write: index, delay: delayL1)) * 0.5
+                let wetL = (line.tap(channel: 0, delaySamples: delayL0)
+                            + line.tap(channel: 0, delaySamples: delayL1)) * 0.5
                 left[frame] = dryL * dryGain + wetL * mixGain
                 if let right {
                     let delayR0 = center + depth * sin(lfo + .pi / 2)
                     let delayR1 = center + depth * sin(lfo + .pi * 1.5)
-                    let wetR = (tap(line, base: capacityPerChannel, write: index, delay: delayR0)
-                                + tap(line, base: capacityPerChannel, write: index,
-                                      delay: delayR1)) * 0.5
+                    let wetR = (line.tap(channel: 1, delaySamples: delayR0)
+                                + line.tap(channel: 1, delaySamples: delayR1)) * 0.5
                     right[frame] = dryR * dryGain + wetR * mixGain
                 }
             }
 
-            index += 1
-            if index == capacityPerChannel { index = 0 }
+            line.advance()
             lfo += phaseIncrement
             if lfo >= 2.0 * .pi { lfo -= 2.0 * .pi }
         }
-        writeIndex = index
         phase = lfo
     }
 }

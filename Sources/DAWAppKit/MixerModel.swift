@@ -109,6 +109,12 @@ public enum MixerFormat {
         case .chorus: return "Chorus"
         case .bassEnhancer: return "Bass Enhancer"
         case .bitCrusher: return "Bit Crusher"
+        case .djFilter: return "DJ Filter"
+        case .ringMod: return "Ring Mod"
+        case .flanger: return "Flanger"
+        case .hallReverb: return "Hall Reverb"
+        case .tapeDelay: return "Tape Delay"
+        case .stereoWidth: return "Stereo Width"
         case .audioUnit:
             let name = effect.audioUnit?.name ?? ""
             return name.isEmpty ? "Audio Unit" : name

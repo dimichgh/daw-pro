@@ -36,6 +36,15 @@ import Foundation
 /// `docs/research/design-note-audition.md`.
 final class InstrumentRenderer: @unchecked Sendable {
     private let instrument: any InstrumentRendering
+
+    /// m39-e P1 — publishes the strip's modulation snapshot into the
+    /// instrument's own slot from the main actor. A narrow accessor rather
+    /// than exposing `instrument`, so the only thing the graph can do to an
+    /// instrument through this renderer is hand it modulation.
+    @MainActor
+    func publishModulation(_ snapshot: ModulationSnapshot?) {
+        instrument.publishModulation(snapshot)
+    }
     /// Graph rate the source node was connected at (== every schedule's rate).
     let sampleRate: Double
     /// Host-tick → seconds factor, precomputed in init so the render path

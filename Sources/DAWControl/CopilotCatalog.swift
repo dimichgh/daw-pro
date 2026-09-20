@@ -995,7 +995,8 @@ public enum CopilotToolCatalog {
                 ("trackId", stringSchema("Id of the track or bus to add the effect to, OR the string \"master\" for the master output chain.")),
                 ("kind", stringSchema(
                     "Which built-in effect to add. On the master chain only these built-ins are allowed.",
-                    enumValues: ["gain", "eq", "compressor", "limiter", "reverb", "delay", "saturator", "gate", "chorus", "bassEnhancer", "bitCrusher"])),
+                    enumValues: ["gain", "eq", "compressor", "limiter", "reverb", "delay", "saturator", "gate", "chorus", "bassEnhancer", "bitCrusher", "djFilter", "ringMod", "flanger",
+                                        "hallReverb", "tapeDelay", "stereoWidth"])),
                 ("index", integerSchema("Position in the chain, 0 = processed first. Omit to append at the end; out-of-range values clamp.", minimum: 0)),
             ], required: ["trackId", "kind"])
         ),
@@ -1071,6 +1072,29 @@ public enum CopilotToolCatalog {
                 ("address", stringSchema("The parameter's address — the exact decimal string from au.describeParams for THIS instance. Never guessed, never reused across instances.")),
                 ("value", numberSchema("New value; out-of-range values clamp to the parameter's [minValue, maxValue] from au.describeParams.")),
             ], required: ["trackId", "address", "value"])
+        ),
+
+        // MARK: hosted-AU presets (2) — m23-cw: au.describeParams let an agent
+        // TUNE a patch; without these it could never START from one, which is
+        // how every real instrument's usable sound space is actually reached.
+
+        CopilotTool(
+            command: "au.listPresets",
+            description: "List the presets a hosted Audio Unit ships with — the ready-made patches its developer authored (\"Cathedral\", \"Bright Pad\", \"Hard\"), plus any the user has saved. Use this BEFORE au.describeParams when the user asks for a sound rather than a setting: starting from the right preset and nudging two knobs beats dialling a patch from scratch, and it is what a human would do. Pass trackId alone for the track's AU instrument, or trackId + effectId for an AU insert effect. Preset NUMBERS are how you load one (au.loadPreset) and they belong to this plugin only — never guess one and never reuse a number across different plugins. A plugin that ships no presets answers with empty lists and hasFactoryPresets:false — that is a normal, successful answer and not an error; many perfectly good plugins (most of Apple's built-in effects, for instance) simply have none, so fall back to au.describeParams/au.setParam and say so plainly rather than reporting a failure. currentPreset tells you what the plugin is on right now, and its `source` field is worth reading: \"factory\" or \"user\" means it is sitting on that listed preset, while \"unlisted\" means its current sound did not come from the lists — typically a fresh plugin nobody has chosen a preset on, or a project that was saved and reopened (the sound is restored exactly, but the plugin no longer claims a preset number). Built-in effects and the built-in Poly Synth are NOT Audio Units and have no presets here.",
+            schema: schemaObject([
+                ("trackId", stringSchema("Id of the track hosting the AU, from project.snapshot. Omit effectId to target the track's AU instrument.")),
+                ("effectId", stringSchema("Id of an AU insert effect on that track, from fx.add's result or project.snapshot. Omit for the track's AU instrument.")),
+            ], required: ["trackId"])
+        ),
+        CopilotTool(
+            command: "au.loadPreset",
+            description: "Load one of a hosted Audio Unit's own presets — the fast way to give the user a usable sound (\"make the reverb a cathedral\", \"use the plugin's Bright Pad patch\"). Call au.listPresets first and pass EITHER presetNumber (exact, always unambiguous — prefer this) OR presetName, never both. If you pass a name it must match a real preset's name; a name that matches two presets is refused rather than guessed, so pass the number instead when that happens. Applies immediately without interrupting playback, and it survives saving and reopening the project. It is NOT undoable — the same as if the user had picked the preset in the plugin's own window — so if they might want the old sound back, tell them which preset was loaded before you change it (au.listPresets reports currentPreset). The response's `preset` is what the plugin ACTUALLY ended up on, read back from the plugin itself: trust it over what you asked for, because some plugins rename or adjust what they were handed. After loading you can fine-tune with au.describeParams/au.setParam — preset first, knobs second.",
+            schema: schemaObject([
+                ("trackId", stringSchema("Id of the track hosting the AU, from project.snapshot. Omit effectId to target the track's AU instrument.")),
+                ("effectId", stringSchema("Id of an AU insert effect on that track. Omit for the track's AU instrument.")),
+                ("presetNumber", integerSchema("The preset's number from au.listPresets for THIS plugin. Factory presets are 0 or above; user-saved presets are negative. Pass this OR presetName, not both.")),
+                ("presetName", stringSchema("The preset's exact name from au.listPresets. Pass this OR presetNumber, not both; presetNumber is preferred because names can repeat.")),
+            ], required: ["trackId"])
         ),
 
         // MARK: render (2)

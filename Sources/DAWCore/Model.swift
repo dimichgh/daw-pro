@@ -1231,6 +1231,17 @@ public struct Track: Identifiable, Codable, Sendable, Equatable {
     /// Empty on a track with no takes; additive like `automation`.
     public var takeGroups: [TakeGroup]
 
+    /// Modulation sources on this strip (m39-e). Empty on every strip with no
+    /// modulation, which is every strip in every project saved before m39-e —
+    /// and that is the whole byte-identity argument: a project with no
+    /// modulation carries no modulation, encodes no modulation key, and
+    /// renders through a code path no modulation branch has touched.
+    public var modulationSources: [ModulationSource]
+    /// Modulation routes on this strip (m39-e). `ModulationRoute.target` is the
+    /// SAME `AutomationTarget` automation uses — one home, so m39-b and m39-e
+    /// address the same targets by construction rather than by agreement.
+    public var modulationRoutes: [ModulationRoute]
+
     /// Where this track's audio came from, when a voice conversion made it
     /// (m24-n). nil on every ordinary track — see `VoiceProvenance` for why
     /// this is a FACT and not a binding, a cache key, or a rights record.
@@ -1374,7 +1385,9 @@ public struct Track: Identifiable, Codable, Sendable, Equatable {
         effects: [EffectDescriptor] = [],
         automation: [AutomationLane] = [],
         takeGroups: [TakeGroup] = [],
-        voiceProvenance: VoiceProvenance? = nil
+        voiceProvenance: VoiceProvenance? = nil,
+        modulationSources: [ModulationSource] = [],
+        modulationRoutes: [ModulationRoute] = []
     ) {
         self.id = id
         self.name = name
@@ -1393,6 +1406,8 @@ public struct Track: Identifiable, Codable, Sendable, Equatable {
         self.automation = automation
         self.takeGroups = takeGroups
         self.voiceProvenance = voiceProvenance
+        self.modulationSources = Array(modulationSources.prefix(ModulationLimits.maxSources))
+        self.modulationRoutes = Array(modulationRoutes.prefix(ModulationLimits.maxRoutes))
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -1402,6 +1417,8 @@ public struct Track: Identifiable, Codable, Sendable, Equatable {
         case sends, effects, automation, takeGroups
         // m24-n. Same key on the wire, in the snapshot and on disk.
         case voiceProvenance
+        // m39-e. Omitted when empty (the takeGroups rule) — see `encode`.
+        case modulationSources, modulationRoutes
     }
 
     /// Routing/FX fields tolerate absence so pre-M4 payloads still decode;
@@ -1427,7 +1444,12 @@ public struct Track: Identifiable, Codable, Sendable, Equatable {
             takeGroups: try c.decodeIfPresent([TakeGroup].self, forKey: .takeGroups) ?? [],
             // Additive optional (m24-n): a pre-provenance payload has no key.
             voiceProvenance: try c.decodeIfPresent(
-                VoiceProvenance.self, forKey: .voiceProvenance)
+                VoiceProvenance.self, forKey: .voiceProvenance),
+            // Additive (m39-e): a pre-modulation payload has neither key.
+            modulationSources: try c.decodeIfPresent(
+                [ModulationSource].self, forKey: .modulationSources) ?? [],
+            modulationRoutes: try c.decodeIfPresent(
+                [ModulationRoute].self, forKey: .modulationRoutes) ?? []
         )
     }
 
@@ -1461,6 +1483,17 @@ public struct Track: Identifiable, Codable, Sendable, Equatable {
         // and wire payload for a track that was never voice-converted stays
         // byte-identical to its pre-m24-n shape.
         try c.encodeIfPresent(voiceProvenance, forKey: .voiceProvenance)
+        // m39-e — the takeGroups rule again, and here it is load-bearing for
+        // the milestone's headline gate: a project with no modulation must
+        // encode, decode and RENDER byte-identically to its pre-m39-e shape.
+        // Emitting `"modulationSources":[]` on every track would break the
+        // first half of that before a single sample was rendered.
+        if !modulationSources.isEmpty {
+            try c.encode(modulationSources, forKey: .modulationSources)
+        }
+        if !modulationRoutes.isEmpty {
+            try c.encode(modulationRoutes, forKey: .modulationRoutes)
+        }
     }
 }
 
@@ -2573,6 +2606,105 @@ public struct PolySynthParams: Codable, Sendable, Equatable {
     /// directions (pinned by `PedalHoldLimitCodableTests`).
     public var pedalHoldLimit: Int?
 
+    // MARK: - m39-g richness pass
+    //
+    // ⭐ THE ONE LAW GOVERNING EVERY FIELD BELOW: additive-optional, and nil
+    // means MUSICALLY NEUTRAL — not "a sensible value", but *the exact sound
+    // the pre-m39-g engine made*. A project saved before the richness pass
+    // renders BIT-IDENTICALLY after it, pinned by
+    // `PolySynthRenderIdentityTests` whose goldens were captured against the
+    // pristine engine. That is why none of these is a plain `Double` with a
+    // pretty default: a non-nil default would re-voice every project on disk.
+    //
+    // ⚠️ NEUTRALITY IS A PAIR PROPERTY IN TWO PLACES, and both are why the
+    // engine branches rather than multiplying by an identity factor:
+    // `unisonDetuneCents` does nothing at one voice, and `noiseColor` does
+    // nothing at zero level. Reading either alone as "the feature is on" is how
+    // the neutral path would acquire arithmetic it must not have.
+    //
+    // ⛔ DELIBERATELY NOT HERE: a filter envelope and any LFO. Both require a
+    // coefficient to move WHILE A NOTE SOUNDS, which breaks this instrument's
+    // "recompute only on parameter-generation change" contract — a render-path
+    // redesign, not a field. They are m39-e; see
+    // `docs/research/2026-09-19-synthesis-engines.md` §0 and §8.
+
+    /// Detuned sub-voices per note, 1...`maxUnisonVoices`. nil = 1 = today.
+    /// ⚠️ This multiplies OSCILLATOR cost per note, not the 16-voice polyphony
+    /// budget: one note still occupies one voice slot.
+    public var unisonVoices: Int?
+    /// Total detune SPREAD across the unison stack, in cents — the outermost
+    /// sub-voices sit at ±half this. Inert at one voice.
+    public var unisonDetuneCents: Double?
+    /// How far the unison stack spreads across the stereo field, 0 = mono
+    /// (centre), 1 = outermost sub-voices hard left/right. Inert at one voice.
+    ///
+    /// ⚠️ THE ONLY FIELD THAT CHANGES THE INSTRUMENT'S CHANNEL BEHAVIOUR: the
+    /// pre-m39-g synth renders channel 0 and copies it to every other channel,
+    /// and a default render MUST stay exactly that (asserted, not assumed).
+    public var unisonStereoSpread: Double?
+
+    /// Sub-oscillator level, 0...1, mixed under the main oscillator. nil = 0 =
+    /// no sub-oscillator at all (not "a silent one" — the engine skips it).
+    public var subLevel: Double?
+    /// Octaves below the main oscillator: -1 or -2. Inert at zero sub level.
+    public var subOctave: Int?
+    /// Sub-oscillator shape. nil = `.sine` — the house default for a sub, which
+    /// adds weight without adding harmonics that fight the main oscillator.
+    /// Inert at zero sub level.
+    public var subWaveform: Waveform?
+
+    /// Noise-layer level, 0...1, mixed in BEFORE the filter so the filter (and
+    /// its resonance) shapes it. nil = 0 = no noise source at all.
+    public var noiseLevel: Double?
+    /// Noise tilt: 0 = dark (low-passed), 0.5 = white, 1 = bright
+    /// (high-passed). Inert at zero noise level.
+    public var noiseColor: Double?
+
+    /// Analog-style oscillator drift depth, 0...1 → a slow per-voice random
+    /// walk of up to ±`driftMaxCents`. nil = 0 = perfectly stable pitch.
+    ///
+    /// ⚠️ Updated ONCE PER RENDER BLOCK, never per sample — this is what keeps
+    /// it on the right side of the coefficient contract (research §7.2).
+    public var drift: Double?
+
+    /// EXTRA filter resonance ABOVE the legacy `resonance` knob's ceiling,
+    /// 0...1, for self-oscillation-style screaming peaks.
+    ///
+    /// ⭐⭐ WHY THIS IS A SECOND FIELD RATHER THAN A WIDER `resonanceRange`:
+    /// `resonance` maps 0...1 to Q 0.5...10 and every project on disk was
+    /// voiced against THAT mapping. Widening the range would either re-scale
+    /// what a stored 0.7 SOUNDS like, or force a piecewise mapping that makes
+    /// the knob's own travel non-linear — and it would silently re-scale every
+    /// UI slider position too, since `PolySynthEditorModel` reads this range
+    /// verbatim. A separate, default-off field leaves the legacy mapping
+    /// literally untouched. (m39-g brief sanctioned exactly this fallback; the
+    /// bend-range decision is the precedent.)
+    public var resonanceBoost: Double?
+    /// Waveshaper drive into the filter, 0...1. nil = 0 = no waveshaper in the
+    /// path at all (the engine branches around it, it does not multiply by 1).
+    public var drive: Double?
+    /// How much note VELOCITY opens the filter, 0...1 → up to
+    /// `cutoffTrackMaxOctaves` octaves at full velocity. Applied once at
+    /// note-on.
+    public var velocityToCutoff: Double?
+    /// How much note PITCH tracks the filter, 0...1, where 1 is full 1:1
+    /// tracking relative to middle C. Applied once at note-on.
+    public var keyToCutoff: Double?
+
+    /// Per-note-on randomisation depth, 0...1 — small independent jitter on
+    /// pan, detune and cutoff so no two notes sound quite alike. nil = 0.
+    public var voiceJitter: Double?
+
+    /// Envelope segment curvature, -1...1. 0 (and nil) = the straight lines the
+    /// engine has always drawn. Positive bends toward a slow-start/fast-finish
+    /// attack and a fast-then-lingering decay/release (the "exponential" shape
+    /// real ADSRs have); negative bends the other way.
+    ///
+    /// ⚠️ This changes the per-sample step FORMULA only. Segment DURATIONS are
+    /// untouched — a 0.15 s release still reaches exact silence, and frees its
+    /// voice, at exactly 0.15 s.
+    public var envelopeCurve: Double?
+
     public static let attackRange: ClosedRange<Double> = 0.0005...5
     public static let decayRange: ClosedRange<Double> = 0.001...5
     public static let sustainRange: ClosedRange<Double> = 0...1
@@ -2585,6 +2717,42 @@ public struct PolySynthParams: Codable, Sendable, Equatable {
     /// instruments would eventually disagree about what a legal cap is.
     public static let pedalHoldLimitRange = SamplerParams.pedalHoldLimitRange
 
+    // MARK: - m39-g ranges
+    //
+    // ⛔ `maxUnisonVoices` IS LOAD-BEARING BEYOND VALIDATION: the engine
+    // allocates a fixed `16 × maxUnisonVoices` block of sub-voice state in
+    // `init` and indexes it on the render thread. This constant is its ONE
+    // home — the allocation and this range must never be able to disagree, so
+    // the engine reads THIS rather than re-typing an 8.
+    public static let maxUnisonVoices = 8
+    public static let unisonVoicesRange: ClosedRange<Int> = 1...maxUnisonVoices
+    public static let unisonDetuneCentsRange: ClosedRange<Double> = 0...50
+    public static let unisonStereoSpreadRange: ClosedRange<Double> = 0...1
+    public static let subLevelRange: ClosedRange<Double> = 0...1
+    public static let subOctaveRange: ClosedRange<Int> = -2...(-1)
+    public static let noiseLevelRange: ClosedRange<Double> = 0...1
+    public static let noiseColorRange: ClosedRange<Double> = 0...1
+    public static let driftRange: ClosedRange<Double> = 0...1
+    public static let resonanceBoostRange: ClosedRange<Double> = 0...1
+    public static let driveRange: ClosedRange<Double> = 0...1
+    public static let velocityToCutoffRange: ClosedRange<Double> = 0...1
+    public static let keyToCutoffRange: ClosedRange<Double> = 0...1
+    public static let voiceJitterRange: ClosedRange<Double> = 0...1
+    public static let envelopeCurveRange: ClosedRange<Double> = -1...1
+
+    /// Drift depth at `drift == 1`, in cents — the ± bound of the random walk.
+    /// Small on purpose: analog drift is a shimmer, not a vibrato.
+    public static let driftMaxCents = 12.0
+    /// How far full `velocityToCutoff` / `keyToCutoff` may move the cutoff, in
+    /// octaves. Stated once so the engine and any UI agree what "1" means.
+    public static let cutoffTrackMaxOctaves = 4.0
+    /// The pitch key tracking is measured FROM — middle C, so a patch voiced at
+    /// C3 keeps its cutoff and notes either side open/close around it.
+    public static let keyTrackCenterPitch = 60.0
+    /// Q at full `resonanceBoost`. The legacy knob's ceiling is 10; this is the
+    /// headroom above it that makes the filter ring like an oscillator.
+    public static let maxBoostedQ = 60.0
+
     public init(
         waveform: Waveform = .saw,
         attack: Double = 0.005,
@@ -2594,7 +2762,22 @@ public struct PolySynthParams: Codable, Sendable, Equatable {
         cutoffHz: Double = 8_000,
         resonance: Double = 0.1,
         gain: Double = 0.8,
-        pedalHoldLimit: Int? = nil
+        pedalHoldLimit: Int? = nil,
+        unisonVoices: Int? = nil,
+        unisonDetuneCents: Double? = nil,
+        unisonStereoSpread: Double? = nil,
+        subLevel: Double? = nil,
+        subOctave: Int? = nil,
+        subWaveform: Waveform? = nil,
+        noiseLevel: Double? = nil,
+        noiseColor: Double? = nil,
+        drift: Double? = nil,
+        resonanceBoost: Double? = nil,
+        drive: Double? = nil,
+        velocityToCutoff: Double? = nil,
+        keyToCutoff: Double? = nil,
+        voiceJitter: Double? = nil,
+        envelopeCurve: Double? = nil
     ) {
         self.waveform = waveform
         self.attack = attack.clamped(to: Self.attackRange)
@@ -2607,12 +2790,193 @@ public struct PolySynthParams: Codable, Sendable, Equatable {
         // Clamp rather than reject, exactly like the seven scalars above; nil
         // stays nil, so a project that never set a cap keeps its wire shape.
         self.pedalHoldLimit = pedalHoldLimit.map { $0.clamped(to: Self.pedalHoldLimitRange) }
+        // m39-g — same rule for all fifteen: clamp a value, pass nil through
+        // untouched. `nil` is not a number to clamp; it is "this project never
+        // opted in", and it has to stay distinguishable from an explicit zero
+        // on a round trip.
+        self.unisonVoices = unisonVoices.map { $0.clamped(to: Self.unisonVoicesRange) }
+        self.unisonDetuneCents = unisonDetuneCents.map {
+            $0.clamped(to: Self.unisonDetuneCentsRange) }
+        self.unisonStereoSpread = unisonStereoSpread.map {
+            $0.clamped(to: Self.unisonStereoSpreadRange) }
+        self.subLevel = subLevel.map { $0.clamped(to: Self.subLevelRange) }
+        self.subOctave = subOctave.map { $0.clamped(to: Self.subOctaveRange) }
+        self.subWaveform = subWaveform
+        self.noiseLevel = noiseLevel.map { $0.clamped(to: Self.noiseLevelRange) }
+        self.noiseColor = noiseColor.map { $0.clamped(to: Self.noiseColorRange) }
+        self.drift = drift.map { $0.clamped(to: Self.driftRange) }
+        self.resonanceBoost = resonanceBoost.map { $0.clamped(to: Self.resonanceBoostRange) }
+        self.drive = drive.map { $0.clamped(to: Self.driveRange) }
+        self.velocityToCutoff = velocityToCutoff.map {
+            $0.clamped(to: Self.velocityToCutoffRange) }
+        self.keyToCutoff = keyToCutoff.map { $0.clamped(to: Self.keyToCutoffRange) }
+        self.voiceJitter = voiceJitter.map { $0.clamped(to: Self.voiceJitterRange) }
+        self.envelopeCurve = envelopeCurve.map { $0.clamped(to: Self.envelopeCurveRange) }
     }
 
     /// The cap the ENGINE uses — the stored value, or `Int.max` for "no cap".
     /// The twin of `SamplerParams.effectivePedalHoldLimit`, and the ONE place
     /// this instrument answers "what does nil mean".
     public var effectivePedalHoldLimit: Int { pedalHoldLimit ?? Int.max }
+
+    // MARK: - m39-g resolved values (the ONE place nil is interpreted)
+    //
+    // ⛔⛔ THESE CLAMP AS WELL AS RESOLVE, AND THE CLAMP IS A MEMORY-SAFETY
+    // BOUNDARY, NOT A COURTESY. `Codable`'s synthesised `init(from:)` assigns
+    // stored properties DIRECTLY — it never calls the clamping init above. So a
+    // project file carrying `"unisonVoices": 1000` (hand-edited, corrupted, or
+    // written by a future build with a wider range) reaches the render thread
+    // unclamped, where it would index past the end of a fixed allocation. The
+    // custom decoder below closes that door too; these accessors are the second
+    // lock, and the one the engine actually turns.
+    public var effectiveUnisonVoices: Int {
+        (unisonVoices ?? 1).clamped(to: Self.unisonVoicesRange)
+    }
+    public var effectiveUnisonDetuneCents: Double {
+        (unisonDetuneCents ?? 0).clamped(to: Self.unisonDetuneCentsRange)
+    }
+    public var effectiveUnisonStereoSpread: Double {
+        (unisonStereoSpread ?? 0).clamped(to: Self.unisonStereoSpreadRange)
+    }
+    public var effectiveSubLevel: Double {
+        (subLevel ?? 0).clamped(to: Self.subLevelRange)
+    }
+    public var effectiveSubOctave: Int {
+        (subOctave ?? -1).clamped(to: Self.subOctaveRange)
+    }
+    public var effectiveSubWaveform: Waveform { subWaveform ?? .sine }
+    public var effectiveNoiseLevel: Double {
+        (noiseLevel ?? 0).clamped(to: Self.noiseLevelRange)
+    }
+    public var effectiveNoiseColor: Double {
+        (noiseColor ?? 0.5).clamped(to: Self.noiseColorRange)
+    }
+    public var effectiveDrift: Double { (drift ?? 0).clamped(to: Self.driftRange) }
+    public var effectiveResonanceBoost: Double {
+        (resonanceBoost ?? 0).clamped(to: Self.resonanceBoostRange)
+    }
+    public var effectiveDrive: Double { (drive ?? 0).clamped(to: Self.driveRange) }
+    public var effectiveVelocityToCutoff: Double {
+        (velocityToCutoff ?? 0).clamped(to: Self.velocityToCutoffRange)
+    }
+    public var effectiveKeyToCutoff: Double {
+        (keyToCutoff ?? 0).clamped(to: Self.keyToCutoffRange)
+    }
+    public var effectiveVoiceJitter: Double {
+        (voiceJitter ?? 0).clamped(to: Self.voiceJitterRange)
+    }
+    public var effectiveEnvelopeCurve: Double {
+        (envelopeCurve ?? 0).clamped(to: Self.envelopeCurveRange)
+    }
+
+    // MARK: - m39-g "is this feature actually on" (the neutrality rules)
+    //
+    // Written here rather than in the engine because each one is a MODEL fact a
+    // caller (or a UI, or an agent) needs too: "I set detune and heard nothing"
+    // is answered by `unisonIsEffective`, not by reading the DSP.
+
+    /// Detune and spread do nothing at a single voice — the pair rule.
+    public var unisonIsEffective: Bool { effectiveUnisonVoices > 1 }
+    /// True only when the instrument will produce a genuinely STEREO signal.
+    /// A default render is channel-identical and must stay that way.
+    public var stereoSpreadIsEffective: Bool {
+        (unisonIsEffective && effectiveUnisonStereoSpread > 0) || effectiveVoiceJitter > 0
+    }
+    /// Octave and waveform do nothing at zero level — the same pair rule.
+    public var subIsEffective: Bool { effectiveSubLevel > 0 }
+    /// Colour does nothing at zero level.
+    public var noiseIsEffective: Bool { effectiveNoiseLevel > 0 }
+    public var driftIsEffective: Bool { effectiveDrift > 0 }
+    public var driveIsEffective: Bool { effectiveDrive > 0 }
+    public var envelopeCurveIsEffective: Bool { effectiveEnvelopeCurve != 0 }
+    /// Whether anything makes a voice's filter cutoff differ from the patch's.
+    public var cutoffIsPerVoice: Bool {
+        effectiveVelocityToCutoff > 0 || effectiveKeyToCutoff > 0 || effectiveVoiceJitter > 0
+    }
+
+    /// The filter Q the engine uses: the legacy mapping, EXACTLY as it has
+    /// always been, with the boost knob extending it above its ceiling.
+    ///
+    /// ⭐ `resonanceBoost == 0` returns `0.5 + resonance * 9.5` — the same
+    /// expression, evaluated the same way, so a project that never touched the
+    /// boost gets a bit-identical coefficient. That identity is the reason this
+    /// is a multiply-by-nothing branch rather than a blend.
+    public var effectiveQ: Double {
+        let base = 0.5 + resonance * 9.5
+        let boost = effectiveResonanceBoost
+        guard boost > 0 else { return base }
+        // Exponential, so the top of the knob is a usable ring rather than a
+        // narrow sliver at the very end of its travel.
+        return base * pow(Self.maxBoostedQ / 10.0, boost)
+    }
+
+    // MARK: - m39-g decoding
+    //
+    // ⛔ WHY THIS TYPE NOW HAS A HAND-WRITTEN DECODER, when the synthesised one
+    // served it for its whole life until m39-g. Two reasons, both paid for
+    // elsewhere in this codebase:
+    //
+    //  ① The synthesised decoder BYPASSES the clamping init entirely, so every
+    //    range above was advisory the moment a value arrived from JSON rather
+    //    than from Swift. That was survivable while every field was a scalar
+    //    the engine merely multiplied by. `unisonVoices` is not: it indexes a
+    //    fixed allocation on the render thread. Routing decode through
+    //    `self.init` makes the ranges real in both directions.
+    //
+    //  ② `subWaveform` decodes TOLERANTLY — as a String, resolved through
+    //    `init(rawValue:)`, with an unknown value becoming nil. This is
+    //    `SamplerZoneDocument.loopMode`'s law (m20-g), restated for
+    //    `voiceMode`/`glideMode` at m34-s/m34-w: a strict enum decode THROWS on
+    //    an unknown rawValue, and this decoder sits inside the project open —
+    //    so a fifth waveform added by a later build would make every project
+    //    using it unopenable in this one. The WHOLE document, not just a field.
+    //
+    // ⚠️ `waveform` is deliberately NOT given that tolerance here. It decodes
+    // strictly and is REQUIRED, exactly as the synthesised decoder made it,
+    // because changing a legacy field's failure behaviour is a separate
+    // decision from adding new ones — and this file's job today is to change
+    // nothing that already works.
+    private enum CodingKeys: String, CodingKey {
+        case waveform, attack, decay, sustain, release, cutoffHz, resonance, gain
+        case pedalHoldLimit
+        case unisonVoices, unisonDetuneCents, unisonStereoSpread
+        case subLevel, subOctave, subWaveform
+        case noiseLevel, noiseColor, drift
+        case resonanceBoost, drive, velocityToCutoff, keyToCutoff, voiceJitter
+        case envelopeCurve
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            waveform: try c.decode(Waveform.self, forKey: .waveform),
+            attack: try c.decode(Double.self, forKey: .attack),
+            decay: try c.decode(Double.self, forKey: .decay),
+            sustain: try c.decode(Double.self, forKey: .sustain),
+            release: try c.decode(Double.self, forKey: .release),
+            cutoffHz: try c.decode(Double.self, forKey: .cutoffHz),
+            resonance: try c.decode(Double.self, forKey: .resonance),
+            gain: try c.decode(Double.self, forKey: .gain),
+            pedalHoldLimit: try c.decodeIfPresent(Int.self, forKey: .pedalHoldLimit),
+            unisonVoices: try c.decodeIfPresent(Int.self, forKey: .unisonVoices),
+            unisonDetuneCents: try c.decodeIfPresent(Double.self, forKey: .unisonDetuneCents),
+            unisonStereoSpread: try c.decodeIfPresent(Double.self, forKey: .unisonStereoSpread),
+            subLevel: try c.decodeIfPresent(Double.self, forKey: .subLevel),
+            subOctave: try c.decodeIfPresent(Int.self, forKey: .subOctave),
+            // The tolerant hop: unknown rawValue → nil → the documented
+            // default, never a throw that fails the project open.
+            subWaveform: try c.decodeIfPresent(String.self, forKey: .subWaveform)
+                .flatMap(Waveform.init(rawValue:)),
+            noiseLevel: try c.decodeIfPresent(Double.self, forKey: .noiseLevel),
+            noiseColor: try c.decodeIfPresent(Double.self, forKey: .noiseColor),
+            drift: try c.decodeIfPresent(Double.self, forKey: .drift),
+            resonanceBoost: try c.decodeIfPresent(Double.self, forKey: .resonanceBoost),
+            drive: try c.decodeIfPresent(Double.self, forKey: .drive),
+            velocityToCutoff: try c.decodeIfPresent(Double.self, forKey: .velocityToCutoff),
+            keyToCutoff: try c.decodeIfPresent(Double.self, forKey: .keyToCutoff),
+            voiceJitter: try c.decodeIfPresent(Double.self, forKey: .voiceJitter),
+            envelopeCurve: try c.decodeIfPresent(Double.self, forKey: .envelopeCurve))
+    }
 }
 
 public struct TimeSignature: Codable, Sendable, Equatable {

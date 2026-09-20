@@ -60,7 +60,10 @@ public enum AutomationParam: String, CaseIterable, Sendable, Equatable {
         switch target {
         case .volume: self = .volume
         case .pan: self = .pan
-        case .sendLevel, .effectParam: return nil
+        // m39-b's `.instrumentParam` joins the targets the v0 picker does not
+        // surface — same reason as send/effect lanes: an agent may author one,
+        // the lane editor does not draw it.
+        case .sendLevel, .effectParam, .instrumentParam: return nil
         }
     }
 

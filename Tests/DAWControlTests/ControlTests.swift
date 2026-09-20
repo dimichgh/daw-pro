@@ -1536,6 +1536,27 @@ struct CommandRouterTests {
         let removableMarkerID = store.addMarker(name: "Rm", beat: 0).id.uuidString
         let renamableMarkerID = store.addMarker(name: "Rn", beat: 4).id.uuidString
         let movableMarkerID = store.addMarker(name: "Mv", beat: 8).id.uuidString
+        // m39-e: the seven strip-scoped `mod.*` verbs are DRIVEN, not excluded —
+        // every one of them has an honest headless form. allCommands order is
+        // describeKinds, addSource, setSource, removeSource, addRoute,
+        // setRouteDepth, removeRoute, setMacro, describe, so each mutation gets
+        // its OWN pre-made subject: removeSource deletes one source and CASCADES
+        // its routes, which would silently disarm the route verbs if they shared
+        // one. `mod.describe`/`mod.describeKinds` need no params at all (describe
+        // defaults to the master strip) and are covered by the bare call.
+        let editableSourceID = try store.addModulationSource(
+            on: .track(track.id), kind: .lfo, name: "Edit").source.id.uuidString
+        let removableSourceID = try store.addModulationSource(
+            on: .track(track.id), kind: .lfo, name: "Rm").source.id.uuidString
+        let routeSource = try store.addModulationSource(
+            on: .track(track.id), kind: .macro, name: "Macro").source
+        let routeSourceID = routeSource.id.uuidString
+        let editableRouteID = try store.addModulationRoute(
+            on: .track(track.id), sourceID: routeSource.id, target: .volume,
+            depth: 0.1).route.id.uuidString
+        let removableRouteID = try store.addModulationRoute(
+            on: .track(track.id), sourceID: routeSource.id, target: .pan,
+            depth: 0.1).route.id.uuidString
         let paramsByCommand: [String: [String: JSONValue]] = [
             // m22-g P2: OFF is the idempotent never-refusing side of the A/B
             // monitor (design §5.6) — a legitimate headless route.
@@ -1621,6 +1642,16 @@ struct CommandRouterTests {
             "track.removeSend": ["trackId": .string(trackID), "sendId": .string(preSendID)],
             // Instrument-only; use the instrument track (the shared trackID is audio).
             "track.setInstrument": ["trackId": .string(instTrackID), "waveform": .string("saw")],
+            // m39-f: STAYS IN THE LOOP, unlike its sibling
+            // instrument.describeSampler two screens down in the exclusion
+            // list — and the difference is the point, not an oversight. That
+            // verb is excluded because a sampler can genuinely be UNCONFIGURED
+            // and it refuses when it is; this one cannot hit that state,
+            // because every instrument track HAS a poly synth (the default
+            // one) and the verb describes it. So a bare call here is a real
+            // route exercise with a real answer, which is exactly what this
+            // loop is for. It needs only the trackId.
+            "instrument.describeSynth": ["trackId": .string(instTrackID)],
             // m23-h: track.reorder sits at the END of allCommands, by which
             // point track.remove has already deleted the shared audio trackID —
             // so it moves the INSTRUMENT track, which survives the whole loop
@@ -1660,6 +1691,20 @@ struct CommandRouterTests {
             // automation.addLane targets "pan" — idempotent against the
             // pre-made removableLaneID, so it succeeds regardless of when it
             // runs relative to automation.removeLane below.
+            "mod.addSource": ["trackId": .string(trackID), "kind": .string("lfo")],
+            "mod.setSource": ["trackId": .string(trackID), "sourceId": .string(editableSourceID),
+                              "params": .object(["rateHz": .number(2)])],
+            "mod.removeSource": ["trackId": .string(trackID),
+                                 "sourceId": .string(removableSourceID)],
+            "mod.addRoute": ["trackId": .string(trackID), "sourceId": .string(routeSourceID),
+                             "target": .object(["type": .string("volume")]),
+                             "depth": .number(-0.1)],
+            "mod.setRouteDepth": ["trackId": .string(trackID),
+                                  "routeId": .string(editableRouteID), "depth": .number(0.2)],
+            "mod.removeRoute": ["trackId": .string(trackID),
+                                "routeId": .string(removableRouteID)],
+            "mod.setMacro": ["trackId": .string(trackID), "sourceId": .string(routeSourceID),
+                             "value": .number(0.5)],
             "automation.addLane": ["trackId": .string(trackID), "target": .object(["type": .string("pan")])],
             "automation.setPoints": ["trackId": .string(trackID), "laneId": .string(preLaneID),
                                      "points": .array([.object(["beat": .number(0), "value": .number(1)])])],
@@ -2019,6 +2064,21 @@ struct CommandRouterTests {
                 // AUParameterSurfaceTests (real AUDelay/DLSMusicDevice trees,
                 // audible-truth render).
                 "au.describeParams", "au.setParam",
+                // m23-cw: au.listPresets / au.loadPreset (hosted-AU PRESET
+                // surface) are excluded for exactly the reason above and one
+                // more. Both need a LIVE `.ready` hosted Audio Unit behind the
+                // target, which this bare router's FakeEngine has none of; and
+                // this loop passes NO params, so both refuse on the required
+                // `trackId` before they ever reach the engine. ⛔ Do NOT "fix"
+                // this by inventing a trackId in paramsByCommand: a made-up id
+                // would refuse with "No track with id …" instead, which is a
+                // DIFFERENT verb working and would silently stop testing what
+                // this entry claims to test. Proven by AUPresetCommandTests
+                // (full wire taxonomy + shapes over a preset-surface fake) and
+                // DAWEngine's AUPresetSurfaceTests (real AUMatrixReverb /
+                // AUDelay preset lists, a load that moves the rendered reverb
+                // tail, and the save/restore state round trip).
+                "au.listPresets", "au.loadPreset",
                 // vc.convertVocals/vc.trainVoice (m10-p-4) hit a REAL
                 // VoiceConversionClient talking to a REAL (almost certainly
                 // not-running-in-CI, and stopped again by the vc.sidecarStop

@@ -1,6 +1,6 @@
 ---
 name: sound-designer
-description: Shapes the TONE of each track in DAW Pro. Use for selecting/tuning an instrument track's sound (built-in poly synth, sampler, SoundFont2/DLS sound bank, or a hosted Audio Unit instrument), importing sound banks or sample libraries, and building a track or bus's insert effect chain (EQ, compressor, reverb, delay, saturator, gate, chorus, limiter, or a hosted Audio Unit effect). Invoke when the task is "make this synth brighter", "put this on a real piano sound", "load this drum sample library", "add some warmth to the guitar", or "what effects does a compressor have".
+description: Shapes the TONE of each track in DAW Pro. Use for selecting/tuning an instrument track's sound (built-in poly synth, sampler, SoundFont2/DLS sound bank, or a hosted Audio Unit instrument), importing sound banks or sample libraries, and building a track or bus's insert effect chain (EQ, compressor, reverb, delay, saturator, gate, chorus, limiter, bass enhancer, bit crusher, DJ filter, ring modulator, flanger, hall reverb, tape delay, stereo width, or a hosted Audio Unit effect). Also owns MODULATION of the sounds it shapes: LFOs, step sequencers, envelope followers and macros routed to instrument or effect parameters — a filter that sweeps, a wobble, or one "brightness" macro moving several parameters at once. Invoke when the task is "make this synth brighter", "put this on a real piano sound", "load this drum sample library", "add some warmth to the guitar", "make the filter pulse in time", "give me one knob that opens this up", or "what effects does a compressor have".
 model: sonnet
 skills:
   - daw-wire-reference
@@ -35,7 +35,16 @@ tools: >-
   mcp__plugin_daw-pro-music-team_daw-pro__instrument_set_sampler_param,
   mcp__plugin_daw-pro-music-team_daw-pro__instrument_set_sampler_zones,
   mcp__plugin_daw-pro-music-team_daw-pro__instrument_probe_liveness,
-  mcp__plugin_daw-pro-music-team_daw-pro__clip_slice_to_sampler
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_slice_to_sampler,
+  mcp__plugin_daw-pro-music-team_daw-pro__mod_describe_kinds,
+  mcp__plugin_daw-pro-music-team_daw-pro__mod_describe,
+  mcp__plugin_daw-pro-music-team_daw-pro__mod_add_source,
+  mcp__plugin_daw-pro-music-team_daw-pro__mod_set_source,
+  mcp__plugin_daw-pro-music-team_daw-pro__mod_remove_source,
+  mcp__plugin_daw-pro-music-team_daw-pro__mod_add_route,
+  mcp__plugin_daw-pro-music-team_daw-pro__mod_set_route_depth,
+  mcp__plugin_daw-pro-music-team_daw-pro__mod_remove_route,
+  mcp__plugin_daw-pro-music-team_daw-pro__mod_set_macro
 ---
 
 You are the **sound-designer** for DAW Pro. Your domain is TONE: which
@@ -138,7 +147,9 @@ tool call — id-capture rules and etiquette live there.
   zone in `instrument_describe_sampler`/`project_snapshot`. **Do not guess
   from the track name.**
 - **Effect chains.** `fx_add` inserts a built-in effect (`gain`, `eq`,
-  `compressor`, `limiter`, `reverb`, `delay`, `saturator`, `gate`, `chorus`)
+  `compressor`, `limiter`, `reverb`, `delay`, `saturator`, `gate`, `chorus`,
+  `bassEnhancer`, `bitCrusher`, `djFilter`, `ringMod`, `flanger`, `hallReverb`,
+  `tapeDelay`, `stereoWidth`)
   or a hosted `audioUnit` effect on a track or bus — PRE-FADER, array order
   is processing order. Call `fx_describe` first (with or without `kind`) to
   see exact parameter names/ranges/defaults/units before `fx_add`'s `params`

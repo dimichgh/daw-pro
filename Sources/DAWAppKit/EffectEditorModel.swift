@@ -243,6 +243,103 @@ public final class EffectEditorModel {
                 ("ALIASING", [("antiAlias", "FILTER"), ("dither", nil)]),
                 ("OUTPUT", [("mix", nil)]),
             ]
+        case .djFilter:
+            // m39-i. FILTER is the whole instrument — one bipolar knob, with
+            // the resonance that IS its character beside it. CHARACTER holds
+            // the two shaping controls a user sets once and leaves; SLOPE is
+            // the 12/24 topology chip, which belongs with the filter it steepens
+            // rather than in its own row (the limiter's `truePeak` precedent:
+            // a toggle sits beside what it acts on). No OUTPUT group — this
+            // effect deliberately has no `mix`.
+            return [
+                ("FILTER", [("position", nil), ("resonance", nil),
+                            ("slopeDbPerOct", "Slope")]),
+                ("CHARACTER", [("deadZoneWidth", "Centre"),
+                               ("resonanceTrack", "Track")]),
+            ]
+        case .ringMod:
+            // m39-m. CARRIER is the whole instrument — the frequency that IS
+            // the effect, with the shape that colours it beside it, the
+            // `slopeDbPerOct` chip precedent (a discrete switch sits with what
+            // it acts on). TONE holds the input high-cut, which is a fold-back
+            // control and belongs with neither the carrier nor the output.
+            // OUTPUT is mix and the stereo spread — the two that decide how
+            // much of this reaches the listener and how wide.
+            return [
+                ("CARRIER", [("carrierHz", "Freq"), ("waveform", "Shape")]),
+                ("TONE", [("inputHighCutHz", "High Cut")]),
+                ("OUTPUT", [("mix", nil), ("stereoSpreadDeg", "Spread")]),
+            ]
+        case .flanger:
+            // m39-j. SWEEP is the instrument — the three controls that decide
+            // where the comb sits and how it moves, in the order a player
+            // reaches for them (how fast, how far, from where). RESONANCE
+            // holds `feedback` alone because it is the single biggest change
+            // to the character and reads as its own decision, not as a trim.
+            // OUTPUT is mix and the stereo phase — how much of this reaches
+            // the listener and how wide, the `.ringMod` grouping precedent.
+            return [
+                ("SWEEP", [("rateHz", "Rate"), ("depthMs", "Depth"),
+                           ("delayMs", "Manual")]),
+                ("RESONANCE", [("feedback", "Feedback")]),
+                ("OUTPUT", [("mix", nil), ("stereoPhaseDeg", "Spread")]),
+            ]
+        case .hallReverb:
+            // m39-l, and the only kind in the tree with FOURTEEN params, so
+            // the grouping is doing real work rather than decorating. SPACE is
+            // the instrument — the two that describe the room itself (how long
+            // it rings, how big it is) plus the gap before it arrives.
+            // CHARACTER holds the shaping that decides what KIND of room it
+            // is: the input smear and where the listener stands. DECAY is the
+            // two-band absorption as ONE group with its two crossovers,
+            // because a multiplier and its corner frequency are unreadable
+            // apart — the EQ-band precedent. MODULATION is the anti-metallic
+            // pair, named so its purpose is discoverable. OUTPUT is mix, width
+            // and the freeze switch (the `slopeDbPerOct` chip precedent: a
+            // discrete switch sits with what it acts on, and freeze acts on
+            // everything that reaches the listener).
+            return [
+                ("SPACE", [("sizeMeters", "Size"), ("decaySeconds", "Decay"),
+                           ("preDelayMs", "Pre-Delay")]),
+                ("CHARACTER", [("diffusion", "Diffusion"),
+                               ("earlyLateBalance", "Distance")]),
+                ("DECAY SHAPE", [("lowDecayMultiplier", "Low x"),
+                                 ("lowCrossoverHz", "Low Freq"),
+                                 ("highDecayMultiplier", "High x"),
+                                 ("highCrossoverHz", "High Freq")]),
+                ("MODULATION", [("modRateHz", "Rate"), ("modDepthMs", "Depth")]),
+                ("OUTPUT", [("mix", nil), ("width", "Width"),
+                            ("freeze", "Freeze")]),
+            ]
+        case .tapeDelay:
+            // m39-n. ECHO is the delay proper — the two controls anyone
+            // reaching for a delay came for. TRANSPORT is the identity: the
+            // wobble that makes it a tape machine rather than a delay, grouped
+            // and named so a user who wants "that tape sound" knows where to
+            // look. TAPE is what the record head does to each pass — drive and
+            // the high-cut belong together because they are one stage. OUTPUT
+            // is mix, last, per the strip rule.
+            return [
+                ("ECHO", [("timeMs", "Time"), ("feedback", "Feedback")]),
+                ("TRANSPORT", [("wowDepthMs", "Wow"), ("wowRateHz", "Wow Rate"),
+                               ("flutterDepthMs", "Flutter")]),
+                ("TAPE", [("saturationDrive", "Drive"), ("highCutHz", "High Cut")]),
+                ("OUTPUT", [("mix", nil)]),
+            ]
+        case .stereoWidth:
+            // m23-dj. IMAGE is the instrument — the two controls that decide
+            // how wide it gets, in the order a user reaches for them: scale
+            // what is already there, then manufacture what is not. LOW END is
+            // the safety stage, and it is its own group because a crossover
+            // frequency and the amount it removes are unreadable apart (the
+            // hallReverb DECAY SHAPE precedent). There is no OUTPUT group:
+            // this kind has no `mix`, deliberately — see
+            // `StereoWidthParams.isNeutral`.
+            return [
+                ("IMAGE", [("width", "Width"), ("spread", "Spread")]),
+                ("LOW END", [("bassMonoHz", "Mono Below"),
+                             ("bassMonoAmount", "Amount")]),
+            ]
         case .audioUnit:
             // AU params are not on the generic surface (M3 vi-b).
             return []
@@ -435,40 +532,31 @@ public final class EffectEditorModel {
     /// LOGARITHMIC — musical octaves read evenly across the travel (a linear
     /// 20 Hz–20 kHz slider buries everything below 2 kHz in the first tenth);
     /// everything else is linear.
-    public enum Scale: Sendable, Equatable {
-        case linear
-        case logarithmic
-    }
+    ///
+    /// ⭐ m39-a: this WAS a private two-case enum re-derived from the free-text
+    /// unit string here AND again in `PolySynthEditorModel`. It is now an alias
+    /// for `DAWCore.ParamCurve`, the one home — the taper is read off the spec,
+    /// never inferred. The alias is kept so every existing caller and test that
+    /// writes `EffectEditorModel.Scale` / `== .logarithmic` keeps compiling
+    /// (additive only; nothing renamed).
+    public typealias Scale = ParamCurve
 
-    /// Hz-unit params get the log mapping (their bounds are always > 0);
-    /// everything else — including negative-spanning dB ranges — stays linear.
+    /// The row's DECLARED curve. No heuristic: `EffectParamSpec.curve` is the
+    /// property, and `ParamCurveConformanceTests` pins that every shipping
+    /// param still resolves to exactly the curve the old `unit == "Hz"`
+    /// inference gave it.
     public static func scale(for spec: EffectParamSpec) -> Scale {
-        spec.unit == "Hz" && spec.range.lowerBound > 0 ? .logarithmic : .linear
+        spec.curve
     }
 
-    /// The 0…1 slider fraction for a value (through the row's scale).
+    /// The 0…1 slider fraction for a value (through the row's declared curve).
     public static func fraction(forValue value: Double, spec: EffectParamSpec) -> Double {
-        let lo = spec.range.lowerBound, hi = spec.range.upperBound
-        guard hi > lo else { return 0 }
-        let v = value.clamped(to: spec.range)
-        switch scale(for: spec) {
-        case .linear:
-            return (v - lo) / (hi - lo)
-        case .logarithmic:
-            return (log(v / lo) / log(hi / lo)).clamped(to: 0...1)
-        }
+        spec.curve.fraction(forValue: value, in: spec.range)
     }
 
-    /// The value at a 0…1 slider fraction (through the row's scale).
+    /// The value at a 0…1 slider fraction (through the row's declared curve).
     public static func value(forFraction fraction: Double, spec: EffectParamSpec) -> Double {
-        let lo = spec.range.lowerBound, hi = spec.range.upperBound
-        let f = fraction.clamped(to: 0...1)
-        switch scale(for: spec) {
-        case .linear:
-            return lo + f * (hi - lo)
-        case .logarithmic:
-            return lo * pow(hi / lo, f)
-        }
+        spec.curve.value(forFraction: fraction, in: spec.range)
     }
 
     /// The current row fraction (for the thin view's slider position).
@@ -591,132 +679,10 @@ public final class EffectEditorModel {
     /// wire names `fx.setParam`/`fx.describe` use. nil for an unknown name or
     /// an AU descriptor (AU params are not on this surface in v1).
     public static func paramValue(_ name: String, in effect: EffectDescriptor) -> Double? {
-        switch effect.kind {
-        case .gain:
-            let p = effect.resolvedGain
-            switch name {
-            case "gainLinear": return p.gainLinear
-            case "invertPolarity": return p.invertPolarity ? 1 : 0  // m38-a
-            default: return nil
-            }
-        case .eq:
-            let p = effect.resolvedEQ
-            switch name {
-            case "lowShelfFreq": return p.lowShelfFreq
-            case "lowShelfGainDb": return p.lowShelfGainDb
-            case "peak1Freq": return p.peak1Freq
-            case "peak1GainDb": return p.peak1GainDb
-            case "peak1Q": return p.peak1Q
-            case "peak2Freq": return p.peak2Freq
-            case "peak2GainDb": return p.peak2GainDb
-            case "peak2Q": return p.peak2Q
-            case "highShelfFreq": return p.highShelfFreq
-            case "highShelfGainDb": return p.highShelfGainDb
-            // m22-a EQ v2 — resolved reads (nil semantics live in EQParams),
-            // matching the wire's resolved params object exactly.
-            case "highPassFreq": return p.resolvedHighPassFreq
-            case "highPassSlopeDbPerOct": return Double(p.resolvedHighPassSlope)
-            case "highPassEnabled": return p.resolvedHighPassEnabled ? 1 : 0
-            case "lowShelfQ": return p.resolvedLowShelfQ
-            case "lowShelfEnabled": return p.resolvedLowShelfEnabled ? 1 : 0
-            case "peak1Enabled": return p.resolvedPeak1Enabled ? 1 : 0
-            case "peak2Enabled": return p.resolvedPeak2Enabled ? 1 : 0
-            case "highShelfQ": return p.resolvedHighShelfQ
-            case "highShelfEnabled": return p.resolvedHighShelfEnabled ? 1 : 0
-            case "lowPassFreq": return p.resolvedLowPassFreq
-            case "lowPassSlopeDbPerOct": return Double(p.resolvedLowPassSlope)
-            case "lowPassEnabled": return p.resolvedLowPassEnabled ? 1 : 0
-            default: return nil
-            }
-        case .compressor:
-            let p = effect.resolvedCompressor
-            switch name {
-            case "thresholdDb": return p.thresholdDb
-            case "ratio": return p.ratio
-            case "attackMs": return p.attackMs
-            case "releaseMs": return p.releaseMs
-            case "kneeDb": return p.kneeDb
-            case "makeupDb": return p.makeupDb
-            case "mix": return p.mix
-            default: return nil
-            }
-        case .limiter:
-            let p = effect.resolvedLimiter
-            switch name {
-            case "ceilingDb": return p.ceilingDb
-            case "releaseMs": return p.releaseMs
-            case "truePeak": return p.truePeak ? 1 : 0
-            default: return nil
-            }
-        case .reverb:
-            let p = effect.resolvedReverb
-            switch name {
-            case "roomSize": return p.roomSize
-            case "damping": return p.damping
-            case "mix": return p.mix
-            case "preDelayMs": return p.preDelayMs
-            case "width": return p.width
-            default: return nil
-            }
-        case .delay:
-            let p = effect.resolvedDelay
-            switch name {
-            case "timeMs": return p.timeMs
-            case "feedback": return p.feedback
-            case "mix": return p.mix
-            case "pingPong": return p.pingPong
-            case "highCutHz": return p.highCutHz
-            // m22-f — resolved reads (nil semantics live in DelayParams),
-            // matching the wire's resolved params object exactly.
-            case "sync": return p.resolvedSync ? 1 : 0
-            case "division": return p.resolvedDivision.beats
-            default: return nil
-            }
-        case .saturator:
-            let p = effect.resolvedSaturator
-            switch name {
-            case "driveDb": return p.driveDb
-            case "mix": return p.mix
-            case "outputDb": return p.outputDb
-            default: return nil
-            }
-        case .gate:
-            let p = effect.resolvedGate
-            switch name {
-            case "thresholdDb": return p.thresholdDb
-            case "attackMs": return p.attackMs
-            case "holdMs": return p.holdMs
-            case "releaseMs": return p.releaseMs
-            default: return nil
-            }
-        case .chorus:
-            let p = effect.resolvedChorus
-            switch name {
-            case "rateHz": return p.rateHz
-            case "depthMs": return p.depthMs
-            case "mix": return p.mix
-            default: return nil
-            }
-        case .bassEnhancer:
-            let p = effect.resolvedBassEnhancer
-            switch name {
-            case "crossoverHz": return p.crossoverHz
-            case "amount": return p.amount
-            case "mix": return p.mix
-            default: return nil
-            }
-        case .bitCrusher:
-            let p = effect.resolvedBitCrusher
-            switch name {
-            case "bits": return p.bits
-            case "downsampleHz": return p.downsampleHz
-            case "antiAlias": return p.antiAlias ? 1 : 0
-            case "dither": return p.dither ? 1 : 0
-            case "mix": return p.mix
-            default: return nil
-            }
-        case .audioUnit:
-            return nil
-        }
+        // ONE HOME (m39-e): the name→field mapping moved to DAWCore so the
+        // render-side modulation publish and `mod.describe` read the SAME
+        // function this editor does. Kept as a static here because call sites
+        // and tests spell it this way.
+        effect.paramValue(name)
     }
 }

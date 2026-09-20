@@ -90,7 +90,7 @@ A comprehensive matrix of capabilities, state, and roadmap status. Everything be
 | **Compressor** | Dynamics | Ratio, threshold, attack, release, makeup gain (soft-knee, stereo-linked) | ✅ Shipped |
 | **Limiter** | Dynamics | Ceiling, release, `truePeak` (5 ms lookahead. `truePeak: 0` — the default — makes Ceiling a hard **dBFS sample-peak** limit; a dBTP meter reads ~0.4–1 dB above it on dense material, which is arithmetic, not a fault. `truePeak: 1` makes Ceiling a **dBTP true-peak** limit via 4× oversampled detection (ITU-R BS.1770-4), so a −1 dBTP delivery spec is met on the first render — m23-ch) | ✅ Shipped |
 | **Reverb** | Space | Freeverb (8 combs + 4 allpasses), room, damping, width, pre-delay | ✅ Shipped |
-| **Delay** | Space | Integer delay lines, feedback, high-cut, ping-pong stereo crossfeed | ✅ Shipped |
+| **Delay** | Space | Integer delay lines, feedback, high-cut, ping-pong stereo crossfeed, **echo freeze** (feedback to 0.999 — the repeats hold instead of fading; measured 3.19 dB down after 110 s) | ✅ Shipped |
 | **Saturator** | Tone | Drive (−driveDb/2 dB compensation), tanh nonlinearity | ✅ Shipped |
 | **Gate** | Dynamics | Threshold, attack, hold, release (true zeros when closed) | ✅ Shipped |
 | **Chorus** | Modulation | 2-voice, stereo/inter-voice LFO phase, depth, rate | ✅ Shipped |

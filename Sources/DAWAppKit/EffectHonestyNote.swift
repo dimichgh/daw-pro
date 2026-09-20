@@ -83,7 +83,64 @@ public struct EffectHonestyNote: Sendable, Equatable {
         case .bassEnhancer:
             return bassEnhancer
         case .gain, .eq, .compressor, .limiter, .reverb, .delay, .saturator,
-             .gate, .chorus, .bitCrusher, .audioUnit:
+             .gate, .chorus, .bitCrusher, .djFilter, .ringMod, .flanger,
+             .hallReverb, .tapeDelay, .stereoWidth, .audioUnit:
+            // `stereoWidth` (m23-dj) was put to the same test and lands with
+            // the rest, but it is the CLOSEST CALL in the list and the
+            // reasoning is worth keeping. It does not promise revelation: it
+            // promises width, and it delivers width. The thing a user could be
+            // surprised by is real — `spread` puts a gentle ripple into each
+            // channel on its own, because a flat mono sum and flat individual
+            // channels are not simultaneously achievable out of a mono source
+            // — but that is a property of ONE control, with a number attached
+            // (`channelPeakDb`/`channelNotchDb`), and a consequence that
+            // belongs to one control belongs in that control's own `note`,
+            // which is where it is. The effect's PROMISE and its MECHANISM do
+            // not diverge, so there is nothing for a disclosure to close.
+            // `tapeDelay` (m39-n) was put to the same test and lands with
+            // `delay`: it promises a wobbling, saturated echo and it delivers
+            // exactly that. Nothing about it claims to REVEAL anything the
+            // source contained — it plainly ADDS repeats, and every repeat is
+            // audibly a repeat. The two things a user could be surprised by
+            // are level-related (`feedback` and `saturationDrive` both change
+            // loudness) and each says so in its own `note`, which is where a
+            // consequence belongs when it is a property of one control rather
+            // than of the effect's promise.
+            // `hallReverb` (m39-l) was put to the same test and lands with
+            // `reverb`: it unmistakably CREATES content the source did not
+            // contain — a tail that was never played — but it never promises
+            // to REVEAL anything. Its name, its `sizeMeters`/`decaySeconds`
+            // controls and its copy all say "this puts your sound in a room
+            // that is not there". No gap between promise and mechanism, so
+            // there is nothing for a disclosure to close. (Two of its params
+            // DO carry level consequences — `mix` and `earlyLateBalance` — and
+            // each says so in its own `note` rather than in a panel the user
+            // has to open.)
+            // `flanger` (m39-j) was put to the same test and lands with
+            // `chorus`: it promises a sweeping, whooshing colouration and it
+            // delivers exactly that by sweeping a comb. Its resonance ADDS
+            // level at the peaks and its positive feedback makes the whole
+            // unit louder — but that is reinforcement of material the user
+            // already had, not content invented from nowhere, and the
+            // `feedback` param's own `note` states the gain arithmetic in
+            // decibels rather than leaving it to be discovered. No gap between
+            // promise and mechanism, so there is nothing for a disclosure to
+            // close.
+            // `ringMod` (m39-m) was put to the same test and lands with
+            // `saturator`/`reverb`/`chorus`, NOT with `bassEnhancer`: it
+            // unmistakably CREATES content the source did not contain (the
+            // sidebands are new tones at new frequencies), but it never
+            // promises to REVEAL anything. Its name, its one knob and its copy
+            // all say "this makes a new sound out of yours". There is no gap
+            // between the promise and the mechanism, so there is nothing for a
+            // disclosure to close.
+            // `djFilter` (m39-i) was put to the same test: it promises to
+            // REMOVE a band and it removes that band. Its one knob, its name
+            // and its copy all say "this takes sound away", so there is no gap
+            // between the promise and the mechanism. Its resonance ADDS level
+            // at the corner — but that is a peak in material the user already
+            // had, not content invented from nowhere, and the param's own
+            // `note` says so in those words.
             // No gap between promise and mechanism — see the criterion above.
             // `saturator`/`reverb`/`chorus` DO create content the source did
             // not contain; they are excluded because nothing in this app tells

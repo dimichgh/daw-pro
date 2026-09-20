@@ -1,0 +1,334 @@
+{
+  "set": "mod-autopan",
+  "description": "Auto-pan \u2014 a bipolar sine LFO on the PAN control, ONE axis: how fast it circles. HEADPHONES REQUIRED; on speakers this mostly disappears. Also a deliberate second measurement: the m39-e anchor bug was found and fixed against a .volume route, and .pan is the other target that takes the same per-sample takeover path. If these four render distinct, pan modulation travels the fixed path too. Depth 0.8 of the full -1..1 pan range on every variant, so ONLY the rate differs.",
+  "variants": [
+    {
+      "name": "no-pan",
+      "axis": "no modulation \u2014 the chord sits centre",
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pad",
+            "kind": "instrument"
+          },
+          "as": "pad"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pad",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.02,
+            "decay": 0.3,
+            "sustain": 0.9,
+            "release": 0.4,
+            "cutoffHz": 2200,
+            "resonance": 0.12,
+            "gain": 0.75,
+            "unisonVoices": 6,
+            "unisonDetuneCents": 14,
+            "unisonStereoSpread": 0.7
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pad",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 48,
+                "startBeat": 0,
+                "lengthBeats": 8
+              },
+              {
+                "pitch": 55,
+                "startBeat": 0,
+                "lengthBeats": 8
+              },
+              {
+                "pitch": 60,
+                "startBeat": 0,
+                "lengthBeats": 8
+              },
+              {
+                "pitch": 64,
+                "startBeat": 0,
+                "lengthBeats": 8
+              },
+              {
+                "pitch": 67,
+                "startBeat": 0,
+                "lengthBeats": 8
+              }
+            ]
+          }
+        }
+      ],
+      "role": "control"
+    },
+    {
+      "name": "slow-0p5hz",
+      "axis": "0.5 Hz \u2014 one full circle every two seconds, a slow drift",
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pad",
+            "kind": "instrument"
+          },
+          "as": "pad"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pad",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.02,
+            "decay": 0.3,
+            "sustain": 0.9,
+            "release": 0.4,
+            "cutoffHz": 2200,
+            "resonance": 0.12,
+            "gain": 0.75,
+            "unisonVoices": 6,
+            "unisonDetuneCents": 14,
+            "unisonStereoSpread": 0.7
+          }
+        },
+        {
+          "command": "mod.addSource",
+          "params": {
+            "trackId": "$pad",
+            "kind": "lfo",
+            "name": "Mod",
+            "waveform": "sine",
+            "rateHz": 0.5,
+            "bipolar": true
+          },
+          "as": "mod"
+        },
+        {
+          "command": "mod.addRoute",
+          "params": {
+            "trackId": "$pad",
+            "sourceId": "$mod",
+            "target": "pan",
+            "depth": 0.8
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pad",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 48,
+                "startBeat": 0,
+                "lengthBeats": 8
+              },
+              {
+                "pitch": 55,
+                "startBeat": 0,
+                "lengthBeats": 8
+              },
+              {
+                "pitch": 60,
+                "startBeat": 0,
+                "lengthBeats": 8
+              },
+              {
+                "pitch": 64,
+                "startBeat": 0,
+                "lengthBeats": 8
+              },
+              {
+                "pitch": 67,
+                "startBeat": 0,
+                "lengthBeats": 8
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "medium-2hz",
+      "axis": "2 Hz \u2014 one circle per half-note at 120 BPM",
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pad",
+            "kind": "instrument"
+          },
+          "as": "pad"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pad",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.02,
+            "decay": 0.3,
+            "sustain": 0.9,
+            "release": 0.4,
+            "cutoffHz": 2200,
+            "resonance": 0.12,
+            "gain": 0.75,
+            "unisonVoices": 6,
+            "unisonDetuneCents": 14,
+            "unisonStereoSpread": 0.7
+          }
+        },
+        {
+          "command": "mod.addSource",
+          "params": {
+            "trackId": "$pad",
+            "kind": "lfo",
+            "name": "Mod",
+            "waveform": "sine",
+            "rateHz": 2,
+            "bipolar": true
+          },
+          "as": "mod"
+        },
+        {
+          "command": "mod.addRoute",
+          "params": {
+            "trackId": "$pad",
+            "sourceId": "$mod",
+            "target": "pan",
+            "depth": 0.8
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pad",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 48,
+                "startBeat": 0,
+                "lengthBeats": 8
+              },
+              {
+                "pitch": 55,
+                "startBeat": 0,
+                "lengthBeats": 8
+              },
+              {
+                "pitch": 60,
+                "startBeat": 0,
+                "lengthBeats": 8
+              },
+              {
+                "pitch": 64,
+                "startBeat": 0,
+                "lengthBeats": 8
+              },
+              {
+                "pitch": 67,
+                "startBeat": 0,
+                "lengthBeats": 8
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "fast-6hz",
+      "axis": "6 Hz \u2014 fast enough to read as texture rather than movement",
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pad",
+            "kind": "instrument"
+          },
+          "as": "pad"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pad",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.02,
+            "decay": 0.3,
+            "sustain": 0.9,
+            "release": 0.4,
+            "cutoffHz": 2200,
+            "resonance": 0.12,
+            "gain": 0.75,
+            "unisonVoices": 6,
+            "unisonDetuneCents": 14,
+            "unisonStereoSpread": 0.7
+          }
+        },
+        {
+          "command": "mod.addSource",
+          "params": {
+            "trackId": "$pad",
+            "kind": "lfo",
+            "name": "Mod",
+            "waveform": "sine",
+            "rateHz": 6,
+            "bipolar": true
+          },
+          "as": "mod"
+        },
+        {
+          "command": "mod.addRoute",
+          "params": {
+            "trackId": "$pad",
+            "sourceId": "$mod",
+            "target": "pan",
+            "depth": 0.8
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pad",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 48,
+                "startBeat": 0,
+                "lengthBeats": 8
+              },
+              {
+                "pitch": 55,
+                "startBeat": 0,
+                "lengthBeats": 8
+              },
+              {
+                "pitch": 60,
+                "startBeat": 0,
+                "lengthBeats": 8
+              },
+              {
+                "pitch": 64,
+                "startBeat": 0,
+                "lengthBeats": 8
+              },
+              {
+                "pitch": 67,
+                "startBeat": 0,
+                "lengthBeats": 8
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

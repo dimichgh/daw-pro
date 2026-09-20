@@ -22,7 +22,28 @@ alone over-counts — see the method below), so a real count needs a
 derivation you can state and defend, not a bare `grep -c`.
 
 It reflects the tool surface enumerated from
-`mcp-server/src/server.ts` (**220 tools**, re-derived 2026-09-04/05 at the
+`mcp-server/src/server.ts` (**232 tools**, re-derived 2026-09-19 at the
+m39-e MCP mirror close, which added the nine `mod_*` tools —
+`mod_describe_kinds`, `mod_add_source`, `mod_set_source`,
+`mod_remove_source`, `mod_add_route`, `mod_set_route_depth`,
+`mod_remove_route`, `mod_set_macro`, `mod_describe` — closing a gap this
+same paragraph never flagged: it sat stale at 223 while `Commands.swift`
+had already moved 218 -> 227 with the `mod.*` engine close, and
+`mcp-server/test/audit-tools.test.ts`'s bijection/audit test carried two RED
+assertions until this close (see below); previously 223, re-derived 2026-09-19 at the
+m39-f/g MCP mirror close, which added `instrument_describe_synth` — the
+Poly Synth's twin of `instrument_describe_sampler`, closing the gap this
+same paragraph flagged as sanctioned a few hours earlier the same day (see
+below) — and mirrored m39-g's fifteen Poly Synth richness parameters into
+`track_set_instrument`'s EXISTING schema (a parameter count, not a tool
+count, so that half adds zero on its own); previously 222, re-derived
+2026-09-19 at the
+m23-cw MCP mirror close, which added `au_list_presets` (a pure READ of a
+hosted AU's own factory/user preset lists, registered directly via
+`server.registerTool` — the `au_describe_params` precedent) and
+`au_load_preset` (LOADS a preset onto the live plugin instance, registered
+through the strict-schema wrapper — the `au_set_param` precedent); previously
+220, re-derived 2026-09-04/05 at the
 m35-g close, which added the four `view.*` tools — `view_capture`,
 `view_select_clip`, `view_panel_layout`, `view_open_editor` — that let an
 agent SEE the app (screenshot it, focus a clip in the piano roll, read/set
@@ -43,22 +64,87 @@ m35-g close (claimed 208 against a measured 220, a TWELVE-tool drift, for the
 same reason) — **treat this paragraph as due for staleness at every close that
 adds a tool, not just the ones that remembered to touch it.** It was corrected
 by re-running the decomposition below, whose arithmetic then matched a live
-`tools/list` over the generated plugin bundle EXACTLY — 220, with a negative
-control (a name that is not a tool) correctly absent. The bijection test,
-`mcp-server/test/audit-tools.test.ts`, defines
-`tool count = commands + |exception table B| + |exception table C|` — 215
-commands (below) + 3 Table-B tools with no backing command at all
+`tools/list` over the generated plugin bundle EXACTLY — 232 (41 direct +
+191 wrapper), with a negative control (a name that is not a tool) correctly
+absent. The bijection test, `mcp-server/test/audit-tools.test.ts`, defines
+`tool count = commands + |exception table B| + |exception table C|` — **227**
+MIRRORED commands + 3 Table-B tools with no backing command at all
 (`generate_image`, `generate_lyrics`, `generate_song_suno` — they call a
 generation provider directly) + 2 Table-C tools that bridge to an EXISTING
 command, `track.setInstrument`, under a friendlier name/shape
-(`instrument_set_sampler_param`, `instrument_set_sampler_zones`) = 220.
-⚠️ The authoritative pin is `mcp-server/test/integration.test.ts`'s
-`assert.equal(result.tools.length, 220)` — **NOT** a `grep -c 'registerTool('`,
+(`instrument_set_sampler_param`, `instrument_set_sampler_zones`) = **232**.
+✅ **CLOSED, m23-cw (2026-09-19): the "215 mirrored of 217 wire" gap this
+paragraph used to flag is gone — `au.listPresets`/`au.loadPreset` are now
+mirrored 1:1 as `au_list_presets`/`au_load_preset`, no exception-table entry
+needed (the mechanical name rule already lands there).** The command count
+and the mirrored count agreed again (217 = 217) for the rest of that day; do
+not reopen this note for a future gap without renaming it — see immediately
+below for the one that opened, and closed, a few hours later the SAME day.
+✅ **CLOSED, m39-f/g (2026-09-19): the gap this paragraph flagged as OPEN a
+few hours earlier the same day — the wire moved to 218
+(`instrument.describeSynth` landed) while the MCP mirror stayed at 217 — is
+gone. `instrument_describe_synth` is now registered (via the local
+`registerTool` wrapper, the `instrument_describe_sampler` precedent — it is a
+pure READ but takes real params, `trackId`, worth typo-catching, so it joined
+the WRAPPER count, not the direct-read count), no exception-table entry
+needed (the mechanical name rule already lands there): `instrument.describeSynth`
+-> `instrument_describe_synth`.** The command count and the mirrored count
+agree again (218 = 218); do not reopen this note for a future gap without
+renaming it. The SAME close also mirrored m39-g's fifteen Poly Synth richness
+parameters (`unisonVoices`, `unisonDetuneCents`, `unisonStereoSpread`,
+`subLevel`, `subOctave`, `subWaveform`, `noiseLevel`, `noiseColor`, `drift`,
+`resonanceBoost`, `drive`, `velocityToCutoff`, `keyToCutoff`, `voiceJitter`,
+`envelopeCurve`) into `track_set_instrument`'s EXISTING schema — new
+PARAMETERS on an existing command/tool never move either count, so that half
+of the close contributed zero to the 222 -> 223 delta above; ranges/units are
+re-typed (not re-derived — a static zod schema cannot call the verb at
+runtime) from `PolySynthParams`'s `static let …Range` constants in
+`Sources/DAWCore/Model.swift`, the SAME source `instrument.describeSynth`
+itself reads, and `instrument_describe_synth` is the RUNTIME authority to
+read back against. ⚠️ `subOctave`'s range is NEGATIVE, **-2...-1** — do not
+schema it with `minimum: 0`. ⚠️ Every one of the fifteen is ADDITIVE-NIL-SAFE
+on write: omitting a field PRESERVES whatever the track already had, and two
+of the fifteen do NOT resolve an unset value to 0 (`noiseColor` -> 0.5,
+`subOctave` -> -1).
+✅ **CLOSED, m39-e (2026-09-19): a gap this paragraph never flagged —
+`Commands.swift` moved to 227 (the nine-verb `mod.*` modulation family
+landed wire-only) while this file's mirror sat stale at 223, and
+`mcp-server/test/audit-tools.test.ts` was RED on two assertions until this
+close — is gone. All nine tools are registered in `mcp-server/src/server.ts`:
+`mod_describe_kinds`/`mod_describe` are pure READS with only OPTIONAL
+params (the `fx_describe` precedent, not the `instrument_describe_synth`
+one — that tool's `trackId` is REQUIRED, which is why it rode the wrapper
+instead), so both joined the DIRECT `server.registerTool` count; the other
+seven (`mod_add_source`, `mod_set_source`, `mod_remove_source`,
+`mod_add_route`, `mod_set_route_depth`, `mod_remove_route`,
+`mod_set_macro`) mutate and rode the strict-schema wrapper, no
+exception-table entry needed (the mechanical name rule already lands there:
+`mod.addSource` -> `mod_add_source`, etc.).** The command count and the
+mirrored count agree again (227 = 227); do not reopen this note for a
+future gap without renaming it. Tool descriptions carry the two things the
+brief required VERBATIM: §7.2.0's polarity convention (`[1,0,1,0]` /
+`[0,1,0,1]`, OFFSET, CLOSED, a NEGATIVE `depth`) on `mod_add_source`'s
+`steps`/`pulseWidth`/`bipolar` fields and on `mod_add_route`'s `.volume`
+target/`depth`; and §7.3's depth-law worked examples (`cutoffHz`'s 8.81
+octaves, `resonance` ±0.25, `.volume` ±6 dB, `.pan` ±1.0) on
+`mod_add_route`/`mod_set_route_depth`. `mod_describe_kinds` is named in all
+eight sibling descriptions, the `fx_describe` precedent. New test file
+`mcp-server/test/modulation.test.ts` (38 tests) pins the forwarding shape
+for all nine, the direct-vs-wrapper strictness split, the nested-strict-gap
+closure on `target` (the discriminated union) and `params` (the m30-c
+precedent), and every one of those verbatim carries.
+⚠️ The authoritative pins are `mcp-server/test/integration.test.ts`'s
+`assert.equal(result.tools.length, 232)` and `mcp-server/test/mcp-log.test.ts`'s
+`assert.equal(instrumented.length, 232)` — **NOT** a `grep -c 'registerTool('`,
 which is a known liar on this file and previously anchored this paragraph at a
 stale 194) and
 `Sources/DAWControl/Commands.swift`
-(**215 commands** — the `CommandRouter.allCommands.count == 215` pin in
-`Tests/DAWControlTests/RenderCommandTests.swift`)
+(**227 commands** — the `CommandRouter.allCommands.count == 227` pin in
+`Tests/DAWControlTests/RenderCommandTests.swift`, and in eighteen sibling
+files — **twenty pin lines across nineteen files** (one file carries two),
+counted 2026-09-19 at the m39-f close; ⚠️ three of the twenty spell it
+`all.count == N` and seventeen `allCommands.count == N`, so grep the LITERAL
+number, not the idiom)
 in the DAW Pro repo — not memory, and not the app's own in-app Copilot
 catalog (`Sources/DAWControl/CopilotCatalog.swift`), which is a **different,
 smaller, differently-named** tool set for a different AI (the app's built-in
@@ -345,6 +431,183 @@ in the same place. It also consumes no randomness: omit both params and a
 seeded timing/velocity result is bit-identical to before they existed.
 Only note LENGTHS change — ids, order, start beats, pitches and velocities
 are preserved, and a note is never extended past the clip end.
+
+### The DJ filter (`kind: "djFilter"`) is a MOTION, and the knob is bipolar
+
+`fx_add {kind: "djFilter"}` is the club/DJ-mixer sweep. Five params, one of
+which is the whole effect:
+
+| param | range | what it does |
+|---|---|---|
+| `position` | −1 … **0** … +1 | **0 is a BIT-EXACT BYPASS.** NEGATIVE = a low-pass falling down from 20 kHz, so the **treble** goes first (muffled, underwater). POSITIVE = a high-pass climbing up from 20 Hz, so the **bass** goes first (thin, radio-like). This is the direction a club mixer's filter knob turns: left muffles, right thins. |
+| `resonance` | 0 … 1 | The whistle at the edge of the sweep, and the character. `Q = 0.707 + resonance × 9.293`. |
+| `slopeDbPerOct` | 12 or 24 | Snaps to the nearer. 24 = tight modern club, 12 = gentler. Does **not** change the resonant peak's height. |
+| `deadZoneWidth` | 0 … 0.2 | The do-nothing detent at the centre, so a sweep passing THROUGH the middle hands over cleanly instead of jumping. |
+| `resonanceTrack` | 0 … 1 | Extra resonance only near the extremes — the "isolator" feel. |
+
+**Three things that will otherwise bite:**
+
+⭐ **Park it at one value and you have built a tone control, not a DJ
+filter.** The thing people mean by "DJ filter" is the SWEEP. Draw it:
+`automation_add_lane {target: "effectParam", param: "position"}` then
+`automation_set_points` from −0.8 to +0.8 over 8 bars. The effect smooths its
+own coefficients internally (32-frame stride), so an automated sweep does not
+zipper the way an `eq.lowPassFreq` lane does.
+
+⚠️ **High resonance makes the whole filter QUIETER, on purpose.** The
+resonant section is scaled by `sqrt(0.707/Q)` so a Q-10 peak cannot slam the
+mix — which costs about **11.5 dB of passband at `resonance: 1`** (measured).
+That is the protection working. Add a `gain` insert after it if you need the
+level back; do not report it as a bug.
+
+⚠️ **The travel is log-symmetric, and there is no `mix`.** Cutoff is
+`20000 × 0.001^|position|` for a **negative** position and `20 × 1000^position`
+for a **positive** one — the low-pass corner FALLS as the knob goes more
+negative, the high-pass corner RISES as it goes more positive — so equal knob
+movement is equal musical movement at both ends. There is
+deliberately no dry/wet: blending a resonant filter with its own dry signal is
+comb filtering, not a gentler filter. Use `deadZoneWidth` (a centre
+crossfade) or automate `position` a shorter distance.
+
+### The ring modulator (`kind: "ringMod"`) is NOT a filter, and its "bug" is the feature
+
+`fx_add {kind: "ringMod"}` multiplies your signal by a tone. **Neither the
+signal nor the tone survives**: every partial at `f` in the input becomes a
+PAIR of new tones at `|f − carrierHz|` and `f + carrierHz`. A harmonic series
+in comes out **inharmonic**, which is why it sounds like a bell, a robot or a
+Dalek rather than like EQ or distortion. This is the effect the user means by
+"frequency modulation" on an insert.
+
+| param | range | what it does |
+|---|---|---|
+| `carrierHz` | 0.5 … **440** … 5000 | THE knob, logarithmic. Under ~20 Hz it is a **tremolo**; 50–300 Hz growls; above ~500 Hz it goes clangorous and sci-fi. |
+| `mix` | 0 … **0.5** … 1 | **0 is a BIT-EXACT BYPASS.** 1 loses the original pitch entirely (the Dalek setting). 0.5 keeps the source recognisable under the metal. |
+| `waveform` | 0 sine / 1 triangle / 2 square / 3 saw | Whole numbers; others round. Sine gives ONE sideband pair per partial and is the clean, bell-like one. The other three are band-limited, so they add no aliasing of their own. |
+| `inputHighCutHz` | 500 … **20000** | A **PRE**-filter on the carrier path only. The fold-back control — see below. |
+| `stereoSpreadDeg` | **0** … 180 | Right-channel carrier phase offset. 0 is mono-safe; 180 is widest and cancels most in a mono fold-down. |
+
+**Three things that will otherwise bite:**
+
+⚠️ **The tremolo rate depends on `mix`, and this WILL be reported as a bug.**
+The output is `signal × (mix·carrier + (1 − mix))`, so the envelope factor only
+swings negative — and only gets rectified into a doubled pulse — when
+`mix > 0.5`. At **mix 0.5 (the default) or below, a 2 Hz carrier is two pulses
+a second**; at **mix 1 it is four**. Measured, not inferred: an earlier draft of
+this page said "four, always" and the rendered demo caught it at 2.00 Hz.
+
+⛔ **THE CLANGOROUS FOLD-BACK IS THE CHARACTER, AND IT IS NOT OVERSAMPLED
+AWAY.** `f + carrierHz` routinely exceeds what the sample rate can represent
+and folds back down as an extra inharmonic tone. Classic hardware ring
+modulators do exactly this and it is half of why people reach for one. If a
+user wants a cleaner, bell-like result, **pull `inputHighCutHz` down to around
+4000** — a partial you removed cannot produce a sideband that folds. Do not
+reach for oversampling; the design forbids it here on purpose. Because the
+high-cut is a PRE-filter it tames the metallic layer **without** dulling the
+dry signal, so at `mix: 0.5` your original keeps its top end.
+
+⭐ **`carrierHz` is a lane worth DRAWING, and safe to.** The oscillator's phase
+is continuous across a change, so a carrier step is a frequency step and never
+a click — `automation_add_lane {target: "effectParam", param: "carrierHz"}`
+sweeping 40 → 900 Hz over 8 bars is a classic riser. `waveform` is discrete and
+refuses automation; changing it mid-note steps the carrier rather than gliding.
+
+### `tapeDelay` and `delay` are different kinds, and picking the wrong one is silent
+
+`fx_add {kind: "delay"}` and `fx_add {kind: "tapeDelay"}` are **both shipping,
+neither replaces the other**, and the two things that decide between them are
+not matters of taste:
+
+| you need | kind | why |
+|---|---|---|
+| tempo sync (`sync`, `division`) | **`delay`** | ⛔ `tapeDelay` has NO sync in v1 and no `sync`/`division` param. Setting one is a name error, not a no-op. |
+| repeats that wobble in pitch | **`tapeDelay`** | ⛔ `delay` holds its delay in a whole number of samples. A sub-sample drift is not a tuning problem there, it is **unrepresentable**. `delay` cannot wow, at any setting. |
+
+⚠️ **`tapeDelay.timeMs` BENDS THE PITCH of repeats that are already sounding.**
+Both kinds mark `timeMs` `warned` for modulation and the two warnings are about
+opposite things. `delay.timeMs` steps whole samples and **clicks** — that is a
+defect. `tapeDelay.timeMs` reads a fractional position and **glides**, like a
+varispeed tape — that is the mechanism working. Riding it by hand is a real dub
+gesture; automating it expecting a clean time change is not. For a clean change,
+change it between phrases or drop `mix` to 0 first.
+
+⭐ **Ask for a stated amount of wobble instead of guessing.** Every `fx.add` /
+`fx.setParam` result — and `project.snapshot` — echoes `wowCents` and
+`flutterCents` inside that insert's `params` object: the actual peak pitch
+deviation the current `wowDepthMs`/`wowRateHz`/`flutterDepthMs` produce.
+⚠️ They are **per-instance echoes, not schema**, so they are **not** in
+`fx.describe`, which returns `{name, min, max, default, curve, note}` and no
+values at all. (`wowCents` is the UPWARD peak; the downward one is a fraction
+larger — `−1200·log2(1 − π·f·D)` — because the pitch ratio is `1 − d'(t)`.) The
+defaults give about 10.8 cents of wow (a tenth of a semitone: obvious on a
+sustained pad, inaudible on a drum hit) and 12.9 cents of flutter. The maximum
+is over a semitone, which is a broken machine and is what the top of the range
+is for. The two wow controls **multiply**: doubling either doubles the deviation.
+
+⚠️ **Its high cut is in the RECORD path, so it colours the FIRST repeat too.**
+`delay.highCutHz` sits in the feedback loop only, so the first echo comes back
+unfiltered and only later ones darken. `tapeDelay.highCutHz` runs on the way in,
+because on a real machine the sound was already on tape by then — so repeat one
+is already rolled off and each later one is duller again. That is what makes a
+0.9 feedback dissolve instead of piling up. `saturationDrive` sits in the same
+stage and **0 is exactly linear**, not merely gentle.
+
+### `stereoWidth.width` is a SILENT NO-OP on a mono source, and that is the trap
+
+⛔ **`fx_add {kind: "stereoWidth", params: {width: 2}}` on a mono track changes
+NOTHING, reports success, and returns a `params` object showing `width: 2`.**
+It is not broken. `width` is a gain on the stereo DIFFERENCE (`L − R`), and on a
+mono source that difference is zero — two times zero is still zero. An agent
+that widens a mono synth with `width` and then reports "done" has shipped
+silence-shaped success.
+
+**The control that actually makes a mono source stereo is `spread`.** It builds
+a new side channel by running the centre through a four-stage all-pass chain
+(2.9–13.1 ms) and adding it to one side while subtracting it from the other.
+Reach for `width` on material that is already stereo, `spread` on material that
+is not, and both when you are not sure.
+
+| the ask | the param | why |
+|---|---|---|
+| "make this stereo bus wider" | **`width`** | Pure gain on the existing difference. No filtering, no delay, no colouration. Free. |
+| "make this mono synth stereo" | **`spread`** | Manufactures a difference. Costs a per-channel ripple — see below. |
+| "tighten the low end" | **`bassMonoAmount`** | ON by default (1). Removes side content below `bassMonoHz` at 12 dB/oct. |
+| "make this mono" | **`width: 0` AND `spread: 0`** | ⛔ **`width: 0` on its own is NOT a mono-maker.** `spread` defaults to **0.3** and builds a new side channel *after* `width` has scaled the old one, so a freshly added insert at `width: 0` still comes out stereo — and on a **mono** source it comes out *wider than it went in*. Send both. |
+
+⭐ **The mono fold-down is untouched at every setting, and that is a structural
+guarantee rather than a tuning.** This kind only ever processes the SIDE
+channel; the MID passes through as it arrived, so `L + R` out is `L + R` in to
+within a couple of float ULPs. That is why it is safe to reach for on a master
+bus, and it is the specific thing a Haas widener (one side delayed 5–30 ms) or a
+polarity-flipped duplicate cannot promise — those widen on speakers and then
+comb, collapse or hollow out the moment anything sums to mono.
+
+⚠️ **`spread` is the one control here that costs something, and the cost is
+arithmetic.** Each channel ON ITS OWN ripples between `20·log10(1 + spread)` and
+`20·log10(1 − spread)` dB across the spectrum: **+2.3 / −3.1 dB at the 0.3
+default**, a complete null at 1.0. The two channels' ripples are complementary —
+that is what makes it sound wide — and they cancel exactly in the sum. You
+cannot have both a flat mono sum and flat individual channels out of a mono
+source; that is a theorem, not an implementation limit, and this kind always
+chooses the flat sum. Every `fx.add` / `fx.setParam` result — and
+`project.snapshot` — echoes `channelPeakDb` and `channelNotchDb` inside that
+insert's `params` object. ⚠️ They are **per-instance echoes, not schema**, so
+they are **not** in `fx.describe`, which returns `{name, min, max, default,
+curve, note}` and no values at all.
+
+⚠️ **`bassMonoHz` does nothing while `bassMonoAmount` is 0**, and a `fx.setParam`
+on it will still report success. The frequency of a fully bypassed filter is not
+a setting.
+
+⛔ **THERE IS NO `mix` ON THIS KIND.** `fx.setParam {name: "mix"}` is a name
+error, not a no-op. A dry/wet blend on a mid/side widener is algebraically just
+another `width` and another `spread`, so it would be a lie in `fx.describe`. The
+equivalent neutral position — and it is a **bit-exact** passthrough — is
+`width: 1`, `spread: 0`, `bassMonoAmount: 0`.
+
+⚠️ **TELL THE USER TO USE HEADPHONES OR TWO SPEAKERS.** A width change is close
+to inaudible on a single speaker *by construction*, since the mono sum is what
+stays the same. If they are on a laptop speaker or a phone, quote
+`channelPeakDb`/`channelNotchDb` instead of asking them to listen.
 
 ### Overlap masks a retrigger. The BUILT-IN SAMPLER slurs for real in `legato`; nothing else does.
 

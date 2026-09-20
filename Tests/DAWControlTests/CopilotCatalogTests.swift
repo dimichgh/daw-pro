@@ -1,3 +1,4 @@
+import DAWCore
 import Foundation
 import Testing
 @testable import DAWControl
@@ -72,7 +73,7 @@ struct CopilotCatalogTests {
         // group delete/move, and strictly better undo atomicity for a
         // capability (clip.remove/clip.move) already IN the catalog — took it
         // 69 -> 71.
-        #expect(CopilotToolCatalog.v1.count == 79)   // 72 at m23-af (transport.panic) -> 74 at m23-aj-2 (moveManyByTracks/moveManyToTrack) -> 75 at m25-d (transport.setStopAtContentEnd) -> 76 at m27 leg D (clip.applyBreathContour) -> 77 at breath pad P1 (clip.applyEffortShape) -> 78 at m31-c (clip.repeatNotes — the in-app copilot composes music too, and this is the exact "author one bar, repeat it" efficiency verb an autonomous agent wants; siblings clip.setNotes/clip.addMIDI are both already in the catalog) -> 79 at m26-a/m27-n (clip.patchNotes — the most obvious autonomous-agent framing of any verb in this file: it exists BECAUSE an agent doing "raise the velocity of 48 shaker notes out of 907" should not have to round-trip the other 859)
+        #expect(CopilotToolCatalog.v1.count == 81)   // 81 at m23-cw (au.listPresets/au.loadPreset — the m21-b2 law: a new user-facing capability must be visible to the in-app copilot, and "give me a cathedral reverb" is exactly the request the copilot could not previously serve, because starting from the right PRESET is how a plugin's sound space is actually reached). 72 at m23-af (transport.panic) -> 74 at m23-aj-2 (moveManyByTracks/moveManyToTrack) -> 75 at m25-d (transport.setStopAtContentEnd) -> 76 at m27 leg D (clip.applyBreathContour) -> 77 at breath pad P1 (clip.applyEffortShape) -> 78 at m31-c (clip.repeatNotes — the in-app copilot composes music too, and this is the exact "author one bar, repeat it" efficiency verb an autonomous agent wants; siblings clip.setNotes/clip.addMIDI are both already in the catalog) -> 79 at m26-a/m27-n (clip.patchNotes — the most obvious autonomous-agent framing of any verb in this file: it exists BECAUSE an agent doing "raise the velocity of 48 shaker notes out of 907" should not have to round-trip the other 859)
         #expect(CopilotToolCatalog.tool(command: "clip.repeatNotes") != nil,
                 "clip.repeatNotes missing from the catalog — m21-b2 requires a new user-facing\n                 capability to be visible to the in-app copilot, and this verb exists\n                 specifically to save an authoring agent from generating repeated material")
         #expect(CopilotToolCatalog.tool(command: "clip.patchNotes") != nil,
@@ -128,6 +129,36 @@ struct CopilotCatalogTests {
         for command in ["clip.duplicate", "arrange.insertBars", "arrange.deleteBars"] {
             #expect(CopilotToolCatalog.tool(command: command) != nil, "\(command) missing from the catalog")
         }
+    }
+
+    /// ⭐ m39-m — THE CATALOG'S `fx.add` KIND ENUM IS A HAND-MAINTAINED LIST
+    /// AND WAS UNPINNED UNTIL NOW. Design §11.0.1 rules that "a new effect KIND
+    /// updates `CopilotCatalog.swift`", but nothing compared that list to the
+    /// enum, so a kind added to `EffectDescriptor.Kind` and forgotten here is
+    /// simply never suggested by the in-app copilot — the capability ships and
+    /// is undiscoverable, which is the exact failure `effect-kind-surface.mjs`
+    /// was built for on the OTHER four surfaces.
+    ///
+    /// Derived from `Kind.allCases`, so it cannot go stale: it fails the day a
+    /// kind is added without touching the catalog, and needs no edit when one
+    /// is added correctly. `.audioUnit` is excluded deliberately — it needs a
+    /// component triple the copilot cannot supply, which is why the catalog's
+    /// own list has never carried it.
+    @Test("m39-m: fx.add's copilot kind enum is EVERY built-in kind, derived from the enum")
+    func copilotFXKindEnumCoversEveryBuiltIn() throws {
+        let tool = try #require(CopilotToolCatalog.tool(command: "fx.add"))
+        let kindSchema = try #require(tool.schema["properties"]?["kind"])
+        let offered = try #require(kindSchema["enum"]?.arrayValue?.compactMap { $0.stringValue })
+        let builtIns = EffectDescriptor.Kind.allCases
+            .filter { $0 != .audioUnit }
+            .map { $0.rawValue }
+        #expect(offered == builtIns,
+                Comment(rawValue: "the copilot offers \(offered) but the built-in kinds are "
+                    + "\(builtIns) — a kind the copilot cannot name is a kind it will never suggest"))
+        // NON-VACUITY, both directions: the list is not empty, and `audioUnit`
+        // is genuinely absent rather than the filter above being a no-op.
+        #expect(offered.count >= 13)
+        #expect(!offered.contains("audioUnit"))
     }
 
     @Test("wire-name mapping round-trips bijectively")

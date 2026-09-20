@@ -152,6 +152,62 @@ struct PolySynthEditorModelTests {
         }
     }
 
+    /// m39-a — the poly-synth half of the taper-lift conformance proof.
+    ///
+    /// The card's knob geometry no longer infers `unit == "Hz"`; it reads the
+    /// spec's DECLARED curve. This re-computes the pre-lift inline formula —
+    /// the arithmetic that stood at `PolySynthEditorModel.swift:287,299` — and
+    /// requires bit-for-bit equality at eleven points of travel on all seven
+    /// knobs, so a lift that moved a knob cannot pass.
+    ///
+    /// ⚠️ It also pins that the ENVELOPE TIMES are still LINEAR. The modulation
+    /// design (`docs/design/2026-09-19-modulation-layer.md` §4) proposes
+    /// `.logarithmic` for attack/decay/release on the future
+    /// `InstrumentParamSpec`; that is a real change to three shipping knobs and
+    /// is m39-b's deliberate call, not a refactor's side effect. If m39-b
+    /// adopts it, this test is the thing that must be updated ON PURPOSE.
+    @Test("m39-a: every knob lands on the same value it did before the taper lift")
+    func taperLiftMovesNoKnob() {
+        func legacyValue(_ f: Double, _ spec: PolySynthParamSpec) -> Double {
+            let lo = spec.range.lowerBound, hi = spec.range.upperBound
+            let f = f.clamped(to: 0...1)
+            if spec.unit == "Hz" && lo > 0 { return lo * pow(hi / lo, f) }
+            return lo + f * (hi - lo)
+        }
+        func legacyFraction(_ v: Double, _ spec: PolySynthParamSpec) -> Double {
+            let lo = spec.range.lowerBound, hi = spec.range.upperBound
+            guard hi > lo else { return 0 }
+            let v = v.clamped(to: spec.range)
+            if spec.unit == "Hz" && lo > 0 {
+                return (log(v / lo) / log(hi / lo)).clamped(to: 0...1)
+            }
+            return (v - lo) / (hi - lo)
+        }
+
+        #expect(PolySynthEditorModel.specs.count == 7)
+        var checked = 0
+        for spec in PolySynthEditorModel.specs {
+            // Declared == what the old string heuristic produced.
+            let inferred: PolySynthEditorModel.Scale =
+                spec.unit == "Hz" && spec.range.lowerBound > 0 ? .logarithmic : .linear
+            #expect(spec.curve == inferred, "\(spec.name) declared \(spec.curve)")
+            for step in 0...10 {
+                let f = Double(step) / 10
+                let lifted = PolySynthEditorModel.value(forFraction: f, spec: spec)
+                #expect(lifted == legacyValue(f, spec), "\(spec.name) at f=\(f)")
+                #expect(PolySynthEditorModel.fraction(forValue: lifted, spec: spec)
+                        == legacyFraction(lifted, spec), "\(spec.name) inverse at f=\(f)")
+                checked += 1
+            }
+        }
+        #expect(checked == 77, "only \(checked) travel points compared")
+        // Named, so the envelope-taper question cannot be closed by accident.
+        #expect(Self.spec("attack").curve == .linear)
+        #expect(Self.spec("decay").curve == .linear)
+        #expect(Self.spec("release").curve == .linear)
+        #expect(Self.spec("cutoffHz").curve == .logarithmic)
+    }
+
     // MARK: - Readouts (deterministic strings, so captures pin exactly)
 
     @Test("envelope seconds read in ms and cross to s at one second")

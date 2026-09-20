@@ -1,0 +1,81 @@
+{
+  "set": "polysynth-cutoff",
+  "description": "Built-in PolySynth playing a short saw-wave arpeggio, cutoffHz as the ONE axis: 600 / 2500 / 9000 Hz — a closed, singing, and nearly-open low-pass. This is the gesture the product is weakest at, so it should read clearly by ear.",
+  "variants": [
+    {
+      "name": "muffled",
+      "axis": "cutoffHz = 600 Hz — low-pass closed well below the arpeggio's upper notes; dark, telephone-like",
+      "commands": [
+        { "command": "track.add", "params": { "name": "Lead", "kind": "instrument" }, "as": "lead" },
+        { "command": "track.setInstrument", "params": {
+          "trackId": "$lead", "kind": "polySynth", "waveform": "saw",
+          "attack": 0.005, "decay": 0.15, "sustain": 0.8, "release": 0.2,
+          "cutoffHz": 600, "resonance": 0.15, "gain": 0.8
+        } },
+        { "command": "clip.addMIDI", "params": {
+          "trackId": "$lead", "atBeat": 0,
+          "notes": [
+            { "pitch": 60, "startBeat": 0, "lengthBeats": 0.9 },
+            { "pitch": 64, "startBeat": 1, "lengthBeats": 0.9 },
+            { "pitch": 67, "startBeat": 2, "lengthBeats": 0.9 },
+            { "pitch": 72, "startBeat": 3, "lengthBeats": 0.9 },
+            { "pitch": 76, "startBeat": 4, "lengthBeats": 0.9 },
+            { "pitch": 72, "startBeat": 5, "lengthBeats": 0.9 },
+            { "pitch": 67, "startBeat": 6, "lengthBeats": 0.9 },
+            { "pitch": 60, "startBeat": 7, "lengthBeats": 1.8 }
+          ]
+        } }
+      ]
+    },
+    {
+      "name": "singing",
+      "axis": "cutoffHz = 2500 Hz — the low-pass sits just above the melody's top note; present, not harsh",
+      "commands": [
+        { "command": "track.add", "params": { "name": "Lead", "kind": "instrument" }, "as": "lead" },
+        { "command": "track.setInstrument", "params": {
+          "trackId": "$lead", "kind": "polySynth", "waveform": "saw",
+          "attack": 0.005, "decay": 0.15, "sustain": 0.8, "release": 0.2,
+          "cutoffHz": 2500, "resonance": 0.15, "gain": 0.8
+        } },
+        { "command": "clip.addMIDI", "params": {
+          "trackId": "$lead", "atBeat": 0,
+          "notes": [
+            { "pitch": 60, "startBeat": 0, "lengthBeats": 0.9 },
+            { "pitch": 64, "startBeat": 1, "lengthBeats": 0.9 },
+            { "pitch": 67, "startBeat": 2, "lengthBeats": 0.9 },
+            { "pitch": 72, "startBeat": 3, "lengthBeats": 0.9 },
+            { "pitch": 76, "startBeat": 4, "lengthBeats": 0.9 },
+            { "pitch": 72, "startBeat": 5, "lengthBeats": 0.9 },
+            { "pitch": 67, "startBeat": 6, "lengthBeats": 0.9 },
+            { "pitch": 60, "startBeat": 7, "lengthBeats": 1.8 }
+          ]
+        } }
+      ]
+    },
+    {
+      "name": "bright",
+      "axis": "cutoffHz = 9000 Hz — low-pass nearly open; the saw's full harmonic buzz comes through",
+      "commands": [
+        { "command": "track.add", "params": { "name": "Lead", "kind": "instrument" }, "as": "lead" },
+        { "command": "track.setInstrument", "params": {
+          "trackId": "$lead", "kind": "polySynth", "waveform": "saw",
+          "attack": 0.005, "decay": 0.15, "sustain": 0.8, "release": 0.2,
+          "cutoffHz": 9000, "resonance": 0.15, "gain": 0.8
+        } },
+        { "command": "clip.addMIDI", "params": {
+          "trackId": "$lead", "atBeat": 0,
+          "notes": [
+            { "pitch": 60, "startBeat": 0, "lengthBeats": 0.9 },
+            { "pitch": 64, "startBeat": 1, "lengthBeats": 0.9 },
+            { "pitch": 67, "startBeat": 2, "lengthBeats": 0.9 },
+            { "pitch": 72, "startBeat": 3, "lengthBeats": 0.9 },
+            { "pitch": 76, "startBeat": 4, "lengthBeats": 0.9 },
+            { "pitch": 72, "startBeat": 5, "lengthBeats": 0.9 },
+            { "pitch": 67, "startBeat": 6, "lengthBeats": 0.9 },
+            { "pitch": 60, "startBeat": 7, "lengthBeats": 1.8 }
+          ]
+        } }
+      ]
+    }
+  ]
+}

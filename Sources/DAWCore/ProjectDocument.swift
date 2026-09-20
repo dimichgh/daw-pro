@@ -718,6 +718,36 @@ public struct EffectDocument: Codable, Sendable, Equatable {
     public var chorus: ChorusParams?
     public var bassEnhancer: BassEnhancerParams?
     public var bitCrusher: BitCrusherParams?
+    /// m39-i. ⚠️ THIS MIRROR IS HAND-MAINTAINED AND THE COMPILER DOES NOT
+    /// FORCE IT: a new params optional added to `EffectDescriptor` but not to
+    /// every one of the five sites below (field, CodingKeys, `init(from
+    /// effect:)`, decode, encode, `effectDescriptor()`) renders and edits
+    /// perfectly and is SILENTLY DROPPED on save. Pinned by a round-trip test.
+    public var djFilter: DJFilterParams?
+    /// m39-m — the same five sites, the same hazard.
+    public var ringMod: RingModParams?
+    /// m39-j — the same five sites, the same hazard. (⚠️ "five sites" counts
+    /// the declaration you are reading as the first; m39-o files the missing
+    /// exhaustive pin. `FlangerPersistenceTests` covers this one by hand.)
+    public var flanger: FlangerParams?
+    /// m39-l — the same SIX sites, the same hazard, and this kind has FOURTEEN
+    /// params riding on them: property, `CodingKeys`, `init(from effect:)`,
+    /// `decodeIfPresent`, `encodeIfPresent`, `effectDescriptor()`. Miss one and
+    /// the project saves, reports success, and reopens with the hall reset to
+    /// defaults. `HallReverbPersistenceTests` covers this one by hand until
+    /// m39-o lands the exhaustive pin.
+    public var hallReverb: HallReverbParams?
+    /// m39-n — the same SIX sites, the same hazard. `TapeDelayPersistenceTests`
+    /// covers this one by hand until m39-o lands the exhaustive pin, and it
+    /// asserts a NON-DEFAULT value per field, because a round-trip test whose
+    /// fixture is all-defaults passes with every `encodeIfPresent` deleted.
+    public var tapeDelay: TapeDelayParams?
+    /// m23-dj — the same SIX sites, the same hazard.
+    /// `StereoWidthPersistenceTests` covers this one by hand until m39-o lands
+    /// the exhaustive pin, and it asserts a NON-DEFAULT value per field,
+    /// because a round-trip test whose fixture is all-defaults passes with
+    /// every `encodeIfPresent` deleted.
+    public var stereoWidth: StereoWidthParams?
     /// Hosted Audio Unit selection + inlined state (stateData rides as base64
     /// through Codable's Data default) — the InstrumentDocument.audioUnit
     /// mirror. Additive optional: pre-M4 (v) files have no key and stay
@@ -729,7 +759,8 @@ public struct EffectDocument: Codable, Sendable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case id, kind, bypassed, gain, eq, compressor, limiter
-        case reverb, delay, saturator, gate, chorus, bassEnhancer, bitCrusher, audioUnit
+        case reverb, delay, saturator, gate, chorus, bassEnhancer, bitCrusher
+        case djFilter, ringMod, flanger, hallReverb, tapeDelay, stereoWidth, audioUnit
         case sidechainSourceTrackID
     }
 
@@ -751,6 +782,12 @@ public struct EffectDocument: Codable, Sendable, Equatable {
         chorus = effect.chorus
         bassEnhancer = effect.bassEnhancer
         bitCrusher = effect.bitCrusher
+        djFilter = effect.djFilter
+        ringMod = effect.ringMod
+        flanger = effect.flanger
+        hallReverb = effect.hallReverb
+        tapeDelay = effect.tapeDelay
+        stereoWidth = effect.stereoWidth
         audioUnit = effect.audioUnit
         sidechainSourceTrackID = effect.sidechainSourceTrackID
     }
@@ -771,6 +808,12 @@ public struct EffectDocument: Codable, Sendable, Equatable {
         chorus = try c.decodeIfPresent(ChorusParams.self, forKey: .chorus)
         bassEnhancer = try c.decodeIfPresent(BassEnhancerParams.self, forKey: .bassEnhancer)
         bitCrusher = try c.decodeIfPresent(BitCrusherParams.self, forKey: .bitCrusher)
+        djFilter = try c.decodeIfPresent(DJFilterParams.self, forKey: .djFilter)
+        ringMod = try c.decodeIfPresent(RingModParams.self, forKey: .ringMod)
+        flanger = try c.decodeIfPresent(FlangerParams.self, forKey: .flanger)
+        hallReverb = try c.decodeIfPresent(HallReverbParams.self, forKey: .hallReverb)
+        tapeDelay = try c.decodeIfPresent(TapeDelayParams.self, forKey: .tapeDelay)
+        stereoWidth = try c.decodeIfPresent(StereoWidthParams.self, forKey: .stereoWidth)
         audioUnit = try c.decodeIfPresent(AudioUnitConfig.self, forKey: .audioUnit)
         sidechainSourceTrackID = try c.decodeIfPresent(UUID.self, forKey: .sidechainSourceTrackID)
     }
@@ -794,6 +837,12 @@ public struct EffectDocument: Codable, Sendable, Equatable {
         try c.encodeIfPresent(chorus, forKey: .chorus)
         try c.encodeIfPresent(bassEnhancer, forKey: .bassEnhancer)
         try c.encodeIfPresent(bitCrusher, forKey: .bitCrusher)
+        try c.encodeIfPresent(djFilter, forKey: .djFilter)
+        try c.encodeIfPresent(ringMod, forKey: .ringMod)
+        try c.encodeIfPresent(flanger, forKey: .flanger)
+        try c.encodeIfPresent(hallReverb, forKey: .hallReverb)
+        try c.encodeIfPresent(tapeDelay, forKey: .tapeDelay)
+        try c.encodeIfPresent(stereoWidth, forKey: .stereoWidth)
         try c.encodeIfPresent(audioUnit, forKey: .audioUnit)
         try c.encodeIfPresent(sidechainSourceTrackID, forKey: .sidechainSourceTrackID)
     }
@@ -809,6 +858,12 @@ public struct EffectDocument: Codable, Sendable, Equatable {
                                 reverb: reverb, delay: delay, saturator: saturator,
                                 gate: gate, chorus: chorus, bassEnhancer: bassEnhancer,
                                 bitCrusher: bitCrusher,
+                                djFilter: djFilter,
+                                ringMod: ringMod,
+                                flanger: flanger,
+                                hallReverb: hallReverb,
+                                tapeDelay: tapeDelay,
+                                stereoWidth: stereoWidth,
                                 audioUnit: audioUnit,
                                 sidechainSourceTrackID: sidechainSourceTrackID)
     }
