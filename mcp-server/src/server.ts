@@ -4299,6 +4299,7 @@ const fxKindSchema = z
     "hallReverb",
     "tapeDelay",
     "stereoWidth",
+    "phaser",
     "audioUnit",
   ])
   .describe(
@@ -4616,6 +4617,50 @@ const fxKindSchema = z
       "close to INAUDIBLE on a single speaker or a phone - by construction, " +
       "since the mono sum is unchanged. Tell them to use headphones or two " +
       "speakers, or show them the numbers above instead. " +
+      "`phaser` IS A SWEPT ALL-PASS PHASER AND IT IS NOT A FLANGER, WHICH IS " +
+      "THE ONLY THING ABOUT IT ANYONE GETS WRONG. Both sweep, both whoosh, " +
+      "and the two words get used interchangeably - but they are different " +
+      "effects and the difference is arithmetic, not taste. A `flanger` sums " +
+      "the signal with a DELAYED copy, which cancels at DOZENS of evenly " +
+      "spaced frequencies - 1, 3, 5, 7 times a base - and that dense, even " +
+      "comb is why a flanger sounds metallic and jet-like. This kind has no " +
+      "delay line at all. It sums the signal with a PHASE-SHIFTED copy, and " +
+      "cancels only where the phase shift reaches half a cycle, which happens " +
+      "a HANDFUL of times: exactly `stages` / 2. Those notches are UNEVENLY " +
+      "spaced and spread apart as they climb (at 8 stages, roughly 1, 3.4, " +
+      "7.5 and 25 times the lowest). Few, uneven, spreading notches is the " +
+      "soft vocal 'wow' of a phaser. If the user asked for a phaser, a sweep, " +
+      "a wah-like movement, something 'swirly' or 'breathing' on a pad, " +
+      "keys, guitar or a whole mix bus, this is the kind; if they asked for " +
+      "metallic, jet-plane or 'that whoosh from the 70s record', reach for " +
+      "`flanger` instead. Params: `rateHz` (0.02-10, default 0.5, " +
+      "logarithmic) is how FAST the sweep moves; `centerHz` (20-1000, " +
+      "default 300, logarithmic) is where the sweep BOTTOMS OUT - the " +
+      "'manual' knob; `depthOctaves` (0-4, default 3) is how far it travels " +
+      "UPWARD from there, and 0 FREEZES it into a fixed notch filter, which " +
+      "is a real setting (a wah pedal held still), not a broken one. " +
+      "`stages` (2-12, default 6) is the notch count control - EVEN NUMBERS " +
+      "ONLY, and an odd value is SNAPPED to the nearer even one, with the " +
+      "snapped value reported back so you never have to track the rule " +
+      "yourself. `feedback` (-0.95 to 0.95, default 0.5) sharpens the peaks " +
+      "between the notches into resonances, and the sign inverts the pattern; " +
+      "⚠️ IT ALSO CHANGES THE LOUDNESS in either direction, so match levels " +
+      "before choosing a side. `mix` (0-1, default 0.5, 0 is a BIT-EXACT " +
+      "BYPASS) is deepest at 0.5 because the notches ARE cancellation between " +
+      "dry and wet. ⚠️ `mix: 1` WITH `feedback: 0` IS VERY NEARLY INAUDIBLE " +
+      "and that is correct, not a bug - an all-pass chain alone changes no " +
+      "frequency's level at all, so with no dry signal left to cancel " +
+      "against there is nothing to hear. `stereoPhaseDeg` (0-180, default 90) " +
+      "offsets the right channel's sweep; 0 keeps a mono source mono. " +
+      "⭐ ASK FOR A STATED NOTCH LAYOUT RATHER THAN GUESSING: the `params` " +
+      "object in EVERY fx_add and fx_set_param RESULT - and in " +
+      "project_snapshot - carries `notchCount` and `firstNotchHz`, the number " +
+      "of notches this instance makes and where the lowest one sits at the " +
+      "bottom of the sweep. ⚠️ They are PER-INSTANCE echoes and are NOT in " +
+      "fx_describe, which returns the static schema (name/min/max/default/" +
+      "curve) and no values at all. `firstNotchHz` is well BELOW `centerHz` " +
+      "(0.41x it at 4 stages, 0.13x at 12), which is the usual surprise: the " +
+      "notches straddle the centre rather than starting at it. " +
       "`audioUnit` hosts an " +
       "installed Audio Unit EFFECT plugin — third-party or Apple effects registered " +
       "with the system — selected via fx_add's `audioUnit` param (REQUIRED when this " +
@@ -4687,7 +4732,7 @@ registerTool(
       "mix's master output chain (post-fader, the last stop before the speakers) instead " +
       "of a track/bus. The master chain hosts BUILT-IN effects only in v1 — `kind: " +
       "\"audioUnit\"` on \"master\" is rejected (pick one of gain|eq|compressor|limiter|" +
-      "reverb|delay|saturator|gate|chorus|bassEnhancer|bitCrusher|djFilter|ringMod|flanger|hallReverb|tapeDelay|stereoWidth). Classic mastering move: fx_add {trackId: " +
+      "reverb|delay|saturator|gate|chorus|bassEnhancer|bitCrusher|djFilter|ringMod|flanger|hallReverb|tapeDelay|stereoWidth|phaser). Classic mastering move: fx_add {trackId: " +
       "\"master\", kind: \"eq\"} then {trackId: \"master\", kind: \"limiter\"}, then " +
       "render_measure_loudness to check the level. Returns " +
       "`{effectId, effects}`: the new effect's server-minted id, and the track's full " +
@@ -5632,7 +5677,29 @@ server.registerTool(
       "and `bassMonoAmount` keep the low end centred at 12 dB/oct. \u26d4 NO " +
       "`mix` on this kind - a dry/wet blend on a mid/side widener is " +
       "algebraically just another width; the neutral bit-exact position is " +
-      "width 1, spread 0, bassMonoAmount 0).",
+      "width 1, spread 0, bassMonoAmount 0), and " +
+      "`phaser` (a SWEPT ALL-PASS PHASER - rateHz/centerHz/depthOctaves/" +
+      "stages/feedback/mix/stereoPhaseDeg: \u26d4 NOT a flanger, and that is " +
+      "the only thing anyone gets wrong about it. A flanger sums with a " +
+      "DELAYED copy and puts DOZENS of evenly spaced notches in the sound at " +
+      "1, 3, 5, 7 times a base frequency, which is why it sounds metallic " +
+      "and jet-like. This kind has no delay line: it sums with a " +
+      "PHASE-SHIFTED copy and puts in exactly `stages` / 2 notches - a " +
+      "handful - UNEVENLY spaced and spreading apart as they climb, which is " +
+      "the soft vocal 'wow' a phaser is for. `stages` is therefore the notch " +
+      "COUNT control, EVEN numbers only, and an odd value is snapped to the " +
+      "nearer even one. `centerHz` is where the sweep bottoms out and is NOT " +
+      "itself a notch - the lowest notch sits well below it - and every " +
+      "fx_add / fx_set_param result echoes `notchCount` and `firstNotchHz` " +
+      "in that effect's `params` (NOT here in fx_describe, which carries " +
+      "schemas and no values). `depthOctaves` 0 freezes the sweep into a " +
+      "fixed notch filter, which is a real setting; `feedback` is bipolar " +
+      "and sharpens the peaks between notches, and it CHANGES THE LOUDNESS; " +
+      "`mix` 0 is a bit-exact bypass and 0.5 is where the notches are " +
+      "deepest. \u26a0\ufe0f `mix` 1 with `feedback` 0 is very nearly " +
+      "INAUDIBLE and that is correct: an all-pass chain alone changes no " +
+      "frequency's level, so with no dry signal to cancel against there is " +
+      "nothing to hear).",
     inputSchema: {
       kind: fxKindSchema.optional().describe("Effect kind to describe. Omit to list every available kind."),
     },
@@ -7270,10 +7337,19 @@ registerTool(
       "map wholesale and re-mints every id. " +
       "Set the sampler to mono voice mode (instrument_set_sampler_param) for the classic " +
       "chopped-soul global choke, or per-pad chokeGroup for independent groups. " +
+      "THE SOURCE CLIP KEEPS PLAYING -- the chop READS the file, it does not consume the " +
+      "recording -- so by default the original and the pad reconstruction sound TOGETHER, " +
+      "measured +6.0 LU and comb-filtered (same waveform, a few samples adrift). Pass " +
+      "`muteSourceTrack: true` to mute the source's track inside the SAME undo step. " +
+      "Then read the TWO mute fields, which are different questions: `mutedTrackId` is " +
+      "what THIS call changed (and what undo restores), `sourceTrackMuted` is whether the " +
+      "original will be heard at all. They diverge -- an already-muted track gives null + " +
+      "true -- so never infer audibility from `mutedTrackId`. " +
       "Everything lands in ONE undo step. Returns {trackId, createdTrackId?, midiClipId?, " +
       "sampleRate, frameCount, sliceCount, headSeconds, slices: [{index, pitch, " +
       "startFrame, endFrame?, sourceSeconds, beat, strength?, snapOffsetFrames?, " +
-      "residualAmplitude?}], warnings} -- `sampleRate`/`frameCount` are the SOURCE FILE's " +
+      "residualAmplitude?}], warnings, mutedTrackId?, sourceTrackMuted} -- " +
+      "`sampleRate`/`frameCount` are the SOURCE FILE's " +
       "own, and every frame number is in those units.",
     inputSchema: {
       clipId: z
@@ -7394,6 +7470,18 @@ registerTool(
             "mode \"transients\" ONLY. Deliberately QUIETER than the source -- the slice " +
             "already carries its own recorded level."
         ),
+      muteSourceTrack: z
+        .boolean()
+        .optional()
+        .describe(
+          "Mute the SOURCE clip's track, inside the same undo step (default false). " +
+            "The chop is read-only, so without this the original AND the pad " +
+            "reconstruction play together -- measured +6.0 LU and comb-filtered, because " +
+            "they are the same waveform a few samples apart. Skipped with a warning when " +
+            "the source track IS the destination (it would silence the pads). Read " +
+            "`mutedTrackId` for what THIS call changed and `sourceTrackMuted` for whether " +
+            "the original will be heard -- they differ when the track was already muted."
+        ),
     },
   },
   async ({
@@ -7411,6 +7499,7 @@ registerTool(
     generateMIDI,
     atBeat,
     velocityFromStrength,
+    muteSourceTrack,
   }) =>
     toToolResult(() =>
       bridge.send("clip.sliceToSampler", {
@@ -7428,6 +7517,7 @@ registerTool(
         generateMIDI,
         atBeat,
         velocityFromStrength,
+        muteSourceTrack,
       })
     )
 );
@@ -10161,8 +10251,12 @@ const automationTargetSchema = z
       "BUILT-IN effect already in the track's insert chain — use it for filter sweeps, " +
       "reverb-mix rises, delay-feedback build-ups, etc.; built-in kinds (gain, eq, " +
       "compressor, limiter, reverb, delay, saturator, gate, chorus, bassEnhancer, " +
-      "bitCrusher, djFilter, ringMod, flanger, hallReverb, tapeDelay, stereoWidth) " +
-      "work today. \u2b50 `stereoWidth`'s `width` is a lane worth drawing - " +
+      "bitCrusher, djFilter, ringMod, flanger, hallReverb, tapeDelay, stereoWidth, " +
+      "phaser) " +
+      "work today. \u26d4 ONE EXCEPTION WORTH KNOWING: `phaser`'s `stages` is " +
+      "DISCRETE - draw it with `hold` interpolation, never a ramp, because a " +
+      "count change clears the all-pass state and a ramp would re-clear it " +
+      "every block. \u2b50 `stereoWidth`'s `width` is a lane worth drawing - " +
       "narrow in the verse, open out on the chorus - and it is one of the " +
       "few automatable params with NO caveat at all: it is a plain gain on " +
       "the stereo difference, so a ramp cannot click, cannot glide the pitch " +

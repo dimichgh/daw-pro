@@ -996,7 +996,7 @@ public enum CopilotToolCatalog {
                 ("kind", stringSchema(
                     "Which built-in effect to add. On the master chain only these built-ins are allowed.",
                     enumValues: ["gain", "eq", "compressor", "limiter", "reverb", "delay", "saturator", "gate", "chorus", "bassEnhancer", "bitCrusher", "djFilter", "ringMod", "flanger",
-                                        "hallReverb", "tapeDelay", "stereoWidth"])),
+                                        "hallReverb", "tapeDelay", "stereoWidth", "phaser"])),
                 ("index", integerSchema("Position in the chain, 0 = processed first. Omit to append at the end; out-of-range values clamp.", minimum: 0)),
             ], required: ["trackId", "kind"])
         ),

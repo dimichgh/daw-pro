@@ -57,6 +57,8 @@ enum EffectFactory {
             return TapeDelayEffect(params: descriptor.resolvedTapeDelay)
         case .stereoWidth:
             return StereoWidthEffect(params: descriptor.resolvedStereoWidth)
+        case .phaser:
+            return PhaserEffect(params: descriptor.resolvedPhaser)
         case .audioUnit:
             // Reached only when the registry has no prepared instance yet
             // (the chain state consults its provider first): bit-exact
@@ -103,6 +105,8 @@ enum EffectFactory {
             (instance as? TapeDelayEffect)?.apply(params: descriptor.resolvedTapeDelay)
         case .stereoWidth:
             (instance as? StereoWidthEffect)?.apply(params: descriptor.resolvedStereoWidth)
+        case .phaser:
+            (instance as? PhaserEffect)?.apply(params: descriptor.resolvedPhaser)
         case .audioUnit:
             // AU params are not on the generic surface in v0 — no-op.
             break

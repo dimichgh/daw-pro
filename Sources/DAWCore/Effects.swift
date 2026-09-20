@@ -120,6 +120,38 @@ public struct EffectDescriptor: Identifiable, Codable, Sendable, Equatable {
         /// this item exists to refuse. `spread` is the control that costs the
         /// ripple; `width` costs nothing on material that is already stereo.
         case stereoWidth
+        /// Swept all-pass phaser (m39-o) — a cascade of FIRST-ORDER ALL-PASS
+        /// sections sharing one corner frequency, summed with the dry signal,
+        /// with bipolar feedback around the chain.
+        ///
+        /// ⛔ **A PHASER IS NOT A FLANGER, AND THE DIFFERENCE IS MEASURABLE,
+        /// NOT A MATTER OF TASTE.** A flanger sums the signal with a DELAYED
+        /// copy of itself; that delay cancels at every odd multiple of
+        /// `1/(2·delay)`, so a flanger's notches are a HARMONIC comb — dozens
+        /// of them, at 1:3:5:7:9… — and sweeping the delay slides the whole
+        /// comb rigidly. This kind has no delay line at all. It sums the
+        /// signal with a PHASE-SHIFTED copy, and cancellation happens only
+        /// where the all-pass chain's total phase reaches an odd multiple of
+        /// 180°. An N-stage chain sweeps 0° → N·180°, so it produces exactly
+        /// **N/2 notches** — a handful, not a comb — and they sit at
+        /// `PhaserParams.notchRatio(stages:index:)` times the corner, which is
+        /// a NON-HARMONIC series (for 8 stages: 1 : 3.36 : 7.52 : 25.3, where
+        /// a flanger would be 1 : 3 : 5 : 7). Fewer notches, unevenly spaced,
+        /// is why a phaser sounds like a soft vocal "whoosh" where a flanger
+        /// sounds like a jet plane. `PhaserTests` measures both series from
+        /// rendered audio and cross-checks each law against the OTHER effect.
+        ///
+        /// ⛔ **THE SWEEP IS UPWARD-ONLY IN LOG FREQUENCY** — the §6.3.2
+        /// principle moved into the domain this kind actually sweeps:
+        /// `corner = centerHz · 2^(depthOctaves · (0.5 + 0.5·sin φ))`. A
+        /// bipolar sweep would dive below `centerHz` and, at large depths,
+        /// under the audible band; multiplying upward from a floor keeps the
+        /// corner in `[centerHz, centerHz·2^depthOctaves]` with no clamp and
+        /// no render-thread branch. ⭐ The ranges are chosen so the TOP of
+        /// that interval (16 kHz) is below `0.45·sampleRate` at every rate
+        /// this app runs at, so the `tan()` guard that would flatten the sweep
+        /// top never engages — `PhaserParams.maxCornerHz` pins it.
+        case phaser
         /// A hosted Audio Unit effect ('aufx', see `audioUnit`) — M4 (v).
         case audioUnit
     }
@@ -144,6 +176,7 @@ public struct EffectDescriptor: Identifiable, Codable, Sendable, Equatable {
     public var hallReverb: HallReverbParams?
     public var tapeDelay: TapeDelayParams?
     public var stereoWidth: StereoWidthParams?
+    public var phaser: PhaserParams?
     /// Hosted Audio Unit selection (additive optional, reusing the instrument
     /// `AudioUnitConfig`: component triple + display names + saved
     /// `fullStateForDocument`). Unlike the instrument rule, `kind ==
@@ -178,6 +211,7 @@ public struct EffectDescriptor: Identifiable, Codable, Sendable, Equatable {
     public var resolvedHallReverb: HallReverbParams { hallReverb ?? HallReverbParams() }
     public var resolvedTapeDelay: TapeDelayParams { tapeDelay ?? TapeDelayParams() }
     public var resolvedStereoWidth: StereoWidthParams { stereoWidth ?? StereoWidthParams() }
+    public var resolvedPhaser: PhaserParams { phaser ?? PhaserParams() }
 
     public init(
         id: UUID = UUID(),
@@ -200,6 +234,7 @@ public struct EffectDescriptor: Identifiable, Codable, Sendable, Equatable {
         hallReverb: HallReverbParams? = nil,
         tapeDelay: TapeDelayParams? = nil,
         stereoWidth: StereoWidthParams? = nil,
+        phaser: PhaserParams? = nil,
         audioUnit: AudioUnitConfig? = nil,
         sidechainSourceTrackID: UUID? = nil
     ) {
@@ -223,6 +258,7 @@ public struct EffectDescriptor: Identifiable, Codable, Sendable, Equatable {
         self.hallReverb = hallReverb
         self.tapeDelay = tapeDelay
         self.stereoWidth = stereoWidth
+        self.phaser = phaser
         self.audioUnit = audioUnit
         self.sidechainSourceTrackID = sidechainSourceTrackID
     }
@@ -2328,6 +2364,308 @@ public struct StereoWidthParams: Codable, Sendable, Equatable {
     }
 }
 
+/// Parameters for the built-in swept all-pass phaser (m39-o).
+/// `docs/design/2026-09-19-creative-effects.md` §2.1 rank 7 is the item; §6.0
+/// is the contract every new kind inherits.
+///
+/// ⛔ **THE ONE THING TO GET RIGHT: A PHASER IS NOT A FLANGER.** Both sum a
+/// signal with an altered copy of itself and sweep the result, and both are
+/// described as "whooshing", so they are routinely conflated. They are not the
+/// same effect and the difference is ARITHMETIC:
+///
+///  · A **flanger** sums with a DELAYED copy. A delay of `d` inverts every
+///    frequency whose half-period divides `d`, so it cancels at the ODD
+///    MULTIPLES of `1/(2d)` — an unbounded, evenly spaced, HARMONIC comb
+///    (1 : 3 : 5 : 7 : 9 …), dozens of notches inside the audible band.
+///    `FlangerParams.combNotchHz` is that law.
+///  · A **phaser** sums with a PHASE-SHIFTED copy. Each first-order all-pass
+///    section passes every frequency at full level while rotating its phase
+///    from 0° at DC to −180° at Nyquist, through −90° at the corner. An
+///    N-section chain therefore sweeps 0° → −N·180°, and the sum cancels only
+///    where that total crosses an ODD multiple of 180°. That happens exactly
+///    **N/2 times** (`notchCount(stages:)`), and the crossings land at
+///    `notchRatio(stages:index:)` times the corner — `tan((2k+1)·π/(2N))`,
+///    which is **NOT a harmonic series**. For 8 stages the ratios are
+///    1 : 3.36 : 7.52 : 25.3 where a flanger's would be 1 : 3 : 5 : 7.
+///
+/// So: **a handful of unevenly spaced notches that spread apart as they climb,
+/// versus a dense evenly spaced comb.** That is why a phaser reads as a soft
+/// vocal "wow" and a flanger as a metallic jet-plane sweep, and it is what
+/// `PhaserTests` measures — the same notch-finder is run over BOTH kinds and
+/// each law is asserted to fit its own effect and to be REJECTED by the other.
+///
+/// ⛔ **THE SWEEP IS UPWARD-ONLY, IN LOG FREQUENCY** — `FlangerParams`' §6.3.2
+/// law carried into the domain this kind sweeps:
+/// `corner = centerHz · 2^(depthOctaves · (0.5 + 0.5·sin φ))`. The obvious
+/// bipolar form would dive an octave or more BELOW `centerHz`, out of the band
+/// where a phaser has anything to cancel; multiplying upward from a floor
+/// keeps the corner inside `[centerHz, centerHz·2^depthOctaves]` with no clamp
+/// (which would flatten the sweep) and no render-thread branch (which would
+/// hide the mistake in the inner loop).
+///
+/// ⭐ **AND THE SWEEP CEILING IS STRUCTURAL, NOT CLAMPED.** An all-pass
+/// coefficient is `(t−1)/(t+1)` with `t = tan(π·fc/fs)`, and `tan` is past its
+/// vertical asymptote — so the coefficient magnitude exceeds 1 and the section
+/// becomes UNSTABLE — the moment `fc` reaches Nyquist. The ranges below are
+/// chosen so `centerRange.upperBound · 2^depthRange.upperBound` is
+/// `maxCornerHz` = 16 kHz, which is under `0.45·fs` for every sample rate at
+/// or above 35.6 kHz. `allpassCoefficient` still carries the guard (a 32 kHz
+/// project would reach it), but at 44.1/48/88.2/96 kHz it never engages, so
+/// the sweep top is never flattened. `maxCornerFitsEverySupportedRate` pins it.
+public struct PhaserParams: Codable, Sendable, Equatable {
+    /// LFO speed in Hz. 0.02 is one sweep every 50 seconds; 10 is a warble.
+    public var rateHz: Double
+    /// The all-pass corner at the BOTTOM of the sweep, in Hz — the "manual"
+    /// knob. With `depthOctaves` at 0 this alone places the notches and the
+    /// effect is a static filter (and, being time-invariant, is exactly what
+    /// an impulse response can characterise — which is how the tests measure).
+    public var centerHz: Double
+    /// How far the sweep travels ABOVE `centerHz`, in OCTAVES. The sweep RANGE,
+    /// never a half-range: the corner covers `centerHz … centerHz·2^depth`.
+    /// Octaves and not a percentage because a frequency sweep is heard
+    /// logarithmically — "one octave" is the same musical distance from 200 Hz
+    /// as from 2 kHz, where "+400 Hz" is not.
+    public var depthOctaves: Double
+    /// How many first-order all-pass sections are cascaded. EVEN ONLY, 2…12,
+    /// snapped by `snappedStages`. Each PAIR of sections buys one notch, so
+    /// this is the notch-count control: 4 → 2 notches, 8 → 4, 12 → 6.
+    public var stages: Double
+    /// How much of the all-pass chain's output is fed back into its input,
+    /// −0.95 … 0.95. BIPOLAR on purpose: the sign decides whether the
+    /// resonance sharpens the peaks between the notches or between the peaks.
+    public var feedback: Double
+    /// Dry/wet. 0 is a bit-exact bypass (rule 6.0.7).
+    public var mix: Double
+    /// Right-channel LFO phase offset from the left, in degrees.
+    public var stereoPhaseDeg: Double
+
+    public static let rateRange: ClosedRange<Double> = 0.02...10
+    public static let centerRange: ClosedRange<Double> = 20...1_000
+    public static let depthRange: ClosedRange<Double> = 0...4
+    public static let stagesRange: ClosedRange<Double> = 2...12
+    public static let feedbackRange: ClosedRange<Double> = -0.95...0.95
+    public static let mixRange: ClosedRange<Double> = 0...1
+    public static let stereoPhaseRange: ClosedRange<Double> = 0...180
+
+    /// The highest corner the upward-only sweep can reach, over the WHOLE
+    /// surface: `centerRange.upperBound · 2^depthRange.upperBound` = 16 kHz.
+    /// ONE HOME, so the engine's `tan` guard, the design claim that the guard
+    /// never engages, and the test that checks it cannot disagree.
+    public static let maxCornerHz =
+        centerRange.upperBound * pow(2, depthRange.upperBound)
+
+    /// The fraction of the sample rate `allpassCoefficient` will not let the
+    /// corner exceed — the `DJFilterEffect` guard's constant, deliberately not
+    /// a second one. 0.45·fs is comfortably under Nyquist, where `tan` is
+    /// finite and well conditioned.
+    public static let cornerCeilingFraction = 0.45
+
+    // MARK: The laws — ONE HOME each, in DAWCore, read by the DSP, the tests
+    // and `fx.describe`'s note text. Nothing below is re-derived anywhere else.
+
+    /// ⛔ THE SWEEP LAW. The all-pass corner in Hz at LFO phase `phaseRadians`,
+    /// swept UPWARD from `centerHz` by up to `depthOctaves` octaves. The result
+    /// is always in `[centerHz, centerHz·2^depthOctaves]` ⊆
+    /// `[centerRange.lowerBound, maxCornerHz]`, so it is always positive and
+    /// always below Nyquist at any supported rate — no clamp, no branch.
+    ///
+    /// Non-finite inputs fall back to the defaults rather than propagating: the
+    /// return value reaches `tan()` on the render thread, and a field-by-field
+    /// automation poke bypasses `init`, so the guard has to live in the law and
+    /// not only in the initialiser (the `FlangerParams.sweptDelayMs` precedent,
+    /// same shape, same reason).
+    public static func sweptCornerHz(phaseRadians: Double, centerHz: Double,
+                                     depthOctaves: Double) -> Double {
+        let floorHz = (centerHz.isFinite ? centerHz : 300).clamped(to: centerRange)
+        let octaves = (depthOctaves.isFinite ? depthOctaves : 3).clamped(to: depthRange)
+        guard phaseRadians.isFinite else { return floorHz }
+        return floorHz * pow(2, octaves * (0.5 + 0.5 * sin(phaseRadians)))
+    }
+
+    /// ⛔ THE COEFFICIENT LAW — `a` for the first-order all-pass
+    /// `H(z) = (a + z⁻¹) / (1 + a·z⁻¹)`, realised per sample as
+    /// `y = a·x + s`, `s' = x − a·y`.
+    ///
+    /// ⚠️ **THE SIGN IS THE WHOLE POINT AND IT IS EASY TO GET BACKWARDS.**
+    /// `a = (t − 1) / (t + 1)`, with `t = tan(π·fc/fs)` — NOT `(1 − t)/(1 + t)`,
+    /// which is the form that appears in one-pole and shelving derivations and
+    /// which, dropped into the transfer function above, gives a section whose
+    /// phase at its own corner is a few degrees rather than −90°. Both signs
+    /// are stable all-passes and both produce `stages/2` notches, so a NOTCH
+    /// COUNT test cannot tell them apart; only `notchHz` can, which is why the
+    /// suite measures positions and not just count.
+    ///
+    /// `a` runs from −1 (corner at DC) through 0 (corner at fs/4) to +1
+    /// (corner at Nyquist), so `|a| < 1` and the section is stable everywhere
+    /// the guard admits.
+    public static func allpassCoefficient(cornerHz: Double, sampleRate: Double) -> Double {
+        guard sampleRate.isFinite, sampleRate > 0 else { return 0 }
+        let hz = cornerHz.isFinite ? cornerHz : centerRange.lowerBound
+        // The `DJFilterEffect` guard, for its reason: a 32 kHz project has a
+        // 16 kHz Nyquist, where an unguarded `tan` is past its asymptote.
+        let guarded = min(max(hz, 5.0), sampleRate * cornerCeilingFraction)
+        let t = tan(.pi * guarded / sampleRate)
+        return (t - 1) / (t + 1)
+    }
+
+    /// Even-only, 2…12. An ODD count would put its last phase crossing exactly
+    /// AT Nyquist — a notch nobody can hear, and a notch count that no longer
+    /// equals `stages/2`. Snapping to even keeps the one law this control
+    /// exists to express exact.
+    ///
+    /// ⚠️ An odd input is an exact TIE between two even neighbours, and the tie
+    /// goes UP (5 → 6, 9 → 10): `Double.rounded()`'s "half away from zero",
+    /// used rather than a second hand-rolled rule. A NON-FINITE input falls
+    /// back to the 6 default, like every other law here — it is not "very
+    /// large", it is "no answer".
+    public static func snappedStages(_ raw: Double) -> Int {
+        let clamped = (raw.isFinite ? raw : 6).clamped(to: stagesRange)
+        let even = (clamped / 2).rounded() * 2
+        return Int(even.clamped(to: stagesRange))
+    }
+
+    /// How many notches a chain of `stages` sections produces: `stages/2`.
+    /// The chain's total phase sweeps 0 → −stages·180°, and the dry+wet sum
+    /// cancels at each odd multiple of 180° it crosses.
+    public static func notchCount(stages: Double) -> Int { snappedStages(stages) / 2 }
+
+    /// ⛔ THE NON-HARMONIC LAW, and the reason this kind is not a flanger.
+    /// Notch `index` sits at this multiple of the corner frequency:
+    /// `tan((2·index + 1)·π / (2·N))` for an N-stage chain.
+    ///
+    /// For 8 stages: 0.199, 0.668, 1.497, 5.027 — ratios to the first of
+    /// 1 : 3.36 : 7.52 : 25.3. A flanger's comb would be 1 : 3 : 5 : 7. The
+    /// series is not harmonic at any stage count, and it SPREADS: successive
+    /// notches get further apart, which is exactly what the ear reads as
+    /// "phaser" rather than "comb".
+    ///
+    /// ⚠️ **THIS IS THE LOW-FREQUENCY (ANALOG-PROTOTYPE) RATIO, AND IT IS A
+    /// GOOD APPROXIMATION ONLY WHERE THE PRODUCT `corner · ratio` IS WELL
+    /// BELOW NYQUIST.** The exact digital answer is `notchHz`, which prewarps
+    /// through `tan`. ⛔ MEASURED, because the first version of this comment
+    /// claimed agreement "anywhere in `centerRange`" and that was FALSE: a
+    /// 12-stage chain's TOP ratio is 7.60, so a 1 kHz corner puts that notch at
+    /// a nominal 7 596 Hz while the exact digital answer at 44.1 kHz is
+    /// 6 972 Hz — **8.9 % away, 54× the index-0 bound.** The agreement claim
+    /// holds for **`index == 0` at the sweep floor** — the only place the
+    /// shipped derived field uses it — where the worst case over the whole
+    /// surface is 0.17 %
+    /// (`notchRatioMatchesTheExactDigitalLawAtTheSweepFloor` pins it).
+    /// **Use `notchHz` for anything else.**
+    /// Returns 0 for an out-of-range index rather than an undefined tangent.
+    public static func notchRatio(stages: Double, index: Int) -> Double {
+        let n = snappedStages(stages)
+        guard index >= 0, index < n / 2 else { return 0 }
+        return tan(Double(2 * index + 1) * .pi / Double(2 * n))
+    }
+
+    /// ⛔ THE EXACT DIGITAL NOTCH LAW. Where notch `index` actually lands, in
+    /// Hz, for an `stages`-section chain whose corner is `cornerHz` at sample
+    /// rate `sampleRate`:
+    ///
+    ///     f = (fs/π) · arctan( tan(π·fc/fs) · tan((2k+1)·π/(2N)) )
+    ///
+    /// Derivation, because a magic formula is a formula nobody can check: one
+    /// section's phase is `φ(ω) = −2·arctan( tan(ω/2) / tan(ω_c/2) )`, N of
+    /// them give `N·φ`, and a notch is where `N·φ = −(2k+1)·π`. Solving for ω
+    /// and converting to Hz gives the line above. It is EXACT — the bilinear
+    /// relation between the analog prototype and this digital section is exact
+    /// — and it is what the rendered-notch test compares against.
+    ///
+    /// ⚠️ Valid at `feedback == 0` and `mix == 0.5`, where the dry and wet
+    /// paths are equal and the nulls are complete. Feedback deepens and
+    /// slightly shifts the response around the notches; a mix away from 0.5
+    /// makes them shallower without moving them.
+    public static func notchHz(cornerHz: Double, stages: Double, index: Int,
+                               sampleRate: Double) -> Double {
+        let ratio = notchRatio(stages: stages, index: index)
+        guard ratio > 0, sampleRate.isFinite, sampleRate > 0 else { return 0 }
+        let hz = cornerHz.isFinite ? cornerHz : centerRange.lowerBound
+        let guarded = min(max(hz, 5.0), sampleRate * cornerCeilingFraction)
+        let t = tan(.pi * guarded / sampleRate)
+        return sampleRate / .pi * atan(t * ratio)
+    }
+
+    /// Where the LOWEST notch sits when the LFO is at the bottom of its travel
+    /// — the number that makes `centerHz` and `stages` legible together, and
+    /// the one `fx.add` / `fx.setParam` echo back per instance.
+    ///
+    /// Sample-rate-free on purpose: at the sweep FLOOR the corner never exceeds
+    /// `centerRange.upperBound` (1 kHz), which is far enough below every
+    /// supported Nyquist that the analog ratio and the exact digital law agree
+    /// to better than 0.2 % — and a derived field that changed when the user
+    /// changed project rate would be a worse lie than a 0.2 % one.
+    public static func firstNotchHzAtSweepFloor(centerHz: Double, stages: Double) -> Double {
+        let floorHz = (centerHz.isFinite ? centerHz : 300).clamped(to: centerRange)
+        return floorHz * notchRatio(stages: stages, index: 0)
+    }
+
+    /// The right channel's LFO phase offset in RADIANS (the unit a phase
+    /// accumulator actually wants). 180° = half a cycle = the two channels
+    /// sweeping in opposition.
+    public static func stereoPhaseOffsetRadians(stereoPhaseDeg degrees: Double) -> Double {
+        guard degrees.isFinite else { return 0 }
+        return degrees.clamped(to: stereoPhaseRange) * .pi / 180
+    }
+
+    /// The effect's steady-state gain on a CONSTANT input — the number that
+    /// explains why raising `feedback` makes the effect louder, and the one the
+    /// demo's loudness note and the engine's DC test both read.
+    ///
+    /// An all-pass chain has gain exactly +1 at DC (each section's `(a+1)/(1+a)`
+    /// is 1), so the recirculation resolves to `1/(1 − feedback)` there, blended
+    /// by `mix`. That is the SAME closed form as `FlangerParams.dcGain`, and it
+    /// is the same form for the same structural reason: both are unity-gain
+    /// recirculations. It is repeated here rather than shared because the two
+    /// kinds' ranges and defaults are independent and a shared home would
+    /// invite one kind's clamp to be applied to the other's value.
+    public static func dcGain(feedback: Double, mix: Double) -> Double {
+        let f = (feedback.isFinite ? feedback : 0).clamped(to: feedbackRange)
+        let m = (mix.isFinite ? mix : 0).clamped(to: mixRange)
+        return (1 - m) + m / (1 - f)
+    }
+
+    public init(rateHz: Double = 0.5, centerHz: Double = 300, depthOctaves: Double = 3,
+                stages: Double = 6, feedback: Double = 0.5, mix: Double = 0.5,
+                stereoPhaseDeg: Double = 90) {
+        // Non-finite guards ahead of every clamp: `clamped(to:)` on a NaN
+        // returns the NaN (both comparisons in `min(max(…))` are false against
+        // NaN), and these values reach `tan()`, a phase accumulator and two
+        // gain multiplies on the render thread.
+        self.rateHz = (rateHz.isFinite ? rateHz : 0.5).clamped(to: Self.rateRange)
+        self.centerHz = (centerHz.isFinite ? centerHz : 300).clamped(to: Self.centerRange)
+        self.depthOctaves = (depthOctaves.isFinite ? depthOctaves : 3)
+            .clamped(to: Self.depthRange)
+        // SNAPPED, not merely clamped — `stages` is discrete, and what is
+        // stored is what is in force (the `RingModParams.waveform` precedent),
+        // so nothing downstream has to keep its own copy of the even rule.
+        self.stages = Double(Self.snappedStages(stages))
+        self.feedback = (feedback.isFinite ? feedback : 0.5).clamped(to: Self.feedbackRange)
+        self.mix = (mix.isFinite ? mix : 0.5).clamped(to: Self.mixRange)
+        self.stereoPhaseDeg = (stereoPhaseDeg.isFinite ? stereoPhaseDeg : 90)
+            .clamped(to: Self.stereoPhaseRange)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case rateHz, centerHz, depthOctaves, stages, feedback, mix, stereoPhaseDeg
+    }
+
+    /// Decoding routes through the clamping init, `decodeIfPresent ?? default`
+    /// per field, so a partial object decodes (the `ChorusParams` pattern).
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            rateHz: try c.decodeIfPresent(Double.self, forKey: .rateHz) ?? 0.5,
+            centerHz: try c.decodeIfPresent(Double.self, forKey: .centerHz) ?? 300,
+            depthOctaves: try c.decodeIfPresent(Double.self, forKey: .depthOctaves) ?? 3,
+            stages: try c.decodeIfPresent(Double.self, forKey: .stages) ?? 6,
+            feedback: try c.decodeIfPresent(Double.self, forKey: .feedback) ?? 0.5,
+            mix: try c.decodeIfPresent(Double.self, forKey: .mix) ?? 0.5,
+            stereoPhaseDeg:
+                try c.decodeIfPresent(Double.self, forKey: .stereoPhaseDeg) ?? 90)
+    }
+}
+
 /// Static parameter schema for every effect kind — the single source of truth
 /// for `fx.describe`, control-layer validation, and MCP tool schemas.
 public struct EffectParamSpec: Sendable, Equatable {
@@ -3524,6 +3862,144 @@ public struct EffectParamSpec: Sendable, Equatable {
                                     + "into a settled image rather than swelling up from "
                                     + "nothing. The curve is linear because the range reaches 0."),
             ]
+        // m39-o — ORDER IS FROZEN. Position IS the automation slot:
+        // 0 rateHz, 1 centerHz, 2 depthOctaves, 3 stages, 4 feedback, 5 mix,
+        // 6 stereoPhaseDeg. APPEND ONLY, forever. ⛔ NO `resonance` SLOT IS
+        // RESERVED: `feedback` already is the resonance control on this
+        // topology, and reserving a slot would buy an ordering that was never
+        // at risk (rule 6.0.1's corollary).
+        case .phaser:
+            return [
+                EffectParamSpec(name: "rateHz", range: PhaserParams.rateRange,
+                                defaultValue: 0.5, unit: "Hz", curve: .logarithmic,
+                                modulatable: .yes,
+                                note: "How fast the sweep moves, in cycles per second. This is "
+                                    + "the speed of the whoosh, not its size. 0.02 is one slow "
+                                    + "pass every 50 seconds - a drift you notice only across a "
+                                    + "whole section; 0.5 (the default) is a comfortable breathing "
+                                    + "sweep; 2-4 is a nervous wobble; 10 turns the sweep itself "
+                                    + "into a texture. The curve is logarithmic, so equal knob "
+                                    + "travel is equal musical travel across all 9 octaves - on a "
+                                    + "linear control everything under 1 Hz, which is most of the "
+                                    + "useful range, would be crammed into the first tenth of the "
+                                    + "knob. Safe to automate or modulate: the sweep position is "
+                                    + "continuous across a rate change, so speeding up never "
+                                    + "jumps the notches."),
+                EffectParamSpec(name: "centerHz", range: PhaserParams.centerRange,
+                                defaultValue: 300, unit: "Hz", curve: .logarithmic,
+                                modulatable: .yes,
+                                note: "The bottom of the sweep, in Hz - the 'manual' knob. Park "
+                                    + "the LFO (set `depthOctaves` to 0) and this alone decides "
+                                    + "where the notches sit. It is not itself a notch frequency: "
+                                    + "the notches are spread around it by `stages`, at the "
+                                    + "multiples listed under that control. At the 6-stage, 300 Hz "
+                                    + "default the lowest notch is at about 80 Hz, with the others "
+                                    + "at 300 and 1120 Hz. LOW IS THICK: 20-100 Hz puts the "
+                                    + "whole pattern under the body of most sounds and the effect "
+                                    + "becomes a slow tonal breathing; 1000 Hz is up in the "
+                                    + "presence range and reads as a thin, whistling sweep. The "
+                                    + "curve is logarithmic because that is how pitch is heard. "
+                                    + "⭐ The `params` object in every fx.add and fx.setParam "
+                                    + "RESULT reports `firstNotchHz` for the current setting, so "
+                                    + "you never have to work this out by hand."),
+                EffectParamSpec(name: "depthOctaves", range: PhaserParams.depthRange,
+                                defaultValue: 3, unit: "oct", curve: .linear,
+                                modulatable: .yes,
+                                note: "How FAR the sweep travels, in octaves, measured UPWARD "
+                                    + "from `centerHz`. The corner covers centerHz to centerHz "
+                                    + "doubled that many times, and never goes below the floor - "
+                                    + "that is deliberate, and it is what keeps a deep sweep from "
+                                    + "diving out of the band where there is anything to cancel. "
+                                    + "0 FREEZES THE SWEEP, which is a real setting and not a "
+                                    + "degenerate one: a parked phaser is a fixed notch filter, "
+                                    + "the sound of a wah pedal held still, and it is the setting "
+                                    + "to use when you want the colour without the movement. 1 is "
+                                    + "a subtle shimmer; 3 (the default) is the classic sweep; 4 "
+                                    + "is a dramatic full-range climb. Think of `centerHz` as "
+                                    + "WHERE the effect sits and this as HOW FAR it swings from "
+                                    + "there. The curve is linear because the range reaches 0."),
+                EffectParamSpec(name: "stages", range: PhaserParams.stagesRange,
+                                defaultValue: 6, unit: "stages", curve: .linear,
+                                modulatable: .refused,
+                                note: "How many all-pass sections are cascaded, and therefore HOW "
+                                    + "MANY NOTCHES the effect puts in the sound: every TWO "
+                                    + "stages buy one notch, so 4 stages give 2 notches, 6 (the "
+                                    + "default) give 3, 8 give 4 and 12 give 6. EVEN NUMBERS "
+                                    + "ONLY - an odd count is SNAPPED to the nearer even one and "
+                                    + "the snapped value is what is reported back, so what you "
+                                    + "read is always what is in force. More stages is denser and "
+                                    + "more dramatic, not louder. ⭐ THIS IS WHAT MAKES A PHASER "
+                                    + "A PHASER AND NOT A FLANGER, and it is worth knowing: a "
+                                    + "flanger puts DOZENS of notches in the sound, evenly "
+                                    + "spaced at 1, 3, 5, 7 times a base frequency, which is why "
+                                    + "it sounds metallic and jet-like. A phaser puts a HANDFUL "
+                                    + "in, unevenly spaced and spreading apart as they climb - at "
+                                    + "8 stages they sit at roughly 1, 3.4, 7.5 and 25 times the "
+                                    + "lowest one. That is the soft vocal 'wow' this effect is "
+                                    + "for. Discrete, so it cannot be MODULATED; automate it with "
+                                    + "a `hold` lane if you want it to change, and expect a "
+                                    + "character step rather than a glide - the all-pass state is "
+                                    + "cleared when the count changes, because a stage that has "
+                                    + "been out of circuit holds a stale value."),
+                EffectParamSpec(name: "feedback", range: PhaserParams.feedbackRange,
+                                defaultValue: 0.5, unit: "linear", curve: .linear,
+                                modulatable: .yes,
+                                note: "How much of the all-pass chain's output is fed back into "
+                                    + "its input, and the single biggest change to the character. "
+                                    + "0 is a plain phaser - soft, wide, no ringing. Turn it "
+                                    + "POSITIVE and the peaks between the notches sharpen into "
+                                    + "resonances: 0.5 (the default) is a singing sweep, 0.95 is "
+                                    + "on the edge of self-oscillation. Turn it NEGATIVE and the "
+                                    + "pattern inverts - what was a peak becomes a dip - which is "
+                                    + "a hollower, more nasal version of the same gesture and is "
+                                    + "why this control crosses zero at all. LEVEL WARNING, "
+                                    + "because it is real and not a mixing choice: moving this "
+                                    + "CHANGES THE LOUDNESS, in either direction, and how much "
+                                    + "depends on the material. Match levels by ear, or put a "
+                                    + "limiter after this insert, before deciding which side you "
+                                    + "prefer. The exact arithmetic, if you want it, holds ON A "
+                                    + "STEADY TONE: the whole unit's gain is (1 - mix) + mix / "
+                                    + "(1 - feedback), so at mix 0.5 feedback 0.5 gives 1.5x "
+                                    + "(+3.5 dB) against feedback 0's 1.0x, and feedback -0.5 "
+                                    + "gives 0.83x (-1.6 dB). ⚠️ That closed form is the gain at "
+                                    + "DC and is NOT a whole-programme loudness prediction; on "
+                                    + "broadband material the notches are what you hear and the "
+                                    + "sign can come out the other way. The curve is `linear` "
+                                    + "because the range crosses 0 and a logarithmic taper "
+                                    + "cannot."),
+                EffectParamSpec(name: "mix", range: PhaserParams.mixRange,
+                                defaultValue: 0.5, unit: "linear", curve: .linear,
+                                modulatable: .yes,
+                                note: "Dry/wet. 0 is a BIT-EXACT bypass - the audio is not "
+                                    + "touched at all, though the all-pass chain and the sweep "
+                                    + "keep running underneath so raising the mix later picks up "
+                                    + "mid-sweep rather than jumping. 0.5 (the default) is where "
+                                    + "a phaser belongs and is not an arbitrary middle: the "
+                                    + "notches are CANCELLATION between the dry signal and its "
+                                    + "phase-shifted copy, so they are deepest when the two are "
+                                    + "equal. Move away from 0.5 in either direction and the "
+                                    + "notches get shallower, so the effect gets subtler rather "
+                                    + "than differently coloured. 1 is the phase-shifted signal "
+                                    + "alone, with no dry copy left to cancel against: at "
+                                    + "feedback 0 that is INAUDIBLE on most material, because an "
+                                    + "all-pass chain changes no frequency's level at all - it "
+                                    + "is the one setting of this effect that can sound like "
+                                    + "nothing is happening, and that is not a bug."),
+                EffectParamSpec(name: "stereoPhaseDeg", range: PhaserParams.stereoPhaseRange,
+                                defaultValue: 90, unit: "deg", curve: .linear,
+                                modulatable: .yes,
+                                note: "How far the RIGHT channel's sweep is rotated from the "
+                                    + "left one, in degrees, which is what makes the effect move "
+                                    + "ACROSS the stereo field instead of straight up and down. "
+                                    + "0 means both channels sweep together, so a mono source "
+                                    + "stays perfectly mono - use it when mono compatibility "
+                                    + "matters more than width. 90 (the default) is a quarter "
+                                    + "cycle apart and is the classic wide sweep. 180 puts the "
+                                    + "two channels in opposition, the widest setting, which is "
+                                    + "also the one that cancels most if the mix is later summed "
+                                    + "to mono. Check a mono fold-down before committing to a "
+                                    + "large value. On a mono track this does nothing at all."),
+            ]
         case .audioUnit:
             // AU parameters are not on the generic name/value surface in v0;
             // bypass/reorder/latency work generically through the chain.
@@ -3744,6 +4220,18 @@ public extension EffectDescriptor {
             case "spread": return p.spread
             case "bassMonoHz": return p.bassMonoHz
             case "bassMonoAmount": return p.bassMonoAmount
+            default: return nil
+            }
+        case .phaser:
+            let p = resolvedPhaser
+            switch name {
+            case "rateHz": return p.rateHz
+            case "centerHz": return p.centerHz
+            case "depthOctaves": return p.depthOctaves
+            case "stages": return p.stages
+            case "feedback": return p.feedback
+            case "mix": return p.mix
+            case "stereoPhaseDeg": return p.stereoPhaseDeg
             default: return nil
             }
         case .audioUnit:

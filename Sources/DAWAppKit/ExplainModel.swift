@@ -292,6 +292,15 @@ public enum ExplainID: String, CaseIterable, Sendable {
     /// no violet.
     case samplerEditor
 
+    // MARK: Pad grid (m39-pads)
+    /// **The 4×4 PAD GRID and the CHOP TO PADS card it is fed by.** ONE id for
+    /// both, the `samplerEditor` / `exportDialog` shared-control rule: the grid
+    /// and the card that fills it are a single coherent surface, and a user who
+    /// needs the grid explained needs the chop explained in the same breath.
+    /// NOT an AI surface in itself — no violet on the affordance — even though
+    /// an individual PAD goes violet when the material it holds is AI-made.
+    case padGrid
+
     // MARK: AI panels (violet affordances — Rule 3)
     case aiCopilot
     case aiSketchpad
@@ -430,6 +439,9 @@ public enum ExplainCatalog {
         .musicalTyping: ExplainEntry(
             title: "Musical Typing",
             body: "Turns your computer keyboard into a piano: the letter keys play notes, and an on-screen keyboard appears so you can click them too. Z and X shift to lower or higher notes; C and V play softer or louder. Arm a track first and what you play is recorded."),
+        .padGrid: ExplainEntry(
+            title: "Pads",
+            body: "Turns a recording into sixteen squares you can play. CHOP cuts the clip you picked into pieces and puts each on its own pad. Click a pad, or press its letter key, to fire it — aim high for a louder hit. Z and X reach the next sixteen. Lit means sounding, dim means empty."),
         .loopDeck: ExplainEntry(
             title: "Looper",
             body: "Builds a song by stacking short parts that repeat. Press LOOPER, arm a track, and play — what you played joins the loop and keeps going while you switch tracks and add the next part. The lamps show what is recording; the back arrow takes off the last part."),

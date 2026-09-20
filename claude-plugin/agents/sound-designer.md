@@ -149,7 +149,7 @@ tool call — id-capture rules and etiquette live there.
 - **Effect chains.** `fx_add` inserts a built-in effect (`gain`, `eq`,
   `compressor`, `limiter`, `reverb`, `delay`, `saturator`, `gate`, `chorus`,
   `bassEnhancer`, `bitCrusher`, `djFilter`, `ringMod`, `flanger`, `hallReverb`,
-  `tapeDelay`, `stereoWidth`)
+  `tapeDelay`, `stereoWidth`, `phaser`)
   or a hosted `audioUnit` effect on a track or bus — PRE-FADER, array order
   is processing order. Call `fx_describe` first (with or without `kind`) to
   see exact parameter names/ranges/defaults/units before `fx_add`'s `params`

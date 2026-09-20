@@ -115,6 +115,7 @@ public enum MixerFormat {
         case .hallReverb: return "Hall Reverb"
         case .tapeDelay: return "Tape Delay"
         case .stereoWidth: return "Stereo Width"
+        case .phaser: return "Phaser"
         case .audioUnit:
             let name = effect.audioUnit?.name ?? ""
             return name.isEmpty ? "Audio Unit" : name

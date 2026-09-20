@@ -158,6 +158,10 @@ test("clip_slice_to_sampler forwards {clipId} (bare) and omits every unset optio
     "generateMIDI",
     "atBeat",
     "velocityFromStrength",
+    // m39-pads. ⚠️ ESPECIALLY THIS ONE: a default duplicated here would mean a
+    // bare call started muting a track the caller never named, which is the
+    // exact behaviour change the app-side FALSE default exists to prevent.
+    "muteSourceTrack",
   ]) {
     assert.equal(
       calls[0]!.params[key],
@@ -203,6 +207,7 @@ test("clip_slice_to_sampler forwards every parameter explicitly", async () => {
       generateMIDI: false,
       atBeat: 16,
       velocityFromStrength: true,
+      muteSourceTrack: true,
     },
   });
 
@@ -222,7 +227,57 @@ test("clip_slice_to_sampler forwards every parameter explicitly", async () => {
     generateMIDI: false,
     atBeat: 16,
     velocityFromStrength: true,
+    muteSourceTrack: true,
   });
+});
+
+test("⭐ muteSourceTrack round-trips, and the response's TWO mute readings survive (m39-pads)", async () => {
+  // The chop is read-only, so without this the original and the pad
+  // reconstruction play together — measured +6.0 LU and comb-filtered.
+  const clipId = randomUUID();
+  const mutedTrackId = randomUUID();
+  queuedResult = { ...makeStubbedChop(), mutedTrackId, sourceTrackMuted: true };
+
+  const result = await client.callTool({
+    name: "clip_slice_to_sampler",
+    arguments: { clipId, muteSourceTrack: true },
+  });
+
+  assert.equal(calls[0]!.params["muteSourceTrack"], true);
+  const parsed = parseJSON(result as any);
+  // ⭐⭐ TWO FIELDS, NOT ONE SPELT TWICE. `mutedTrackId` answers "what did this
+  // call change, and what will undo restore?"; `sourceTrackMuted` answers "will
+  // the original be heard?". They diverge in BOTH directions — an already-muted
+  // track gives null + true, a chop onto the source's own track gives null +
+  // false — so an agent inferring audibility from `mutedTrackId` would tell a
+  // user to go mute a track that is already silent.
+  assert.equal(parsed.mutedTrackId, mutedTrackId);
+  assert.equal(parsed.sourceTrackMuted, true);
+
+  // The already-muted combination, verbatim across the boundary.
+  calls.length = 0;
+  queuedResult = {
+    ...makeStubbedChop(),
+    mutedTrackId: null,
+    sourceTrackMuted: true,
+    warnings: ["“Break” was already muted, so nothing changed there"],
+  };
+  const second = parseJSON((await client.callTool({
+    name: "clip_slice_to_sampler",
+    arguments: { clipId, muteSourceTrack: true },
+  })) as any);
+  assert.equal(second.mutedTrackId, null, "nothing was muted BY THIS CALL");
+  assert.equal(second.sourceTrackMuted, true, "…and the original is still inaudible");
+  assert.match(second.warnings[0], /already muted/);
+});
+
+test("muteSourceTrack is rejected at the schema layer when it is not a boolean", async () => {
+  const result = (await client.callTool({
+    name: "clip_slice_to_sampler",
+    arguments: { clipId: randomUUID(), muteSourceTrack: "yes" },
+  })) as any;
+  assert.ok(result.isError);
+  assert.equal(calls.length, 0, "the schema refused before the bridge");
 });
 
 test("clip_slice_to_sampler forwards the divisions and grid modes' own parameters", async () => {
@@ -361,6 +416,11 @@ test("⭐ clip_slice_to_sampler's description names the CHOP use case, the veloc
   // The two refusals that would otherwise look like a successful chop.
   assert.match(description, /REJECT|rejects?/i);
   assert.match(description, /truncate/i);
+  // m39-pads: the +6 LU surprise, and the two readings that answer it. An
+  // agent that cannot find `muteSourceTrack` will chop, listen, and hear a
+  // comb-filtered double with nothing to attribute it to.
+  assert.match(description, /muteSourceTrack/);
+  assert.match(description, /sourceTrackMuted/);
   // Where the caller goes next. m32-c: this used to assert only /zonePatches/,
   // which the description satisfied by telling the agent to call
   // `track_set_instrument {sampler: {zonePatches}}` — a call the MCP schema

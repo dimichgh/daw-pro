@@ -155,7 +155,7 @@ test("an unknown effect kind is still rejected at the MCP boundary", async () =>
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const invented: any = await client.callTool({
     name: "fx_add",
-    arguments: { trackId: "track-1", kind: "phaser" },
+    arguments: { trackId: "track-1", kind: "wobbulator" },
   });
   assert.ok(invented.isError, "an invented kind must be rejected at the boundary");
   assert.equal(calls.length, 0, "nothing reached the bridge");

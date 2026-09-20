@@ -1,5 +1,375 @@
 # Changelog
 
+## 2026-09-20 — The pad grid: a human can finally reach the chopper
+
+**`clip.sliceToSampler` has had no door.** Measured 2026-09-19 with positive
+controls: `grep -rniE 'padGrid|drumPad|padBank|fingerDrum' Sources/` returned
+**zero** (control: `breathPad` 18 files), and `grep -rli 'sliceToSampler'
+Sources/DAWApp Sources/DAWAppKit` returned **zero files**. An AI agent could chop
+a record into 53 playable pads over MCP and a user could reach none of it. This
+ships the surface.
+
+**A 4×4 MPC grid as Musical Typing's THIRD FACE.** The strip already resolves
+the hard half of a performance surface — which track is the target, whether it
+can sound, whether a take is capturing, the sustain pedal, the velocity ladder,
+release-on-record-edge, release-on-track-change. A pad grid mounted anywhere
+else would need all of it again and the second copy would drift. So `KEYS /
+CHORDS` becomes `KEYS / CHORDS / PADS`, on the strip's own stated law: *the
+piano is not relabelled, it is REPLACED*, because in pads mode a key names a
+SLICE and not a pitch.
+
+⭐⭐ **PAD 1 IS BOTTOM-LEFT BECAUSE THAT IS WHAT NOTE 36 MEANS.** Every MPC and
+every Drum Rack lays 36 at the bottom-left square and counts upward, which is
+exactly why `SliceToSamplerSettings.defaultBaseNote` is 36 in the first place. A
+top-left grid would disagree with the note number — a picture that lies about
+what a click does.
+
+⛔⛔ **A BANK STRIDES SIXTEEN, NOT TWELVE, and that is the bug a reviewer should
+hunt.** Musical Typing's `baseOctave` steps by twelve; reusing it for banks is
+the obvious economy and it is wrong, because a bank is sixteen pads. It would
+make bank 2 start four pads INSIDE bank 1 — overlapping four slices and hiding
+four more — while every bank-1-only test stayed green. The controller therefore
+carries `padBaseNote` / `padBank` as their own state. Planted, it reddens three
+named tests.
+
+⭐⭐⭐ **THE COMPUTER KEYBOARD DRUMS THE PADS FROM A SPATIALLY ALIGNED 4×4
+BLOCK — the keys sit under the hand the way the pads sit on screen.**
+
+    1 2 3 4   → pads 13-16 → notes 48-51   (TOP row of the grid)
+    Q W E R   → pads  9-12 → notes 44-47
+    A S D F   → pads  5-8  → notes 40-43
+    Z X C V   → pads  1-4  → notes 36-39   (BOTTOM row of the grid)
+
+The keyboard's bottom row drives the grid's bottom row, because pad 1 is
+bottom-left on every MPC, Maschine and Drum Rack. Bank and velocity move to
+`K`/`L` and `O`/`P` — under the right hand, while the left hand drums — and the
+legend, the readouts and the pad captions all follow from the one key table.
+
+⛔⛔ **THIS REPLACED A LINEAR RE-READ OF THE PIANO ROW, AND THE FIRST ANSWER WAS
+WRONG.** v1 mapped the 17 note keys (`A W S E D F T G…`) to pads 1–16 in piano
+order — Ableton's own answer, and defensible on paper. It is not a pad grid: a
+**linear mapping onto a SQUARE surface** means a pad's position on screen tells
+you nothing about which key plays it, so "row 2, column 3" was reachable only by
+knowing it was semitone 6 and that semitone 6 is `T`. That is
+transposition-by-lookup, not finger drumming. **Spatial correspondence is the
+feature, not a nicety.**
+
+⚠️ **THE BLOCKER WAS SELF-IMPOSED.** v1's note said the 4×4 block "cannot be
+built here" because `Z X C V` are the octave/velocity controls and `1 2 3 4` are
+not in `allCaps`. That is a constraint of **notes** mode. Pads mode is a MODE and
+may set its own key arbitration, exactly as it already sets its own note
+semantics — so `decide` now takes a `playMode` and swaps the whole key table.
+Pads mode claims exactly **six** keycodes the app did not already swallow
+(`Q R 1 2 3 4`, asserted by `padOnlyKeyCodes`), and only while it is on; measured
+against every `keyboardShortcut` in the app, none collides. In exchange the
+piano keys that are not part of the block (`T G Y H U J ;`) stop being swallowed
+in pads mode — a stray `;` reaches the app instead of dying silently.
+
+⚠️ **A KEY THAT CHANGED MEANING IS PINNED FROM BOTH SIDES.** `Z` shifted the
+octave down before this existed; in pads mode it is pad 1 and must not touch the
+octave at all. The test asserts both readings of the same physical key, because
+a branch that moved both would leave notes mode transposed after a visit to the
+pads. The origin itself (`Z` → pad 1 → note 36; `1` → pad 13 → note 48, and the
+drawn bottom-left square agreeing with the keyboard's bottom-left key) is
+asserted outright — inverting a pad grid is silent, and it is the commonest way
+this gets built backwards.
+
+⭐ **POLYPHONY COMES FROM THE KEY PATH, WHICH IS WHY IT IS THERE.** One pointer
+is one pad; a kick under a hat needs two, so the letter keys go through the
+controller's own `keyPitches` ledger rather than through `pointerDown`. ONE
+controller, ONE pusher at the live-note sink, three faces — a second object
+pushing its own held set would fight `releaseAll()` for what is ringing.
+
+⚠️ **VELOCITY FROM STRIKE POSITION IS SHARED, AND THE SEAM IS WHY.** Aim high on
+a pad for a harder hit. `LiveNoteSink.setHeldPitches` is SET-shaped — a pitch set
+and ONE velocity for all of it — so a per-hit velocity cannot be represented
+while another pad is held. The strike therefore moves the same velocity `C`/`V`
+move, and the strip's VELOCITY readout shows it, which makes the shared value
+visible instead of secretly wrong.
+
+⭐⭐ **THE SOURCE-STILL-PLAYS PROBLEM IS NOW ADDRESSABLE, AND THE TWO DEFAULTS
+DIVERGE ON PURPOSE.** The chop is read-only, so afterwards the timeline holds
+BOTH the original and a reconstruction that replays it — measured **+6.0 LU**
+and audibly comb-filtered, the same waveform a few samples adrift.
+`clip.sliceToSampler` gains an additive **`muteSourceTrack`**, applied INSIDE the
+one `performEdit` so a single undo puts the pads and the mute back together. It
+defaults **FALSE on the wire** (a shipped verb keeps its exact meaning) and
+**TRUE in the card**, which can show the toggle, NAME the track, and warn when
+other clips on it go quiet too. Silently muting a track the caller never named is
+the plausible-looking-success shape this subsystem is arranged against; saying
+nothing leaves the first chop sounding wrong with no explanation on screen.
+
+⭐⭐ **THE RESULT REPORTS TWO FACTS, NOT ONE, AND THEY DIVERGE IN BOTH
+DIRECTIONS.** `mutedTrackId` answers *"what did this call change, and what will
+undo restore?"*; `sourceTrackMuted` answers *"will the original be heard?"* — read
+back OUT OF THE STORE after the edit. An already-muted track gives `nil` + true;
+a chop onto the source's own track gives `nil` + false. A surface inferring
+audibility from `mutedTrackId` would tell a user to go mute a track that is
+already silent. **The first cut of the card did exactly that** — it assembled the
+notice from what it had REQUESTED — and the fix is pinned by a test that walks
+all three reachable combinations.
+
+⚠️ **ONE BRANCH IS DEFENSIVE AND CURRENTLY UNREACHABLE, said out loud so nobody
+deletes it.** `sourceTrackID == destinationID` needs an AUDIO clip on an
+INSTRUMENT track, and `ProjectStore.importAudio` guards `kind == .audio`
+(ProjectStore.swift:4465), so no path in the tree can produce it today. A future
+audio-on-instrument path would make it live the same day, and its absence then
+would silently mute the pads. No behavioural test can reach it; `PadGridSiteTests`
+pins that it exists.
+
+**Loaded is not empty, and lit is not pressed.** A loaded pad is a raised panel
+with a dim trace of its own accent; an empty one is a recess at the placeholder
+ink floor — a fill difference, because a 1 px border change is not a
+glance-level difference. `isPlaying` is read back from the controller's
+`soundingPitches`, never from "was clicked", so **a pad struck on a track that
+cannot sound depresses and stays dark**. Each pad carries its letter key, its
+slice ordinal *over the whole keymap* (bank 2 pad 1 reads "slice 17", not "slice
+1"), its note name, and a position tick showing where in the record the slice
+sits — **frames as a fraction, never fabricated seconds**, because converting
+needs the file's sample rate and that means main-actor file I/O (the m26-i
+ruling). **Violet whenever the material is AI-made**, cyan otherwise; the grid
+reports honestly rather than guessing provenance from a filename.
+
+⭐ **SLICES BELOW PAD 1 ARE REPORTED, not hidden.** A keymap based under the
+grid draws sixteen empty squares over a full sampler with every other reading
+agreeing. The header says how many and offers the one-click re-base.
+
+**Surfaces.** `DAWAppKit.PadGridGeometry` (pure, non-isolated) + `PadGridModel`
+(`@MainActor`, injector-shaped like `SamplerEditorModel`, read fresh every
+access so a wire chop redraws the grid); `DAWApp/Components/PadGridView`
+(value-in, previewable) and `DAWApp/Instrument/ChopToPadsPanel` (centered
+dark-glass card in the window content, so `debug.captureUI` can photograph it;
+Simple = where to cut + how finely + the mute decision, Pro adds the pad
+ceiling, pad 1's note and the lead-in). `ExplainID.padGrid` (registry 99 → 100,
+floor raised). `debug.padGrid` staging — **app tier, off `allCommands` and off
+MCP**, the `debug.samplerEditor` precedent, so the wire count stays **227**. No
+`padGrid.*` verb was added and that is a decision: the one new capability went
+onto the verb an agent already looks at, and every pad is a MIDI note that
+`note.play` already sounds and `instrument.describeSampler` already reports.
+
+⚠️ **NOT A `Canvas`, and that is a considered exception.** `Canvas` +
+`TimelineView` is the recipe for surfaces that redraw CONTINUOUSLY. A pad grid
+redraws on note-on, note-off, bank change and chop — discrete events, tens per
+minute at a hard performance. Sixteen light views buy real hit-testing, real
+tooltips, real accessibility labels and the ONE `glow()` recipe from `Theme`
+rather than a second copy written as `GraphicsContext.addFilter(.shadow(...))`.
+Nothing here allocates per frame because there is no frame.
+
+⚠️ **A NOTE-NAME CONVENTION CLASH IS RECORDED, NOT "FIXED".**
+`SliceToSamplerSettings.defaultBaseNote` is documented as *"36 = C1, the MPC
+pad-1 note"* (Yamaha/MPC octaves) while this app's ONE namer,
+`Fundamental.noteName`, uses scientific pitch and calls 36 **C2**. The grid uses
+the app's namer — a pad grid that invented a second octave convention would
+disagree with the piano roll and the sampler card about the same note — and the
+card's prose says "note 36" with no letter, so a panel cannot contradict its own
+readout. The chopper's comment is the thing out of step; it is prose, not
+behaviour.
+
+⭐⭐ **A SECOND ROUTE: right-click an audio clip ▸ "Chop to Pads…".** The first
+cut shipped the chopper three gestures deep — Musical Typing ▸ PADS ▸ *CHOP A
+CLIP…* — behind a strip that is OFF by default. That is reachable and
+undiscoverable, which is m23-cf's whole lesson (*"an operation reachable by only
+one route is an operation that goes missing"*). The menu entry sits with DELETE
+and CUT/COPY **outside the `if pro` block**, because turning a recording into an
+instrument is not expert clip-edit chrome; a site test asserts that position
+rather than mere existence, since the bug it prevents is invisibility in Simple.
+It selects the clip it named before opening the card — right-click does not
+select on macOS, so without that the card would offer to chop whatever was
+selected before.
+
+### ⛔⛔ THREE DEFECTS THAT ONLY A CAPTURE COULD FIND
+
+All three shipped green. `debug.captureUI` photographed them.
+
+1. **The notice named the WRONG TRACK.** The summary read the ACTIVE track's
+   name, but the app switches the active track only *after* `runChop` returns —
+   so a clip on "Break" chopped onto a new "loop chops" produced *"1 pad on
+   "Break" (a new track)"*, pointing the user at the track that had just been
+   MUTED, while the header two lines above said "on loop chops". **One screen,
+   two answers.** The summary now resolves the landed track BY ID
+   (`trackNameForID`). The test harness hid it by returning a constant name for
+   both questions; the new test makes them deliberately disagree.
+2. **"its 1 other clip GO quiet too."** The plural was handled on the noun and
+   forgotten on the verb; every fixture used more than one clip.
+3. **The refusal showed a beginner a raw UUID.** The store writes for an agent:
+   *"chopping clip 6017D54C-0E44-…-06E006C52A1B would make 15 pads…"*. The card
+   already names the clip, so `lastRefusalForHumans` swaps the id for the name —
+   **every number and every remedy survives**, and `lastRefusal` stays byte-exact
+   for the wire.
+
+⚠️ **STILL OPEN, REPORTED NOT FIXED:** that same store sentence offers remedies
+in API spelling — *"raise minSliceSeconds"*, *"Pass includeHead: true"* — to a
+user whose controls are labelled *MOST PADS TO MAKE* and *Keep the lead-in as
+pad 1*. The numbers are right and the text is actionable, but the nouns are the
+wire's, not the user's. Rewriting it touches a shared, separately-tested string.
+
+⛔ **A stale mirror was removed.** `PadGridModel.refusal` was written by
+`runChop` and read by nothing — the card and the wire both ask `blockingRefusal`,
+which recomputes from the live selection. Two answers to "why can't I chop?",
+one of which goes stale the moment the selection changes.
+
+## 2026-09-19k — A phaser, and a measurement that proves it is not a flanger
+
+`.phaser` (m39-o, design §2.1 rank 7) ships: a cascade of first-order all-pass
+sections sharing one swept corner, summed with the dry signal, with bipolar
+feedback. Seven parameters — `rateHz`, `centerHz`, `depthOctaves`, `stages`,
+`feedback`, `mix`, `stereoPhaseDeg` — one new effect kind, **zero new wire
+commands**; it rides `fx.add` / `fx.setParam` / `fx.describe` like every other
+built-in, and `doc-count-drift` still measures **227**, which is the tripwire
+design rule 6.0.11 asks for.
+
+⛔ **THE ITEM IS THE DISTINCTION, NOT THE EFFECT.** "Phaser" and "flanger" get
+used interchangeably by people who mean one of them specifically, and the
+difference is arithmetic rather than taste. A flanger sums with a **delayed**
+copy, which cancels at the odd multiples of `1/(2·delay)` — a dense, evenly
+spaced, **harmonic** comb, dozens of notches wide. This kind has no delay line
+in it at all. It sums with a **phase-shifted** copy, and cancellation happens
+only where the chain's accumulated phase crosses an odd multiple of 180°:
+exactly **`stages`/2 notches**, at `tan((2k+1)·π/2N)` times the corner, a
+**non-harmonic** series that spreads as it climbs. Few, uneven, spreading is
+what "phaser" sounds like; many, even is what "flanger" sounds like.
+
+⭐ **MEASURED AGAINST THE SIBLING, NOT AGAINST ITSELF.** One notch-finder is run
+over a rendered `.phaser` and a rendered `.flanger` and each law is asserted to
+fit its own kind **and to be rejected by the other**. In 15 Hz–8 kHz the phaser
+puts **4** notches at **1 : 3.359 : 7.523 : 25.25**, matching `notchHz` to
+better than 2 % and sitting **12 % / 50 % / 261 %** from a comb; the flanger
+puts **16** at **1 : 3.000 : 5.000 : 7.000**, matching `combNotchHz` and sitting
+**10.7 % / 33.5 % / 72.3 %** from the phaser law. Two self-checks would have
+passed if both kinds were flangers; this cannot.
+
+⚠️ **THE COEFFICIENT SIGN IS THE TRAP, AND IT WAS CAUGHT BEFORE ANY CODE WAS
+WRITTEN.** The all-pass coefficient is `(t−1)/(t+1)`, **not** the
+`(1−t)/(1+t)` that appears in one-pole and shelving derivations. Both forms are
+stable all-passes; in double precision the wrong one puts **−0.04° / −13.1°** of
+phase at corners where the right one puts exactly **−90.000°**. A first check
+that "confirmed" the right sign had used `a = 0`, the one value where both forms
+agree. ⚠️ **And the follow-up claim, that "a count-based test passes either
+way", was ALSO wrong — the plant refuted it.** Planted in Swift it reddens three
+legs: the −90° law leg (19 issues), the rendered notch POSITIONS (82 issues),
+and the notch COUNT. The count moves for a reason worth naming, because it is
+not a discrimination: the wrong sign parks the corner near DC, which drags
+notches out of the 15 Hz–12 kHz scan window. A plausible-sounding sentence about
+which test catches what is a hypothesis; the plant is the experiment.
+
+⭐ **THE SWEEP CEILING IS STRUCTURAL RATHER THAN CLAMPED.** `centerHz` tops out
+at 1 kHz and `depthOctaves` at 4, so the corner can never exceed **16 kHz** —
+below `0.45·fs` at every rate this app runs at. The `tan` guard that keeps a
+32 kHz project stable therefore never engages at 44.1/48/88.2/96 kHz, and the
+sweep top is never flattened. Widening either range reddens
+`maxCornerFitsEverySupportedRate`.
+
+⛔ **THE DENORMAL FLUSH IS PER SECTION, AND THAT IS NOT THE FLANGER'S RULE.**
+The flanger owns one recirculating word because its delay line is its only
+memory. Every first-order all-pass here is its **own** IIR with a pole at `|a|`,
+so each decays into subnormals on silence independently — **at `feedback` 0 as
+much as at 0.95**, which is the case a flanger-shaped one-word flush would leave
+uncovered. The leg renders both.
+
+⚠️ **`mix: 1` WITH `feedback: 0` IS VERY NEARLY INAUDIBLE, AND THAT IS
+CORRECT.** An all-pass chain alone changes no frequency's level at all —
+measured flat to **1.2e-05 dB** — so with no dry signal left to cancel against
+there is nothing to hear. It ships as a warning on every surface because it is
+the most likely bug report this kind will attract. `mix: 0` is a **bit-exact**
+bypass, and its positive control renders at `mix: 0.5` so "bit-exact" cannot
+quietly mean "inert".
+
+⭐⭐ **m39-o ALSO PAID A DEBT FOUR OTHER KINDS HAD DEFERRED TO IT.**
+`Sources/DAWCore/ProjectDocument.swift` mirrors `EffectDescriptor` by hand at
+six sites and the compiler forces only three; miss `encodeIfPresent` and a
+project **saves, reports success, and reopens with that effect reset to
+defaults**. Four comments in that file said the exhaustive pin would arrive with
+this item. It has: `EffectDocumentMirrorTests` round-trips a non-default
+descriptor for **every** `EffectDescriptor.Kind`, is driven by `allCases` so a
+kind with no fixture **fails rather than being skipped**, asserts every fixture
+differs from its spec default **field by field** (an all-defaults fixture passes
+with every `encodeIfPresent` deleted), and carries a plant control that **strips
+a params key** and proves the comparison reddens.
+
+⚠️ **`phaser` USED TO BE THE "DEFINITELY NOT A KIND" FIXTURE IN FIVE TESTS.**
+Two Swift suites and two MCP suites used it to provoke an unknown-kind refusal.
+A test whose impossible value becomes possible does not fail gracefully — it
+asserts the wrong branch. All five now say `wobbulator`, and the Swift one keeps
+a positive control proving the old name is now **accepted**.
+
+⛔⛔ **TWO OF THIS ITEM'S OWN TESTS COULD NOT FAIL, AND ONLY A PLANT SAID SO.**
+Deleting **every** per-section denormal flush left **35/35 green**; so did
+replacing the `mix == 0` bypass guard with `if true`. Neither was a mistuned
+threshold — both assertions were structurally blind. The flush leg read only the
+OUTPUT, where a separate chain-output flush masks the section states; it now
+reads the section words themselves, **once per quantum across the tail**,
+because a single end-of-tail sample misses the band the state decays through.
+The bypass leg compared `[Float]` arrays on a sine — and `dry·1 + wet·0` is
+exactly `dry` for every normal float, so the only input that can tell "never
+written" from "neutrally blended" is **−0.0**… which `[Float] ==` still cannot
+see, because IEEE says `−0.0 == +0.0`. It now seeds −0.0, ±`leastNonzeroMagnitude`
+and −`leastNormalMagnitude` and compares **bit patterns**, with a control
+asserting `input[0] == 0.0` is *true* while the bit patterns differ. Re-planted,
+each defect now reddens **exactly one** leg. A third blind spot was found the
+same way before it could ship: **every spectral leg renders at `depthOctaves: 0`,
+where the coefficient never moves**, so nothing could see whether the 32-frame
+coefficient stride is interpolated or slammed — `L14` now measures it, and the
+threshold sits between two measured renders (**−80.6 dB** interpolated,
+**−44.9 dB** stepped) rather than being invented.
+
+⚠️ **AND THE ALLOCATION GATE CAUGHT ITS OWN FIXTURE.** §12 gate 2 renders 4 000
+quanta and asserts zero malloc events. Re-processing one staged chunk in place
+feeds the effect its own output, and at `mix 0.5 / feedback 0.8` this kind's DC
+gain is **3.0** — so the signal reached `inf`, then `NaN`, while the allocation
+count stayed a clean **0**. A probe measuring a NaN render reports its zero in
+exactly the same green as a probe measuring a real one. The buffer is now
+re-staged from a preallocated source every call.
+
+**The demo** (`scripts/demos/specs/phaser.json`, four variants on the `stages`
+axis) is loudness-matched to within **0.4 LU** of the set median, and the sweep
+is measured **in the shipped files**: band energy divided by the control's peaks
+at **0.355 Hz** for 4 and 8 stages — the LFO's own 0.35 Hz — and at **1.05 Hz**
+for 12, which is three times the rate and exactly what six notches should do.
+The control measured against itself reports **0.000** at every frequency, so the
+probe cannot manufacture a modulation that is not there. ⚠️ The pad's unison
+detune was **removed** after measurement showed its own ~0.9 Hz beating was
+louder than the sweep the listener is being asked to notice.
+
+## 2026-09-19j — The demo harness can finally hear a real recording
+
+⛔ **Until today, nothing in this tree had ever demonstrated an effect on
+recorded audio.** The headless harness (`DemoRender`) implemented neither
+`clip.addAudio` nor `clip.sliceToSampler`, so every demo ever rendered here ran
+on material the harness synthesised itself. That was invisible because
+synthesised demos are perfectly good at showing what an effect *does* — the gap
+only surfaces when someone asks a question a synth cannot answer. A user asked
+whether the DJ filter works on their own recorded voice, then sent the file.
+
+Both commands are now implemented. Two consequences, and the second is the one
+that mattered:
+
+1. Effects can be demonstrated on a real recording. Measured on the user's
+   voice: the `djFilter` sweep removes **35.6 dB** of treble early and
+   **30.3 dB** of bass late; `stereoWidth`'s `spread` builds a side channel at
+   **&minus;28.4 dB** where the mono source had **&minus;inf**; the `tapeDelay`
+   still rings at **&minus;48 dB** after the voice stops, where dry is silent.
+2. **The sample-flip chop is demonstrable at all.** 53 transient slices from
+   9.7 s of speech, and the auto-generated MIDI reconstruction null-tests
+   **28 dB below** the source (residual &minus;52.6 dB against a &minus;24.3 dB
+   signal; **25,284 of 3.8 million bytes** differ, 0.66 %). The claim that a
+   chop "starts from identical to the record" is now measured, not asserted.
+
+⚠️ **Two traps, both found by measuring rather than by reading.** The chopper
+REFUSES when the transient count exceeds `maxSlices` (53 vs a default cap of 32)
+and says so naming both numbers — *"slices are never silently dropped, because a
+chop missing its last bar still looks like a successful chop."* And the source
+clip is read-only and **keeps playing**, so pads and source sound together:
+measured **+6.0 LU** and comb-filtered until the source track is silenced.
+
+⭐ **`scripts/gates/demo-harness-audio.mjs` guards both capabilities**, and it
+generates its own source audio with ffmpeg rather than committing a WAV — a
+fixture in `/tmp` is a gate that silently stops running, and the effects commit
+deliberately carried no binaries. It proves it can fail three ways: a
+**negative control** that fails the gate if an unknown key is ever silently
+*accepted* (the `unisonVoices` regression shape), a **non-vacuity** check that a
+chop reporting zero pads is a failure rather than a silent pass, and a
+falsification run confirming the harness rejects a vanished command by name.
+
 ## 2026-09-19i — Width you can take to a club PA, and the theorem that says what it costs
 
 `.stereoWidth` (m23-dj) ships: a mid/side widener and mono-maker whose headline

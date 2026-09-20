@@ -92,6 +92,24 @@ struct MusicalKeyboardStrip: View {
     /// True while a generation is in flight — the button dims.
     var isGeneratingPlaybox: Bool = false
 
+    // ── m39-pads: the THIRD face. ────────────────────────────────────────────
+    /// The pad grid's live model, or nil in a bare preview (the PADS chip then
+    /// still switches mode and the face draws an empty grid, which is honest —
+    /// a preview has no sampler).
+    var padGrid: PadGridModel?
+    /// A PAD was struck with the mouse: index in the current bank, and where in
+    /// the pad (0 = top edge).
+    ///
+    /// ⛔ **SAME ONE-FUNNEL REASON AS `onPointerPress`** — the app hands in the
+    /// closure that refreshes the target state first, so the mouse and
+    /// `debug.padGrid` run one path and a gate cannot be green on a route no
+    /// human takes.
+    var onPadPress: (Int, Double) -> Void = { _, _ in }
+    var onPadRelease: () -> Void = {}
+    var onSetBank: (Int) -> Void = { _ in }
+    /// Opens the CHOP TO PADS card.
+    var onOpenChop: () -> Void = {}
+
     /// Keyboard height. Tall enough for a black key (62 %) to be a comfortable
     /// mouse target and for the letter legend to sit under it without crowding.
     private static let keyboardHeight: CGFloat = 64
@@ -117,6 +135,13 @@ struct MusicalKeyboardStrip: View {
     private static let chordRowHeight: CGFloat = 76
 
     private var isChordMode: Bool { controller.playMode == .chords }
+    /// m39-pads. ⚠️ **A THIRD FACE, NOT A SECOND BOOLEAN READ AS A NEGATION.**
+    /// Every `!isChordMode` in this file used to mean "the piano"; it now means
+    /// "not the chord row", which is two different faces. Each site was re-read
+    /// rather than left to fall through — the m39-e shape, where a third case
+    /// quietly inherited a two-case answer and 24 tests stayed green over an
+    /// inert feature.
+    private var isPadMode: Bool { controller.playMode == .pads }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -134,6 +159,13 @@ struct MusicalKeyboardStrip: View {
                 progressionRow
                 playboxRow
                 chordRow
+            } else if isPadMode {
+                // ⭐ THE SAME ARGUMENT ONE FACE FURTHER ON. In pads mode a key
+                // does not name a pitch on a keyboard either — it names a SLICE
+                // of a record, and which slice depends on the bank. Drawing a
+                // piano and writing slice numbers on it would be the same
+                // picture-that-lies the chord row was split out to avoid.
+                padFace
             } else {
                 keyboard
             }
@@ -201,8 +233,9 @@ struct MusicalKeyboardStrip: View {
             // readable at a glance instead of inferred from a switch position —
             // the same "explicit, never ambient" law the mode lamp obeys.
             HStack(spacing: 0) {
-                modeChip("KEYS", isOn: !isChordMode) { onSetPlayMode(.notes) }
+                modeChip("KEYS", isOn: !isChordMode && !isPadMode) { onSetPlayMode(.notes) }
                 modeChip("CHORDS", isOn: isChordMode) { onSetPlayMode(.chords) }
+                modeChip("PADS", isOn: isPadMode) { onSetPlayMode(.pads) }
             }
             .background(DAWTheme.panelRaised)
             .clipShape(RoundedRectangle(cornerRadius: 5))
@@ -212,8 +245,17 @@ struct MusicalKeyboardStrip: View {
             // "Foundations"). OCTAVE reads as the note the `A` key sounds rather
             // than as a bare number — Rule 6: a beginner should not have to know
             // what "octave 4" means to find the note they just played.
-            DigitalReadout(label: "Octave", value: octaveValue,
-                           color: DAWTheme.playback, valueSize: 15)
+            // ⚠️ **THE READOUT SAYS WHAT Z/X ACTUALLY MOVE.** In pads mode they
+            // move the BANK, so a readout still labelled "Octave" would be a
+            // number nothing on screen responds to — the m39-e shape in a
+            // label. One readout, three truths.
+            if isPadMode {
+                DigitalReadout(label: "Pads", value: padRangeValue,
+                               color: DAWTheme.playback, valueSize: 15)
+            } else {
+                DigitalReadout(label: "Octave", value: octaveValue,
+                               color: DAWTheme.playback, valueSize: 15)
+            }
             DigitalReadout(label: "Velocity", value: String(controller.velocity),
                            color: DAWTheme.playback, valueSize: 15)
 
@@ -334,6 +376,160 @@ struct MusicalKeyboardStrip: View {
 
     private var octaveValue: String {
         Fundamental.noteName(midiNote: controller.baseNote)
+    }
+
+    /// Which sixteen pads are under the hand, 1-based and inclusive — the
+    /// question a performer asks ("am I on the kick bank or the perc bank?"),
+    /// not the 0-based bank index the code carries.
+    private var padRangeValue: String {
+        let first = controller.padBank * PadGridGeometry.padsPerBank + 1
+        return "\(first)–\(first + PadGridGeometry.padsPerBank - 1)"
+    }
+
+    // MARK: - The pad face (m39-pads)
+
+    /// ⚠️ **THE GRID IS DRAWN FROM THE MODEL'S `pads`, NOT FROM THE
+    /// CONTROLLER.** The controller knows what is SOUNDING; only the model
+    /// knows which pads carry a slice. Drawing from the controller alone would
+    /// produce a grid where every square looked identical — the exact "cannot
+    /// tell loaded from empty" surface this item exists to avoid.
+    @ViewBuilder
+    private var padFace: some View {
+        if let padGrid {
+            VStack(alignment: .leading, spacing: 9) {
+                padFaceHeader(padGrid)
+                PadGridView(
+                    pads: padGrid.pads,
+                    bank: padGrid.bank,
+                    bankCount: padGrid.bankCount,
+                    frameSpan: padGrid.loadedFrameSpan,
+                    canSound: canSound,
+                    onPadDown: onPadPress,
+                    onPadUp: onPadRelease,
+                    onSetBank: onSetBank)
+                if let notice = padGrid.lastChop {
+                    chopNotice(notice, model: padGrid)
+                }
+            }
+        } else {
+            // A preview with no model. Says so rather than drawing a dead grid.
+            Text("No instrument selected — pick a track to see its pads.")
+                .font(.system(size: 11))
+                .foregroundStyle(DAWTheme.textFaint)
+                .frame(height: 220)
+        }
+    }
+
+    private func padFaceHeader(_ padGrid: PadGridModel) -> some View {
+        HStack(spacing: 12) {
+            // ⭐ LOADED vs TOTAL, ALWAYS — "a pad grid where you cannot tell
+            // loaded from empty is not usable" applies to the SUMMARY as much
+            // as to the squares. SF Mono, because it is a count.
+            Text("\(padGrid.loadedCount)")
+                .font(.system(size: 13, weight: .bold, design: .monospaced))
+                .foregroundStyle(padGrid.loadedCount > 0
+                                 ? DAWTheme.playback : DAWTheme.textFaint)
+            Text(padGrid.loadedCount == 1 ? "slice loaded" : "slices loaded")
+                .font(.system(size: 11))
+                .foregroundStyle(DAWTheme.textSecondary)
+            if let name = padGrid.targetName {
+                Text("on \(name)")
+                    .font(.system(size: 11))
+                    .foregroundStyle(DAWTheme.textDim)
+                    .lineLimit(1)
+            }
+            // ⭐ THE UNREACHABLE-SLICE REPORT. A keymap based below pad 1 draws
+            // sixteen empty squares over a fully loaded sampler, and every other
+            // reading agrees with the picture. Say it, and offer the one-click
+            // fix rather than making the user find the base note.
+            if padGrid.unreachableBelowCount > 0 {
+                Button { padGrid.baseOnLowestSlice() } label: {
+                    Text("\(padGrid.unreachableBelowCount) below pad 1 — show them")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(DAWTheme.record)
+                }
+                .buttonStyle(.plain)
+                .help("This kit has slices under the grid's first pad. Re-base the grid "
+                      + "on the lowest one.")
+            }
+            Spacer(minLength: 8)
+            Button(action: onOpenChop) {
+                Text("CHOP A CLIP…")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .tracking(0.8)
+                    // Create/add affordances are NEUTRAL CHROME (Rule 3) — no
+                    // accent and no glow at rest. An accent is earned by state,
+                    // not by inviting a click.
+                    .foregroundStyle(DAWTheme.textPrimary)
+                    .frame(height: 22)
+                    .padding(.horizontal, 12)
+                    .background(DAWTheme.panelRaised)
+                    .clipShape(RoundedRectangle(cornerRadius: 5))
+                    .overlay(RoundedRectangle(cornerRadius: 5)
+                        .stroke(DAWTheme.hairline, lineWidth: 1))
+            }
+            .buttonStyle(.plain)
+            .help("Cut the selected audio clip into pads you can play.")
+        }
+    }
+
+    /// What the chop just did, and what it muted. ⚠️ Stays up until dismissed:
+    /// it reports an action with a SIDE EFFECT on another track, which is not
+    /// something to flash past the corner of the eye.
+    private func chopNotice(_ notice: PadChopSummary, model: PadGridModel) -> some View {
+        HStack(alignment: .top, spacing: 7) {
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 11))
+                .foregroundStyle(DAWTheme.signal)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(chopNoticeText(notice))
+                    .font(.system(size: 10))
+                    .foregroundStyle(DAWTheme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                ForEach(notice.warnings, id: \.self) { warning in
+                    Text(warning)
+                        .font(.system(size: 10))
+                        .foregroundStyle(DAWTheme.record)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Spacer(minLength: 0)
+            Button { model.dismissChopNotice() } label: {
+                Text("GOT IT")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .foregroundStyle(DAWTheme.textDim)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(9)
+        .background(DAWTheme.panelRaised)
+        .clipShape(RoundedRectangle(cornerRadius: 7))
+        .overlay(RoundedRectangle(cornerRadius: 7).stroke(DAWTheme.hairline, lineWidth: 1))
+    }
+
+    private func chopNoticeText(_ notice: PadChopSummary) -> String {
+        var text = "\(notice.sliceCount) pad\(notice.sliceCount == 1 ? "" : "s") on "
+            + "“\(notice.trackName)”\(notice.createdTrack ? " (a new track)" : "")."
+        // ⚠️⚠️ **TWO INDEPENDENT FACTS, TWO SENTENCES — and collapsing them into
+        // one `if/else` is the bug this shape exists to prevent.** "Did THIS
+        // chop mute something?" (undo messaging) and "will the original be
+        // heard?" (what you are about to listen to) are different questions with
+        // four combinations, not two: a track that was ALREADY muted gets no
+        // mute from this call and is still inaudible, and a chop onto the
+        // source's own track gets no mute and IS audible. Both readings come
+        // from the store, never from what the card asked for.
+        if let muted = notice.mutedTrackName {
+            text += " “\(muted)” was muted so the original does not play under the pads "
+                + "— unmute it in the track list whenever you like."
+        }
+        if notice.sourceStillAudible {
+            // THE HONESTY BRANCH. Not muting is a legitimate choice, and the
+            // user who made it must be told what they will hear rather than
+            // left to diagnose a comb filter by ear.
+            text += " The original is still playing underneath — mute its track "
+                + "if the two sound hollow together."
+        }
+        return text
     }
 
     // MARK: - The keys
@@ -652,8 +848,18 @@ struct MusicalKeyboardStrip: View {
 
     private var legend: some View {
         HStack(spacing: 14) {
-            legendChip("Z / X", isChordMode ? "higher / lower" : "octave")
-            legendChip("C / V", "louder / quieter")
+            // ⚠️ THREE FACES, THREE MEANINGS — and in pads mode the CONTROL
+            // KEYS THEMSELVES MOVE, not just their meaning: `Z X C V` become
+            // pads 1-4 of the spatial block, so bank and velocity relocate to
+            // `K / L` and `O / P`. A legend that still said "Z / X octave"
+            // would name keys that now play drums.
+            if isPadMode {
+                legendChip("K / L", "bank")
+                legendChip("O / P", "louder / quieter")
+            } else {
+                legendChip("Z / X", isChordMode ? "higher / lower" : "octave")
+                legendChip("C / V", "louder / quieter")
+            }
             // m34-l. The chip LIGHTS with the pedal — a second, in-place answer
             // to "is it down?" right where the user's eye is when they are
             // reading which key does what.
@@ -673,6 +879,16 @@ struct MusicalKeyboardStrip: View {
                      ? "Every key plays a chord. Pick a preset — or press NEW LIGHTS — to be shown what to play."
                      : "Follow the bright outline — that's your next chord. "
                        + "The bars under the keys after it show what's coming, widest first. Every key still plays.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(DAWTheme.textDim)
+            }
+            if isPadMode {
+                // Rule 6: say what the squares mean in the words a beginner
+                // would use — including the one fact a still picture cannot
+                // convey, that where you click changes how hard it hits.
+                Text("The Z X C V / A S D F / Q W E R / 1 2 3 4 block plays the "
+                     + "sixteen pads, laid out like the grid. Click high on a pad "
+                     + "for a harder hit.")
                     .font(.system(size: 10))
                     .foregroundStyle(DAWTheme.textDim)
             }

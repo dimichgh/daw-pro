@@ -21,10 +21,31 @@ public struct SliceToSamplerResult: Codable, Sendable, Equatable {
     public var headSeconds: Double
     public var slices: [SliceReport]
     public var warnings: [String]
+    /// The track this call MUTED, or nil — and nil is the default, because
+    /// `muteSourceTrack` is.
+    ///
+    /// ⚠️ **REPORTED SEPARATELY FROM THE REQUEST, because they can differ.**
+    /// Asking to mute the source when the source track IS the destination is
+    /// refused (it would silence the pads that were just made), and asking to
+    /// mute a track that was already muted changes nothing. A caller that read
+    /// its own request back would believe both of those worked.
+    public var mutedTrackId: UUID?
+    /// Is the SOURCE clip's track muted NOW — whether or not this call did it?
+    ///
+    /// ⭐⭐ **A SECOND FIELD, NOT A SPELLING OF THE FIRST, AND THE DIFFERENCE IS
+    /// THE ONE QUESTION A USER ACTUALLY ASKS.** `mutedTrackId` answers *"what
+    /// did this call change, and what will undo put back?"*. This answers *"will
+    /// the original play underneath my pads?"* — and the two diverge in both
+    /// directions: a track that was ALREADY muted gives `mutedTrackId: nil` with
+    /// this TRUE, and a chop onto the source's own track gives `nil` with this
+    /// FALSE. A surface that inferred audibility from `mutedTrackId` would tell
+    /// a user to go mute a track that is already silent.
+    public var sourceTrackMuted: Bool
 
     public init(trackId: UUID, createdTrackId: UUID?, midiClipId: UUID?,
                 sampleRate: Double, frameCount: Int, sliceCount: Int,
-                headSeconds: Double, slices: [SliceReport], warnings: [String]) {
+                headSeconds: Double, slices: [SliceReport], warnings: [String],
+                mutedTrackId: UUID? = nil, sourceTrackMuted: Bool = false) {
         self.trackId = trackId
         self.createdTrackId = createdTrackId
         self.midiClipId = midiClipId
@@ -34,6 +55,8 @@ public struct SliceToSamplerResult: Codable, Sendable, Equatable {
         self.headSeconds = headSeconds
         self.slices = slices
         self.warnings = warnings
+        self.mutedTrackId = mutedTrackId
+        self.sourceTrackMuted = sourceTrackMuted
     }
 }
 
@@ -86,10 +109,41 @@ extension ProjectStore {
     /// re-run compounds; undo first"*). One edit is also one engine rebuild and
     /// one file read: a zones change is STRUCTURAL, so creating N zones in N
     /// edits would re-read the whole source file N times.
+    ///
+    /// ## ⭐⭐ `muteSourceTrack` — the +6 LU problem, made addressable (m39-pads)
+    ///
+    /// The source clip is READ-ONLY here and stays exactly where it is, which is
+    /// correct: a chop reads the file, it does not consume the recording. The
+    /// consequence is that after a chop the timeline holds BOTH the original and
+    /// a reconstruction that replays it, and **measured 2026-09-19 the two
+    /// together are +6.0 LU louder than the source alone and audibly
+    /// comb-filtered** — the same waveform a few samples adrift.
+    ///
+    /// ⛔ **DEFAULTS FALSE, AND THAT DEFAULT IS NOT NEGOTIABLE.** This verb is
+    /// shipped; an agent's existing `clip.sliceToSampler` call must keep meaning
+    /// exactly what it meant yesterday (the additive-only law). A command that
+    /// silently began muting a track the caller never named would also be the
+    /// plausible-looking-success shape this whole subsystem is arranged against.
+    /// The PAD GRID's card defaults it ON, because it can SHOW the toggle and
+    /// name the track; a wire caller gets no such chance to see it.
+    ///
+    /// ⚠️ **REFUSED — with a warning, not an error — when the source track IS
+    /// the destination.** Muting it would silence the pads the call just made,
+    /// and returning success over a silent instrument is worse than declining.
+    ///
+    /// ⚠️⚠️ **THAT BRANCH IS DEFENSIVE AND CURRENTLY UNREACHABLE, said out loud
+    /// so nobody "simplifies" it away.** `importAudio` guards
+    /// `tracks[index].kind == .audio` (ProjectStore.swift:4465), so no path in
+    /// the tree today can put an AUDIO clip on an INSTRUMENT track — and
+    /// `sourceTrackID == destinationID` needs exactly that. A future
+    /// audio-on-instrument path (a recording, say) would make it live the same
+    /// day, and its absence then would silently mute the pads. No behavioural
+    /// test can reach it; `PadGridSiteTests` pins that it exists.
     @discardableResult
     public func sliceClipToSampler(clipId: UUID,
                                    targetTrackId: UUID? = nil,
-                                   settings: SliceToSamplerSettings)
+                                   settings: SliceToSamplerSettings,
+                                   muteSourceTrack: Bool = false)
         async throws -> SliceToSamplerResult {
         guard let resolvedEngine = engine else { throw ProjectError.engineUnavailable }
         // A chop always changes the zones array, which is a STRUCTURAL
@@ -216,7 +270,13 @@ extension ProjectStore {
         var warnings = plan.warnings
         var createdTrackID: UUID?
         var midiClipID: UUID?
+        var mutedTrackID: UUID?
         let destinationID: UUID
+        // Captured by ID, not by index: the edit body below APPENDS a track,
+        // and an index taken before an append is exactly the kind of quietly
+        // stale handle this file's re-locate-after-every-await discipline exists
+        // to avoid.
+        let sourceTrackID = tracks[t2].id
 
         if let targetTrackId {
             guard let ti = tracks.firstIndex(where: { $0.id == targetTrackId }) else {
@@ -303,14 +363,46 @@ extension ProjectStore {
                     end: midiClip.startBeat + midiClip.lengthBeats,
                     tempoMap: transport.tempoMap).clips
             }
+
+            // ⭐ INSIDE THE ONE `performEdit`, so ONE undo puts the pads AND the
+            // mute back together. A separate `setMute` call afterwards would
+            // make the user press ⌘Z twice to get back where they started, and
+            // the halfway state — the original audible under a keymap that no
+            // longer exists — is one nobody asked for.
+            if muteSourceTrack, sourceTrackID != destinationID,
+               let si = tracks.firstIndex(where: { $0.id == sourceTrackID }) {
+                if tracks[si].isMuted {
+                    warnings.append(
+                        "“\(tracks[si].name)” was already muted, so nothing changed there")
+                } else {
+                    tracks[si].isMuted = true
+                    mutedTrackID = sourceTrackID
+                }
+            }
+
             engine?.tracksDidChange(tracks)
+        }
+
+        // ⚠️ WARNED, NOT THROWN: the chop itself succeeded and the pads are
+        // real. Appended AFTER the edit so it cannot be read as a reason the
+        // edit did not happen.
+        if muteSourceTrack && sourceTrackID == destinationID {
+            warnings.append(
+                "the source clip is on the SAME track the pads landed on, so muting it was "
+                + "skipped — it would have silenced the pads too. Chop onto a new track "
+                + "(omit targetTrackId) if you want the original muted")
         }
 
         return SliceToSamplerResult(
             trackId: destinationID, createdTrackId: createdTrackID,
             midiClipId: midiClipID, sampleRate: geometry.sampleRate,
             frameCount: geometry.frameCount, sliceCount: plan.slices.count,
-            headSeconds: plan.headSeconds, slices: plan.slices, warnings: warnings)
+            headSeconds: plan.headSeconds, slices: plan.slices, warnings: warnings,
+            mutedTrackId: mutedTrackID,
+            // ⚠️ READ BACK OUT OF THE STORE AFTER THE EDIT, never assembled from
+            // what was requested. That is the whole reason this field exists as
+            // its own measurement — see its doc.
+            sourceTrackMuted: tracks.first { $0.id == sourceTrackID }?.isMuted ?? false)
     }
 
     /// The clip's source window in SOURCE-FILE seconds — the chop region.

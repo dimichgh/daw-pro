@@ -395,6 +395,87 @@ struct PersistenceTests {
         #expect(decoded.effectDescriptor()?.stereoWidth?.width == decoded.stereoWidth?.width)
     }
 
+    /// m39-o — the same hand-mirrored hazard, by field, through the real
+    /// save/open path. (The EXHAUSTIVE cross-kind pin now lives in
+    /// `EffectDocumentMirrorTests`; this leg is the per-field one it
+    /// deliberately is not.) Every value below is a NON-DEFAULT, because a leg
+    /// that round-trips defaults passes even when the mirror drops the object
+    /// entirely — `resolvedPhaser` manufactures defaults from nil.
+    @Test("m39-o: all 7 phaser parameters survive save -> open (the hand-mirrored mirror)")
+    func phaserParamsSurviveTheDocumentMirror() throws {
+        let dir = tempDir()
+        let store = ProjectStore()
+        store.media = FakeMedia()
+        let track = store.addTrack(name: "Rhodes", kind: .audio)
+        let effect = try store.addEffect(toTrack: track.id, kind: .phaser)
+        // Defaults are 0.5 / 300 / 3 / 6 / 0.5 / 0.5 / 90 — not one value below
+        // is any of them. `stages` is EVEN because the setter snaps, and an odd
+        // fixture would come back changed for a reason that is not data loss.
+        let expected: [(String, Double)] = [
+            ("rateHz", 1.9), ("centerHz", 640), ("depthOctaves", 1.75),
+            ("stages", 12), ("feedback", -0.72), ("mix", 0.81),
+            ("stereoPhaseDeg", 137),
+        ]
+        #expect(expected.count == EffectParamSpec.specs(for: .phaser).count,
+                "this leg stopped covering every parameter")
+        for (name, value) in expected {
+            _ = try store.setEffectParam(trackID: track.id, effectID: effect.id,
+                                         name: name, value: value)
+        }
+
+        let path = dir.appendingPathComponent("Phase").path
+        try store.saveProject(to: path)
+
+        let reopened = ProjectStore()
+        reopened.media = FakeMedia()
+        try reopened.openProject(at: path)
+
+        let restored = try #require(reopened.tracks.first?.effects.first)
+        #expect(restored.kind == .phaser)
+        let params = try #require(
+            restored.phaser,
+            "the phaser params object was dropped by the document mirror")
+        for (name, value) in expected {
+            let actual = try #require(restored.paramValue(name),
+                                      "\(name) is not on the paramValue surface")
+            #expect(abs(actual - value) < 1e-9,
+                    "\(name) came back \(actual), not \(value)")
+        }
+        // Read two fields directly too, so the leg does not depend ONLY on
+        // `paramValue`'s own switch being right.
+        #expect(abs(params.centerHz - 640) < 1e-9)
+        #expect(params.stages == 12)
+    }
+
+    /// §12 gate 7 for m39-o. Same shape as the stereoWidth/tapeDelay legs, same
+    /// built-in positive control.
+    @Test("m39-o: a pre-phaser effect encodes byte-identically, and the control fires")
+    func absentPhaserParamsAddNoBytes() throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let id = UUID(uuidString: "3C3C3C3C-4D4D-5E5E-6F6F-707070707070")!
+
+        let legacy = EffectDocument(from: EffectDescriptor(
+            id: id, kind: .gain, gain: GainParams(gainLinear: 1.5)))
+        let legacyBytes = try encoder.encode(legacy)
+        #expect(!String(decoding: legacyBytes, as: UTF8.self).contains("phaser"),
+                "a nil phaser must be OMITTED, not encoded as null")
+
+        // POSITIVE CONTROL: the same comparison, with the field populated.
+        var populated = legacy
+        populated.phaser = PhaserParams(centerHz: 640, stages: 12)
+        let populatedBytes = try encoder.encode(populated)
+        #expect(populatedBytes != legacyBytes, """
+                the encoder is ignoring phaser entirely — the omission proof above \
+                is vacuous
+                """)
+        #expect(String(decoding: populatedBytes, as: UTF8.self).contains("phaser"))
+
+        let decoded = try JSONDecoder().decode(EffectDocument.self, from: populatedBytes)
+        #expect(abs((decoded.phaser?.centerHz ?? 0) - 640) < 1e-9)
+        #expect(decoded.effectDescriptor()?.phaser?.stages == decoded.phaser?.stages)
+    }
+
     /// §12 gate 7 for m39-n. Same shape as the hallReverb/flanger legs, same
     /// built-in positive control.
     @Test("m39-n: a pre-tapeDelay effect encodes byte-identically, and the control fires")

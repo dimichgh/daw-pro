@@ -1187,6 +1187,75 @@ Seeded 2026-07-26 from the user's hands-on session against **`dist/DAWPro.app` b
   - [ ] (m23-di-2) **Third-party voice-model IMPORT (②) — the one genuinely absent capability.** Zero `voiceImport|importVoiceModel` anywhere; `VoicePanelModel`'s `importSamples`/`addClipAsSample` import training AUDIO, not model files. ⭐ **THE SEAM IS ALREADY ON SCREEN: `VoicePanel.swift:208` renders a "NEEDS PREP" chip for the facade's `needsConversion` state — a voice folder holding `model.pth` but no `model.npz` (`scripts/rvc/server.py:165`). The panel already SHOWS the third-party-model case and nothing can act on it — so this is a file picker plus a `.pth`→`.npz` step, NOT a new pipeline.** ⭐ **POLICY, so no cycle re-refuses it: third-party/celebrity voice models are ALLOWED (the user withdrew that prohibition 2026-07-27, re-affirmed for TRAINING 2026-07-29); provenance and licensing are THEIRS. The one surviving limit is that we wire up IMPORTING user-supplied files and do NOT build scrapers that go FIND celebrity models at scale — which is exactly what this is.** ⚠️ **Never touch `scripts/rvc/`.** Blocked-ish on di-3 only in the sense that di-3 may widen the scope. Route: `mcp-integration-engineer`. ⭐⭐ **SPLIT 2026-08-10 AFTER A PREMISE CHECK THAT FOUND A HARD WALL IN THE SECOND HALF — di-2a (the import, doable now) and di-2b (resolving `needsConversion`, WHICH NEEDS THE USER'S WORD). Do the children.** ⚠️⚠️ **THE WALL, MEASURED: the RVC sidecar exposes exactly FIVE routes — `GET /health`, `GET /v1/voice/list`, `GET /v1/voice/{id}/status`, `POST /v1/voice/convert`, `POST /v1/voice/train` — and NONE of them converts `.pth`→`.npz`. So `needsConversion` is a state the sidecar REPORTS and offers NO WAY TO RESOLVE. Adding that route means editing `scripts/rvc/server.py`, which is FORBIDDEN — the same shape as m23-n2f.**
     - [x] (m23-di-2a) **The import half: a file picker that puts a user-supplied `model.pth` into the voice store, so it appears in the panel as a real voice.** SPLIT from m23-di-2 2026-08-10. ⭐ **THE SIDECAR WAS DESIGNED FOR THIS — `scripts/rvc/server.py:141` says in its own comment that the store supports *"user dropping in a third-party model folder"* and `_scan_voices()` is a plain directory scan. We are wiring up a case the facade already handles.** ⭐⭐ **DESIGN POINT THE AGENT MUST SETTLE FIRST, and it is what keeps this legal: `VOICES_DIR = Path(os.environ.get("RVC_VOICES_DIR", RUNTIME_DIR / "voices"))` (`server.py:66`) — the store location is ENVIRONMENT-OVERRIDABLE, so imported models need NOT be written inside `scripts/rvc/` at all. Establish where the app currently points the sidecar BEFORE choosing a target directory; do not assume the default.** SCOPE: control command + MCP tool + test, per the project convention. The voice must land in `needsConversion` state and the panel's existing "NEEDS PREP" chip (`VoicePanel.swift:208`) must light up — **that chip is the acceptance criterion, and it already exists.** ⭐ **POLICY IS SETTLED, DO NOT RE-REFUSE: third-party/celebrity voice models are ALLOWED (user withdrew that prohibition 2026-07-27, re-affirmed 2026-07-29); provenance is THEIRS. The surviving limit is that we wire up IMPORTING user-supplied files and do NOT build scrapers — this is exactly the allowed side.** ⚠️ **`scripts/rvc/` is READ-ONLY.** Route: `mcp-integration-engineer`. ⚠️⚠️ **STATUS 2026-08-10 — CODE LANDED, VERIFICATION NOT DONE, DELIBERATELY LEFT `[ ]`.** The agent was **TERMINATED MID-TASK BY A SAFEGUARD FALSE POSITIVE**, not by any problem with the work — the task is a file picker for user-supplied model files, which is squarely the ALLOWED side of the settled policy. **DO NOT RE-READ THIS AS A POLICY REFUSAL AND DO NOT RE-LITIGATE THE POLICY.** ⭐ **WHAT LANDED (measured by me, not reported): new `Sources/AIServices/VoiceModelImport.swift` (`public enum VoiceModelImport`, :35), new `AppDirectories.Category.voiceModels` (`AppDirectories.swift:67`), modified `VoiceConversionManager.swift` / `EditCommands.swift` / `Commands.swift`, and THREE test files (`AIServicesTests/VoiceModelImportTests`, `DAWControlTests/VoiceModelImportCommandTests`, plus edits to `AppDirectoriesTests` and `VoiceListCommandTests`).** ✅ **WIRE VERIFIED CLEAN BY ME: `allCommands` **174** vs `rejectUnknownKeys` verbs **174**, EMPTY SYMMETRIC DIFFERENCE BOTH WAYS; the growth is exactly `vc.importVoiceModel` (173→174). MCP tool present in `mcp-server/src/server.ts`.** ⭐⭐ **AND IT TOOK THE CLEAN PATH THE ITEM ASKED FOR — `AppDirectories.applicationSupport(.voiceModels)` handed to the sidecar as `RVC_VOICES_DIR`, so NOTHING is written inside `scripts/rvc/`.** ⚠️⚠️ **WHAT IS OWED BEFORE TICKING: a compile + `./scripts/test.sh` run, and a live control-port round trip showing a voice arriving in `needsConversion` with the "NEEDS PREP" chip lit. NOT RUN — at close time 5 swift processes and 4 `DAWApp` instances were active under another agent, and m23-fa-1 MEASURED that concurrent builds/staging manufacture genuine-looking failures (`TIMEOUT debug.arrangeZoom`, `masterCapture start failed`). Verifying into that contention would have produced a verdict I could not trust either way.** ✅✅✅ **VERIFIED AND TICKED 2026-08-10, SEQUENTIALLY, ON A QUIET TREE.** **① TESTS: `5300 tests in 539 suites passed`, `grep -c ✘` = 0, off a COMPLETE 13079-line log with a 5829 `✔` positive control (up from 5275/537).** ⚠️ **17 lines matched `error:` and I classified them rather than waving them off — ALL are test NAMES and measurement labels (`worst per-frame error: 0.0`); `grep -cE '\.swift:[0-9]+:[0-9]+: error:'` = **0**, so no compiler diagnostic.** **② WIRE: `allCommands` 174 vs `rejectUnknownKeys` verbs 174, EMPTY SYMMETRIC DIFFERENCE BOTH WAYS; growth is exactly `vc.importVoiceModel` (173→174). MCP tool present.** **③ LIVE CONTROL-PORT ROUND TRIP on staging 17695: 5/5, exit 0.** C1 import returns `state:"needsConversion"` with `voiceId` sanitised `"My Test Voice"`→`"my-test-voice"` and `hasIndex:true`. ⭐ **C2/C3 ARE THE DISCRIMINATING LEGS — A SETTER'S RETURN IS NOT PROOF IT TOOK — and the directory really holds `model.pth`, `model.index`, `voice.json` (`{"createdAt":…,"name":"My Test Voice"}`).** ⭐ **TWO NEGATIVE CONTROLS PASSED: reserved id `base` refused, and a nonexistent source refused, each with a legible message.** ✅ **PROFILE ISOLATION CONFIRMED BY THE PATH ITSELF: `…/dawpro-staging-profile-CaL4FH/DAWPro/VoiceModels/my-test-voice` — NOT the user's real Application Support, and NOT inside `scripts/rvc/`.** ⚠️ **MY OWN PROBE FAILED FIRST AND THE FEATURE WAS FINE: C2 read `r.directory`/`r.path` when the response field is `directoryPath`. A red leg whose message CONTAINS the value it says is missing is a broken CHECK, not a broken feature.** ⚠️ **NOT COVERED, STATED PLAINLY: the "NEEDS PREP" chip was not observed rendering — that needs the RVC sidecar up, and the wire state (`needsConversion`) is what the chip binds to. Probe kept at `<scratchpad>/di2a-roundtrip.mjs`; NOT added to `scripts/gates/` — the corpus has 61 vacuous verdicts and m23-fa-2 has not migrated them yet.**
     - [ ] (m23-di-2b) ⛔ **NEEDS THE USER'S WORD — resolving `needsConversion` has no legal path that I can choose unilaterally.** SPLIT from m23-di-2 2026-08-10. An imported `.pth` is inert until converted to `.npz`, and the three options are not equivalent: **(i) add a `POST /v1/voice/{id}/prepare` route to the sidecar — the clean design, and FORBIDDEN, because it edits `scripts/rvc/server.py`; (ii) invoke the vendored converter as a SUBPROCESS from the app — `scripts/rvc/runtime/src/tools/convert_pth_to_mlx.py` EXISTS and is a plain 91-line CLI taking `input .pth` / `output .npz`, so this RUNS a file without MODIFYING one and is arguably within the constraint, but it couples us to the vendored tree's internal layout AND to its pinned commit, and it needs that tree's `uv` environment (torch + mlx) rather than system python; (iii) leave imported models inert and document it.** ⭐ **(ii) is the only one that both works and stays inside the rules, but it is the user's call because it deliberately reaches into a directory they fenced off — ASK, do not assume the fence was only about edits.** ⚠️ **Do not start di-2b before di-2a lands: an unconverted import is still a visible, honest capability, and the question is easier to ask with the picker working.** Route: none until answered.
+- [x] (m39-x) ✅ **SHIPPED 2026-09-20 — `.phaser`, rank 7, AND IT IS PROVABLY NOT A FLANGER.**
+  Verified by me: I re-ran its discrimination leg and planted its bypass defect by hand.
+  ⭐⭐⭐ **THE MEASUREMENT IS THE ITEM.** One notch-finder, run on a rendered `.phaser` AND a rendered
+  `.flanger`, with four assertions: each kind fits its own law AND fails the other's.
+  **Phaser: 4 notches at 1 : 3.359 : 7.523 : 25.254** — 12 % / 50 % / **261 %** away from a comb.
+  **Flanger, same finder: 16 notches at 1 : 3.000 : 5.000 : 7.000** — a textbook odd-harmonic comb.
+  ⭐ Running the finder on the FLANGER is the positive control proving it was not tuned to flatter
+  the phaser; as the test's own doc says, **"1 and 3 alone would pass if both kinds were flangers."**
+  ⛔ **THREE PLANTS REDDENED NOTHING AND ALL THREE WERE FINDINGS.** (1) A bypass plant was invisible
+  because `dry·1 + wet·0` is **exactly** `dry` for every normal float — only **−0.0** discriminates,
+  and `[Float] ==` cannot see even that, since IEEE says `−0.0 == +0.0`. Now compares **bit
+  patterns**. (2) A denormal plant was invisible because the leg read only the OUTPUT, where a
+  separate chain-output flush masks the section states — structurally blind, not mistuned.
+  (3) A coefficient-interpolation plant would have been invisible **and so would the obvious
+  instrument for it**, because every spectral leg renders at zero depth where the coefficient never
+  moves; the artifact is a cluster, not a line, and the broadband floor separates by **35.7 dB**.
+  ⚠️ **Id erratum, the THIRD tonight:** the design's build table (§1498) calls this `m39-o`, which is
+  **spent** on the exhaustive-persistence pin; its leg table (§1572) says `m39-x`. **`m39-x` is
+  authoritative.** Same shape as `m39-j-0` and `m39-aa`.
+  ⛔ **The agent retracted three claims it had ALREADY WRITTEN** into `CHANGELOG.md`, `ARCHITECTURE.md`
+  and its own test header after a plant refuted them — a count leg reddens too, because the wrong
+  sign parks the corner near DC and drags notches out of the scan window. ⭐ **A written claim is a
+  hypothesis until a plant has tried to break it.**
+- [x] (m39-pads) ✅ **SHIPPED 2026-09-20 — THE PAD GRID: a human can finally reach the chopper.**
+  Until today `clip.sliceToSampler` was reachable from **NO view** (measured, positive-controlled):
+  an AI agent could chop a recording into 53 pads through MCP and a person could not chop at all.
+  This is the surface the user's items **(2) drum machine** and **(4) loop/drum depth** both need,
+  and it anticipates `m34-n`'s own note that *"velocity becomes load-bearing only if a DRUM mode is
+  added later — that is exactly where real hardware spends it."*
+  ⚠️ **Id is DESCRIPTIVE on purpose.** Three letter-id errata landed tonight (`m39-n`, `m39-o`,
+  and the build-vs-leg split). This is not an effect and does not belong in the `m39-n … m39-ab`
+  ranked-suite range; a name that cannot collide is worth more here than the next free letter.
+  ⭐⭐ **THE KEY MAPPING IS THE USER'S CORRECTION, AND THEY WERE RIGHT.** The first build re-read the
+  17 piano-shaped musical-typing keys LINEARLY as 16 pads — which means a pad's position on screen
+  has no relation to the key under the hand, so hitting "row 2, column 3" is a lookup, not finger
+  drumming. Their words: *"ideally we need grid to map to similarly aligned keys on keyboard."*
+  Rebuilt to a spatial block, **bottom row to bottom row**:
+  `Z X C V` → pads 1-4 (notes 36-39) · `A S D F` → 5-8 · `Q W E R` → 9-12 · `1 2 3 4` → 13-16.
+  ⭐ **The agent's "cannot be built here" objection was answered by MODE, not avoidance** — pads mode
+  claims exactly **six** new keycodes (`Q R 1 2 3 4`), only while it is on, measured against every
+  `keyboardShortcut` in the app with **no collision**; bank/velocity moved to `K`/`L` and `O`/`P` so
+  the right hand pages while the left drums. ⛔ **The origin is pinned by a test** (`keyLabel(forPad:
+  0) == "Z"`), asserted from letters, pitches AND the drawn grid — *"the commonest way this is built
+  backwards."*
+  ⭐⭐ **THREE DEFECTS ONLY THE SCREEN CAPTURE COULD FIND, all shipped green:** the chop notice named
+  the **wrong track** (it pointed at the source it had just muted), said *"its 1 other clip **go**
+  quiet"*, and showed a beginner a raw **UUID**. ⭐ **Why the first one hid is the keeper: a fixture
+  where two sources cannot disagree cannot test that they agree.**
+  ⛔⛔ **TWO LIVE DEFECTS HID FOR HOURS INSIDE CROSS-AGENT NOISE — MY FAULT, SEE BELOW:** `padDown`
+  was **INERT** (it computed the pitch and threw it away with `_ = pitch`, so clicking a pad made no
+  sound) and `padIndex(displayRow:column:)` had **lost its inversion**, so pad 1 drew top-left while
+  `square(forPad:)` still said bottom-left and the two stopped being inverses.
+  ⛔⛔ **PROCESS FAILURE, AND IT WAS MINE: I ran two agents concurrently and briefed neither to
+  namespace its scratch files.** They shared one scratchpad AND one `.build`. Both wrote `plant.py`;
+  the pad grid's version **ignores `sys.argv`** and ran its own campaign on every invocation, so the
+  phaser agent's plant loop was silently planting defects into `PadGrid*.swift`. Identical test
+  filters then gave different failures minutes apart, and real reds read as flake.
+  ⚠️ **The pad-grid agent then concluded the phaser's ENTIRE plant table was void. IT IS NOT —
+  I settled it by experiment**, planting the phaser's own bypass defect by hand and watching `L1a`
+  redden alone. The phaser had rebuilt under unique names at 22:47 and finished clean at 22:51;
+  the shared `plant.py` was only overwritten at 23:03. ⭐⭐⭐ **AN AGENT'S DIAGNOSIS OF ANOTHER
+  AGENT'S WORK IS A CLAIM, AND A WEAKER ONE THAN ITS CLAIMS ABOUT ITS OWN.** Laws:
+  [[daw-pro-gate-laws]] §2026-09-20.
+  ⚠️ **Open, reported not fixed:** the store's refusal offers remedies in API spelling
+  (*"raise minSliceSeconds"*) to a user whose control reads *MOST PADS TO MAKE*; the **672 pt window
+  floor is UNMEASURED** (captured at 1800 px, may be the m26-i shape); the context-menu route is
+  pinned by source shape but **never exercised through an actual right-click**; `K`/`L` can page to
+  an empty bank; and the **C1/C2 convention clash** stands (the chopper says 36 = C1, the app's namer
+  says C2).
 - [x] (m23-dj) ✅ **SHIPPED 2026-09-19 as the `.stereoWidth` insert kind — rank 5.** Verified by me,
   not accepted from the agent: Swift **8326 / 728 / zero failures** (own run, 278.8 s), MCP
   **878 / 0**, wire **227**, 17 kinds × 5 surfaces exit 0, 18 demo specs, six persistence sites
@@ -4318,7 +4387,7 @@ must handle it anyway.
   description, and in the MCP README's `fx_describe` row. ⭐ **Search by FIELD NAME, not by phrasing.**
 - [ ] (m39-n … m39-ab) **The remaining ranked suite** — ✅ ~~`.stereoWidth`~~ **SHIPPED as `m23-dj`**
   (that item was the home, exactly as "ADOPT m23-dj, do not mint beside it" required),
-  ✅ ~~`.tapeDelay` free-ms~~ **SHIPPED as `m39-aa` above**, `.phaser`,
+  ✅ ~~`.tapeDelay` free-ms~~ **SHIPPED as `m39-aa` above**, ✅ ~~`.phaser`~~ **SHIPPED as `m39-x`**,
   `.transientShaper` (⚠️ **price the DETECTOR, not the shaper** —
   `TransientAnalyzer` is offline, file-in, allocates freely, not reusable short of a rewrite),
   `.freqShifter`, `.clipper` + `Oversampler`, Saturator v2 (**the second `Oversampler` caller — this

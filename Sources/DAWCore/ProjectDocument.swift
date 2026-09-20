@@ -726,28 +726,38 @@ public struct EffectDocument: Codable, Sendable, Equatable {
     public var djFilter: DJFilterParams?
     /// m39-m — the same five sites, the same hazard.
     public var ringMod: RingModParams?
-    /// m39-j — the same five sites, the same hazard. (⚠️ "five sites" counts
-    /// the declaration you are reading as the first; m39-o files the missing
-    /// exhaustive pin. `FlangerPersistenceTests` covers this one by hand.)
+    /// m39-j — the same SIX sites, the same hazard. ✅ THE EXHAUSTIVE PIN
+    /// LANDED AT m39-o: `EffectDocumentMirrorTests` round-trips a NON-DEFAULT
+    /// descriptor for every kind, driven by `Kind.allCases`.
+    /// `FlangerPersistenceTests` still covers this one by hand, by field.
     public var flanger: FlangerParams?
     /// m39-l — the same SIX sites, the same hazard, and this kind has FOURTEEN
     /// params riding on them: property, `CodingKeys`, `init(from effect:)`,
     /// `decodeIfPresent`, `encodeIfPresent`, `effectDescriptor()`. Miss one and
     /// the project saves, reports success, and reopens with the hall reset to
-    /// defaults. `HallReverbPersistenceTests` covers this one by hand until
-    /// m39-o lands the exhaustive pin.
+    /// defaults. ✅ THE EXHAUSTIVE PIN LANDED AT m39-o
+    /// (`EffectDocumentMirrorTests`); `HallReverbPersistenceTests` still covers
+    /// this one by hand, by field.
     public var hallReverb: HallReverbParams?
-    /// m39-n — the same SIX sites, the same hazard. `TapeDelayPersistenceTests`
-    /// covers this one by hand until m39-o lands the exhaustive pin, and it
-    /// asserts a NON-DEFAULT value per field, because a round-trip test whose
-    /// fixture is all-defaults passes with every `encodeIfPresent` deleted.
+    /// m39-n — the same SIX sites, the same hazard. ✅ THE EXHAUSTIVE PIN
+    /// LANDED AT m39-o (`EffectDocumentMirrorTests`, which adopted this
+    /// comment's own rule: its fixtures are non-default IN EVERY FIELD, and a
+    /// control asserts that mechanically). `TapeDelayPersistenceTests` still
+    /// covers this one by hand, by field.
     public var tapeDelay: TapeDelayParams?
-    /// m23-dj — the same SIX sites, the same hazard.
-    /// `StereoWidthPersistenceTests` covers this one by hand until m39-o lands
-    /// the exhaustive pin, and it asserts a NON-DEFAULT value per field,
-    /// because a round-trip test whose fixture is all-defaults passes with
-    /// every `encodeIfPresent` deleted.
+    /// m23-dj — the same SIX sites, the same hazard. ✅ THE EXHAUSTIVE PIN
+    /// LANDED AT m39-o (`EffectDocumentMirrorTests`);
+    /// `StereoWidthPersistenceTests` still covers this one by hand, by field.
     public var stereoWidth: StereoWidthParams?
+    /// m39-o — the same SIX sites, the same hazard, and ⭐ THE ITEM THAT
+    /// LANDED THE EXHAUSTIVE PIN THE FOUR COMMENTS ABOVE KEPT DEFERRING TO IT.
+    /// `EffectDocumentMirrorTests` round-trips a NON-DEFAULT descriptor for
+    /// EVERY `EffectDescriptor.Kind`, driven by `allCases`, so a kind added
+    /// without all six sites now fails there instead of waiting for someone to
+    /// hand-write a per-kind test — and it carries a plant control that STRIPS
+    /// a params key and proves the comparison reddens. The per-kind tests stay:
+    /// they name individual fields and go through the real save/open path.
+    public var phaser: PhaserParams?
     /// Hosted Audio Unit selection + inlined state (stateData rides as base64
     /// through Codable's Data default) — the InstrumentDocument.audioUnit
     /// mirror. Additive optional: pre-M4 (v) files have no key and stay
@@ -760,7 +770,8 @@ public struct EffectDocument: Codable, Sendable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case id, kind, bypassed, gain, eq, compressor, limiter
         case reverb, delay, saturator, gate, chorus, bassEnhancer, bitCrusher
-        case djFilter, ringMod, flanger, hallReverb, tapeDelay, stereoWidth, audioUnit
+        case djFilter, ringMod, flanger, hallReverb, tapeDelay, stereoWidth, phaser
+        case audioUnit
         case sidechainSourceTrackID
     }
 
@@ -788,6 +799,7 @@ public struct EffectDocument: Codable, Sendable, Equatable {
         hallReverb = effect.hallReverb
         tapeDelay = effect.tapeDelay
         stereoWidth = effect.stereoWidth
+        phaser = effect.phaser
         audioUnit = effect.audioUnit
         sidechainSourceTrackID = effect.sidechainSourceTrackID
     }
@@ -814,6 +826,7 @@ public struct EffectDocument: Codable, Sendable, Equatable {
         hallReverb = try c.decodeIfPresent(HallReverbParams.self, forKey: .hallReverb)
         tapeDelay = try c.decodeIfPresent(TapeDelayParams.self, forKey: .tapeDelay)
         stereoWidth = try c.decodeIfPresent(StereoWidthParams.self, forKey: .stereoWidth)
+        phaser = try c.decodeIfPresent(PhaserParams.self, forKey: .phaser)
         audioUnit = try c.decodeIfPresent(AudioUnitConfig.self, forKey: .audioUnit)
         sidechainSourceTrackID = try c.decodeIfPresent(UUID.self, forKey: .sidechainSourceTrackID)
     }
@@ -843,6 +856,7 @@ public struct EffectDocument: Codable, Sendable, Equatable {
         try c.encodeIfPresent(hallReverb, forKey: .hallReverb)
         try c.encodeIfPresent(tapeDelay, forKey: .tapeDelay)
         try c.encodeIfPresent(stereoWidth, forKey: .stereoWidth)
+        try c.encodeIfPresent(phaser, forKey: .phaser)
         try c.encodeIfPresent(audioUnit, forKey: .audioUnit)
         try c.encodeIfPresent(sidechainSourceTrackID, forKey: .sidechainSourceTrackID)
     }
@@ -864,6 +878,7 @@ public struct EffectDocument: Codable, Sendable, Equatable {
                                 hallReverb: hallReverb,
                                 tapeDelay: tapeDelay,
                                 stereoWidth: stereoWidth,
+                                phaser: phaser,
                                 audioUnit: audioUnit,
                                 sidechainSourceTrackID: sidechainSourceTrackID)
     }

@@ -265,7 +265,11 @@ struct EffectChainStoreTests {
             fromPath: dir.appendingPathComponent("Ghost").path)
         try FileManager.default.createDirectory(at: bundleURL, withIntermediateDirectories: true)
 
-        // Hand-authored project.json: one known gain effect plus a `phaser` effect
+        // Hand-authored project.json: one known gain effect plus a `wobbulator`
+        // effect. ⚠️ THIS FIXTURE SAID `phaser` UNTIL m39-o SHIPPED ONE — a
+        // forward-compat drop test whose "unknown kind" becomes a known kind
+        // stops testing the drop path and starts testing the happy path,
+        // silently.
         // this build doesn't know (a forward-compat file from a later milestone).
         let trackID = UUID()
         let keepID = UUID()
@@ -283,7 +287,7 @@ struct EffectChainStoreTests {
               "clips": [],
               "effects": [
                 {"id": "\(keepID.uuidString)", "kind": "gain", "gain": {"gainLinear": 0.5}},
-                {"id": "\(UUID().uuidString)", "kind": "phaser"}
+                {"id": "\(UUID().uuidString)", "kind": "wobbulator"}
               ]
             }
           ]
@@ -300,7 +304,7 @@ struct EffectChainStoreTests {
         #expect(vox.effects.count == 1)
         #expect(vox.effects.first?.id == keepID)
         #expect(vox.effects.first?.resolvedGain.gainLinear == 0.5)
-        #expect(warnings.contains("unknown effect kind 'phaser' on track 'Vox' — effect dropped"))
+        #expect(warnings.contains("unknown effect kind 'wobbulator' on track 'Vox' — effect dropped"))
     }
 
     // MARK: - m38-a gain polarity (the name->field mapping)

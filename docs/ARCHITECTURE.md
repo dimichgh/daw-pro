@@ -1753,6 +1753,53 @@ NO-OP on a mono source** — it scales a difference that is zero — and that tr
 note, `fxKindSchema`, the MCP README and the wire-reference skill, because the most likely request
 ("make my mono synth wide") reaches for the wrong one of the two controls.
 
+- **`.phaser` IS AN ALL-PASS CASCADE, NOT A DELAY LINE, AND THAT DISTINCTION IS THE ITEM
+(SHIPPED 2026-09-19 as m39-o — design §2.1 rank 7).** A flanger sums with a DELAYED copy, which
+cancels at the odd multiples of `1/(2·delay)` — a dense, evenly spaced, **harmonic** comb. This kind
+sums with a PHASE-SHIFTED copy: `stages` first-order all-pass sections sharing one swept corner, so
+the total phase runs 0 → −`stages`·180° and the sum cancels only where it crosses an odd multiple of
+180° — exactly **`stages`/2 notches**, at `tan((2k+1)π/2N)` times the corner, a **non-harmonic**
+series that SPREADS as it climbs. ⭐ **MEASURED, not asserted, and measured against the sibling:** one
+notch-finder is run over a rendered `.phaser` and a rendered `.flanger` (`PhaserTests` L4). The phaser
+puts **4 notches** in 15 Hz–8 kHz at ratios **1 : 3.359 : 7.523 : 25.25**, matching
+`PhaserParams.notchHz` to better than 2 % and sitting **12 % / 50 % / 261 %** away from a comb; the
+flanger puts **16** in the same band at **1 : 3.000 : 5.000 : 7.000**, matching `combNotchHz` and
+sitting **10.7 % / 33.5 % / 72.3 %** away from the phaser law. Each law fits its own kind and is
+REJECTED by the other, which is what makes it a discrimination rather than two self-checks.
+⚠️ **THE COEFFICIENT SIGN IS THE TRAP:** `a = (t−1)/(t+1)`, not `(1−t)/(1+t)`. Both are stable
+all-passes; in double precision the wrong one puts **−0.04° / −13.1°** at corners where the right one
+puts exactly **−90.000°**. ⚠️ **A first draft of this bullet added "so a COUNT test passes either
+way" — PLAUSIBLE AND WRONG, refuted by planting it.** Measured, the wrong sign reddens THREE legs:
+the −90° law leg, L2's notch POSITIONS, and L3's COUNT. The count moves not because a count can tell
+the signs apart but because the wrong sign parks the corner near DC and drags notches out of the
+15 Hz–12 kHz scan window. L2 is still the leg that discriminates.
+⭐ **The sweep ceiling is STRUCTURAL rather than clamped:**
+`centerRange.upperBound · 2^depthRange.upperBound` = **16 kHz**, below `0.45·fs` at every supported
+rate, so the `tan` guard never engages and the sweep top is never flattened — pinned by
+`maxCornerFitsEverySupportedRate`. ⛔ **The denormal flush is PER SECTION, not per recirculating word
+like the flanger's:** every first-order all-pass is its own IIR with a pole at `|a|` and decays into
+subnormals on silence **even at `feedback` 0**. ⚠️ **`mix` 1 at `feedback` 0 is very nearly INAUDIBLE
+and that is correct** — an all-pass chain alone changes no frequency's level, so with no dry signal
+left to cancel against there is nothing to hear (measured flat to **1.2e-05 dB**); the warning ships
+on every surface because it is the most likely bug report this kind will attract.
+⛔⛔ **TWO OF THIS KIND'S OWN LEGS COULD NOT FAIL UNTIL A PLANT SAID SO, AND A THIRD HOLE WAS FOUND
+THE SAME WAY.** Deleting every per-section denormal flush left 35/35 green (the leg read only the
+OUTPUT, which a separate chain-output flush masks; it now reads the section words once per quantum
+across the tail). Replacing the `mix == 0` guard with `if true` also left 35/35 green — `dry·1 + wet·0`
+is exactly `dry`, so only **−0.0** discriminates, and `[Float] ==` cannot see even that because IEEE
+says `−0.0 == +0.0`; the leg now compares **bit patterns**. And because **every spectral leg renders
+at `depthOctaves: 0`, where the coefficient never moves**, nothing could see whether the 32-frame
+stride (§6.0.6) is interpolated per sample or slammed at the boundary — `PhaserTests` L14 measures the
+modulation artifact floor at a threshold sitting between two measured renders (**−80.6 dB**
+interpolated, **−44.9 dB** stepped). ⚠️ Its §12-gate-2 allocation leg also caught its own fixture:
+re-processing one chunk in place at `mix 0.5 / feedback 0.8` (DC gain **3.0**) reached `NaN` while the
+malloc count stayed a clean 0.
+⭐ **m39-o ALSO LANDED THE EXHAUSTIVE PERSISTENCE PIN** four `ProjectDocument` comments had been
+deferring to it: `EffectDocumentMirrorTests` round-trips a non-default descriptor for every
+`EffectDescriptor.Kind`, refuses to skip a kind with no fixture, asserts every fixture differs from
+its spec default field by field, and carries a plant control that STRIPS a params key and proves the
+comparison reddens.
+
 - **One shared primitive is extracted, one declared-but-unbuilt, one deferred (SETTLED 2026-09-19 by design).**
 `InterpolatedDelayLine` is extracted from `ChorusEffect` (three requested features need exactly that code,
 and its write-head-crossing guarantee is the subtle condition a fresh implementation gets wrong).

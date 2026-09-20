@@ -505,7 +505,7 @@ struct FXCommandTests {
                 == ["gain", "eq", "compressor", "limiter",
                     "reverb", "delay", "saturator", "gate", "chorus", "bassEnhancer",
                     "bitCrusher", "djFilter", "ringMod", "flanger", "hallReverb",
-                    "tapeDelay", "stereoWidth", "audioUnit"])
+                    "tapeDelay", "stereoWidth", "phaser", "audioUnit"])
         // AU params are not on the generic surface in v0 — empty schema.
         #expect(kinds.last?["params"]?.arrayValue?.isEmpty == true)
 
@@ -690,15 +690,26 @@ struct FXCommandTests {
             .doubleValue == -24)
 
         // Unknown kind error enumerates every kind (derived from Kind.allCases).
+        // ⚠️ THE BOGUS NAME WAS `phaser` UNTIL m39-o SHIPPED ONE. A test whose
+        // "definitely not a kind" fixture becomes a kind does not fail
+        // gracefully — it asserts the wrong branch entirely. `wobbulator` is
+        // chosen to be un-shippable: it is not an effect anyone builds.
         let badKind = await router.handle(ControlRequest(
             id: "3", command: "fx.add",
-            params: ["trackId": .string(trackID.uuidString), "kind": .string("phaser")]
+            params: ["trackId": .string(trackID.uuidString), "kind": .string("wobbulator")]
         ))
         #expect(!badKind.ok)
-        #expect(badKind.error == "unknown effect kind 'phaser' — use "
+        #expect(badKind.error == "unknown effect kind 'wobbulator' — use "
                 + "gain|eq|compressor|limiter|reverb|delay|saturator|gate|chorus|"
                 + "bassEnhancer|bitCrusher|djFilter|ringMod|flanger|hallReverb|tapeDelay|"
-                + "stereoWidth|audioUnit")
+                + "stereoWidth|phaser|audioUnit")
+        // POSITIVE CONTROL on the rename: the name that USED to be the bogus
+        // one is now a real kind, and must be ACCEPTED.
+        let nowReal = await router.handle(ControlRequest(
+            id: "3b", command: "fx.add",
+            params: ["trackId": .string(trackID.uuidString), "kind": .string("phaser")]
+        ))
+        #expect(nowReal.ok)
 
         // Every kind adds and exposes its resolved params on the wire.
         //
@@ -719,17 +730,17 @@ struct FXCommandTests {
             "saturator": "driveDb", "gate": "thresholdDb", "chorus": "rateHz",
             "bassEnhancer": "crossoverHz", "bitCrusher": "bits", "djFilter": "position",
             "ringMod": "carrierHz", "flanger": "rateHz", "hallReverb": "sizeMeters",
-            "tapeDelay": "timeMs", "stereoWidth": "width",
+            "tapeDelay": "timeMs", "stereoWidth": "width", "phaser": "centerHz",
         ]
         let censusKinds = EffectDescriptor.Kind.allCases
             .map(\.rawValue)
             .filter { $0 != "audioUnit" }
         // Non-vacuity: if `allCases` ever stops enumerating, the loop below would
         // pass by doing nothing at all.
-        #expect(censusKinds.count >= 17)
+        #expect(censusKinds.count >= 18)
         let uncovered = censusKinds.filter { expectedParam[$0] == nil }
         #expect(uncovered.isEmpty, "kinds with no entry in this census: \(uncovered) — add one rather than widening the filter; a kind with no wire probe is how a param surface ships untested")
-        // ⚠️ ONE FRESH TRACK PER KIND. The census is 17 kinds and a track holds
+        // ⚠️ ONE FRESH TRACK PER KIND. The census is 18 kinds and a track holds
         // at most 16 effects, so piling them onto `trackID` makes the LAST kinds
         // fail with "effect chain is full" — which is a cap artifact, not a wire
         // defect, and would be read as one. (Measured: this is exactly what
@@ -1348,6 +1359,158 @@ struct FXCommandTests {
         #expect(masterParams["bassMonoHz"]?.doubleValue == 90)
         #expect(abs((masterParams["channelPeakDb"]?.doubleValue ?? 0) - 4.0824) < 0.001,
                 "the derived ripple must follow the params the caller supplied at add time")
+    }
+
+    /// m39-o — the `.phaser` kind on the wire. Three things at once, because
+    /// all three are places this tree has been bitten before:
+    ///
+    /// ⭐ **WHICH VERB CARRIES THE DERIVED FIELDS.** `notchCount` and
+    /// `firstNotchHz` are built by `effectParamsJSON`, so they ride
+    /// `fx.add`, `fx.setParam` and `project.snapshot` — and are **ABSENT from
+    /// `fx.describe`**, which is a per-kind SCHEMA with no instance and no
+    /// values. This is the `wowCents` / `channelPeakDb` shape and it has
+    /// already produced one wrong sentence of prose in this repo. Both halves
+    /// are asserted, and the `== nil` half carries a positive control so it
+    /// cannot pass because the key path was mistyped.
+    ///
+    /// ⭐ **`stages` IS THE ONE SETTER WHOSE ECHO IS NOT ITS INPUT.** It snaps
+    /// to an EVEN count, because an odd chain would put its last phase
+    /// crossing exactly at Nyquist, where it cannot be heard or measured. A
+    /// caller sending 7 gets 8 back. That is deliberate, and a caller that
+    /// believed its own value had stuck would mis-read every subsequent
+    /// reading, so the snap is proven ON THE WIRE and not only in the law.
+    ///
+    /// ⭐ **§12 gate 6 — the describe/settable bijection**, the `hallReverb`
+    /// leg's shape: every declared name is SET and read back, and the refusal
+    /// message for a bogus name is PARSED to prove the accepted set is not
+    /// larger than the declared one either.
+    @Test("m39-o: phaser rides the generic fx verbs — derived notches, the even-stage snap, the bijection")
+    func phaserRidesTheGenericFXSurface() async throws {
+        let (router, _) = makeRouter()
+        let trackID = await addTrack(router, name: "Sweep", kind: "audio")
+
+        let added = await router.handle(ControlRequest(
+            id: "1", command: "fx.add",
+            params: ["trackId": .string(trackID.uuidString), "kind": .string("phaser")]))
+        #expect(added.ok)
+        let effectID = try #require(added.result?["effectId"]?.stringValue)
+        let defaults = try #require(added.result?["effects"]?.arrayValue?.first?["params"])
+        #expect(defaults["rateHz"]?.doubleValue == 0.5)
+        #expect(defaults["centerHz"]?.doubleValue == 300)
+        #expect(defaults["depthOctaves"]?.doubleValue == 3)
+        #expect(defaults["stages"]?.doubleValue == 6)
+        #expect(defaults["feedback"]?.doubleValue == 0.5)
+        #expect(defaults["mix"]?.doubleValue == 0.5)
+        #expect(defaults["stereoPhaseDeg"]?.doubleValue == 90)
+
+        // The derived echoes, read through their ONE HOME rather than
+        // re-derived here — plus the hard numbers the notes and the MCP text
+        // quote, so a change to the law that keeps both sides consistent still
+        // reddens something.
+        let count = try #require(defaults["notchCount"]?.doubleValue)
+        let firstNotch = try #require(defaults["firstNotchHz"]?.doubleValue)
+        #expect(count == Double(PhaserParams.notchCount(stages: 6)))
+        #expect(count == 3, "six sections make THREE notches, not six")
+        #expect(abs(firstNotch - PhaserParams.firstNotchHzAtSweepFloor(
+            centerHz: 300, stages: 6)) < 1e-9)
+        #expect(abs(firstNotch - 80.385) < 0.01,
+                "the quoted default is not what the wire carries")
+
+        // ⭐ THE SNAP, ON THE WIRE: 7 is accepted and answered with 8. The
+        // caller's number is NOT what comes back, and both derived fields move
+        // with it — `notchCount` up to four, `firstNotchHz` DOWN, because a
+        // longer chain reaches its first 180° crossing further below the
+        // corner (tan(π/16) = 0.199 against tan(π/12) = 0.268).
+        let odd = await router.handle(ControlRequest(
+            id: "2", command: "fx.setParam",
+            params: ["trackId": .string(trackID.uuidString), "effectId": .string(effectID),
+                     "name": .string("stages"), "value": .number(7)]))
+        #expect(odd.ok, "an odd stage count is SNAPPED, never refused")
+        let snapped = try #require(odd.result?["effects"]?.arrayValue?.first?["params"])
+        #expect(snapped["stages"]?.doubleValue == 8,
+                "stages 7 must come back as 8 — the caller's value is not the stored one")
+        #expect(snapped["notchCount"]?.doubleValue == 4)
+        let movedNotch = try #require(snapped["firstNotchHz"]?.doubleValue)
+        #expect(abs(movedNotch - 59.674) < 0.01)
+        #expect(movedNotch < firstNotch,
+                "more sections must move the LOWEST notch down, not up")
+        // …and the field that does not depend on `stages` did not move, which
+        // is what proves these are two independent derivations rather than one
+        // number echoed twice.
+        #expect(snapped["centerHz"]?.doubleValue == 300)
+
+        // ⭐ THE HALF AN AGENT GETS WRONG: `fx.describe` is the SCHEMA, so
+        // neither derived key is there — and no PARAM is named `notchCount`
+        // either.
+        let describe = await router.handle(ControlRequest(
+            id: "3", command: "fx.describe", params: ["kind": .string("phaser")]))
+        #expect(describe.ok)
+        let kindObject = try #require(describe.result?["kinds"]?.arrayValue?.first)
+        #expect(kindObject["notchCount"] == nil,
+                "fx.describe must not carry an instance value")
+        #expect(kindObject["firstNotchHz"] == nil,
+                "fx.describe must not carry an instance value")
+        // Positive control for the two `== nil` claims: the SAME lookup shape,
+        // on the SAME object, finds something that IS there — so the absences
+        // are real rather than a mistyped key path.
+        #expect(kindObject["kind"]?.stringValue == "phaser")
+        #expect(kindObject["params"]?.arrayValue?.isEmpty == false)
+
+        // → §12 gate 6: the declared set and the SETTABLE set are the same set.
+        let declared = EffectParamSpec.specs(for: .phaser)
+        #expect(declared.count == 7)
+        #expect(kindObject["params"]?.arrayValue?.compactMap { $0["name"]?.stringValue }
+                == declared.map(\.name))
+        for (index, spec) in declared.enumerated() {
+            let value = spec.range.lowerBound
+                + (spec.range.upperBound - spec.range.lowerBound) * 0.37
+            let response = await router.handle(ControlRequest(
+                id: "set-\(index)", command: "fx.setParam",
+                params: ["trackId": .string(trackID.uuidString),
+                         "effectId": .string(effectID),
+                         "name": .string(spec.name), "value": .number(value)]))
+            #expect(response.ok, "fx.setParam refused the declared name '\(spec.name)'")
+            let echoed = response.result?["effects"]?.arrayValue?.first?["params"]?[spec.name]?
+                .doubleValue
+            #expect(echoed != nil, "'\(spec.name)' is declared but absent from the wire echo")
+            // `stages` is the ONE param whose echo is legitimately not its
+            // input; it is compared against the snap law instead, so this loop
+            // cannot be made to pass by a setter that silently drops values.
+            let expected = spec.name == "stages"
+                ? Double(PhaserParams.snappedStages(value))
+                : value
+            #expect(abs((echoed ?? .nan) - expected) < 1e-9,
+                    "'\(spec.name)' echoed \(echoed ?? .nan), not \(expected)")
+        }
+
+        // → and the accepted set is NO LARGER: the refusal names the valid set,
+        // and it is parsed rather than eyeballed. `delayMs` is the FLANGER's
+        // param — the kind this one is most likely to be confused with — so a
+        // switch arm that fell through to the flanger's would be caught here.
+        let bogus = await router.handle(ControlRequest(
+            id: "bogus", command: "fx.setParam",
+            params: ["trackId": .string(trackID.uuidString),
+                     "effectId": .string(effectID),
+                     "name": .string("delayMs"), "value": .number(4)]))
+        #expect(!bogus.ok, "`delayMs` belongs to the flanger and must be refused on a phaser")
+        let message = try #require(bogus.error)
+        #expect(message == "unknown parameter 'delayMs' for phaser effect — valid: "
+                + declared.map(\.name).joined(separator: ", "),
+                "the refusal message and the spec table disagree: \(message)")
+
+        // Legal on the master chain, like every built-in, and the derived
+        // fields follow params supplied AT ADD TIME rather than the defaults.
+        let master = await router.handle(ControlRequest(
+            id: "5", command: "fx.add",
+            params: ["trackId": .string("master"), "kind": .string("phaser"),
+                     "params": .object(["centerHz": .number(500), "stages": .number(12)])]))
+        #expect(master.ok)
+        let masterParams = try #require(master.result?["effects"]?.arrayValue?.last?["params"])
+        #expect(masterParams["centerHz"]?.doubleValue == 500)
+        #expect(masterParams["stages"]?.doubleValue == 12)
+        #expect(masterParams["notchCount"]?.doubleValue == 6)
+        #expect(abs((masterParams["firstNotchHz"]?.doubleValue ?? 0) - 500
+                    * PhaserParams.notchRatio(stages: 12, index: 0)) < 1e-9)
     }
 
     /// The teaching text is part of the capability: an agent that cannot work

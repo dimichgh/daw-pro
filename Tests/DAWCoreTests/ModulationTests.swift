@@ -40,9 +40,10 @@ struct ModulationTests {
     /// specifically not to have. m23-dj's `.stereoWidth` added 4 yes +
     /// 0 warned + 0 refused, taking it to 106 over 17 — the second kind after
     /// the flanger to add NO refusal, for the same reason (four continuous
-    /// knobs, no discrete param, no `mix`). A new param without a verdict must
-    /// fail this loudly.
-    @Test("§6.2 frozen verdict split: 68 yes + 20 warned + 18 refused = 106 across all 17 param-bearing kinds")
+    /// knobs, no discrete param, no `mix`). m39-o's `.phaser` added 6 yes +
+    /// 0 warned + 1 refused (its `stages` is the discrete one), taking it to
+    /// 113 over 18. A new param without a verdict must fail this loudly.
+    @Test("§6.2 frozen verdict split: 74 yes + 20 warned + 19 refused = 113 across all 18 param-bearing kinds")
     func verdictSplitMatchesTheFrozenTable() {
         var yes = 0, warned = 0, refused = 0, total = 0
         for kind in EffectDescriptor.Kind.allCases {
@@ -57,10 +58,24 @@ struct ModulationTests {
         }
         print("[measured] m39-e verdicts — yes \(yes), warned \(warned), "
               + "refused \(refused), total \(total)")
-        #expect(total == 106)
-        #expect(yes == 68)
+        #expect(total == 113)
+        #expect(yes == 74)
         #expect(warned == 20)
-        #expect(refused == 18)
+        #expect(refused == 19)
+    }
+
+    /// m39-o's own contribution, asserted separately from the total so a
+    /// compensating error elsewhere in the table cannot hide it.
+    /// ⭐ `stages` is the refusal, and it is refused for the `ringMod.waveform`
+    /// reason (discrete) PLUS one this kind adds: changing the count CLEARS the
+    /// all-pass state, so a modulator riding it would re-clear every block.
+    @Test("m39-o: .phaser contributes exactly 6 yes / 0 warned / 1 refused")
+    func phaserVerdictsMatch() {
+        let specs = EffectParamSpec.specs(for: .phaser)
+        #expect(specs.count == 7)
+        #expect(specs.filter { $0.modulatable == .yes }.count == 6)
+        #expect(specs.filter { $0.modulatable == .warned }.isEmpty)
+        #expect(specs.filter { $0.modulatable == .refused }.map(\.name) == ["stages"])
     }
 
     /// m39-l's own contribution, asserted separately from the total so a
@@ -264,7 +279,7 @@ struct ModulationTests {
               + "\(refusedByAutomation) refused by automation")
         // Positive control: the scan must actually FIND automation refusals,
         // or "every refusal is also a modulation refusal" is vacuously true.
-        #expect(checked == 106)
+        #expect(checked == 113)
         #expect(refusedByAutomation >= 2, "delay.sync and delay.division at minimum")
     }
 

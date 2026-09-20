@@ -680,4 +680,117 @@ struct SliceToSamplerCommandTests {
 
         try? FileManager.default.removeItem(at: dir)
     }
+
+    // MARK: - muteSourceTrack (m39-pads)
+
+    @Test("⭐⭐ the source track keeps playing by DEFAULT — the shipped meaning is unchanged")
+    func muteDefaultsOffAndIsAdditive() async throws {
+        let engine = engineWithThreeOnsets()
+        let (router, store) = makeRouter(engine: engine)
+        let (trackID, clipID) = try await addAudioClip(router)
+
+        let response = await chop(router, clipID: clipID)
+        #expect(response.ok)
+        // ⚠️ THE ADDITIVE-ONLY LAW, MEASURED: an existing call must mean today
+        // exactly what it meant before `muteSourceTrack` existed.
+        #expect(response.result?["mutedTrackId"] == nil
+                || response.result?["mutedTrackId"] == .null)
+        #expect(response.result?["sourceTrackMuted"]?.boolValue == false)
+        let source = try #require(store.tracks.first { $0.id.uuidString == trackID })
+        #expect(source.isMuted == false)
+    }
+
+    @Test("⭐ muteSourceTrack:true mutes the source, in the SAME undo step as the chop")
+    func muteSourceLandsInOneUndoStep() async throws {
+        let engine = engineWithThreeOnsets()
+        let (router, store) = makeRouter(engine: engine)
+        let (trackID, clipID) = try await addAudioClip(router)
+        let sourceID = try #require(UUID(uuidString: trackID))
+
+        let response = await chop(router, clipID: clipID,
+                                  ["muteSourceTrack": .bool(true)])
+        #expect(response.ok)
+        #expect(response.result?["mutedTrackId"]?.stringValue == trackID)
+        #expect(response.result?["sourceTrackMuted"]?.boolValue == true)
+        #expect(store.tracks.first { $0.id == sourceID }?.isMuted == true)
+        // The chop really happened too.
+        #expect(response.result?["sliceCount"]?.doubleValue == 3)
+
+        // ⭐⭐ ONE UNDO PUTS BOTH BACK. Two edits would leave the original
+        // audible under a keymap that no longer exists — a halfway state
+        // nobody asked for.
+        try store.undo()
+        #expect(store.tracks.first { $0.id == sourceID }?.isMuted == false)
+        #expect(store.tracks.contains { $0.kind == .instrument } == false)
+    }
+
+    @Test("⭐ muting the source works when the pads land on an EXISTING instrument track")
+    func muteWorksOntoAnExistingTarget() async throws {
+        // The two-track case — the one an agent reaches when it chops onto a
+        // track it already made. The source is a DIFFERENT track, so the mute
+        // applies and the pads stay audible.
+        //
+        // ⚠️⚠️ **THE SAME-TRACK CASE IS NOT TESTED HERE BECAUSE IT IS CURRENTLY
+        // UNREACHABLE, AND THAT IS A FINDING RATHER THAN AN OMISSION.**
+        // `ProjectStore.importAudio` guards `tracks[index].kind == .audio`
+        // (ProjectStore.swift:4465), so no wire path can put an audio clip on
+        // an instrument track — meaning `sourceTrackID == destinationID` cannot
+        // arise today. The guard in `sliceClipToSampler` is kept as defensive
+        // code (a future audio-on-instrument path would make it live
+        // immediately, and its absence would silence the pads), and
+        // `PadGridSiteTests` pins that it EXISTS since no behavioural test can.
+        let engine = engineWithThreeOnsets()
+        let (router, store) = makeRouter(engine: engine)
+        let (audioTrackID, clipID) = try await addAudioClip(router)
+        let addTrack = await router.handle(ControlRequest(
+            id: "t2", command: "track.add", params: ["kind": .string("instrument")]))
+        let instTrackID = try #require(addTrack.result?["id"]?.stringValue)
+
+        let response = await chop(router, clipID: clipID,
+                                  ["targetTrackId": .string(instTrackID),
+                                   "muteSourceTrack": .bool(true)])
+        #expect(response.ok)
+        #expect(response.result?["mutedTrackId"]?.stringValue == audioTrackID)
+        #expect(response.result?["sourceTrackMuted"]?.boolValue == true)
+        // ⭐ AND THE PAD TRACK IS NOT MUTED — the whole point of muting the
+        // source is that the pads are what you hear.
+        #expect(store.tracks.first { $0.id.uuidString == instTrackID }?.isMuted == false)
+        #expect(store.tracks.first { $0.id.uuidString == audioTrackID }?.isMuted == true)
+    }
+
+    @Test("⭐⭐ an ALREADY-muted source reports no mutedTrackId but IS inaudible")
+    func alreadyMutedReportsBothFacts() async throws {
+        // The combination a single boolean cannot express — and the reason
+        // `sourceTrackMuted` is a second field rather than a spelling of the
+        // first. A surface inferring audibility from `mutedTrackId` would tell
+        // the user to go mute a track that is already silent.
+        let engine = engineWithThreeOnsets()
+        let (router, store) = makeRouter(engine: engine)
+        let (trackID, clipID) = try await addAudioClip(router)
+        let muted = await router.handle(ControlRequest(
+            id: "m", command: "track.setMute",
+            params: ["trackId": .string(trackID), "muted": .bool(true)]))
+        #expect(muted.ok)
+
+        let response = await chop(router, clipID: clipID,
+                                  ["muteSourceTrack": .bool(true)])
+        #expect(response.ok)
+        #expect(response.result?["mutedTrackId"] == nil
+                || response.result?["mutedTrackId"] == .null)
+        #expect(response.result?["sourceTrackMuted"]?.boolValue == true)
+        #expect(store.tracks.first { $0.id.uuidString == trackID }?.isMuted == true)
+        let warnings = try #require(response.result?["warnings"]?.arrayValue)
+        #expect(warnings.contains { ($0.stringValue ?? "").contains("already muted") })
+    }
+
+    @Test("muteSourceTrack rejects a non-boolean by name")
+    func muteRejectsNonBoolean() async throws {
+        let engine = engineWithThreeOnsets()
+        let (router, _) = makeRouter(engine: engine)
+        let (_, clipID) = try await addAudioClip(router)
+        let response = await chop(router, clipID: clipID,
+                                  ["muteSourceTrack": .string("yes")])
+        #expect(!response.ok)
+        #expect(response.error?.contains("'muteSourceTrack'") == true)
+    }
 }

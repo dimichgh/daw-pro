@@ -313,6 +313,30 @@ final class AppModel {
     /// and `debug.samplerEditor`; the card renders as a centered overlay.
     var samplerEditorTrackID: UUID?
 
+    /// **THE PAD GRID's headless model (m39-pads)** — which square holds which
+    /// slice, which bank is showing, and the chop card's settings. Owned here so
+    /// `debug.padGrid` drives the SAME instance `debug.captureUI` renders.
+    ///
+    /// ⚠️ The GRID is drawn inside `MusicalKeyboardStrip`'s third face rather
+    /// than in a modal of its own, so there is no `padGridTrackID`: the pad
+    /// target is `activeTrackID`, the same resolution the live-note sink uses.
+    /// Two resolutions would draw one instrument's pads and sound another's.
+    /// ⚠️ **A PLACEHOLDER UNTIL `installPadGrid()` RUNS, and that shape is
+    /// forced by Swift's two-phase init, not chosen.** The real model must hold
+    /// `self.musicalTyping` and close over `self.activeTrackID`, and a class
+    /// may not read ANY property of `self` until every stored property has a
+    /// value — so it cannot be built in the initialiser at all. The default
+    /// below carries its own throwaway controller and is replaced whole on the
+    /// line after `installMusicalTyping()`. `PadGridModel.isBound` is false on
+    /// it, which is what makes "never installed" a NAMEABLE state rather than a
+    /// grid that looks like an empty kit.
+    var padGrid = PadGridModel(typing: MusicalTypingController(),
+                               zones: { [] }, targetName: { nil })
+
+    /// Is the CHOP TO PADS card up? A centered overlay, in the window content
+    /// so `debug.captureUI` can photograph it (the captureUI law).
+    var chopToPadsOpen = false
+
     /// The Quantize & Groove panel's headless model (m11-a): the grid/strength/
     /// swing/ends state, the groove picker (built-in swings + saved templates), and
     /// the extract affordance. Owned here (like `instrumentPicker`) so the
@@ -2361,6 +2385,12 @@ final class AppModel {
             || humanizePanelClipID != nil
             || breathPadClipID != nil
             || voiceConvertClipIDs != nil
+            // m39-pads. ⚠️ THE OBLIGATION ABOVE, HONOURED: the CHOP TO PADS
+            // card is a scrimmed centered modal, and it is open with an AUDIO
+            // CLIP SELECTED by construction — which is exactly the state where
+            // an unguarded DELETE would destroy the very clip the card is about
+            // to chop.
+            || chopToPadsOpen
             || showExportSheet
             || showUndoHistory
             || showSettings
@@ -4550,6 +4580,30 @@ final class AppModel {
                 _ = try store.setInstrument(id: trackID, sampler: params)
             })
 
+        // THE PAD GRID (m39-pads). Every injector is a LIVE read — the zones,
+        // the track name, the AI provenance and the selected clip are all
+        // resolved fresh on each access, never snapshotted at open time, so an
+        // agent's `clip.sliceToSampler` over the wire redraws the grid the user
+        // is looking at.
+        //
+        // ⚠️ `self` is captured for the injectors on purpose: they resolve
+        // through `activeTrackID` and `selectedClipID`, which are AppModel's own
+        // computed state, and there is no second home for either. `[unowned
+        // self]` rather than `[weak self]` because the model is a stored
+        // property of this object and cannot outlive it.
+        //
+        // ⛔ THE CHOP GOES THROUGH `store.sliceClipToSampler` — the SAME method
+        // `clip.sliceToSampler` calls, so the card and the wire cannot diverge.
+        // No parallel mutation path.
+        //
+        // ⚠️ THE PAD GRID IS NOT BUILT HERE. It resolves through
+        // `activeTrackID` / `selectedClipID` — `self`'s own computed state —
+        // which Swift's two-phase init forbids touching from an initialiser at
+        // all. `installPadGrid()`, on the line after `installMusicalTyping()`,
+        // builds and binds it; `PadGridSiteTests` reads this source for both
+        // the declaration and that call, because a grid left unbound draws an
+        // empty kit and says nothing about it.
+
         // The Quantize & Groove model (m11-a): the built-in MPC swings are computed
         // once; the saved-template list, Apply, and Extract all route through the
         // store methods the wire uses (`quantizeClipNotes` = ONE undo step via its
@@ -4873,6 +4927,7 @@ final class AppModel {
         // stuck-note safety net. AFTER `installSpaceKeyMonitor` because the note
         // keys ride the very monitor it installs.
         installMusicalTyping()
+        installPadGrid()
         // edit.pasteClips (m26-k): AppModel conforms to EditPasteControlling
         // directly (EditPasteWireSurface.swift) — no separate owned object is
         // needed, since AppModel already IS the paste's one home
@@ -5217,6 +5272,10 @@ final class AppModel {
                 return try self.keySpaceDebug(params)
             case "debug.mainActorWedge":
                 return try self.mainActorWedgeDebug(params)
+            case "debug.padGrid":
+                // m39-pads. App tier, deliberately off `allCommands` and off
+                // MCP — see `padGridDebug`.
+                return try self.padGridDebug(params)
             case "debug.mixerAddAU":
                 return self.mixerAddAUDebug(params)
             case "debug.effectPicker":

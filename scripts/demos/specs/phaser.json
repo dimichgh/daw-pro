@@ -1,0 +1,383 @@
+{
+  "set": "phaser",
+  "description": "m39-o, the .phaser insert. Every variant plays the IDENTICAL sustained six-note chord (A minor 9, held for four bars at 120 BPM, then allowed to release) so nothing but the one parameter differs.\n\nTHE ONE AXIS IS `stages`, and it runs 4 -> 8 -> 12. rateHz (0.35), centerHz (300), depthOctaves (3), feedback (0.6), mix (0.5) and stereoPhaseDeg (90) are byte-for-byte identical in all three effect variants. Variant 1 has no effect at all.\n\nWHAT A PHASER ACTUALLY IS, because it is routinely confused with a flanger and they are not the same effect. Both take your sound, make an altered copy of it, add the copy back, and then move the alteration slowly up and down. What differs is HOW the copy is altered, and the result is not a matter of taste. A FLANGER delays the copy by a couple of thousandths of a second. A delay cancels out dozens of frequencies at once, spaced evenly all the way up the spectrum, and sweeping it drags that whole row of holes along together - which is why a flanger sounds metallic, like a jet passing overhead. A PHASER has no delay in it at all. It shifts the copy's timing differently at different pitches, and cancellation then happens at only a HANDFUL of frequencies - exactly half the `stages` number - which are UNEVENLY spaced and get further apart as they climb. Fewer holes, unevenly placed, is what makes a phaser sound soft and vocal and breathing rather than metallic. `stages` is the control that decides how many holes there are, so it is the control that decides how much of a phaser this is.\n\nWHAT TO LISTEN FOR - and the honest warning first. This is a SUBTLE effect on purpose, much subtler than the tape delay or the ring modulator. Nothing here changes the notes, the rhythm or the volume; what moves is the COLOUR of a sound that is otherwise standing still. Use headphones or two speakers, listen to a whole pass (about three seconds), and listen to the TOP of the chord rather than the bass - the bass note barely moves in any of these.\n\nVariant 1 ('no-phaser') is the bare chord, so you know what is being added: it just sits there, completely static. In 'stages-4' something starts slowly passing through the top of the chord - two moving holes, so it reads as a gentle brightening and dulling, like the sound is slowly turning to face you and turning away again. In 'stages-8' there are four holes, and the movement becomes much more obviously a SWOOSH: there is a hollow, slightly nasal character that travels upward and falls back, roughly once every three seconds. In 'stages-12' there are six, packed close enough together that the sound gets a distinctly watery, underwater quality - richer, but also further from the sound you started with. More stages is not louder and not better; it is more of the effect. The question is which of the three is the amount you want.\n\nMEASURED, so \"it has more notches\" is not just a claim. The number of cancellation notches is exactly `stages` divided by 2, confirmed by rendering an impulse through this exact effect and counting the nulls in its frequency response: 4 stages -> 2 notches, 8 -> 4, 12 -> 6 (PhaserTests L3). Their spacing is NOT the flanger's even comb: at 8 stages they land at 1 : 3.36 : 7.52 : 25.25 times the lowest one, where a flanger's would be 1 : 3 : 5 : 7, and the same notch-finder run over a real .flanger render finds 16 notches at 1 : 3.000 : 5.000 : 7.000 in the same band (PhaserTests L4). Each effect's law fits itself and is rejected by the other, by 10 % to 261 %.\n\nWHY THERE IS NO 'mix: 0' VARIANT HERE, stated because its absence is deliberate: `mix: 0` is a BIT-EXACT bypass, so that variant would render BYTE-IDENTICAL to 'no-phaser' - which is exactly what this harness's distinctness check exists to flag as a broken axis. The bit-exact claim is proven in the test suite instead (PhaserTests L1a, with L1b as its positive control so 'bit-exact' cannot quietly mean 'inert').\n\nLOUDNESS MATCH, stated because it is a real edit and not an accident. Cancelling frequencies REMOVES energy, so the three phaser variants rendered 2.2 LU quieter than the bare chord. Each one therefore carries one extra, IDENTICAL insert after the phaser: a plain gain of 1.2882 (+2.2 dB), which puts the level back without touching the tone. It is the same insert with the same value in all three, so the only thing that differs between them is still `stages`. Measured after matching, all four variants sit within 0.4 LU of the set's median - which matters because a listener reliably picks 'the third one' when the third one is simply louder.\n\nWHY THE PAD HAS NO UNISON DETUNE, recorded because it was there in the first render and taken out on measurement. Detuned unison voices BEAT against each other, and that beating is itself a slow wobble in the sound - roughly 0.9 Hz here. It sits right on top of the thing the listener is being asked to notice (a 0.35 Hz sweep), it is present identically in every variant, and when the band energy of these files was measured it was the LOUDER of the two motions. A demo whose material moves on its own is a demo of the material. One saw per note, no detune, so the only thing moving in these files is the phaser.\n\nAND THE MOTION IS MEASURED IN THESE EXACT FILES, not just in the unit tests. Band energy (300-4000 Hz, 21 ms windows) of each phaser variant was divided by the control's, which cancels the chord's own attack and decay, and the resulting series was searched for its strongest periodicity between 0.1 and 2 Hz. 'stages-4' and 'stages-8' peak at 0.355 Hz - the phaser's own rateHz of 0.35, to within the search grid - at 17x and 29x the level of an off-rate control bin. 'stages-12' peaks at 1.05 Hz, which is THREE TIMES the sweep rate and is exactly what six notches should do: with that many holes, the band dips three times per pass instead of once. That is the density the listener is being asked to hear, showing up as arithmetic. NEGATIVE CONTROL: the same measurement run on the control against ITSELF reports 0.000 at every frequency, so the probe cannot manufacture a modulation that is not there.",
+  "variants": [
+    {
+      "name": "no-phaser",
+      "axis": "no phaser at all - the bare sustained chord, so you know what is being added",
+      "role": "control",
+      "render": {
+        "durationSeconds": 11
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pad",
+            "kind": "instrument"
+          },
+          "as": "pad"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pad",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.45,
+            "decay": 0.3,
+            "sustain": 1.0,
+            "release": 1.1,
+            "cutoffHz": 9000,
+            "resonance": 0.15,
+            "gain": 0.34,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pad",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 45,
+                "startBeat": 0,
+                "lengthBeats": 16
+              },
+              {
+                "pitch": 52,
+                "startBeat": 0,
+                "lengthBeats": 16
+              },
+              {
+                "pitch": 57,
+                "startBeat": 0,
+                "lengthBeats": 16
+              },
+              {
+                "pitch": 60,
+                "startBeat": 0,
+                "lengthBeats": 16
+              },
+              {
+                "pitch": 64,
+                "startBeat": 0,
+                "lengthBeats": 16
+              },
+              {
+                "pitch": 71,
+                "startBeat": 0,
+                "lengthBeats": 16
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "stages-4",
+      "axis": "stages 4: TWO notches. The gentlest setting - a slow brightening and dulling rather than an obvious swoosh.",
+      "render": {
+        "durationSeconds": 11
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pad",
+            "kind": "instrument"
+          },
+          "as": "pad"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pad",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.45,
+            "decay": 0.3,
+            "sustain": 1.0,
+            "release": 1.1,
+            "cutoffHz": 9000,
+            "resonance": 0.15,
+            "gain": 0.34,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pad",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 45,
+                "startBeat": 0,
+                "lengthBeats": 16
+              },
+              {
+                "pitch": 52,
+                "startBeat": 0,
+                "lengthBeats": 16
+              },
+              {
+                "pitch": 57,
+                "startBeat": 0,
+                "lengthBeats": 16
+              },
+              {
+                "pitch": 60,
+                "startBeat": 0,
+                "lengthBeats": 16
+              },
+              {
+                "pitch": 64,
+                "startBeat": 0,
+                "lengthBeats": 16
+              },
+              {
+                "pitch": 71,
+                "startBeat": 0,
+                "lengthBeats": 16
+              }
+            ]
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$pad",
+            "kind": "phaser",
+            "params": {
+              "rateHz": 0.35,
+              "centerHz": 300,
+              "depthOctaves": 3,
+              "stages": 4,
+              "feedback": 0.6,
+              "mix": 0.5,
+              "stereoPhaseDeg": 90
+            }
+          },
+          "as": "phase"
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$pad",
+            "kind": "gain",
+            "params": {
+              "gainLinear": 1.2882
+            }
+          },
+          "as": "match"
+        }
+      ]
+    },
+    {
+      "name": "stages-8",
+      "axis": "stages 8: FOUR notches. The classic phaser - a hollow, nasal swoosh travelling up and falling back.",
+      "render": {
+        "durationSeconds": 11
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pad",
+            "kind": "instrument"
+          },
+          "as": "pad"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pad",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.45,
+            "decay": 0.3,
+            "sustain": 1.0,
+            "release": 1.1,
+            "cutoffHz": 9000,
+            "resonance": 0.15,
+            "gain": 0.34,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pad",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 45,
+                "startBeat": 0,
+                "lengthBeats": 16
+              },
+              {
+                "pitch": 52,
+                "startBeat": 0,
+                "lengthBeats": 16
+              },
+              {
+                "pitch": 57,
+                "startBeat": 0,
+                "lengthBeats": 16
+              },
+              {
+                "pitch": 60,
+                "startBeat": 0,
+                "lengthBeats": 16
+              },
+              {
+                "pitch": 64,
+                "startBeat": 0,
+                "lengthBeats": 16
+              },
+              {
+                "pitch": 71,
+                "startBeat": 0,
+                "lengthBeats": 16
+              }
+            ]
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$pad",
+            "kind": "phaser",
+            "params": {
+              "rateHz": 0.35,
+              "centerHz": 300,
+              "depthOctaves": 3,
+              "stages": 8,
+              "feedback": 0.6,
+              "mix": 0.5,
+              "stereoPhaseDeg": 90
+            }
+          },
+          "as": "phase"
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$pad",
+            "kind": "gain",
+            "params": {
+              "gainLinear": 1.2882
+            }
+          },
+          "as": "match"
+        }
+      ]
+    },
+    {
+      "name": "stages-12",
+      "axis": "stages 12: SIX notches. Dense and watery, almost underwater. More effect, further from the original sound.",
+      "render": {
+        "durationSeconds": 11
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pad",
+            "kind": "instrument"
+          },
+          "as": "pad"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pad",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.45,
+            "decay": 0.3,
+            "sustain": 1.0,
+            "release": 1.1,
+            "cutoffHz": 9000,
+            "resonance": 0.15,
+            "gain": 0.34,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pad",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 45,
+                "startBeat": 0,
+                "lengthBeats": 16
+              },
+              {
+                "pitch": 52,
+                "startBeat": 0,
+                "lengthBeats": 16
+              },
+              {
+                "pitch": 57,
+                "startBeat": 0,
+                "lengthBeats": 16
+              },
+              {
+                "pitch": 60,
+                "startBeat": 0,
+                "lengthBeats": 16
+              },
+              {
+                "pitch": 64,
+                "startBeat": 0,
+                "lengthBeats": 16
+              },
+              {
+                "pitch": 71,
+                "startBeat": 0,
+                "lengthBeats": 16
+              }
+            ]
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$pad",
+            "kind": "phaser",
+            "params": {
+              "rateHz": 0.35,
+              "centerHz": 300,
+              "depthOctaves": 3,
+              "stages": 12,
+              "feedback": 0.6,
+              "mix": 0.5,
+              "stereoPhaseDeg": 90
+            }
+          },
+          "as": "phase"
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$pad",
+            "kind": "gain",
+            "params": {
+              "gainLinear": 1.2882
+            }
+          },
+          "as": "match"
+        }
+      ]
+    }
+  ]
+}

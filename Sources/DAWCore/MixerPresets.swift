@@ -59,6 +59,7 @@ extension EffectDescriptor {
             hallReverb: hallReverb,
             tapeDelay: tapeDelay,
             stereoWidth: stereoWidth,
+            phaser: phaser,
             audioUnit: audioUnit)
     }
 }

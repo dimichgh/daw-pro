@@ -604,6 +604,51 @@ another `width` and another `spread`, so it would be a lie in `fx.describe`. The
 equivalent neutral position — and it is a **bit-exact** passthrough — is
 `width: 1`, `spread: 0`, `bassMonoAmount: 0`.
 
+### `phaser` and `flanger` are DIFFERENT EFFECTS, and picking the wrong one is the trap
+
+⛔ **Both sweep, both "whoosh", and the two words get used interchangeably by
+people who mean one of them specifically.** The difference is arithmetic, not
+taste, and it is audible immediately:
+
+| | `flanger` | `phaser` |
+|---|---|---|
+| what it sums with | a **delayed** copy | a **phase-shifted** copy |
+| notches | **dozens**, evenly spaced at **1 : 3 : 5 : 7 ×** a base | **`stages` ÷ 2** — a handful — at **1 : 3.4 : 7.5 : 25 ×** (8 stages), spreading as they climb |
+| sounds like | metallic, jet-plane, aggressive | soft, vocal, breathing, "swirly" |
+| reach for it when | "that whoosh from the 70s record", metallic, jet | pads, keys, guitar, a mix bus that needs movement |
+
+**Measured, not asserted:** the same notch-finder run over both kinds finds
+**4** notches for an 8-stage phaser and **16** for a flanger in the same band,
+and each one's notch positions sit **10 %–261 %** away from the other's law.
+
+⚠️ **`phaser.centerHz` IS NOT A NOTCH FREQUENCY, and this is the second trap.**
+It is the all-pass corner at the bottom of the sweep; the notches straddle it,
+and **the lowest one sits well BELOW it** — 0.41× at 4 stages, 0.13× at 12. Ask
+for a phaser "around 400 Hz" by setting `centerHz` and then READ the answer:
+every `fx.add` / `fx.setParam` result — and `project.snapshot` — echoes
+`notchCount` and `firstNotchHz` inside that insert's `params` object.
+⚠️ They are **per-instance echoes, not schema**, so they are **not** in
+`fx.describe`, which returns `{name, min, max, default, curve, note}` and no
+values at all.
+
+⛔ **`phaser.stages` IS EVEN-ONLY AND SNAPS SILENTLY.** `fx.setParam {name:
+"stages", value: 7}` succeeds and reports **8**. Read the value back rather than
+assuming yours took. It is also **discrete**: `mod.addRoute` refuses it, and an
+`automation.addLane` on it wants `hold` interpolation, never a ramp — a count
+change clears the all-pass state, so a ramp would re-clear it every block.
+
+⚠️ **`phaser` at `mix: 1` with `feedback: 0` is very nearly INAUDIBLE, and it is
+not broken.** An all-pass chain alone changes no frequency's level at all
+(measured flat to 1.2e-05 dB), so with no dry copy left to cancel against there
+is nothing to hear. The notches ARE cancellation between dry and wet: they are
+deepest at `mix: 0.5` and get shallower in **either** direction from there.
+`mix: 0` is a bit-exact bypass.
+
+⚠️ **`phaser.depthOctaves: 0` is a REAL SETTING, not a broken one** — it freezes
+the sweep into a fixed notch filter, which is the sound of a wah pedal held
+still. If a user asks for "that phaser colour but stop it moving", that is the
+control, not `rateHz`.
+
 ⚠️ **TELL THE USER TO USE HEADPHONES OR TWO SPEAKERS.** A width change is close
 to inaudible on a single speaker *by construction*, since the mono sum is what
 stays the same. If they are on a laptop speaker or a phone, quote

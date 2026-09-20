@@ -84,7 +84,7 @@ public struct EffectHonestyNote: Sendable, Equatable {
             return bassEnhancer
         case .gain, .eq, .compressor, .limiter, .reverb, .delay, .saturator,
              .gate, .chorus, .bitCrusher, .djFilter, .ringMod, .flanger,
-             .hallReverb, .tapeDelay, .stereoWidth, .audioUnit:
+             .hallReverb, .tapeDelay, .stereoWidth, .phaser, .audioUnit:
             // `stereoWidth` (m23-dj) was put to the same test and lands with
             // the rest, but it is the CLOSEST CALL in the list and the
             // reasoning is worth keeping. It does not promise revelation: it

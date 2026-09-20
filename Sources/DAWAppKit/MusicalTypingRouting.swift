@@ -50,6 +50,17 @@ import Foundation
 public enum MusicalTypingKeyRole: Equatable, Sendable {
     /// A note key: `semitone` semitones above the base note (0…16).
     case note(semitone: Int)
+    /// A PAD key (m39-pads): pad `index` (0…15) of the current bank.
+    ///
+    /// ⭐⭐ **A PAD INDEX IS NOT A SEMITONE, AND THE SEPARATE CASE IS THE POINT.**
+    /// Pads mode first shipped by re-reading the 17 note keys in piano order,
+    /// which made a pad's SCREEN position unrelated to the KEY position under
+    /// the hand: to hit "row 2, column 3" you had to know it was semitone 6 and
+    /// that semitone 6 is `T`. That is transposition-by-lookup, and it defeats
+    /// the entire purpose of a pad grid. The keys are now a SPATIAL 4×4 block
+    /// whose geometry matches the grid's, so this role carries the pad index
+    /// directly and no caller can re-derive it from a pitch.
+    case pad(index: Int)
     /// Shift the whole layout down one octave.
     case octaveDown
     /// Shift the whole layout up one octave.
@@ -151,6 +162,22 @@ public enum MusicalTypingPlayMode: String, Equatable, Sendable, CaseIterable {
     case notes
     /// One key, one correctly-voiced diatonic chord — m23-cv.
     case chords
+    /// **One key, one PAD of a 4×4 MPC grid — m39-pads.** The sixteen lowest
+    /// note keys (`A`…`P`) become sixteen drum pads on the current bank; `Z`/`X`
+    /// change BANK instead of octave, and the 17th key (`;`) goes dead.
+    ///
+    /// ⚠️⚠️ **A THIRD CASE MAKES EVERY `playMode == .chords` SITE A TWO-WAY
+    /// QUESTION THAT NOW HAS THREE ANSWERS.** There are five of them, and each
+    /// was re-read when this case was added rather than left to fall through to
+    /// the note path by default — an inert branch that falls through and keeps
+    /// every test green is precisely m39-e's shape, which shipped a whole
+    /// modulation layer that did nothing. The five: `MusicalTypingController`'s
+    /// `pointerPress` (pads take the note path, correctly — a pad IS one pitch)
+    /// and `perform` (pads take their OWN branch, because the PITCH is
+    /// different), `MusicalTypingStaging`'s chord-echo guard (pads report no
+    /// chord state, correctly), and `MusicalKeyboardStrip`'s `isChordMode` (now
+    /// a three-way face switch).
+    case pads
 }
 
 /// One cell of the on-screen CHORD ROW: which key plays it, what it is called,
@@ -411,6 +438,90 @@ public enum MusicalTypingRouting {
     /// both moving would leave a number nothing checks.
     public static let allCaps: [MusicalTypingKeyCap] = noteCaps + controlCaps
 
+    // MARK: - PADS MODE: a SPATIALLY ALIGNED 4×4 block (m39-pads-2)
+
+    /// The sixteen keys that drum the pads, **in pad order — pad 1 first**.
+    ///
+    /// ⭐⭐⭐ **THE KEYBOARD'S BOTTOM ROW DRIVES THE GRID'S BOTTOM ROW, AND
+    /// GETTING THAT BACKWARDS IS THE COMMONEST WAY THIS IS BUILT WRONG.** Pad 1
+    /// is `baseNote` (36) and sits BOTTOM-LEFT on every MPC, Maschine and Drum
+    /// Rack; numbering runs left-to-right then UPWARD. So:
+    ///
+    ///     1 2 3 4   → pads 13-16 → notes 48-51   (TOP row of the grid)
+    ///     Q W E R   → pads  9-12 → notes 44-47
+    ///     A S D F   → pads  5-8  → notes 40-43
+    ///     Z X C V   → pads  1-4  → notes 36-39   (BOTTOM row of the grid)
+    ///
+    /// Map `1 2 3 4` to pads 1-4 instead and the surface is upside down against
+    /// every piece of hardware the user has touched — and it will feel wrong
+    /// without them being able to say why. `PadGridGeometryTests` pins the
+    /// origin.
+    ///
+    /// ⛔⛔ **THIS REPLACED A LINEAR RE-READ OF THE PIANO ROW, AND THE REASON IS
+    /// THE HAND.** The first cut mapped the 17 note keys (`A W S E D F T G…`) to
+    /// pads 1-16 in piano order — Ableton's own answer, and defensible on paper.
+    /// In use it is not a pad grid: a linear mapping onto a SQUARE surface means
+    /// a pad's position on screen has no relationship to the key's position
+    /// under the hand, so "row 2, column 3" is reachable only by knowing it is
+    /// semitone 6 and that semitone 6 is `T`. **Spatial correspondence IS the
+    /// feature.** The user asked for it directly.
+    ///
+    /// ⚠️ The land-grab objection that once blocked this is answered by MODE,
+    /// not by avoidance: these keys are claimed ONLY while `playMode == .pads`
+    /// (see `decide(…playMode:)`), so notes mode and the rest of the app are
+    /// untouched. `Z X C V` keep their octave/velocity duties everywhere else.
+    ///
+    /// ⚠️ Non-US layouts: the POSITIONS hold, the printed letters may not — the
+    /// same honest limitation `noteCaps` carries, for the same reason.
+    public static let padCaps: [MusicalTypingKeyCap] = [
+        // Bottom row of the keyboard = BOTTOM row of the grid = pads 1-4.
+        MusicalTypingKeyCap(keyCode: 0x06, label: "Z", role: .pad(index: 0)),
+        MusicalTypingKeyCap(keyCode: 0x07, label: "X", role: .pad(index: 1)),
+        MusicalTypingKeyCap(keyCode: 0x08, label: "C", role: .pad(index: 2)),
+        MusicalTypingKeyCap(keyCode: 0x09, label: "V", role: .pad(index: 3)),
+        MusicalTypingKeyCap(keyCode: 0x00, label: "A", role: .pad(index: 4)),
+        MusicalTypingKeyCap(keyCode: 0x01, label: "S", role: .pad(index: 5)),
+        MusicalTypingKeyCap(keyCode: 0x02, label: "D", role: .pad(index: 6)),
+        MusicalTypingKeyCap(keyCode: 0x03, label: "F", role: .pad(index: 7)),
+        MusicalTypingKeyCap(keyCode: 0x0C, label: "Q", role: .pad(index: 8)),
+        MusicalTypingKeyCap(keyCode: 0x0D, label: "W", role: .pad(index: 9)),
+        MusicalTypingKeyCap(keyCode: 0x0E, label: "E", role: .pad(index: 10)),
+        MusicalTypingKeyCap(keyCode: 0x0F, label: "R", role: .pad(index: 11)),
+        MusicalTypingKeyCap(keyCode: 0x12, label: "1", role: .pad(index: 12)),
+        MusicalTypingKeyCap(keyCode: 0x13, label: "2", role: .pad(index: 13)),
+        MusicalTypingKeyCap(keyCode: 0x14, label: "3", role: .pad(index: 14)),
+        MusicalTypingKeyCap(keyCode: 0x15, label: "4", role: .pad(index: 15)),
+    ]
+
+    /// Pads mode's control keys.
+    ///
+    /// ⭐ **THEY MOVED BECAUSE THE PAD BLOCK TOOK THEIR SEATS**, and they moved
+    /// to keys the mode ALREADY owns (`K L O P` are note caps in notes mode), so
+    /// pads mode claims exactly SIX keycodes the app did not already swallow —
+    /// `Q R 1 2 3 4`. They also land under the RIGHT hand while the block is
+    /// under the left, which is how hardware splits drumming from bank paging.
+    ///
+    /// ⚠️ The ROLES are reused deliberately: `.octaveDown`/`.octaveUp` already
+    /// mean "move the layout down/up" and the controller already reads them as
+    /// BANKS in pads mode. One meaning, one handler — a `.padBankDown` case
+    /// would be a second spelling of a decision that is already made.
+    public static let padControlCaps: [MusicalTypingKeyCap] = [
+        MusicalTypingKeyCap(keyCode: 0x28, label: "K", role: .octaveDown),
+        MusicalTypingKeyCap(keyCode: 0x25, label: "L", role: .octaveUp),
+        MusicalTypingKeyCap(keyCode: 0x1F, label: "O", role: .velocityDown),
+        MusicalTypingKeyCap(keyCode: 0x23, label: "P", role: .velocityUp),
+        MusicalTypingKeyCap(keyCode: sustainKeyCode, label: "⇥", role: .sustainToggle),
+    ]
+
+    /// Every key PADS mode claims — 21.
+    public static let padAllCaps: [MusicalTypingKeyCap] = padCaps + padControlCaps
+
+    /// The keycodes pads mode claims that notes mode does NOT — the entire land
+    /// grab this mode adds, and it is asserted in `MusicalTypingRoutingTests`.
+    public static var padOnlyKeyCodes: Set<UInt16> {
+        Set(padAllCaps.map(\.keyCode)).subtracting(allCaps.map(\.keyCode))
+    }
+
     /// The number of semitones the layout spans (17: C … E, an octave + a third).
     public static let semitoneSpan = noteCaps.count
 
@@ -429,6 +540,23 @@ public enum MusicalTypingRouting {
     /// event now names another window. See `MusicalTypingController.releaseKey`.
     public static func cap(forKeyCode keyCode: UInt16) -> MusicalTypingKeyCap? {
         capsByKeyCode[keyCode]
+    }
+
+    /// Same dictionary, built once, for PADS mode's spatial block.
+    private static let padCapsByKeyCode: [UInt16: MusicalTypingKeyCap] = {
+        Dictionary(uniqueKeysWithValues: padAllCaps.map { ($0.keyCode, $0) })
+    }()
+
+    /// The cap for a physical key **in a given play mode**.
+    ///
+    /// ⛔ **KEY-UP MUST USE THE SAME MODE THE KEY-DOWN USED.** The controller
+    /// keeps a `keyPitches` ledger keyed by keycode precisely so a release does
+    /// not have to re-derive anything — but any caller that looks a cap up on
+    /// release must pass the mode, or `Z` released in pads mode resolves to
+    /// `octaveDown` and the pad it started never stops. See `releaseKey`.
+    public static func cap(forKeyCode keyCode: UInt16,
+                           playMode: MusicalTypingPlayMode) -> MusicalTypingKeyCap? {
+        playMode == .pads ? padCapsByKeyCode[keyCode] : capsByKeyCode[keyCode]
     }
 
     /// The cap wearing this US-ANSI legend, case-insensitively — the
@@ -484,10 +612,17 @@ public enum MusicalTypingRouting {
         isRepeat: Bool,
         responder: TransportKeyResponder,
         window: TransportKeyWindow,
-        isEnabled: Bool
+        isEnabled: Bool,
+        // ⭐ DEFAULTS TO `.notes` so every pre-pads caller and test keeps its
+        // exact meaning; only the controller, which knows its own mode, passes
+        // anything else. Pads mode's six extra keys (`Q R 1 2 3 4`) are
+        // therefore swallowed ONLY while that mode is up.
+        playMode: MusicalTypingPlayMode = .notes
     ) -> MusicalTypingDecision {
         guard isEnabled else { return .passThrough(.modeOff) }
-        guard let cap = cap(forKeyCode: keyCode) else { return .passThrough(.unmapped) }
+        guard let cap = cap(forKeyCode: keyCode, playMode: playMode) else {
+            return .passThrough(.unmapped)
+        }
         guard modifiers.isEmpty else { return .passThrough(.chord) }
         guard responder == .none else { return .passThrough(.textEditing) }
         guard window == .main else { return .passThrough(.secondaryWindow) }

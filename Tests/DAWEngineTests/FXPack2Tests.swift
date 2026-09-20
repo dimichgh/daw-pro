@@ -414,7 +414,7 @@ struct FXPack2Tests {
             "gain", "eq", "compressor", "limiter",
             "reverb", "delay", "saturator", "gate", "chorus", "bassEnhancer",
             "bitCrusher", "djFilter", "ringMod", "flanger", "hallReverb", "tapeDelay",
-            "stereoWidth", "audioUnit",
+            "stereoWidth", "phaser", "audioUnit",
         ])
         #expect(EffectParamSpec.specs(for: .reverb).map(\.name)
                 == ["roomSize", "damping", "mix", "preDelayMs", "width"])

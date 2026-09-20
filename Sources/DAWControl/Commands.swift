@@ -4598,16 +4598,30 @@ public final class CommandRouter {
             // engineUnavailable; clipNotFound/trackNotFound via the
             // LocalizedError mapping.
             //
+            // muteSourceTrack? (default FALSE — m39-pads). ⭐ THE SOURCE CLIP
+            // KEEPS PLAYING, which is correct (the chop reads the file, it does
+            // not consume the recording) and has a consequence worth naming:
+            // the original and the reconstruction sound TOGETHER, measured at
+            // +6.0 LU and comb-filtered. Pass true to mute the source clip's
+            // track INSIDE the same undo step. Defaults FALSE because this verb
+            // is shipped and an existing call must keep its exact meaning
+            // (additive-only); the pad grid's own card defaults it ON, because
+            // it can show the toggle and name the track first. SKIPPED with a
+            // warning when the source track IS the destination — muting it
+            // would silence the pads. The response reports mutedTrackId, which
+            // is null when nothing was muted for ANY reason; reading your own
+            // request back would miss both skip cases.
+            //
             // ONE undo step ("Chop to Sampler", no coalescing). Response:
             // {trackId, createdTrackId?, midiClipId?, sampleRate, frameCount,
             // sliceCount, headSeconds, slices: [{index, pitch, startFrame,
             // endFrame?, sourceSeconds, beat, strength?, snapOffsetFrames?,
-            // residualAmplitude?}], warnings}.
+            // residualAmplitude?}], warnings, mutedTrackId?}.
             try params.rejectUnknownKeys(
                 ["clipId", "targetTrackId", "mode", "sensitivity", "divisions",
                  "gridBeats", "minSliceSeconds", "maxSlices", "includeHead",
                  "baseNote", "snapWindowMs", "generateMIDI", "atBeat",
-                 "velocityFromStrength"],
+                 "velocityFromStrength", "muteSourceTrack"],
                 verb: "clip.sliceToSampler")
             let chopClipID = try params.requireClipID()
             var chopTargetTrackID: UUID?
@@ -4618,9 +4632,11 @@ public final class CommandRouter {
                 chopTargetTrackID = id
             }
             let chopSettings = try parseSliceToSamplerSettings(params)
+            let chopMuteSource = try Self.optionalBool(params["muteSourceTrack"],
+                                                       "'muteSourceTrack'") ?? false
             let chopResult = try await store.sliceClipToSampler(
                 clipId: chopClipID, targetTrackId: chopTargetTrackID,
-                settings: chopSettings)
+                settings: chopSettings, muteSourceTrack: chopMuteSource)
             return .success(request.id, try JSONValue(encoding: chopResult))
 
         case "clip.detectPitch":
@@ -10670,6 +10686,34 @@ public final class CommandRouter {
                     StereoWidthParams.channelPeakDb(spread: stereo.spread)),
                 "channelNotchDb": .number(
                     StereoWidthParams.channelNotchDb(spread: stereo.spread)),
+            ])
+        case .phaser:
+            let phaser = effect.resolvedPhaser
+            return .object([
+                "rateHz": .number(phaser.rateHz),
+                "centerHz": .number(phaser.centerHz),
+                "depthOctaves": .number(phaser.depthOctaves),
+                // Numeric-but-discrete (the `ringMod.waveform` precedent): the
+                // value is already SNAPPED to an even count by
+                // `PhaserParams.snappedStages`, so what is reported here is the
+                // count actually in force, never the 7 someone sent.
+                "stages": .number(phaser.stages),
+                "feedback": .number(phaser.feedback),
+                "mix": .number(phaser.mix),
+                "stereoPhaseDeg": .number(phaser.stereoPhaseDeg),
+                // DERIVED, through `PhaserParams`, the one home, never
+                // re-derived here. The `tapeDelay.wowCents` /
+                // `flanger.firstNotchHzAtSweepFloor` shape: `centerHz` is NOT
+                // itself a notch frequency — the notches are spread around it
+                // by `stages` — so an agent asked for "a phaser around 400 Hz"
+                // cannot judge the setting without these. `notchCount` is the
+                // headline (it is what separates this kind from a flanger) and
+                // `firstNotchHz` is where the lowest one sits at the bottom of
+                // the sweep.
+                "notchCount": .number(Double(PhaserParams.notchCount(stages: phaser.stages))),
+                "firstNotchHz": .number(
+                    PhaserParams.firstNotchHzAtSweepFloor(
+                        centerHz: phaser.centerHz, stages: phaser.stages)),
             ])
         case .audioUnit:
             // Hosted AU: the component triple + display name. AU parameters

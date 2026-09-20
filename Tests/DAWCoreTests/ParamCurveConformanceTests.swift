@@ -131,28 +131,28 @@ struct ParamCurveConformanceTests {
 
     @Test("the conformance loop actually walked the whole roster")
     func rosterCensus() {
-        // 18 kinds (m39-i appended `.djFilter`, m39-m `.ringMod`, m39-j
+        // 19 kinds (m39-i appended `.djFilter`, m39-m `.ringMod`, m39-j
         // `.flanger`, m39-l `.hallReverb`, m39-n `.tapeDelay`, m23-dj
-        // `.stereoWidth`); `.audioUnit` is deliberately param-less (AU params
-        // are not on the generic name/value surface), the other 17 all carry
-        // specs.
-        #expect(EffectDescriptor.Kind.allCases.count == 18)
+        // `.stereoWidth`, m39-o `.phaser`); `.audioUnit` is deliberately
+        // param-less (AU params are not on the generic name/value surface), the
+        // other 18 all carry specs.
+        #expect(EffectDescriptor.Kind.allCases.count == 19)
         #expect(EffectParamSpec.specs(for: .audioUnit).isEmpty)
         let paramBearing = EffectDescriptor.Kind.allCases.filter {
             !EffectParamSpec.specs(for: $0).isEmpty
         }
-        #expect(paramBearing.count == 17, "kinds with params: \(paramBearing.map(\.rawValue))")
+        #expect(paramBearing.count == 18, "kinds with params: \(paramBearing.map(\.rawValue))")
         // Measured 2026-09-19. Append-only: this number may RISE when a param
         // is appended to a table; it must never fall (a spec's INDEX is its
         // positional automation slot and the arrays are append-only forever).
-        #expect(Self.allEffectSpecs.count >= 106,
+        #expect(Self.allEffectSpecs.count >= 113,
                 "spec census is \(Self.allEffectSpecs.count); param arrays are append-only")
     }
 
     @Test("the logarithmic census is exactly the ten Hz params, named")
     func logarithmicCensus() {
         let logs = Self.allEffectSpecs.filter { $0.spec.curve == .logarithmic }
-        #expect(logs.count == 26, "logarithmic specs: \(logs.map { "\($0.kind.rawValue).\($0.spec.name)" })")
+        #expect(logs.count == 28, "logarithmic specs: \(logs.map { "\($0.kind.rawValue).\($0.spec.name)" })")
         #expect(Set(logs.map(\.spec.name)) == Set([
             "lowShelfFreq", "peak1Freq", "peak2Freq", "highShelfFreq",
             "highPassFreq", "lowPassFreq",   // eq
@@ -183,6 +183,12 @@ struct ParamCurveConformanceTests {
                                              // NAME and is LINEAR, which is
                                              // why the set below is of names
                                              // and the count above is of specs
+            "centerHz",                      // phaser (m39-o) — genuine Hz,
+                                             // the all-pass corner at the
+                                             // sweep floor. ⚠️ `phaser.rateHz`
+                                             // shares the `chorus`/`flanger`
+                                             // NAME, so m39-o adds TWO
+                                             // logarithmic specs and ONE name.
             "bassMonoHz",                    // stereoWidth (m23-dj) — genuine
                                              // Hz, a crossover corner, no
                                              // exemption needed. ⭐ It is the
@@ -464,5 +470,41 @@ struct ParamCurveConformanceTests {
         #expect(feedback?.range.lowerBound == -0.95)
         #expect(feedback?.range.upperBound == 0.95)
         #expect(feedback?.curve == .linear)
+    }
+
+    /// §12 gate 3 for m39-o — the same gate, the same reason.
+    /// `PhaserEffect.storeAutomatedParam` hard-codes these SEVEN indices, so
+    /// inserting a param in the MIDDLE of the table would silently re-point
+    /// every saved automation lane on every shipped `.phaser` insert.
+    /// APPEND-ONLY: this array may GROW at the end, never reorder or shrink.
+    @Test("m39-o: the .phaser slot order is frozen, rateHz == automation slot 0")
+    func phaserSlotOrderIsFrozen() {
+        #expect(EffectParamSpec.specs(for: .phaser).map(\.name) == [
+            "rateHz",           // slot 0
+            "centerHz",         // slot 1
+            "depthOctaves",     // slot 2
+            "stages",           // slot 3
+            "feedback",         // slot 4
+            "mix",              // slot 5
+            "stereoPhaseDeg",   // slot 6
+        ])
+        let specs = EffectParamSpec.specs(for: .phaser)
+        // `depthOctaves` reaches 0 (a FROZEN sweep, a real setting), so
+        // `.logarithmic` is structurally invalid on it — log(0) is -inf and the
+        // runtime fallback to linear is SILENT. Pinned so nobody "improves" it.
+        let depth = specs.first { $0.name == "depthOctaves" }
+        #expect(depth?.range.lowerBound == 0)
+        #expect(depth?.curve == .linear)
+        // `feedback` crosses zero, so the same argument applies, doubly.
+        let feedbackSpec = specs.first { $0.name == "feedback" }
+        #expect(feedbackSpec?.range.lowerBound == -0.95)
+        #expect(feedbackSpec?.curve == .linear)
+        // `stages` is the discrete one: its default must be an EVEN count in
+        // range, or `fx.describe` advertises a value the setter would snap.
+        let stages = specs.first { $0.name == "stages" }
+        #expect(stages?.defaultValue == 6)
+        #expect(PhaserParams.snappedStages(stages?.defaultValue ?? 0)
+                == Int(stages?.defaultValue ?? 0))
+        #expect(stages?.modulatable == .refused)
     }
 }

@@ -171,6 +171,33 @@ protocol EffectRendering: AnyObject {
     ///                 (there is no tap arithmetic to poison) but because a NaN
     ///                 `width` would silence the strip permanently through the
     ///                 interpolation accumulator
+    ///   phaser        1 `tan` PER CHANNEL per 32-frame block (the all-pass
+    ///                 corner, through `PhaserParams.allpassCoefficient`) —
+    ///                 TWO per block total, NOT one per SECTION: every section
+    ///                 shares the one corner, which is also what makes the
+    ///                 notch count exactly `stages/2`. Plus one `sin` and one
+    ///                 `pow` per block inside `sweptCornerHz`. Per SAMPLE, adds
+    ///                 and multiplies ONLY — no libm at all in the inner loop —
+    ///                 because the coefficient is INTERPOLATED across the block
+    ///                 (the `tapeDelay` precedent) rather than re-derived, and
+    ///                 `feedback`/`mix` interpolate directly. State is ONE
+    ///                 `UnsafeMutablePointer<Float>` of `stagesRange.upperBound
+    ///                 * 2` words allocated in `init` at the MAXIMUM stage
+    ///                 count, so a stage-count change is an index bound and
+    ///                 NOTHING EVER RESIZES, plus one feedback word per channel
+    ///                 and one LFO phase. UP TO 26 recirculating words are
+    ///                 DENORMAL-FLUSHED per sample (`DelayEffect`'s `1e-20`):
+    ///                 EVERY section's state word — because each first-order
+    ///                 all-pass is its OWN IIR with a pole at |a| and decays
+    ///                 into subnormals on silence INDEPENDENTLY, at feedback 0
+    ///                 as much as at 0.95, which is the part a flanger-shaped
+    ///                 one-word flush would miss — plus both feedback words.
+    ///                 Every field is RE-CLAMPED in the derive, and here that
+    ///                 is stability and not tidiness: an unfenced `centerHz` or
+    ///                 `depthOctaves` would push the corner past Nyquist, where
+    ///                 `tan` is beyond its asymptote and |a| exceeds 1, i.e. an
+    ///                 UNSTABLE section. ⚠️ `stages` is the one param that
+    ///                 CLEARS state (a bounded store, off the inner loop)
     ///   audioUnit     default no-op below (empty spec surface in v0)
     func storeAutomatedParam(slot: Int, value: Double)
 }

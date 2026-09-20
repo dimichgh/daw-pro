@@ -267,6 +267,13 @@ private func renderVariant(set: String, variant: [String: Any], outDir: URL) asy
     // would fail `engineUnavailable`.
     let engine = AudioEngine()
     store.engine = engine
+    // Without this, `clip.addAudio` throws `mediaServiceUnavailable` — the
+    // store's `media` is nil by default, exactly as `engine` is. Until 2026-09-19
+    // the headless harness could only demo effects on SYNTHESIZED material, so
+    // no demo in this tree had ever proved an effect on a real recording.
+    // `AudioFileImporter` is stateless, does one-shot header I/O, and never
+    // touches the render path.
+    store.media = AudioFileImporter()
 
     var bindings: [String: UUID] = [:]
 
@@ -437,6 +444,100 @@ private func renderVariant(set: String, variant: [String: Any], outDir: URL) asy
                     notes: notes
                 )
                 if let bindAs { bindings[bindAs] = clip.id }
+
+            case "clip.addAudio":
+                // Imports a real recording so an effect can be demonstrated on
+                // one. ⚠️ The path is resolved against the CURRENT DIRECTORY
+                // when relative; the harness runs this binary with cwd = repo
+                // root. An absolute path is always unambiguous and is what the
+                // vocal specs use.
+                //
+                // ⛔ Overlap policy is the store's (m33-j): `importAudio`'s
+                // default REFUSES a collision with `clipImportWouldOverlap`
+                // rather than silently trimming, so a spec that stacks two
+                // imports at one beat FAILS LOUDLY instead of quietly losing
+                // audio. Do not add an `overwrite` escape here without a demo
+                // that needs it.
+                let trackID = try requireID(params, "trackId", bindings: bindings)
+                guard let rawPath = str(params["path"]) else {
+                    throw DemoRenderError(message: "clip.addAudio missing 'path'")
+                }
+                let audioURL = URL(fileURLWithPath: rawPath)
+                guard FileManager.default.fileExists(atPath: audioURL.path) else {
+                    throw DemoRenderError(
+                        message: "clip.addAudio: no file at \(audioURL.path)")
+                }
+                let audioClip = try store.importAudio(
+                    url: audioURL, toTrack: trackID, atBeat: num(params["atBeat"]))
+                if let bindAs { bindings[bindAs] = audioClip.id }
+
+            case "clip.sliceToSampler":
+                // The sample-flip chop (m32-b2): turns an audio clip into a bank
+                // of sampler pads, one per MIDI note from `baseNote` up, and by
+                // default writes a MIDI clip replaying the ORIGINAL groove.
+                //
+                // ⚠️ REJECT UNKNOWN KEYS, for the reason `track.setInstrument`
+                // spells out above: this harness once accepted `unisonVoices`
+                // and silently threw it away, and four "different" variants
+                // rendered byte-identical. A chop setting accepted and dropped
+                // would look exactly like a chop setting that does not work.
+                let sliceKnown: Set<String> = [
+                    "clipId", "targetTrackId", "mode", "sensitivity", "divisions",
+                    "gridBeats", "minSliceSeconds", "maxSlices", "includeHead",
+                    "baseNote", "snapWindowSeconds", "generateMIDI", "atBeat",
+                    "velocityFromStrength", "muteSourceTrack",
+                ]
+                let sliceUnknown = params.keys.filter { !sliceKnown.contains($0) }.sorted()
+                guard sliceUnknown.isEmpty else {
+                    throw DemoRenderError(message:
+                        "clip.sliceToSampler got unknown key(s) "
+                        + sliceUnknown.joined(separator: ", ")
+                        + " — the harness would have silently ignored them. Known keys: "
+                        + sliceKnown.sorted().joined(separator: ", "))
+                }
+                let sourceClipID = try requireID(params, "clipId", bindings: bindings)
+                let sliceMode: SliceBoundaryMode
+                switch str(params["mode"]) {
+                case nil, "transients": sliceMode = .transients
+                case "divisions": sliceMode = .divisions
+                case "grid": sliceMode = .grid
+                case let other:
+                    throw DemoRenderError(message:
+                        "clip.sliceToSampler unknown mode '\(other ?? "")' — "
+                        + "use transients, divisions or grid")
+                }
+                var sliceSettings = SliceToSamplerSettings(mode: sliceMode)
+                if let v = num(params["sensitivity"]) { sliceSettings.sensitivity = v }
+                if let v = num(params["divisions"]) { sliceSettings.divisions = Int(v) }
+                if let v = num(params["gridBeats"]) { sliceSettings.gridBeats = v }
+                if let v = num(params["minSliceSeconds"]) { sliceSettings.minSliceSeconds = v }
+                if let v = num(params["maxSlices"]) { sliceSettings.maxSlices = Int(v) }
+                if let v = params["includeHead"] as? Bool { sliceSettings.includeHead = v }
+                if let v = num(params["baseNote"]) { sliceSettings.baseNote = Int(v) }
+                if let v = num(params["snapWindowSeconds"]) { sliceSettings.snapWindowSeconds = v }
+                if let v = params["generateMIDI"] as? Bool { sliceSettings.generateMIDI = v }
+                if let v = num(params["atBeat"]) { sliceSettings.atBeat = v }
+                if let v = params["velocityFromStrength"] as? Bool {
+                    sliceSettings.velocityFromStrength = v
+                }
+                let sliceTarget: UUID? = params["targetTrackId"] == nil
+                    ? nil : try requireID(params, "targetTrackId", bindings: bindings)
+                // m39-pads. ⭐ WORTH HAVING IN THE HARNESS PRECISELY BECAUSE OF
+                // WHAT IT FIXES: a demo that chops and renders WITHOUT it hears
+                // the original under the pads (+6.0 LU, comb-filtered), which
+                // is a rendered artefact nobody would attribute to the chop.
+                let sliceMute = (params["muteSourceTrack"] as? Bool) ?? false
+                let sliceResult = try await store.sliceClipToSampler(
+                    clipId: sourceClipID, targetTrackId: sliceTarget,
+                    settings: sliceSettings, muteSourceTrack: sliceMute)
+                narrate("  # chop: \(sliceResult.sliceCount) slice(s) -> pads from note "
+                        + "\(sliceSettings.baseNote)"
+                        + (sliceResult.mutedTrackId != nil ? ", source track muted" : ""))
+                // Bind the PAD TRACK so later commands can address it: the
+                // created track when one was made, else the target it filled.
+                if let bindAs {
+                    bindings[bindAs] = sliceResult.createdTrackId ?? sliceResult.trackId
+                }
 
             case "fx.add":
                 let trackID = try requireID(params, "trackId", bindings: bindings)

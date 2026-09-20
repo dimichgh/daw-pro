@@ -3258,6 +3258,7 @@ public final class ProjectStore {
         case .hallReverb: return "Hall Reverb"
         case .tapeDelay: return "Tape Delay"
         case .stereoWidth: return "Stereo Width"
+        case .phaser: return "Phaser"
         default: return kind.rawValue.prefix(1).uppercased() + kind.rawValue.dropFirst()
         }
     }
@@ -3890,6 +3891,22 @@ public final class ProjectStore {
             default: return
             }
             effect.stereoWidth = params
+        case .phaser:
+            var params = effect.resolvedPhaser
+            switch name {
+            case "rateHz": params.rateHz = value
+            case "centerHz": params.centerHz = value
+            case "depthOctaves": params.depthOctaves = value
+            // SNAPPED through the law — `stages` is discrete, and storing the
+            // raw 7 would make `fx.setParam`'s echo disagree with what is in
+            // force (the `RingModParams.waveform` precedent).
+            case "stages": params.stages = Double(PhaserParams.snappedStages(value))
+            case "feedback": params.feedback = value
+            case "mix": params.mix = value
+            case "stereoPhaseDeg": params.stereoPhaseDeg = value
+            default: return
+            }
+            effect.phaser = params
         case .audioUnit:
             // Unreachable: specs(for: .audioUnit) is empty, so name validation
             // in setEffectParam rejects every name first. AU params are not

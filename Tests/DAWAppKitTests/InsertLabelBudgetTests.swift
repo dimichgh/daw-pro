@@ -121,7 +121,11 @@ struct InsertLabelBudgetTests {
         // it still does not displace it, so the budget sweep above still
         // passes on its own rather than because the new name happened to be
         // short.
-        #expect(builtInKinds.count == 17)
+        // ⭐ CHECKED for m39-o: "Phaser" is six characters against "Bass
+        // Enhancer"'s thirteen — the SHORTEST new name in the suite, so the
+        // widest is unmoved and the budget sweep above still passes on its own
+        // rather than because the new name happened to be short.
+        #expect(builtInKinds.count == 18)
         let widest = builtInKinds
             .map { MixerFormat.effectDisplayName(EffectDescriptor(kind: $0)) }
             .max { width($0) < width($1) }

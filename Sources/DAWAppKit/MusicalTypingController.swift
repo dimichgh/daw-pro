@@ -73,6 +73,64 @@ public final class MusicalTypingController {
     /// already ringing, which is what a real keyboard does.
     public private(set) var velocity = AuditionController.defaultVelocity
 
+    // MARK: - Pads mode (m39-pads)
+
+    /// The MIDI note PAD 1 OF BANK 1 fires. 36 = C1 — the MPC pad-1 note, and
+    /// the same number `SliceToSamplerSettings.defaultBaseNote` chops to, so a
+    /// default chop lands on a default grid with nothing to configure.
+    ///
+    /// ⛔⛔ **THIS IS NOT `baseOctave` AND MUST NEVER BE DERIVED FROM IT.** An
+    /// octave is twelve semitones; a bank is sixteen pads. Deriving one from the
+    /// other — which looks like an obvious economy, and is the first thing a
+    /// reader will try to "simplify" — makes bank 2 start four pads inside bank
+    /// 1, overlapping four slices and hiding four more, while every test that
+    /// only checks bank 1 stays green. See `PadGridGeometry.padsPerBank`.
+    public private(set) var padBaseNote = 36
+
+    /// Which bank of 16 the grid is showing, 0-based.
+    public private(set) var padBank = 0
+
+    /// The pitch a pad of the CURRENT bank fires — the ONE home for that sum,
+    /// shared by the letter keys here and by `PadGridModel`'s drawing.
+    public func padPitch(index: Int) -> Int? {
+        PadGridGeometry.pitch(forPad: index, baseNote: padBaseNote, bank: padBank)
+    }
+
+    /// Moves pad 1. Clamped into MIDI so the top of a bank can always exist.
+    public func setPadBaseNote(_ note: Int) {
+        let clamped = note.clamped(to: 0...(127 - PadGridGeometry.padsPerBank + 1))
+        guard clamped != padBaseNote else { return }
+        padBaseNote = clamped
+        bump()
+    }
+
+    /// Switches bank. Refuses a bank whose pad 1 would leave MIDI, so no bank is
+    /// ever reachable that cannot sound its own first pad.
+    public func setPadBank(_ value: Int) {
+        let wanted = max(0, value)
+        guard PadGridGeometry.pitch(forPad: 0, baseNote: padBaseNote, bank: wanted) != nil,
+              wanted != padBank else { return }
+        padBank = wanted
+        // ⚠️ HELD PADS ARE LEFT ALONE, exactly as `shiftOctave` leaves held
+        // notes: `keyPitches` remembers the pitch each key started, so a key
+        // still down when the bank changes releases the pad it actually struck
+        // rather than stranding it and stopping an innocent neighbour.
+        bump()
+    }
+
+    public func shiftPadBank(by delta: Int) { setPadBank(padBank + delta) }
+
+    /// Sets the velocity outright — what a pad STRUCK NEAR ITS TOP EDGE does.
+    ///
+    /// ⚠️ The C/V keys still step by `MusicalTypingRouting.velocityStep` from
+    /// wherever this leaves it; there is one velocity and one readout for it.
+    public func setVelocity(_ value: Int) {
+        let clamped = value.clamped(to: AuditionController.velocityRange)
+        guard clamped != velocity else { return }
+        velocity = clamped
+        bump()
+    }
+
     // MARK: - Chord mode (m23-cv)
 
     /// What ONE key press produces.
@@ -730,7 +788,10 @@ public final class MusicalTypingController {
                               window: TransportKeyWindow) -> MusicalTypingDecision {
         let decision = MusicalTypingRouting.decide(
             keyCode: keyCode, modifiers: modifiers, isRepeat: isRepeat,
-            responder: responder, window: window, isEnabled: isEnabled)
+            responder: responder, window: window, isEnabled: isEnabled,
+            // m39-pads-2: the mode chooses the key table, so the spatial 4×4
+            // block is claimed only while the pad grid is the face on screen.
+            playMode: playMode)
         lastDecision = decision
         switch decision {
         case .passThrough(let refusal):
@@ -958,8 +1019,13 @@ public final class MusicalTypingController {
 
     private func perform(_ role: MusicalTypingKeyRole, keyCode: UInt16) {
         switch role {
-        case .octaveDown: shiftOctave(by: -1)
-        case .octaveUp: shiftOctave(by: 1)
+        // ⭐ m39-pads: Z/X move the BANK in pads mode. The physical keys and the
+        // legend beside them keep their "move the layout down / up" meaning —
+        // only the unit changes, from twelve semitones to sixteen pads. A THIRD
+        // pair of keys for banks would have had to come from somewhere, and
+        // there is nowhere: `allCaps` is 22 keys and every one is spoken for.
+        case .octaveDown: playMode == .pads ? shiftPadBank(by: -1) : shiftOctave(by: -1)
+        case .octaveUp: playMode == .pads ? shiftPadBank(by: 1) : shiftOctave(by: 1)
         case .velocityDown: stepVelocity(by: -1)
         case .velocityUp: stepVelocity(by: 1)
         // m34-l. Unlike the note branch below, a REFUSED press still swallows
@@ -967,6 +1033,27 @@ public final class MusicalTypingController {
         // focus out of the instrument the user is playing would be a worse
         // answer than a lamp that stays dark. `setSustain` records why.
         case .sustainToggle: toggleSustain()
+        // ── PADS MODE (m39-pads-2). A SPATIAL 4×4 block: the key's position in
+        // the block IS the pad's position on screen, so the index arrives here
+        // already decided and nothing re-derives it from a pitch.
+        //
+        // The SAME ledger and the SAME seam as a note key — polyphony comes
+        // free, which is the entire reason pads go through this path and not
+        // through `pointerDown`: one pointer is one pad, and finger-drumming a
+        // kick under a hat needs two.
+        case .pad(let index):
+            // ⛔ `.canSound`, NOT `== .ready` — see the note branch below.
+            guard targetState.canSound else {
+                lastSilencedBy = targetState
+                bump()
+                return
+            }
+            // nil when the pad's note would leave MIDI: DROP the press rather
+            // than clamp it onto a neighbouring pad's slice.
+            guard let padPitch = padPitch(index: index) else { bump(); return }
+            lastSilencedBy = nil
+            keyPitches[keyCode] = [padPitch]
+            sound([padPitch])
         case .note(let semitone):
             // ⛔ `.canSound`, NOT `== .ready`: `.recordingArmed` and
             // `.recordingUnarmed` are STATUSES, not refusals. Typing while a

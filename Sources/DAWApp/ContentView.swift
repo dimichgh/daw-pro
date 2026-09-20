@@ -435,6 +435,19 @@ struct ContentView: View {
                 onClose: { withAnimation(.easeOut(duration: 0.15)) { model.closeSamplerEditor() } }
             )
         }
+        // CHOP TO PADS (m39-pads): the door onto `clip.sliceToSampler`, which
+        // had none — an agent could chop a record into 53 playable pads over MCP
+        // and a human could reach it from nowhere. Opened by the pad face's
+        // "CHOP A CLIP…" affordance and `debug.padGrid {openChop:true}`. Chops
+        // through the SAME `store.sliceClipToSampler` the wire calls.
+        if model.chopToPadsOpen {
+            ChopToPadsPanel(
+                model: model.padGrid,
+                densityStore: model.panelDensity,
+                onClose: { withAnimation(.easeOut(duration: 0.15)) { model.closeChopToPads() } },
+                onChop: { model.runChopToPads() }
+            )
+        }
         // AU-effect picker (m13-g, audit F6): opened by a Pro channel/bus strip's
         // insert add-menu "Audio Units…" item; UI-only — Add routes through the SAME
         // `store.addEffect(kind:.audioUnit)` the wire uses. Never opened for master.
@@ -1110,6 +1123,9 @@ struct ContentView: View {
             onExtractGroove: { clip in
                 model.openQuantizePanel(clipID: clip.id, startExtract: true)
             },
+            // Chop to Pads… (m39-pads, audio only, BOTH densities): the second
+            // route to the chopper, beside the pad face's own "CHOP A CLIP…".
+            onChopToPads: { clip in model.openChopToPads(clipID: clip.id) },
             // Convert Voice… (m24-m leg B, Pro clip menu): opens the panel on
             // the ids the menu's own title named, which ride the SAME store
             // seam as the wire's vc.convertClips.
@@ -1793,7 +1809,15 @@ struct ContentView: View {
                 // the button and `debug.musicalTyping` drive ONE path.
                 onSetAdvanceMode: { model.setMusicalTypingAdvanceMode($0) },
                 onGeneratePlaybox: { model.generatePlaybox() },
-                isGeneratingPlaybox: model.playbox.isBusy
+                isGeneratingPlaybox: model.playbox.isBusy,
+                // m39-pads — the third face. Same law as every closure above:
+                // through an `AppModel` funnel, so the mouse, the chips and
+                // `debug.padGrid` drive ONE path.
+                padGrid: model.padGrid,
+                onPadPress: { model.padGridDown(index: $0, normalizedY: $1) },
+                onPadRelease: { model.padGridUp() },
+                onSetBank: { model.padGridSetBank($0) },
+                onOpenChop: { withAnimation(.easeOut(duration: 0.15)) { model.openChopToPads() } }
             )
             .onAppear { model.refreshMusicalTypingTarget() }
             // ⚠️ RELEASES ON BOTH EDGES, AND THAT IS A DECISION, NOT AN

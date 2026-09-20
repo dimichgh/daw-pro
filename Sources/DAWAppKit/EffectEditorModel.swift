@@ -340,6 +340,20 @@ public final class EffectEditorModel {
                 ("LOW END", [("bassMonoHz", "Mono Below"),
                              ("bassMonoAmount", "Amount")]),
             ]
+        case .phaser:
+            // m39-o. SWEEP is the instrument — the three controls that make
+            // the whoosh, in the order a user reaches for them: where it sits,
+            // how far it travels, how fast. CHARACTER is what the sweep sounds
+            // LIKE rather than where it goes: `stages` sets how many notches
+            // there are and `feedback` how sharp they are, and the two are
+            // unreadable apart (the hallReverb DECAY SHAPE precedent). OUTPUT
+            // is mix and the stereo spread, last, per the strip rule.
+            return [
+                ("SWEEP", [("centerHz", "Centre"), ("depthOctaves", "Depth"),
+                           ("rateHz", "Rate")]),
+                ("CHARACTER", [("stages", "Stages"), ("feedback", "Feedback")]),
+                ("OUTPUT", [("mix", nil), ("stereoPhaseDeg", "Stereo")]),
+            ]
         case .audioUnit:
             // AU params are not on the generic surface (M3 vi-b).
             return []

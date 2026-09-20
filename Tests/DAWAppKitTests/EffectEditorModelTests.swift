@@ -595,11 +595,24 @@ struct EffectEditorModelTests {
         // reads the RANGE. ⚠️ `hallReverb.width` (0…1.2) is deliberately NOT
         // here: its neutral is 1.0, which is not the centre of its range, so a
         // centre-out knob would put the detent in the wrong place.
+        // ⭐ CHECKED for m39-o: `phaser.feedback` is -0.95…+0.95 LINEAR, the
+        // same shape as the flanger's and for the same reason — feedback 0 is
+        // the plain phaser and the two sides are different characters (ringing
+        // resonances vs a hollower inverted pattern) rather than more and less
+        // of one thing. A FIFTH unrelated kind earns the centre-out knob purely
+        // because `knobStyle(for:)` reads the RANGE. ⚠️ `phaser.depthOctaves`
+        // (0…4) and `phaser.stages` (2…12) are deliberately NOT here: neither
+        // range crosses zero, so neither has a centre to detent to.
         #expect(bipolar == [
             "eq.lowShelfGainDb", "eq.peak1GainDb", "eq.peak2GainDb",
             "eq.highShelfGainDb", "saturator.outputDb", "djFilter.position",
-            "flanger.feedback", "hallReverb.earlyLateBalance",
+            "flanger.feedback", "hallReverb.earlyLateBalance", "phaser.feedback",
         ])
+        // The phaser's detent also sits at exactly half travel, because its
+        // range is symmetric about zero like the flanger's and the DJ filter's.
+        let phaserFeedback = EffectParamSpec.specs(for: .phaser)
+            .first { $0.name == "feedback" }!
+        #expect(abs(EffectEditorModel.knobFillAnchor(for: phaserFeedback) - 0.5) < 1e-12)
         // The flanger's detent also sits at exactly half travel, because its
         // range is symmetric about zero like the DJ filter's.
         let feedback = EffectParamSpec.specs(for: .flanger).first { $0.name == "feedback" }!

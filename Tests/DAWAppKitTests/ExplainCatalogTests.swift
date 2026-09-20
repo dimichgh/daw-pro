@@ -48,8 +48,10 @@ struct ExplainCatalogTests {
         // SAMPLER editor card (.samplerEditor) → 98; m23-ct added MUSICAL TYPING
         // (.musicalTyping — one entry for the KEYS chip, the on-screen keyboard it
         // reveals and its Z/X/C/V controls, the `exportDialog` one-surface-one-card
-        // precedent) → 99.
-        #expect(ExplainID.allCases.count >= 99,
+        // precedent) → 99; m39-pads added the PAD GRID (.padGrid — one entry for
+        // the 4×4 grid, its bank chips and the CHOP TO PADS card that fills it,
+        // the same shared-control rule) → 100.
+        #expect(ExplainID.allCases.count >= 100,
                 "explain coverage shrank below the m23-ct floor: \(ExplainID.allCases.count)")
     }
 

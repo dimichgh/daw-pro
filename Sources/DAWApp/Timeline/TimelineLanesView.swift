@@ -222,6 +222,10 @@ struct TimelineLanesView: View {
     var onOpenBreathPad: (_ clip: Clip) -> Void = { _ in }
     /// Opens the Quantize panel focused on the extract affordance (both kinds).
     var onExtractGroove: (_ clip: Clip) -> Void = { _ in }
+    /// Opens **Chop to Pads…** on this clip (m39-pads) — AUDIO clips only, and
+    /// in BOTH densities. Routes to `openChopToPads(clipID:)`, which selects the
+    /// clip before showing the card.
+    var onChopToPads: (_ clip: Clip) -> Void = { _ in }
     /// Opens the **Convert Voice…** panel (m24-m leg B, Pro clip menu; sp-c).
     /// UI-only — routes to `openVoiceConvert(clipIDs:)`, whose panel rides the
     /// SAME store seam as the wire's `vc.convertClips`. The COMMAND (title +
@@ -1287,6 +1291,7 @@ struct TimelineLanesView: View {
                     onOpenHumanize: { onOpenHumanize(clip) },
                     onOpenBreathPad: { onOpenBreathPad(clip) },
                     onExtractGroove: { onExtractGroove(clip) },
+                    onChopToPads: { onChopToPads(clip) },
                     voiceConvertCommand: VoiceConvertMenuPolicy.clipContextCommand(
                         clickedClipID: clip.id,
                         clickedClipIsAudio: !clip.isMIDI && clip.audioFileURL != nil,
@@ -3010,6 +3015,8 @@ private struct ClipBlock: View {
     /// Opens the Quantize panel focused on the extract affordance (both kinds —
     /// `groove.extract` supports MIDI onsets and audio transients).
     var onExtractGroove: () -> Void = {}
+    /// Opens **Chop to Pads…** (m39-pads) — audio only, both densities.
+    var onChopToPads: () -> Void = {}
 
     // MARK: Convert to voice (m10-p-5)
 
@@ -3990,6 +3997,25 @@ private struct ClipBlock: View {
         // playhead-anchored route.
         Button(cutCommand.title) { onClipboardClip(.cut, cutCommand) }
         Button(copyCommand.title) { onClipboardClip(.copy, copyCommand) }
+        // ═══ CHOP TO PADS (m39-pads) — AUDIO ONLY, AND IN BOTH DENSITIES ═══
+        //
+        // ⭐ **DELIBERATELY OUTSIDE THE `if pro` BLOCK, on Delete's argument.**
+        // Chopping a recording onto pads is not clip-EDIT chrome; it is how a
+        // recording BECOMES an instrument you can play. Before this entry the
+        // only route to the chopper was Musical Typing ▸ PADS ▸ "CHOP A CLIP…"
+        // — three gestures deep, behind a strip that is off by default, i.e.
+        // exactly the "operation reachable by only one route is an operation
+        // that goes missing" failure m23-cf paid for two entries up.
+        //
+        // AUDIO ONLY, and hidden rather than offered-then-errored (the
+        // "Quantize…" / "Convert Voice…" rule): `sliceClipToSampler` throws on
+        // a MIDI clip, which has no recording to cut. The `audioFileURL` half
+        // matches `voiceConvertCommand`'s own audio test below — a clip can be
+        // non-MIDI and still have no file behind it yet.
+        if !clip.isMIDI, clip.audioFileURL != nil {
+            Divider()
+            Button("Chop to Pads…") { onChopToPads() }
+        }
         // The separator is CONDITIONAL because in SIMPLE density on a NON-TAKE
         // clip both blocks below are empty, so an unconditional one would be a
         // trailing rule with nothing under it — in the beginner density, on the
