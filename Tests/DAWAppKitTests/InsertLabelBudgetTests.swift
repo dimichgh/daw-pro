@@ -88,7 +88,7 @@ struct InsertLabelBudgetTests {
     // while the assertion below read 15 — the title had rotted through two
     // kinds because nothing compares a test's NAME to its own expectation. The
     // count lives in the `#expect`, which is the thing that can actually fail.
-    @Test("The sweep is not vacuous: every built-in name is swept, and the widest is Bass Enhancer")
+    @Test("The sweep is not vacuous: every built-in name is swept, and the widest is Transient Shaper")
     func sweepIsNotVacuous() {
         // 11 since m32-e added `bitCrusher`, 12 since m39-i added `djFilter`,
         // 13 since m39-m added `ringMod`.
@@ -125,13 +125,76 @@ struct InsertLabelBudgetTests {
         // Enhancer"'s thirteen — the SHORTEST new name in the suite, so the
         // widest is unmoved and the budget sweep above still passes on its own
         // rather than because the new name happened to be short.
-        #expect(builtInKinds.count == 18)
+        // ⭐⭐ CHECKED for m39-y, AND THIS ONE DISPLACED THE HOLDER. "Transient
+        // Shaper" is SIXTEEN characters and MEASURES 83.907 pt against the 85 pt
+        // channel budget — it FITS, with 1.09 pt to spare, and it is now the
+        // WIDEST built-in name, ending "Bass Enhancer"'s run at 72.567 pt. This
+        // is the first new kind whose name moved the maximum, so the two
+        // assertions below were REWORDED rather than bumped: the old
+        // "Bass Enhancer must stay the widest built-in name" is now false by
+        // design and its message would have lied. ⚠️ 1.09 pt is THIN. Any
+        // future rename must be measured, not eyeballed, and `Transient
+        // Shaper`'s own width is pinned below so a font or size change is
+        // caught here rather than in a screenshot.
+        // ⭐⭐ **AND THE DRAWING HALF WAS MEASURED TOO, NOT INFERRED FROM THIS
+        // ARITHMETIC.** This file measures a STRING with AppKit text metrics;
+        // whether SwiftUI's `Text` truncates is a different question, and
+        // `scripts/gates/m23s-insert-labels.mjs` — the gate that answers it —
+        // carries a HAND-FROZEN ten-kind `BUILT_INS` list that will never see
+        // this name. So m39-y ran a one-shot staging probe over
+        // `debug.insertLabels` instead: the channel row DREW "Transient Shaper"
+        // at **84.000 pt against 85.000 available with drawn == intrinsic**
+        // (master: 84.000 against 105.000), i.e. no truncation, and an
+        // `audioUnit` row in the SAME sweep DID truncate ("AUMultibandCompressor",
+        // drawn 60.000 vs intrinsic 124.000) — so the reading is positively
+        // controlled and is not "this probe cannot see truncation at all".
+        // ⚠️ The view rounds: 84.000 drawn vs 83.907 here, and 73.000 vs 72.567
+        // for "Bass Enhancer". THE ARITHMETIC UNDER-REPORTS BY ~0.1–0.4 pt, so
+        // a future name that clears 85 pt only in this file is NOT proven to fit.
+        // CHECKED for m39-z, AND THE OBVIOUS NAME DID NOT FIT. "Frequency
+        // Shifter" MEASURES 88.156 pt against the 85 pt channel budget - OVER
+        // by 3.156 pt, and it would have shipped TRUNCATED. The shipped name is
+        // "Frequency Shift" at 78.153 pt, 6.847 pt spare. That margin clears on
+        // the ARITHMETIC ALONE: this file is documented above to under-report
+        // the drawn width by ~0.1-0.4 pt, and 6.847 pt is an order of magnitude
+        // more than that, so unlike "Transient Shaper"'s 1.09 pt this name
+        // needed no staging probe to be safe. "Transient Shaper" (83.907 pt)
+        // REMAINS the widest built-in name, so the two assertions below are
+        // bumped rather than reworded.
+        // ⭐ CHECKED for m39-ac: "Clipper" is SEVEN characters and MEASURES
+        // 35.677 pt against the 85 pt channel budget — the widest margin any
+        // built-in name has had, and less than half of "Transient Shaper"'s
+        // 83.907 pt, so the widest name is unmoved and the budget sweep above
+        // still passes on its own rather than because the new name happened to
+        // be short. There was no second candidate to weigh: "Clipper" is the
+        // ordinary word for the thing, unlike m39-z's "Frequency Shifter",
+        // which had to be shortened.
+        // ⭐ CHECKED for m39-af: "Dynamic EQ" is TEN characters. Its measured
+        // width is pinned below, next to the other names this file holds; it is
+        // nowhere near "Transient Shaper"'s 83.907 pt, so the widest name is
+        // unmoved and the budget sweep above still passes on its own rather than
+        // because the new name happened to be short. ⚠️ The name was NOT free:
+        // `dynamicEQ`.capitalised is "DynamicEQ", which is what BOTH display-name
+        // functions would have shipped without an explicit arm, and which this
+        // sweep would have passed — a label budget cannot see a wrong label.
+        #expect(builtInKinds.count == 22)
         let widest = builtInKinds
             .map { MixerFormat.effectDisplayName(EffectDescriptor(kind: $0)) }
             .max { width($0) < width($1) }
-        #expect(widest == "Bass Enhancer")
-        // Measured 72.57 pt at 10 pt medium — the name that made a 16 pt trailing
-        // glyph impossible on a 132 pt strip (63 pt budget with one).
+        #expect(widest == "Transient Shaper")
+
+        // m39-y's name, measured and pinned. It is the whole remaining budget
+        // headroom, so this assertion is the tightest one in the file.
+        let shaper = width("Transient Shaper")
+        print("[measured] Transient Shaper draws at \(shaper) pt against an "
+              + "\(MixerStripLayout.builtInInsertLabelWidth) pt budget "
+              + "(\(MixerStripLayout.builtInInsertLabelWidth - shaper) pt spare)")
+        #expect(shaper > 82 && shaper < 85)
+        #expect(shaper <= MixerStripLayout.builtInInsertLabelWidth,
+                "the widest built-in name no longer fits the channel strip")
+
+        // The FORMER holder, kept because it is the name m23-s was filed for and
+        // its 72.57 pt is what made a 16 pt trailing glyph impossible.
         let w = width("Bass Enhancer")
         #expect(w > 70 && w < 75)
         #expect(w > MixerStripLayout.insertLabelWidth(
@@ -142,8 +205,24 @@ struct InsertLabelBudgetTests {
         // widen past the budget the sweep above enforces.
         let crusher = width("Bit Crusher")
         print("[measured] Bit Crusher draws at \(crusher) pt against an 85 pt budget")
-        #expect(crusher < w, "Bass Enhancer must stay the widest built-in name")
+        #expect(crusher < shaper, "Transient Shaper must stay the widest built-in name")
         #expect(crusher <= MixerStripLayout.builtInInsertLabelWidth)
+
+        // m39-af's name, MEASURED rather than eyeballed — the rule this file
+        // exists for. ⚠️ The arithmetic here under-reports the drawn width by
+        // ~0.1-0.4 pt (see the "Transient Shaper" note above), so only a margin
+        // an order of magnitude larger than that clears on this file alone. This
+        // one's is.
+        let dyn = width("Dynamic EQ")
+        print("[measured] Dynamic EQ draws at \(dyn) pt against an "
+              + "\(MixerStripLayout.builtInInsertLabelWidth) pt budget "
+              + "(\(MixerStripLayout.builtInInsertLabelWidth - dyn) pt spare)")
+        #expect(dyn < shaper, "Transient Shaper must stay the widest built-in name")
+        #expect(dyn <= MixerStripLayout.builtInInsertLabelWidth)
+        // The MARGIN is pinned, not just the fit, so a font or size change that
+        // eats the headroom reddens here rather than in a screenshot.
+        #expect(MixerStripLayout.builtInInsertLabelWidth - dyn > 10,
+                "Dynamic EQ's margin is thin enough to need a staging pixel probe")
     }
 
     /// The three names the shipping app was drawing truncated, named explicitly

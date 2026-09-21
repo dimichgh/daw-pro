@@ -1,0 +1,914 @@
+{
+  "set": "dyneq",
+  "description": "m39-af, the .dynamicEQ insert: an EQ band that only moves WHEN THE MUSIC MAKES IT MOVE. Every variant plays the IDENTICAL source -- eight three-note chord stabs (C3 + C4 + G4, one beat long every two beats -- 16 beats, four bars, 8 s at 120 BPM on a saw pad) -- so nothing but the band's behaviour differs, and every variant drives the SAME band: band 3, parked at 3000 Hz with a Q of 2, ratio 8, attack 5 ms, release 80 ms. Bands 1, 2 and 4 are OFF in all five, so exactly one thing is working.\n\nWHY STABS AND NOT A HELD CHORD, because this fixture was REBUILT after failing its own rule. The first cut of this set held one 16-beat chord, and the 3 kHz level across that sustain MEASURED -40.94 / -41.07 / -40.87 / -41.04 dB: 0.2 dB of movement. A dynamic EQ on a source with no in-band dynamics is just a static EQ, and it showed -- 'cut-6' and 'cut-18' came out 0.069 dB apart while the prose claimed the difference was obvious. THE SEPARATION IS MEASURED ON THE SOURCE FIRST, and on the fixture that shipped it is 16.9 dB: through a 400 Hz-wide probe at 3 kHz the control render peaks at -28.4 dBFS during a stab and falls to -45.3 dBFS in the gap between stabs. Every threshold below was then derived FROM that number rather than guessed: the three above-threshold variants sit at -43 dBFS (the band engages on each stab and releases in each gap) and 'below-12' sits at -35 dBFS, which is ABOVE the material because a below-threshold band has to be.\n\nWHAT A DYNAMIC EQ ACTUALLY IS, because it is neither an EQ nor a compressor. A normal EQ turns a frequency down and leaves it down, whatever the music does. A compressor turns EVERYTHING down when one part of the music gets loud. This turns ONE FREQUENCY down (or up) ONLY WHILE THAT FREQUENCY ITSELF is loud (or quiet), and leaves the rest of the sound alone. At rest the band is arithmetically flat -- a fresh Dynamic EQ is bit-for-bit transparent, proven directly by DynamicEQRenderTests rather than by a hash here.\n\nWHAT DIFFERS BETWEEN THESE FIVE, and it is TWO controls, not four. `band3Mode` picks WHICH SIDE of the threshold wakes the band (1 = above, 2 = below) and the SIGN of `band3RangeDb` picks WHICH WAY it then moves. That pair gives four musical moves from two knobs, and three of the four are here.\n\nWHAT TO LISTEN FOR, with the measured size of each move (whole file, relative to the control, through a 1.2 kHz-wide probe at 3 kHz). 'no-dyneq' is the pad untouched, so you know what is being changed. 'cut-6' (-2.46 dB) and 'cut-18' (-3.59 dB) both duck 3 kHz on each stab and let it back up in each gap -- the de-harsh move, the one this kind is reached for most. 'boost-12' (+9.75 dB) is the same trigger with the sign flipped: it makes 3 kHz louder exactly when 3 kHz is already loud, so every stab gets an edge. 'below-12' (+1.62 dB) is the other mode: it lifts 3 kHz when 3 kHz goes QUIET, so the gaps and decays brighten while the stabs are left alone -- the opposite motion from 'boost-12' on the same material, which is the pair worth comparing.\n\nHOW BIG THE DEPTH AXIS REALLY IS, stated because the honest number is smaller than the knob suggests. 'cut-6' and 'cut-18' differ ONLY in how far the band may travel (6 dB vs 18 dB), and they measure 1.14 dB apart over the whole file, or 2.48 dB apart right at the band centre (-3.87 vs -6.35 dB through a 400 Hz-wide probe). NOT 12 dB -- and the reason is worth knowing: a range cap only bites when the band ASKS for more than the cap. On this source the band asks for about 9 dB at its loudest, so 6 dB clamps it and 18 dB never does. Making it ask for a genuine 18 dB would mean putting the threshold below the gap floor, at which point the band never releases and has stopped being dynamic at all. The shallow variant is therefore the subtle one BY DESIGN; if only one of the five reads as no change, expect it to be 'cut-6'.\n\nLOUDNESS, STATED SO IT IS NOT MISTAKEN FOR THE AXIS: the cutting variants are QUIETER than the control and the boosting ones are LOUDER, because that is literally what they do -- 'boost-12' most of all. Do not pick a variant because it is louder.\n\nAND WHAT IT LEAVES ALONE, which is the other half of the claim: everything below 400 Hz moves by at most 0.007 dB in the three cutting/below variants. 'boost-12' moves it 0.106 dB, and that is not leakage -- it is the bell's own skirt, which is ASYMMETRIC by construction (the side-path form adds (G-1) times a band-pass, and G-1 is +2.98 for a 12 dB boost against -0.87 for an 18 dB cut). The gate computes each variant's skirt from its own range and Q rather than budgeting them equally.\n\nWHY THESE FIVE AND NOT THREE: this set doubles as the fixture for `scripts/gates/m39af-dyneq-bytes.mjs`, so each variant covers a render-path BRANCH the others cannot reach -- the no-effect control, the downward limb at two depths, the UPWARD limb (whose ballistics are the one place this kind could ship broken and green), and the below-threshold limb.",
+  "variants": [
+    {
+      "name": "no-dyneq",
+      "axis": "no dynamic EQ at all - the pad untouched, so you know what is being changed",
+      "render": {
+        "durationSeconds": 10
+      },
+      "role": "control",
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pad",
+            "kind": "instrument"
+          },
+          "as": "pad"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pad",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.03,
+            "decay": 0.5,
+            "sustain": 0.85,
+            "release": 0.25,
+            "cutoffHz": 6000,
+            "resonance": 0.1,
+            "gain": 0.62,
+            "unisonVoices": 3,
+            "unisonDetuneCents": 9,
+            "unisonStereoSpread": 0.5,
+            "subLevel": 0.25,
+            "subOctave": -1,
+            "subWaveform": "sine"
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pad",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 48,
+                "startBeat": 0.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 60,
+                "startBeat": 0.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 67,
+                "startBeat": 0.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 48,
+                "startBeat": 2.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 60,
+                "startBeat": 2.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 67,
+                "startBeat": 2.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 48,
+                "startBeat": 4.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 60,
+                "startBeat": 4.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 67,
+                "startBeat": 4.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 48,
+                "startBeat": 6.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 60,
+                "startBeat": 6.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 67,
+                "startBeat": 6.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 48,
+                "startBeat": 8.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 60,
+                "startBeat": 8.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 67,
+                "startBeat": 8.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 48,
+                "startBeat": 10.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 60,
+                "startBeat": 10.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 67,
+                "startBeat": 10.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 48,
+                "startBeat": 12.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 60,
+                "startBeat": 12.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 67,
+                "startBeat": 12.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 48,
+                "startBeat": 14.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 60,
+                "startBeat": 14.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 67,
+                "startBeat": 14.0,
+                "lengthBeats": 1.0
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "cut-6",
+      "axis": "band3RangeDb -6 - the band may duck 3 kHz by at most 6 dB while 3 kHz is loud (the de-harsh move, clamped to a polish depth; measured -2.46 dB)",
+      "render": {
+        "durationSeconds": 10
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pad",
+            "kind": "instrument"
+          },
+          "as": "pad"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pad",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.03,
+            "decay": 0.5,
+            "sustain": 0.85,
+            "release": 0.25,
+            "cutoffHz": 6000,
+            "resonance": 0.1,
+            "gain": 0.62,
+            "unisonVoices": 3,
+            "unisonDetuneCents": 9,
+            "unisonStereoSpread": 0.5,
+            "subLevel": 0.25,
+            "subOctave": -1,
+            "subWaveform": "sine"
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$pad",
+            "kind": "dynamicEQ",
+            "params": {
+              "band3Mode": 1,
+              "band3Freq": 3000,
+              "band3Q": 2,
+              "band3ThresholdDb": -43,
+              "band3Ratio": 8,
+              "band3RangeDb": -6,
+              "band3AttackMs": 5,
+              "band3ReleaseMs": 80
+            }
+          },
+          "as": "dyneq"
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pad",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 48,
+                "startBeat": 0.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 60,
+                "startBeat": 0.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 67,
+                "startBeat": 0.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 48,
+                "startBeat": 2.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 60,
+                "startBeat": 2.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 67,
+                "startBeat": 2.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 48,
+                "startBeat": 4.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 60,
+                "startBeat": 4.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 67,
+                "startBeat": 4.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 48,
+                "startBeat": 6.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 60,
+                "startBeat": 6.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 67,
+                "startBeat": 6.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 48,
+                "startBeat": 8.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 60,
+                "startBeat": 8.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 67,
+                "startBeat": 8.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 48,
+                "startBeat": 10.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 60,
+                "startBeat": 10.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 67,
+                "startBeat": 10.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 48,
+                "startBeat": 12.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 60,
+                "startBeat": 12.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 67,
+                "startBeat": 12.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 48,
+                "startBeat": 14.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 60,
+                "startBeat": 14.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 67,
+                "startBeat": 14.0,
+                "lengthBeats": 1.0
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "cut-18",
+      "axis": "band3RangeDb -18 - the SAME band with the cap lifted, so it travels as far as the music asks (about 9 dB) instead of being clamped at 6; measured -3.59 dB",
+      "render": {
+        "durationSeconds": 10
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pad",
+            "kind": "instrument"
+          },
+          "as": "pad"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pad",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.03,
+            "decay": 0.5,
+            "sustain": 0.85,
+            "release": 0.25,
+            "cutoffHz": 6000,
+            "resonance": 0.1,
+            "gain": 0.62,
+            "unisonVoices": 3,
+            "unisonDetuneCents": 9,
+            "unisonStereoSpread": 0.5,
+            "subLevel": 0.25,
+            "subOctave": -1,
+            "subWaveform": "sine"
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$pad",
+            "kind": "dynamicEQ",
+            "params": {
+              "band3Mode": 1,
+              "band3Freq": 3000,
+              "band3Q": 2,
+              "band3ThresholdDb": -43,
+              "band3Ratio": 8,
+              "band3RangeDb": -18,
+              "band3AttackMs": 5,
+              "band3ReleaseMs": 80
+            }
+          },
+          "as": "dyneq"
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pad",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 48,
+                "startBeat": 0.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 60,
+                "startBeat": 0.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 67,
+                "startBeat": 0.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 48,
+                "startBeat": 2.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 60,
+                "startBeat": 2.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 67,
+                "startBeat": 2.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 48,
+                "startBeat": 4.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 60,
+                "startBeat": 4.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 67,
+                "startBeat": 4.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 48,
+                "startBeat": 6.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 60,
+                "startBeat": 6.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 67,
+                "startBeat": 6.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 48,
+                "startBeat": 8.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 60,
+                "startBeat": 8.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 67,
+                "startBeat": 8.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 48,
+                "startBeat": 10.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 60,
+                "startBeat": 10.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 67,
+                "startBeat": 10.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 48,
+                "startBeat": 12.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 60,
+                "startBeat": 12.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 67,
+                "startBeat": 12.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 48,
+                "startBeat": 14.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 60,
+                "startBeat": 14.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 67,
+                "startBeat": 14.0,
+                "lengthBeats": 1.0
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "boost-12",
+      "axis": "band3RangeDb +12 - the sign FLIPPED, so the same trigger makes 3 kHz LOUDER instead of quieter (the upward limb); measured +9.75 dB",
+      "render": {
+        "durationSeconds": 10
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pad",
+            "kind": "instrument"
+          },
+          "as": "pad"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pad",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.03,
+            "decay": 0.5,
+            "sustain": 0.85,
+            "release": 0.25,
+            "cutoffHz": 6000,
+            "resonance": 0.1,
+            "gain": 0.62,
+            "unisonVoices": 3,
+            "unisonDetuneCents": 9,
+            "unisonStereoSpread": 0.5,
+            "subLevel": 0.25,
+            "subOctave": -1,
+            "subWaveform": "sine"
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$pad",
+            "kind": "dynamicEQ",
+            "params": {
+              "band3Mode": 1,
+              "band3Freq": 3000,
+              "band3Q": 2,
+              "band3ThresholdDb": -43,
+              "band3Ratio": 8,
+              "band3RangeDb": 12,
+              "band3AttackMs": 5,
+              "band3ReleaseMs": 80
+            }
+          },
+          "as": "dyneq"
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pad",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 48,
+                "startBeat": 0.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 60,
+                "startBeat": 0.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 67,
+                "startBeat": 0.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 48,
+                "startBeat": 2.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 60,
+                "startBeat": 2.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 67,
+                "startBeat": 2.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 48,
+                "startBeat": 4.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 60,
+                "startBeat": 4.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 67,
+                "startBeat": 4.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 48,
+                "startBeat": 6.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 60,
+                "startBeat": 6.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 67,
+                "startBeat": 6.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 48,
+                "startBeat": 8.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 60,
+                "startBeat": 8.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 67,
+                "startBeat": 8.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 48,
+                "startBeat": 10.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 60,
+                "startBeat": 10.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 67,
+                "startBeat": 10.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 48,
+                "startBeat": 12.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 60,
+                "startBeat": 12.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 67,
+                "startBeat": 12.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 48,
+                "startBeat": 14.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 60,
+                "startBeat": 14.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 67,
+                "startBeat": 14.0,
+                "lengthBeats": 1.0
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "below-12",
+      "axis": "band3Mode 2 - the band wakes when 3 kHz goes QUIET instead of loud, and lifts it (the below-threshold limb); measured +1.62 dB",
+      "render": {
+        "durationSeconds": 10
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pad",
+            "kind": "instrument"
+          },
+          "as": "pad"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pad",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.03,
+            "decay": 0.5,
+            "sustain": 0.85,
+            "release": 0.25,
+            "cutoffHz": 6000,
+            "resonance": 0.1,
+            "gain": 0.62,
+            "unisonVoices": 3,
+            "unisonDetuneCents": 9,
+            "unisonStereoSpread": 0.5,
+            "subLevel": 0.25,
+            "subOctave": -1,
+            "subWaveform": "sine"
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$pad",
+            "kind": "dynamicEQ",
+            "params": {
+              "band3Mode": 2,
+              "band3Freq": 3000,
+              "band3Q": 2,
+              "band3ThresholdDb": -35,
+              "band3Ratio": 8,
+              "band3RangeDb": 12,
+              "band3AttackMs": 5,
+              "band3ReleaseMs": 80
+            }
+          },
+          "as": "dyneq"
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pad",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 48,
+                "startBeat": 0.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 60,
+                "startBeat": 0.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 67,
+                "startBeat": 0.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 48,
+                "startBeat": 2.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 60,
+                "startBeat": 2.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 67,
+                "startBeat": 2.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 48,
+                "startBeat": 4.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 60,
+                "startBeat": 4.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 67,
+                "startBeat": 4.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 48,
+                "startBeat": 6.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 60,
+                "startBeat": 6.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 67,
+                "startBeat": 6.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 48,
+                "startBeat": 8.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 60,
+                "startBeat": 8.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 67,
+                "startBeat": 8.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 48,
+                "startBeat": 10.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 60,
+                "startBeat": 10.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 67,
+                "startBeat": 10.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 48,
+                "startBeat": 12.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 60,
+                "startBeat": 12.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 67,
+                "startBeat": 12.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 48,
+                "startBeat": 14.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 60,
+                "startBeat": 14.0,
+                "lengthBeats": 1.0
+              },
+              {
+                "pitch": 67,
+                "startBeat": 14.0,
+                "lengthBeats": 1.0
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

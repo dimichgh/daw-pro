@@ -42,8 +42,57 @@ struct ModulationTests {
     /// the flanger to add NO refusal, for the same reason (four continuous
     /// knobs, no discrete param, no `mix`). m39-o's `.phaser` added 6 yes +
     /// 0 warned + 1 refused (its `stages` is the discrete one), taking it to
-    /// 113 over 18. A new param without a verdict must fail this loudly.
-    @Test("§6.2 frozen verdict split: 74 yes + 20 warned + 19 refused = 113 across all 18 param-bearing kinds")
+    /// 113 over 18. m39-y's `.transientShaper` added 6 yes + 0 warned +
+    /// 0 refused, taking it to 119 over 19 — the THIRD kind after the flanger
+    /// and `.stereoWidth` to add NO refusal, and for a reason worth stating
+    /// because it looks like an omission: this kind has NO DISCRETE PARAM at
+    /// all, deliberately (a `detectMode` peak/RMS switch and a `stereoLink`
+    /// toggle were both considered and REJECTED — an RMS mode smears the exact
+    /// event the detector exists to find, and unlinked detection moves the
+    /// stereo image with the drummer). Its two TIME constants are `yes` rather
+    /// than `warned` because a one-pole ENVELOPE coefficient bends the
+    /// trajectory of a state variable whose current value is unchanged — unlike
+    /// `eq`, whose FILTER coefficients zipper.
+    /// ⚠️ THE TITLE STRING IS ITSELF A SITE. Update it with the numbers, or the
+    /// test name lies about what it pins.
+    /// A new param without a verdict must fail this loudly.
+    /// m39-ac's `.clipper` added 4 yes + 0 warned + 2 REFUSED, taking it to
+    /// 130 over 21 — and it is the first kind since `.eq` to contribute more
+    /// than one refusal. Both are rule 6.0.5 discrete params: `mode` is a
+    /// two-position switch (an LFO on it is a stutter, not a sweep) and
+    /// `oversampling` is a three-position quality setting that ALSO CLEARS the
+    /// oversampler's FIR histories when it changes, which is an independent
+    /// second reason on its own (the `phaser.stages` precedent, same shape).
+    /// m39-ad added ONE param to an EXISTING kind rather than a new kind —
+    /// `.saturator`'s `oversampling`, 0 yes + 0 warned + 1 REFUSED — taking the
+    /// table to 131 over the SAME 21 param-bearing kinds. ⭐ THE KIND COUNT NOT
+    /// MOVING IS THE POINT: this is the first growth of this table that is not a
+    /// new kind, and it is the shape that can silently repoint automation slots
+    /// if the param is not APPENDED. `saturatorVerdictsMatch` below asserts the
+    /// order as a LIST for exactly that reason.
+    /// m39-ae is the SECOND growth of that shape and the larger one:
+    /// `.compressor`'s de-esser adds 0 yes + 2 warned + 1 REFUSED, taking the
+    /// table to 134 over the same 21 kinds. ⚠️ ZERO `yes` IS NOT AN OVERSIGHT —
+    /// `detectorMode` is a three-position switch (rule 6.0.5) and the other two
+    /// are FILTER coefficients, which zipper at any modulation rate for the
+    /// `eq.peak1Freq` reason rather than the rate-aliasing reason. This is the
+    /// first kind to contribute more `warned` than `yes`.
+    /// ⭐⭐ m39-af is the LARGEST single move this table has ever made — a whole
+    /// new kind contributing **32** params at once, where the previous record
+    /// for a new kind was `.hallReverb`'s 14. 134 → 166 over 21 → 22
+    /// param-bearing kinds. ⚠️ A NET DELTA HIDES A SHRINK, so the 32 are NAMED
+    /// rather than merely totalled, in `dynamicEQVerdictsMatch` below:
+    /// **20 yes + 8 warned + 4 refused**, which is 5 + 2 + 1 per band times four
+    /// identical bands.
+    ///  · `bandNMode` (4) REFUSED — a three-position switch, rule 6.0.5, the
+    ///    `compressor.detectorMode` precedent exactly.
+    ///  · `bandNFreq` and `bandNQ` (8) WARNED — both are FILTER coefficients,
+    ///    which zipper at any modulation rate for the `eq.peak1Freq` reason
+    ///    rather than the rate-aliasing one.
+    ///  · the five dynamics controls (20) YES — thresholds, ratios, ranges and
+    ///    both time constants are plain scalars in the gain computer with no
+    ///    coefficient behind them.
+    @Test("§6.2 frozen verdict split: 109 yes + 30 warned + 27 refused = 166 across all 22 param-bearing kinds")
     func verdictSplitMatchesTheFrozenTable() {
         var yes = 0, warned = 0, refused = 0, total = 0
         for kind in EffectDescriptor.Kind.allCases {
@@ -58,10 +107,182 @@ struct ModulationTests {
         }
         print("[measured] m39-e verdicts — yes \(yes), warned \(warned), "
               + "refused \(refused), total \(total)")
-        #expect(total == 113)
-        #expect(yes == 74)
-        #expect(warned == 20)
-        #expect(refused == 19)
+        #expect(total == 166)
+        #expect(yes == 109)
+        #expect(warned == 30)
+        #expect(refused == 27)
+    }
+
+    /// m39-af's own contribution, asserted separately from the total so a
+    /// compensating error elsewhere in the table cannot hide it, and NAMED
+    /// because a net delta hides a shrink.
+    ///
+    /// ⛔⛔ THE ORDER IS THE WHOLE TEST. This kind's 32 slots are BAND-MAJOR —
+    /// `slot = (band−1)·8 + p` — and `DynamicEQEffect.storeAutomatedParam`
+    /// switches on those exact positions in a table that lives in a DIFFERENT
+    /// MODULE, with no compiler rule comparing the two. A lane landing outside
+    /// that switch's `(0...31)` guard is SILENTLY INERT: nothing logs, nothing
+    /// fails, the user's automation simply does nothing.
+    @Test("m39-af: .dynamicEQ contributes exactly 20 yes / 8 warned / 4 refused, band-major")
+    func dynamicEQVerdictsMatch() {
+        let specs = EffectParamSpec.specs(for: .dynamicEQ)
+        #expect(specs.count == 32)
+        #expect(specs.map(\.name) == [
+            "band1Mode", "band1Freq", "band1Q", "band1ThresholdDb",
+            "band1Ratio", "band1RangeDb", "band1AttackMs", "band1ReleaseMs",
+            "band2Mode", "band2Freq", "band2Q", "band2ThresholdDb",
+            "band2Ratio", "band2RangeDb", "band2AttackMs", "band2ReleaseMs",
+            "band3Mode", "band3Freq", "band3Q", "band3ThresholdDb",
+            "band3Ratio", "band3RangeDb", "band3AttackMs", "band3ReleaseMs",
+            "band4Mode", "band4Freq", "band4Q", "band4ThresholdDb",
+            "band4Ratio", "band4RangeDb", "band4AttackMs", "band4ReleaseMs",
+        ])
+        #expect(specs.filter { $0.modulatable == .refused }.map(\.name)
+                == ["band1Mode", "band2Mode", "band3Mode", "band4Mode"])
+        #expect(specs.filter { $0.modulatable == .warned }.map(\.name)
+                == ["band1Freq", "band1Q", "band2Freq", "band2Q",
+                    "band3Freq", "band3Q", "band4Freq", "band4Q"])
+        #expect(specs.filter { $0.modulatable == .yes }.count == 20)
+        // ⛔ AND EVERY `mode` DEFAULTS TO 0 — OFF. This is what makes a freshly
+        // added Dynamic EQ bit-exact transparent rather than merely quiet, and
+        // it is the property the whole transparency null leans on.
+        for band in 1...4 {
+            let mode = specs.first { $0.name == "band\(band)Mode" }
+            #expect(mode?.defaultValue == 0, "band\(band)Mode must default to OFF")
+        }
+        // The four bands are IDENTICAL apart from their default centre, which is
+        // the claim that makes 32 slots reviewable by reviewing 8. Asserted
+        // mechanically rather than trusted.
+        for p in 0..<8 {
+            let names = (0..<4).map { specs[$0 * 8 + p] }
+            #expect(Set(names.map(\.unit)).count == 1, "unit differs across bands at p=\(p)")
+            #expect(Set(names.map(\.curve)).count == 1, "curve differs across bands at p=\(p)")
+            #expect(Set(names.map(\.modulatable)).count == 1,
+                    "modulatable differs across bands at p=\(p)")
+            #expect(Set(names.map { "\($0.range)" }).count == 1,
+                    "range differs across bands at p=\(p)")
+            if p != 1 {  // p == 1 is `freq`, whose defaults are deliberately spread
+                #expect(Set(names.map(\.defaultValue)).count == 1,
+                        "default differs across bands at p=\(p)")
+            }
+        }
+        #expect((0..<4).map { specs[$0 * 8 + 1].defaultValue } == [120, 500, 3_000, 8_000])
+    }
+
+    /// m39-ae's own contribution, asserted separately from the total so a
+    /// compensating error elsewhere in the table cannot hide it.
+    ///
+    /// ⛔⛔ THE ORDER IS THE WHOLE TEST, and on this kind it matters more than
+    /// it did for the saturator. `.compressor` has shipped since M4 (iii);
+    /// slots 0…5 are the original six and slot 6 is m23-ck's `mix`, and all
+    /// seven are in saved user automation lanes right now. The de-esser's three
+    /// had to be APPENDED at 7/8/9. A count would not see an insertion at the
+    /// front, and an insertion at the front would silently repoint every one of
+    /// those lanes with no error anywhere.
+    @Test("m39-ae: .compressor contributes exactly 0 yes / 2 warned / 1 refused, de-ess APPENDED last")
+    func compressorDeEssVerdictsMatch() {
+        let specs = EffectParamSpec.specs(for: .compressor)
+        #expect(specs.count == 10)
+        #expect(specs.map(\.name)
+                == ["thresholdDb", "ratio", "attackMs", "releaseMs", "kneeDb", "makeupDb",
+                    "mix", "detectorMode", "detectorFreqHz", "detectorQ"])
+        #expect(specs.filter { $0.modulatable == .refused }.map(\.name) == ["detectorMode"])
+        #expect(specs.filter { $0.modulatable == .warned }.map(\.name)
+                == ["detectorFreqHz", "detectorQ"])
+        // ⛔ AND THE DEFAULT IS 0 — OFF. This is the whole of m39-ae: a shipped
+        // kind may not change what it does at its default, and here "the
+        // default" is not a setting but the absence of a feature.
+        #expect(specs[7].defaultValue == 0)
+        // The other two default to a USABLE band rather than to zero, because
+        // they are inert until the mode is on and a corner at 0 Hz would make
+        // switching the mode on sound broken.
+        #expect(specs[8].defaultValue == 6_500)
+        #expect(specs[9].defaultValue == 2)
+        // The frequency param declares `.logarithmic`, like every other
+        // frequency in the table — a linear fraction of 1 k…16 k cannot express
+        // "an octave up" and the m39-e depth law is defined on this field.
+        #expect(specs[8].curve == .logarithmic)
+    }
+
+    /// m39-ad's own contribution, asserted separately from the total so a
+    /// compensating error elsewhere in the table cannot hide it.
+    ///
+    /// ⛔⛔ THE ORDER IS THE WHOLE TEST. `.saturator` is the first SHIPPED kind
+    /// to gain a param: slots 0/1/2 are in saved user automation lanes right
+    /// now, so `oversampling` had to be APPENDED at slot 3. A count would not
+    /// see an insertion at the front, and an insertion at the front would
+    /// silently repoint every one of those lanes.
+    @Test("m39-ad: .saturator contributes exactly 3 yes / 0 warned / 1 refused, oversampling APPENDED last")
+    func saturatorVerdictsMatch() {
+        let specs = EffectParamSpec.specs(for: .saturator)
+        #expect(specs.count == 4)
+        #expect(specs.filter { $0.modulatable == .yes }.count == 3)
+        #expect(specs.filter { $0.modulatable == .warned }.isEmpty)
+        #expect(specs.filter { $0.modulatable == .refused }.map(\.name) == ["oversampling"])
+        #expect(specs.map(\.name) == ["driveDb", "mix", "outputDb", "oversampling"])
+        // ⛔ AND THE DEFAULT IS 1, NOT THE CLIPPER'S 4. This is the whole of
+        // m39-ad: a shipped kind may not change what it does at its default.
+        #expect(specs[3].defaultValue == 1)
+        #expect(EffectParamSpec.specs(for: .clipper)
+                .first { $0.name == "oversampling" }?.defaultValue == 4,
+                Comment(rawValue:
+                    "the clipper's default must stay 4 — the two kinds share the control "
+                    + "and deliberately not the default"))
+    }
+
+    /// m39-ac's own contribution, asserted separately from the total so a
+    /// compensating error elsewhere in the table cannot hide it.
+    @Test("m39-ac: .clipper contributes exactly 4 yes / 0 warned / 2 refused")
+    func clipperVerdictsMatch() {
+        let specs = EffectParamSpec.specs(for: .clipper)
+        #expect(specs.count == 6)
+        #expect(specs.filter { $0.modulatable == .yes }.count == 4)
+        #expect(specs.filter { $0.modulatable == .warned }.isEmpty)
+        #expect(specs.filter { $0.modulatable == .refused }.map(\.name)
+                == ["mode", "oversampling"])
+        // ⛔ THE FROZEN ORDER, asserted as a LIST rather than a count: the
+        // INDEX here IS the automation slot, permanently, and a count cannot
+        // see a swap. `ClipperEffect.storeAutomatedParam` switches on these
+        // exact positions.
+        #expect(specs.map(\.name)
+                == ["driveDb", "ceilingDb", "mode", "oversampling", "mix", "outputDb"])
+    }
+
+    /// m39-z's own contribution, asserted separately from the total so a
+    /// compensating error elsewhere in the table cannot hide it.
+    /// ⭐ FIVE yes and NO refusal, which looks like an omission and is not:
+    /// this kind has NO DISCRETE PARAM AT ALL, deliberately. The obvious one -
+    /// an up/down DIRECTION switch - was REJECTED because the sign of `shiftHz`
+    /// already carries the direction, and a discrete param would be
+    /// `Modulatable: refused` by rule 6.0.5, making the single most expressive
+    /// axis on the effect un-sweepable through zero. The four continuous
+    /// alternatives it could have had (`feedback`, `driveDb`, a carrier
+    /// waveform, a Ring mode) are either declined for v1 or already covered by
+    /// `.ringMod`.
+    @Test("m39-z: .freqShifter contributes exactly 5 yes / 0 warned / 0 refused")
+    func freqShifterVerdictsMatch() {
+        let specs = EffectParamSpec.specs(for: .freqShifter)
+        #expect(specs.count == 5)
+        #expect(specs.filter { $0.modulatable == .yes }.count == 5)
+        #expect(specs.filter { $0.modulatable == .warned }.isEmpty)
+        #expect(specs.filter { $0.modulatable == .refused }.isEmpty)
+        // ⛔ THE FROZEN ORDER, asserted as a LIST rather than a count: the
+        // INDEX here IS the automation slot, permanently, and a count cannot
+        // see a swap. `FreqShifterEffect.storeAutomatedParam` switches on these
+        // positions.
+        #expect(specs.map(\.name)
+                == ["shiftHz", "fineHz", "stereoSpreadHz", "mix", "outputDb"])
+    }
+
+    /// m39-y's own contribution, asserted separately from the total so a
+    /// compensating error elsewhere in the table cannot hide it.
+    @Test("m39-y: .transientShaper contributes exactly 6 yes / 0 warned / 0 refused")
+    func transientShaperVerdictsMatch() {
+        let specs = EffectParamSpec.specs(for: .transientShaper)
+        #expect(specs.count == 6)
+        #expect(specs.filter { $0.modulatable == .yes }.count == 6)
+        #expect(specs.filter { $0.modulatable == .warned }.isEmpty)
+        #expect(specs.filter { $0.modulatable == .refused }.isEmpty)
     }
 
     /// m39-o's own contribution, asserted separately from the total so a
@@ -279,8 +500,42 @@ struct ModulationTests {
               + "\(refusedByAutomation) refused by automation")
         // Positive control: the scan must actually FIND automation refusals,
         // or "every refusal is also a modulation refusal" is vacuously true.
-        #expect(checked == 113)
-        #expect(refusedByAutomation >= 2, "delay.sync and delay.division at minimum")
+        // 130 = 124 through m39-z + the SIX .clipper params (m39-ac);
+        // 131 = + m39-ad's `saturator.oversampling`;
+        // 134 = + m39-ae's THREE `compressor` de-ess params;
+        // 166 = + m39-af's THIRTY-TWO `dynamicEQ` params. ⭐ AND NONE OF THE 32
+        // IS REFUSED BY AUTOMATION, which is the interesting half: that kind's
+        // `latencySamples` is a literal 0 at every setting, so the
+        // `saturator.oversampling` reason for a refusal does not exist there and
+        // `Automation.swift` deliberately has no entry for it. All 32 slots take
+        // lanes and `DynamicEQEffect.storeAutomatedParam` guards the WHOLE
+        // `(0...31)` table — so `refusedByAutomation` is UNMOVED at 3 while
+        // `checked` jumps by 32.
+        #expect(checked == 166)
+        #expect(refusedByAutomation >= 3,
+                "delay.sync, delay.division and saturator.oversampling at minimum")
+        // ⛔ m39-ad: the AUTOMATION refusal is asserted by NAME, not just
+        // counted. `saturator.oversampling` must be undrawable because moving it
+        // from the render thread would stale the PDC plan — while the IDENTICALLY
+        // NAMED param on `.clipper` must stay drawable, because that kind's
+        // latency is constant. A count cannot tell those two apart.
+        let satEffect = EffectDescriptor(kind: .saturator)
+        let satTrack = Track(name: "s", kind: .audio, effects: [satEffect])
+        #expect(AutomationTarget.effectParam(effectID: satEffect.id,
+                                             paramName: "oversampling")
+                .valueRange(in: satTrack) == nil,
+                Comment(rawValue: "a lane on saturator.oversampling would be a silent dead "
+                    + "lane AND would stale the PDC plan"))
+        #expect(AutomationTarget.effectParam(effectID: satEffect.id, paramName: "driveDb")
+                .valueRange(in: satTrack) != nil,
+                "POSITIVE CONTROL: the saturator's other params must still be automatable")
+        let clipEffect = EffectDescriptor(kind: .clipper)
+        let clipTrack = Track(name: "c", kind: .audio, effects: [clipEffect])
+        #expect(AutomationTarget.effectParam(effectID: clipEffect.id,
+                                             paramName: "oversampling")
+                .valueRange(in: clipTrack) != nil,
+                Comment(rawValue: "the clipper's oversampling stays automatable — its "
+                    + "latency is constant, so a lane on it is harmless"))
     }
 
     // MARK: - §3.2 — the closed forms are functions of position, with no state

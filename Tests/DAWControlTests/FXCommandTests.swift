@@ -426,6 +426,85 @@ struct FXCommandTests {
         #expect(snapFX["invertPolarity"]?.doubleValue == 1)
     }
 
+    /// m39-ad. The saturator's new `oversampling` knob and the three DERIVED
+    /// fields every `fx.add` / `fx.setParam` result echoes beside it.
+    ///
+    /// ⛔⛔ **`latencySamples` IS THE ONE THAT MATTERS AND IT IS NOT A CONSTANT
+    /// ON THIS KIND** — 0 at factor 1, 32 at 2/4 — where `.clipper`'s is a
+    /// constant 32 at every factor. An agent that carries the clipper's habit
+    /// across will be wrong, which is exactly why the number is on the wire
+    /// rather than only in the source. (The engine-level proof that the PDC plan
+    /// FOLLOWS this number lives in `PDCWiringTests`; this pins the wire.)
+    @Test("m39-ad: the saturator echoes resolvedOversampling, latencySamples and aliasRejectionDb")
+    func saturatorEchoesOversamplingDerivations() async throws {
+        let (router, _) = makeRouter()
+        let trackID = await addTrack(router, name: "Bass", kind: "audio")
+
+        // 1. A freshly added saturator — the DEFAULT, which must be factor 1
+        //    and must cost NOTHING.
+        let added = await router.handle(ControlRequest(
+            id: "1", command: "fx.add",
+            params: ["trackId": .string(trackID.uuidString), "kind": .string("saturator")]))
+        #expect(added.ok)
+        let fresh = try #require(added.result?["effects"]?.arrayValue?.first?["params"])
+        #expect(fresh["oversampling"]?.doubleValue == 1)
+        #expect(fresh["resolvedOversampling"]?.doubleValue == 1)
+        #expect(fresh["latencySamples"]?.doubleValue == 0, Comment(rawValue:
+            "a freshly added saturator reported "
+            + "\(fresh["latencySamples"]?.doubleValue ?? -1) samples of latency on the wire — "
+            + "at the default it must be 0, or every existing project shifts in time"))
+        #expect(fresh["aliasRejectionDb"]?.doubleValue == -OversamplerDesign.stopbandAttenuationDb)
+        let effectID = try #require(added.result?["effectId"]?.stringValue)
+
+        // 2. Turn it up: the latency moves WITH the knob, on the wire.
+        for (requested, resolved, latency) in [(4.0, 4.0, 32.0), (2.0, 2.0, 32.0),
+                                               // ⚠️ 3 SNAPS UP to 4 — the stored
+                                               // value is NOT snapped, the
+                                               // resolved one is.
+                                               (3.0, 4.0, 32.0), (1.0, 1.0, 0.0)] {
+            let set = await router.handle(ControlRequest(
+                id: "2", command: "fx.setParam",
+                params: ["trackId": .string(trackID.uuidString), "effectId": .string(effectID),
+                         "name": .string("oversampling"), "value": .number(requested)]))
+            #expect(set.ok)
+            let params = try #require(set.result?["effects"]?.arrayValue?.first?["params"])
+            #expect(params["oversampling"]?.doubleValue == requested, Comment(rawValue:
+                "the STORED value must come back unsnapped (the phaser.stages precedent)"))
+            #expect(params["resolvedOversampling"]?.doubleValue == resolved, Comment(rawValue:
+                "requested \(requested) resolved to "
+                + "\(params["resolvedOversampling"]?.doubleValue ?? -1), expected \(resolved)"))
+            #expect(params["latencySamples"]?.doubleValue == latency, Comment(rawValue:
+                "requested \(requested) reported "
+                + "\(params["latencySamples"]?.doubleValue ?? -1) samples, expected \(latency)"))
+        }
+
+        // 3. project.snapshot reports them through the SAME effectParamsJSON.
+        _ = await router.handle(ControlRequest(
+            id: "3", command: "fx.setParam",
+            params: ["trackId": .string(trackID.uuidString), "effectId": .string(effectID),
+                     "name": .string("oversampling"), "value": .number(4)]))
+        let snapshot = await router.handle(ControlRequest(id: "4", command: "project.snapshot"))
+        let track = try #require(snapshot.result?["tracks"]?.arrayValue?
+            .first { $0["id"]?.stringValue == trackID.uuidString })
+        let snapFX = try #require(track["effects"]?.arrayValue?.first?["params"])
+        #expect(snapFX["resolvedOversampling"]?.doubleValue == 4)
+        #expect(snapFX["latencySamples"]?.doubleValue == 32)
+
+        // ⭐ CONTROL: the CLIPPER's identically named param must report a
+        // CONSTANT 32, including at factor 1. If these two kinds ever agree at
+        // factor 1, one of the two designs has been "harmonised" into a bug.
+        let clip = await router.handle(ControlRequest(
+            id: "5", command: "fx.add",
+            params: ["trackId": .string(trackID.uuidString), "kind": .string("clipper"),
+                     "params": .object(["oversampling": .number(1)])]))
+        #expect(clip.ok)
+        let clipParams = try #require(clip.result?["effects"]?.arrayValue?.last?["params"])
+        #expect(clipParams["resolvedOversampling"]?.doubleValue == 1)
+        #expect(clipParams["latencySamples"]?.doubleValue == 32, Comment(rawValue:
+            "the clipper reported \(clipParams["latencySamples"]?.doubleValue ?? -1) at factor 1 "
+            + "— its latency is a CONSTANT 32 by design, because its factor is automatable"))
+    }
+
     @Test("m38-a: fx.describe reports invertPolarity with its type and default")
     func fxDescribeReportsPolarity() async throws {
         let (router, _) = makeRouter()
@@ -505,7 +584,8 @@ struct FXCommandTests {
                 == ["gain", "eq", "compressor", "limiter",
                     "reverb", "delay", "saturator", "gate", "chorus", "bassEnhancer",
                     "bitCrusher", "djFilter", "ringMod", "flanger", "hallReverb",
-                    "tapeDelay", "stereoWidth", "phaser", "audioUnit"])
+                    "tapeDelay", "stereoWidth", "phaser", "transientShaper", "freqShifter",
+                    "clipper", "dynamicEQ", "audioUnit"])
         // AU params are not on the generic surface in v0 — empty schema.
         #expect(kinds.last?["params"]?.arrayValue?.isEmpty == true)
 
@@ -526,8 +606,13 @@ struct FXCommandTests {
             "lowPassFreq", "lowPassSlopeDbPerOct", "lowPassEnabled",
         ])
         // m23-ck appends mix in slot 6 — the six original params keep 0…5.
+        // m39-ae appends the DE-ESSER's three in slots 7…9, for the same
+        // reason and with a longer history behind it: `.compressor` has been
+        // shipped since M4 (iii), so an insertion anywhere in this list would
+        // silently repoint every automation lane on every saved project.
         #expect(paramNames("compressor") == [
             "thresholdDb", "ratio", "attackMs", "releaseMs", "kneeDb", "makeupDb", "mix",
+            "detectorMode", "detectorFreqHz", "detectorQ",
         ])
         // m23-ch appends truePeak in slot 2 — ceilingDb/releaseMs keep 0/1.
         #expect(paramNames("limiter") == ["ceilingDb", "releaseMs", "truePeak"])
@@ -536,7 +621,10 @@ struct FXCommandTests {
         // stability); the m22-f tempo-sync params are APPENDED.
         #expect(paramNames("delay") == ["timeMs", "feedback", "mix", "pingPong", "highCutHz",
                                         "sync", "division"])
-        #expect(paramNames("saturator") == ["driveDb", "mix", "outputDb"])
+        // m39-ad APPENDS oversampling — the three legacy slots (0…2) keep their
+        // indices, which on a SHIPPED kind is the difference between adding a
+        // control and silently repointing every saved automation lane.
+        #expect(paramNames("saturator") == ["driveDb", "mix", "outputDb", "oversampling"])
         #expect(paramNames("gate") == ["thresholdDb", "attackMs", "holdMs", "releaseMs"])
         #expect(paramNames("chorus") == ["rateHz", "depthMs", "mix"])
         // m32-e: the two boolean switches ride the numeric surface as 0/1 (the
@@ -702,7 +790,8 @@ struct FXCommandTests {
         #expect(badKind.error == "unknown effect kind 'wobbulator' — use "
                 + "gain|eq|compressor|limiter|reverb|delay|saturator|gate|chorus|"
                 + "bassEnhancer|bitCrusher|djFilter|ringMod|flanger|hallReverb|tapeDelay|"
-                + "stereoWidth|phaser|audioUnit")
+                + "stereoWidth|phaser|transientShaper|freqShifter|clipper|dynamicEQ|"
+                + "audioUnit")
         // POSITIVE CONTROL on the rename: the name that USED to be the bogus
         // one is now a real kind, and must be ACCEPTED.
         let nowReal = await router.handle(ControlRequest(
@@ -731,13 +820,21 @@ struct FXCommandTests {
             "bassEnhancer": "crossoverHz", "bitCrusher": "bits", "djFilter": "position",
             "ringMod": "carrierHz", "flanger": "rateHz", "hallReverb": "sizeMeters",
             "tapeDelay": "timeMs", "stereoWidth": "width", "phaser": "centerHz",
+            "transientShaper": "attackDb", "freqShifter": "shiftHz",
+            "clipper": "ceilingDb",
+            // m39-af. `band1Freq` rather than `band1Mode`, deliberately: the
+            // probe below asserts the param is PRESENT in the wire result, and
+            // a mode of 0 would be present-and-zero either way, so a frequency
+            // is the probe that can tell "the field is there" from "the field
+            // decoded to nothing".
+            "dynamicEQ": "band1Freq",
         ]
         let censusKinds = EffectDescriptor.Kind.allCases
             .map(\.rawValue)
             .filter { $0 != "audioUnit" }
         // Non-vacuity: if `allCases` ever stops enumerating, the loop below would
         // pass by doing nothing at all.
-        #expect(censusKinds.count >= 18)
+        #expect(censusKinds.count >= 21)
         let uncovered = censusKinds.filter { expectedParam[$0] == nil }
         #expect(uncovered.isEmpty, "kinds with no entry in this census: \(uncovered) — add one rather than widening the filter; a kind with no wire probe is how a param surface ships untested")
         // ⚠️ ONE FRESH TRACK PER KIND. The census is 18 kinds and a track holds
@@ -850,6 +947,150 @@ struct FXCommandTests {
                                                             preDelayMs: preDelay) * 1_000
         #expect(abs(arrival - expected) < 1e-6,
                 "firstArrivalMs \(arrival) is not the closed form \(expected)")
+    }
+
+    /// m39-af — the `.dynamicEQ` kind end-to-end on the wire, at the size that
+    /// makes it worth its own leg: **THIRTY-TWO params**, the largest table in
+    /// the tree by 45 %, declared in `EffectParamSpec.specs` and accepted by a
+    /// separate path in `ProjectStore.applyEffectParam`. The `hallReverb`
+    /// bijection above is the shape; this is the same gate at a size where a
+    /// single mistyped band number would be invisible to a reviewer.
+    ///
+    /// ⭐ Like every other built-in this kind ships **ZERO new commands**:
+    /// `fx.add` parses the kind through `EffectDescriptor.Kind(rawValue:)` and
+    /// `fx.setParam`/`fx.describe` are name-driven off `specs(for:)`, so
+    /// `doc-count-drift` must read the same totals after this item as before.
+    @Test("m39-af: all 32 dynamicEQ params are settable, no undeclared one is, names echo")
+    func dynamicEQDescribeAndSetAgree() async throws {
+        let (router, _) = makeRouter()
+        let trackID = await addTrack(router, name: "Vox", kind: "audio")
+        let addResponse = await router.handle(ControlRequest(
+            id: "1", command: "fx.add",
+            params: ["trackId": .string(trackID.uuidString), "kind": .string("dynamicEQ")]
+        ))
+        #expect(addResponse.ok, "fx.add refused dynamicEQ: \(addResponse.error ?? "")")
+        let effectID = try #require(addResponse.result?["effectId"]?.stringValue)
+
+        let declared = EffectParamSpec.specs(for: .dynamicEQ)
+        #expect(declared.count == 32)
+
+        // → every DECLARED name is accepted, takes a value, and reads back.
+        for (index, spec) in declared.enumerated() {
+            let value = spec.range.lowerBound
+                + (spec.range.upperBound - spec.range.lowerBound) * 0.37
+            let response = await router.handle(ControlRequest(
+                id: "set-\(index)", command: "fx.setParam",
+                params: ["trackId": .string(trackID.uuidString),
+                         "effectId": .string(effectID),
+                         "name": .string(spec.name), "value": .number(value)]
+            ))
+            #expect(response.ok, "fx.setParam refused the declared name '\(spec.name)'")
+            let echoed = response.result?["effects"]?.arrayValue?.first?["params"]?[spec.name]?
+                .doubleValue
+            #expect(echoed != nil, "'\(spec.name)' is declared but absent from the wire echo")
+            // ⚠️ `bandNMode` is SNAPPED, so it does not echo the raw 0.37-of-range
+            // value — the `phaser.stages` precedent. Every other param echoes
+            // exactly what was set.
+            // ⚠ EVERY param echoes EXACTLY what was set, `bandNMode`
+            // INCLUDED: `fx.setParam` CLAMPS to the declared range but does NOT
+            // SNAP a discrete value — the `phaser.stages` precedent, where a
+            // stored 3 renders as 4. The snapped truth reaches the wire through
+            // the additive `bandNModeLabel` echo asserted below, and reaches the
+            // render thread through `DynamicEQParams.mode(at:)`. A test that
+            // expected a snapped ECHO here would be asserting behaviour this
+            // tree deliberately does not have.
+            #expect(abs((echoed ?? .nan) - value) < 1e-9,
+                    Comment(rawValue: "'\(spec.name)' echoed \(echoed ?? .nan), not the "
+                        + "\(value) that was set"))
+        }
+
+        // ⭐ AND EVERY WRITE LANDED ON ITS OWN FIELD. Thirty-two near-identical
+        // names across four near-identical bands is exactly where a `band2Q`
+        // arm that writes `band3Q` hides — and each write above would still
+        // "echo" correctly, because the echo re-reads after the write. The
+        // proof has to be that all 32 hold their distinct values AT ONCE.
+        let final = await router.handle(ControlRequest(
+            id: "final", command: "fx.setParam",
+            params: ["trackId": .string(trackID.uuidString),
+                     "effectId": .string(effectID),
+                     "name": .string("band1Q"), "value": .number(6.5)]
+        ))
+        #expect(final.ok)
+        let params = try #require(final.result?["effects"]?.arrayValue?.first?["params"])
+        for (index, spec) in declared.enumerated() {
+            guard spec.name != "band1Q" else { continue }
+            let want = spec.range.lowerBound
+                + (spec.range.upperBound - spec.range.lowerBound) * 0.37
+            let got = params[spec.name]?.doubleValue
+            #expect(abs((got ?? .nan) - want) < 1e-9,
+                    Comment(rawValue: "'\(spec.name)' holds \(got ?? .nan) not \(want) "
+                        + "(index \(index)) — two name arms share a field"))
+        }
+        #expect(params["band1Q"]?.doubleValue == 6.5)
+
+        // → the accepted set is NO LARGER: the refusal message lists it.
+        let bogus = await router.handle(ControlRequest(
+            id: "bogus", command: "fx.setParam",
+            params: ["trackId": .string(trackID.uuidString),
+                     "effectId": .string(effectID),
+                     "name": .string("peak1Freq"), "value": .number(500)]
+        ))
+        #expect(!bogus.ok, "`peak1Freq` belongs to the OTHER EQ kind and must be refused")
+        let expectedMessage = "unknown parameter 'peak1Freq' for dynamicEQ effect — valid: "
+            + declared.map(\.name).joined(separator: ", ")
+        #expect(try #require(bogus.error) == expectedMessage,
+                "the refusal message and the spec table disagree: \(bogus.error ?? "")")
+
+        // → `fx.describe` reports the SAME thirty-two, in the SAME order, each
+        //   with its teaching note.
+        let describe = await router.handle(ControlRequest(
+            id: "describe", command: "fx.describe",
+            params: ["kind": .string("dynamicEQ")]
+        ))
+        #expect(describe.ok)
+        let described = describe.result?["kinds"]?.arrayValue?.first?["params"]?.arrayValue
+        #expect(described?.compactMap { $0["name"]?.stringValue } == declared.map(\.name))
+        #expect(described?.allSatisfy { ($0["note"]?.stringValue?.count ?? 0) > 80 } == true,
+                "a dynamicEQ param reached fx.describe with no teaching note")
+
+        // → the ADDITIVE human echoes: a snapped mode LABEL per band, plus the
+        //   two constants an agent would otherwise have to read out of source.
+        #expect(params["band1ModeLabel"]?.stringValue == "above")
+        #expect(params["band4ModeLabel"]?.stringValue == "above")
+        #expect(params["latencySamples"]?.doubleValue == 0)
+        #expect(params["kneeDb"]?.doubleValue == DynamicEQParams.kneeDb)
+    }
+
+    /// ⛔ m39-af — **THE DISPLAY NAME IS "Dynamic EQ", NOT "DynamicEQ".** The
+    /// store's `effectDisplayName` has a `default:` arm that title-cases the raw
+    /// value, so WITHOUT an explicit case this kind ships as "DynamicEQ" in
+    /// every undo label — a cosmetic-looking bug the compiler, the insert-label
+    /// budget sweep and `effect-kind-surface.mjs` all pass. That arm's own
+    /// comment predicts this exact failure by name, and m39-y and m39-ac each
+    /// hit it.
+    @Test("m39-af: the undo label reads 'Dynamic EQ', not the camelCase raw value")
+    func dynamicEQUndoLabelIsSpelledOut() async throws {
+        let (router, store) = makeRouter()
+        let trackID = await addTrack(router, name: "Vox", kind: "audio")
+        let response = await router.handle(ControlRequest(
+            id: "1", command: "fx.add",
+            params: ["trackId": .string(trackID.uuidString), "kind": .string("dynamicEQ")]
+        ))
+        #expect(response.ok)
+        let label = await store.undoLabel
+        #expect(label == "Add Dynamic EQ to 'Vox'",
+                Comment(rawValue: "undo label is \(label ?? "nil") — the default: arm shipped "
+                    + "the camelCase raw value"))
+        // ⭐ POSITIVE CONTROL: a kind that DOES rely on the default arm still
+        // reads correctly, so the assertion above is about the explicit case
+        // rather than about the label machinery being broken.
+        let control = await router.handle(ControlRequest(
+            id: "2", command: "fx.add",
+            params: ["trackId": .string(trackID.uuidString), "kind": .string("chorus")]
+        ))
+        #expect(control.ok)
+        let controlLabel = await store.undoLabel
+        #expect(controlLabel == "Add Chorus to 'Vox'")
     }
 
     /// m39-i — the `.djFilter` kind end-to-end on the wire. The point that is
@@ -1270,6 +1511,108 @@ struct FXCommandTests {
         #expect(masterParams["wowDepthMs"]?.doubleValue == 8)
         #expect(abs((masterParams["wowCents"]?.doubleValue ?? 0) - 125.845) < 0.01,
                 "the maximum the notes quote is not what the wire carries")
+    }
+
+    /// ⭐⭐ m39-y — THE SAME TEST FOR THE SAME REASON, AND IT IS NOT A COPY OF
+    /// THE ONE ABOVE. `.transientShaper` echoes THREE derived keys, one
+    /// per-instance and two CONSTANT, and the constants are the ones most likely
+    /// to be mis-documented: `fullShapeDifferentialDb` is what makes
+    /// `attackDb: +6` mean anything at all ("up to +6 dB, reached at a 12 dB
+    /// differential"), and `detectorFloorDb` is the answer to "why did nothing
+    /// happen on my quiet stem". Both are claimed in `fxKindSchema`, in the MCP
+    /// README, in `fx_describe`'s own description and in two param notes — five
+    /// places, which is exactly the shape that shipped a FALSE wire claim in
+    /// three places at once on 2026-09-19. Both halves are asserted: PRESENT
+    /// where they are, ABSENT from `fx.describe`, where none of that prose may
+    /// claim they live.
+    @Test("m39-y: transientShaper rides the generic fx verbs — defaults, three derived echoes, none of them in fx.describe")
+    func transientShaperRidesTheGenericFXSurface() async throws {
+        let (router, _) = makeRouter()
+        let trackID = await addTrack(router, name: "Drums", kind: "audio")
+
+        let added = await router.handle(ControlRequest(
+            id: "1", command: "fx.add",
+            params: ["trackId": .string(trackID.uuidString),
+                     "kind": .string("transientShaper")]))
+        #expect(added.ok)
+        let effectID = try #require(added.result?["effectId"]?.stringValue)
+        let defaults = try #require(added.result?["effects"]?.arrayValue?.first?["params"])
+        #expect(defaults["attackDb"]?.doubleValue == 0)
+        #expect(defaults["sustainDb"]?.doubleValue == 0)
+        #expect(defaults["attackMs"]?.doubleValue == 5)
+        #expect(defaults["sustainMs"]?.doubleValue == 200)
+        #expect(defaults["outputDb"]?.doubleValue == 0)
+        #expect(defaults["mix"]?.doubleValue == 1)
+
+        // The derived echo, read through its ONE HOME rather than re-derived
+        // here — that is how the record and the source come to disagree while
+        // both look right. 0.28927 × 5 ms = 1.446 ms of full punch at defaults.
+        let window = try #require(defaults["attackWindowMs"]?.doubleValue)
+        #expect(abs(window - TransientShaperParams.attackWindowMs(attackMs: 5)) < 1e-12)
+        #expect(abs(window - 1.446) < 0.001,
+                "the 'about 0.29 times' the notes quote is not what the wire carries")
+        // The two CONSTANT echoes, whose whole job is to let an agent answer
+        // "what does +6 promise?" and "why is nothing happening?" off the wire.
+        #expect(defaults["fullShapeDifferentialDb"]?.doubleValue == 12)
+        #expect(defaults["detectorFloorDb"]?.doubleValue == -70)
+
+        // `attackWindowMs` TRACKS, so it is derived rather than a constant
+        // somebody pasted in: 30 ms gives 8.678 ms, the figure the tests and the
+        // demo both quote.
+        let longer = await router.handle(ControlRequest(
+            id: "2", command: "fx.setParam",
+            params: ["trackId": .string(trackID.uuidString), "effectId": .string(effectID),
+                     "name": .string("attackMs"), "value": .number(30)]))
+        #expect(longer.ok)
+        let moved = try #require(longer.result?["effects"]?.arrayValue?.first?["params"])
+        let movedWindow = try #require(moved["attackWindowMs"]?.doubleValue)
+        #expect(abs(movedWindow - 8.678) < 0.001,
+                "attackWindowMs \(movedWindow) did not follow attackMs")
+        // …and the two CONSTANTS did NOT move, which is what proves they are
+        // constants rather than three numbers derived from the same input.
+        #expect(moved["fullShapeDifferentialDb"]?.doubleValue == 12)
+        #expect(moved["detectorFloorDb"]?.doubleValue == -70)
+
+        // ⭐ THE HALF THE PROSE IS MOST LIKELY TO GET WRONG: `fx.describe`
+        // carries the SCHEMA and no values, so NONE of the three keys is there,
+        // and no param is named for them either.
+        let describe = await router.handle(ControlRequest(
+            id: "3", command: "fx.describe",
+            params: ["kind": .string("transientShaper")]))
+        #expect(describe.ok)
+        let kindObject = try #require(describe.result?["kinds"]?.arrayValue?.first)
+        for key in ["attackWindowMs", "fullShapeDifferentialDb", "detectorFloorDb"] {
+            #expect(kindObject[key] == nil,
+                    Comment(rawValue: "fx.describe must not carry \(key) — the prose says it does not"))
+        }
+        #expect(kindObject["params"]?.arrayValue?.compactMap { $0["name"]?.stringValue }
+                == ["attackDb", "sustainDb", "attackMs", "sustainMs", "outputDb", "mix"])
+        // Positive control for the three `== nil` claims above: the SAME lookup
+        // shape finds something that IS there, so the absences are real rather
+        // than a mistyped key path.
+        #expect(kindObject["kind"]?.stringValue == "transientShaper")
+
+        // ⛔ NOT A COMPRESSOR: `threshold`/`thresholdDb`/`ratio` are refused
+        // rather than quietly dropped. An agent that reaches for a compressor's
+        // vocabulary must be told, not silently ignored.
+        for missing in ["threshold", "thresholdDb", "ratio", "kneeDb"] {
+            let refused = await router.handle(ControlRequest(
+                id: "4", command: "fx.setParam",
+                params: ["trackId": .string(trackID.uuidString), "effectId": .string(effectID),
+                         "name": .string(missing), "value": .number(1)]))
+            #expect(!refused.ok,
+                    Comment(rawValue: "\(missing) must not be accepted on transientShaper — it has no threshold, deliberately"))
+        }
+
+        // Legal on the master chain, like every built-in.
+        let master = await router.handle(ControlRequest(
+            id: "5", command: "fx.add",
+            params: ["trackId": .string("master"), "kind": .string("transientShaper"),
+                     "params": .object(["attackDb": .number(6), "attackMs": .number(30)])]))
+        #expect(master.ok)
+        let masterParams = try #require(master.result?["effects"]?.arrayValue?.last?["params"])
+        #expect(masterParams["attackDb"]?.doubleValue == 6)
+        #expect(abs((masterParams["attackWindowMs"]?.doubleValue ?? 0) - 8.678) < 0.001)
     }
 
     /// m23-dj — the `.stereoWidth` kind on the wire, and the SAME

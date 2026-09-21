@@ -161,6 +161,34 @@ struct CopilotCatalogTests {
         #expect(!offered.contains("audioUnit"))
     }
 
+    @Test("m39-dm-copilot: track.setInstrument's copilot kind enum is EVERY instrument kind, derived from the enum")
+    func copilotInstrumentKindEnumCoversEveryKind() throws {
+        let tool = try #require(CopilotToolCatalog.tool(command: "track.setInstrument"))
+        let kindSchema = try #require(tool.schema["properties"]?["kind"])
+        let offered = try #require(kindSchema["enum"]?.arrayValue?.compactMap { $0.stringValue })
+        let all = InstrumentDescriptor.Kind.allCases.map { $0.rawValue }
+        // No filter here, unlike fx.add's `audioUnit` exclusion: the copilot
+        // CAN switch to every kind, because each track carries the settings it
+        // was last given in the app across a kind switch. What it cannot do is
+        // CONFIGURE the non-polySynth kinds — that is the description's job to
+        // say, not this enum's.
+        #expect(offered == all,
+                Comment(rawValue: "the copilot offers \(offered) but the instrument kinds are "
+                    + "\(all) — a kind the copilot cannot name is a kind it will never suggest"))
+        // NON-VACUITY: guard COMPLETENESS, so a half-fix that restores only one
+        // of the kinds this test was written for cannot pass.
+        //
+        // A FLOOR, not a total. This assertion first read `== 5` and went stale
+        // within the same item that wrote it, the moment `drumSynth` became the
+        // sixth kind — an EXACT total duplicates the derived `offered == all`
+        // above and rots on every legitimate addition, while a floor plus named
+        // membership still fails a half-fix and still fails a silent REMOVAL.
+        #expect(offered.count >= 6)
+        #expect(offered.contains("sampler"))
+        #expect(offered.contains("soundBank"))
+        #expect(offered.contains("drumSynth"))
+    }
+
     @Test("wire-name mapping round-trips bijectively")
     func wireNameMappingRoundTrips() {
         for tool in CopilotToolCatalog.v1 {

@@ -1642,6 +1642,12 @@ public struct InstrumentDescriptor: Codable, Sendable, Equatable {
         /// hosting AU is an implementation detail — identity lives entirely
         /// in `soundBank`.
         case soundBank
+        /// The built-in 808/909-lineage synthesised drum machine (m39-dm):
+        /// eight fixed, named, monophonic one-shot voices. Identity lives
+        /// entirely in `drumKit`; `kind == .drumSynth && drumKit == nil` is
+        /// legal and renders the FACTORY KIT rather than silence — unlike
+        /// `.audioUnit`/`.soundBank`, nothing external has to resolve.
+        case drumSynth
     }
 
     public var kind: Kind
@@ -1661,24 +1667,37 @@ public struct InstrumentDescriptor: Codable, Sendable, Equatable {
     /// is legal and renders the silent placeholder — the
     /// componentless-`.audioUnit` rule.
     public var soundBank: SoundBankConfig?
+    /// Drum-machine kit (m39-dm; additive optional, carried across kind
+    /// switches like `sampler`/`audioUnit`/`soundBank`, so pre-drumSynth
+    /// project files still decode). `nil` reads as the factory 808 kit — see
+    /// `resolvedDrumKit`.
+    public var drumKit: DrumKitParams?
 
     public static let `default` = InstrumentDescriptor()
 
     /// The sampler params with the nil-default resolved.
     public var resolvedSampler: SamplerParams { sampler ?? SamplerParams() }
 
+    /// The drum kit with the nil-default resolved. ⚠️ Unlike `resolvedSampler`
+    /// (whose nil is an EMPTY, silent sampler), a nil kit resolves to the full
+    /// FACTORY KIT: a drum machine with no configuration is a playable 808, not
+    /// silence. Nothing external has to resolve for it to sound.
+    public var resolvedDrumKit: DrumKitParams { drumKit ?? DrumKitParams() }
+
     public init(
         kind: Kind = .polySynth,
         polySynth: PolySynthParams = PolySynthParams(),
         sampler: SamplerParams? = nil,
         audioUnit: AudioUnitConfig? = nil,
-        soundBank: SoundBankConfig? = nil
+        soundBank: SoundBankConfig? = nil,
+        drumKit: DrumKitParams? = nil
     ) {
         self.kind = kind
         self.polySynth = polySynth
         self.sampler = sampler
         self.audioUnit = audioUnit
         self.soundBank = soundBank
+        self.drumKit = drumKit
     }
 }
 

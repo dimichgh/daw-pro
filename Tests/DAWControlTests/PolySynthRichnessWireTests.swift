@@ -607,8 +607,13 @@ extension CommandRouterTests {
                 "the allow-list parse is broken, so any comparison below is meaningless")
 
         // The keys that are NOT poly-synth parameters: the track selector, the
-        // kind switch, and the three wholesale instrument configs.
-        let nonParameters: Set<String> = ["trackId", "kind", "sampler", "audioUnit", "soundBank"]
+        // kind switch, and the FOUR wholesale instrument configs — `drumKit`
+        // joined at m39-dm and belongs here for the same reason `sampler` does:
+        // it configures a different instrument wholesale, so `describeSynth`
+        // must not be expected to list it as a poly-synth parameter.
+        let nonParameters: Set<String> = [
+            "trackId", "kind", "sampler", "audioUnit", "soundBank", "drumKit",
+        ]
         let settableParameters = advertised.subtracting(nonParameters)
 
         let parameters = try synthNested(try await synthDescribe(router, trackID), "parameters")

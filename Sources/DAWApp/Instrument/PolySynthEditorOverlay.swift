@@ -163,6 +163,26 @@ struct PolySynthEditorOverlay: View {
 
     /// One grouped section: the micro-header over a tight row of knob cells
     /// (the EffectEditorOverlay section idiom).
+    ///
+    /// ⭐ **THERE IS NO DISPATCH CHAIN HERE, AND THAT IS CHECKED RATHER THAN
+    /// ASSUMED** (m39-ah). `EffectEditorOverlay.groupSection` runs
+    /// toggle → slope → division → choice → syncedTime → `else knobCell`,
+    /// because effect kinds carry discrete params. This card's table does not:
+    /// every member of `PolySynthEditorModel.specs` is continuous, and the poly
+    /// synth's two DISCRETE params live elsewhere — `waveform` is the OSC
+    /// segmented picker above (a wave shape is categorical, never a knob —
+    /// report §3), and `pedalHoldLimit` has no face on this card at all.
+    ///
+    /// ⛔ **SO A BARE `knobCell` IS CORRECT ONLY WHILE THAT STAYS TRUE, AND IT
+    /// IS NOT SELF-ENFORCING.** Adding a discrete param to `specs` would draw a
+    /// rotary with a meaningless readout and nothing would error — the exact
+    /// m39-ag defect, where `dynamicEQ.band1Mode` shipped as a knob reading
+    /// `0.00` for a three-way switch. The invariant is held by
+    /// `PolySynthEditorModelTests.everyDiscreteInstrumentParamAvoidsTheKnob`,
+    /// which takes its answer from `DAWCore`'s
+    /// `InstrumentParamSpec.discreteParamNames(for:)` — a table maintained for
+    /// modulation refusal, in another module, that knows nothing about drawing.
+    /// **If that census reddens, add the arm; do not widen `specs`.**
     private func groupSection(_ group: PolySynthParamGroup) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(group.title)

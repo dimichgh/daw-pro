@@ -198,9 +198,18 @@ public final class InstrumentPickerModel {
     /// Built-in engine instruments. Simple hides Test Tone (an engine-verify
     /// instrument a beginner never reaches for); Pro shows all three (design §7).
     public var builtIns: [BuiltInInstrument] {
+        // ⛔ m39-dm — THIS IS A HAND-BUILT ARRAY LITERAL, NOT A SWITCH. Adding a
+        // case to `InstrumentDescriptor.Kind` does NOT break this file, and a
+        // kind missing from here is INVISIBLE IN THE UI while remaining fully
+        // functional over the wire — a wire-only feature, with no compile
+        // error and nothing to grep for. `InstrumentPickerBuiltInsTests` pins
+        // the list against `Kind.allCases` so the next kind cannot repeat it.
         var list: [BuiltInInstrument] = [
             BuiltInInstrument(kind: .polySynth, name: "Poly Synth",
                               detail: "Built-in synthesizer — warm, tunable tones."),
+            BuiltInInstrument(kind: .drumSynth, name: "Drum Machine",
+                              detail: "Eight classic drum sounds you can shape — kick, snare, "
+                                  + "hats, clap and more."),
             BuiltInInstrument(kind: .sampler, name: "Sampler",
                               detail: "Plays your own audio files across the keys."),
         ]
@@ -594,6 +603,7 @@ public final class InstrumentPickerModel {
         case .soundBank:
             let name = descriptor.soundBank?.displayName ?? ""
             return name.isEmpty ? "Sound Bank" : name
+        case .drumSynth: return "Drum Machine"
         }
     }
 

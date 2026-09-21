@@ -1110,8 +1110,8 @@ Seeded 2026-07-26 from the user's hands-on session against **`dist/DAWPro.app` b
 - [ ] (m23-ci) **NO DITHER ON BIT-DEPTH-REDUCED EXPORT — 16-bit delivery gets signal-correlated quantisation distortion instead of the benign decorrelated noise floor every competing DAW ships by default.** Found 2026-08-04 by the `research-analyst` pro-parity re-audit (`docs/research/2026-08-04-pro-parity-gaps.md` §3.1), commissioned by the user right after m23-ch. ⭐ **THE SAME SHAPE AS m23-ch, WHICH IS WHY IT RANKS: the correct behaviour is reported honestly on the wire (`ditherApplied: false`, m23-m2) but never reaches the surface a human acts through.** MY OWN VERIFICATION: `grep -n 'dither\|Dither' Sources/DAWEngine/OfflineRenderer.swift` returns **nothing** — the only bit-depth code is `settings[AVLinearPCMBitDepthKey] = bitDepth` at `:617-618`, handing quantisation to AVFoundation, which ROUNDS. The m23-m2 gate measured that rounding directly: 24-bit worst-case delta `5.960e-8` = exactly 2⁻²⁴ = half an LSB, the textbook rounding signature. ⚠️ **PROPORTION, so this does not read as scarier than it is: half an LSB at 16-bit is ≈ −96 dBFS. This is NOT a correctness failure like a ceiling breach — nothing clips, nothing breaches a spec. It is a QUALITY TAX SPECIFIC TO 16-BIT, audible where mastering engineers listen hardest (fade-outs to silence, reverb/delay tails) as faint graininess rather than clean noise. 24-bit and 32-bit-float delivery — the common professional depths today — are unaffected in practice.** ⚠️ **AND THE EXPORT DIALOG SHOWS NOTHING EITHER WAY BY DESIGN: `ExportSheet.swift:35` deliberately carries *"NO LOUDNESS NUMBERS anywhere, before or after the render"* (m23-m3, a correct call on its own terms because pre-quantisation numbers would mismatch the delivered file) — so the one place a human picks "16-bit, sure" carries zero signal that the file will be rounded, not dithered.** Competitors: Logic ships POWr #1/#2/#3 + UV22HR specifically for the bounce-to-16-bit step; Pro Tools ships the same POW-r family at export. (Cubase/Studio One/Reaper NOT individually re-verified this pass — near-universal table stakes, but do not repeat as "all five".) ⚠️ **SCOPING BLOCKER, FLAGGED BY THE AUDIT AS UNVERIFIED AND STILL UNVERIFIED BY ME: nobody has confirmed WHICH code path performs the actual sample conversion. The settings dictionary passed to AVFoundation is confirmed; whether `AVAudioFile`'s writer does the rounding internally (so dithering means bypassing it and writing raw integer PCM by hand) or whether a pre-quantisation hook exists is NOT. Establish that BEFORE estimating.** Fix shape: TPDF (or noise-shaped) dither generator ahead of quantisation, applied only on reduction, with `ditherApplied` becoming true when it fires. Weight S–M once the path question is answered. Route: `audio-dsp-engineer`.
 - [ ] (m23-cj) **NO MID/SIDE PROCESSING ANYWHERE IN THE BUILT-IN FX SUITE — a hard capability wall in every mastering chain.** Found 2026-08-04 by the pro-parity re-audit (§3.2). MY OWN VERIFICATION: `grep -rniE 'mid.?side|midSide' Sources/DAWEngine/Effects/ Sources/DAWCore/Effects.swift` returns **exactly two hits, both `ReverbEffect.swift` (`:11`, `:315`), both the WET-only stereo-width knob**. Nothing in the render path performs M/S encode/decode around a processing block. `EQEffect` and `CompressorEffect` are per-channel or stereo-linked only. ⚠️ **UNLIKE m23-ch/m23-ci THIS IS NOT SILENT — a user reaches for it, finds nothing, and knows immediately. That is why it ranks below them despite being a bigger capability: a noticed absence costs less than a wrong answer.** But it is genuinely absent: tightening lows to mono while keeping highs wide, or EQ/de-essing the sides independently of the centre image, cannot be done here today on any track including the master. Competitors CONFIRMED for two of five: Ableton EQ Eight has a Stereo/L-R/M-S switch; Cubase Frequency offers per-band Mid-Side vs Left-Right. ⚠️ **Logic, Studio One and Reaper were searched and NOT confirmed — do not restate this as "all five" without re-checking.** Fix shape: the M/S encode/decode primitive is a contained one-time piece of DSP (it is the SHARED half); wiring it into EQ and Compressor as a per-effect mode is two moderate follow-ons once it exists. ⚠️ **RT-safety: encode/decode is arithmetic only, but a per-effect mode switch must not reallocate on the render thread.** Weight M. Route: `audio-dsp-engineer`.
 - [x] (m23-ck) **NO PARALLEL-COMPRESSION (DRY/WET) KNOB ON THE BUILT-IN COMPRESSOR — the cheapest real capability on the entire parity list.** Found 2026-08-04 by the pro-parity re-audit (§3.4). `CompressorParams` (`Sources/DAWCore/Effects.swift:318-364`) has `thresholdDb`/`ratio`/`attackMs`/`releaseMs`/`kneeDb`/`makeupDb` and **nothing else** — no blend. New-York/parallel compression is a daily mixing move, and today it costs a duplicate track plus a send blend. ⭐ **ONE ADDITIVE PARAMETER PLUS A LINEAR BLEND AT RENDER TIME. Effort/value ratio is the best on the list, which is the same logic the m10-q audit used to rank the groove UI above bigger items.** ⚠️ **ADDITIVE-ONLY DISCIPLINE APPLIES: the new field must default to fully-wet so every existing project — including the user's, whose compressor sits at `makeupDb: 8.8` / `thresholdDb: -18` / `ratio: 1.5` — renders BIT-IDENTICALLY. Verify that, do not assume it.** ⚠️ **The blend must be delay-matched: if the compressor path has any lookahead the dry path needs the same delay, or the blend combs. Check before wiring.** ✅ **PREMISES RE-VERIFIED 2026-08-09 AND TWO OF THEM DE-RISK THIS ITEM.** ⭐ **THE DELAY-MATCH CAUTION RESOLVES TO "NO DELAY NEEDED": there is NO lookahead in the compressor.** `grep -rni lookahead` over `Sources/DAWEngine/Effects/` + `Effects.swift` puts every hit in `LimiterEffect` (fixed 5 ms, reported as `latencySamples`); `CompressorEffect.process` works IN PLACE on the buffers with no delay line. ⭐ **THE NAMING ALREADY EXISTS — do not invent one: `mix: Double` + `public static let mixRange = 0...1`, used by Reverb (`:437`), Delay (`:498`) and `:579`. So the field is `mix`, default **1.0** = fully wet = today's behaviour.** ⭐⭐ **AND IT NEEDS NO MCP CHANGE: `fx_set_param`'s `name` is a free `z.string().min(1)`, NOT an enum — param names are discovered at runtime through `fx_describe`, so the ONLY surface to update is `fx_describe`'s listing.** ⚠️ **TWO BIT-IDENTITY PATHS, NOT ONE, AND THEY FAIL DIFFERENTLY: the in-memory default AND the PERSISTED path — a project saved before this change has no `mix` key, so `decodeIfPresent(…) ?? 1` is the mechanism and it needs a JSON FIXTURE THAT OMITS THE KEY. A default that is right in the initialiser and wrong in the decoder only ever shows up on a user's saved file.** ⚠️ **The dry signal is the MAIN input, never the KEY buffers — the compressor has a sidechain variant at `CompressorEffect.swift:203`.** ✅ **DONE 2026-08-10.** `CompressorParams.mix` (7th field, `0...1`, default **1**), blend folded into the existing per-sample scalar: `gain = Float(mixWet * pow(10, (env + makeupDb)/20) + mixDry)` — ONE multiply-add, no dry buffer, no branch, no new state. ⭐ **Because there is exactly ONE application site, the plain and keyed paths CANNOT diverge.** `fx.describe` needed no handler change (100 % spec-driven). ⭐ **The no-latency finding CONFIRMED AND STRONGER than filed: `latencySamples` is a literal 0 and the blend is a scalar multiply on the SAME sample — dry and wet are literally the same value, so combing is not merely absent, it is structurally impossible.** ⭐⭐ **THE LOAD-BEARING EVIDENCE IS A REDDEN, NOT THE GREEN RUN: the agent set the DECODER default to `?? 0.9` while leaving the initialiser alone — the JSON fixture test went RED while the in-memory test stayed GREEN, demonstrating empirically that the two bit-identity paths are genuinely distinct and that "right in the init, wrong in the decoder" is caught ONLY by the persisted-file case.** A second redden (swapping `mixWet`/`mixDry`) was caught by 8 of 13 tests. **VERIFIED BY ME:** restores confirmed by grep on the FINAL file (`?? 1`, zero `?? 0.9`; `mixWet = p.mix` not swapped); `swift build` clean; **5251/535 → 5264/536, 0 ✘**, re-run with the FULL log captured (12479 lines, 5790 `✔`, `grep -c ✘` = 0). ⚠️ **My first failure scan was WORTHLESS — I had piped the run through `tail -25`, so I greped 25 lines and got a meaningless 0; the tell was the positive control returning 12 `✔` against 5264 tests. See the law in [[daw-pro-gate-laws]].** ⭐ The delta reconciles exactly: +13 tests / +1 suite = the one new suite. ⚠️ **Re-saving a project now writes `"mix":1` into every compressor object (non-optional CodingKey) — the bar was RENDER bit-identity, which is proven; disk bytes change on next save, matching the `truePeak` precedent.** Two follow-ons filed: **m23-ev** (stale `fx_add` prose) and **m23-ew** (GR meter at `mix:0` — NEEDS THE USER'S WORD). Weight S. Route: `audio-dsp-engineer`.
-- [ ] (m23-cl) **NO BUILT-IN MULTIBAND COMPRESSOR OR DYNAMIC EQ — the best-evidenced competitor gap in the audit (all five compared DAWs confirmed) and the largest build on it.** Found 2026-08-04 by the pro-parity re-audit (§3.3). The built-in roster is **10** kinds (`Effects.swift`: gain, eq, compressor, limiter, reverb, delay, saturator, gate, chorus, bassEnhancer — MY OWN count off the enum). None splits the signal into bands for independent dynamics; none applies EQ gain that reacts to level. Competitors, each individually cited in the audit doc: Logic **Multipressor** (4-band), Cubase **MultibandCompressor** (4-band), Ableton **Multiband Dynamics** (3 bands), Studio One **Multiband Dynamics** (secondary source), Reaper **ReaXcomp**. Cubase's Frequency 2 additionally does true level-reactive per-band filtering — a genuine dynamic EQ, not merely multiband dynamics. ⚠️ **The audit's FIRST draft cited a ROADMAP AU-hosting test fixture naming `AUMultibandCompressor` as evidence for Cubase — that string is Apple's own stock AU, present only because it is the longest installed AU name on this test machine. CIRCULAR, and it was caught and dropped. Do not let it back in.** ⚠️ **DESIGN SPIKE BEFORE BUILD COMMITMENT — crossover topology and band count are render-thread shape decisions, comparable in scope to the original M4 FX-pack build. Same disposition m10-q gave sidechain before M12.** Weight L for either shape. m23-cm is the cheap partial win if only one slice ships. Route: `daw-architect` for the spike, then `audio-dsp-engineer`.
-- [ ] (m23-cm) **NO DEDICATED DE-ESSER — real, but the most-mitigated gap on the parity list.** Found 2026-08-04 by the pro-parity re-audit (§3.4). `CompressorParams` has no internal detector-filter option, so there is no one-click sibilance tamer. ⭐ **A DETERMINED USER CAN ALREADY BUILD THE CLASSIC MANUAL VERSION — duplicate the vocal, EQ the duplicate to isolate sibilance, key the original's compressor off it — BECAUSE SIDECHAIN ROUTING SHIPPED IN M12. That mitigation is why this ranks last among the dynamics gaps.** ⚠️ **But price the mitigation honestly: v1 sidechain is scoped to compressor/gate destinations only, ONE key per strip, and audio-TRACK sources only (bus sources deferred per m12-f/g) — so the workaround costs a spare track AND the strip's only sidechain slot.** Competitor: Logic ships **DeEsser 2** as a stock Dynamics plug-in with Relative/Absolute detection. Fix shape: a fixed-band variant reusing the existing Compressor ballistics — materially cheaper than the full dynamic EQ of m23-cl. Weight S–M. Route: `audio-dsp-engineer`.
+- [ ] (m23-cl) **NO BUILT-IN MULTIBAND COMPRESSOR OR DYNAMIC EQ — the best-evidenced competitor gap in the audit (all five compared DAWs confirmed) and the largest build on it.** Found 2026-08-04 by the pro-parity re-audit (§3.3). The built-in roster is **10** kinds (`Effects.swift`: gain, eq, compressor, limiter, reverb, delay, saturator, gate, chorus, bassEnhancer — MY OWN count off the enum). None splits the signal into bands for independent dynamics; none applies EQ gain that reacts to level. Competitors, each individually cited in the audit doc: Logic **Multipressor** (4-band), Cubase **MultibandCompressor** (4-band), Ableton **Multiband Dynamics** (3 bands), Studio One **Multiband Dynamics** (secondary source), Reaper **ReaXcomp**. Cubase's Frequency 2 additionally does true level-reactive per-band filtering — a genuine dynamic EQ, not merely multiband dynamics. ⚠️ **The audit's FIRST draft cited a ROADMAP AU-hosting test fixture naming `AUMultibandCompressor` as evidence for Cubase — that string is Apple's own stock AU, present only because it is the longest installed AU name on this test machine. CIRCULAR, and it was caught and dropped. Do not let it back in.** ⚠️ **DESIGN SPIKE BEFORE BUILD COMMITMENT — crossover topology and band count are render-thread shape decisions, comparable in scope to the original M4 FX-pack build. Same disposition m10-q gave sidechain before M12.** Weight L for either shape. m23-cm is the cheap partial win if only one slice ships. Route: `daw-architect` for the spike, then `audio-dsp-engineer`. ✅ **SPIKE DONE 2026-09-20 FOR THE DYNAMIC-EQ HALF ONLY — `docs/design/2026-09-20-dynamic-eq.md`.** ⭐ **Its first finding REFUTES this bullet's own premise for that half: a dynamic EQ HAS NO CROSSOVER.** A multiband compressor splits into disjoint bands and sums them back, so its filters must be complementary — that reconstruction constraint IS the crossover decision, and it is what earned the L. A dynamic EQ is N FULL-BAND peaking sections in series whose GAIN is detector-driven; nothing is decomposed, so nothing has to reconstruct. **The dynamic-EQ half is S–M and ships without settling crossover topology at all. THE MULTIBAND HALF, AND ITS CROSSOVER DECISION, REMAIN OPEN — do not tick this box for a dynamic-EQ-only landing; say in the close note which half shipped.** Settled: a NEW kind `.dynamicEQ` (NOT a mode on `.eq` — `EQEffect.process` is channel-outer so a stereo-linked detector cannot be added without re-nesting the loop the EQv2 null pin freezes), 4 bell bands in series, 8 params each = 32 slots, side-path `y = x + (G−1)·BP(x)` on the existing `EQFilterResponse.bandPassSection`, `latencySamples` a literal 0. Recorded under ARCHITECTURE “Key future decisions”. ⚠️ The spike also CORRECTS a law this file repeats: a saved automation lane persists the param NAME, not an index (`Automation.swift:81-84`); append-only still stands, for different reasons. Route for the build: `audio-dsp-engineer`. ⭐⭐ **THE DYNAMIC-EQ HALF SHIPPED 2026-09-20 AS `m39-af` — AND THIS CHECKBOX STAYS DELIBERATELY OPEN, which is this bullet's own instruction ("do not tick this box for a dynamic-EQ-only landing; say in the close note which half shipped"), not an oversight.** ⚠️ **The two halves of the spike disagree about this and the BANNER wins: `docs/design/2026-09-20-dynamic-eq.md:7-8` says the checkbox "must NOT be ticked by this work", while its own Step 9 (`:1018`) says to tick it with a caveat. Half the item is genuinely unbuilt, so an unticked box is the true statement — but the m23-cm failure this file records is the OPPOSITE risk (a shipped feature whose box stayed open and was re-found as a gap by a later audit), so the shipped half is named HERE, in the bullet, where that audit will read it.** **SHIPPED:** a new kind `.dynamicEQ` — 4 bell bands in series, 8 params each (**32 slots, the largest kind in the app**), side-path `y = x + (G−1)·BP(x)`, `latencySamples` a literal **0** at every setting, `bandNMode` 0 = OFF as a TRUE no-op so a fresh insert is bit-for-bit transparent. Effect-kind count **21 → 22**. Wired through MCP on the existing `fx.*` surface with **zero new verbs** — wire stays **227**, MCP tools stay **232**. **STILL OPEN:** the multiband-compressor half and its crossover/reconstruction decision, which is what earns this item its **L** weight and is untouched by the above (a dynamic EQ has no crossover — see the spike's §1).
+- [x] (m23-cm) ✅ **SHIPPED 2026-09-20 as `m39-ae` — closing note at the end of this bullet.** **NO DEDICATED DE-ESSER — real, but the most-mitigated gap on the parity list.** Found 2026-08-04 by the pro-parity re-audit (§3.4). `CompressorParams` has no internal detector-filter option, so there is no one-click sibilance tamer. ⭐ **A DETERMINED USER CAN ALREADY BUILD THE CLASSIC MANUAL VERSION — duplicate the vocal, EQ the duplicate to isolate sibilance, key the original's compressor off it — BECAUSE SIDECHAIN ROUTING SHIPPED IN M12. That mitigation is why this ranks last among the dynamics gaps.** ⚠️ **But price the mitigation honestly: v1 sidechain is scoped to compressor/gate destinations only, ONE key per strip, and audio-TRACK sources only (bus sources deferred per m12-f/g) — so the workaround costs a spare track AND the strip's only sidechain slot.** Competitor: Logic ships **DeEsser 2** as a stock Dynamics plug-in with Relative/Absolute detection. Fix shape: a fixed-band variant reusing the existing Compressor ballistics — materially cheaper than the full dynamic EQ of m23-cl. Weight S–M. Route: `audio-dsp-engineer`. ✅ **SHIPPED 2026-09-20 as `m39-ae`, AND THIS BULLET PREDICTED ITS SHAPE ON 2026-08-04:** “a fixed-band variant reusing the existing Compressor ballistics” is exactly what was built — `detectorMode` / `detectorFreqHz` / `detectorQ` appended at automation slots **7/8/9** on the shipped `.compressor`, so the effect-kind count stays **21** and none of the EIGHT per-kind sites was touched. The sidechain-cost caveat above is now moot for sibilance: the detector filter is internal, so it costs neither a spare track nor the strip's sidechain slot. ⚠️ **THE CHECKBOX STAYED OPEN THROUGH THE CYCLE THAT CLOSED IT** — m39-ae's entry (~line 4618) never named this id, which is exactly what the ADOPT banner (~line 3749) forbids, and a future parity audit would have re-found a shipped feature as a gap. Caught 2026-09-20 only because reading m23-cl to brief the dynamic EQ put this bullet on the screen.
 - [ ] (m23-cn) **NO VCA / FOLDER-TRACK GROUPING — and the audit corrected itself on WHAT this is a gap versus, which is the part worth keeping.** Found 2026-08-04 by the pro-parity re-audit (§3.6). Grepped `Commands.swift`'s full 171-case list for any group/folder/VCA verb — none. ⭐ **IT IS NOT A GAP VERSUS ABLETON: DAW Pro's BUS ROUTING (M4-i) already gives Ableton-Group-equivalent function — a submix destination with its own fader, sends and FX chain. Ableton's "Group" IS a bus. Filing this as "we lack groups" would be false.** It is a gap versus **Logic Track Stacks and Cubase VCA faders specifically**: moving several INDEPENDENTLY-ROUTED tracks' faders together (duck all backing vocals by a common amount) WITHOUT summing their audio into one bus and WITHOUT disturbing each track's own sends/output routing. ⚠️ **That distinction is the whole item — a VCA is a fader-delta relationship, not an audio path. Implementing it as a bus would silently change everyone's routing.** Weight M for a linked-fader-delta model; L for full Track-Stack visual nesting. Lowest urgency on the parity list. Route: `daw-architect` then `swift-app-engineer`.
 - [ ] (m23-co) **EXPORT NEVER RESAMPLES — delivered files are always at project rate.** Surfaced (not freshly found) by the pro-parity re-audit (§3.5); it was already noted in the m23-m plan as unscheduled **Phase 2**, and this item exists only to give it an id so it stops living as prose. `render.bounce`/`stems`/`mixdown` take no target-sample-rate parameter, and FEATURES.md states it plainly ("Sample rate: project rate"). ⭐ **SMALLER THAN IT LOOKS: M19/M20 already built AND MEASURED high-quality SRC machinery for the live device-output edge — this is a reuse question, not a from-scratch DSP build.** ⚠️ **BUT SEE THE m20-d LESSON BEFORE TRUSTING ANY TEST HERE: no Swift test on this 48 kHz machine can discriminate a cross-rate edit — mutating m20-d left the suite GREEN (measured). Cross-rate proof lives in the live gates, so a delivery-SRC feature needs a GATE, not a unit test.** Weight M (the existing Phase-2 framing calls for a short empirical spike). Route: `audio-dsp-engineer`.
 - [x] (m23-cp) **`docs/FEATURES.md` IS MATERIALLY STALE — and it is the file a human or agent reads when deciding whether they need a workaround, which is exactly how m23-ch happened.** Found 2026-08-04 by the pro-parity re-audit (Method section), which explicitly refused to use it as ground truth and read `Commands.swift` / `Effects/*.swift` instead. ⭐ **ONE LINE OF IT WAS ALREADY FALSE IN THE MOST EXPENSIVE POSSIBLE WAY AND IS NOW FIXED: `:90` described the Limiter as having a "true peak ceiling", a capability the app does not have at all. Corrected 2026-08-04 to say **sample-peak**, pointing at m23-ch. A user's mastering agent burned four renders on that premise.** Remaining known-stale, each measured against the tree rather than inherited: wire commands **126 → 171**; MCP tools **129 → 174**; built-in effects **9 → 10** (`:249` omits `bassEnhancer`; MY OWN enum count is 10). And it never mentions as shipped: MIDI CC lanes (M16), tempo maps (M12), sidechain (M12), markers (M11), crossfades (M11), bounce-in-place (M11), gain envelopes (M13). ⚠️ **TOTALS ROT INVISIBLY IN THIS REPO — the same class as ARCHITECTURE's headline reading 168 while its own enumeration stayed coherent (m23-aj-2). DO NOT copy a count from another doc; DECOMPOSE it, and note that the obvious pattern for EACH wire count returns a confident 0.** ⚠️ **Recount at the moment of writing — an inherited number is not a measured one however it reached you.** Route: `docs-scribe`. ⭐⭐ **DONE 2026-08-09 (delegated to `docs-scribe`, every number DECOMPOSED BY ME BEFORE BRIEFING and every claim re-verified by me after).** Counts landed: **wire 126→173, MCP 129→176, built-in effects 9→10** (`bassEnhancer` added). ⭐ **Each measured TWO independent ways that agree AS SETS, not merely as totals** — wire: comment-stripped `allCommands` literal = 173 AND `rejectUnknownKeys(…, verb:)` sites = 173, symmetric difference EMPTY both directions; MCP: 142 line-start `registerTool(` + 34 `server.registerTool(` = 176, fully reconciled against 178 raw occurrences (the 2 extra are the wrapper's own definition + its inner call). ⚠️ **THE NAIVE WIRE COUNT IS 174, NOT 172** — a bare quoted-string scan of the array picks up a string inside a COMMENT. (Memory recorded 172 as the naive trap; that is a DIFFERENT wrong route. There are at least two.) ⚠️ **TYPE-NAME ROT IN THIS ITEM'S OWN TEXT: there is no `EffectKind`.** It is `EffectDescriptor.Kind` (`Sources/DAWCore/Effects.swift:8`) — a literal grep for `EffectKind` in `Sources/DAWCore/` returns a CONFIDENT ZERO that reads exactly like "the feature is gone". It has **11** cases; built-ins are **10** because `audioUnit` is AU HOSTING, not a built-in. ⭐⭐ **THIS ITEM'S "never mentions as shipped" LIST IS SUBSTANTIALLY PREMISE-FALSE — 4 of its 7 were ALREADY documented:** MIDI CC lanes (`:67`, m16-b, in full), tempo maps (`:32`), crossfades (`:51`/`:132`), markers (`:30`/`:47`). Only **sidechain, gain envelope, bounce-in-place** were genuinely absent and were added (+ the Bass Enhancer row). ⭐ **AND THE ITEM'S OWN RECORDED FIX WAS ITSELF STALE:** it says `:90` was corrected 2026-08-04 from "true peak ceiling" to "sample-peak" — but the opt-in true-peak limiter has since SHIPPED (`LimiterSettings.truePeak`, default `false`, `Effects.swift:394`), and the line had ALREADY been updated to describe both modes correctly. `docs-scribe` verified it and left it BYTE-IDENTICAL rather than following my brief's instruction to change it — the correct call, and the reason to brief with "read these three lines yourself" rather than "write this sentence". ⚠️⚠️ **A FALSE CONSTRAINT WAS CAUGHT ON REVIEW, AND MY OWN MEMORY WAS WRONG THE OPPOSITE WAY — the exact failure class this item exists to prevent.** The new Sidechain row first read *"audio-track sources only"*; my memory said *"can't key off an instrument track (bus-only)"*. **BOTH WRONG — the ROLES ARE INVERTED.** Read from `ProjectStore.setSidechain` (`ProjectStore.swift:2505`): the **DESTINATION** strip must be `.audio` or `.bus` (an INSTRUMENT strip cannot host a sidechained effect at all — it walks its chain inside the source node and has no input bus for a key edge), while the **SOURCE** may be any NON-BUS track, instrument included; buses (master included) are the deferred ones. Row rewritten from the source, and the memory entry corrected. ⚠️ **RESIDUE FOUND AND FIXED BY ME, NOT ON THE ITEM'S LIST: the two OTHER count lines in the same block were BOTH stale by exactly 18** — Copilot catalog **56→74** (`CopilotTool(` in `CopilotCatalog.swift`), Explain catalog **74→92** (`ExplainEntry(` sites AND `ExplainID` cases, agreeing at 92). ⚠️ Note the trap: the doc's stale "Explain = 74" is the Copilot catalog's CURRENT value, so the two lines read as if one had been copied to the other. **A COUNT BLOCK ROTS AS A BLOCK — recount EVERY line in it, not the ones the item names.** Deliberately NOT documented (changing under concurrent agents at close time): MIDI-import instrument assignment / track naming, the step sequencer, piano-roll marquee + clipboard.
@@ -1255,7 +1255,194 @@ Seeded 2026-07-26 from the user's hands-on session against **`dist/DAWPro.app` b
   floor is UNMEASURED** (captured at 1800 px, may be the m26-i shape); the context-menu route is
   pinned by source shape but **never exercised through an actual right-click**; `K`/`L` can page to
   an empty bank; and the **C1/C2 convention clash** stands (the chopper says 36 = C1, the app's namer
-  says C2).
+  says C2). ✅ **The API-spelling refusal is CLOSED 2026-09-20 (m39-pads-2) — it was the one the
+  user actually hit.**
+- [x] (m39-pads-2) ✅ **SHIPPED 2026-09-20 — LET GO: STOPS / PLAYS ON, and the refusal learns the
+  panel's words.** Both halves came from one user session, neither from a gate.
+  ⭐⭐ **THE REFUSAL WAS ACCURATE AND UNUSABLE.** They hit the pad ceiling and read *"over the
+  maxSlices limit of 9 — Raise maxSlices, lower sensitivity, raise minSliceSeconds"* while looking
+  at sliders labelled **MOST PADS TO MAKE** and **HOW MANY HITS TO CATCH**. Every number and every
+  remedy in that sentence was correct. `lastRefusalForHumans` now carries a UI vocabulary map;
+  `lastRefusal` stays **byte-exact** because agents read it and tests pin it, and the test asserts
+  BOTH — the translation must never reach the wire.
+  ⭐⭐ **THE ONE-SHOT SWITCH IS A BOOLEAN THAT ALREADY EXISTED, SURFACED WHERE THE HAND IS.**
+  `SamplerParams.oneShot` has shipped for milestones, is settable over MCP
+  (`instrument_set_sampler_param`) and has a toggle on the sampler editor card. None of that helped:
+  `SliceToSampler` writes no `oneShot` on its zones (measured), so every chop inherits the global
+  `false`, and the default release is 0.05 s — **a mouse click on a two-second slice is a 50 ms
+  blip**, over a loaded pad, with the light flashing. ⛔ **NO NEW WIRE COMMAND AND NO NEW MCP TOOL,
+  deliberately:** this is a new *surface* onto an existing capability, not a new capability, and a
+  parallel verb would be a second way to say what `instrument.setSamplerParam` already says.
+  ⚠️ **Named `triggerMode`, not `release`** — `SamplerParams.release` is already the envelope's
+  release *time*, and two things one character apart in one sampler's vocabulary is how a setter
+  gets called on the wrong field.
+  ⚠️ **REPORTED, NOT FAKED:** in one-shot the pad light goes **dark while the slice still sounds** —
+  `isPlaying` reads `soundingPitchSet`, the HAND's ledger, and the engine holds the voice past
+  note-off. Making the light true needs a note-ended signal back from the engine; until then the
+  mode's own help text says so out loud rather than letting the grid claim silence over sound.
+  ⚠️ **Open, reported not fixed:** `ValueSlider` is jump-to-point (a documented pointer convention
+  here), so a single CLICK on the 1–96 track at ~8% is what set their ceiling to 9. Left alone —
+  it is a shared control and a design-language decision, not a bug fix.
+- [x] (m39-levels) ✅ **SHIPPED 2026-09-20 — SIXTEEN LEVELS: one slice spread chromatically
+  across the grid.** User-asked, same session as `m39-pads-2`: *"it does not increase pitch when it
+  is moved on the note scale. Is it expected?"* It was — `SliceToSampler.swift:321` writes every
+  slice `minPitch == maxPitch == rootPitch`, one key wide, so the engine's transposition
+  (`exp2((pitch − rootPitch)/12)`) has nothing to reach. They chose the LEVELS-switch shape over a
+  per-slice widen.
+  ⛔⛔ **IT ADDS A ZONE AND EDITS NONE — the design rule, and the test that pins it is the
+  load-bearing one.** Widening the slice in place, or swapping the keymap for sixteen copies with
+  the original "remembered" in the view model, are BOTH data-loss shapes: a keymap is the only home
+  a chop has, and a view model does not survive a quit. The spread is one new zone in a pitch window
+  no existing zone occupies; the grid re-bases onto it and back. Falsified by PLANTING the in-place
+  widen and watching the source zone's `maxPitch` stick at 53 after exit.
+  ⭐ **The free window is a function with tests, not a hard-coded octave** — a 90-slice chop from 36
+  reaches note 125, so "an octave up" falls off MIDI. Prefers directly below the chop, then above,
+  then the lowest fit; **returns nil loudly** when the keymap fills the keyboard, because an
+  overlapping window makes pads that sometimes play the spread and sometimes play a slice.
+  ⭐ **The pads read INTERVALS in a spread, not slice numbers** — one zone answers all sixteen
+  pitches, so sixteen squares would otherwise all read "slice 7" while each played something
+  different: true of the zone, false of the sound.
+  ⚠️ **Open:** pad 1 is the unshifted slice and the spread runs UPWARD only; centring it (pad 9 = 0)
+  would buy downward pitch at the cost of the one sentence that makes the mode self-explanatory, and
+  downward is already reachable on the sampler card's per-zone **Tune** knob (±4800 cents). Offered
+  to the user, not yet ruled on.
+- [ ] (m39-dm) 🥁 **DESIGNED 2026-09-20, NOT BUILT — OUR OWN DRUM MACHINE (`.drumSynth`), the user's
+  wave item (2).** Design: `docs/design/2026-09-20-drum-machine.md` (1,259 lines). Eight synthesised
+  voices — kick/tom/rim/clap/hats/cymbal from the **808** lineage, snare from the **909** — with the
+  real difference equations, not descriptions. ⭐ **"909 vs 808" is a PRESET, not a topology**, for
+  every voice both machines actually synthesise; the one honest exception is that the 909's hats are
+  6-bit PCM, and the doc says so rather than pretending.
+  ⭐⭐ **ADDRESSING: dotted names (`kick.tune`, `openHat.decay`) through the EXISTING
+  `AutomationTarget.instrumentParam(paramName:)` — no new enum case, coding key or wire shape.**
+  Forced by `Sources/DAWCore/InstrumentParams.swift:18-24`, which says in those words that the
+  effect side's append-only POSITIONAL SLOT law *"DOES NOT TRANSFER, AND MUST NEVER BE ALLOWED TO"*.
+  The research doc's own `pads: [DrumVoiceParams]` array proposal is therefore **overruled**.
+  75 parameter names, every one modulatable, zero discrete parameters.
+  ⛔⛔⛔ **37 INSTRUMENT-KIND SITES, of which 21 ARE NOT COMPILER-FORCED — and I VERIFIED the two
+  worst myself.** `PlaybackGraph.swift:1729-1735` switches over the **existential** with
+  `default: break`, so a new kind **renders fine and never receives a parameter change for the life
+  of the session** — every knob edit returns success (verified: only `PolySynthInstrument` and
+  `SamplerInstrument` have arms). And `ModulationSnapshotBuilder.swift:255`'s
+  `InstrumentParamID(rawValue:)` returns nil for a dotted name, dropping the route **after**
+  `mod.addRoute` validated it and returned success. ⚠️ Effects have EIGHT such sites; instruments
+  have **37**. Same shape, four times the surface.
+  ⚠️ **VERIFIED AND FAIR: instrument-param automation LANES are refused engine-wide today**
+  (`ProjectStore.swift:3527`), for every kind — and the refusal is HONEST, throwing rather than
+  storing a lane that would look live and do nothing. Modulation via `mod.addRoute` works. Filed as
+  **m39-dm-lanes**; note-on latching makes lane delivery *cheaper* here than in the general case.
+  ⚠️ **Render randomness must be seeded from the ABSOLUTE SAMPLE POSITION**, or rendering from bar 5
+  will not match bar 5 of a full render — the determinism law `ModulationSnapshot.swift:27-33` exists
+  to protect. One plant (P14) is the only thing that catches it.
+  ⚠️ **UNVERIFIED by the designer (no build was allowed — two agents held the tree):** per-sample
+  cost against the render budget; snare partial frequencies and clap bandpass centre (architectures
+  sourced, numbers common practice); behaviour past `ModulationLimits.maxRoutes = 64`.
+- [x] (m39-dm-copilot) ✅ **FIXED 2026-09-20 — the in-app AI copilot can now select the SAMPLER and a
+  SOUND BANK, and the reason it rotted is now pinned by a test.** `CopilotCatalog.swift:392` offers
+  all five `InstrumentDescriptor.Kind` cases, and `CopilotCatalogTests`
+  `copilotInstrumentKindEnumCoversEveryKind` DERIVES the expected list from `Kind.allCases` —
+  mirroring the `fx.add` precedent at `m39-m`, whose absence on the instrument side is exactly why
+  this drifted. ⭐ **THE NON-VACUITY GUARD IS COMPLETENESS, NOT A FILTER** (`count == 5` plus an
+  explicit `contains` for each of the two restored kinds), so a half-fix that adds only one cannot
+  pass. **Plant-verified: deleting `soundBank` from the literal reddens 3 assertions, each naming it;
+  restored green.**
+  ⚠️⚠️ **THE ENTRY BELOW WAS RIGHT THAT MCP'S SCHEMA IS CORRECT AND WRONG THAT THE COPILOT WAS THE
+  ONLY STALE SURFACE — `mcp-server/README.md:76` ADVERTISED FOUR OF THE FIVE KINDS TOO**, missing
+  `soundBank` entirely, and documented no `soundBank` param at all. Found by READING THE PROSE, which
+  no census gate can do; both now fixed. **A scope claim is a measurement and rots like one.**
+  ⭐ **AND THE DESCRIPTION NOW STATES THE SILENT-SUCCESS TRAP**, checked against `Model.swift:1652-63`
+  rather than assumed: `sampler` with no zones, `audioUnit` with no component and `soundBank` with no
+  bank are each **legal states that SUCCEED and render SILENCE**. Switching kind restores what a
+  track last had (configs are carried across kind switches), but on a never-configured track the
+  copilot would otherwise have reported success over a silent track — this tree's named failure.
+  **The original finding, kept as the regression record:** ⛔ **ALREADY-SHIPPED BUG, found while
+  designing the drum machine and VERIFIED BY ME: the in-app AI copilot could not select the SAMPLER
+  or a SOUND BANK.**
+  `Sources/DAWControl/CopilotCatalog.swift:392` hard-coded
+  `enumValues: ["testTone", "polySynth", "audioUnit"]` while `sampler` (`Model.swift:1638`) and
+  `soundBank` (`:1644`) had long shipped. **MCP's SCHEMA was CORRECT** (`server.ts:2122` offers all
+  five) **and the wire was CORRECT** (`Commands.swift:1569`). So an external agent could load a
+  sampler and the assistant sitting inside the app could not, which is precisely the instrument the
+  whole chop/pad-grid workflow is built on.
+- [x] (m39-z) ✅ **SHIPPED 2026-09-20 — `.freqShifter`, the 20th insert kind: every partial moves the
+  same number of HERTZ, and the inharmonicity is the product.** Designed in the file comment of
+  `Sources/DAWEngine/Effects/FreqShifterEffect.swift` (§1–§5); no separate design doc. Independently
+  verified by me, not accepted from the agent: **Swift 8518 / 739**, my own two uncontended full runs
+  — **277.1 s with ONE pre-existing intermittent** (`AuditionEngineTests:331` C12, the SEVENTH known
+  load flake, 3/3 green isolated, untouched since 2026-08-20) **and 273.0 s CLEAN, exit 0**; delta
+  **+31 / +2**, **no test retired** (one title renamed: `ModulationTests`' §6.2 verdict line).
+  **ZERO warnings in `Sources/`** — all 27 distinct warnings in the build are in `Tests/` files
+  untouched by this work, counted with the 3 `ArrangeVerticalFollowTests` `#require` warnings as the
+  positive control. `doc-count-drift` 0 (**227 commands, unchanged — no new verb**),
+  `effect-kind-surface` 0 (20 kinds × 5 surfaces). **MCP 894: 893 pass + 1 PRE-EXISTING load-timeout
+  flake** (`integration.test.ts:635`, ~39 s of real rendering against a 60 s ceiling — filed as the
+  EIGHTH known flake and the first that is not Swift).
+  ⭐ **The structure and the number that determines everything:** a **10-section IIR Hilbert pair
+  (5 + 5 all-passes in z⁻², one branch carrying an extra `z⁻¹`)** feeding single-sideband modulation,
+  `I·cos + Q·sin`. Worst quadrature phase error **0.37646°**, which predicts
+  `20·log10(tan(ε/2))` = **−49.67 dB** unwanted-sideband rejection.
+  ⭐⭐ **I MEASURED THE PHYSICS WITH MY OWN INSTRUMENT, SHARING NO CODE WITH THE AGENT'S GATE** — a
+  pure-python Goertzel over ffmpeg-decoded renders (these are IEEE-float WAVs, which python's `wave`
+  module refuses) — and got **50.23 dB rejection at +40, +200 and −200 Hz, with the carrier
+  annihilated at −220 dB or better**. Theory 49.67, agent's node gate 50.23, my python 50.23:
+  **three instruments, 0.6 dB apart.**
+  ⛔⛔ **MY OWN PLANT PROVED THE DEMO HARNESS WOULD HAVE SHIPPED A RING MODULATOR.** I zeroed the Q
+  branch (`wet = I·cos` alone = textbook double-sideband) and re-rendered: **`render-variants.mjs`
+  exited 0 with `audible=true` on every variant**, while rejection collapsed **50.23 → 9.54 dB** and
+  my instrument's verdict flipped to "BOTH sidebands present — NOT a shifter". The dedicated physics
+  gate caught it (2 failures, naming the ring-modulator diagnosis and the all-pass signs).
+  **The m39-y lesson held on the first kind that tested it: audibility and byte-distinctness prove
+  NOTHING about whether the axis did its job.** Plant restored, hash-verified byte-identical, and the
+  poisoned renders regenerated.
+  ⚠️ **A PIPE ATE THE GATE'S EXIT CODE AND I NEARLY CERTIFIED A BROKEN GATE.** `node gate.mjs | tail`
+  reported `0` while the gate was genuinely exiting **1** — `$?` is `tail`'s status. Re-measured
+  without the pipe. **Never read an exit code through a pipeline.**
+  ⚠️ **"Frequency Shifter" does NOT fit — 88.156 pt against an 85.000 pt budget.** Ships as
+  **"Frequency Shift", 78.153 pt**.
+  ⚠️ **Its three Hz params are the first `deliberateExemptions` running the OTHER way** — Hz-unit but
+  legitimately `.linear`, because their ranges cross zero and `.logarithmic` requires `lo > 0`. The
+  `djFilter.position` dodge (relabel the unit) was deliberately declined: 200 Hz is 200 Hz.
+  ⛔ **A DEFECT THE AGENT FOUND IN ITS OWN REVIEW, AFTER IT THOUGHT IT WAS DONE:** `stereoSpreadHz`'s
+  note promised "It does nothing on a mono track" while the code applied `+spread/2` to the only
+  channel — a mono strip at `shiftHz 200, spread 8` landed entirely at **1204 Hz** with nothing at
+  1200, while `effectiveShiftHz` still reported 200. The record said X, the source said Y. Fixed by
+  deciding the spread in `process()` after `stereo` is known; pinned by L7b with a stereo positive
+  control proving the probe can see 1204 when it should.
+  ⚠️ **Open:** `render-variants.mjs` has no `--scratch-path`, so demo renders necessarily build into
+  the SHARED `.build`; the gate's `buildSha256`-vs-binary freshness check (exit 3) is the tripwire
+  and read clean throughout. `/plugin update` still owed. No wall-clock benchmark — cost is stated as
+  an operation count (10 all-pass sections + 2 transcendentals per sample per channel).
+- [x] (m39-y) ✅ **SHIPPED 2026-09-20 — `.transientShaper`, the 19th insert kind: punch without
+  volume.** Independently verified by me, not accepted from the agent: **Swift 8487 / 737 / zero
+  failures** (my own uncontended run, 278.1 s, exit 0; delta +37/+3, **no test retired** — two titles
+  renamed), 0 warnings, `doc-count-drift` 0 (227 commands, all four routes agree),
+  `effect-kind-surface` 0 (19 kinds × 5 surfaces).
+  ⭐ **The detector is NEW, and the roadmap's own warning is why** — `TransientAnalyzer` is offline,
+  file-in and allocates freely. This is a stereo-linked three-envelope differential follower in the
+  LINEAR domain whose differentials are taken as **dB ratios**, which is what makes it
+  level-independent (worst disagreement **1.65e−06 dB across 20 dB of input level**). **Zero
+  lookahead, `latencySamples == 0`** — it adds no new PDC source. 0 malloc events over 4000 quanta.
+  ⭐⭐ **THE MEASUREMENT THAT PROVES IT IS A SHAPER AND NOT A FADER:** at a pinned **−26.4 LUFS
+  (±0.00 LU)**, true peak climbs **−16.5 → −7.7 dBTP** along `attackDb` and falls **−11.7 → −17.5**
+  along `sustainDb`. Changing crest factor while loudness does not move IS the definition.
+  ⛔⛔ **EIGHT hand-written per-kind sites, not the six this tree has said for milestones** — I
+  verified the two extra myself: `MixerPresets.withFreshID()` (omit it and a curated preset stamps
+  the effect with EVERY PARAMETER SILENTLY DROPPED) and `ProjectStore.effectDisplayName`'s `default:`
+  arm (omit it and it ships to users as "TransientShaper"). Neither is compiler-forced, because
+  `EffectDescriptor.init`'s arguments all default to nil. Laws: [[daw-pro-gate-laws]] §2026-09-20.
+  ⛔⛔⛔ **AND MY OWN BYTE-IDENTITY GATE PASSED A COMPLETELY INERT SHAPER.** Planting
+  `shapedFraction → 0` left the four renders BYTE-DISTINCT, because their per-variant `outputDb`
+  trims still differed. **Identical bytes prove the axis did nothing; distinct bytes prove nothing at
+  all.** The dedicated gate `scripts/gates/m39y-transient-shaper-bytes.mjs` asserts the PHYSICS
+  instead — and it, too, was scoring a STALE `manifest.json` and passing; it now compares the
+  manifest's `buildSha256` against the binary on disk and **exits 3 rather than score**. Proven three
+  ways: fresh+working 0, stale 3 (both hashes named), fresh+inert 1.
+  ⚠️ **"Transient Shaper" fits, MEASURED not calculated** — drawn **84.000 pt against an 85.000 pt
+  budget** over a staging probe, displacing "Bass Enhancer" as the widest built-in. The view rounds
+  UP of the AppKit arithmetic, so `InsertLabelBudgetTests` alone under-reports by 0.1–0.4 pt and the
+  real margin is **1.0 pt** — a future name clearing 85 pt in that file alone is NOT proven to fit.
+  ⚠️ **Open:** no wall-clock benchmark of the detector (operation count only — 3 transcendentals/frame
+  against `CompressorEffect`'s shipping 2); `/plugin update` now owed for BOTH the bundle and the new
+  `daw-wire-reference/SKILL.md` section.
 - [x] (m23-dj) ✅ **SHIPPED 2026-09-19 as the `.stereoWidth` insert kind — rank 5.** Verified by me,
   not accepted from the agent: Swift **8326 / 728 / zero failures** (own run, 278.8 s), MCP
   **878 / 0**, wire **227**, 17 kinds × 5 surfaces exit 0, 18 demo specs, six persistence sites
@@ -4388,10 +4575,104 @@ must handle it anyway.
 - [ ] (m39-n … m39-ab) **The remaining ranked suite** — ✅ ~~`.stereoWidth`~~ **SHIPPED as `m23-dj`**
   (that item was the home, exactly as "ADOPT m23-dj, do not mint beside it" required),
   ✅ ~~`.tapeDelay` free-ms~~ **SHIPPED as `m39-aa` above**, ✅ ~~`.phaser`~~ **SHIPPED as `m39-x`**,
-  `.transientShaper` (⚠️ **price the DETECTOR, not the shaper** —
-  `TransientAnalyzer` is offline, file-in, allocates freely, not reusable short of a rewrite),
-  `.freqShifter`, `.clipper` + `Oversampler`, Saturator v2 (**the second `Oversampler` caller — this
-  is when it gets extracted**), de-esser as a `.compressor` mode, dynamic EQ (⚠️ **ADOPT m23-cl**).
+  ✅ ~~`.transientShaper`~~ **SHIPPED as `m39-y`** (the `TransientAnalyzer` non-reuse ruling —
+  offline, file-in, allocates freely — is recorded in `docs/ARCHITECTURE.md`),
+  ✅ ~~`.freqShifter`~~ **SHIPPED as `m39-z`** (display name is "Frequency Shift" — "Frequency
+  Shifter" measured 88.156 pt against an 85 pt budget; the design is the file comment, no separate
+  doc),
+  ✅ ~~`.clipper` + `Oversampler`~~ **SHIPPED as `m39-ac` 2026-09-20 — the 21st insert kind and the
+  reusable polyphase-FIR `Oversampler` under it.** Headline: the **ALIAS FLOOR drops 91.05 dB** going
+  1× → 4× on the demo fixture (19.77 dB at 2×), and **55.57 dB** on `ClipperTests` L1's own tone —
+  two instruments, same verdict. Gate `scripts/gates/m39ac-clipper-physics.mjs`; three planted
+  defects (factor forced to 1 / no anti-imaging filter / naive decimation) collapsed it to
+  **0.00 / 1.30 / −0.00 dB**. ⚠️ **The oversampler was NEVER the hard part — the FIXTURE was.** The
+  first spec drove the tone to −6.832 dBFS against a −6 dBFS ceiling, so the clipper applied gain and
+  nothing else; all five variants rendered, all were byte-distinct, all were `audible=true`, and only
+  the physics gate caught it. The gate now checks the clip DEPTH arithmetically before it scores.
+  Latency is a **constant 32 samples at every factor** — a deliberate design invariance (see
+  `docs/ARCHITECTURE.md`), because a factor-dependent latency would stale the PDC plan that param
+  edits never republish. Display name "Clipper" measured **35.677 pt** against the 85 pt budget,
+  ✅ ~~Saturator v2~~ **SHIPPED as `m39-ad` 2026-09-20 — the second `Oversampler` caller, and the
+  first time a SHIPPED kind gained a parameter.** `.saturator` gets `oversampling` (1/2/4),
+  **APPENDED at slot 3** because slots 0–2 are in saved user automation lanes. Headline: the
+  **ALIAS FLOOR drops 90.28 dB** 1× → 4× on the demo fixture (16.47 dB at 2×) and **69.76 dB** on
+  `SaturatorOversamplingTests` L1's own tone — reproducing m39-ac's 91.05 dB through a different
+  nonlinearity and the same filter. Gate `scripts/gates/m39ad-saturator-physics.mjs`; a planted
+  sample-and-hold upsample collapsed it to **1.11 dB** and reddened the H3 invariance leg at
+  **2.18 dB**, while the demo harness exited 0 with `audible=true` on all six variants.
+  ⛔⛔ **THE DEFAULT IS 1, NOT THE CLIPPER'S 4, AND THE PRESERVATION IS MEASURED RATHER THAN
+  ARGUED** (the "bend range stays 2.0" precedent): `scripts/gates/m39ad-saturator-default-bytes.mjs`
+  pins THREE sha256s taken from the pre-m39-ad build — a no-effect CONTROL (so a pipeline change
+  exits 3 "cannot score" instead of falsely blaming the effect), the untouched default, and a
+  PARTIAL-MIX render. ⚠️ **That third pin exists because of a measured blind spot: `mix` defaults
+  to 1, so the dry term is multiplied by zero and a REASSOCIATED blend passed the two-pin gate AND
+  all 20 unit tests.** The pins were re-derived from an independently rebuilt `git worktree` of
+  `a338854` and reproduced exactly, which is what makes a file hash usable as evidence.
+  ⛔⛔ **`latencySamples` IS PARAMETER-DEPENDENT ON THIS KIND** (0 at factor 1, 32 at 2/4) — the
+  thing m39-ac deliberately refused. Safe here, and ONLY here, because the factor moves on the MAIN
+  ACTOR only (inside `applyParameters`, whose tail recomputes PDC — proven by
+  `PDCWiringTests.saturatorOversamplingEditDrivesTheEngineRecompute`, which reddens on a planted
+  render-thread read) and because the slot is **INERT to automation** — `AutomationTarget
+  .valueRange` REFUSES a lane on it, the `delay.sync` precedent. The clipper's identically named
+  param stays automatable and its latency stays constant; both asymmetries are pinned.
+  ✅ ~~de-esser as a `.compressor` mode~~ **SHIPPED as `m39-ae` 2026-09-20 — the SECOND shipped
+  kind to gain parameters, and the oldest one yet.** `.compressor` gets `detectorMode` (0 off /
+  1 band-pass / 2 high-pass), `detectorFreqHz` and `detectorQ`, **APPENDED at slots 7/8/9** because
+  0–5 are the original six and 6 is m23-ck's `mix`, all of them in saved user automation lanes.
+  A de-esser is a compressor whose DETECTOR hears a filtered copy while the audio path stays the
+  main input — so the filter hangs on the existing sidechain machinery and **NO new kind, and none
+  of the EIGHT per-kind surfaces, was touched.** **This CLOSES `m23-cm`**, the 2026-08-04 pro-parity de-esser gap, whose predicted fix shape it matches exactly.
+  ⭐ **HEADLINE, and it is stronger than a tolerance: non-sibilant material comes out
+  SAMPLE-FOR-SAMPLE IDENTICAL** — 187 200 samples, bit for bit — while a broadband compressor at
+  the same settings ducks it 3.23 dB. The detector never crosses threshold, the envelope snaps to
+  exact 0, the gain is exactly 1.0, and the output IS the input.
+  ⭐⭐ **THE LEG THAT WOULD HAVE CAUGHT THE REAL BUG IS THE DULL ONE** (the m39-ac/ad lesson, third
+  time): a wideband de-esser applies ONE scalar, so it cannot move the BALANCE between two tones —
+  measured drift **0.0013 dB**. A band-pass leaking into the AUDIO path is the single most likely
+  way to build this wrong, and it would have stayed loud, stayed audible, kept ducking on
+  sibilance, and passed every headline number. Gate `scripts/gates/m39ae-deesser-physics.mjs`, which
+  also separates all three modes in a PREDICTED direction (high-pass ducks 5.22 dB harder than
+  band-pass because a 2-pole high-pass has gain Q at its own corner), and positive-controls its own
+  probe against a bin known to be EMPTY (the control reads −209 dB there).
+  ⭐⭐ **TWO DEFECTS PLANTED AND BOTH CAUGHT, AND THE FIRST IS THE WHOLE ARGUMENT:** (A) a **5 %**
+  leak of the filtered detector signal into the AUDIO path — `render-variants.mjs` **EXITED 0 with
+  `audible=true` on all four variants and plausible LUFS**, while the physics gate exited 1 with the
+  balance drift at **0.423 dB against a 0.25 tolerance** and named the cause; (B) `.highPass`
+  silently resolving to the band-pass section — caught by the mode-separation leg **at exactly
+  0.00 dB**, plus the harness's own byte-distinctness check. Neither plant moved a headline number.
+  ⛔⛔ **THE DEFAULT IS OFF AND THE PRESERVATION IS MEASURED** —
+  `scripts/gates/m39ae-compressor-default-bytes.mjs` pins **SIX** sha256s from the pre-m39-ae build
+  across TWO source families and TWO controls, and **all six reproduced exactly on a different
+  binary after the feature landed.** ⚠️ **One of the six is SIDECHAIN-KEYED, and that is the pin
+  that mattered:** this item restructured the detector's gather loop and a self-keyed-only fixture
+  never executes its keyed limb. ⭐ **The `Biquad` moved to `Primitives/` as the `Oversampler`
+  precedent requires** (second caller = extract), proven by re-pinning the EXISTING `ringmod` demo
+  set — a fixture that cannot have been shaped to pass — plus a unit test against a hand-copy of the
+  original expressions. **Positive-controlled: 1e-25 → 1e-20 in the flush reddened all three
+  ring-mod variants while the control held, and left the compressor gate green.**
+  ⚠️ **A CRASH WAS FOUND BY A TEST WRITING ITSELF:** `detectorMode(at:)` guarded only `isFinite`,
+  and `Int(1e300)` **traps** — a render-thread crash reachable through a field-by-field automation
+  poke, which bypasses the clamping init. `.clamped(to:)` now comes BEFORE the conversion, the
+  `ClipperParams.mode(at:)` shape. ⛔ **Latency stays a literal 0 at every setting**, so unlike
+  m39-ad no automation lane is refused — the refusal there was about latency, not about discreteness.
+  Verdict table 131 → 134 (0 yes / 2 warned / 1 refused — the first kind to add more `warned` than
+  `yes`). Demo sets `deesser.json` (physics), `deesser-listening.json` (4 variants on `thresholdDb`),
+  `deesser-bytes.json` (the pin fixture).
+  ⛔⛔ **THE LISTENING FIXTURE DEMONSTRATED THE OPPOSITE OF ITS OWN TEXT, AND ONLY A MEASUREMENT
+  OF THE FIXTURE ITSELF COULD SEE IT.** The first cut used a sawtooth voice; inside the detector
+  band the sibilant blip was only **5.5 dB** above the sustained notes, so every threshold that
+  caught the blip also ducked the vowels (**1.5 dB** at `medium`, **6.2 dB** at `strong`) while the
+  prose claimed they were untouched — and all four variants rendered, measured `audible=true`, and
+  came out byte-distinct. Retuned to a triangle voice with the blip on its own fundamental in the
+  band: separation **33.1 dB**, vowel GR **0.03 dB** at `medium`, and the whole first note
+  (**42 000 samples**) bit-identical to a no-compressor render, against the plain compressor at the
+  SAME threshold ducking those notes **5.0 dB**. ⭐ **LAW: a listening fixture's load-bearing number
+  is the SEPARATION between what the effect targets and what it must leave alone — measure it
+  BEFORE choosing the axis; no gate, harness or ear check in this tree can substitute.**
+  ⚠️ The control was also re-pointed to the de-essed middle variant's threshold so the A/B turns on
+  `detectorMode` alone; at its old −24 it ducked nothing and the "before" half of the demo was inert.
+  Remaining in this bullet:
+  dynamic EQ (⚠️ **ADOPT m23-cl**).
   ⛔ **DEFERRED to their own spikes, do not let one absorb another:** beat repeat / tape stop /
   backspin / half-time (need a capture ring buffer + the frozen-but-unbuilt position-delivery API),
   granular freeze (a grain scheduler is a different primitive again), shimmer/pitch shifter.

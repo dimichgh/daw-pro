@@ -1,0 +1,867 @@
+{
+ "set": "clipper-listening",
+ "description": "m39-ac, the .clipper insert. Every variant plays the IDENTICAL staccato pluck riff used by the transient-shaper demos, and every CLIPPED variant uses the IDENTICAL settings (driveDb 18, ceilingDb -6, hard mode, outputDb -9).\n\nTHE ONE AXIS IS `oversampling`, and it runs 1 -> 2 -> 4. Nothing else differs, not even the output level: clipping to the same ceiling at the same drive lands all three within ~0.1 LUFS of each other, so this is a fair A/B by construction rather than by trimming.\n\nWHAT TO LISTEN FOR: the clipped tone itself is the same in all three. What changes is a thin metallic FIZZ sitting on top of the notes -- harmonics generated above Nyquist that fold back as inharmonic tones. At 1x it is unfiltered and most audible; at 4x it is ~91 dB down and should be gone. HOW BIG IS IT, MEASURED: the 1x and 4x renders differ by -43.85 dB RMS (2x differs by -59.02 dB), and that difference sits 22 dB higher up the spectrum than the music does, so it is high-frequency fizz rather than a level or tone change. -44 dB is REAL but SUBTLE -- on a laptop speaker it may well be inaudible. If 1x and 4x sound the same to you, that is a real and useful answer, not a failure to listen: it means the oversampling is costing CPU for something you cannot hear on this material, and the default should be reconsidered. The 6272 Hz test tone in `clipper-physics` is where the same defect is 91 dB and unmissable; music hides it, which is exactly why the gate does not use music.\n\nThe control is the bare riff so you can hear what the clipper is adding in the first place.",
+ "variants": [
+  {
+   "name": "no-clipper",
+   "axis": "no clipper at all - the bare pluck riff, so you know what is being added",
+   "render": {
+    "durationSeconds": 9
+   },
+   "commands": [
+    {
+     "command": "track.add",
+     "params": {
+      "name": "Pluck",
+      "kind": "instrument"
+     },
+     "as": "pluck"
+    },
+    {
+     "command": "track.setInstrument",
+     "params": {
+      "trackId": "$pluck",
+      "kind": "polySynth",
+      "waveform": "saw",
+      "attack": 0.0,
+      "decay": 0.32,
+      "sustain": 0.0,
+      "release": 0.18,
+      "cutoffHz": 6500,
+      "resonance": 0.2,
+      "gain": 0.5,
+      "unisonVoices": 1,
+      "unisonDetuneCents": 0
+     }
+    },
+    {
+     "command": "clip.addMIDI",
+     "params": {
+      "trackId": "$pluck",
+      "atBeat": 0,
+      "notes": [
+       {
+        "pitch": 40,
+        "startBeat": 0.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 52,
+        "startBeat": 0.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 47,
+        "startBeat": 1.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 52,
+        "startBeat": 1.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 40,
+        "startBeat": 2.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 52,
+        "startBeat": 2.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 47,
+        "startBeat": 3.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 55,
+        "startBeat": 3.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 40,
+        "startBeat": 4.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 52,
+        "startBeat": 4.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 47,
+        "startBeat": 5.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 52,
+        "startBeat": 5.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 40,
+        "startBeat": 6.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 55,
+        "startBeat": 6.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 47,
+        "startBeat": 7.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 52,
+        "startBeat": 7.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 40,
+        "startBeat": 8.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 52,
+        "startBeat": 8.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 47,
+        "startBeat": 9.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 52,
+        "startBeat": 9.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 40,
+        "startBeat": 10.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 52,
+        "startBeat": 10.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 47,
+        "startBeat": 11.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 55,
+        "startBeat": 11.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 40,
+        "startBeat": 12.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 52,
+        "startBeat": 12.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 47,
+        "startBeat": 13.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 52,
+        "startBeat": 13.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 40,
+        "startBeat": 14.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 55,
+        "startBeat": 14.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 47,
+        "startBeat": 15.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 52,
+        "startBeat": 15.5,
+        "lengthBeats": 0.22
+       }
+      ]
+     }
+    }
+   ],
+   "role": "control"
+  },
+  {
+   "name": "clip-1x",
+   "axis": "oversampling 1: the clipper running at the base rate. The aliasing is UNFILTERED - this is what a naive clipper sounds like.",
+   "render": {
+    "durationSeconds": 9
+   },
+   "commands": [
+    {
+     "command": "track.add",
+     "params": {
+      "name": "Pluck",
+      "kind": "instrument"
+     },
+     "as": "pluck"
+    },
+    {
+     "command": "track.setInstrument",
+     "params": {
+      "trackId": "$pluck",
+      "kind": "polySynth",
+      "waveform": "saw",
+      "attack": 0.0,
+      "decay": 0.32,
+      "sustain": 0.0,
+      "release": 0.18,
+      "cutoffHz": 6500,
+      "resonance": 0.2,
+      "gain": 0.5,
+      "unisonVoices": 1,
+      "unisonDetuneCents": 0
+     }
+    },
+    {
+     "command": "clip.addMIDI",
+     "params": {
+      "trackId": "$pluck",
+      "atBeat": 0,
+      "notes": [
+       {
+        "pitch": 40,
+        "startBeat": 0.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 52,
+        "startBeat": 0.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 47,
+        "startBeat": 1.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 52,
+        "startBeat": 1.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 40,
+        "startBeat": 2.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 52,
+        "startBeat": 2.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 47,
+        "startBeat": 3.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 55,
+        "startBeat": 3.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 40,
+        "startBeat": 4.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 52,
+        "startBeat": 4.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 47,
+        "startBeat": 5.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 52,
+        "startBeat": 5.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 40,
+        "startBeat": 6.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 55,
+        "startBeat": 6.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 47,
+        "startBeat": 7.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 52,
+        "startBeat": 7.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 40,
+        "startBeat": 8.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 52,
+        "startBeat": 8.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 47,
+        "startBeat": 9.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 52,
+        "startBeat": 9.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 40,
+        "startBeat": 10.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 52,
+        "startBeat": 10.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 47,
+        "startBeat": 11.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 55,
+        "startBeat": 11.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 40,
+        "startBeat": 12.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 52,
+        "startBeat": 12.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 47,
+        "startBeat": 13.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 52,
+        "startBeat": 13.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 40,
+        "startBeat": 14.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 55,
+        "startBeat": 14.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 47,
+        "startBeat": 15.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 52,
+        "startBeat": 15.5,
+        "lengthBeats": 0.22
+       }
+      ]
+     }
+    },
+    {
+     "command": "fx.add",
+     "params": {
+      "trackId": "$pluck",
+      "kind": "clipper",
+      "params": {
+       "driveDb": 18,
+       "ceilingDb": -6,
+       "mode": 0,
+       "oversampling": 1,
+       "mix": 1,
+       "outputDb": -9
+      }
+     },
+     "as": "clip"
+    }
+   ]
+  },
+  {
+   "name": "clip-2x",
+   "axis": "oversampling 2: half the folded harmonics are filtered away, but the ones that fold INSIDE the doubled band still pass.",
+   "render": {
+    "durationSeconds": 9
+   },
+   "commands": [
+    {
+     "command": "track.add",
+     "params": {
+      "name": "Pluck",
+      "kind": "instrument"
+     },
+     "as": "pluck"
+    },
+    {
+     "command": "track.setInstrument",
+     "params": {
+      "trackId": "$pluck",
+      "kind": "polySynth",
+      "waveform": "saw",
+      "attack": 0.0,
+      "decay": 0.32,
+      "sustain": 0.0,
+      "release": 0.18,
+      "cutoffHz": 6500,
+      "resonance": 0.2,
+      "gain": 0.5,
+      "unisonVoices": 1,
+      "unisonDetuneCents": 0
+     }
+    },
+    {
+     "command": "clip.addMIDI",
+     "params": {
+      "trackId": "$pluck",
+      "atBeat": 0,
+      "notes": [
+       {
+        "pitch": 40,
+        "startBeat": 0.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 52,
+        "startBeat": 0.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 47,
+        "startBeat": 1.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 52,
+        "startBeat": 1.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 40,
+        "startBeat": 2.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 52,
+        "startBeat": 2.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 47,
+        "startBeat": 3.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 55,
+        "startBeat": 3.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 40,
+        "startBeat": 4.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 52,
+        "startBeat": 4.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 47,
+        "startBeat": 5.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 52,
+        "startBeat": 5.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 40,
+        "startBeat": 6.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 55,
+        "startBeat": 6.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 47,
+        "startBeat": 7.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 52,
+        "startBeat": 7.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 40,
+        "startBeat": 8.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 52,
+        "startBeat": 8.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 47,
+        "startBeat": 9.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 52,
+        "startBeat": 9.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 40,
+        "startBeat": 10.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 52,
+        "startBeat": 10.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 47,
+        "startBeat": 11.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 55,
+        "startBeat": 11.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 40,
+        "startBeat": 12.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 52,
+        "startBeat": 12.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 47,
+        "startBeat": 13.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 52,
+        "startBeat": 13.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 40,
+        "startBeat": 14.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 55,
+        "startBeat": 14.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 47,
+        "startBeat": 15.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 52,
+        "startBeat": 15.5,
+        "lengthBeats": 0.22
+       }
+      ]
+     }
+    },
+    {
+     "command": "fx.add",
+     "params": {
+      "trackId": "$pluck",
+      "kind": "clipper",
+      "params": {
+       "driveDb": 18,
+       "ceilingDb": -6,
+       "mode": 0,
+       "oversampling": 2,
+       "mix": 1,
+       "outputDb": -9
+      }
+     },
+     "as": "clip"
+    }
+   ]
+  },
+  {
+   "name": "clip-4x",
+   "axis": "oversampling 4: alias floor ~91 dB below the fundamental. Same clipping, none of the fizz.",
+   "render": {
+    "durationSeconds": 9
+   },
+   "commands": [
+    {
+     "command": "track.add",
+     "params": {
+      "name": "Pluck",
+      "kind": "instrument"
+     },
+     "as": "pluck"
+    },
+    {
+     "command": "track.setInstrument",
+     "params": {
+      "trackId": "$pluck",
+      "kind": "polySynth",
+      "waveform": "saw",
+      "attack": 0.0,
+      "decay": 0.32,
+      "sustain": 0.0,
+      "release": 0.18,
+      "cutoffHz": 6500,
+      "resonance": 0.2,
+      "gain": 0.5,
+      "unisonVoices": 1,
+      "unisonDetuneCents": 0
+     }
+    },
+    {
+     "command": "clip.addMIDI",
+     "params": {
+      "trackId": "$pluck",
+      "atBeat": 0,
+      "notes": [
+       {
+        "pitch": 40,
+        "startBeat": 0.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 52,
+        "startBeat": 0.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 47,
+        "startBeat": 1.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 52,
+        "startBeat": 1.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 40,
+        "startBeat": 2.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 52,
+        "startBeat": 2.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 47,
+        "startBeat": 3.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 55,
+        "startBeat": 3.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 40,
+        "startBeat": 4.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 52,
+        "startBeat": 4.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 47,
+        "startBeat": 5.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 52,
+        "startBeat": 5.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 40,
+        "startBeat": 6.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 55,
+        "startBeat": 6.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 47,
+        "startBeat": 7.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 52,
+        "startBeat": 7.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 40,
+        "startBeat": 8.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 52,
+        "startBeat": 8.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 47,
+        "startBeat": 9.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 52,
+        "startBeat": 9.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 40,
+        "startBeat": 10.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 52,
+        "startBeat": 10.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 47,
+        "startBeat": 11.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 55,
+        "startBeat": 11.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 40,
+        "startBeat": 12.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 52,
+        "startBeat": 12.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 47,
+        "startBeat": 13.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 52,
+        "startBeat": 13.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 40,
+        "startBeat": 14.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 55,
+        "startBeat": 14.5,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 47,
+        "startBeat": 15.0,
+        "lengthBeats": 0.22
+       },
+       {
+        "pitch": 52,
+        "startBeat": 15.5,
+        "lengthBeats": 0.22
+       }
+      ]
+     }
+    },
+    {
+     "command": "fx.add",
+     "params": {
+      "trackId": "$pluck",
+      "kind": "clipper",
+      "params": {
+       "driveDb": 18,
+       "ceilingDb": -6,
+       "mode": 0,
+       "oversampling": 4,
+       "mix": 1,
+       "outputDb": -9
+      }
+     },
+     "as": "clip"
+    }
+   ]
+  }
+ ]
+}

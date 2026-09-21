@@ -352,7 +352,12 @@ public enum InstrumentFamilyResolver {
         guard let instrument else { return .unresolved(.instrumentTrackHasNoInstrument) }
 
         switch instrument.kind {
-        case .testTone, .polySynth, .sampler:
+        // `.drumSynth` carries no GM family and must not pretend to. GM does
+        // have a percussion convention (channel 10), but our kit is eight
+        // synthesised voices on notes 36–43 with no GM program behind them —
+        // claiming a family here would make the resolver answer confidently
+        // about a mapping that does not exist.
+        case .testTone, .polySynth, .sampler, .drumSynth:
             return .unresolved(.instrumentKindCarriesNoFamily)
         case .audioUnit:
             return .unresolved(.hostedAudioUnitIsOpaque)

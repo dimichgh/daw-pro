@@ -63,7 +63,7 @@ struct MasterChainStoreTests {
             return
         }
         #expect(error?.errorDescription
-                == "the master chain hosts built-in effects only in v1 — pick one of gain|eq|compressor|limiter|reverb|delay|saturator|gate|chorus|bassEnhancer|bitCrusher|djFilter|ringMod|flanger|hallReverb|tapeDelay|stereoWidth|phaser")
+                == "the master chain hosts built-in effects only in v1 — pick one of gain|eq|compressor|limiter|reverb|delay|saturator|gate|chorus|bassEnhancer|bitCrusher|djFilter|ringMod|flanger|hallReverb|tapeDelay|stereoWidth|phaser|transientShaper|freqShifter|clipper|dynamicEQ")
         #expect(store.masterEffects.isEmpty)
         #expect(store.undoLabel == nil)  // guard sits OUTSIDE the edit body
     }

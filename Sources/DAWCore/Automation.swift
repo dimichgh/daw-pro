@@ -113,6 +113,35 @@ public enum AutomationTarget: Hashable, Sendable, Codable {
             if effect.kind == .delay, paramName == "sync" || paramName == "division" {
                 return nil
             }
+            // m39-ad: the saturator's `oversampling` is refused for the same
+            // reason in a different flavour. `SaturatorEffect.storeAutomatedParam`
+            // guards slots 0…2, so a lane on slot 3 would be a silent dead lane
+            // — but the reason it is guarded is stronger than the delay's: this
+            // kind's `latencySamples` DEPENDS on the factor (0 at 1, 32 at 2/4),
+            // and the PDC plan is rebuilt only on a main-actor parameter pass. A
+            // lane moving it from the render thread would leave the plan stale
+            // with every test still green (`SaturatorEffect` DESIGN §3).
+            //
+            // ⚠️⚠️ THE SAME PARAM NAME ON `.clipper` IS DELIBERATELY NOT REFUSED.
+            // That kind reports a CONSTANT 32 samples at every factor, so moving
+            // it from a lane is harmless and stepping it between sections is a
+            // real musical move. The asymmetry is the point: the refusal is
+            // about the LATENCY, not about the name.
+            if effect.kind == .saturator, paramName == "oversampling" {
+                return nil
+            }
+            // ⭐ m39-af — `.dynamicEQ` HAS NO ENTRY HERE, AND THE OMISSION IS A
+            // DECISION RATHER THAN AN OVERSIGHT. All 32 of its slots accept
+            // lanes (`DynamicEQEffect.storeAutomatedParam` guards `(0...31)`,
+            // the WHOLE table) because the only reasons this function refuses
+            // anything are absent from that kind: nothing about it needs tempo
+            // math off the render thread (the delay's reason), and its
+            // `latencySamples` is a LITERAL 0 at every setting of every param —
+            // minimum-phase IIR, no delay line, no lookahead — so there is no
+            // PDC plan a render-thread store could leave stale (the saturator's
+            // reason). Lookahead was rejected for exactly this: it would have
+            // made the latency parameter-dependent and forced a refusal here.
+            //
             // `.audioUnit` yields an empty spec table → `first(where:)` is nil.
             return EffectParamSpec.specs(for: effect.kind)
                 .first(where: { $0.name == paramName })?.range

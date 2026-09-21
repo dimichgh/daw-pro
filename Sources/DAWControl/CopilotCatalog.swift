@@ -384,12 +384,17 @@ public enum CopilotToolCatalog {
         ),
         CopilotTool(
             command: "track.setInstrument",
-            description: "Select or tweak the instrument on an instrument track — this is what makes its MIDI clips audible. kind picks the instrument; omitted fields keep their current value. (Sampler/Audio-Unit configuration is not available through the copilot — use the app UI for those.)",
+            description: "Select or tweak the instrument on an instrument track — this is what makes its MIDI clips audible. kind picks the instrument; omitted fields keep their current value. ⚠️ Only polySynth and drumSynth can be CONFIGURED from here. drumSynth needs no setup at all — it plays a full 808 kit the moment you select it, on notes 36-43 (kick, snare, closed hat, open hat, clap, tom, rim, cymbal), and its 75 parameters are reachable with instrument.setDrumParam. sampler, soundBank and audioUnit are switchable because each track remembers the settings it was last given in the app, so switching back restores them — but on a track that has never been set up in the app, switching to one of those SUCCEEDS AND PLAYS NOTHING (a sampler with no zones is a legal, silent state). If the user has not configured that instrument in the app UI, pick polySynth or drumSynth, or tell them to set it up there first.",
             schema: schemaObject([
                 ("trackId", stringSchema("Id of the instrument track, from project.snapshot.")),
                 ("kind", stringSchema(
                     "Which instrument to use. Omit to keep the current instrument.",
-                    enumValues: ["testTone", "polySynth", "audioUnit"])),
+                    // ⛔ m39-dm — A HAND-WRITTEN LIST THE COMPILER CANNOT SEE.
+                    // A kind missing here is unselectable by the in-app copilot
+                    // while working perfectly everywhere else.
+                    // `CopilotCatalogTests` pins it against `Kind.allCases`.
+                    enumValues: ["testTone", "polySynth", "sampler", "audioUnit",
+                                 "soundBank", "drumSynth"])),
                 ("waveform", stringSchema(
                     "polySynth oscillator waveform: saw (bright/buzzy), square (hollow), triangle (mellow), sine (pure/soft). Omit to keep the current value.",
                     enumValues: ["saw", "square", "triangle", "sine"])),
@@ -994,9 +999,11 @@ public enum CopilotToolCatalog {
             schema: schemaObject([
                 ("trackId", stringSchema("Id of the track or bus to add the effect to, OR the string \"master\" for the master output chain.")),
                 ("kind", stringSchema(
-                    "Which built-in effect to add. On the master chain only these built-ins are allowed.",
+                    "Which built-in effect to add. On the master chain only these built-ins are allowed. ⛔ There is NO \"deEsser\" kind: a de-esser IS a compressor whose detector only listens to the sibilant band, so add a \"compressor\" and set its detectorMode to 1 with detectorFreqHz on the 'sss' (5000-9000 Hz on most voices).",
                     enumValues: ["gain", "eq", "compressor", "limiter", "reverb", "delay", "saturator", "gate", "chorus", "bassEnhancer", "bitCrusher", "djFilter", "ringMod", "flanger",
-                                        "hallReverb", "tapeDelay", "stereoWidth", "phaser"])),
+                                        "hallReverb", "tapeDelay", "stereoWidth", "phaser",
+                                        "transientShaper", "freqShifter", "clipper",
+                                        "dynamicEQ"])),
                 ("index", integerSchema("Position in the chain, 0 = processed first. Omit to append at the end; out-of-range values clamp.", minimum: 0)),
             ], required: ["trackId", "kind"])
         ),

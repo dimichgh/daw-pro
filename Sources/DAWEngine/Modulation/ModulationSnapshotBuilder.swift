@@ -252,13 +252,30 @@ enum ModulationSnapshotBuilder {
         case .instrumentParam(let paramName):
             guard strip.isInstrumentTrack else { return nil }
             let descriptor = strip.instrument ?? .default
-            guard let id = InstrumentParamID(rawValue: paramName),
-                  let spec = InstrumentParamSpec.specs(for: descriptor.kind)
+            // ⛔⛔ m39-dm — THIS GUARD USED TO START WITH
+            // `InstrumentParamID(rawValue: paramName)`, AND THAT IS WHY THE
+            // DRUM MACHINE NEEDED A REFACTOR RATHER THAN AN ADDITION.
+            // `InstrumentParamID` is a flat seven-case enum, so
+            // `InstrumentParamID(rawValue: "kick.tune")` is nil, the guard
+            // failed, and the route was dropped from the published snapshot —
+            // AFTER `mod.addRoute` had validated it and returned success. A
+            // success response and a dead feature: this tree's characteristic
+            // failure, exactly.
+            //
+            // The spec table now carries the render code itself, so this is a
+            // SINGLE resolution step from name to render identity for every
+            // instrument kind, flat-named or dotted. `InstrumentParamID` is
+            // still the authority for `.polySynth`'s codes — the table is
+            // populated from it — and `InstrumentParamCodePositiveControlTests`
+            // pins 0…6 as unmoved by this change, because the risk here is not
+            // that drum routes fail but that EVERY LIVE POLYSYNTH ROUTE
+            // SILENTLY RENUMBERS.
+            guard let spec = InstrumentParamSpec.specs(for: descriptor.kind)
                       .first(where: { $0.name == paramName }),
                   spec.modulatable != .refused
             else { return nil }
             resolved.kindCode = ModulationSnapshot.TargetCode.instrumentParam
-            resolved.paramSlot = id.code
+            resolved.paramSlot = spec.code
             resolved.rangeLo = spec.range.lowerBound
             resolved.rangeHi = spec.range.upperBound
             resolved.curveCode = ModulationEvaluator.code(for: spec.curve)

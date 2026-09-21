@@ -2014,6 +2014,531 @@ const soundBankSchema = z
       "untouched."
   );
 
+// ---------------------------------------------------------------------------
+// Drum Kit (m39-dm) — the built-in eight-voice one-shot drum synth.
+//
+// ⭐ GROUND TRUTH: every name, range, unit, curve, default and meaning below is
+// DERIVED from `DrumKitParams.paramSpecs` (Sources/DAWCore/DrumKit.swift),
+// the ONE HOME for all 75 addressable names — re-measure against that table
+// before editing a range here rather than trusting this comment.
+//
+// ⛔ THE EIGHT VOICE SCHEMAS ARE DELIBERATELY NOT ONE SHARED SHAPE. The wire's
+// `setValue`/`parseDrumKit` only accept the spec-table rows that name a given
+// voice (e.g. `kick.band` and `rim.spread` do not exist), so a single 14-leaf
+// schema reused across all eight voices would make zod say "valid" about a
+// name the wire refuses. Each voice below carries exactly its own rows: kick
+// 10, snare 10, closedHat 8, openHat 8, clap 9, tom 9, rim 8, cymbal 9 = 71,
+// plus 4 kit-wide leaves = 75.
+//
+// ⚠️ ADDRESSING ASYMMETRY: the four kit-wide leaves (`gain`, `velocityToTone`,
+// `accentThreshold`, `accentDepth`) are TOP-LEVEL keys directly on `drumKit`
+// (`{drumKit: {gain: 0.9}}`), NOT nested under a `kit` sub-object — even
+// though instrument_describe_drum_kit reports them grouped under a `kit` key
+// in its response and instrument_set_drum_param addresses them by the dotted
+// name `kit.gain`. A caller who copies describe's response shape straight
+// back into `drumKit` will hit this schema's `.strict()` and be refused;
+// say so in the field descriptions below rather than let it surprise anyone.
+//
+// ⚠️ CLAMPED, NOT REFUSED — the opposite of track_set_instrument's m39-g
+// polySynth richness knobs. Every drumKit value here silently clamps into its
+// range on the wire (`DrumKitParams.setValue`), so these fields carry no
+// `.min()`/`.max()`: adding one would make MCP refuse a value the wire would
+// have happily clamped. `instrument_set_drum_param`'s response `value` (the
+// STORED, re-read value) vs `requested` (what you sent) is how a clamp is
+// surfaced when it happens.
+function drumLeaf(description: string) {
+  return z.number().finite().optional().describe(description);
+}
+
+// ⚠️ FACTORY FUNCTIONS, NOT SHARED CONSTANTS. `chokeGroup`/`note` are
+// identical across all eight voices, but the JSON-schema generator dedupes
+// schema nodes BY OBJECT IDENTITY into a `$ref`, and a `$ref` sibling carries
+// no `description` of its own — reusing one `z...` instance across all eight
+// voices made every occurrence past the first read as "has no description"
+// to `audit-tools.test.ts`'s property walker even though `.describe()` was
+// called. A fresh instance per voice keeps eight textually-identical but
+// distinct schema nodes, each with its own inline description.
+function drumChokeGroupField() {
+  return z
+    .number()
+    .int()
+    .nullable()
+    .optional()
+    .describe(
+      "Mutual-cut group, 0-63 (clamped if out of range). Two voices sharing a group cut each " +
+        "other off — the classic open/closed hi-hat behaviour (both hats default to group 0, so " +
+        "the open hat choking off a ringing closed hat, and vice versa, is the out-of-the-box " +
+        "sound). STRUCTURAL, not one of the 75 addressable names — it cannot be modulated and " +
+        "cannot be reached through instrument_set_drum_param, only here. ⛔ NULLABLE WITH NO " +
+        "FALLBACK: send `null` to deliberately CLEAR this voice's choke group (chokes nothing, " +
+        "is choked by nothing); OMIT the key entirely to leave whatever this voice already has " +
+        "untouched. A default fallback here would silently UNDO a deliberate clear the next time " +
+        "an unrelated knob on this voice is edited — this is the one field on the whole object " +
+        "that does not overlay onto a resting value."
+    );
+}
+
+function drumNoteField() {
+  return z
+    .number()
+    .optional()
+    .describe(
+      "Read-only/derived — the MIDI note (36-43) that triggers this voice. Present so you can " +
+        "feed instrument_describe_drum_kit's or instrument_load_drum_preset's `drumKit` response " +
+        "straight back into this object; IGNORED if you send it, never an error."
+    );
+}
+
+const drumKickSchema = z
+  .object({
+    tune: drumLeaf(
+      "Hz, 20-200, logarithmic, default 52. The pitch the kick SETTLES to — it starts higher " +
+        "by `kick.pitchAmount` and falls. Takes effect at the next note-on."
+    ),
+    decay: drumLeaf(
+      "Seconds, 0.05-3.0, logarithmic, default 0.62. How long the boom lasts — time to fall " +
+        "60 dB. Takes effect at the next note-on."
+    ),
+    snap: drumLeaf(
+      "0-1 linear, default 0.18. CLICK LEVEL — the beater, not the boom: a short high-passed " +
+        "noise burst at the very start. Takes effect at the next note-on."
+    ),
+    tone: drumLeaf(
+      "0-1 linear, default 0.5. Duller to brighter — tilts this voice's filter. Takes effect " +
+        "at the next note-on."
+    ),
+    drive: drumLeaf(
+      "0-1 linear, default 0.12. Saturation into the voice's output — adds harmonics rather " +
+        "than level. Takes effect at the next note-on."
+    ),
+    level: drumLeaf(
+      "0-1 linear, default 0.9. Output level. Applied PER SAMPLE, so — unlike almost every " +
+        "other drum parameter — it moves a voice that is ALREADY SOUNDING; one of only two " +
+        "parameters (with `pan`) that does."
+    ),
+    pan: drumLeaf(
+      "-1..1 linear, default 0. Stereo position. Applied per sample, so it moves a SOUNDING " +
+        "voice — one of only two parameters (with `level`) that does."
+    ),
+    velocity: drumLeaf(
+      "0-1 linear, default 0.55. How much a note's MIDI velocity moves this voice. At 0 every " +
+        "hit is identical (correct for a machine-even pattern); splits between level and " +
+        "brightness per `kit.velocityToTone`. Takes effect at the next note-on."
+    ),
+    pitchAmount: drumLeaf(
+      "×, 0-12, linear, default 3.2. How far above `kick.tune` the pitch STARTS, as a " +
+        "multiple — at 3.2 a 52 Hz kick starts near 218 Hz. At 0 the kick does not sweep at " +
+        "all and `kick.pitchDecay` does nothing. Takes effect at the next note-on."
+    ),
+    pitchDecay: drumLeaf(
+      "Seconds, 0.002-0.3, logarithmic, default 0.045. How fast the pitch falls — short reads " +
+        "as impact, long reads as a tom. Does nothing while `kick.pitchAmount` is 0. Takes " +
+        "effect at the next note-on."
+    ),
+    chokeGroup: drumChokeGroupField(),
+    note: drumNoteField(),
+  })
+  .strict()
+  .optional()
+  .describe(
+    "Kick drum (10 addressable params) — an 808-lineage sine with independent pitch and " +
+      "amplitude envelopes."
+  );
+
+const drumSnareSchema = z
+  .object({
+    tune: drumLeaf(
+      "Hz, 80-600, logarithmic, default 180. The first drumhead mode; the second sits at " +
+        "`snare.partial2Ratio` times this. Takes effect at the next note-on."
+    ),
+    decay: drumLeaf(
+      "Seconds, 0.03-1.0, logarithmic, default 0.19. Time to fall 60 dB. Takes effect at the " +
+        "next note-on."
+    ),
+    snap: drumLeaf(
+      "0-1 linear, default 0.55. SNAPPY — the balance between the drumhead tone and the wire " +
+        "noise (the 909 panel's third knob). Takes effect at the next note-on."
+    ),
+    tone: drumLeaf(
+      "0-1 linear, default 0.5. Duller to brighter — tilts this voice's filter. Takes effect " +
+        "at the next note-on."
+    ),
+    drive: drumLeaf(
+      "0-1 linear, default 0.10. Saturation into the voice's output. Takes effect at the next " +
+        "note-on."
+    ),
+    level: drumLeaf(
+      "0-1 linear, default 0.8. Output level. Applied per sample — one of only two parameters " +
+        "(with `pan`) that moves a SOUNDING voice."
+    ),
+    pan: drumLeaf(
+      "-1..1 linear, default 0. Stereo position. Applied per sample — one of only two " +
+        "parameters (with `level`) that moves a SOUNDING voice."
+    ),
+    velocity: drumLeaf(
+      "0-1 linear, default 0.85. How much MIDI velocity moves this voice; splits between " +
+        "level and brightness per `kit.velocityToTone`. Takes effect at the next note-on."
+    ),
+    partial2Ratio: drumLeaf(
+      "×, 1.05-4.0, linear, default 1.83. Where the second drumhead mode sits, as a multiple " +
+        "of `snare.tune`. Inharmonic ratios read as a real head; 2.0 reads as a tuned drum. " +
+        "Takes effect at the next note-on."
+    ),
+    noiseTone: drumLeaf(
+      "Hz, 300-12000, logarithmic, default 2200. Centre of the wire-noise band. Takes effect " +
+        "at the next note-on."
+    ),
+    chokeGroup: drumChokeGroupField(),
+    note: drumNoteField(),
+  })
+  .strict()
+  .optional()
+  .describe("Snare (10 addressable params) — two drumhead modes plus gated wire noise.");
+
+const drumClosedHatSchema = z
+  .object({
+    tune: drumLeaf(
+      "×, 0.25-4.0, logarithmic, default 1.0. Scales all SIX oscillators of the 808 hat bank " +
+        "together — a bank scale factor, NOT a pitch in Hz; the circuit has no single " +
+        "fundamental. Takes effect at the next note-on."
+    ),
+    decay: drumLeaf(
+      "Seconds, 0.01-0.4, logarithmic, default 0.05. Time to fall 60 dB. The closed and open " +
+        "hats are the same circuit behind two decay pots. Takes effect at the next note-on."
+    ),
+    snap: drumLeaf(
+      "0-1 linear, default 0.5. ATTACK SHARPNESS — how abruptly the gate opens on the closed " +
+        "hat. Takes effect at the next note-on."
+    ),
+    tone: drumLeaf(
+      "0-1 linear, default 0.5. Duller to brighter — tilts this voice's filter. Takes effect " +
+        "at the next note-on."
+    ),
+    drive: drumLeaf(
+      "0-1 linear, default 0. Saturation into the voice's output. Takes effect at the next " +
+        "note-on."
+    ),
+    level: drumLeaf(
+      "0-1 linear, default 0.7. Output level. Applied per sample — one of only two parameters " +
+        "(with `pan`) that moves a SOUNDING voice."
+    ),
+    pan: drumLeaf(
+      "-1..1 linear, default 0.1. Stereo position. Applied per sample — one of only two " +
+        "parameters (with `level`) that moves a SOUNDING voice."
+    ),
+    velocity: drumLeaf(
+      "0-1 linear, default 0.75. How much MIDI velocity moves this voice; splits between " +
+        "level and brightness per `kit.velocityToTone`. Takes effect at the next note-on."
+    ),
+    chokeGroup: drumChokeGroupField(),
+    note: drumNoteField(),
+  })
+  .strict()
+  .optional()
+  .describe(
+    "Closed hi-hat (8 addressable params) — defaults to `chokeGroup` 0, shared with the open " +
+      "hat, so either cuts the other off."
+  );
+
+const drumOpenHatSchema = z
+  .object({
+    tune: drumLeaf(
+      "×, 0.25-4.0, logarithmic, default 1.0. Scales all SIX oscillators of the 808 hat bank " +
+        "together — a bank scale factor, NOT a pitch in Hz. Takes effect at the next note-on."
+    ),
+    decay: drumLeaf(
+      "Seconds, 0.05-1.5, logarithmic, default 0.32. Time to fall 60 dB. The closed and open " +
+        "hats are the same circuit behind two decay pots. Takes effect at the next note-on."
+    ),
+    snap: drumLeaf(
+      "0-1 linear, default 0.5. ATTACK SHARPNESS — how abruptly the gate opens on the open " +
+        "hat. Takes effect at the next note-on."
+    ),
+    tone: drumLeaf(
+      "0-1 linear, default 0.5. Duller to brighter — tilts this voice's filter. Takes effect " +
+        "at the next note-on."
+    ),
+    drive: drumLeaf(
+      "0-1 linear, default 0. Saturation into the voice's output. Takes effect at the next " +
+        "note-on."
+    ),
+    level: drumLeaf(
+      "0-1 linear, default 0.7. Output level. Applied per sample — one of only two parameters " +
+        "(with `pan`) that moves a SOUNDING voice."
+    ),
+    pan: drumLeaf(
+      "-1..1 linear, default 0.1. Stereo position. Applied per sample — one of only two " +
+        "parameters (with `level`) that moves a SOUNDING voice."
+    ),
+    velocity: drumLeaf(
+      "0-1 linear, default 0.7. How much MIDI velocity moves this voice; splits between level " +
+        "and brightness per `kit.velocityToTone`. Takes effect at the next note-on."
+    ),
+    chokeGroup: drumChokeGroupField(),
+    note: drumNoteField(),
+  })
+  .strict()
+  .optional()
+  .describe(
+    "Open hi-hat (8 addressable params) — defaults to `chokeGroup` 0, shared with the closed " +
+      "hat, so either cuts the other off."
+  );
+
+const drumClapSchema = z
+  .object({
+    tune: drumLeaf(
+      "Hz, 300-4000, logarithmic, default 1000. Centre of the noise band. Takes effect at the " +
+        "next note-on."
+    ),
+    decay: drumLeaf(
+      "Seconds, 0.05-1.5, logarithmic, default 0.28. Length of the diffuse TAIL after the " +
+        "three fast pulses. Takes effect at the next note-on."
+    ),
+    snap: drumLeaf(
+      "0-1 linear, default 0.5. BURST VERSUS TAIL — at 1 the tail dominates and the individual " +
+        "hand-claps blur. Takes effect at the next note-on."
+    ),
+    tone: drumLeaf(
+      "0-1 linear, default 0.55. Duller to brighter — tilts this voice's filter. Takes effect " +
+        "at the next note-on."
+    ),
+    drive: drumLeaf(
+      "0-1 linear, default 0.05. Saturation into the voice's output. Takes effect at the next " +
+        "note-on."
+    ),
+    level: drumLeaf(
+      "0-1 linear, default 0.75. Output level. Applied per sample — one of only two " +
+        "parameters (with `pan`) that moves a SOUNDING voice."
+    ),
+    pan: drumLeaf(
+      "-1..1 linear, default -0.15. Stereo position. Applied per sample — one of only two " +
+        "parameters (with `level`) that moves a SOUNDING voice."
+    ),
+    velocity: drumLeaf(
+      "0-1 linear, default 0.6. How much MIDI velocity moves this voice; splits between level " +
+        "and brightness per `kit.velocityToTone`. Takes effect at the next note-on."
+    ),
+    spread: drumLeaf(
+      "Seconds, 0.002-0.06, logarithmic, default 0.011. Time between the four retriggered " +
+        "pulses — 11 ms is the hardware figure and is what makes a clap read as several hands " +
+        "rather than one noise burst. Has almost no audible effect once `clap.snap` is near " +
+        "1.0 (the tail dominates and buries the pulses). Takes effect at the next note-on."
+    ),
+    chokeGroup: drumChokeGroupField(),
+    note: drumNoteField(),
+  })
+  .strict()
+  .optional()
+  .describe("Clap (9 addressable params) — the four-pulse retrigger IS the sound.");
+
+const drumTomSchema = z
+  .object({
+    tune: drumLeaf("Hz, 50-400, logarithmic, default 120. The tom's pitch. Takes effect at the next note-on."),
+    decay: drumLeaf(
+      "Seconds, 0.05-2.0, logarithmic, default 0.38. Time to fall 60 dB. Also sets the " +
+        "pitch-envelope time, which is a FIXED 0.18x of this (not itself addressable — it " +
+        "holds the tom at 9 names rather than 10). Takes effect at the next note-on."
+    ),
+    snap: drumLeaf(
+      "0-1 linear, default 0.25. STICK NOISE — the transient of the beater on the head. Takes " +
+        "effect at the next note-on."
+    ),
+    tone: drumLeaf(
+      "0-1 linear, default 0.5. Duller to brighter — tilts this voice's filter. Takes effect " +
+        "at the next note-on."
+    ),
+    drive: drumLeaf(
+      "0-1 linear, default 0.05. Saturation into the voice's output. Takes effect at the next " +
+        "note-on."
+    ),
+    level: drumLeaf(
+      "0-1 linear, default 0.8. Output level. Applied per sample — one of only two parameters " +
+        "(with `pan`) that moves a SOUNDING voice."
+    ),
+    pan: drumLeaf(
+      "-1..1 linear, default -0.25. Stereo position. Applied per sample — one of only two " +
+        "parameters (with `level`) that moves a SOUNDING voice."
+    ),
+    velocity: drumLeaf(
+      "0-1 linear, default 0.8. How much MIDI velocity moves this voice; splits between level " +
+        "and brightness per `kit.velocityToTone`. Takes effect at the next note-on."
+    ),
+    pitchAmount: drumLeaf(
+      "×, 0-4, linear, default 0.45. How far above `tom.tune` the pitch starts. This is the " +
+        "WHOLE DIFFERENCE between a tom and a kick voice: 0.45 here against the kick's 3.2. " +
+        "Takes effect at the next note-on."
+    ),
+    chokeGroup: drumChokeGroupField(),
+    note: drumNoteField(),
+  })
+  .strict()
+  .optional()
+  .describe("Tom (9 addressable params) — the kick topology at a shallower pitch sweep.");
+
+const drumRimSchema = z
+  .object({
+    tune: drumLeaf(
+      "Hz, 400-4000, logarithmic, default 1700. The ring frequency. Takes effect at the next " +
+        "note-on."
+    ),
+    decay: drumLeaf(
+      "Seconds, 0.005-0.5, logarithmic, default 0.028. Time to fall 60 dB — 0.028s is a " +
+        "rimshot, 0.11s with `rim.tone` near 0 is a clave. Takes effect at the next note-on."
+    ),
+    snap: drumLeaf(
+      "0-1 linear, default 0.4. THE CLICK at the head of the ring. Takes effect at the next " +
+        "note-on."
+    ),
+    tone: drumLeaf(
+      "0-1 linear, default 0.3. Duller to brighter — tilts this voice's filter. Takes effect " +
+        "at the next note-on."
+    ),
+    drive: drumLeaf(
+      "0-1 linear, default 0. Saturation into the voice's output. Takes effect at the next " +
+        "note-on."
+    ),
+    level: drumLeaf(
+      "0-1 linear, default 0.6. Output level. Applied per sample — one of only two parameters " +
+        "(with `pan`) that moves a SOUNDING voice."
+    ),
+    pan: drumLeaf(
+      "-1..1 linear, default 0.3. Stereo position. Applied per sample — one of only two " +
+        "parameters (with `level`) that moves a SOUNDING voice."
+    ),
+    velocity: drumLeaf(
+      "0-1 linear, default 0.7. How much MIDI velocity moves this voice; splits between level " +
+        "and brightness per `kit.velocityToTone`. Takes effect at the next note-on."
+    ),
+    chokeGroup: drumChokeGroupField(),
+    note: drumNoteField(),
+  })
+  .strict()
+  .optional()
+  .describe("Rim (8 addressable params) — one very short ring.");
+
+const drumCymbalSchema = z
+  .object({
+    tune: drumLeaf(
+      "×, 0.25-4.0, logarithmic, default 1.0. Scales all six oscillators of the bank together, " +
+        "as on the hats — a bank scale factor, NOT a pitch in Hz. Takes effect at the next " +
+        "note-on."
+    ),
+    decay: drumLeaf(
+      "Seconds, 0.1-4.0, logarithmic, default 1.1. Time to fall 60 dB. In the hardware this " +
+        "controls the LOWER band only (see `cymbal.band`), which is what makes a cymbal rather " +
+        "than a very long hat. `cymbal.tone` has little effect below about 0.2s of decay. " +
+        "Takes effect at the next note-on."
+    ),
+    snap: drumLeaf(
+      "0-1 linear, default 0.5. ATTACK SHARPNESS. Takes effect at the next note-on."
+    ),
+    tone: drumLeaf(
+      "0-1 linear, default 0.45. Duller to brighter — tilts this voice's filter. Takes effect " +
+        "at the next note-on."
+    ),
+    drive: drumLeaf(
+      "0-1 linear, default 0. Saturation into the voice's output. Takes effect at the next " +
+        "note-on."
+    ),
+    level: drumLeaf(
+      "0-1 linear, default 0.55. Output level. Applied per sample — one of only two " +
+        "parameters (with `pan`) that moves a SOUNDING voice."
+    ),
+    pan: drumLeaf(
+      "-1..1 linear, default -0.2. Stereo position. Applied per sample — one of only two " +
+        "parameters (with `level`) that moves a SOUNDING voice."
+    ),
+    velocity: drumLeaf(
+      "0-1 linear, default 0.8. How much MIDI velocity moves this voice; splits between level " +
+        "and brightness per `kit.velocityToTone`. Takes effect at the next note-on."
+    ),
+    band: drumLeaf(
+      "Hz, 800-12000, logarithmic, default 3440. Centre of the LOWER band — the one " +
+        "`cymbal.decay` applies to. Keep it well below the hats' 7100 Hz band or the cymbal " +
+        "becomes a long hat. Takes effect at the next note-on."
+    ),
+    chokeGroup: drumChokeGroupField(),
+    note: drumNoteField(),
+  })
+  .strict()
+  .optional()
+  .describe("Cymbal (9 addressable params) — the hat bank through a different bandpass.");
+
+const drumKitSchema = z
+  .object({
+    kick: drumKickSchema,
+    snare: drumSnareSchema,
+    closedHat: drumClosedHatSchema,
+    openHat: drumOpenHatSchema,
+    clap: drumClapSchema,
+    tom: drumTomSchema,
+    rim: drumRimSchema,
+    cymbal: drumCymbalSchema,
+    gain: drumLeaf(
+      "0-2, \"level\" unit, linear, default 1.0. Output gain for the WHOLE KIT, applied after " +
+        "every voice sums. 0 silences the entire kit."
+    ),
+    velocityToTone: drumLeaf(
+      "0-1 linear, default 0.4. How much of EACH voice's velocity response is BRIGHTNESS " +
+        "rather than level — a real drum struck harder is brighter, not merely louder. At 0, " +
+        "every voice's `velocity` moves level only, which is what makes a programmed kit tick " +
+        "rather than groove."
+    ),
+    accentThreshold: drumLeaf(
+      "1-127, \"velocity\" unit, linear, default 100. MIDI velocity at or above which a hit " +
+        "counts as ACCENTED — a step property (like the 808), not a continuous dynamic: a " +
+        "pattern sending 110 on accented steps and 80 elsewhere is hardware-correct with no " +
+        "knowledge of the velocity curve."
+    ),
+    accentDepth: drumLeaf(
+      "0-1 linear, default 0.25. Extra level (and half a share of extra brightness) an " +
+        "accented hit receives, on every voice."
+    ),
+  })
+  .strict()
+  .describe(
+    "Drum Kit configuration — a WHOLESALE instrument config, the fourth alongside `sampler`/" +
+      "`audioUnit`/`soundBank`, NOT a polySynth parameter — used only when `kind` is (or is " +
+      "being set to) `drumSynth`. This is a PARTIAL OVERLAY onto the track's CURRENT kit (the " +
+      "`sampler`/`soundBank` precedent's overlay half, not their wholesale-`zones` half): " +
+      "`{drumKit: {kick: {decay: 0.9}}}` moves ONE of the 75 addressable parameters and leaves " +
+      "the other 74 exactly as they were — including on a track that already has a fully-" +
+      "dialled kit. Unlike `audioUnit`/`soundBank`, providing `drumKit` does NOT imply " +
+      "`kind` `drumSynth` — it stores the kit config regardless of the track's kind (same " +
+      "as `sampler`), so it is silently inaudible on a track whose `kind` is not (or is not " +
+      "also being set to) `drumSynth`. Send `kind: \"drumSynth\"` in this call, or a prior " +
+      "one, to actually hear it; read the response's `kind` field to confirm what is " +
+      "actually sounding. " +
+      "Omit `drumKit` entirely to leave the track's current kit untouched. " +
+      "Eight voices — `kick`/`snare`/`closedHat`/`openHat`/`clap`/`tom`/`rim`/`cymbal` — each " +
+      "carrying ONLY the leaf parameters that voice actually has (10/10/8/8/9/9/8/9 = 71; a " +
+      "name outside a voice's own set, e.g. `kick.band` or `rim.spread`, does not exist and is " +
+      "rejected), plus FOUR kit-wide leaves — `gain`/`velocityToTone`/`accentThreshold`/" +
+      "`accentDepth` — as TOP-LEVEL keys on `drumKit` itself (NOT nested under a `kit` key, " +
+      "even though the describe/preset-load responses group them that way when reading them " +
+      "back). 71 + 4 = the full 75. " +
+      "EVERY VALUE HERE IS CLAMPED INTO ITS RANGE, NEVER REFUSED — the opposite of this " +
+      "tool's polySynth richness knobs; see instrument_set_drum_param for the same clamp " +
+      "surfaced explicitly via `value` vs `requested`. " +
+      "⭐ ONE-SHOT LATCHING: every drum parameter EXCEPT `level` and `pan` is read once at " +
+      "note-on and held for that hit's whole duration — editing e.g. `kick.decay` mid-hit does " +
+      "NOT change the hit already sounding, only the NEXT one. `level`/`pan` are the voice's " +
+      "output stage and move a hit that is already sounding. Not knowing this reads as a " +
+      "broken engine; it is a one-shot synth's ordinary behaviour. " +
+      "⚠️ Each voice's own `chokeGroup` (0-63, nullable, structural — not one of the 75 " +
+      "addressable names) is the one field that does NOT overlay onto a resting default: " +
+      "`null` deliberately CLEARS it, omitting the key leaves it untouched. Both hats default " +
+      "to group 0 (so they choke each other) — clearing that is a real, supported edit and " +
+      "must not be silently undone by an unrelated knob turn. " +
+      "There is deliberately NO discrete/enum parameter anywhere on this instrument (see " +
+      "instrument_list_drum_presets) — the 808/909/acoustic/lofi/trap factory kits differ " +
+      "only in these same 75 numbers, never in topology, which is what makes 'every drum " +
+      "parameter is automatable' literally true here. For the full picture of a track's " +
+      "current kit — ranges, defaults, engine-applied values, which settings are silently " +
+      "inert right now, route budget — call instrument_describe_drum_kit rather than guessing " +
+      "from this schema alone."
+  );
+
 registerTool(
   "track_set_instrument",
   {
@@ -2093,6 +2618,16 @@ registerTool(
       "bankMSB/bankLSB, is only meaningful for `kind` `soundBank`, implies " +
       "that kind even if `kind` is omitted, and is MUTUALLY EXCLUSIVE with " +
       "`audioUnit` in the same call (providing both errors, nothing lands). " +
+      "`drumKit` (m39-dm, see its own description) is a WHOLESALE instrument config for the " +
+      "built-in eight-voice drum machine — NOT a polySynth parameter — only meaningful for " +
+      "`kind` `drumSynth`. UNLIKE `audioUnit`/`soundBank`, it does NOT imply that kind: " +
+      "the kit is stored (same as `sampler`) even when `kind` stays polySynth/sampler/" +
+      "audioUnit/soundBank, and stays silently inaudible until `kind: \"drumSynth\"` is " +
+      "also sent, in this call or a prior one. It is a PARTIAL " +
+      "OVERLAY onto the track's current 75-parameter kit, unlike `sampler`'s wholesale " +
+      "`zones` array: send only the leaves you want to change. For a single named parameter " +
+      "prefer instrument_set_drum_param, and for a factory starting point prefer " +
+      "instrument_load_drum_preset over building this object by hand. " +
       "Default instrument (a " +
       "fresh instrument track) is polySynth with a saw wave. Audio and bus " +
       "tracks reject this — use track_add or project_snapshot to find/create " +
@@ -2119,16 +2654,21 @@ registerTool(
     inputSchema: {
       trackId: z.string().min(1).describe("Id of the instrument track, from project_snapshot."),
       kind: z
-        .enum(["testTone", "polySynth", "sampler", "audioUnit", "soundBank"])
+        .enum(["testTone", "polySynth", "sampler", "audioUnit", "soundBank", "drumSynth"])
         .optional()
         .describe(
           "Which instrument to use: `testTone` (simple fixed test tone), `polySynth` " +
             "(polyphonic subtractive synth), `sampler` (plays back your own audio files, " +
             "configured via `sampler`), `soundBank` (plays a SoundFont2/DLS bank program, " +
             "selected via `soundBank`; see instrument_list_sound_banks to discover banks — " +
-            "General MIDI needs no setup), or `audioUnit` (hosts an installed Audio Unit " +
+            "General MIDI needs no setup), `audioUnit` (hosts an installed Audio Unit " +
             "instrument plugin, selected via `audioUnit`; see instrument_list_audio_units " +
-            "to discover installed AUs). Omit to keep the current instrument."
+            "to discover installed AUs), or `drumSynth` (the built-in eight-voice one-shot " +
+            "drum machine — kick/snare/closed hat/open hat/clap/tom/rim/cymbal, MIDI notes " +
+            "36-43 — configured via `drumKit`, edited one parameter at a time via " +
+            "instrument_set_drum_param, or loaded wholesale from a factory kit via " +
+            "instrument_load_drum_preset; see instrument_describe_drum_kit for the full " +
+            "picture of what's currently set). Omit to keep the current instrument."
         ),
       waveform: z
         .enum(["saw", "square", "triangle", "sine"])
@@ -2386,6 +2926,7 @@ registerTool(
       sampler: samplerSchema.optional(),
       audioUnit: audioUnitSchema.optional(),
       soundBank: soundBankSchema.optional(),
+      drumKit: drumKitSchema.optional(),
     },
   },
   async ({
@@ -2418,6 +2959,7 @@ registerTool(
     sampler,
     audioUnit,
     soundBank,
+    drumKit,
   }) =>
     toToolResult(() =>
       bridge.send("track.setInstrument", {
@@ -2450,6 +2992,7 @@ registerTool(
         sampler,
         audioUnit,
         soundBank,
+        drumKit,
       })
     )
 );
@@ -3928,6 +4471,198 @@ registerTool(
   async ({ trackId }) => toToolResult(() => bridge.send("instrument.describeSynth", { trackId }))
 );
 
+// ---------------------------------------------------------------------------
+// Drum Kit (m39-dm) — the four MCP tools for the built-in drum machine. All
+// facts here (names/ranges/units/clamp-vs-refuse/warnings) are re-derived
+// from `Sources/DAWControl/Commands.swift`'s `instrument.setDrumParam` /
+// `instrument.describeDrumKit` / `instrument.listDrumPresets` /
+// `instrument.loadDrumPreset` handlers and `DrumKitParams.paramSpecs` — see
+// the `drumKitSchema` comment above for the ground-truth pointer.
+// ---------------------------------------------------------------------------
+
+registerTool(
+  "instrument_set_drum_param",
+  {
+    title: "Set one Drum Kit parameter by name",
+    description:
+      "Set exactly ONE of the Drum Kit's 75 addressable parameters by its dotted name, e.g. " +
+      "`kick.decay`, `closedHat.tune`, or `kit.gain`. THE narrower sibling of " +
+      "track_set_instrument's `drumKit` object — reach for that instead when changing several " +
+      "parameters in one call. `name` is `<voice>.<leaf>` for a per-voice parameter " +
+      "(`kick`/`snare`/`closedHat`/`openHat`/`clap`/`tom`/`rim`/`cymbal`) or `kit.<leaf>` for " +
+      "one of the four kit-wide leaves (`kit.gain`/`kit.velocityToTone`/`kit.accentThreshold`/" +
+      "`kit.accentDepth`) — call instrument_describe_drum_kit first (its `order` field lists " +
+      "all 75 valid names) if you are not sure of the exact spelling. A typo'd or nonexistent " +
+      "name is REFUSED with the valid names for that scope (e.g. asking for `kik.tune` lists " +
+      "every valid `kick.*` name), so the error teaches the correct spelling rather than just " +
+      "failing. ⚠️ `chokeGroup` is NOT reachable here — it is structural, not one of the 75 " +
+      "names; set it via track_set_instrument's `drumKit.<voice>.chokeGroup` instead. " +
+      "`value` is CLAMPED into that parameter's range, exactly like track_set_instrument's " +
+      "`drumKit` object — the ONLY refusal on `value` itself is a non-finite number (NaN/" +
+      "Infinity), since those survive clamping unchanged and the render thread turns several " +
+      "of these parameters into sample counts that TRAP on NaN. The response's `value` is the " +
+      "STORED value re-read after the edit (so you can see whether a clamp happened) and " +
+      "`requested` is exactly what you sent — they differ only when a clamp fired. " +
+      "⭐ ONE-SHOT LATCHING applies here too: every drum parameter except `level` and `pan` is " +
+      "read once at note-on and held for that hit's whole duration, so setting e.g. " +
+      "`kick.decay` mid-hit changes the NEXT hit, not the one already sounding. `level`/`pan` " +
+      "move a voice that is already sounding. " +
+      "Works on an instrument track whose ACTIVE instrument is not currently `drumSynth` too " +
+      "— the kit is carried across kind switches like the Sampler's/Poly Synth's own configs " +
+      "— the response's `kind`/`isActiveInstrument` say which instrument is actually sounding " +
+      "right now. Refuses readably for an audio/bus track and an unknown trackId.",
+    inputSchema: {
+      trackId: z.string().min(1).describe("Id of the instrument track, from project_snapshot."),
+      name: z
+        .string()
+        .min(1)
+        .describe(
+          "Dotted drum parameter name, e.g. `kick.decay`, `closedHat.tune`, `kit.gain`. See " +
+            "instrument_describe_drum_kit's `order` field for the full list of 75 valid names."
+        ),
+      value: z
+        .number()
+        .finite()
+        .describe(
+          "The new value. CLAMPED into the parameter's own range (see " +
+            "instrument_describe_drum_kit for each parameter's min/max/unit/curve) rather " +
+            "than refused — compare the response's `value` (stored) against `requested` (what " +
+            "you sent) to see whether a clamp fired. Must be finite: NaN/Infinity are REFUSED " +
+            "outright, never clamped."
+        ),
+    },
+  },
+  async ({ trackId, name, value }) =>
+    toToolResult(() => bridge.send("instrument.setDrumParam", { trackId, name, value }))
+);
+
+registerTool(
+  "instrument_describe_drum_kit",
+  {
+    title: "Read a track's Drum Kit configuration (read-only)",
+    description:
+      "Read the built-in Drum Kit's FULL configuration on an instrument track — all 75 " +
+      "parameters' range, unit, curve, default, current value, whether each one is silently " +
+      "inert right now, and the modulation route budget — the drum-machine twin of " +
+      "instrument_describe_synth/instrument_describe_sampler for the other built-in sound " +
+      "sources. Works even when the track's ACTIVE instrument is something else right now — " +
+      "like the Sampler/Poly Synth, the kit is carried across kind switches, so you can " +
+      "inspect a previously-built kit before switching back to it; `isActiveInstrument` says " +
+      "whether `drumSynth` is the kind actually sounding. `isConfigured` says whether this " +
+      "track has ever been given a kit at all — false means you are looking at the untouched " +
+      "factory default (the SAME default track_set_instrument's `drumKit` overlay would start " +
+      "from on this track). " +
+      "Refuses readably for an audio/bus track (only instrument tracks carry an instrument) " +
+      "and an unknown trackId — there is deliberately no 'never configured' refusal, matching " +
+      "instrument_describe_synth: every instrument track HAS a kit (the default's) even " +
+      "untouched. " +
+      "Returns {trackId, kind, isActiveInstrument, isConfigured, voices, kit, parameterCount " +
+      "(75), order, presets, routesUsed, routeBudget, warnings}. `voices` is keyed by the " +
+      "eight voice names (`kick`/`snare`/`closedHat`/`openHat`/`clap`/`tom`/`rim`/`cymbal`), " +
+      "each `{displayName, note (the MIDI note 36-43 that triggers it), parameters, " +
+      "chokeGroup?}` — `parameters` is keyed by leaf name (`tune`/`decay`/... — ONLY the " +
+      "leaves that voice actually has, 8-10 of them) and `chokeGroup` (0-63) is present ONLY " +
+      "when set — absent means this voice chokes nothing and is choked by nothing, which is " +
+      "NOT the same fact as group 0 (both hats default to group 0, so they choke each other " +
+      "out of the box). `kit` holds the four kit-wide parameters " +
+      "(`gain`/`velocityToTone`/`accentThreshold`/`accentDepth`) in the same per-parameter " +
+      "shape. Every entry under `parameters`/`kit` is " +
+      "`{name, value, default, min, max, unit, curve, modulatable: true, " +
+      "appliesAtNextNoteOn, meaning?}` — `modulatable` is always true (this is the first " +
+      "built-in instrument with no discrete/unmodulatable parameter at all), and " +
+      "`appliesAtNextNoteOn` is false ONLY for `level`/`pan` on each voice: those two are the " +
+      "voice's output stage and move a hit that is already sounding, while every other " +
+      "parameter latches at note-on and leaves a sounding hit untouched until the next one. " +
+      "`order` lists all 75 dotted names (`kick.tune`, ..., `kit.accentDepth`) in a sensible " +
+      "read order — pass any of them straight to instrument_set_drum_param. `presets` is the " +
+      "five factory kit NAMES (`808`/`909`/`acoustic`/`lofi`/`trap` — pass one to " +
+      "instrument_load_drum_preset; call instrument_list_drum_presets for a one-line summary " +
+      "of each). `routesUsed`/`routeBudget` (64) answer a real ceiling: there are 75 " +
+      "addressable names sharing ONE 64-route modulation budget with this strip's automation " +
+      "lanes, so they cannot all be routed at once — this reports the ceiling before it bites " +
+      "rather than leaving you to discover it when a route silently goes missing. " +
+      "⚠️ `warnings` (a string array, present ONLY when at least one fires) is the same " +
+      "'accepted, stored, echoed back, and SILENT' guard instrument_describe_synth carries: " +
+      "`kick.pitchDecay` does nothing while `kick.pitchAmount` is 0; `clap.spread` has almost " +
+      "no audible effect once `clap.snap` is near 1.0; `cymbal.tone` has little effect below " +
+      "about 0.2s of `cymbal.decay`; `kit.velocityToTone` at 0 means every voice's `velocity` " +
+      "moves level only; and — the SILENCE class — any voice's `velocity` or `level` at 0, or " +
+      "`kit.gain` at 0, is named explicitly rather than left for you to notice a quiet render.",
+    inputSchema: {
+      trackId: z.string().min(1).describe("Id of the instrument track to describe, from project_snapshot."),
+    },
+  },
+  async ({ trackId }) => toToolResult(() => bridge.send("instrument.describeDrumKit", { trackId }))
+);
+
+registerTool(
+  "instrument_load_drum_preset",
+  {
+    title: "Load a factory Drum Kit preset (replaces the whole kit)",
+    description:
+      "Load one of the five factory Drum Kits onto an instrument track. ⚠️ THIS DOES NOT " +
+      "CHANGE `kind` — it replaces the stored kit config only (same rule as `sampler`), so " +
+      "on a track whose `kind` is not already `drumSynth` the load succeeds but is silently " +
+      "inaudible; check the response's `kind`/`isActiveInstrument` and, if needed, send " +
+      "`kind: \"drumSynth\"` via track_set_instrument (before or after this call). " +
+      "⚠️ WHOLESALE, NOT AN OVERLAY — unlike track_set_instrument's `drumKit` " +
+      "object (a partial update) this REPLACES all 75 parameters at once; the response's " +
+      "`replacedAllParameters` is always true, stated explicitly rather than left for you to " +
+      "discover by diffing. `name` is matched case-insensitively against the five lineages — " +
+      "`808` (the defaults: deep sub kick, slow fall, loose hats, a snare that sits back), " +
+      "`909` (a harder click: faster/deeper kick pitch sweep, a much shorter body, a " +
+      "brighter/snappier snare), `acoustic` (longer, less saturated, inharmonic snare modes, " +
+      "a wider kit image), `lofi` (dull and driven: everything darker, saturated kick, short " +
+      "closed-down hats), and `trap` (a very long sub kick, a tight clap-forward snare, fast " +
+      "bright hats built for rolls). Call instrument_list_drum_presets first for a one-line " +
+      "summary of each, or read the full numeric recipe via instrument_describe_drum_kit " +
+      "after loading one. ⭐ THERE IS NO `character` ENUM AND NO DISCRETE PARAMETER ANYWHERE " +
+      "ON THIS INSTRUMENT — the five lineages differ only in these same 75 numbers, never in " +
+      "topology, so anything a preset sets can also be dialled by hand or reached one knob at " +
+      "a time afterward via instrument_set_drum_param. An unknown `name` is REFUSED and lists " +
+      "the five valid names rather than a bare 'not found'. " +
+      "Returns {trackId, name (the canonical preset name), summary, replacedAllParameters " +
+      "(true), parameterCount (75), kind, isActiveInstrument, drumKit (the full resulting kit " +
+      "— the same per-voice/kit-wide numeric shape instrument_describe_drum_kit's `voices`/" +
+      "`kit` use, so you can read exactly what landed without a follow-up describe call)}. " +
+      "Refuses readably for an audio/bus track and an unknown trackId.",
+    inputSchema: {
+      trackId: z.string().min(1).describe("Id of the instrument track, from project_snapshot."),
+      name: z
+        .string()
+        .min(1)
+        .describe(
+          "Preset name, case-insensitive: `808`, `909`, `acoustic`, `lofi`, or `trap`. See " +
+            "instrument_list_drum_presets for a one-line summary of each."
+        ),
+    },
+  },
+  async ({ trackId, name }) =>
+    toToolResult(() => bridge.send("instrument.loadDrumPreset", { trackId, name }))
+);
+
+server.registerTool(
+  "instrument_list_drum_presets",
+  {
+    title: "List the five factory Drum Kit presets",
+    description:
+      "List the five factory Drum Kit lineages available to instrument_load_drum_preset. No " +
+      "params, never errors. Each entry is `{name, summary}`: `808` (the defaults — deep sub " +
+      "kick, slow fall, loose hats, a snare that sits back), `909` (a harder click — faster/" +
+      "deeper kick pitch sweep, a much shorter body, a brighter/snappier snare), `acoustic` " +
+      "(longer, less saturated, inharmonic snare modes, a wider kit image), `lofi` (dull and " +
+      "driven — everything darker, saturated kick, short closed-down hats), and `trap` (a " +
+      "very long sub kick, a tight clap-forward snare, fast bright hats built for rolls). " +
+      "⭐ THERE IS NO `character` ENUM — the five differ only in NUMBERS, never in topology, " +
+      "which is why this instrument has no discrete parameter anywhere; pass a `name` " +
+      "straight to instrument_load_drum_preset to apply one wholesale, or read a track's " +
+      "current kit with instrument_describe_drum_kit and dial your own with " +
+      "instrument_set_drum_param / track_set_instrument's `drumKit`. Returns " +
+      "{presets: [{name, summary}], count (5)}.",
+  },
+  async () => toToolResult(() => bridge.send("instrument.listDrumPresets"))
+);
+
 registerTool(
   "instrument_probe_liveness",
   {
@@ -4300,6 +5035,10 @@ const fxKindSchema = z
     "tapeDelay",
     "stereoWidth",
     "phaser",
+    "transientShaper",
+    "freqShifter",
+    "clipper",
+    "dynamicEQ",
     "audioUnit",
   ])
   .describe(
@@ -4322,7 +5061,42 @@ const fxKindSchema = z
       "`ratio`, `attackMs`, `releaseMs`, `kneeDb`, `makeupDb`, and `mix` — the parallel " +
       "(New-York) compression blend, 0 = untouched dry signal, 1 = fully compressed " +
       "(the default, so an existing project is unchanged). Crush hard and blend a little " +
-      "back with `mix` rather than duplicating the track. `limiter` is a lookahead " +
+      "back with `mix` rather than duplicating the track. " +
+      "⭐ **IT IS ALSO THE DE-ESSER, AND THERE IS NO SEPARATE `deEsser` KIND.** A " +
+      "de-esser IS a compressor — same threshold, ratio, attack, release — with one " +
+      "difference: the part that DECIDES when to turn down listens to a FILTERED copy of " +
+      "the signal instead of the whole thing. So it is a mode here: `detectorMode` 0 (the " +
+      "default) is OFF and bit-for-bit the compressor this kind has always been; 1 is " +
+      "BAND-PASS, where the detector hears only a band around `detectorFreqHz` (park it on " +
+      "the 'sss', 5000-9000 Hz on most voices, and it ignores everything else); 2 is " +
+      "HIGH-PASS, where it hears everything above `detectorFreqHz` — that catches " +
+      "sibilance that moves around, since an 'sh' sits lower than an 's', but it also hears " +
+      "cymbals and breath. `detectorQ` means TWO things: the band's width at mode 1 " +
+      "(bandwidth = `detectorFreqHz` / Q, and the band peaks at 0 dB at EVERY Q so widening " +
+      "it does not quietly move your threshold), and the corner's RESONANCE at mode 2 (the " +
+      "response AT the corner IS Q, so the default 2 is a deliberate +6 dB emphasis; use " +
+      "0.707 for a flat Butterworth corner). " +
+      "⛔ **WIDEBAND, NOT SPLIT-BAND**: when the detector fires the WHOLE signal ducks " +
+      "for as long as the 'sss' lasts — it does not carve the sibilant band out and leave " +
+      "the rest playing. Inaudible on a solo voice because an 's' is short; audible on a " +
+      "full mix, so do not put one there. That is also why it adds **ZERO latency** and " +
+      "cannot shift an existing project in time (`latencySamples` is a constant 0 at every " +
+      "setting, echoed in every `fx_add`/`fx_set_param` result). " +
+      "⚠️ `detectorMode` is DISCRETE — automate it with hold steps, never a ramp, and " +
+      "modulation refuses it outright; `detectorFreqHz`/`detectorQ` are filter corners and " +
+      "modulation WARNS on them (they zipper at any rate, the `eq.peak1Freq` problem), " +
+      "though automating them between sections is fine. With a SIDECHAIN KEY attached it is " +
+      "the KEY that gets filtered, because the key IS the detector's input — which makes " +
+      "'duck this track when THAT one gets sibilant' one call. Every `fx_add`/" +
+      "`fx_set_param` result also echoes `resolvedDetectorMode` (the SNAPPED value the " +
+      "render thread uses — a stored 1.4 renders as 1), `detectorBandwidthHz`, " +
+      "`detectorBandwidthApplies` and `latencySamples` inside that insert's `params` " +
+      "(per-instance/constant echoes, NOT part of `fx_describe`'s schema). Proven off " +
+      "rendered audio by `scripts/gates/m39ae-compressor-default-bytes.mjs` (the default is " +
+      "byte-identical to the pre-de-esser build, sidechained variant included) and " +
+      "`scripts/gates/m39ae-deesser-physics.mjs` (non-sibilant material comes out " +
+      "SAMPLE-IDENTICAL, and the balance between two frequencies never moves). " +
+      "`limiter` is a lookahead " +
       "brick-wall limiter: `ceilingDb`, `releaseMs`, `truePeak` — it adds 5 ms of processing " +
       "latency, reported per-effect as `latencySamples` in project_snapshot's `effects` array. " +
       "MIND WHICH PEAK THE CEILING COUNTS (m23-ch): with `truePeak: 0` (the default) " +
@@ -4357,7 +5131,15 @@ const fxKindSchema = z
       "nearest of 1/1…1/32 straight/dotted/triplet — e.g. 1 = 1/4, 0.75 = 1/8 dotted, " +
       "0.333 = 1/8 triplet; the snapshot echoes a human `divisionLabel` like \"1/8d\"). " +
       "`saturator` " +
-      "is a tanh-based drive/color stage: `driveDb`, `mix`, `outputDb`. `gate` is a " +
+      "is a tanh-based drive/colour stage: `driveDb`, `mix`, `outputDb`, " +
+      "`oversampling`. ⭐ `oversampling` (1/2/4) DEFAULTS TO 1, the OPPOSITE of " +
+      "`clipper`'s default of 4, and deliberately: this kind shipped before the " +
+      "control existed, so at 1 the machinery is skipped entirely and the effect is " +
+      "bit-for-bit what it always was. Set it to 4 on a new insert you are driving " +
+      "hard - that is what removes the metallic fold-back fizz. ⚠⚠ IT " +
+      "CHANGES THE EFFECT'S LATENCY (0 samples at 1, 32 at 2 or 4), unlike " +
+      "`clipper` whose 32 is constant; read `latencySamples` back from the result. " +
+      "⚠ It is DISCRETE and is neither automatable nor modulatable. `gate` is a " +
       "noise gate: `thresholdDb`, `attackMs`, `holdMs`, `releaseMs`. `chorus` is a " +
       "2-voice modulated thickener: `rateHz`, `depthMs`, `mix`. " +
       "`bassEnhancer` is a psychoacoustic bass enhancer (RBass class): `crossoverHz`, " +
@@ -4661,6 +5443,171 @@ const fxKindSchema = z
       "curve) and no values at all. `firstNotchHz` is well BELOW `centerHz` " +
       "(0.41x it at 4 stages, 0.13x at 12), which is the usual surprise: the " +
       "notches straddle the centre rather than starting at it. " +
+      "`freqShifter` MOVES EVERY FREQUENCY BY THE SAME NUMBER OF Hz, WHICH " +
+      "IS NOT WHAT A PITCH SHIFTER DOES. A pitch shifter MULTIPLIES every " +
+      "frequency by the same ratio, so a note stays a note; this ADDS a " +
+      "fixed number of Hz to every frequency, so a note built from " +
+      "100/200/300 Hz becomes 200/300/400 Hz - no longer a harmonic series, " +
+      "and the ear hears METAL or a BELL rather than a pitch. \u26d4 IT WILL " +
+      "NOT PLAY IN TUNE AND THAT IS THE POINT; reach for a pitch shifter if " +
+      "you want in-tune. It is also NOT `ringMod`: a ring modulator emits " +
+      "BOTH the sum and the difference (double-sideband) while this emits " +
+      "ONE of them (single-sideband, the unwanted one rejected by about " +
+      "50 dB). Use it for bells, clangs, metallic textures and alien " +
+      "timbres at large settings (hundreds of Hz), and - the classic trick - " +
+      "for a slow beating, swirling thickness at TINY settings of 1-20 Hz " +
+      "via `fineHz`, which is also the oldest fix in live sound for a " +
+      "microphone on the edge of feedback. `shiftHz` is coarse and `fineHz` " +
+      "is fine; they are ADDED, and THE SIGN IS THE DIRECTION (positive up, " +
+      "negative down) so it sweeps smoothly through zero with no separate " +
+      "switch. `stereoSpreadHz` shifts the two sides by different amounts " +
+      "for a churning stereo image (1-6 Hz is the sweet spot; it partly " +
+      "cancels in mono). \u26a0\ufe0f Shifting DOWN by more than a sound's own " +
+      "frequency pushes it below 0 Hz and it REFLECTS back up - 100 Hz " +
+      "shifted -300 Hz returns at 200 Hz - which is real analog behaviour, " +
+      "not a fault. At `mix` 0 it is BIT-EXACT DRY and it adds ZERO latency. " +
+      "`transientShaper` CHANGES HOW HARD A SOUND STARTS AND HOW LONG IT " +
+      "RINGS, AND NOTHING IN BETWEEN. It is the kind for 'more punch', " +
+      "'snappier drums', 'tame the click', 'tighter/drier kit', 'make the " +
+      "snare hit harder' or 'less room on the drums'. ⛔ IT IS NOT A " +
+      "COMPRESSOR AND IT HAS NO THRESHOLD, deliberately: a compressor " +
+      "responds to absolute LEVEL, so its setting means something different " +
+      "at every fader position, while this responds to how fast the signal " +
+      "is rising or falling relative to ITS OWN running average. It compares " +
+      "the sound to ITSELF, so turning the track down does NOT turn the " +
+      "effect down, and the same setting works on a quiet stem and a hot " +
+      "one. Params: `attackDb` (-20 to 20, default 0) is PUNCH - the front " +
+      "of each hit; `sustainDb` (-20 to 20, default 0) is BODY - the " +
+      "ring-out after it, where POSITIVE LENGTHENS the tail and NEGATIVE " +
+      "SHORTENS it (that catches people out). The two are INDEPENDENT by " +
+      "construction: moving one does not move the other, which is the whole " +
+      "reason to use this instead of a compressor. `attackMs` (0.1-50, " +
+      "default 5, logarithmic) is how long the front of a sound COUNTS as " +
+      "the hit - not a fade and not a delay; `sustainMs` (20-1000, default " +
+      "200, logarithmic) is how far into the tail the body control reaches. " +
+      "`outputDb` (-24 to 24, default 0) is a plain trim and it is " +
+      "LOAD-BEARING, not a nicety: adding punch genuinely raises loudness, " +
+      "so trim until the shaped and unshaped versions measure the same and " +
+      "what is left is the punch. `mix` (0-1, default 1) blends it back. " +
+      "⭐ THE dB NUMBERS ARE MAXIMA, NOT PROMISES: the full amount lands " +
+      "only where a hit starts at least 12 dB above its own running average, " +
+      "and a softer or slower sound gets proportionally less - which is what " +
+      "makes it sound natural rather than pumping. ⚠️ NOTHING HAPPENS AT " +
+      "ALL below -70 dBFS, deliberately, so room tone and noise are never " +
+      "shaped; that is the answer to 'why did nothing happen on my quiet " +
+      "stem'. ⚠️ It also does nothing audible on material with no onsets - a " +
+      "held pad or a sustained chord - and that is correct rather than a " +
+      "fault. ⚠️ A positive `attackDb` RAISES PEAKS, so check headroom. " +
+      "At its defaults it is BIT-EXACT DRY (identical output, sample for " +
+      "sample) and it adds ZERO latency. ⭐ ASK FOR THE STATED NUMBERS " +
+      "RATHER THAN GUESSING: the `params` object in EVERY fx_add and " +
+      "fx_set_param RESULT - and in project_snapshot - carries " +
+      "`attackWindowMs` (how long the full punch lasts for this instance, " +
+      "about 0.29x `attackMs`), `fullShapeDifferentialDb` (the 12 dB that " +
+      "'maximum' is measured against) and `detectorFloorDb` (the -70). " +
+      "⚠️ They are PER-INSTANCE or CONSTANT echoes and are NOT in " +
+      "fx_describe, which returns the static schema (name/min/max/default/" +
+      "curve) and no values at all. " +
+      "`clipper` PUTS A HARD CEILING ON THE WAVEFORM AND CUTS OFF EVERYTHING " +
+      "ABOVE IT. It is the kind for 'louder', 'make the drums hit harder', " +
+      "'more density', 'squeeze the master' and 'aggressive/crunchy'. " +
+      "⛔ IT IS NOT `saturator`: tanh only ever APPROACHES its limit, so a " +
+      "saturator can never promise a peak ceiling, while BOTH of this kind's " +
+      "modes reach the ceiling at a finite input and stay there. ⛔ It is " +
+      "also NOT `limiter`: a limiter rides a GAIN to keep peaks down and " +
+      "keeps the waveform's shape, while this deforms the waveform on " +
+      "purpose - which is where the loudness and the bite come from. Use a " +
+      "limiter when it must not be heard and this when you want to hear it; " +
+      "a clipper BEFORE a limiter is the standard mastering pair. Params: " +
+      "`ceilingDb` (-24 to 0, default -0.3) is the ceiling in dBFS; " +
+      "`driveDb` (-12 to 36, default 0) is how hard the sound is pushed into " +
+      "it. ⭐ NEITHER KNOB ALONE SAYS WHERE CLIPPING STARTS - that is " +
+      "`ceilingDb - driveDb` at the INPUT, echoed as `clipThresholdDbfs`. " +
+      "`mode` (0 hard, 1 soft, default 0) is the shape of the cut: hard " +
+      "slices flat and is the bright aggressive one, soft bends into the " +
+      "ceiling through a knee and leaves quiet material completely " +
+      "untouched. ⭐ `oversampling` (1, 2 or 4, default 4) IS THE QUALITY " +
+      "CONTROL AND THE REASON THIS KIND EXISTS: chopping a wave creates " +
+      "tones above what digital audio can store, which FOLD BACK into the " +
+      "music as a thin metallic fizz unrelated to anything playing. Running " +
+      "the shaper at 2x or 4x moves that fold out of the way. 1 turns it OFF " +
+      "and is a REAL setting - plenty of records want the grit, and it is " +
+      "the only way to hear what 4 is removing. Only 1, 2 and 4 exist; 3 " +
+      "rounds UP. `mix` (0-1, default 1) blends the clipped and dry signals " +
+      "for parallel clipping; `outputDb` (-24 to 24, default 0) is a trim " +
+      "and it is LOAD-BEARING, because clipping makes things louder and " +
+      "louder always sounds better - trim until the two versions measure the " +
+      "same and what is left is the character. ⚠️ THE CEILING IS A SAMPLE " +
+      "CEILING, NOT A TRUE-PEAK ONE: samples are bounded exactly, but the " +
+      "wave drawn through them can ride up to about a decibel higher between " +
+      "samples, which is what a broadcast meter reads. Follow with a " +
+      "`limiter` at `truePeak` 1 if you need that guarantee. ⚠️ A positive " +
+      "`outputDb` raises the real maximum to `ceilingDb + outputDb`, echoed " +
+      "as `wetCeilingDbfs`. ⛔ UNLIKE EVERY OTHER BUILT-IN EXCEPT `limiter` " +
+      "THIS KIND REPORTS LATENCY: a CONSTANT 32 samples, the same at every " +
+      "`oversampling` setting including 1, which delay compensation removes " +
+      "automatically. At `mix` 0 the output is the input delayed by exactly " +
+      "those 32 samples, sample for sample - not an untouched buffer. ⭐ ASK " +
+      "FOR THE STATED NUMBERS RATHER THAN GUESSING: the `params` object in " +
+      "EVERY fx_add and fx_set_param RESULT - and in project_snapshot - " +
+      "carries `clipThresholdDbfs`, `wetCeilingDbfs`, `resolvedMode`, " +
+      "`resolvedOversampling` (the SNAPPED values the render thread actually " +
+      "uses), `latencySamples` and `aliasRejectionDb`. ⚠️ They are " +
+      "PER-INSTANCE or CONSTANT echoes and are NOT in fx_describe, which " +
+      "returns the static schema (name/min/max/default/curve) and no values " +
+      "at all. " +
+      "`dynamicEQ` IS A FOUR-BAND DYNAMIC EQUALIZER - an EQ band whose gain " +
+      "moves on its own once the signal crosses a threshold, so it corrects " +
+      "only the moment that needs it. It is the LARGEST kind in the app: 32 " +
+      "params, `band1Mode`...`band4ReleaseMs`, BAND-MAJOR " +
+      "(`slot = (band-1)*8 + p`) - call fx_describe {kind: \"dynamicEQ\"} for " +
+      "the full table with a teaching note on every one rather than reading " +
+      "it off here. BELLS ONLY in v1, no shelves. Each band has: `bandNMode` " +
+      "(0 OFF/default - a TRUE no-op, the filter is not even run, so a " +
+      "freshly added instance is bit-for-bit transparent; 1 ABOVE, triggers " +
+      "when the level INSIDE THE BAND rises past `bandNThresholdDb`; 2 " +
+      "BELOW, triggers when it falls under it); `bandNFreq`/`bandNQ` (the " +
+      "band's centre and width - ⚠️ THIS Q IS NOT `eq`'s Q: at 1 kHz, Q 2, " +
+      "this band is about 704 Hz wide where an `eq` peaking band is about " +
+      "498 Hz, and unlike `eq` this band WIDENS as it works harder, so " +
+      "porting a Q value across kinds will not sound the same); " +
+      "`bandNThresholdDb`/`bandNRatio` (when and how hard it reacts); " +
+      "`bandNRangeDb` (how far it may move AND which way - negative cuts, " +
+      "positive boosts, a hard cap so the band can never overshoot); " +
+      "`bandNAttackMs`/`bandNReleaseMs`. ⭐ `bandNMode` TIMES THE SIGN OF " +
+      "`bandNRangeDb` GIVES FOUR MUSICAL MOVES FROM TWO KNOBS: above + " +
+      "negative (the default sign) de-esses or tames a resonance - turns " +
+      "the band down when it gets loud; above + positive turns it up when " +
+      "it gets loud, exaggerating a transient; below + positive restores " +
+      "air under a quiet passage; below + negative is one-band downward " +
+      "expansion. ⚠️ `bandNMode: 2` (below) SITS AT FULL RANGE ON SILENCE " +
+      "AND THAT IS CORRECT, NOT A BUG - digital silence reads as -180 dBFS " +
+      "in the band, under every threshold, so a below band is fully " +
+      "triggered by silence. There is NO per-band `mix` (a band with " +
+      "`bandNRangeDb: 0` already does nothing, bit-for-bit) and NO " +
+      "lookahead, so this kind adds ZERO LATENCY at every setting of every " +
+      "param, and NO gain-reduction meter in v1 - poll fx_spectrum during " +
+      "playback to see a band actually moving instead. Every `fx_add`/" +
+      "`fx_set_param` result (NOT fx_describe) echoes `band1ModeLabel`..." +
+      "`band4ModeLabel` (the SNAPPED mode as a string, \"off\"/\"above\"/" +
+      "\"below\"), `latencySamples` (always 0) and `kneeDb` (a fixed 6, not " +
+      "a param). ⚠️ `bandNMode` is DISCRETE: `fx_set_param` CLAMPS a stored " +
+      "value to 0-2 but does NOT round it to a whole number - the " +
+      "`clipper.mode` precedent (NOT `phaser.stages`, which genuinely " +
+      "SNAPS its stored value to an even number) - so a stored 1.5 renders " +
+      "off the SNAPPED value that `bandNModeLabel` echoes; automate it with " +
+      "`hold`, never a ramp, and modulation refuses it outright. " +
+      "`bandNFreq`/`bandNQ` are filter corners and modulation WARNS on them " +
+      "(they zipper at any rate, the `eq.peak1Freq` problem). ⚠️⚠️ BUDGET: " +
+      "automation lanes and modulated effect params SHARE ONE 64-entry cap " +
+      "per mixer strip, and ONE fully-automated dynamicEQ instance is 32 of " +
+      "them - half a strip. `mod_add_route` refuses past the cap and names " +
+      "both contributors, but `automation_add_lane` does NOT check it - " +
+      "past 64 the render schedule keeps only the FIRST 64 effect-param " +
+      "tracks and drops the rest with no error and no warning, so a lane " +
+      "that reports success can still do nothing at render time. Automate " +
+      "the bands you are actually riding rather than all four on two " +
+      "instances at once. " +
       "`audioUnit` hosts an " +
       "installed Audio Unit EFFECT plugin — third-party or Apple effects registered " +
       "with the system — selected via fx_add's `audioUnit` param (REQUIRED when this " +
@@ -4732,7 +5679,7 @@ registerTool(
       "mix's master output chain (post-fader, the last stop before the speakers) instead " +
       "of a track/bus. The master chain hosts BUILT-IN effects only in v1 — `kind: " +
       "\"audioUnit\"` on \"master\" is rejected (pick one of gain|eq|compressor|limiter|" +
-      "reverb|delay|saturator|gate|chorus|bassEnhancer|bitCrusher|djFilter|ringMod|flanger|hallReverb|tapeDelay|stereoWidth|phaser). Classic mastering move: fx_add {trackId: " +
+      "reverb|delay|saturator|gate|chorus|bassEnhancer|bitCrusher|djFilter|ringMod|flanger|hallReverb|tapeDelay|stereoWidth|phaser|transientShaper|freqShifter|clipper|dynamicEQ). Classic mastering move: fx_add {trackId: " +
       "\"master\", kind: \"eq\"} then {trackId: \"master\", kind: \"limiter\"}, then " +
       "render_measure_loudness to check the level. Returns " +
       "`{effectId, effects}`: the new effect's server-minted id, and the track's full " +
@@ -5590,7 +6537,12 @@ server.registerTool(
       "to list every available kind at once. Available kinds: `gain` (simple linear " +
       "gain stage), `eq` (parametric — low shelf, two peaking bands, high shelf, plus " +
       "optional high/low-pass filters, shelf Q, and per-band `*Enabled` bypass), " +
-      "`compressor` (soft-knee, stereo-linked dynamics), `limiter` (lookahead " +
+      "`compressor` (soft-knee, stereo-linked dynamics — AND the de-esser: "  +
+      "`detectorMode` 0 = off and bit-for-bit the classic compressor, 1 = BAND-PASS "  +
+      "detector around `detectorFreqHz`, 2 = HIGH-PASS. \u26d4 There is no separate "  +
+      "`deEsser` kind; a de-esser IS a compressor that only listens to the sibilant "  +
+      "band. Wideband, so the whole signal ducks for the length of the 'sss' and it "  +
+      "adds ZERO latency), `limiter` (lookahead " +
       "brick-wall, adds 5 ms latency — see project_snapshot's per-effect `latencySamples`), " +
       "`reverb` (Freeverb-style room — roomSize/damping/mix/preDelayMs/width; ⚠️ `roomSize` " +
       "is really a DECAY control - the comb lengths are fixed constants, so " +
@@ -5609,7 +6561,14 @@ server.registerTool(
       "the tail, and anything you keep feeding it builds toward 1/(1-feedback) times " +
       "itself — to USE a freeze, put the delay on a bus and pull the send to 0), " +
       "`saturator` (tanh drive " +
-      "color — driveDb/mix/outputDb), `gate` (noise gate — thresholdDb/attackMs/holdMs/" +
+      "colour — driveDb/mix/outputDb/oversampling: BENDS the wave instead of cutting " +
+      "it, so it can never promise a ceiling the way `clipper` can. ⭐ " +
+      "`oversampling` 1/2/4 DEFAULTS TO 1 - the opposite of `clipper`'s 4 - because " +
+      "this kind shipped before the control existed and projects already using one " +
+      "must keep sounding identical; at 1 it is bit-for-bit what it always was. Set " +
+      "it to 4 on a new insert you are driving hard. ⚠⚠ It CHANGES THE " +
+      "LATENCY here (0 at 1, 32 at 2/4), unlike `clipper`; it is DISCRETE and " +
+      "neither automatable nor modulatable), `gate` (noise gate — thresholdDb/attackMs/holdMs/" +
       "releaseMs), `chorus` (2-voice modulated thickener — rateHz/depthMs/mix), and " +
       "`bassEnhancer` (psychoacoustic bass enhancer — crossoverHz/amount/mix: it " +
       "generates the 2nd/3rd/4th harmonics of the sub-crossover content and adds them " +
@@ -5699,7 +6658,94 @@ server.registerTool(
       "deepest. \u26a0\ufe0f `mix` 1 with `feedback` 0 is very nearly " +
       "INAUDIBLE and that is correct: an all-pass chain alone changes no " +
       "frequency's level, so with no dry signal to cancel against there is " +
-      "nothing to hear).",
+      "nothing to hear), and " +
+      "`transientShaper` (attackDb/sustainDb/attackMs/sustainMs/outputDb/mix: " +
+      "changes how HARD a sound starts and how LONG it rings, and nothing " +
+      "in between. \u26d4 NOT a compressor and it has NO threshold - it " +
+      "responds to how fast the signal is rising or falling relative to its " +
+      "OWN running average, so it compares the sound to ITSELF and turning " +
+      "the track down does not turn the effect down. `attackDb` is PUNCH " +
+      "(the front of each hit) and `sustainDb` is BODY (the ring-out after " +
+      "it), and the two are INDEPENDENT by construction - moving one does " +
+      "not move the other. \u26a0\ufe0f A POSITIVE `sustainDb` LENGTHENS " +
+      "the tail and a negative one SHORTENS it, which catches people out. " +
+      "\u2b50 The dB numbers are MAXIMA, not promises: the full amount " +
+      "lands only on a hit that starts at least 12 dB above its own running " +
+      "average, and every fx_add / fx_set_param result echoes " +
+      "`attackWindowMs`, `fullShapeDifferentialDb` and `detectorFloorDb` in " +
+      "that effect's `params` (NOT here in fx_describe, which carries " +
+      "schemas and no values). Nothing at all happens below -70 dBFS, so " +
+      "room tone is never shaped, and nothing audible happens on material " +
+      "with no onsets such as a held pad - both deliberate. At its defaults " +
+      "it is BIT-EXACT DRY and it adds ZERO latency), and " +
+      "`freqShifter` (shiftHz/fineHz/stereoSpreadHz/mix/outputDb: moves " +
+      "every frequency by the same number of Hz rather than by the same " +
+      "RATIO, which is what a pitch shifter does. \u26d4 IT DOES NOT PLAY IN " +
+      "TUNE, deliberately - adding a constant to every partial destroys the " +
+      "harmonic series, so 100/200/300 Hz becomes 200/300/400 Hz and the " +
+      "result reads as a bell or a sheet of metal. \u26d4 NOT the same as " +
+      "`ringMod` either: that one is double-sideband and emits both the sum " +
+      "and the difference, while this is single-sideband and emits one, the " +
+      "other rejected by about 50 dB. `shiftHz` (coarse) and `fineHz` " +
+      "(fine) are ADDED and their sum is capped at the coarse range; THE " +
+      "SIGN IS THE DIRECTION, so it sweeps through zero without a mode " +
+      "switch. Tiny values of 1-20 Hz on `fineHz` give slow beating and " +
+      "chorus-like thickness rather than an audible shift. Every fx_add / " +
+      "fx_set_param result echoes `effectiveShiftHz`, " +
+      "`sidebandRejectionDb` and `hilbertPhaseErrorDeg` in that effect's " +
+      "`params` (NOT here in fx_describe, which carries schemas and no " +
+      "values). Shifting down past 0 Hz REFLECTS back up. At `mix` 0 it is " +
+      "BIT-EXACT DRY and it adds ZERO latency), and " +
+      "`clipper` (driveDb/ceilingDb/mode/oversampling/mix/outputDb: a HARD " +
+      "CEILING - everything above `ceilingDb` is cut off, which is how loud " +
+      "masters and hard-hitting drums are actually made. ⛔ NOT " +
+      "`saturator`, and the difference is exact rather than a matter of " +
+      "degree: tanh only APPROACHES its bound, so a saturator can never " +
+      "promise a ceiling, while both modes here reach it at a finite input. " +
+      "⛔ NOT `limiter` either - a limiter rides a gain and keeps the " +
+      "waveform's shape; this deforms it on purpose. Clipping starts at an " +
+      "INPUT level of `ceilingDb - driveDb`, echoed as `clipThresholdDbfs`. " +
+      "⭐ `oversampling` (1/2/4, default 4) is the quality control and " +
+      "the reason the kind exists: clipping makes tones above Nyquist that " +
+      "FOLD BACK as an inharmonic metallic fizz, and 2x or 4x moves the fold " +
+      "out of the audio band. 1 is a real setting that lets the fizz " +
+      "through. ⚠️ The ceiling bounds SAMPLES, not TRUE PEAK - the " +
+      "wave between samples can ride about a decibel higher; follow with a " +
+      "`limiter` at `truePeak` 1 if you need that guarantee. ⚠️ " +
+      "`mode` and `oversampling` are DISCRETE: automate them with `hold`, " +
+      "never a ramp. Every fx_add / fx_set_param result echoes " +
+      "`clipThresholdDbfs`, `wetCeilingDbfs`, `resolvedMode`, " +
+      "`resolvedOversampling`, `latencySamples` and `aliasRejectionDb` in " +
+      "that effect's `params` (NOT here in fx_describe, which carries " +
+      "schemas and no values). ⛔ UNLIKE EVERY OTHER BUILT-IN EXCEPT " +
+      "`limiter` THIS ONE REPORTS LATENCY - a constant 32 samples at every " +
+      "`oversampling` setting, removed automatically by delay compensation - " +
+      "so at `mix` 0 the output is the input DELAYED BY 32 SAMPLES, sample " +
+      "for sample, rather than an untouched buffer), and " +
+      "`dynamicEQ` (a FOUR-BAND DYNAMIC EQ, the largest kind in the app at " +
+      "32 params, band-major - band1Mode/band1Freq/band1Q/" +
+      "band1ThresholdDb/band1Ratio/band1RangeDb/band1AttackMs/" +
+      "band1ReleaseMs repeated for bands 2-4: an EQ band whose gain moves " +
+      "only once the signal crosses a threshold. Bells only, no shelves. " +
+      "`bandNMode` 0 off (default, a true no-op) / 1 above threshold / 2 " +
+      "below threshold, and it is DISCRETE - fx_set_param clamps it to " +
+      "0-2 but does not round it, the clipper.mode precedent (NOT " +
+      "phaser.stages, which really does snap its stored value), so every " +
+      "fx_add/fx_set_param result echoes the SNAPPED " +
+      "truth as `band1ModeLabel`...`band4ModeLabel` (NOT here in " +
+      "fx_describe). `bandNMode` times the SIGN of `bandNRangeDb` gives " +
+      "four moves from two knobs: above+negative de-esses, above+positive " +
+      "excites, below+positive restores air on a quiet passage, " +
+      "below+negative is downward expansion. ⚠️ THIS Q IS NOT `eq`'s Q - " +
+      "at 1 kHz Q 2 this band is about 704 Hz wide against `eq`'s 498 Hz, " +
+      "and it widens as it works harder. No `mix`, no lookahead, ZERO " +
+      "latency at every setting, and no gain-reduction meter in v1 - use " +
+      "fx_spectrum to see a band move. ⚠️⚠️ BUDGET: automation lanes and " +
+      "modulated params share ONE 64-entry cap per strip, and one fully " +
+      "automated instance is 32 of them, half a strip; `mod_add_route` " +
+      "refuses past the cap but `automation_add_lane` does not check it, " +
+      "so past 64 the render schedule silently keeps only the first 64 " +
+      "tracks).",
     inputSchema: {
       kind: fxKindSchema.optional().describe("Effect kind to describe. Omit to list every available kind."),
     },
@@ -10252,11 +11298,21 @@ const automationTargetSchema = z
       "reverb-mix rises, delay-feedback build-ups, etc.; built-in kinds (gain, eq, " +
       "compressor, limiter, reverb, delay, saturator, gate, chorus, bassEnhancer, " +
       "bitCrusher, djFilter, ringMod, flanger, hallReverb, tapeDelay, stereoWidth, " +
-      "phaser) " +
+      "phaser, transientShaper, freqShifter, clipper, dynamicEQ) " +
       "work today. \u26d4 ONE EXCEPTION WORTH KNOWING: `phaser`'s `stages` is " +
       "DISCRETE - draw it with `hold` interpolation, never a ramp, because a " +
       "count change clears the all-pass state and a ramp would re-clear it " +
-      "every block. \u2b50 `stereoWidth`'s `width` is a lane worth drawing - " +
+      "every block. THE SAME APPLIES TO `clipper`'s `mode` AND its " +
+      "`oversampling`, for the same reason - changing the factor clears the " +
+      "oversampling filters. \u26d4\u26d4 AND `saturator`'s `oversampling` IS " +
+      "REFUSED OUTRIGHT - not 'draw it with hold', REFUSED: creating a lane on it " +
+      "errors like an unknown param name. That kind's LATENCY depends on the factor " +
+      "(0 samples at 1, 32 at 2/4), and delay compensation is recomputed only when " +
+      "you edit the parameter directly, so a lane moving it mid-render would leave " +
+      "the whole project's compensation stale. Use fx_set_param between sections " +
+      "instead. The identically named param on `clipper` IS automatable, because " +
+      "that kind's latency is a constant 32 at every factor. " +
+      "\u2b50 `stereoWidth`'s `width` is a lane worth drawing - " +
       "narrow in the verse, open out on the chorus - and it is one of the " +
       "few automatable params with NO caveat at all: it is a plain gain on " +
       "the stereo difference, so a ramp cannot click, cannot glide the pitch " +
@@ -10274,6 +11330,21 @@ const automationTargetSchema = z
       "canonical lane to draw: one bipolar knob from -0.8 to +0.8 over 8 bars IS " +
       "the DJ filter sweep, and that effect smooths its own coefficients " +
       "internally so the sweep does not zipper. " +
+      "⛔ `dynamicEQ`'s `bandNMode` is DISCRETE the same way `phaser`'s " +
+      "`stages` and `clipper`'s `mode` are: draw it with `hold`, never a " +
+      "ramp, and note modulation refuses it outright (this kind's " +
+      "`bandNFreq`/`bandNQ` are WARNED instead, the `eq.peak1Freq` filter- " +
+      "coefficient problem). ⚠⚠ `dynamicEQ` IS THE ONE KIND WHERE " +
+      "AUTOMATING EVERYTHING IS A REAL RISK, NOT JUST A STYLE CHOICE: " +
+      "automation lanes and modulated effect params share ONE 64-entry cap " +
+      "PER STRIP, and this kind's 32 params make one fully-automated " +
+      "instance HALF that budget on its own. `mod_add_route` refuses past " +
+      "the cap and names both contributors — but `automation_add_lane` does " +
+      "NOT check it, so adding a lane past 64 still returns success while " +
+      "the render schedule silently keeps only the first 64 effect-param " +
+      "tracks and drops the rest with no warning anywhere on the wire. " +
+      "Automate the bands you are actually riding rather than every band of " +
+      "two instances at once. " +
       "`effectParam` is REJECTED in v0 when the effect is a hosted Audio Unit " +
       "(`kind: \"audioUnit\"` from fx_add), since its generic parameter surface is empty."
   );

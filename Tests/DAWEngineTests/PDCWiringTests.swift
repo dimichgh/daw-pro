@@ -218,4 +218,113 @@ struct PDCWiringTests {
         #expect(report.strips[dry.id]?.compensationSamples == 0)
         #expect(report.strips[fxTrack.id]?.compensationSamples == 0)
     }
+
+    // MARK: - m39-ad: a PARAMETER that moves a latency
+
+    /// ⛔⛔ **THE HARDEST CORRECTNESS QUESTION IN m39-ad, ASKED OF THE LIVE
+    /// ENGINE RATHER THAN OF THE EFFECT.**
+    ///
+    /// Every other built-in's `latencySamples` is a constant, or a function of
+    /// the sample rate, and `.clipper` went out of its way to KEEP it constant
+    /// across its `oversampling` parameter precisely because "param edits never
+    /// republish the chain" (`EffectRendering`) — a latency that moved with a
+    /// knob would silently stale the PDC plan with every unit test still green.
+    ///
+    /// `.saturator` cannot take that way out: it is a SHIPPED kind, and
+    /// reporting 32 samples at its default would shift every saved project. So
+    /// it reports 0 at factor 1 and 32 at 2/4, and the staleness is closed
+    /// differently — the factor moves ONLY on a main-actor `apply(params:)`,
+    /// which always runs inside `PlaybackGraph.applyParameters`, whose TAIL
+    /// calls `recomputeCompensation`.
+    ///
+    /// ⭐ THIS TEST IS THE PROOF OF THAT CLAIM, AND IT IS NOT AN ARGUMENT ABOUT
+    /// THE CODE: it drives the REAL `ProjectStore → AudioEngine` path with a
+    /// plain `fx.setParam` and reads the PLAN back. If the recompute ever stops
+    /// happening on a parameter edit, the plan stops moving here and this
+    /// reddens — while `SaturatorOversamplingTests` stays entirely green,
+    /// because nothing in the effect itself would be wrong.
+    @Test("m39-ad: a saturator's oversampling edit moves the LIVE PDC plan, in the same pass")
+    func saturatorOversamplingEditDrivesTheEngineRecompute() throws {
+        let engine = AudioEngine()  // never prepared — no hardware started
+        let store = ProjectStore()
+        store.engine = engine
+
+        let dry = store.addTrack(name: "Dry", kind: .audio)
+        let fxTrack = store.addTrack(name: "Saturated", kind: .audio)
+        let effect = try store.addEffect(toTrack: fxTrack.id, kind: .saturator)
+
+        // ── the DEFAULT costs nothing, which is the whole of m39-ad ──────────
+        #expect(store.effectLatencySamples(trackID: fxTrack.id, effectID: effect.id) == 0,
+                Comment(rawValue: "a freshly added saturator reports "
+                    + "\(store.effectLatencySamples(trackID: fxTrack.id, effectID: effect.id)) "
+                    + "samples — at the default it must report 0, or every existing project "
+                    + "containing one shifts in time"))
+        var report = try #require(store.pdcReport())
+        #expect(report.maxPathLatencySamples == 0)
+        #expect(report.strips[dry.id]?.compensationSamples == 0)
+
+        // ── turn the knob to 4: the PLAN must move, not just the effect ──────
+        _ = try store.setEffectParam(trackID: fxTrack.id, effectID: effect.id,
+                                     name: "oversampling", value: 4)
+        let oversampled = store.effectLatencySamples(trackID: fxTrack.id, effectID: effect.id)
+        #expect(oversampled == OversamplerDesign.latencySamples, Comment(rawValue:
+            "the effect reports \(oversampled) samples at oversampling 4, expected "
+            + "\(OversamplerDesign.latencySamples)"))
+        report = try #require(store.pdcReport())
+        #expect(report.strips[fxTrack.id]?.chainLatencySamples == oversampled, Comment(rawValue:
+            "the CHAIN still reports "
+            + "\(report.strips[fxTrack.id]?.chainLatencySamples ?? -1) — `EffectChainState"
+            + ".latencySamples` did not see the new value in the pass that published it"))
+        #expect(report.maxPathLatencySamples == oversampled, Comment(rawValue:
+            "the PDC PLAN still reports \(report.maxPathLatencySamples). The latency moved and "
+            + "the plan did not: every other strip is now 32 samples out of alignment and "
+            + "nothing else in this tree can see it."))
+        #expect(report.strips[dry.id]?.compensationSamples == oversampled, Comment(rawValue:
+            "the dry strip did not pad to the saturated strip's new latency"))
+
+        // ── and back to 1: it must UN-move, not latch ────────────────────────
+        _ = try store.setEffectParam(trackID: fxTrack.id, effectID: effect.id,
+                                     name: "oversampling", value: 1)
+        #expect(store.effectLatencySamples(trackID: fxTrack.id, effectID: effect.id) == 0)
+        report = try #require(store.pdcReport())
+        #expect(report.maxPathLatencySamples == 0, Comment(rawValue:
+            "the plan latched at \(report.maxPathLatencySamples) after the factor went back "
+            + "to 1 — a one-way latency is as stale as a stuck one"))
+        #expect(report.strips[dry.id]?.compensationSamples == 0)
+
+        // ── 2 costs the same 32 as 4: it is the FILTER's delay, not the ──────
+        //    factor's, so only "1 versus not-1" moves the number.
+        _ = try store.setEffectParam(trackID: fxTrack.id, effectID: effect.id,
+                                     name: "oversampling", value: 2)
+        #expect(store.effectLatencySamples(trackID: fxTrack.id, effectID: effect.id)
+                == OversamplerDesign.latencySamples)
+    }
+
+    /// ⭐ THE INVARIANCE CONTROL FOR THE TEST ABOVE. `.clipper` has an
+    /// IDENTICALLY NAMED parameter on the SAME primitive, and its latency must
+    /// NOT move with it — a constant 32 at every factor, including 1. If a
+    /// future edit "harmonises" the two kinds, one of them becomes a regression:
+    /// the clipper's factor is AUTOMATABLE, so a moving latency there really
+    /// would stale the plan from the render thread.
+    @Test("m39-ad control: the CLIPPER's oversampling edit does NOT move any latency")
+    func clipperOversamplingEditLeavesTheLatencyAlone() throws {
+        let engine = AudioEngine()
+        let store = ProjectStore()
+        store.engine = engine
+
+        let fxTrack = store.addTrack(name: "Clipped", kind: .audio)
+        let effect = try store.addEffect(toTrack: fxTrack.id, kind: .clipper)
+        let atDefault = store.effectLatencySamples(trackID: fxTrack.id, effectID: effect.id)
+        #expect(atDefault == OversamplerDesign.latencySamples)
+        for factor in [1.0, 2.0, 4.0] {
+            _ = try store.setEffectParam(trackID: fxTrack.id, effectID: effect.id,
+                                         name: "oversampling", value: factor)
+            #expect(store.effectLatencySamples(trackID: fxTrack.id, effectID: effect.id)
+                    == atDefault, Comment(rawValue:
+                        "the clipper's latency moved to "
+                        + "\(store.effectLatencySamples(trackID: fxTrack.id, effectID: effect.id)) "
+                        + "at factor \(factor) — it must be constant, because that kind's "
+                        + "factor can be moved from an automation lane"))
+        }
+    }
 }

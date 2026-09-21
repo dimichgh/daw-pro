@@ -66,6 +66,7 @@ struct InstrumentChip: View {
         case .sampler: return "square.stack.3d.up"
         case .soundBank: return "pianokeys"
         case .audioUnit: return "puzzlepiece.extension.fill"
+        case .drumSynth: return "circle.grid.2x2.fill"
         }
     }
 

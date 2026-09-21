@@ -90,6 +90,20 @@ struct PadGridSiteTests {
         // a THROWAWAY controller, so a `rebind`-only install would leave the
         // pads pushing at a sink nothing else can see.
         #expect(staging.contains("padGrid = PadGridModel(typing: musicalTyping"))
+
+        // ⛔⛔ **THE LET GO INJECTORS, AND THEY ARE PINNED FOR THE SAME REASON AS
+        // THE REST OF THIS TEST** (m39-pads-2). `rebind`'s `oneShot:` and
+        // `setOneShot:` both DEFAULT — delete these two lines and the package
+        // still compiles, every `PadGridTests` case still passes (they inject
+        // their own), and the LET GO row draws dimmed as "not a sampler" over a
+        // sampler holding 53 slices. Self-consistent, dead, and shaped exactly
+        // like the legitimate non-sampler state. A default is a silent failure
+        // with a compiler-shaped alibi.
+        #expect(staging.contains("oneShot: { [unowned self] in self.padGridOneShot() }"))
+        #expect(staging.contains("setOneShot: { [unowned self] on in self.padGridSetOneShot(on) }"))
+        // …and the write goes to the SAME one home the sampler card uses, not a
+        // second mutation path of its own.
+        #expect(staging.contains("store.setInstrument(id: id, sampler: params)"))
     }
 
     /// ⚠️ The same-track mute guard cannot be reached behaviourally — see

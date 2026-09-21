@@ -3075,7 +3075,23 @@ public final class ProjectStore {
         case .sampler:   return a.resolvedSampler.zones != b.resolvedSampler.zones
         case .audioUnit: return a.audioUnit?.component != b.audioUnit?.component
         case .soundBank: return a.soundBank?.address != b.soundBank?.address
-        case .testTone, .polySynth: return false
+        // ⭐ m39-dm — `.drumSynth` FOLLOWS THE POLY-SYNTH RULE, NOT THE SAMPLER
+        // RULE, AND THAT IS A DECISION RATHER THAN A DEFAULT.
+        //
+        // A kit edit is a parameter overlay delivered as an atomic snapshot
+        // publish; it maps to the SAME engine node. Verified against the engine
+        // rather than assumed: `PlaybackGraph.InstrumentTrackKey` carries
+        // `kind`, `samplerZones`, `audioUnitComponent`, `soundBank` and `clips`
+        // — NO drum payload — so the graph does not rebuild on a kit change and
+        // this function must not claim it does.
+        //
+        // Returning `true` here would look harmless and would cost the user
+        // real behaviour: on any ROUTED strip (bus output, a send, or feeding a
+        // sidechain) `setInstrument` would then hit
+        // `requireRoutingMutationAllowed`, which throws `transportBusy` while
+        // recording. Every drum knob turn would refuse mid-take, with a
+        // sensible-looking error, for no reason.
+        case .testTone, .polySynth, .drumSynth: return false
         }
     }
 
@@ -3259,6 +3275,30 @@ public final class ProjectStore {
         case .tapeDelay: return "Tape Delay"
         case .stereoWidth: return "Stereo Width"
         case .phaser: return "Phaser"
+        // ⛔ m39-y. WITHOUT THIS LINE the `default:` below ships it as
+        // "TransientShaper" in every undo label — a cosmetic-looking bug that
+        // the compiler, `effect-kind-surface.mjs` (whole-file PRESENCE) and
+        // every existing test pass. `TransientShaperStoreTests` asserts it
+        // directly, because nothing else can.
+        case .transientShaper: return "Transient Shaper"
+        // ⛔ m39-z. Same trap, and this one ALSO has to fit the mixer's 85 pt
+        // insert-label budget: "Frequency Shifter" MEASURES 88.156 pt and does
+        // NOT fit, so the shipped name is "Frequency Shift" (78.153 pt).
+        // `InsertLabelBudgetTests` sweeps `Kind.allCases` and is the instrument.
+        case .freqShifter: return "Frequency Shift"
+        // ⛔ m39-ac. The `default:` arm below would ship this one as "Clipper"
+        // ANYWAY — `clipper`.capitalised IS the display name — so this line
+        // looks redundant and is not: a kind that relies on the default is a
+        // kind whose display name is an ACCIDENT of its raw value, and the
+        // next rename (or the next kind whose raw value is `deEsser`) inherits
+        // the bug this arm exists to prevent. `EffectChainStoreTests` pins it.
+        case .clipper: return "Clipper"
+        // ⛔⛔ m39-af, AND THIS ONE IS THE `default:` ARM'S OWN PREDICTION COMING
+        // TRUE: `dynamicEQ`.capitalised is "DynamicEQ", which is plausible
+        // enough to survive review and wrong in every undo label and every
+        // store-side display. Both display-name functions need it (the other is
+        // `MixerFormat.effectDisplayName`); the compiler catches neither.
+        case .dynamicEQ: return "Dynamic EQ"
         default: return kind.rawValue.prefix(1).uppercased() + kind.rawValue.dropFirst()
         }
     }
@@ -3692,6 +3732,16 @@ public final class ProjectStore {
             // m23-ck parallel compression: 1 fully wet (the default), 0 a
             // bit-exact bypass. Already clamped to 0…1 by the spec range.
             case "mix": params.mix = value
+            // m39-ae the de-esser. All three are already clamped to their spec
+            // ranges by the caller; `detectorMode` is stored UNSNAPPED on
+            // purpose — the `phaser.stages` / `clipper.mode` precedent, where
+            // the store keeps what was asked for and the render thread snaps
+            // through the one home (`CompressorParams.detectorMode(at:)`). The
+            // wire echoes `resolvedDetectorMode` so the difference is visible
+            // rather than a surprise.
+            case "detectorMode": params.detectorMode = value
+            case "detectorFreqHz": params.detectorFreqHz = value
+            case "detectorQ": params.detectorQ = value
             default: return
             }
             effect.compressor = params
@@ -3745,6 +3795,11 @@ public final class ProjectStore {
             case "driveDb": params.driveDb = value
             case "mix": params.mix = value
             case "outputDb": params.outputDb = value
+            // m39-ad. Stored UNSNAPPED, exactly like `clipper.oversampling` and
+            // `phaser.stages`: the setter clamps to the range but does not snap,
+            // so a stored 3 renders as 4. `resolvedOversampling` on the wire is
+            // what the render thread actually uses.
+            case "oversampling": params.oversampling = value
             default: return
             }
             effect.saturator = params
@@ -3907,6 +3962,50 @@ public final class ProjectStore {
             default: return
             }
             effect.phaser = params
+        case .transientShaper:
+            var params = effect.resolvedTransientShaper
+            switch name {
+            case "attackDb": params.attackDb = value
+            case "sustainDb": params.sustainDb = value
+            case "attackMs": params.attackMs = value
+            case "sustainMs": params.sustainMs = value
+            case "outputDb": params.outputDb = value
+            case "mix": params.mix = value
+            default: return
+            }
+            effect.transientShaper = params
+        case .freqShifter:
+            var params = effect.resolvedFreqShifter
+            switch name {
+            case "shiftHz": params.shiftHz = value
+            case "fineHz": params.fineHz = value
+            case "stereoSpreadHz": params.stereoSpreadHz = value
+            case "mix": params.mix = value
+            case "outputDb": params.outputDb = value
+            default: return
+            }
+            effect.freqShifter = params
+        case .clipper:
+            var params = effect.resolvedClipper
+            switch name {
+            case "driveDb": params.driveDb = value
+            case "ceilingDb": params.ceilingDb = value
+            case "mode": params.mode = value
+            case "oversampling": params.oversampling = value
+            case "mix": params.mix = value
+            case "outputDb": params.outputDb = value
+            default: return
+            }
+            effect.clipper = params
+        case .dynamicEQ:
+            // m39-af — 32 names through the ONE name↔field home in DAWCore
+            // rather than a fourth hand-copied 32-case switch. `setValue`
+            // returns false for an unknown name, which is this switch's `return`
+            // (leave the descriptor untouched); `setEffectParam` has already
+            // clamped `value` to the spec range.
+            var params = effect.resolvedDynamicEQ
+            guard params.setValue(value, forParamName: name) else { return }
+            effect.dynamicEQ = params
         case .audioUnit:
             // Unreachable: specs(for: .audioUnit) is empty, so name validation
             // in setEffectParam rejects every name first. AU params are not
@@ -3973,7 +4072,23 @@ public final class ProjectStore {
         envelopeCurve: Double? = nil,
         sampler: SamplerParams? = nil,
         audioUnit: AudioUnitConfig? = nil,
-        soundBank: SoundBankConfig? = nil
+        soundBank: SoundBankConfig? = nil,
+        // ⛔⛔ m39-dm — THE DRUM KIT IS **TWO** ARGUMENTS, NOT SEVENTY-FIVE,
+        // AND THAT IS THE WHOLE POINT.
+        //
+        // This signature already carries 22 optionals, and the doc comment
+        // above records that every one of them must be hand-mirrored in the
+        // rebuild below or it DESTROYS ITSELF on every unrelated call. Seventy-
+        // five more would make that mirror-pair unmaintainable by construction
+        // — well past the point where a human can keep two lists in sync.
+        //
+        // So the kit travels wholesale (`drumKit`, the sampler/AU/soundBank
+        // precedent) or one NAME at a time (`drumParam`), and the overlay below
+        // is a `var` + in-place mutation rather than an initialiser argument
+        // list. A struct you mutate cannot drop a field it does not mention;
+        // an initialiser list can, silently, on every call.
+        drumKit: DrumKitParams? = nil,
+        drumParam: (name: String, value: Double)? = nil
     ) throws -> InstrumentDescriptor? {
         guard let index = tracks.firstIndex(where: { $0.id == id }) else { return nil }
         guard tracks[index].kind == .instrument else {
@@ -4001,6 +4116,36 @@ public final class ProjectStore {
         // one implies its kind when kind is omitted.
         let current = tracks[index].instrument ?? .default
         let p = current.polySynth
+        // ⭐⭐ m39-dm — THE DRUM OVERLAY IS A `var` + IN-PLACE MUTATION, AND
+        // THAT SHAPE IS A DESIGN CONSTRAINT RATHER THAN A STYLE CHOICE.
+        //
+        // The poly-synth rebuild below is an explicit initialiser call, which
+        // is why it needs 25 hand-mirrored `?? p.field` lines and why the file
+        // warns that a twenty-sixth "WILL COMPILE, SHIP, AND DELETE ITSELF".
+        // With 75 drum parameters that pattern is not maintainable by anyone.
+        //
+        // A struct you MUTATE cannot drop a field it does not mention. So the
+        // kit starts as whatever the track already had, takes a wholesale
+        // replacement if one was given, then takes a single named overlay if
+        // one was given — and a 76th parameter added to `DrumKitParams`
+        // tomorrow rides through all three paths with no edit here at all.
+        var kit = current.drumKit
+        if let drumKit {
+            var replacement = drumKit
+            replacement.clampAll()
+            kit = replacement
+        }
+        if let drumParam {
+            // `nil` means the track has never been given a kit; start from the
+            // factory one so a single-parameter edit works on a fresh track.
+            var overlaid = kit ?? DrumKitParams()
+            // A false return is an unknown name: leave the kit exactly as it
+            // was rather than storing a half-applied edit. The control layer
+            // reports the refusal.
+            if overlaid.setValue(drumParam.value, forParamName: drumParam.name) {
+                kit = overlaid
+            }
+        }
         let resolved = InstrumentDescriptor(
             kind: kind ?? (audioUnit != nil ? .audioUnit
                            : soundBank != nil ? .soundBank : current.kind),
@@ -4056,7 +4201,11 @@ public final class ProjectStore {
             ),
             sampler: sampler ?? current.sampler,
             audioUnit: audioUnit ?? current.audioUnit,
-            soundBank: soundBank ?? current.soundBank
+            soundBank: soundBank ?? current.soundBank,
+            // ⛔ `kit` is ALREADY the overlaid value (see the block above). It
+            // must be named here or the drum machine joins the list of things
+            // this initialiser silently deletes on every unrelated call.
+            drumKit: kit
         )
         // m13-c: an instrument-NODE rebuild (kind/zones/AU/sound-bank change)
         // on a ROUTED strip tears the node down through the reconcile

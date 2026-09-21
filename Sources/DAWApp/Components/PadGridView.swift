@@ -45,10 +45,28 @@ struct PadGridView: View {
     /// Can the target actually sound? Drives the whole surface's ink, so the
     /// grid never looks live over a track that cannot make a noise.
     var canSound: Bool
+    /// What a pad does when you let go, or nil when the target is not a
+    /// built-in sampler and there is nothing to set.
+    var triggerMode: PadTriggerMode?
+    /// The store's refusal from the last attempt to change it.
+    var triggerModeError: String?
+    /// Why the row is dead, when it is. ⚠️ It becomes the row's tooltip: the
+    /// CHIPS' own help describes pads this track does not have, and a disabled
+    /// control explaining a capability that is not there is worse than silence.
+    var triggerModeUnavailableReason: String?
     /// Struck: pad index + where in the pad, 0 = top edge.
     var onPadDown: (Int, Double) -> Void
     var onPadUp: () -> Void
     var onSetBank: (Int) -> Void
+    var onSetTriggerMode: (PadTriggerMode) -> Void
+    /// SIXTEEN LEVELS: is a spread up, is the grid waiting for a pad, what the
+    /// header should say, why the button is dead, and the last refusal.
+    var isLevels: Bool = false
+    var levelsArming: Bool = false
+    var levelsStatus: String?
+    var levelsUnavailableReason: String?
+    var levelsError: String?
+    var onToggleLevels: () -> Void = {}
 
     /// Pad edge, and the gap between pads. Generous: this is a surface fingers
     /// aim at, and the design language asks for generous spacing before it asks
@@ -71,6 +89,33 @@ struct PadGridView: View {
         VStack(alignment: .leading, spacing: 9) {
             bankRow
             grid
+            // ⚠️ ITS OWN LINE, NOT TUCKED INTO `bankRow`. Four bank chips plus
+            // "K / L switches bank" plus two word-chips would not fit the
+            // grid's 269 pt at four banks, and the casualty would be the hint
+            // text — a layout nobody has looked at is exactly what this
+            // project's own law says not to ship.
+            triggerModeRow
+            if let levelsStatus {
+                Text(levelsStatus)
+                    .font(.system(size: 10))
+                    .foregroundStyle(levelsArming ? DAWTheme.record : DAWTheme.textDim)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let levelsError {
+                Text(levelsError)
+                    .font(.system(size: 10))
+                    .foregroundStyle(DAWTheme.record)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let triggerModeError {
+                // ⚠️ SHOWN, not swallowed. The sampler apply is wholesale and
+                // can refuse; a chip that lit while the write bounced would be
+                // a switch claiming a state the engine is not in.
+                Text(triggerModeError)
+                    .font(.system(size: 10))
+                    .foregroundStyle(DAWTheme.record)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 
@@ -165,10 +210,15 @@ struct PadGridView: View {
                 .foregroundStyle(ink.primary)
             // SF Mono for every numeric readout (Foundations). "12" is a slice
             // ordinal, not decoration.
-            Text(state.sliceOrdinal.map { "\($0)" } ?? "—")
+            // ⭐ IN A SPREAD THIS IS THE INTERVAL, NOT THE SLICE NUMBER. Every
+            // pad is the same zone there, so sixteen squares would all read
+            // "7" while each played a different pitch — true of the zone,
+            // false of the sound. `PadState.levelsSemitones` decides.
+            Text(state.levelsSemitones.map(SixteenLevels.offsetLabel(semitones:))
+                 ?? state.sliceOrdinal.map { "\($0)" } ?? "—")
                 .font(.system(size: 10, weight: .semibold, design: .monospaced))
                 .tracking(0.6)
-                .foregroundStyle(ink.secondary)
+                .foregroundStyle(state.levelsSemitones == 0 ? ink.primary : ink.secondary)
             Text(state.noteName)
                 .font(.system(size: 8, weight: .medium, design: .monospaced))
                 .tracking(0.5)
@@ -278,6 +328,89 @@ struct PadGridView: View {
                 .foregroundStyle(DAWTheme.textFaint)
             Spacer(minLength: 0)
         }
+    }
+
+    // MARK: - What a pad does when you let go
+
+    /// ⭐ **THE ROW ASKS THE QUESTION AND THE CHIPS FINISH THE SENTENCE** —
+    /// "LET GO: STOPS" / "LET GO: PLAYS ON". Naming the two states ONE SHOT and
+    /// NOTE ON, as hardware does, would be correct and would teach a newcomer
+    /// nothing; the words here are what they will hear.
+    ///
+    /// ⚠️ **ALWAYS DRAWN, DIM WHEN DEAD** — the `bankRow` rule. A control that
+    /// vanished over a non-sampler track would leave the surface silently
+    /// missing the one setting that explains why a click made almost no sound.
+    @ViewBuilder
+    private var triggerModeRow: some View {
+        HStack(spacing: 8) {
+            Text("LET GO")
+                .font(.system(size: 9, weight: .semibold))
+                .tracking(1.4)
+                .foregroundStyle(triggerMode == nil ? DAWTheme.textFaint : DAWTheme.textDim)
+            HStack(spacing: 0) {
+                ForEach(PadTriggerMode.allCases, id: \.self) { value in
+                    triggerModeChip(value)
+                }
+            }
+            .background(DAWTheme.panelRaised)
+            .clipShape(RoundedRectangle(cornerRadius: 5))
+            .overlay(RoundedRectangle(cornerRadius: 5).stroke(DAWTheme.hairline, lineWidth: 1))
+            .opacity(triggerMode == nil ? 0.45 : 1)
+            if triggerMode != nil {
+                Text("A tap is a very short hold.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(DAWTheme.textFaint)
+            }
+            Spacer(minLength: 8)
+            levelsButton
+        }
+        // ⚠️ The ROW answers for the dead case; see `triggerModeUnavailableReason`.
+        .help(triggerModeUnavailableReason ?? "")
+    }
+
+    private func triggerModeChip(_ value: PadTriggerMode) -> some View {
+        let isOn = triggerMode == value
+        return Button { onSetTriggerMode(value) } label: {
+            Text(value.label)
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .foregroundStyle(isOn ? DAWTheme.background : DAWTheme.textDim)
+                .frame(height: 18)
+                .padding(.horizontal, 7)
+                .background(isOn ? DAWTheme.playback : Color.clear)
+        }
+        .buttonStyle(.plain)
+        .disabled(triggerMode == nil)
+        .help(value.help)
+    }
+
+    /// ⭐ **ONE BUTTON, THREE STATES, AND THE LABEL SAYS WHICH.** Off it offers
+    /// LEVELS; armed it says PICK A PAD in amber, because the grid is waiting
+    /// for something and a control that looked identical while the meaning of a
+    /// click had changed would be the affordance-lies shape; live it says EXIT
+    /// LEVELS, so the way out is the same button that got you in.
+    private var levelsButton: some View {
+        let label = isLevels ? "EXIT LEVELS" : (levelsArming ? "PICK A PAD" : "LEVELS")
+        let lit = isLevels || levelsArming
+        let tint = levelsArming ? DAWTheme.record : DAWTheme.playback
+        return Button(action: onToggleLevels) {
+            Text(label)
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .foregroundStyle(lit ? DAWTheme.background : DAWTheme.textDim)
+                .frame(height: 18)
+                .padding(.horizontal, 8)
+                .background(lit ? tint : DAWTheme.panelRaised)
+                .clipShape(RoundedRectangle(cornerRadius: 5))
+                .overlay(RoundedRectangle(cornerRadius: 5)
+                    .stroke(DAWTheme.hairline, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .disabled(!isLevels && levelsUnavailableReason != nil)
+        .opacity(!isLevels && levelsUnavailableReason != nil ? 0.45 : 1)
+        // ⚠️ The REASON, when there is one — a dimmed button that explains
+        // nothing teaches nothing.
+        .help(levelsUnavailableReason
+              ?? "Spread one slice across all sixteen pads, a semitone apart, "
+              + "so you can play it. Your chop is untouched and comes back when you exit.")
     }
 
     private func bankChip(_ index: Int) -> some View {

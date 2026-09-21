@@ -68,7 +68,9 @@ import Foundation
 /// log nothing, touch no ObjC, hop no actors. ALL state is a fixed number of
 /// scalars — 2 channels × 1 biquad of 2 TDF2 taps, plus one phase — so there is
 /// nothing to size and `prepare()` has nothing to allocate. Both state words of
-/// each biquad are denormal-flushed PER SAMPLE (see `Biquad.step`).
+/// each biquad are denormal-flushed PER SAMPLE (see `Biquad.step` in
+/// `Primitives/Biquad.swift` — m39-ae moved that type out of this file
+/// unchanged, see the note beside the declaration site below).
 final class RingModEffect: EffectRendering, @unchecked Sendable {
     /// Coefficient recompute stride, in frames — the modulation design's frozen
     /// stride, adopted for the same reason: fine enough that an automated
@@ -80,40 +82,19 @@ final class RingModEffect: EffectRendering, @unchecked Sendable {
     /// the EQ and the bass enhancer.
     private static let butterworthQ = EQFilterResponse.butterworth2Q
 
-    /// One 2-pole transposed-direct-form-II biquad, one channel.
-    /// TDF2 is the shape `BassEnhancerEffect` uses for the same coefficients,
-    /// for the same reason: two state words, good numerical behaviour at low
-    /// corners, and it is what `EQFilterResponse.cutSection`'s normalisation
-    /// assumes.
-    private struct Biquad {
-        var z1: Double = 0
-        var z2: Double = 0
-
-        /// ⚠️ Both state words are denormal-flushed on EVERY sample — the
-        /// `DJFilterEffect.SVFSection` convention, and for the same reason: a
-        /// recursive filter decaying toward zero on silence lands in subnormal
-        /// territory, where each operation costs orders of magnitude more, on
-        /// the render thread, during silence, which is exactly when nobody is
-        /// looking. A 500 Hz corner's poles sit at radius ~0.955, so a
-        /// quantum-boundary flush would leave hundreds of samples in the slow
-        /// path on every fade-out.
-        @inline(__always)
-        mutating func step(_ x: Double, b0: Double, b1: Double, b2: Double,
-                           a1: Double, a2: Double) -> Double {
-            let y = b0 * x + z1
-            z1 = b1 * x - a1 * y + z2
-            z2 = b2 * x - a2 * y
-            if abs(z1) < 1e-25 { z1 = 0 }
-            if abs(z2) < 1e-25 { z2 = 0 }
-            return y
-        }
-
-        @inline(__always)
-        mutating func clear() {
-            z1 = 0
-            z2 = 0
-        }
-    }
+    // ⛔ THE 2-POLE TDF2 BIQUAD THAT USED TO BE DECLARED HERE NOW LIVES IN
+    // `Primitives/Biquad.swift` (m39-ae). It moved because `CompressorEffect`
+    // became its SECOND caller — the `Oversampler` rule: a primitive is
+    // extracted when a second caller appears, not on spec — and it moved
+    // EXPRESSION-VERBATIM, including the per-sample 1e-25 denormal flush on
+    // both state words.
+    //
+    // ⚠️⚠️ THIS KIND IS SHIPPED, SO THE MOVE HAD TO BE PROVEN AND NOT ARGUED.
+    // `scripts/gates/m39ae-ringmod-unchanged-bytes.mjs` pins all four renders of
+    // `scripts/demos/specs/ringmod.json` against hashes measured from the build
+    // that existed before the extraction, and `RingModBiquadExtractionTests`
+    // runs the primitive against a hand-copy of the original inline expressions
+    // and requires BIT-EQUAL output over a long recursive run.
 
     /// Immutable box crossing main actor → render thread. POD payload.
     private final class ParamSnapshot {

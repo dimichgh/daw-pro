@@ -40,9 +40,39 @@ public struct InstrumentParamSpec: Sendable, Equatable {
     /// Optional teaching line, surfaced verbatim by the describe verbs.
     public let note: String?
 
+    /// ⭐ m39-dm — THE RENDER-SIDE IDENTITY, NOW CARRIED BY THE TABLE ITSELF.
+    ///
+    /// It used to be reached through `InstrumentParamID(rawValue: name)`, which
+    /// is a FLAT seven-case enum. The drum machine addresses parameters by a
+    /// dotted `<scope>.<param>` name, and `InstrumentParamID(rawValue:
+    /// "kick.tune")` is nil — so the snapshot builder's guard failed and the
+    /// route was DROPPED from the published snapshot, silently, after
+    /// `mod.addRoute` had already answered success. Moving the code here
+    /// REMOVES a name→enum round trip rather than adding one, and makes this
+    /// table the single resolution point from name to render-thread identity,
+    /// which is what its header already claims it is.
+    ///
+    /// Wire-local: carried inside one snapshot, never persisted, never on the
+    /// wire. `InstrumentParamID.code` remains the authority for `.polySynth`
+    /// (this field is populated FROM it, so the two cannot disagree) and
+    /// `InstrumentParamCodePositiveControlTests` pins 0…6 as unmoved.
+    public let code: Int32
+
+    /// Whether the parameter is consumed only when a note starts. Modulating
+    /// one is permitted but it takes effect at the NEXT note-on.
+    ///
+    /// ⚠️ m39-dm moved this here from `InstrumentParamID.appliesAtNextNoteOn`
+    /// FOR THE SAME REASON as `code`, and missing it would have been a SILENT
+    /// loss rather than a compile error: the moment drum params stopped
+    /// resolving through `InstrumentParamID`, nothing would have carried the
+    /// flag and the describe verbs' "Takes effect at the next note-on" line
+    /// would simply have stopped being true. Populated from the enum for
+    /// `.polySynth`, so the two homes cannot drift.
+    public let appliesAtNextNoteOn: Bool
+
     public init(name: String, range: ClosedRange<Double>, defaultValue: Double,
                 unit: String, curve: ParamCurve, modulatable: Modulatable,
-                note: String? = nil) {
+                note: String? = nil, code: Int32, appliesAtNextNoteOn: Bool) {
         self.name = name
         self.range = range
         self.defaultValue = defaultValue
@@ -50,6 +80,19 @@ public struct InstrumentParamSpec: Sendable, Equatable {
         self.curve = curve
         self.modulatable = modulatable
         self.note = note
+        self.code = code
+        self.appliesAtNextNoteOn = appliesAtNextNoteOn
+    }
+
+    /// Convenience for the `.polySynth` rows: both new fields come straight
+    /// from `InstrumentParamID`, so a row cannot be written with a code the
+    /// enum disagrees with.
+    init(id: InstrumentParamID, range: ClosedRange<Double>, defaultValue: Double,
+         unit: String, curve: ParamCurve, modulatable: Modulatable,
+         note: String? = nil) {
+        self.init(name: id.rawValue, range: range, defaultValue: defaultValue,
+                  unit: unit, curve: curve, modulatable: modulatable, note: note,
+                  code: id.code, appliesAtNextNoteOn: id.appliesAtNextNoteOn)
     }
 }
 
@@ -118,7 +161,7 @@ public extension InstrumentParamSpec {
             let d = PolySynthParams()
             return [
                 InstrumentParamSpec(
-                    name: InstrumentParamID.cutoffHz.rawValue,
+                    id: .cutoffHz,
                     range: PolySynthParams.cutoffRange, defaultValue: d.cutoffHz,
                     unit: "Hz", curve: .logarithmic, modulatable: .yes,
                     note: "Low-pass filter corner. Modulation depth is in OCTAVES "
@@ -126,35 +169,55 @@ public extension InstrumentParamSpec {
                         + "40–18 000 Hz range is ±0.88 octaves, and it means the "
                         + "same musical gesture at 200 Hz as at 8 kHz."),
                 InstrumentParamSpec(
-                    name: InstrumentParamID.resonance.rawValue,
+                    id: .resonance,
                     range: PolySynthParams.resonanceRange, defaultValue: d.resonance,
                     unit: "", curve: .linear, modulatable: .yes),
                 InstrumentParamSpec(
-                    name: InstrumentParamID.gain.rawValue,
+                    id: .gain,
                     range: PolySynthParams.gainRange, defaultValue: d.gain,
                     unit: "level", curve: .linear, modulatable: .yes),
                 InstrumentParamSpec(
-                    name: InstrumentParamID.attack.rawValue,
+                    id: .attack,
                     range: PolySynthParams.attackRange, defaultValue: d.attack,
                     unit: "s", curve: .logarithmic, modulatable: .yes,
                     note: "Takes effect at the next note-on: a sounding voice keeps "
                         + "the attack it started with."),
                 InstrumentParamSpec(
-                    name: InstrumentParamID.decay.rawValue,
+                    id: .decay,
                     range: PolySynthParams.decayRange, defaultValue: d.decay,
                     unit: "s", curve: .logarithmic, modulatable: .yes,
                     note: "Takes effect at the next note-on."),
                 InstrumentParamSpec(
-                    name: InstrumentParamID.sustain.rawValue,
+                    id: .sustain,
                     range: PolySynthParams.sustainRange, defaultValue: d.sustain,
                     unit: "level", curve: .linear, modulatable: .yes,
                     note: "Takes effect at the next note-on."),
                 InstrumentParamSpec(
-                    name: InstrumentParamID.release.rawValue,
+                    id: .release,
                     range: PolySynthParams.releaseRange, defaultValue: d.release,
                     unit: "s", curve: .logarithmic, modulatable: .yes,
                     note: "Takes effect at the next note-on."),
             ]
+        case .drumSynth:
+            // ⭐ m39-dm — 75 rows, DERIVED FROM `DrumKitParams.paramSpecs`
+            // rather than re-typed. Two hand-maintained lists of 75 names would
+            // have diverged on the first edit; this one cannot, and the
+            // `describeDrumKit` verb reads the same table again rather than a
+            // third copy.
+            //
+            // ⭐⭐ EVERY ROW IS `.yes`. This is the first built-in instrument
+            // whose `discreteParamNames` is empty and whose entire surface is
+            // modulatable — which is exactly what the brief asked for. It is
+            // affordable because a one-shot consumes its parameters at
+            // note-on, so there is no per-sample coefficient re-derivation and
+            // no block-rate zipper problem to trade against.
+            return DrumKitParams.paramSpecs.map { spec in
+                InstrumentParamSpec(
+                    name: spec.name, range: spec.range,
+                    defaultValue: spec.defaultValue, unit: spec.unit,
+                    curve: spec.curve, modulatable: .yes, note: spec.note,
+                    code: spec.code, appliesAtNextNoteOn: spec.appliesAtNextNoteOn)
+            }
         case .testTone, .sampler, .audioUnit, .soundBank:
             return []
         }
@@ -167,7 +230,15 @@ public extension InstrumentParamSpec {
     static func discreteParamNames(for kind: InstrumentDescriptor.Kind) -> [String] {
         switch kind {
         case .polySynth: return ["waveform", "pedalHoldLimit"]
-        case .testTone, .sampler, .audioUnit, .soundBank: return []
+        // ⭐ `.drumSynth` returns EMPTY, and the emptiness is a DESIGN
+        // PROPERTY rather than an unfinished table: the drum machine has no
+        // discrete parameter at all. 808-vs-909 is a preset over one
+        // continuous topology, not a `character` enum; `chokeGroup` is
+        // structural and deliberately kept off the modulation surface. So no
+        // `modulationTargetUnsupported(.discrete)` refusal exists for this
+        // instrument, which is what makes "every parameter automatable" true
+        // rather than nearly true.
+        case .testTone, .sampler, .audioUnit, .soundBank, .drumSynth: return []
         }
     }
 
@@ -180,6 +251,15 @@ public extension InstrumentParamSpec {
     /// The current value of a named param on a descriptor — the base the depth
     /// law offsets. nil when the name does not resolve on that kind.
     static func currentValue(of name: String, in descriptor: InstrumentDescriptor) -> Double? {
+        // ⛔ m39-dm — WITHOUT THIS BRANCH EVERY DRUM ROUTE WOULD MODULATE
+        // AROUND THE DEFAULT RATHER THAN AROUND THE VALUE THE USER SET.
+        // `ModulationSnapshotBuilder` uses this for `baseValue` and falls back
+        // to `spec.defaultValue` when it returns nil — so a user who tuned the
+        // kick to 40 Hz and then put an LFO on it would hear the LFO wobble
+        // around 52 Hz. Audible, wrong, and nothing fails anywhere.
+        if descriptor.kind == .drumSynth {
+            return descriptor.resolvedDrumKit.value(forParamName: name)
+        }
         guard descriptor.kind == .polySynth, let id = InstrumentParamID(rawValue: name) else {
             return nil
         }

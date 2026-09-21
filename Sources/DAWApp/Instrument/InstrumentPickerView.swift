@@ -230,7 +230,10 @@ struct InstrumentPickerOverlay: View {
                 EffectEditorButton(action: onTuneSampler)
                     .help("Tune the Sampler — its zone map, envelopes, tuning, level and looping")
                     .explainable(.samplerEditor))
-        case .testTone, .soundBank, .audioUnit:
+        // `.drumSynth` has no editor card yet (m39-dm ships engine + model +
+        // wire; the card is UI work). Showing a tune button that opens nothing
+        // is worse than showing none.
+        case .testTone, .soundBank, .audioUnit, .drumSynth:
             // Test Tone has nothing to tune; sound banks pick a program in this
             // same picker; a hosted AU opens its own plugin window.
             return nil

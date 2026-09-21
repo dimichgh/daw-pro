@@ -404,9 +404,19 @@ struct MusicalKeyboardStrip: View {
                     bankCount: padGrid.bankCount,
                     frameSpan: padGrid.loadedFrameSpan,
                     canSound: canSound,
+                    triggerMode: padGrid.triggerMode,
+                    triggerModeError: padGrid.lastTriggerModeError,
+                    triggerModeUnavailableReason: padGrid.triggerModeUnavailableReason,
                     onPadDown: onPadPress,
                     onPadUp: onPadRelease,
-                    onSetBank: onSetBank)
+                    onSetBank: onSetBank,
+                    onSetTriggerMode: { padGrid.setTriggerMode($0) },
+                    isLevels: padGrid.isLevels,
+                    levelsArming: padGrid.levelsArming,
+                    levelsStatus: padGrid.levelsStatus,
+                    levelsUnavailableReason: padGrid.levelsUnavailableReason,
+                    levelsError: padGrid.lastLevelsError,
+                    onToggleLevels: { padGrid.toggleLevels() })
                 if let notice = padGrid.lastChop {
                     chopNotice(notice, model: padGrid)
                 }

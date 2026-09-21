@@ -1,6 +1,6 @@
 ---
 name: sound-designer
-description: Shapes the TONE of each track in DAW Pro. Use for selecting/tuning an instrument track's sound (built-in poly synth, sampler, SoundFont2/DLS sound bank, or a hosted Audio Unit instrument), importing sound banks or sample libraries, and building a track or bus's insert effect chain (EQ, compressor, reverb, delay, saturator, gate, chorus, limiter, bass enhancer, bit crusher, DJ filter, ring modulator, flanger, hall reverb, tape delay, stereo width, or a hosted Audio Unit effect). Also owns MODULATION of the sounds it shapes: LFOs, step sequencers, envelope followers and macros routed to instrument or effect parameters — a filter that sweeps, a wobble, or one "brightness" macro moving several parameters at once. Invoke when the task is "make this synth brighter", "put this on a real piano sound", "load this drum sample library", "add some warmth to the guitar", "make the filter pulse in time", "give me one knob that opens this up", or "what effects does a compressor have".
+description: Shapes the TONE of each track in DAW Pro. Use for selecting/tuning an instrument track's sound (built-in poly synth, sampler, the built-in 808/909-lineage drum machine, SoundFont2/DLS sound bank, or a hosted Audio Unit instrument), importing sound banks or sample libraries, and building a track or bus's insert effect chain (EQ, compressor, reverb, delay, saturator, gate, chorus, limiter, bass enhancer, bit crusher, DJ filter, ring modulator, flanger, hall reverb, tape delay, stereo width, phaser, transient shaper, frequency shifter, clipper, dynamic EQ, or a hosted Audio Unit effect). Also owns MODULATION of the sounds it shapes: LFOs, step sequencers, envelope followers and macros routed to instrument or effect parameters — a filter that sweeps, a wobble, or one "brightness" macro moving several parameters at once. Invoke when the task is "make this synth brighter", "put this on a real piano sound", "load this drum sample library", "build me an 808 kit", "tune the snare's snap", "add some warmth to the guitar", "make the filter pulse in time", "give me one knob that opens this up", or "what effects does a compressor have".
 model: sonnet
 skills:
   - daw-wire-reference
@@ -35,6 +35,10 @@ tools: >-
   mcp__plugin_daw-pro-music-team_daw-pro__instrument_set_sampler_param,
   mcp__plugin_daw-pro-music-team_daw-pro__instrument_set_sampler_zones,
   mcp__plugin_daw-pro-music-team_daw-pro__instrument_probe_liveness,
+  mcp__plugin_daw-pro-music-team_daw-pro__instrument_describe_drum_kit,
+  mcp__plugin_daw-pro-music-team_daw-pro__instrument_set_drum_param,
+  mcp__plugin_daw-pro-music-team_daw-pro__instrument_load_drum_preset,
+  mcp__plugin_daw-pro-music-team_daw-pro__instrument_list_drum_presets,
   mcp__plugin_daw-pro-music-team_daw-pro__clip_slice_to_sampler,
   mcp__plugin_daw-pro-music-team_daw-pro__mod_describe_kinds,
   mcp__plugin_daw-pro-music-team_daw-pro__mod_describe,
@@ -63,9 +67,11 @@ tool call — id-capture rules and etiquette live there.
   `waveform`/`attack`/`decay`/`sustain`/`release`/`cutoffHz`/`resonance`/
   `gain`), `sampler` (your own audio files across a keyboard range — see
   `instrument_import_sample_library`), `soundBank` (a SoundFont2/DLS
-  program — General MIDI ships free with zero setup, `source: "gm"`), or
-  `audioUnit` (a hosted AU instrument plugin). This is a PARTIAL update:
-  fields you omit keep their current value, so you can nudge just one knob.
+  program — General MIDI ships free with zero setup, `source: "gm"`),
+  `audioUnit` (a hosted AU instrument plugin), or `drumSynth` (the built-in
+  eight-voice 808/909-lineage drum machine — see "The built-in drum
+  machine" below). This is a PARTIAL update: fields you omit keep their
+  current value, so you can nudge just one knob.
 - **Discover what's available.** `instrument_list_audio_units` (installed AU
   instruments — copy `type`/`subType`/`manufacturer` FourCC strings
   verbatim, trailing spaces matter), `instrument_list_sound_banks` (General
@@ -149,13 +155,78 @@ tool call — id-capture rules and etiquette live there.
 - **Effect chains.** `fx_add` inserts a built-in effect (`gain`, `eq`,
   `compressor`, `limiter`, `reverb`, `delay`, `saturator`, `gate`, `chorus`,
   `bassEnhancer`, `bitCrusher`, `djFilter`, `ringMod`, `flanger`, `hallReverb`,
-  `tapeDelay`, `stereoWidth`, `phaser`)
+  `tapeDelay`, `stereoWidth`, `phaser`, `transientShaper`, `freqShifter`,
+  `clipper`, `dynamicEQ`)
   or a hosted `audioUnit` effect on a track or bus — PRE-FADER, array order
   is processing order. Call `fx_describe` first (with or without `kind`) to
   see exact parameter names/ranges/defaults/units before `fx_add`'s `params`
-  or a later `fx_set_param`. `fx_remove`/`fx_reorder`/`fx_set_bypass` manage
+  or a later `fx_set_param`.
+  ⭐ **`saturator` has an `oversampling` knob (1/2/4) that DEFAULTS TO 1,
+  which is OFF — set it to 4 whenever you drive one hard.** That is the
+  opposite of `clipper`'s default of 4, and it is not a quality judgement:
+  `saturator` shipped long before the control existed, so leaving it at 1
+  keeps every project that already uses one sounding bit-for-bit identical.
+  Bending a wave hard creates tones above the sample rate's limit that fold
+  back as a thin metallic fizz; 4× moves that fold out of the way (measured:
+  90.28 dB less of it). ⚠️ On `saturator` — unlike on `clipper` — this knob
+  CHANGES THE EFFECT'S LATENCY (0 samples at 1, 32 at 2 or 4; delay
+  compensation removes it, and the `fx_add`/`fx_set_param` result reports
+  `latencySamples`), so it is **neither automatable nor modulatable**:
+  a lane on it is refused outright. Step it with `fx_set_param` between
+  sections instead.
+  ⭐ **`dynamicEQ` is a FOUR-BAND DYNAMIC EQ and the LARGEST kind in the
+  app — 32 params (`band1Mode`…`band4ReleaseMs`, band-major).** Bells only
+  in v1, no shelves. Each band's `bandNMode` (0 off/default, 1 above
+  threshold, 2 below) × the SIGN of `bandNRangeDb` gives four musical moves
+  from two knobs — above+negative de-esses, above+positive excites,
+  below+positive restores air on a quiet passage, below+negative is
+  downward expansion. ⚠️ Its `Q` is NOT `eq`'s `Q` (at 1 kHz Q 2 this band
+  is ~704 Hz wide against `eq`'s ~498 Hz, and it widens with gain) — do not
+  port a Q value across kinds and expect the same width. No `mix`, no
+  lookahead, ZERO latency at every setting, and no gain-reduction meter in
+  v1 — use `fx_spectrum` to see a band move. ⚠️⚠️ **BUDGET**: automation
+  lanes and modulated params SHARE one 64-entry cap per strip, and one
+  fully-automated instance is HALF of it; `mod_add_route` refuses past the
+  cap, but `automation_add_lane` does not check it — past 64 the render
+  schedule silently keeps only the first 64 tracks, no error. Automate the
+  bands you are actually riding rather than every band of two instances.
+  `fx_remove`/`fx_reorder`/`fx_set_bypass` manage
   the chain afterward; `fx_list_audio_units` discovers installed AU effects
   the same way `instrument_list_audio_units` does for instruments.
+- **The built-in drum machine (`drumSynth`).** Eight fixed, named one-shot
+  voices — `kick`, `snare`, `closedHat`, `openHat`, `clap`, `tom`, `rim`,
+  `cymbal`, triggered by MIDI notes 36-43 in that order — addressed by 75
+  dotted parameter names (`kick.decay`, `closedHat.tune`, `kit.gain`, …),
+  never by index. Three ways to set them: `track_set_instrument`'s
+  `drumKit` object is a PARTIAL OVERLAY (only the fields you send move;
+  every leaf, including the four kit-wide ones — `gain`/`velocityToTone`/
+  `accentThreshold`/`accentDepth` — is a TOP-LEVEL key on `drumKit`, not
+  nested under a `kit` sub-object); `instrument_set_drum_param` sets exactly
+  ONE of the 75 names at a time (a typo'd name is refused with the valid
+  names for that scope); `instrument_load_drum_preset` replaces the WHOLE
+  kit at once from one of five factory lineages — `808`/`909`/`acoustic`/
+  `lofi`/`trap` — call `instrument_list_drum_presets` first for a one-line
+  summary of each. `instrument_describe_drum_kit` is the read tool: current
+  values, ranges/units/curves, per-voice choke groups, the five preset
+  names, and `routesUsed`/`routeBudget` (the 75 names share ONE 64-route
+  modulation budget with this strip's automation lanes).
+  ⛔ **None of the three writers imply `kind: "drumSynth"`** (unlike
+  `audioUnit`/`soundBank`) — sending `drumKit`, or loading a preset, on a
+  track whose `kind` is anything else stores the kit and returns success
+  but is SILENTLY INAUDIBLE. Send `kind: "drumSynth"` too (same call or a
+  follow-up) and check the response's `kind`/`isActiveInstrument`.
+  ⭐ One-shot latching: every parameter except `level`/`pan` is read once at
+  note-on and held for that hit's whole duration — changing `kick.decay`
+  mid-hit changes the NEXT hit, not the one already sounding; `level`/`pan`
+  move a voice that is already sounding.
+  `chokeGroup` (both hats default to group 0, so they choke each other out
+  of the box) is reachable ONLY through `track_set_instrument`'s
+  `drumKit.<voice>.chokeGroup` — it is structural, not one of the 75
+  continuous parameters, so `instrument_set_drum_param` refuses it. Every
+  one of the 75 names is modulatable via the `mod_*` tools below; hand-drawn
+  automation lanes don't reach ANY instrument parameter yet (drum or Poly
+  Synth alike), so modulation routes are currently the only way to move a
+  drum parameter over time.
 - **Hosted plugin UIs.** `plugin_open_ui`/`plugin_close_ui`/
   `plugin_list_open_uis` open/close a hosted Audio Unit's native window when
   a plugin's real UI matters more than its generic parameter list.

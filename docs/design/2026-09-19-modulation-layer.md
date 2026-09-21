@@ -574,6 +574,16 @@ boolean/topology switch).
 | | `antiAlias`, `dither` (2) | **refused** | `D` — boolean |
 | `audioUnit` | (empty spec surface) | **refused** | `modulationTargetUnsupported`, reason `hostedAudioUnit` — matches automation, which drops `.audioUnit` lanes at schedule-build resolution |
 
+> ⚠️ **DATED POINTER, added 2026-09-20 by m39-ad — read this before quoting the totals below.**
+> The table above is a snapshot of the **eleven** kinds that existed when this design was written.
+> Ten more kinds have shipped since (flanger, hallReverb, djFilter, ringMod, tapeDelay, stereoWidth,
+> phaser, transientShaper, freqShifter, clipper) and one existing row has MOVED: `saturator` is
+> **4** params now, not the 3 counted below — m39-ad appended `oversampling`, verdict **refused**.
+> The live, measured split today is **89 yes + 20 warned + 22 refused = 131 across 21 param-bearing
+> kinds**, and the place that number is *enforced* is `Tests/DAWCoreTests/ModulationTests.swift`,
+> which derives it from `EffectParamSpec.specs(for:)` rather than from this prose. Treat the
+> per-kind rows below as the *reasoning* — which is still good — and the totals as history.
+
 **Totals: 31 yes, 18 warned, 15 refused = 64.** Counted per kind off the table above and
 cross-checked against the inventory's per-kind counts (gain 2, eq 22, compressor 7, limiter 3,
 reverb 5, delay 7, saturator 3, gate 4, chorus 3, bassEnhancer 3, bitCrusher 5 = 64). A test must
@@ -1309,7 +1319,10 @@ Ordinary coverage is assumed. These are the ones specific to this design, each w
    documented order's result bit-exactly.
 6. **Verdict completeness.** Sum the §6.2 table against `EffectParamSpec.specs(for:)` across all 11
    kinds: **31 yes + 18 warned + 15 refused = 64**. A new param without a verdict fails the build's
-   test, not a reviewer's attention.
+   test, not a reviewer's attention. ⚠️ **DATED 2026-09-20 (m39-ad): this mechanism worked exactly
+   as designed — every kind added since was forced through it — so the RULE stands, but the NUMBER
+   has moved ten kinds' worth. It is 89 + 20 + 22 = 131 over 21 kinds today; see the dated pointer
+   above §6.2's totals line. Re-derive from the test, never from this line.**
 7. **Refusal-superset invariant.** For every `(kind, param)`: if `AutomationTarget.valueRange` returns
    nil, `mod.addRoute` must refuse. Mechanically checkable; pins §6.1.
 8. **RT-safety allocation probe, absolute zero**, on the stage and evaluator — the

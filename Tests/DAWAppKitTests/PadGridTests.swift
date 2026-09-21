@@ -611,6 +611,63 @@ extension MusicalTypingControllerTests {
         #expect(model.lastRefusal?.contains(clipID.uuidString) == true)
     }
 
+    /// ⭐⭐ THE REMEDY MUST NAME A CONTROL THAT IS ON THE SCREEN.
+    ///
+    /// ⛔ **MEASURED ON A REAL USER, 2026-09-20.** They hit the pad ceiling and
+    /// read *"over the maxSlices limit of 9 — Raise maxSlices, lower
+    /// sensitivity, raise minSliceSeconds"* while looking at a panel whose
+    /// sliders say "Most pads to make" and "How many hits to catch". Every
+    /// number and every remedy was CORRECT; none of the words were theirs.
+    /// That is a defect no gate in this tree could have seen — the sentence is
+    /// accurate, the tests that pin it pass, and it is still unusable.
+    ///
+    /// ⚠️ The load-bearing half is the LAST expectation: the store's string is
+    /// a WIRE CONTRACT that agents read and other tests pin byte-exact, so the
+    /// translation must live in the view model and leave `lastRefusal` alone.
+    /// Rewriting the store's sentence would fix a person's problem by breaking
+    /// an agent's — the trade this test exists to forbid.
+    @Test("⭐⭐ the remedy a PERSON reads names the SLIDER, not the API parameter")
+    func refusalRemedySpeaksTheUIVocabulary() async {
+        let clipID = UUID()
+        let controller = MusicalTypingController()
+        let model = PadGridModel(
+            typing: controller, zones: { [] }, targetName: { "Break" },
+            selectedClip: {
+                PadChopSource(clipId: clipID, clipName: "test-voice", trackId: UUID(),
+                              trackName: "Break", isMIDI: false, otherClipsOnTrack: 0)
+            },
+            chopAction: { _, _, _ in
+                // The user's ACTUAL sentence, verbatim.
+                throw ProjectError.invalidClipEdit(
+                    "chopping clip \(clipID.uuidString) would make 90 pads, over the "
+                    + "maxSlices limit of 9 — nothing was changed. Raise maxSlices "
+                    + "(hard cap 96), lower sensitivity, raise minSliceSeconds, or trim "
+                    + "the clip to a shorter passage")
+            })
+        #expect(await model.runChop() == false)
+        let human = try! #require(model.lastRefusalForHumans)
+
+        // The words that ARE on the panel.
+        #expect(human.contains("“Most pads to make”"))
+        #expect(human.contains("“How many hits to catch”"))
+        // …and the words that are NOT.
+        #expect(!human.contains("maxSlices"))
+        #expect(!human.contains("sensitivity"))
+        #expect(!human.contains("minSliceSeconds"))
+        // ⛔ Every number and the escape hatch still survive the rewrite.
+        #expect(human.contains("90"))
+        #expect(human.contains("9"))
+        #expect(human.contains("96"))
+        #expect(human.contains("trim the clip"))
+        #expect(human.contains("“test-voice”"))
+
+        // ⛔⛔ THE WIRE TEXT IS UNCHANGED — the whole point of translating here.
+        let wire = try! #require(model.lastRefusal)
+        #expect(wire.contains("maxSlices"))
+        #expect(wire.contains("minSliceSeconds"))
+        #expect(wire.contains(clipID.uuidString))
+    }
+
     @Test("the mute label's VERB agrees with its count, not just the noun")
     func muteLabelVerbAgrees() {
         // "its 1 other clip GO quiet too" shipped — the plural was handled on
@@ -630,5 +687,285 @@ extension MusicalTypingControllerTests {
                               trackName: "Break", isMIDI: false, otherClipsOnTrack: 3)
             })
         #expect(many.muteLabel.contains("3 other clips go quiet too"))
+    }
+
+    // MARK: - What a pad does when you let go (m39-pads-2)
+
+    /// ⭐⭐ **THE ANTI-INERT CHECK ON THE POINTER PATH, AND IT IS NOT DUPLICATION.**
+    /// The key-driven cases above prove `soundingPitches` empties on key-up.
+    /// This one drives `padDown`/`padUp` — the MOUSE funnel — because those are
+    /// separate entry points and the pad grid has ALREADY shipped one of them
+    /// inert once (m39-pads: a `padDown` that reached no sink, with every
+    /// headless reading self-consistent and silent pads on screen). A gate that
+    /// only ever exercised the keys would pass identically over that defect.
+    /// ⚠️ **THE SPY SINK IS THE POINT, NOT `soundingPitches`.** That property is
+    /// the controller's OWN ledger; an inert path can keep it perfectly correct
+    /// while nothing reaches the engine, which is exactly the shape that shipped.
+    /// `sets` is the only instrument that sees the seam.
+    @Test("⭐ a pad struck with the POINTER reaches the SEAM, and lets go when the pointer does")
+    func pointerPadGates() {
+        let sink = MusicalTypingControllerTests.PadSpySink()
+        let controller = MusicalTypingController(sink: sink)
+        controller.targetState = .ready
+        controller.setEnabled(true)
+        controller.setPlayMode(.pads)
+        let model = PadGridModel(typing: controller, zones: { [self.zone(36)] },
+                                 targetName: { "Chop" })
+        model.padDown(index: 0, normalizedY: 0.5)
+        #expect(controller.soundingPitches == [36])
+        #expect(sink.last == [36])
+        model.padUp()
+        // ⛔ THIS is the half the user asked about: in GATE mode the sound ends
+        // when the hand does. A click — down and up inside one frame — is a
+        // complete gate cycle, which is why one-shot exists at all.
+        #expect(controller.soundingPitches.isEmpty)
+        #expect(sink.last.isEmpty)
+    }
+
+    /// ⭐ The trigger mode is READ THROUGH, so an agent's
+    /// `instrument.setSamplerParam {oneShot}` moves the row.
+    @Test("⭐ the LET GO row reads the sampler live and writes back through it")
+    func triggerModeRoundTrips() {
+        let controller = MusicalTypingController()
+        // The SAMPLER is the single source of truth — the model holds no copy.
+        var sampler = SamplerParams(gain: 1)
+        var writes = 0
+        let model = PadGridModel(
+            typing: controller, zones: { [] }, targetName: { "Chop" },
+            oneShot: { sampler.oneShot },
+            setOneShot: { on in
+                writes += 1
+                sampler.oneShot = on
+                return nil
+            })
+
+        // A fresh chop inherits `SamplerParams().oneShot == false` — the pads
+        // gate, which is what the user met.
+        #expect(model.triggerMode == .gate)
+        #expect(model.triggerModeUnavailableReason == nil)
+
+        model.setTriggerMode(.oneShot)
+        #expect(writes == 1)
+        #expect(sampler.oneShot == true)
+        #expect(model.triggerMode == .oneShot)
+
+        // ⚠️ A redundant click must not pay for a wholesale sampler apply
+        // (`setInstrument` re-validates every zone file).
+        model.setTriggerMode(.oneShot)
+        #expect(writes == 1)
+
+        // ⭐ THE LIVE READ: the wire moves the sampler underneath the model and
+        // the row follows, with no call into the model at all. A cached copy
+        // would still say `.oneShot` here.
+        sampler.oneShot = false
+        #expect(model.triggerMode == .gate)
+    }
+
+    /// ⭐ nil is a REAL third state — "this track has no sampler" — and the row
+    /// says so rather than drawing a default that claims a setting.
+    @Test("⛔ over a non-sampler track the LET GO row is dead and NAMES the track")
+    func triggerModeUnavailableNamesTheTrack() {
+        let controller = MusicalTypingController()
+        let model = PadGridModel(typing: controller, zones: { [] },
+                                 targetName: { "Lead Vox" },
+                                 oneShot: { nil })
+        #expect(model.triggerMode == nil)
+        let reason = try! #require(model.triggerModeUnavailableReason)
+        #expect(reason.contains("“Lead Vox”"))
+
+        // No track at all is a DIFFERENT sentence — "pick a track" is the
+        // remedy there, and naming a track that does not exist would not be.
+        let untargeted = PadGridModel(typing: controller, zones: { [] },
+                                      targetName: { nil }, oneShot: { nil })
+        #expect(untargeted.triggerModeUnavailableReason?.contains("Pick a track") == true)
+    }
+
+    /// ⛔ A sampler apply is WHOLESALE and can genuinely refuse (a slice whose
+    /// source file moved). A chip that lit while the write bounced would be a
+    /// switch claiming a state the engine is not in — this tree's
+    /// characteristic failure wearing a toggle.
+    @Test("⛔ a refused write SHOWS the store's refusal and does not fake the flip")
+    func triggerModeSurfacesARefusal() {
+        let controller = MusicalTypingController()
+        let sampler = SamplerParams(gain: 1)
+        let model = PadGridModel(
+            typing: controller, zones: { [] }, targetName: { "Chop" },
+            oneShot: { sampler.oneShot },
+            setOneShot: { _ in "“slice-07.wav” is missing — the sampler was not changed." })
+        model.setTriggerMode(.oneShot)
+        #expect(model.lastTriggerModeError?.contains("slice-07.wav") == true)
+        // The row still reads what the SAMPLER holds, not what was clicked.
+        #expect(model.triggerMode == .gate)
+    }
+
+    // MARK: - Sixteen Levels (m39-levels)
+
+    /// A pad grid over a live keymap the test can watch being written.
+    private func levelsFixture(slices: Int = 9)
+        -> (PadGridModel, MusicalTypingController, () -> [SamplerZone]) {
+        let controller = MusicalTypingController()
+        controller.targetState = .ready
+        controller.setEnabled(true)
+        controller.setPlayMode(.pads)
+        // A box, so the model's reads see the model's own writes — the live
+        // sampler, not a snapshot.
+        final class Box: @unchecked Sendable { var zones: [SamplerZone] = [] }
+        let box = Box()
+        box.zones = (0..<slices).map { i in
+            SamplerZone(audioFileURL: URL(fileURLWithPath: "/tmp/m39levels-fixture.wav"),
+                        rootPitch: 36 + i, minPitch: 36 + i, maxPitch: 36 + i,
+                        startFrame: i * 1000, endFrame: i * 1000 + 900)
+        }
+        let model = PadGridModel(
+            typing: controller, zones: { box.zones }, targetName: { "Chop" },
+            setZones: { written in box.zones = written; return nil })
+        return (model, controller, { box.zones })
+    }
+
+    /// ⛔⛔⛔ **THE LOAD-BEARING TEST OF THIS WHOLE FEATURE.** The two obvious
+    /// builds of Sixteen Levels — widen the chosen slice in place, or swap the
+    /// keymap for sixteen copies and remember the original in this object — both
+    /// destroy the only home a chop has, and a "remembered" original in a view
+    /// model is gone when the app quits. The user would open a saved project and
+    /// find 90 hand-placed slices replaced by sixteen copies of slice 7. So:
+    /// entering ADDS ONE ZONE and every original must come back byte-identical.
+    @Test("⛔⛔ entering LEVELS adds ONE zone and leaves every slice byte-identical")
+    func levelsNeverEditsTheChop() {
+        let (model, _, zonesNow) = levelsFixture(slices: 9)
+        let before = zonesNow()
+
+        #expect(model.enterLevels(fromPad: 2))
+        let after = zonesNow()
+        #expect(after.count == before.count + 1)
+        // ⭐ EVERY ORIGINAL, UNCHANGED — id, span, root, slice window, all of it.
+        // `SamplerZone` is `Equatable`, so this compares the whole struct rather
+        // than the two fields a hand-written check would have remembered.
+        for original in before {
+            #expect(after.contains(original), "slice at root \(original.rootPitch) was altered")
+        }
+
+        model.exitLevels()
+        // ⛔ And leaving restores the keymap EXACTLY, not merely its count.
+        #expect(zonesNow() == before)
+    }
+
+    @Test("⭐ the spread lands below the chop and the grid moves onto it")
+    func levelsMovesTheGrid() {
+        let (model, controller, zonesNow) = levelsFixture(slices: 9)
+        #expect(model.baseNote == 36)
+        #expect(model.enterLevels(fromPad: 0))
+
+        let live = try! #require(model.levels)
+        #expect(live.base == 20)               // 16 keys directly below 36
+        #expect(live.homeBaseNote == 36)
+        #expect(controller.padBaseNote == 20)  // the grid actually moved
+        #expect(model.isLevels)
+
+        // The spread answers all sixteen pads…
+        let loaded = model.pads.filter(\.isLoaded).count
+        #expect(loaded == 16)
+        // …and hitting pad 4 sounds note 23, which is the source +3 semitones.
+        model.padDown(index: 3, normalizedY: 0.5)
+        #expect(controller.soundingPitches == [23])
+        model.padUp()
+
+        model.exitLevels()
+        #expect(controller.padBaseNote == 36)
+        #expect(model.isLevels == false)
+        #expect(zonesNow().count == 9)
+    }
+
+    /// ⭐ Sixteen squares that all read "slice 3" while each plays a different
+    /// pitch would be true of the zone and false of the sound.
+    @Test("⭐ in a spread the pads read INTERVALS, not sixteen copies of one slice number")
+    func levelsPadsReadIntervals() {
+        let (model, _, _) = levelsFixture(slices: 9)
+        #expect(model.pads[2].sliceOrdinal == 3)
+        #expect(model.pads[2].levelsSemitones == nil)
+
+        #expect(model.enterLevels(fromPad: 2))
+        #expect(model.pads[0].levelsSemitones == 0)
+        #expect(model.pads[15].levelsSemitones == 15)
+        // ⛔ The slice number is GONE, not merely overdrawn — a stale ordinal
+        // left in the value would reach any other reader of `PadState`.
+        let withOrdinals = model.pads.compactMap(\.sliceOrdinal)
+        #expect(withOrdinals.isEmpty)
+        #expect(model.levels?.sourceOrdinal == 3)
+        #expect(model.levelsStatus?.contains("slice 3") == true)
+    }
+
+    @Test("LEVELS arms, and the next pad hit PICKS rather than plays")
+    func levelsArmingSwallowsTheHit() {
+        let (model, controller, _) = levelsFixture(slices: 9)
+        model.toggleLevels()
+        #expect(model.levelsArming)
+        #expect(model.levelsStatus?.contains("Hit the pad") == true)
+
+        model.padDown(index: 4, normalizedY: 0.5)
+        // ⛔ It did NOT sound — the hit chose the slice.
+        #expect(controller.soundingPitches.isEmpty)
+        #expect(model.isLevels)
+        #expect(model.levelsArming == false)
+        #expect(model.levels?.sourceOrdinal == 5)
+    }
+
+    @Test("⛔ arming on an EMPTY pad refuses and says so, rather than spreading silence")
+    func levelsRefusesAnEmptyPad() {
+        let (model, _, zonesNow) = levelsFixture(slices: 4)
+        model.toggleLevels()
+        model.padDown(index: 9, normalizedY: 0.5)   // only pads 1–4 are loaded
+        #expect(model.isLevels == false)
+        #expect(model.lastLevelsError?.contains("empty") == true)
+        #expect(zonesNow().count == 4)              // nothing was written
+    }
+
+    @Test("⛔ with no room on the keyboard the button is dead and NAMES the reason")
+    func levelsUnavailableOverAFullKeymap() {
+        let controller = MusicalTypingController()
+        let full = (0...127).map {
+            SamplerZone(audioFileURL: URL(fileURLWithPath: "/tmp/m39levels-full.wav"),
+                        rootPitch: $0, minPitch: $0, maxPitch: $0)
+        }
+        let model = PadGridModel(typing: controller, zones: { full },
+                                 targetName: { "Chop" })
+        let reason = try! #require(model.levelsUnavailableReason)
+        #expect(reason.contains("no room"))
+        // …and pressing it does not arm a mode that cannot be entered.
+        model.toggleLevels()
+        #expect(model.levelsArming == false)
+
+        // An EMPTY kit gets its own sentence — "chop something first" and "the
+        // keyboard is full" are different problems with different remedies.
+        let empty = PadGridModel(typing: controller, zones: { [] }, targetName: { "Chop" })
+        #expect(empty.levelsUnavailableReason?.contains("Chop something") == true)
+    }
+
+    /// ⚠️ The store can refuse a wholesale sampler apply. The spread must not be
+    /// announced when the write bounced.
+    @Test("⛔ a refused write leaves the grid on the chop and shows the refusal")
+    func levelsSurfacesARefusal() {
+        let controller = MusicalTypingController()
+        let zones = [SamplerZone(audioFileURL: URL(fileURLWithPath: "/tmp/m39levels-r.wav"),
+                                 rootPitch: 36, minPitch: 36, maxPitch: 36)]
+        let model = PadGridModel(
+            typing: controller, zones: { zones }, targetName: { "Chop" },
+            setZones: { _ in "“take-3.wav” is missing — the sampler was not changed." })
+        #expect(model.enterLevels(fromPad: 0) == false)
+        #expect(model.isLevels == false)
+        #expect(controller.padBaseNote == 36)
+        #expect(model.lastLevelsError?.contains("take-3.wav") == true)
+    }
+
+    /// The two chips carry the two labels, and the enum converts in ONE place.
+    @Test("the LET GO chips finish the sentence, and map to the engine's flag")
+    func triggerModeLabels() {
+        #expect(PadTriggerMode.gate.label == "STOPS")
+        #expect(PadTriggerMode.oneShot.label == "PLAYS ON")
+        #expect(PadTriggerMode.gate.isOneShot == false)
+        #expect(PadTriggerMode.oneShot.isOneShot == true)
+        #expect(PadTriggerMode(oneShot: true) == .oneShot)
+        #expect(PadTriggerMode(oneShot: false) == .gate)
+        // rawValues are what `debug.padGrid {triggerMode:}` accepts.
+        #expect(PadTriggerMode.allCases.map(\.rawValue) == ["gate", "oneShot"])
     }
 }

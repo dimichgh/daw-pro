@@ -176,6 +176,15 @@ extension ProjectStore {
         case .sampler:
             let zones = instrument.resolvedSampler.zones.count
             return "sampler, \(zones) zone\(zones == 1 ? "" : "s")"
+        case .drumSynth:
+            // The drum machine DOES carry a sub-selection worth naming — a kit
+            // is as much "which patch was probed" as a sound-bank program is.
+            // Report the preset when the kit matches one exactly, and say
+            // "custom" otherwise, so a liveness verdict in a log can be traced
+            // back to a sound without a second round trip.
+            let kit = instrument.resolvedDrumKit
+            let preset = DrumKitParams.presets.first { $0.params == kit }
+            return "drum machine, \(preset.map { "\($0.name) kit" } ?? "custom kit")"
         case .polySynth, .testTone:
             return nil
         }

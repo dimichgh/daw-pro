@@ -1,0 +1,1082 @@
+{
+  "set": "freq-shifter-listening",
+  "description": "m39-z, the .freqShifter insert - THE LISTENING SET. Its sibling freq-shifter-physics.json is a measurement fixture (one bare sine, so a Goertzel probe can read single bins); this set exists because a sine moving from 440 Hz to 640 Hz proves the physics and tells you NOTHING about whether you want the effect. The material is the same pluck riff the transient-shaper set used, so the two are comparable by ear. ONE AXIS: the total shift in Hz. Everything else is held - same riff, same synth, mix 0.5 on every shifted variant, outputDb 0, spread 0. Mix is 0.5 rather than 1 because that is how the effect is actually used musically: the original note stays, the shifted copy rings against it, and the BEATING between them is the sound. At mix 1 you hear only the shifted copy and the riff's harmony is simply gone - correct, but it reads as a broken synth rather than as an effect. WHAT TO LISTEN FOR: the shifted copy is INHARMONIC. A pitch shifter would move every partial by the same RATIO and you would hear a second pluck a musical interval away. This moves every partial by the same number of HERTZ, so the partials stop being whole-number multiples of anything and the pluck turns bell-like, metallic, clangorous. That inharmonicity is the feature. The +3 Hz variant is the other end of the same axis and sounds nothing like the others: too small to hear as a pitch change, it beats slowly against the dry signal - a slow shimmer that never repeats, because unlike a chorus there is no LFO to cycle. NOTE THE ASYMMETRY between up and down: shifting DOWN pushes low partials toward 0 Hz and folds any that would go negative back up (a 100 Hz partial shifted -200 Hz comes back at 100 Hz), which is why -200 sounds thicker and more chaotic than +200 rather than merely lower.",
+  "variants": [
+    {
+      "name": "no-shifter",
+      "role": "control",
+      "axis": "no frequency shifter at all - the bare pluck riff, so you know what is being added",
+      "render": {
+        "durationSeconds": 9
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pluck",
+            "kind": "instrument"
+          },
+          "as": "pluck"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pluck",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.0,
+            "decay": 0.32,
+            "sustain": 0.0,
+            "release": 0.18,
+            "cutoffHz": 6500,
+            "resonance": 0.2,
+            "gain": 0.5,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pluck",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 40,
+                "startBeat": 0.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 0.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 1.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 1.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 2.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 2.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 3.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 55,
+                "startBeat": 3.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 4.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 4.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 5.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 5.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 6.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 55,
+                "startBeat": 6.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 7.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 7.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 8.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 8.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 9.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 9.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 10.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 10.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 11.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 55,
+                "startBeat": 11.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 12.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 12.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 13.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 13.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 14.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 55,
+                "startBeat": 14.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 15.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 15.5,
+                "lengthBeats": 0.22
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "shift-down-200",
+      "axis": "total shift -200 Hz at mix 0.5 - downward, where the fold-at-zero happens; the thickest and most chaotic of the set",
+      "render": {
+        "durationSeconds": 9
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pluck",
+            "kind": "instrument"
+          },
+          "as": "pluck"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pluck",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.0,
+            "decay": 0.32,
+            "sustain": 0.0,
+            "release": 0.18,
+            "cutoffHz": 6500,
+            "resonance": 0.2,
+            "gain": 0.5,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pluck",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 40,
+                "startBeat": 0.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 0.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 1.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 1.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 2.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 2.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 3.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 55,
+                "startBeat": 3.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 4.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 4.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 5.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 5.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 6.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 55,
+                "startBeat": 6.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 7.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 7.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 8.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 8.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 9.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 9.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 10.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 10.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 11.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 55,
+                "startBeat": 11.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 12.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 12.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 13.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 13.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 14.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 55,
+                "startBeat": 14.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 15.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 15.5,
+                "lengthBeats": 0.22
+              }
+            ]
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$pluck",
+            "kind": "freqShifter",
+            "params": {
+              "shiftHz": -200,
+              "fineHz": 0,
+              "stereoSpreadHz": 0,
+              "mix": 0.5,
+              "outputDb": 0
+            }
+          },
+          "as": "shifter"
+        }
+      ]
+    },
+    {
+      "name": "shift-up-40",
+      "axis": "total shift +40 Hz at mix 0.5 - a small shift: still clearly detuned and metallic, but the riff's shape survives",
+      "render": {
+        "durationSeconds": 9
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pluck",
+            "kind": "instrument"
+          },
+          "as": "pluck"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pluck",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.0,
+            "decay": 0.32,
+            "sustain": 0.0,
+            "release": 0.18,
+            "cutoffHz": 6500,
+            "resonance": 0.2,
+            "gain": 0.5,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pluck",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 40,
+                "startBeat": 0.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 0.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 1.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 1.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 2.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 2.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 3.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 55,
+                "startBeat": 3.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 4.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 4.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 5.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 5.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 6.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 55,
+                "startBeat": 6.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 7.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 7.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 8.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 8.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 9.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 9.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 10.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 10.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 11.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 55,
+                "startBeat": 11.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 12.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 12.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 13.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 13.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 14.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 55,
+                "startBeat": 14.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 15.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 15.5,
+                "lengthBeats": 0.22
+              }
+            ]
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$pluck",
+            "kind": "freqShifter",
+            "params": {
+              "shiftHz": 40,
+              "fineHz": 0,
+              "stereoSpreadHz": 0,
+              "mix": 0.5,
+              "outputDb": 0
+            }
+          },
+          "as": "shifter"
+        }
+      ]
+    },
+    {
+      "name": "shift-up-200",
+      "axis": "total shift +200 Hz at mix 0.5 - the classic bell/clang; the same riff, no longer harmonic",
+      "render": {
+        "durationSeconds": 9
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pluck",
+            "kind": "instrument"
+          },
+          "as": "pluck"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pluck",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.0,
+            "decay": 0.32,
+            "sustain": 0.0,
+            "release": 0.18,
+            "cutoffHz": 6500,
+            "resonance": 0.2,
+            "gain": 0.5,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pluck",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 40,
+                "startBeat": 0.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 0.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 1.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 1.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 2.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 2.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 3.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 55,
+                "startBeat": 3.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 4.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 4.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 5.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 5.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 6.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 55,
+                "startBeat": 6.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 7.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 7.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 8.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 8.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 9.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 9.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 10.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 10.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 11.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 55,
+                "startBeat": 11.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 12.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 12.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 13.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 13.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 14.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 55,
+                "startBeat": 14.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 15.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 15.5,
+                "lengthBeats": 0.22
+              }
+            ]
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$pluck",
+            "kind": "freqShifter",
+            "params": {
+              "shiftHz": 200,
+              "fineHz": 0,
+              "stereoSpreadHz": 0,
+              "mix": 0.5,
+              "outputDb": 0
+            }
+          },
+          "as": "shifter"
+        }
+      ]
+    },
+    {
+      "name": "shift-fine-3hz",
+      "axis": "total shift +3 Hz at mix 0.5, reached on the fineHz knob because 3 Hz is finer than the coarse control is meant for - the slow-beating end of the axis, chorus-adjacent but never cycling",
+      "render": {
+        "durationSeconds": 9
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pluck",
+            "kind": "instrument"
+          },
+          "as": "pluck"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pluck",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.0,
+            "decay": 0.32,
+            "sustain": 0.0,
+            "release": 0.18,
+            "cutoffHz": 6500,
+            "resonance": 0.2,
+            "gain": 0.5,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pluck",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 40,
+                "startBeat": 0.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 0.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 1.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 1.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 2.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 2.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 3.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 55,
+                "startBeat": 3.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 4.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 4.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 5.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 5.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 6.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 55,
+                "startBeat": 6.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 7.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 7.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 8.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 8.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 9.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 9.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 10.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 10.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 11.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 55,
+                "startBeat": 11.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 12.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 12.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 13.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 13.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 14.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 55,
+                "startBeat": 14.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 15.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 15.5,
+                "lengthBeats": 0.22
+              }
+            ]
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$pluck",
+            "kind": "freqShifter",
+            "params": {
+              "shiftHz": 0,
+              "fineHz": 3,
+              "stereoSpreadHz": 0,
+              "mix": 0.5,
+              "outputDb": 0
+            }
+          },
+          "as": "shifter"
+        }
+      ]
+    }
+  ]
+}

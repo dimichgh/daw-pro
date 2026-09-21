@@ -301,6 +301,19 @@ extension AppModel: ViewUIControlling {
                 + "its identity IS the program. List the alternatives with "
                 + "instrument.listSoundBankPrograms, then switch with "
                 + "track.setInstrument {soundBank:{source, program}}.")
+        case .drumSynth:
+            // ⚠️ HONEST, AND EVERY VERB NAMED HERE WAS CHECKED AGAINST
+            // `allCommands` — the rule this file learned the hard way one case
+            // above, where an earlier draft invented a verb that did not exist.
+            // The drum machine ships its engine, model and wire in m39-dm; the
+            // editor CARD is UI work that has not been built, so this says so
+            // rather than opening the wrong panel or failing silently.
+            throw DebugError(
+                "track \"\(track.name)\" plays the drum machine, which has no editor card yet — "
+                + "its 75 parameters are on the wire. Read them with "
+                + "instrument.describeDrumKit, set one with "
+                + "instrument.setDrumParam {name:\"kick.decay\", value:0.9}, and load a factory "
+                + "kit with instrument.loadDrumPreset {name:\"909\"}.")
         case .testTone:
             throw DebugError(
                 "track \"\(track.name)\" plays the built-in test tone, which has no editor "

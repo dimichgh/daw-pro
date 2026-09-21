@@ -119,16 +119,19 @@ struct InstrumentPickerModelTests {
         let model = Self.prepared()
         #expect(model.banks.map(\.name) == ["General MIDI", "Vintage"])   // GM first
         #expect(model.audioUnits.count == 3)
-        // Pro built-ins: all three, Test Tone included.
-        #expect(model.builtIns.map(\.kind) == [.polySynth, .sampler, .testTone])
+        // Pro built-ins: all four, Test Tone included. m39-dm put the Drum
+        // Machine SECOND, immediately after Poly Synth and ahead of Sampler:
+        // these assertions are ORDER-sensitive on purpose, so the row order a
+        // beginner actually sees is pinned rather than incidental.
+        #expect(model.builtIns.map(\.kind) == [.polySynth, .drumSynth, .sampler, .testTone])
     }
 
     @Test("Simple hides Test Tone; Pro shows it")
     func builtInDensitySplit() {
         let model = Self.prepared(density: .simple)
-        #expect(model.builtIns.map(\.kind) == [.polySynth, .sampler])
+        #expect(model.builtIns.map(\.kind) == [.polySynth, .drumSynth, .sampler])
         model.density = .pro
-        #expect(model.builtIns.map(\.kind) == [.polySynth, .sampler, .testTone])
+        #expect(model.builtIns.map(\.kind) == [.polySynth, .drumSynth, .sampler, .testTone])
     }
 
     // MARK: - Search (spans all sections)

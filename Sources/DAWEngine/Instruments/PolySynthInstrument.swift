@@ -780,9 +780,20 @@ final class PolySynthInstrument: InstrumentRendering, @unchecked Sendable {
     /// this is the worst case in the whole app: the signals being driven are
     /// bright saws and squares, and the artefacts get worse the higher you
     /// play. The tell is unmistakable once you look for it — partials that move
-    /// DOWN as the note moves UP. This tree has already shipped one
-    /// un-oversampled `tanh` (`SaturatorEffect`) and has a standing,
+    /// DOWN as the note moves UP. This tree had already shipped one
+    /// un-oversampled `tanh` (`SaturatorEffect`) and carried a standing,
     /// acknowledged debt on it; a second one was not worth adding.
+    ///
+    /// ⚠️ DATED 2026-09-20 (m39-ad): that debt is now OPT-IN repayable on the
+    /// `.saturator` kind — it grew an `oversampling` param (1/2/4) — but the
+    /// DEFAULT there is still 1, i.e. still un-oversampled, because changing a
+    /// shipped kind's default would change existing projects' tone. So the
+    /// sentence above is still true of what a user hears out of the box, and
+    /// this ADAA stage is still the only always-on antialiased shaper in the
+    /// tree. The two approaches are not interchangeable: ADAA costs no latency
+    /// and no extra filtering but only suppresses the first-order term, while
+    /// oversampling costs 32 samples of latency and suppresses everything the
+    /// filter's stopband reaches. A synth voice cannot afford the latency.
     ///
     /// So this is FIRST-ORDER ANTIDERIVATIVE ANTIALIASING (Parker/Zavalishin/
     /// Le Bivic, DAFx-16): instead of evaluating f(x) at the sample point,

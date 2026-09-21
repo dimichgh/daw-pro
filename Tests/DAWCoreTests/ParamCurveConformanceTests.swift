@@ -94,6 +94,40 @@ struct ParamCurveConformanceTests {
         "hallReverb.lowDecayMultiplier": .logarithmic,
         "hallReverb.highDecayMultiplier": .logarithmic,
         "tapeDelay.timeMs": .logarithmic,
+        // m39-y. TWO MORE TIME CONSTANTS, for the `tapeDelay.timeMs` reason and
+        // measured in octaves rather than asserted: `attackMs` spans
+        // 0.1…50 ms = **8.97 octaves** and the musically useful third of it
+        // lives under 5 ms, which a linear taper buries in the knob's first
+        // tenth; `sustainMs` spans 20…1000 ms = **5.64 octaves**. Both have
+        // `lo > 0`, so `.logarithmic` is structurally available to them where
+        // the kind's three dB params (ranges crossing 0) and its `mix` (range
+        // touching 0) cannot take it. ⚠️ `attackMs` is a name SHARED with
+        // `compressor.attackMs` and `gate.attackMs`, which are LINEAR and stay
+        // that way — the `tapeDelay.timeMs` / `delay.timeMs` split exactly, and
+        // it is why the census below keys on specs for its count and names for
+        // its set.
+        "transientShaper.attackMs": .logarithmic,
+        "transientShaper.sustainMs": .logarithmic,
+        // ⭐⭐ m39-z ADDS THREE, AND THEY ARE THE FIRST EXEMPTIONS THAT RUN
+        // THE OTHER WAY: every exemption above is "not a Hz, but logarithmic
+        // anyway". These three are "GENUINELY A Hz, AND LINEAR ANYWAY" - the
+        // first time `hzAndLogarithmicAgreeToday`'s other direction has had to
+        // give. The reason is structural, not taste: `shiftHz` (-2000...2000),
+        // `fineHz` (-20...20) and `stereoSpreadHz` (-20...20) are all BIPOLAR,
+        // and `.logarithmic` requires `lo > 0` (log(0) = -inf), so the curve
+        // the inference wants is not merely wrong for them, it is INVALID -
+        // `multiplicativeCurvesHaveAPositiveLowerBound` would redden on it.
+        // ⚠ `djFilter.position` dodged this same collision by declaring its
+        // unit "linear"; m39-z does NOT, because a shift of 200 Hz genuinely IS
+        // 200 Hz and the editor formats by unit. Lying about the unit to keep a
+        // curve census tidy would put the lie where a user can read it.
+        // ⭐ THE RESOLUTION-LOSS THE LOG CURVE WOULD HAVE FIXED IS REAL, and
+        // it is why `fineHz` exists at all: the famous 1-20 Hz beating zone is
+        // 1 % of `shiftHz`'s travel. Two linear knobs buy back what one
+        // bipolar knob cannot have.
+        "freqShifter.shiftHz": .linear,
+        "freqShifter.fineHz": .linear,
+        "freqShifter.stereoSpreadHz": .linear,
     ]
 
     static func exemption(_ kind: EffectDescriptor.Kind, _ name: String) -> ParamCurve? {
@@ -136,23 +170,39 @@ struct ParamCurveConformanceTests {
         // `.stereoWidth`, m39-o `.phaser`); `.audioUnit` is deliberately
         // param-less (AU params are not on the generic name/value surface), the
         // other 18 all carry specs.
-        #expect(EffectDescriptor.Kind.allCases.count == 19)
+        // m39-ac appended `.clipper` (six params), taking the roster to 22 and
+        // the param-bearing kinds to 21.
+        // ⭐ m39-af appended `.dynamicEQ` — roster 23, param-bearing 22 — and it
+        // is by far the LARGEST table any kind has carried: THIRTY-TWO params
+        // (4 bands x 8), where the previous record was `.eq`'s 22. That is why
+        // the spec census below moves by 32 in one item.
+        #expect(EffectDescriptor.Kind.allCases.count == 23)
         #expect(EffectParamSpec.specs(for: .audioUnit).isEmpty)
         let paramBearing = EffectDescriptor.Kind.allCases.filter {
             !EffectParamSpec.specs(for: $0).isEmpty
         }
-        #expect(paramBearing.count == 18, "kinds with params: \(paramBearing.map(\.rawValue))")
-        // Measured 2026-09-19. Append-only: this number may RISE when a param
-        // is appended to a table; it must never fall (a spec's INDEX is its
-        // positional automation slot and the arrays are append-only forever).
-        #expect(Self.allEffectSpecs.count >= 113,
+        #expect(paramBearing.count == 22, "kinds with params: \(paramBearing.map(\.rawValue))")
+        // Measured 2026-09-20 (m39-y appended `.transientShaper`'s six).
+        // Append-only: this number may RISE when a param is appended to a
+        // table; it must never fall (a spec's INDEX is its positional
+        // automation slot and the arrays are append-only forever).
+        #expect(Self.allEffectSpecs.count >= 119,
                 "spec census is \(Self.allEffectSpecs.count); param arrays are append-only")
     }
 
     @Test("the logarithmic census is exactly the ten Hz params, named")
     func logarithmicCensus() {
         let logs = Self.allEffectSpecs.filter { $0.spec.curve == .logarithmic }
-        #expect(logs.count == 28, "logarithmic specs: \(logs.map { "\($0.kind.rawValue).\($0.spec.name)" })")
+        // m39-ae adds ONE spec and ONE name — `compressor.detectorFreqHz`,
+        // 4 octaves of genuine Hz, no exemption needed. 30 → 31.
+        // ⭐ m39-af adds FOUR specs and FOUR names — `dynamicEQ.band1Freq`
+        // …`band4Freq`, 20…20 000 Hz of genuine Hz each, no exemption needed
+        // (they mirror `EQParams.peakFreqRange`, which is already logarithmic on
+        // `.eq`). 31 → 35. ⚠️ FOUR AND FOUR, unlike every recent kind: this is
+        // the first kind whose Hz params are per-BAND rather than per-effect, so
+        // the names do not collide with each other OR with anything else in the
+        // tree, and the count and the set move together for once.
+        #expect(logs.count == 35, "logarithmic specs: \(logs.map { "\($0.kind.rawValue).\($0.spec.name)" })")
         #expect(Set(logs.map(\.spec.name)) == Set([
             "lowShelfFreq", "peak1Freq", "peak2Freq", "highShelfFreq",
             "highPassFreq", "lowPassFreq",   // eq
@@ -197,6 +247,37 @@ struct ParamCurveConformanceTests {
                                              // `bassMonoAmount` are all
                                              // 0-based gains and therefore
                                              // structurally linear
+            "attackMs", "sustainMs",         // transientShaper (m39-y) — both
+                                             // EXEMPTED: 8.97 and 5.64 octaves
+                                             // of TIME. ⚠️ `attackMs` is shared
+                                             // with `compressor.attackMs` and
+                                             // `gate.attackMs`, which are
+                                             // LINEAR — the `timeMs` split
+                                             // again, so m39-y adds TWO
+                                             // logarithmic specs and TWO names
+                                             // only because `sustainMs` is new
+            "detectorFreqHz",                // compressor (m39-ae) — the
+                                             // de-ess detector's band centre /
+                                             // high-pass corner. Genuine Hz
+                                             // across 4 octaves (1 k…16 k), so
+                                             // no exemption is needed. ⭐ It is
+                                             // the FIRST logarithmic param on
+                                             // `.compressor`: every other knob
+                                             // on that kind is dB, a ratio or a
+                                             // time, and the two times are
+                                             // LINEAR by the kind's own
+                                             // convention
+            "band1Freq", "band2Freq", "band3Freq", "band4Freq",
+                                             // dynamicEQ (m39-af) — four
+                                             // genuine Hz controls, one per
+                                             // band, on `EQParams.peakFreqRange`
+                                             // (20…20 000). No exemption: the
+                                             // same range is already
+                                             // logarithmic on `.eq`'s peaks,
+                                             // and a band centre that read
+                                             // linearly would bury everything
+                                             // under 2 kHz in the first tenth
+                                             // of the knob
         ]))
         // ⚠️ THE SET IS OF NAMES AND THE COUNT IS OF SPECS, so they move
         // differently and that is deliberate: m39-j added THREE logarithmic
@@ -362,8 +443,11 @@ struct ParamCurveConformanceTests {
         #expect(EffectParamSpec.specs(for: .gain).map(\.name) == ["gainLinear", "invertPolarity"])
         #expect(EffectParamSpec.specs(for: .eq).prefix(4).map(\.name)
             == ["lowShelfFreq", "lowShelfGainDb", "peak1Freq", "peak1GainDb"])
+        // m39-ae APPENDS the de-esser's three at 7/8/9 — `CompressorEffect`
+        // .storeAutomatedParam switches on these exact positions.
         #expect(EffectParamSpec.specs(for: .compressor).map(\.name)
-            == ["thresholdDb", "ratio", "attackMs", "releaseMs", "kneeDb", "makeupDb", "mix"])
+            == ["thresholdDb", "ratio", "attackMs", "releaseMs", "kneeDb", "makeupDb", "mix",
+                "detectorMode", "detectorFreqHz", "detectorQ"])
         #expect(EffectParamSpec.specs(for: .limiter).map(\.name)
             == ["ceilingDb", "releaseMs", "truePeak"])
         #expect(EffectParamSpec.specs(for: .chorus).map(\.name) == ["rateHz", "depthMs", "mix"])

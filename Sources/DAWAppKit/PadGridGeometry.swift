@@ -260,10 +260,20 @@ public struct PadState: Equatable, Sendable, Identifiable {
     public let startFrame: Int?
     /// Was this pad's audio produced by AI? Violet, always.
     public let isAITouched: Bool
+    /// In SIXTEEN LEVELS, how far above the source slice this pad plays, in
+    /// semitones (pad 1 = 0). nil in normal play.
+    ///
+    /// ⚠️ **PRESENT MEANS "THIS GRID IS A SPREAD", and the view must prefer it
+    /// over `sliceOrdinal`.** One wide zone answers all sixteen pitches in
+    /// LEVELS, so every pad would otherwise read the SAME slice number — a
+    /// grid of sixteen squares all labelled "slice 7", each of which plays
+    /// something different. The number would be true and the picture a lie.
+    public let levelsSemitones: Int?
 
     public init(id: Int, pitch: Int?, noteName: String, keyLabel: String?,
                 isLoaded: Bool, isPlaying: Bool, sliceOrdinal: Int?,
-                startFrame: Int?, isAITouched: Bool) {
+                startFrame: Int?, isAITouched: Bool,
+                levelsSemitones: Int? = nil) {
         self.id = id
         self.pitch = pitch
         self.noteName = noteName
@@ -273,6 +283,7 @@ public struct PadState: Equatable, Sendable, Identifiable {
         self.sliceOrdinal = sliceOrdinal
         self.startFrame = startFrame
         self.isAITouched = isAITouched
+        self.levelsSemitones = levelsSemitones
     }
 
     /// Where this pad is drawn on screen.

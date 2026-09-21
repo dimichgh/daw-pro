@@ -677,6 +677,49 @@ struct RecordingStoreTests {
         #expect(try #require(store.tracks.first { $0.id == synth.id }).instrument?.kind == .sampler)
     }
 
+    /// ⭐ m39-dm — A DRUM KIT EDIT IS A PARAM OVERLAY, NOT A NODE REBUILD, AND
+    /// THAT IS THE DIFFERENCE BETWEEN A USABLE INSTRUMENT AND AN UNUSABLE ONE.
+    ///
+    /// `instrumentNodeIdentityChanged` returns `false` for `.drumSynth` — the
+    /// poly-synth rule, not the sampler-zones rule — because
+    /// `PlaybackGraph.InstrumentTrackKey` carries no drum payload and the graph
+    /// therefore does not rebuild on a kit change. If that decision were made
+    /// the other way, EVERY DRUM KNOB TURN WOULD REFUSE mid-take on a routed
+    /// strip, with a sensible-looking `transportBusy` error and no reason.
+    ///
+    /// It lives here rather than beside the other drum-kit store tests because
+    /// the rolling-transport harness (`FakeRecordingEngine` + `rolling`) is in
+    /// this file, and a second copy of it is worse than a cross-reference.
+    @Test("m39-dm: a drum kit edit stays legal mid-recording on a routed strip")
+    func drumKitEditIsLegalMidTake() throws {
+        let engine = FakeRecordingEngine()
+        let store = ProjectStore()
+        store.engine = engine
+        let drums = store.addTrack(name: "Drums", kind: .instrument)
+        let bus = store.addTrack(name: "Bus", kind: .bus)
+        _ = try store.addSend(toTrack: drums.id, busID: bus.id)  // routed
+        _ = try store.setInstrument(id: drums.id, kind: .drumSynth)
+        try rolling(store, engine: engine)
+
+        // A single named parameter, and a wholesale kit — both are overlays.
+        _ = try store.setInstrument(id: drums.id,
+                                    drumParam: (name: "kick.decay", value: 0.9))
+        #expect(try #require(store.tracks.first { $0.id == drums.id })
+            .instrument?.drumKit?.kick.decay == 0.9)
+        let nine = try #require(DrumKitParams.preset(named: "909")).params
+        _ = try store.setInstrument(id: drums.id, drumKit: nine)
+        #expect(try #require(store.tracks.first { $0.id == drums.id })
+            .instrument?.drumKit == nine)
+
+        // The CONTROL, so this is not vacuous: a KIND swap on the same routed
+        // strip IS a node rebuild and still refuses.
+        let error = projectError { _ = try store.setInstrument(id: drums.id, kind: .sampler) }
+        guard case .transportBusy = try #require(error) else {
+            Issue.record("expected transportBusy from a routed kind swap"); return
+        }
+        store.stop()
+    }
+
     // m13-c F: the explicitly-legal set stays legal mid-take (so a future guard
     // never overreaches into param/chain/attach-only territory).
     @Test("param-only + attach-only verbs stay legal mid-recording")

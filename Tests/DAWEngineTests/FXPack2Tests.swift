@@ -414,7 +414,11 @@ struct FXPack2Tests {
             "gain", "eq", "compressor", "limiter",
             "reverb", "delay", "saturator", "gate", "chorus", "bassEnhancer",
             "bitCrusher", "djFilter", "ringMod", "flanger", "hallReverb", "tapeDelay",
-            "stereoWidth", "phaser", "audioUnit",
+            "stereoWidth", "phaser", "transientShaper", "freqShifter", "clipper",
+            // m39-af — APPENDED before `audioUnit`, which stays LAST: the hosted
+            // kind is the terminator of this list by convention and several
+            // tests read `allCases.last` for it.
+            "dynamicEQ", "audioUnit",
         ])
         #expect(EffectParamSpec.specs(for: .reverb).map(\.name)
                 == ["roomSize", "damping", "mix", "preDelayMs", "width"])
@@ -422,8 +426,10 @@ struct FXPack2Tests {
         // (0…4) never move.
         #expect(EffectParamSpec.specs(for: .delay).map(\.name)
                 == ["timeMs", "feedback", "mix", "pingPong", "highCutHz", "sync", "division"])
+        // m39-ad: oversampling APPENDED so the three legacy automation slots
+        // (0…2) never move.
         #expect(EffectParamSpec.specs(for: .saturator).map(\.name)
-                == ["driveDb", "mix", "outputDb"])
+                == ["driveDb", "mix", "outputDb", "oversampling"])
         #expect(EffectParamSpec.specs(for: .gate).map(\.name)
                 == ["thresholdDb", "attackMs", "holdMs", "releaseMs"])
         #expect(EffectParamSpec.specs(for: .chorus).map(\.name)

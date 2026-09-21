@@ -344,7 +344,13 @@ extension ProjectStore {
                 polySynth: current.polySynth,
                 sampler: sampler,
                 audioUnit: current.audioUnit,
-                soundBank: current.soundBank)
+                soundBank: current.soundBank,
+                // ⛔ m39-dm — CARRIED FORWARD LIKE EVERY OTHER PAYLOAD. This is
+                // another explicit initialiser call, so omitting it would take
+                // the nil default and CHOPPING A CLIP TO A SAMPLER WOULD WIPE
+                // THE USER'S DRUM KIT — with a success response, on a track
+                // they were not editing the drums of.
+                drumKit: current.drumKit)
 
             if settings.generateMIDI && !plan.notes.isEmpty {
                 let midiClip = Clip(

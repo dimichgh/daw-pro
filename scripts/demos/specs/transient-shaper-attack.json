@@ -1,0 +1,867 @@
+{
+  "set": "transient-shaper-attack",
+  "description": "m39-y, the .transientShaper insert. Every variant plays the IDENTICAL staccato two-bar pluck riff (32 short notes, four bars at 120 BPM) so nothing but the one parameter differs.\n\nTHE ONE AXIS IS `attackDb`, and it runs -9 -> +4 -> +9. attackMs (30), sustainDb (0), sustainMs (200) and mix (1) are byte-for-byte identical in all three effect variants. Variant 1 has no effect at all.\n\nWHY THE MATERIAL IS A PLUCK AND NOT A PAD, stated because it is the single most likely way this demo gets built wrong. A transient shaper only does something where a sound is STARTING or DECAYING faster than its own running average. A sustained pad has no onsets and no decay, so every variant would come out almost identical and the demo would prove nothing while still reporting success. The synth here has an instant attack and zero sustain, so every note is a hard hit followed by a decay into silence - which is exactly what this effect is for.\n\nWHAT A TRANSIENT SHAPER ACTUALLY IS, because it gets confused with a compressor and they are not the same thing. A compressor watches the LEVEL of a sound and turns it down when it goes above a line you set. That means the setting means something different at every fader position, and turning the track down turns the effect off. This watches how FAST the sound is rising or falling compared to its own running average, and so it compares the sound to ITSELF. Turning the track down does not turn the effect down. There is no threshold on it at all, deliberately. What `attackDb` moves is the FRONT of each note - the pick hitting the string - and it leaves everything after that alone.\n\nWHAT TO LISTEN FOR. Listen to the very front of each note, not the whole riff. In 'attack-plus-9' the pick is more THERE - each note pokes out of the line and the space after it sounds a touch wider, because the front got louder and the tail did not. In 'attack-plus-4' the same thing, half as much. In 'attack-minus-9' the same notes are rounder and further back, as if the room swallowed the front of them - this is the fastest way to tame something clicky. THESE ARE LEVELLED TO THE SAME LOUDNESS ON PURPOSE, so if one just sounds 'bigger' you are hearing the punch and not the volume. If you hear no difference at all, check the material has real hits in it: on a smooth pad or a held chord this effect genuinely does nothing, and that is not a fault.\n\nMEASURED, so \"it changes the punch\" is not just a claim. At attackMs 30 the window over which the boost is at FULL strength is 8.678 ms (0.28927 x 30, reported as `attackWindowMs` in every fx.add result). Rendered through this exact effect, a +6 dB setting raises the peak of that window by 6.000 dB and a -6 dB setting lowers it by 6.000 dB, while the window from 50 ms to 200 ms after each onset moves 0.000 dB at +9 dB of punch - the two ends of the sound are INDEPENDENT (TransientShaperTests L5). And the shaping is LEVEL-INDEPENDENT: the same burst rendered 20 dB quieter gets a gain trajectory agreeing to 1.65e-06 dB, sample for sample (L6).\n\nWHY THERE IS NO 'all defaults' VARIANT HERE, stated because its absence is deliberate. At its defaults this effect is BIT-EXACT DRY - the output is identical to the input sample for sample - so that variant would render BYTE-IDENTICAL to 'no-shaper', which is exactly what this harness's distinctness check exists to flag as a broken axis. The bit-exact claim is proven in the test suite instead (TransientShaperTests L4, comparing FLOAT BIT PATTERNS rather than values, on a fixture carrying signed zeros and subnormals).\n\nLOUDNESS MATCH, stated because it is a real edit and not an accident. Adding punch genuinely raises loudness, and a listener reliably picks whichever version is louder. Each effect variant therefore carries an `outputDb` trim - inside the SAME insert, so no extra effect is added and the axis stays clean - chosen so all four variants sit within 1.0 LU of the set's median. That works because a transient shaper changes the CREST FACTOR (the gap between the peaks and the average), and crest factor is exactly what loudness matching does NOT flatten out.",
+  "variants": [
+    {
+      "name": "no-shaper",
+      "axis": "no transient shaper at all - the bare pluck riff, so you know what is being added",
+      "render": {
+        "durationSeconds": 9
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pluck",
+            "kind": "instrument"
+          },
+          "as": "pluck"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pluck",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.0,
+            "decay": 0.32,
+            "sustain": 0.0,
+            "release": 0.18,
+            "cutoffHz": 6500,
+            "resonance": 0.2,
+            "gain": 0.5,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pluck",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 40,
+                "startBeat": 0.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 0.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 1.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 1.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 2.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 2.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 3.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 55,
+                "startBeat": 3.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 4.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 4.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 5.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 5.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 6.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 55,
+                "startBeat": 6.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 7.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 7.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 8.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 8.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 9.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 9.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 10.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 10.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 11.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 55,
+                "startBeat": 11.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 12.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 12.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 13.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 13.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 14.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 55,
+                "startBeat": 14.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 15.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 15.5,
+                "lengthBeats": 0.22
+              }
+            ]
+          }
+        }
+      ],
+      "role": "control"
+    },
+    {
+      "name": "attack-minus-9",
+      "axis": "attackDb -9: the front of each note pushed BACK. Rounder, further away, less click.",
+      "render": {
+        "durationSeconds": 9
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pluck",
+            "kind": "instrument"
+          },
+          "as": "pluck"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pluck",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.0,
+            "decay": 0.32,
+            "sustain": 0.0,
+            "release": 0.18,
+            "cutoffHz": 6500,
+            "resonance": 0.2,
+            "gain": 0.5,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pluck",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 40,
+                "startBeat": 0.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 0.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 1.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 1.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 2.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 2.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 3.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 55,
+                "startBeat": 3.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 4.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 4.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 5.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 5.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 6.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 55,
+                "startBeat": 6.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 7.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 7.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 8.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 8.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 9.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 9.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 10.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 10.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 11.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 55,
+                "startBeat": 11.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 12.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 12.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 13.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 13.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 14.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 55,
+                "startBeat": 14.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 15.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 15.5,
+                "lengthBeats": 0.22
+              }
+            ]
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$pluck",
+            "kind": "transientShaper",
+            "params": {
+              "attackDb": -9,
+              "sustainDb": 0,
+              "attackMs": 30,
+              "sustainMs": 200,
+              "mix": 1,
+              "outputDb": 1.5
+            }
+          },
+          "as": "shaper"
+        }
+      ]
+    },
+    {
+      "name": "attack-plus-4",
+      "axis": "attackDb +4: a little more pick. The gentlest setting that is clearly audible.",
+      "render": {
+        "durationSeconds": 9
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pluck",
+            "kind": "instrument"
+          },
+          "as": "pluck"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pluck",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.0,
+            "decay": 0.32,
+            "sustain": 0.0,
+            "release": 0.18,
+            "cutoffHz": 6500,
+            "resonance": 0.2,
+            "gain": 0.5,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pluck",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 40,
+                "startBeat": 0.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 0.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 1.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 1.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 2.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 2.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 3.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 55,
+                "startBeat": 3.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 4.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 4.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 5.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 5.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 6.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 55,
+                "startBeat": 6.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 7.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 7.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 8.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 8.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 9.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 9.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 10.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 10.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 11.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 55,
+                "startBeat": 11.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 12.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 12.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 13.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 13.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 14.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 55,
+                "startBeat": 14.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 15.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 15.5,
+                "lengthBeats": 0.22
+              }
+            ]
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$pluck",
+            "kind": "transientShaper",
+            "params": {
+              "attackDb": 4,
+              "sustainDb": 0,
+              "attackMs": 30,
+              "sustainMs": 200,
+              "mix": 1,
+              "outputDb": -1.0
+            }
+          },
+          "as": "shaper"
+        }
+      ]
+    },
+    {
+      "name": "attack-plus-9",
+      "axis": "attackDb +9: the pick is right at the front. Each note pokes out of the line.",
+      "render": {
+        "durationSeconds": 9
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pluck",
+            "kind": "instrument"
+          },
+          "as": "pluck"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pluck",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.0,
+            "decay": 0.32,
+            "sustain": 0.0,
+            "release": 0.18,
+            "cutoffHz": 6500,
+            "resonance": 0.2,
+            "gain": 0.5,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pluck",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 40,
+                "startBeat": 0.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 0.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 1.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 1.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 2.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 2.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 3.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 55,
+                "startBeat": 3.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 4.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 4.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 5.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 5.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 6.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 55,
+                "startBeat": 6.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 7.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 7.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 8.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 8.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 9.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 9.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 10.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 10.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 11.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 55,
+                "startBeat": 11.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 12.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 12.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 13.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 13.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 40,
+                "startBeat": 14.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 55,
+                "startBeat": 14.5,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 47,
+                "startBeat": 15.0,
+                "lengthBeats": 0.22
+              },
+              {
+                "pitch": 52,
+                "startBeat": 15.5,
+                "lengthBeats": 0.22
+              }
+            ]
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$pluck",
+            "kind": "transientShaper",
+            "params": {
+              "attackDb": 9,
+              "sustainDb": 0,
+              "attackMs": 30,
+              "sustainMs": 200,
+              "mix": 1,
+              "outputDb": -2.6
+            }
+          },
+          "as": "shaper"
+        }
+      ]
+    }
+  ]
+}

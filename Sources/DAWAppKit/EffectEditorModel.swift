@@ -185,7 +185,16 @@ public final class EffectEditorModel {
             // order. (The saturator puts `mix` FIRST in its OUTPUT group; if
             // that ordering should win here instead, it is a design call, not
             // a correctness one.)
+            // m39-ae: DE-ESS is its own section and it sits FIRST, before
+            // TRIGGER — signal-flow order, because the detector filter is
+            // upstream of the threshold that reads it. Labels are spelled out
+            // ("Listen To", "Width") rather than left as the parameter names:
+            // a novice reading "detectorFreqHz" on a compressor card has no
+            // way to know it is the de-esser, which is this feature's whole
+            // discovery problem in one row.
             return [
+                ("DE-ESS", [("detectorMode", "Mode"), ("detectorFreqHz", "Listen To"),
+                            ("detectorQ", "Width")]),
                 ("TRIGGER", [("thresholdDb", nil), ("ratio", nil), ("kneeDb", nil)]),
                 ("TIME", [("attackMs", nil), ("releaseMs", nil)]),
                 ("OUTPUT", [("makeupDb", nil), ("mix", nil)]),
@@ -214,8 +223,15 @@ public final class EffectEditorModel {
                 ("OUTPUT", [("mix", nil)]),
             ]
         case .saturator:
+            // m39-ad: CHARACTER joins, between DRIVE and OUTPUT, carrying the
+            // one control that changes what the saturation SOUNDS like without
+            // changing how much of it there is — the `clipper`'s own section
+            // name and its own "Quality" label, because it is literally the
+            // same control on the same primitive and a user who has met one
+            // should recognise the other.
             return [
                 ("DRIVE", [("driveDb", nil)]),
+                ("CHARACTER", [("oversampling", "Quality")]),
                 ("OUTPUT", [("mix", nil), ("outputDb", nil)]),
             ]
         case .gate:
@@ -354,6 +370,81 @@ public final class EffectEditorModel {
                 ("CHARACTER", [("stages", "Stages"), ("feedback", "Feedback")]),
                 ("OUTPUT", [("mix", nil), ("stereoPhaseDeg", "Stereo")]),
             ]
+        case .transientShaper:
+            // m39-y. SHAPE is the instrument — the two things this effect
+            // actually does, in the order a user reaches for them: the front of
+            // the sound, then the tail. TIMING is how long each of those lasts;
+            // an amount and its window are unreadable apart (the hallReverb
+            // DECAY SHAPE precedent), but they are grouped by ROLE rather than
+            // paired, because the two amounts are what a user compares against
+            // each other. OUTPUT is trim and mix, last, per the strip rule —
+            // and `outputDb` sits there rather than beside the amounts because
+            // it is a level match, not a shaping control.
+            return [
+                ("SHAPE", [("attackDb", "Punch"), ("sustainDb", "Body")]),
+                ("TIMING", [("attackMs", "Punch Length"),
+                            ("sustainMs", "Body Length")]),
+                ("OUTPUT", [("outputDb", "Trim"), ("mix", nil)]),
+            ]
+        case .freqShifter:
+            // m39-z. SHIFT is the effect - the coarse knob and the fine one
+            // TOGETHER, because they are one control split in two for
+            // resolution and reading either alone is misleading (the hallReverb
+            // DECAY SHAPE precedent for pairing what is unreadable apart).
+            // IMAGE is the one stereo control. OUTPUT is trim and mix, last,
+            // per the strip rule.
+            return [
+                ("SHIFT", [("shiftHz", "Shift"), ("fineHz", "Fine")]),
+                ("IMAGE", [("stereoSpreadHz", "Spread")]),
+                ("OUTPUT", [("outputDb", "Trim"), ("mix", nil)]),
+            ]
+        case .clipper:
+            // m39-ac. CLIP is the instrument — where the ceiling is and how
+            // hard the sound is pushed into it, in the order a user reaches for
+            // them. The two are unreadable apart (the hallReverb DECAY SHAPE
+            // precedent): neither knob alone says where clipping starts.
+            // CHARACTER is what the clipping sounds LIKE rather than how much
+            // of it there is — the shape of the cut and the quality setting
+            // that decides whether the folded-back fizz comes with it. OUTPUT
+            // is trim and mix, last, per the strip rule.
+            return [
+                ("CLIP", [("ceilingDb", "Ceiling"), ("driveDb", "Drive")]),
+                ("CHARACTER", [("mode", "Shape"), ("oversampling", "Quality")]),
+                ("OUTPUT", [("outputDb", "Trim"), ("mix", nil)]),
+            ]
+        case .dynamicEQ:
+            // m39-af. FOUR IDENTICAL GROUPS, one per band, low → high, which is
+            // the `.eq` card's own shape (one band per group, signal order left
+            // to right) applied to a kind whose bands are uniform. No OUTPUT
+            // group: this kind deliberately has no `mix` — a dynamic EQ's
+            // wet/dry IS the band gain, and a second blend would be a confusing
+            // duplicate (the `.djFilter` no-`mix` precedent).
+            //
+            // Labels are SPELLED OUT rather than left as parameter names — the
+            // m39-ae DE-ESS precedent, and the same reason: a novice reading
+            // "band2ThresholdDb" has no way to know which of eight knobs starts
+            // the band moving. "Listen" carries the mode because the mode is
+            // literally which side of the threshold the band listens to, and
+            // "Range" is signed (minus turns the band down).
+            //
+            // ⚠️ EIGHT ITEMS PER GROUP is the widest card in the app — `.eq`'s
+            // widest group is four. If a pixel check says four groups of eight
+            // does not fit, the design's NAMED fallback is to drop to three
+            // bands (24 slots); the per-band block is identical either way, so
+            // that decision is genuinely late-binding. It must be made by
+            // looking, not by hoping (design §10 G8).
+            return (1...DynamicEQParams.bandCount).map { band in
+                ("BAND \(band)", [
+                    ("band\(band)Mode", "Listen"),
+                    ("band\(band)Freq", "Freq"),
+                    ("band\(band)Q", "Q"),
+                    ("band\(band)ThresholdDb", "Threshold"),
+                    ("band\(band)Ratio", "Ratio"),
+                    ("band\(band)RangeDb", "Range"),
+                    ("band\(band)AttackMs", "Attack"),
+                    ("band\(band)ReleaseMs", "Release"),
+                ])
+            }
         case .audioUnit:
             // AU params are not on the generic surface (M3 vi-b).
             return []
@@ -470,11 +561,23 @@ public final class EffectEditorModel {
         set(name: "division", value: division.beats)
     }
 
-    /// The EQ's HP/LP slope params are TWO-STATE (12 or 24 dB/oct — the model
-    /// layer snaps anything else, m22-a), so they render as a 12/24 chip, not
-    /// a knob. Same numeric wire underneath.
+    /// The HP/LP slope params are TWO-STATE (12 or 24 dB/oct — the model layer
+    /// snaps anything else through `EQParams.snapSlope`, m22-a), so they render
+    /// as a 12/24 chip, not a knob. Same numeric wire underneath.
+    ///
+    /// ⛔⛔ **THE MATCH IS CASE-INSENSITIVE, AND THAT IS A SHIPPED BUG'S FIX**
+    /// (m39-ag). It was `hasSuffix("SlopeDbPerOct")`, which matches the EQ's
+    /// `highPassSlopeDbPerOct` / `lowPassSlopeDbPerOct` but **NOT the DJ
+    /// filter's, which is the bare `slopeDbPerOct` with a lowercase s** — so
+    /// `djFilter`'s topology switch fell through to `knobCell` and drew a rotary
+    /// over a two-value param. It went unnoticed for the ordinary reason: the
+    /// test that pinned this function RESTATED `hasSuffix("SlopeDbPerOct")`
+    /// instead of checking it, so source and test agreed with each other and
+    /// with nothing else. `EffectChoiceParamTests.everyDiscreteParamAvoidsTheKnob`
+    /// — which derives the discrete set from `.refused` — caught it on its first
+    /// run, having been written for a different family entirely.
     public static func isSlopeParam(_ spec: EffectParamSpec) -> Bool {
-        spec.name.hasSuffix("SlopeDbPerOct")
+        spec.name.lowercased().hasSuffix("slopedbperoct")
     }
 
     /// The chip's read side: 24 at or above the snap midpoint, else 12 —
@@ -487,6 +590,161 @@ public final class EffectEditorModel {
     /// (0.5 rounds up).
     public static func toggleIsOn(_ value: Double) -> Bool {
         value >= 0.5
+    }
+
+    // MARK: - Discrete CHOICE params (m39-ag)
+
+    /// One legal setting of a discrete choice param: the exact wire value the
+    /// chip writes, and the beginner-readable label it draws.
+    public struct EffectParamChoice: Equatable, Sendable {
+        /// The value written through `set(name:value:)` — always a legal,
+        /// already-snapped number, so the card can never store a 1.7.
+        public let value: Double
+        /// What the chip draws. Title case, drawn VERBATIM — the string the
+        /// tests pin is the string on screen.
+        public let label: String
+
+        public init(value: Double, label: String) {
+            self.value = value
+            self.label = label
+        }
+    }
+
+    /// The `band1Mode`…`band4Mode` names, off `DynamicEQParams.bandCount` rather
+    /// than a literal 4 — a fifth band must not silently fall back to a knob.
+    public static let dynamicEQModeParamNames: Set<String> =
+        Set((1...DynamicEQParams.bandCount).map { "band\($0)Mode" })
+
+    /// A param whose legal values are a small FINITE SET renders as a chip that
+    /// names the setting, never a knob over a continuum that does not exist
+    /// (m39-ag). `dynamicEQ.band1Mode` shipped as a rotary reading **`0.00`**
+    /// for a three-way off/above/below switch — the single most important
+    /// control on the card, and from the card you could not tell which of the
+    /// three it was.
+    ///
+    /// ⚠️ **AN EXPLICIT LIST, ON PURPOSE, AND IT IS NOT SELF-ENFORCING** — the
+    /// exact shape (and the exact hazard) of `isToggleParam` above. It is
+    /// deliberately NOT written as `spec.modulatable == .refused && !toggle &&
+    /// …`: `EffectChoiceParamTests.everyDiscreteParamAvoidsTheKnob` DERIVES the
+    /// expected answer from `.refused` — which `Modulation.swift` maintains for
+    /// an unrelated reason ("modulation additionally refuses DISCRETE params,
+    /// because an LFO cannot meaningfully drive a boolean or a topology
+    /// switch") — so a definition in those terms would make the census restate
+    /// itself and never fail. That is the m32-e trap documented above, which
+    /// shipped two binary params as knobs with the suite green.
+    ///
+    /// Names are unique across the built-in kinds (`oversampling` is the one
+    /// that repeats, on `clipper` and `saturator`, and the two share a snap by
+    /// construction — `SaturatorParams.oversamplingFactor` forwards). The census
+    /// test checks BOTH directions, so a future continuous param that happens to
+    /// be called `mode` fails there rather than shipping as a chip.
+    public static func isChoiceParam(_ spec: EffectParamSpec) -> Bool {
+        switch spec.name {
+        case "detectorMode",    // compressor — the de-esser's off/band/high
+             "mode",            // clipper — hard vs soft
+             "oversampling",    // clipper + saturator — 1× / 2× / 4×
+             "waveform",        // ringMod — the carrier shape
+             "stages",          // phaser — even-only 2…12
+             "freeze":          // hallReverb — "DISCRETE on a continuous surface"
+            return true
+        default:
+            return dynamicEQModeParamNames.contains(spec.name)
+        }
+    }
+
+    /// The label for a raw value — **snapped through the KIND'S OWN one-home
+    /// snapping function in `DAWCore` first**, so the chip names what is
+    /// actually in force rather than what happens to be stored.
+    ///
+    /// ⭐ That distinction is the whole defect. `fx.setParam` CLAMPS these
+    /// without rounding (the documented `phaser.stages` precedent), so a stored
+    /// `band1Mode` of 0.4 is a real, reachable state whose RENDER behaviour is
+    /// `off` — and the card must say `Off`, exactly as the wire's
+    /// `band1ModeLabel` already does.
+    ///
+    /// ⚠️ Every arm is an exhaustive `switch` over a shared `DAWCore` enum or an
+    /// `Int` the snap returns — never a `[Double: String]` keyed by number. A
+    /// new enum case therefore fails to COMPILE here rather than silently
+    /// drawing the wrong word.
+    ///
+    /// ⛔ RESIDUAL, and it is a real one: `CompressorParams.DetectorMode`,
+    /// `ClipperParams.Mode` and `DynamicEQParams.Mode` carry no `displayName`,
+    /// so `Commands.swift` spells them inline (`"off"`/`"above"`/`"below"`,
+    /// `"bandPass"`, `"soft"`) and this is a SECOND SPELLING of one enum. The
+    /// meaning has one home — the snap — and an added case breaks both sites at
+    /// compile time; only a re-WORDING of an existing case can drift, and the
+    /// literal pins in `EffectChoiceParamTests` catch that on this side. The fix
+    /// is a `displayName` on those three enums that `Commands.swift` reads, and
+    /// it was NOT done here for two reasons: `Sources/DAWCore/` was being edited
+    /// concurrently, and changing the wire's `"bandPass"` token is a wire change.
+    public static func choiceLabel(value: Double, spec: EffectParamSpec) -> String {
+        switch spec.name {
+        case "detectorMode":
+            switch CompressorParams.detectorMode(at: value) {
+            case .off: return "Off"
+            case .bandPass: return "Band-Pass"
+            case .highPass: return "High-Pass"
+            }
+        case "mode":
+            switch ClipperParams.mode(at: value) {
+            case .hard: return "Hard"
+            case .soft: return "Soft"
+            }
+        case "oversampling":
+            // `SaturatorParams.oversamplingFactor` forwards here by design, and
+            // `oversamplingSnapIsSharedWithTheSaturator` pins that it still does,
+            // so one arm is correct for both kinds.
+            return "\(ClipperParams.oversamplingFactor(at: value))×"
+        case "waveform":
+            // The only one with a `displayName` already in DAWCore — the wire's
+            // own source for `waveformLabel`, so this is genuinely one home.
+            return RingModParams.waveform(at: value).displayName
+        case "stages":
+            // Even-only; the snap resolves an odd tie UPWARD (5 → 6).
+            return "\(PhaserParams.snappedStages(value))"
+        case "freeze":
+            return HallReverbParams.isFrozen(value) ? "Hold" : "Off"
+        default:
+            guard dynamicEQModeParamNames.contains(spec.name) else { return "" }
+            switch DynamicEQParams.mode(at: value) {
+            case .off: return "Off"
+            case .above: return "Above"
+            case .below: return "Below"
+            }
+        }
+    }
+
+    /// Every legal setting of a choice param, in wire order — the chip's menu.
+    /// Option VALUES come from the `DAWCore` range/roster constants, never from
+    /// numbers typed here, so a widened range grows the menu on its own.
+    public static func choices(for spec: EffectParamSpec) -> [EffectParamChoice] {
+        let values: [Double]
+        switch spec.name {
+        case "detectorMode":
+            values = Self.wholeSteps(in: CompressorParams.detectorModeRange)
+        case "mode":
+            values = Self.wholeSteps(in: ClipperParams.modeRange)
+        case "oversampling":
+            values = OversamplerDesign.supportedFactors.map(Double.init)
+        case "waveform":
+            values = RingModParams.Waveform.allCases.map { Double($0.rawValue) }
+        case "stages":
+            values = stride(from: PhaserParams.stagesRange.lowerBound,
+                            through: PhaserParams.stagesRange.upperBound, by: 2).map { $0 }
+        case "freeze":
+            values = Self.wholeSteps(in: HallReverbParams.freezeRange)
+        default:
+            guard dynamicEQModeParamNames.contains(spec.name) else { return [] }
+            values = Self.wholeSteps(in: DynamicEQParams.modeRange)
+        }
+        return values.map {
+            EffectParamChoice(value: $0, label: choiceLabel(value: $0, spec: spec))
+        }
+    }
+
+    /// Whole numbers across a closed range — the enum-backed choice domains.
+    private static func wholeSteps(in range: ClosedRange<Double>) -> [Double] {
+        stride(from: range.lowerBound, through: range.upperBound, by: 1).map { $0 }
     }
 
     /// The current value for one row — read from the live descriptor via the
@@ -612,8 +870,17 @@ public final class EffectEditorModel {
     /// every cited competitor shows these as %). Excludes Q (0.1…18), linear
     /// gain (0…4, dB-equivalent below), and the pingPong toggle. Formatter
     /// side ONLY — the wire value stays the raw 0…1 fraction.
+    /// ⚠️ m39-ag adds the `isChoiceParam` exclusion, and it was load-bearing for
+    /// a shipped defect: `hallReverb.freeze` is `0…1` with unit `"linear"` and
+    /// is NOT a toggle param, so it satisfied every clause here and the card
+    /// drew an infinite-hold SWITCH as a knob reading **`0 %`** — a percentage
+    /// of a binary. (It is not in `isToggleParam` for a good reason: the store
+    /// CLAMPS it without rounding, so `binaryModelParamsRenderAsToggles`, which
+    /// derives from a real 0.4 write, correctly calls it non-binary. The
+    /// discreteness lives in `HallReverbParams.isFrozen` — "DISCRETE on a
+    /// continuous surface" — which is the choice family, not the toggle family.)
     public static func isPercentParam(_ spec: EffectParamSpec) -> Bool {
-        spec.unit == "linear" && !isToggleParam(spec)
+        spec.unit == "linear" && !isToggleParam(spec) && !isChoiceParam(spec)
             && spec.range.lowerBound == 0 && spec.range.upperBound <= 1
     }
 
@@ -633,6 +900,13 @@ public final class EffectEditorModel {
         // (m22-f) — the same nearest-snap the store applies.
         if isDivisionParam(spec) {
             return (NoteDivision.nearest(toBeats: value).rawValue, "")
+        }
+        // A discrete choice reads as the SNAPPED setting's name, never a
+        // number (m39-ag) — "Above", not "1.00"; "Off", not "0.00". This arm
+        // must sit ahead of the percent check below, which `freeze` would
+        // otherwise satisfy and read as "0 %".
+        if isChoiceParam(spec) {
+            return (choiceLabel(value: value, spec: spec), "")
         }
         // 0…1 amount knobs read in % (report Actionable-5); wire stays 0…1.
         if isPercentParam(spec) {

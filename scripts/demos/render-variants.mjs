@@ -66,9 +66,28 @@
 //                             binary underneath a stale assumption, so this
 //                             harness treats "build first" as the safe
 //                             default, not an optimization to skip)
+//     --scratch-path=<dir>  (default: the repo's shared `.build`)
 //
-// EXIT CODES: 0 all variants rendered & passed the audibility gate ·
-//             1 a variant failed to render, or failed the audibility gate ·
+// ⛔⛔ WHY `--scratch-path` EXISTS (m39-ac). Headless mode builds `DemoRender`
+// into the SHARED `.build`, which is also where `swift build` and
+// `./scripts/test.sh` put their objects. Several agents work this tree
+// concurrently, and "never build while another build is running" is a standing
+// rule here precisely because that directory is shared — but until now a demo
+// render had NO WAY to comply: rendering REQUIRED touching `.build`. Pointing
+// `swift build --scratch-path` at an isolated directory removes the conflict
+// entirely.
+// ⚠️ A FRESH SCRATCH PATH REBUILDS EVERYTHING (several minutes, and it does not
+// share a module cache with the main tree). Start it early, and never while
+// timing the suite. The manifest records `binaryPath`, so every downstream gate
+// that hashes the binary for freshness follows the scratch build automatically.
+// ⚠️ It changes nothing by default: with the flag absent the harness uses
+// `.build/debug/DemoRender` exactly as before, byte for byte.
+//
+// EXIT CODES: 0 all variants rendered, were audible, and were DISTINCT ·
+//             1 a variant failed to render, failed the audibility gate, or
+//               rendered BYTE-IDENTICAL to another (the axis did not take —
+//               a hard failure since 2026-09-20; it used to only warn, which
+//               meant a set whose axis did nothing exited 0) ·
 //             2 spec/argument/infrastructure error ·
 //             3 the silence POSITIVE CONTROL did not report silence —
 //               nothing was scored (the doc-count-drift.mjs shape)
@@ -87,16 +106,24 @@ const ROOT = resolve(HERE, "..", "..");
 // ═══════════════════════════════════════════════════════════════════════════
 
 function parseArgs(argv) {
-  const args = { mode: "headless", skipBuild: false, out: null, specPath: null };
+  const args = { mode: "headless", skipBuild: false, out: null, specPath: null,
+                 scratchPath: null };
   for (const a of argv) {
     if (a === "--skip-build") args.skipBuild = true;
     else if (a.startsWith("--mode=")) args.mode = a.slice("--mode=".length);
     else if (a.startsWith("--out=")) args.out = a.slice("--out=".length);
+    else if (a.startsWith("--scratch-path=")) {
+      args.scratchPath = a.slice("--scratch-path=".length);
+      if (!args.scratchPath) {
+        console.error("--scratch-path needs a directory"); process.exit(2);
+      }
+    }
     else if (!a.startsWith("--")) args.specPath = a;
     else { console.error(`unknown flag: ${a}`); process.exit(2); }
   }
   if (!args.specPath) {
-    console.error("usage: render-variants.mjs <specPath.json> [--mode=headless|app] [--out=<dir>] [--skip-build]");
+    console.error("usage: render-variants.mjs <specPath.json> [--mode=headless|app] "
+      + "[--out=<dir>] [--scratch-path=<dir>] [--skip-build]");
     process.exit(2);
   }
   if (!["headless", "app"].includes(args.mode)) {
@@ -353,13 +380,15 @@ function compareMonoFoldDown(variant, control) {
 // HEADLESS mode — build DemoRender, run it, parse its stdout protocol.
 // ═══════════════════════════════════════════════════════════════════════════
 
-function buildOrAbort(product, skip) {
+function buildOrAbort(product, skip, scratchPath) {
   if (skip) {
     console.log(`# build SKIPPED for ${product} by request — this run may test an older binary`);
     return;
   }
-  console.log(`# swift build --product ${product} …`);
-  const r = spawnSync("swift", ["build", "--product", product], { cwd: ROOT, stdio: "inherit" });
+  const flags = ["build", "--product", product];
+  if (scratchPath) flags.push("--scratch-path", scratchPath);
+  console.log(`# swift ${flags.join(" ")} …`);
+  const r = spawnSync("swift", flags, { cwd: ROOT, stdio: "inherit" });
   if (r.status !== 0) {
     console.error(`ABORT: swift build --product ${product} failed — refusing to run a render against` +
       ` whatever binary happens to be on disk`);
@@ -367,9 +396,11 @@ function buildOrAbort(product, skip) {
   }
 }
 
-async function runHeadless(spec, outDir, skipBuild) {
-  buildOrAbort("DemoRender", skipBuild);
-  const binaryPath = resolve(ROOT, ".build/debug/DemoRender");
+async function runHeadless(spec, outDir, skipBuild, scratchPath) {
+  buildOrAbort("DemoRender", skipBuild, scratchPath);
+  // The scratch path's layout mirrors `.build`'s, so only the ROOT differs.
+  const buildRoot = scratchPath ? resolve(process.cwd(), scratchPath) : resolve(ROOT, ".build");
+  const binaryPath = resolve(buildRoot, "debug/DemoRender");
   if (!existsSync(binaryPath)) {
     console.error(`ABORT: ${binaryPath} does not exist after a successful build — build graph changed?`);
     process.exit(2);
@@ -596,8 +627,13 @@ async function main() {
 
   const controls = runPositiveControls(outDir);
 
+  if (args.scratchPath && args.mode !== "headless") {
+    console.error("--scratch-path only applies to --mode=headless (app mode launches a "
+      + "staging binary through scripts/gates/_staging.mjs)");
+    process.exit(2);
+  }
   const run = args.mode === "headless"
-    ? await runHeadless(spec, outDir, args.skipBuild)
+    ? await runHeadless(spec, outDir, args.skipBuild, args.scratchPath)
     : await runApp(spec, outDir);
 
   console.log(`\n# measuring ${run.variants.length} rendered variant(s)…`);
@@ -634,11 +670,45 @@ async function main() {
 
   // Distinctness check: three plausible-looking LUFS numbers do not prove
   // the axis actually moved. Identical bytes prove it didn't.
+  // ⚠️⚠️ **READ THIS BEFORE TRUSTING A PASS: THE IMPLICATION RUNS ONE WAY.**
+  // Identical bytes prove the axis did NOTHING. **Distinct bytes prove NOTHING
+  // AT ALL.** Measured 2026-09-20: planting `shapedFraction → 0` in the
+  // transient shaper — the shaper never shapes, a completely inert effect —
+  // still produced four DISTINCT renders, because the variants' per-variant
+  // `outputDb` loudness trims differ. This check exited 0 on a dead feature.
+  // Any residual gain, dither or seed does the same. So a demo set whose claim
+  // matters needs a gate that asserts the PHYSICS (see
+  // `scripts/gates/m39y-transient-shaper-bytes.mjs`: loudness constant within
+  // 1 LU AND true peak monotonic along the axis). This check is a floor, not a
+  // verdict.
+  //
+  // ⛔⛔ **THIS IS A GATE, NOT A WARNING — CORRECTED 2026-09-20.** It printed
+  // `⚠ WARNING` to stderr and touched nothing that set the exit code, so a demo
+  // set whose axis did NOTHING exited 0 and read as a pass. That is precisely
+  // the failure this check was written for: m39-e shipped an LFO on
+  // `.volume`/`.pan` that was completely inert, live and offline, with 24 unit
+  // tests green, and THIS check is what caught it — by being READ by a human,
+  // not by failing anything. A guard whose verdict depends on somebody scrolling
+  // is not a guard. An audible-but-unchanged render is the most dangerous result
+  // this harness can produce, because every other number on the page looks fine.
   const hashes = measured.filter((m) => m.sha256).map((m) => m.sha256);
   const uniqueHashes = new Set(hashes);
-  if (hashes.length > 1 && uniqueHashes.size !== hashes.length) {
-    console.error(`\n⚠ WARNING: ${hashes.length - uniqueHashes.size} variant(s) rendered BYTE-IDENTICAL to another — ` +
-      `the axis this set claims to differ on may not have taken effect.`);
+  const identicalCount = hashes.length > 1 ? hashes.length - uniqueHashes.size : 0;
+  if (identicalCount > 0) {
+    // Name the actual pairs: "2 variants are identical" sends the reader back
+    // to the manifest to work out WHICH, and the answer is the whole diagnosis.
+    const byHash = new Map();
+    for (const m of measured) {
+      if (!m.sha256) continue;
+      if (!byHash.has(m.sha256)) byHash.set(m.sha256, []);
+      byHash.get(m.sha256).push(m.variant);
+    }
+    const groups = [...byHash.values()].filter((names) => names.length > 1);
+    console.error(`\n✘ ${identicalCount} variant(s) rendered BYTE-IDENTICAL to another — ` +
+      `the axis this set claims to differ on did NOT take effect:`);
+    for (const names of groups) console.error(`    identical: ${names.join(" == ")}`);
+    console.error(`  Three renders with plausible LUFS numbers do not prove an axis moved. ` +
+      `Identical bytes prove it did not.`);
   }
 
   // Ducking-hypothesis comparison against the control (if the spec asked for
@@ -785,7 +855,12 @@ async function main() {
   const anyInaudible = measured.some((m) => m.ok && !m.audible);
   if (anyRenderFailed) console.error("✘ at least one variant FAILED TO RENDER — see above");
   if (anyInaudible) console.error("✘ at least one variant rendered but FAILED THE AUDIBILITY GATE (looks like silence)");
-  process.exit(anyRenderFailed || anyInaudible ? 1 : 0);
+  // ⛔ `identicalCount` joins the exit condition (2026-09-20). There is
+  // deliberately NO spec-level opt-out: a set that legitimately wants two
+  // identical renders is a set whose axis is not an axis, and an escape hatch
+  // here would be used to silence exactly the defect the check exists to find.
+  if (identicalCount > 0) console.error("✘ at least one variant is BYTE-IDENTICAL to another — the axis did not take");
+  process.exit(anyRenderFailed || anyInaudible || identicalCount > 0 ? 1 : 0);
 }
 
 main().catch((e) => {

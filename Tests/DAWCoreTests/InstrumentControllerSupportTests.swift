@@ -183,7 +183,12 @@ struct InstrumentControllerSupportTests {
                     || ccs.count < 128, "\(kind) produced an incoherent set")
             #expect(ccs == ccs.sorted(), "\(kind) must enumerate ascending")
         }
-        #expect(InstrumentDescriptor.Kind.allCases.count == 5)
+        // NON-VACUITY for the loop above: a FLOOR, not a total. An exact count
+        // here pins nothing the loop does not already check and rots on every
+        // legitimate kind addition — it read `== 5` until m39-dm made
+        // `drumSynth` the sixth. A floor still fails a silent REMOVAL, which is
+        // the only way the loop could go vacuous.
+        #expect(InstrumentDescriptor.Kind.allCases.count >= 6)
     }
 
     // MARK: - Neutral defaults (the ⓒ teaching point's factual basis)

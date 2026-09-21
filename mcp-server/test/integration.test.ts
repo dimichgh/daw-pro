@@ -520,7 +520,27 @@ test("tools/list returns exactly the audit-enforced tool count", { skip: SKIP_RE
   // regexes: **41 direct + 191 wrapper = 232**, 0 duplicates in either set,
   // 0 names in both sets, and the same bogus-name negative control
   // (`"zzz_not_a_tool"`) returning 0.
-  assert.equal(result.tools.length, 232);
+  //
+  // 232 -> 236 at m39-dm's MCP mirror (2026-09-21): the drum machine's four
+  // wire verbs (`instrument.setDrumParam`/`describeDrumKit`/`listDrumPresets`/
+  // `loadDrumPreset`) shipped engine+wire+catalog earlier (`Commands.swift`
+  // stayed at 231 — no wire growth, this is MCP-only) — this closes the "an
+  // AI agent cannot touch the instrument at all" gap. `instrument_set_drum_param`
+  // and `instrument_load_drum_preset` mutate and rode the strict-schema
+  // wrapper; `instrument_describe_drum_kit` is a pure READ with a required
+  // `trackId` but rode the wrapper anyway, the `instrument_describe_synth`
+  // precedent (real params worth typo-catching); `instrument_list_drum_presets`
+  // takes no params at all and joined the DIRECT `server.registerTool` count,
+  // the `instrument_list_sound_banks`/`marker_list` precedent. The `kind`
+  // enum on `track_set_instrument` also gained `drumSynth` and a new
+  // `drumKit` object param — additions to an EXISTING tool's schema, so that
+  // half adds zero to this total on its own. Command<->tool bijection stays
+  // mechanical (`instrument.setDrumParam` -> `instrument_set_drum_param`,
+  // etc.), no exception-table entry needed. RE-MEASURED, not derived, by the
+  // same two name-capturing regexes: **42 direct + 194 wrapper = 236**, 0
+  // duplicates in either set, 0 names in both sets, and the same bogus-name
+  // negative control (`"zzz_not_a_tool"`) returning 0.
+  assert.equal(result.tools.length, 236);
 });
 
 // ---------------------------------------------------------------------------

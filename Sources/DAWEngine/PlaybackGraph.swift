@@ -565,6 +565,10 @@ final class PlaybackGraph {
         // AUSampler for a sound-bank track (m10-n) arrives through the same
         // seam — no new provider needed. Pending/failed/missing → silence.
         case .soundBank: return self.audioUnitProvider(track) ?? SilentPlaceholderInstrument()
+        // m39-dm — a built-in kind, so there is no provider and no placeholder
+        // branch: `resolvedDrumKit` turns a nil payload into the FACTORY kit,
+        // which means a drum track sounds the moment it is created.
+        case .drumSynth: return DrumSynthInstrument(params: descriptor.resolvedDrumKit)
         }
     }
 
@@ -1731,6 +1735,21 @@ final class PlaybackGraph {
                     synth.apply(params: (track.instrument ?? .default).polySynth)
                 case let sampler as SamplerInstrument:
                     sampler.apply(params: (track.instrument ?? .default).resolvedSampler)
+                // ⛔⛔ m39-dm — THE WORST SITE IN THE WHOLE INSTRUMENT PATH, AND
+                // IT IS NOT COMPILER-FORCED. This is a `switch` over an
+                // EXISTENTIAL with a `default:`, not over `InstrumentDescriptor
+                // .Kind`, so adding a kind does not break this file. Without
+                // this branch the drum machine constructs, renders, sounds and
+                // NEVER RECEIVES A PARAMETER CHANGE for the life of the
+                // session — every knob turn succeeding and doing nothing.
+                //
+                // Every test that builds an instrument WITH its params and then
+                // renders passes regardless. Only a test that edits a parameter
+                // on a LIVE graph and re-renders can fail, which is why
+                // `DrumSynthLiveGraphTests` exists and why plant P10 deletes
+                // exactly these two lines.
+                case let drums as DrumSynthInstrument:
+                    drums.apply(params: (track.instrument ?? .default).resolvedDrumKit)
                 default:
                     break
                 }

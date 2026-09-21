@@ -22,7 +22,9 @@ alone over-counts — see the method below), so a real count needs a
 derivation you can state and defend, not a bare `grep -c`.
 
 It reflects the tool surface enumerated from
-`mcp-server/src/server.ts` (**232 tools**, re-derived 2026-09-19 at the
+`mcp-server/src/server.ts` (**236 tools**, re-derived 2026-09-20 at the
+m39-dm drum-machine close — four `instrument_*DrumKit/DrumParam/DrumPreset`
+tools; before that 232 at the
 m39-e MCP mirror close, which added the nine `mod_*` tools —
 `mod_describe_kinds`, `mod_add_source`, `mod_set_source`,
 `mod_remove_source`, `mod_add_route`, `mod_set_route_depth`,
@@ -64,15 +66,16 @@ m35-g close (claimed 208 against a measured 220, a TWELVE-tool drift, for the
 same reason) — **treat this paragraph as due for staleness at every close that
 adds a tool, not just the ones that remembered to touch it.** It was corrected
 by re-running the decomposition below, whose arithmetic then matched a live
-`tools/list` over the generated plugin bundle EXACTLY — 232 (41 direct +
-191 wrapper), with a negative control (a name that is not a tool) correctly
+`tools/list` over the generated plugin bundle EXACTLY — **236 (42 direct +
+194 wrapper, MEASURED 2026-09-20 with the anchored pattern)**; it was 232
+(41 + 191) before the drum machine, with a negative control (a name that is not a tool) correctly
 absent. The bijection test, `mcp-server/test/audit-tools.test.ts`, defines
-`tool count = commands + |exception table B| + |exception table C|` — **227**
+`tool count = commands + |exception table B| + |exception table C|` — **231**
 MIRRORED commands + 3 Table-B tools with no backing command at all
 (`generate_image`, `generate_lyrics`, `generate_song_suno` — they call a
 generation provider directly) + 2 Table-C tools that bridge to an EXISTING
 command, `track.setInstrument`, under a friendlier name/shape
-(`instrument_set_sampler_param`, `instrument_set_sampler_zones`) = **232**.
+(`instrument_set_sampler_param`, `instrument_set_sampler_zones`) = **236**.
 ✅ **CLOSED, m23-cw (2026-09-19): the "215 mirrored of 217 wire" gap this
 paragraph used to flag is gone — `au.listPresets`/`au.loadPreset` are now
 mirrored 1:1 as `au_list_presets`/`au_load_preset`, no exception-table entry
@@ -134,12 +137,12 @@ for all nine, the direct-vs-wrapper strictness split, the nested-strict-gap
 closure on `target` (the discriminated union) and `params` (the m30-c
 precedent), and every one of those verbatim carries.
 ⚠️ The authoritative pins are `mcp-server/test/integration.test.ts`'s
-`assert.equal(result.tools.length, 232)` and `mcp-server/test/mcp-log.test.ts`'s
-`assert.equal(instrumented.length, 232)` — **NOT** a `grep -c 'registerTool('`,
+`assert.equal(result.tools.length, 236)` and `mcp-server/test/mcp-log.test.ts`'s
+`assert.equal(instrumented.length, 236)` — **NOT** a `grep -c 'registerTool('`,
 which is a known liar on this file and previously anchored this paragraph at a
 stale 194) and
 `Sources/DAWControl/Commands.swift`
-(**227 commands** — the `CommandRouter.allCommands.count == 227` pin in
+(**231 commands** — the `CommandRouter.allCommands.count == 227` pin in
 `Tests/DAWControlTests/RenderCommandTests.swift`, and in eighteen sibling
 files — **twenty pin lines across nineteen files** (one file carries two),
 counted 2026-09-19 at the m39-f close; ⚠️ three of the twenty spell it
@@ -654,6 +657,351 @@ to inaudible on a single speaker *by construction*, since the mono sum is what
 stays the same. If they are on a laptop speaker or a phone, quote
 `channelPeakDb`/`channelNotchDb` instead of asking them to listen.
 
+### `freqShifter` is NOT a pitch shifter and NOT a ring modulator, and it will not play in tune
+
+`fx_add {kind: "freqShifter"}` adds the same number of **Hz** to every partial.
+A pitch shifter MULTIPLIES every partial by the same **ratio**. ⛔ **That is not a
+nuance, it is the whole kind**: 100/200/300 Hz becomes 200/300/400 Hz, which is
+no longer a harmonic series, so the result reads as a BELL or a sheet of METAL
+rather than as a note. If a user asks to "shift the vocal up a tone", this is the
+WRONG kind — it cannot play in tune and no setting makes it.
+
+⛔ **It is also not `ringMod`.** A ring modulator is DOUBLE-sideband: it emits
+both `f + fc` and `|f − fc|` and the original partial vanishes. This is
+SINGLE-sideband — one of the two survives and the other is rejected. Measured off
+a rendered 1 kHz sine shifted +200 Hz: wanted sideband **−6.02 dB**, unwanted
+image **−55.77 dB**, carrier leakage **−153.8 dB**, i.e. **49.75 dB of rejection**.
+A build that had quietly lost its quadrature would show those first two within a
+fraction of a dB of each other and would still sound metallic.
+
+⭐ **THE FAMOUS USE IS THE TINY ONE.** `fineHz` at **1–20 Hz** does not sound like
+a shift at all — it beats slowly against the dry signal for a thickness no chorus
+produces, and is the oldest fix in live sound for a microphone on the edge of
+feedback. `fineHz` exists as a separate knob because that zone is **1 % of
+`shiftHz`'s travel** and `.logarithmic` is unavailable to a range that crosses 0.
+The two are ADDED and their SUM is clamped to `shiftHz`'s range, so the
+advertised ±2000 Hz is the real limit rather than ±2020.
+
+⭐ **THE SIGN IS THE DIRECTION** — positive up, negative down, no mode switch — so
+it sweeps and automates continuously THROUGH zero.
+
+⚠️ **SHIFTING DOWN PAST 0 Hz REFLECTS, AND THAT IS REAL.** A partial driven below
+0 Hz comes back up at `|f + Δ|` with its phase inverted: 100 Hz shifted −300 Hz
+returns at **200 Hz** (measured, −6.02 dB). Every analog Bode shifter does this.
+Do not report it as a bug.
+
+⚠️ **`mix` MATTERS MORE HERE THAN ON MOST EFFECTS.** At `mix` 1 the in-tune
+original is GONE — right for bells, usually wrong for a lead vocal or bass. The
+default is 0.5. At `mix` **exactly 0** the insert is BIT-EXACT dry (the buffer is
+never written) while the network and both oscillators keep running, so raising it
+again fades in rather than jumping. `outputDb` trims the SHIFTED copy only, which
+is what keeps `mix` 0 bit-exact at any trim setting.
+
+⚠️ `effectiveShiftHz`, `sidebandRejectionDb` and `hilbertPhaseErrorDeg` are
+echoed in `fx.add` / `fx.setParam` results and `project.snapshot` inside that
+insert's `params` — **per-instance echoes, not schema**, so they are **not** in
+`fx.describe`.
+
+### `transientShaper` has NO threshold, its knobs are MAXIMA, and nothing under −70 dBFS is touched
+
+`fx_add {kind: "transientShaper"}` reshapes a hit rather than its level:
+`attackDb` ("Punch") moves the leading edge, `sustainDb` ("Body") moves the tail.
+⛔ **It is not a compressor and it has no threshold or ratio**, because it
+responds to the signal's rate of change against its OWN lagged copy, not to
+absolute level. Pulling the fader down does not pull the effect down — measured:
+the same settings on the same hit 20 dB quieter shaped it to within
+**1.65e-06 dB** of the loud one.
+
+⛔ **`attackDb: 6` IS A CEILING, NOT "+6 dB".** The full amount lands only where
+the detector's differential reaches `fullShapeDifferentialDb` = **12 dB** — a
+hard, step-like onset. Softer or slower onsets produce a smaller differential and
+get a PROPORTIONAL fraction of the knob, which is what keeps it from pumping.
+Measured on a plucked burst: `attackDb: 6` reads **+6.00 dB** over the first
+`attackWindowMs`, `attackDb: -6` reads **−6.00 dB**. When a user asks why "+12"
+only moved their pad a little, this is the answer — the fix is a harder source or
+a shorter `attackMs`, not a bigger number.
+
+⚠️ **`attackWindowMs` is DERIVED from `attackMs`, and the two are not the same
+number.** `attackMs` is the DETECTOR's lag; the window over which attack shaping
+is at full strength for a step onset is `attackMs × 0.28927`, so the default
+`attackMs: 5` shapes the first **~1.45 ms** — a 3.46× difference. Every `fx.add`
+/ `fx.setParam` result and `project.snapshot` echo `attackWindowMs`,
+`fullShapeDifferentialDb` and `detectorFloorDb` inside that insert's `params`
+object. ⚠️ Those are **per-instance echoes, not schema**, so they are **not** in
+`fx.describe`, which returns `{name, min, max, default, curve, note}` and no
+values at all.
+
+⛔ **NOTHING BELOW −70 dBFS IS SHAPED AT ALL** (`detectorFloorDb`), and it is a
+HARD gate, not a soft knee. A fade-out tail, a quiet room-tone take, or a track
+feeding a heavily attenuated send crosses it and the insert becomes a bit-exact
+passthrough while the knobs still read +12. Measured: a −64 dBFS burst is shaped
+**+9.75 dB**; the same burst at −76 dBFS is shaped **0.0 dB**. If a user reports
+"it does nothing on this track", check the level going INTO the insert first.
+
+⚠️ **`mix: 0` is a bit-exact bypass, and so are the defaults** (`attackDb: 0`,
+`sustainDb: 0`, `outputDb: 0`) — verified on float BIT PATTERNS, not a tolerance.
+The detector still runs; it just has nothing to apply. `outputDb` is the trim for
+re-matching level after a shaping change and is the only parameter that applies
+unconditionally — it is the one to automate if you want a plain gain move.
+
+⚠️ **Zero latency, deliberately** (`latencySamples == 0`): no lookahead, so it
+never enters the PDC path. The honest cost is that an attack CUT leaves the first
+~2 samples of a leading edge unattenuated (a sub-0.05 ms tick).
+
+### `clipper` is NOT `saturator` and NOT `limiter`, and `oversampling` is the reason the kind exists
+
+`fx_add {kind: "clipper"}` sets a HARD CEILING and cuts off everything above it.
+That is how loud masters and hard-hitting drums are actually made, and it is a
+different job from either neighbouring kind:
+
+- ⛔ **NOT `saturator`.** The difference is exact, not a matter of degree.
+  `tanh` only ASYMPTOTICALLY approaches its bound, so a saturator can never
+  promise a peak ceiling at all. BOTH of this kind's modes reach the ceiling at a
+  FINITE input and stay there — `hard` immediately, `soft` bending in through a
+  cubic knee and going flat at **1.5× the ceiling**.
+- ⛔ **NOT `limiter`.** A limiter rides a GAIN to avoid clipping and preserves
+  the waveform's shape. This DEFORMS the waveform on purpose — that deformation
+  is where the loudness and the bite come from.
+
+⭐ **`clipThresholdDbfs` IS THE NUMBER THE USER ACTUALLY WANTS, AND NEITHER KNOB
+SHOWS IT.** Clipping starts at an INPUT level of `ceilingDb − driveDb`. Every
+`fx.add` / `fx.setParam` result echoes it. When someone says "I set the ceiling
+to −6 but nothing is clipping", this is the number to quote — with `driveDb: 0`
+nothing below −6 dBFS input ever reaches the ceiling.
+
+⚠️ **NEGATIVE DRIVE IS REACHABLE ON PURPOSE** (`driveDb` goes to −12). With a low
+ceiling and a negative drive this stops being a loudness tool and becomes a gentle
+wave-shaper. That is a setting, not a misuse.
+
+#### Oversampling: what it fixes, and the honest size of it
+
+Hard clipping generates harmonics far above Nyquist. They do not vanish — they
+FOLD BACK into the audible band as tones unrelated to the music, a thin metallic
+fizz. Running the shaper at 2× or 4× moves the fold out of the band.
+
+⭐ **MEASURED, off rendered audio, on a 6271.927 Hz tone at 48 kHz** (the fixture
+`scripts/gates/m39ac-clipper-physics.mjs` uses, re-derived and re-measured
+independently): the alias floor drops **91.05 dB** going from `1` to `4`.
+
+⚠️ **`2` IS MUCH CLOSER TO `1` THAN TO `4`, AND THE PHYSICS SAYS WHY** — do not
+read the numbers as a smooth ramp. H13 and H15 fold *INSIDE* 2×'s own doubled
+band and pass through untouched: **−53.3 / −50.4 dB at BOTH `1` and `2`**, but
+**−147 / −152 dB at `4`**. If a user wants the fizz gone, `2` is a compromise and
+`4` is the answer.
+
+⛔ **THE HONEST CALIBRATION: ON MUSIC THIS IS SUBTLE.** On the tone it is 91 dB
+and unmissable. On an actual riff, `1` and `4` differ by about **−43.85 dB** RMS —
+real, and tilted **+4.16 dB** toward the high end against the music's own −18.2 dB,
+which is exactly the signature of high-frequency fizz. But 44 dB down is quiet.
+**If a user says they cannot hear the difference on a laptop speaker, that is a
+real answer, not a failure to listen** — quote the tone measurement instead of
+asking them to listen harder, and treat "is 4× worth the CPU for this material"
+as an open question rather than a settled one.
+
+⭐ **`1` IS A SHIPPED SETTING, NOT A DEGRADED ONE.** Plenty of records want that
+grit, and it is the only way to hear what the other settings remove.
+
+⚠️ **ONLY 1, 2 AND 4 EXIST, AND 3 ROUNDS *UP* TO 4.** The snap is `< 1.5 → 1`,
+`< 3.0 → 2`, else `4` — ties resolve upward. `resolvedOversampling` and
+`resolvedMode` come back in every result and are the values the render thread
+actually uses; quote those, never the requested ones.
+
+⚠️ **`mode` AND `oversampling` ARE DISCRETE — automate them with `hold`, NEVER a
+ramp.** They are `Modulatable: refused`.
+
+#### The latency is a CONSTANT 32, and `mix: 0` is a DELAYED identity
+
+⛔ **UNLIKE EVERY OTHER BUILT-IN EXCEPT `limiter`, THIS KIND REPORTS LATENCY** —
+a constant **32 samples at every `oversampling` setting, including `1`**, removed
+automatically by delay compensation.
+
+⭐ **THAT CONSTANCY IS A DESIGN REQUIREMENT, NOT A COINCIDENCE.** The anti-alias
+kernel's cutoff is pinned at BASE-rate Nyquist, so its group delay is the same 32
+base samples at every factor. It has to be: parameter edits do not republish the
+chain, so a factor-dependent latency would silently stale the PDC plan the moment
+a user moved the knob. At `1` the kernel degenerates to a unit impulse and the 32
+samples of delay remain.
+
+⛔ **SO `mix: 0` IS NOT AN UNTOUCHED BUFFER HERE.** It is the input DELAYED BY 32
+SAMPLES, sample for sample. This kind deliberately breaks the usual bit-exact-dry
+identity law, and the dry half of the blend is delayed to match so the mix stays
+phase-coherent. If a null test against this insert at `mix: 0` fails, check the
+32-sample offset before reporting a bug.
+
+⚠️ **THE CEILING BOUNDS SAMPLES, NOT TRUE PEAK.** The wave drawn between samples
+can ride roughly a decibel higher, which is what a broadcast meter reads. Follow
+with a `limiter` at `truePeak: 1` if you need that guarantee. And a POSITIVE
+`outputDb` raises the real maximum to `ceilingDb + outputDb`, echoed as
+`wetCeilingDbfs` — the ceiling knob alone is not the output ceiling.
+
+### `saturator` has the SAME `oversampling` knob and THREE of its rules are INVERTED
+
+`saturator` and `clipper` now share a control with the same name, the same
+values (1/2/4) and the same snap. **Everything else about it is different on the
+two kinds, and an agent that carries a habit across will be wrong three ways.**
+
+| | `clipper` | `saturator` |
+|---|---|---|
+| default | **4** | **1 (OFF)** |
+| latency | **constant 32** at every factor | **0 at 1, 32 at 2/4** |
+| automation lane on it | allowed (use `hold`) | **REFUSED — the lane errors** |
+| `mix: 0` | delayed identity, `in[n−32]` | **untouched buffer** at 1; `in[n−32]` at 2/4 |
+
+#### Why the default is 1, and why that is not "the worse setting"
+
+⛔ **IT IS A COMPATIBILITY DEFAULT, NOT A QUALITY OPINION.** `saturator` shipped
+long before this control existed, so there are already saved projects with one in
+a chain. A default of 2 or 4 would change what every one of them SOUNDS like AND
+shift it in time by 32 samples, silently, on the next open. At `1` the whole
+oversampling path is **skipped** — not run at factor 1, skipped — and the output
+is bit-for-bit what it always was.
+
+⭐ **THAT IS A MEASURED CLAIM, NOT A DESIGN INTENTION.**
+`scripts/gates/m39ad-saturator-default-bytes.mjs` pins the sha256 of a rendered
+saturator against hashes captured from a build in which the parameter did not
+exist, with a no-effect CONTROL hash so an unrelated engine change cannot be
+mistaken for a saturator regression. Two of its three pins cover the default; the
+third covers a PARTIAL `mix`, because at the default `mix` of 1 the dry half of
+the blend is multiplied by zero and a change confined to the blend is invisible.
+
+⭐ **SO: IF YOU ARE ADDING A SATURATOR TODAY AND DRIVING IT HARD, PASS
+`oversampling: 4`.** The alias floor drops **90.28 dB** from 1 to 4 — measured
+off rendered audio on the same 6271.927 Hz tone the clipper's gate uses
+(`scripts/gates/m39ad-saturator-physics.mjs`). `tanh` is odd-symmetric exactly
+like a hard clip, so it folds back exactly the same way.
+
+⚠️ **AND `2` IS MUCH CLOSER TO `1` THAN TO `4` HERE TOO, FOR THE SAME REASON:
+16.47 dB against 90.28.** H13 and H15 fold *inside* 2×'s own doubled band and
+pass through untouched — measured unchanged to 0.1 dB between `1` and `2`. If a
+user wants the fizz gone, `2` is a compromise and `4` is the answer.
+
+#### The latency MOVES with the knob here, and that is the trap
+
+⛔⛔ **DO NOT ASSUME 32.** On `saturator` it is **0 at `oversampling` 1** and
+**32 at 2 or 4**. Read `latencySamples` back out of the `fx.add` /
+`fx.setParam` result; it is echoed on every one, alongside
+`resolvedOversampling` and `aliasRejectionDb`. Delay compensation removes it
+either way, so the track still lines up — but a null test against this insert
+will be off by 32 samples at 2/4 and by nothing at 1.
+
+⚠️ **THIS IS WHY AN AUTOMATION LANE ON IT IS REFUSED RATHER THAN DISCOURAGED.**
+`automation.setLane` on `saturator`.`oversampling` errors like an unknown
+parameter name. Delay compensation is recomputed only when the parameter is
+edited directly, so a lane moving the factor from the render thread would leave
+the whole project's compensation stale with nothing reporting it. Step it with
+`fx.setParam` between sections instead. The identically named parameter on
+`clipper` *is* automatable (with `hold`), precisely because that kind's latency
+is constant.
+
+⛔ **AND `saturator` IS STILL NOT `clipper`.** Sharing a quality knob changes
+nothing about what the two kinds do: `tanh` only ever APPROACHES its bound, so
+`saturator` cannot promise a peak ceiling at any setting. If a level must not be
+exceeded, that is `clipper` (or a `limiter`). If you want the sound to thicken,
+that is this one.
+
+### `dynamicEQ` is the largest kind in the app, and its budget cost is the trap, not its DSP
+
+`fx_add {kind: "dynamicEQ"}` gives you a FOUR-BAND DYNAMIC EQ — a normal EQ band
+whose gain moves on its own once the signal crosses a threshold, so it corrects
+only the instant that needs it rather than sitting there full-time like a static
+`eq` band. It is 32 parameters, band-major (`slot = (band−1)·8 + p`,
+`band1Mode`…`band4ReleaseMs`) — call `fx_describe {kind: "dynamicEQ"}` for the
+full table; this section is the traps, not the reference.
+
+**Bells only in v1 — no shelves.** Each band is: `bandNMode` (0 OFF/default — a
+TRUE no-op, the band's filter is not even stepped, so a freshly added instance
+is bit-for-bit transparent until a band is turned on; 1 ABOVE, triggers when the
+level INSIDE THE BAND rises past `bandNThresholdDb`; 2 BELOW, triggers when it
+falls under it), `bandNFreq`/`bandNQ` (centre and width), `bandNThresholdDb`/
+`bandNRatio` (when and how hard it reacts), `bandNRangeDb` (how far it may move
+AND which way — negative cuts, positive boosts, a hard cap), `bandNAttackMs`/
+`bandNReleaseMs`.
+
+⭐ **`bandNMode` TIMES THE SIGN OF `bandNRangeDb` IS FOUR MUSICAL MOVES FROM TWO
+KNOBS.** above + negative (the default sign) is the familiar de-esser/de-harsh
+move — turns the band down when it gets loud; above + positive turns it UP when
+it gets loud (upward excitement); below + positive restores air under a fade;
+below + negative is one-band downward expansion for mic rumble between phrases.
+
+⚠️ **`bandNMode: 2` (below) SITS AT FULL RANGE ON SILENCE, AND THAT IS CORRECT,
+NOT A BUG.** Digital silence reads as −180 dBFS inside the band, which is below
+every threshold, so a `below` band is always fully triggered by silence — exactly
+what an expander does to silence.
+
+#### This `Q` is not `eq`'s `Q`, measured, not a rounding difference
+
+⚠️⚠️ **AN AGENT PORTING A `Q` SETTING FROM `.eq` WILL BE WRONG.** At 1 kHz, `Q: 2`,
+a `dynamicEQ` band measures about **704 Hz** wide at half-gain where an `eq`
+peaking band at the same `Q` measures about **498 Hz**. `dynamicEQ`'s band also
+WIDENS as it works harder (592 / 704 / 993 / 1401 Hz at 3 / 6 / 12 / 18 dB of
+movement) while `eq`'s band stays a fixed width at any gain. That is the
+deliberate price of this kind's topology — the band's poles do not move with its
+gain, which is what lets the gain change every sample without clicking — not an
+implementation gap to close.
+
+#### No `mix`, no lookahead, no meter — and that is three separate decisions
+
+⛔ **NO PER-BAND `mix`.** A band at `bandNRangeDb: 0` already does nothing,
+bit-for-bit, so a second blend control would be a redundant knob computing the
+same thing a different way.
+
+⭐ **ZERO LATENCY AT EVERY SETTING OF EVERY PARAM**, because there is no
+lookahead. A very fast `bandNAttackMs` still cannot act before the sound
+arrives — that is the trade for adding nothing to `latencySamples` and shifting
+nothing in the project's timing when you add one.
+
+⚠️ **NO GAIN-REDUCTION METER IN v1** — unlike `compressor`/`limiter`/`gate`,
+`fx_add`/`fx_set_param` results carry no `gainReductionDb` for this kind. Poll
+`fx_spectrum` during playback instead to see a band's response actually moving.
+
+#### `bandNMode` clamps, does not snap — the `clipper.mode` precedent
+
+⚠️ **`fx_set_param` ON `bandNMode` CLAMPS THE STORED VALUE TO 0–2 BUT DOES NOT
+ROUND IT.** A stored `1.5` is not corrected to `1` or `2` in the param itself —
+the render thread (and the `bandNModeLabel` echo) SNAP it at read time instead,
+exactly the way `clipper.mode` already works on this surface. ⛔ **`phaser.stages`
+is NOT this precedent and citing it as one was a measured error** (corrected
+2026-09-20): it genuinely SNAPS its STORED value — `PhaserParams`' init runs
+`Self.snappedStages(stages)` (`Effects.swift:3012-3015`, commented "SNAPPED, not
+merely clamped"), and a write of `5` reads back as **`6`**. This same file says
+so at its own `phaser.stages` entry above; the two statements contradicted each
+other for several cycles.
+Read `band1ModeLabel`…`band4ModeLabel` back from the `fx_add`/`fx_set_param`
+result (a STRING, `"off"`/`"above"`/`"below"`, NOT in `fx_describe`) for the
+truth the render thread actually uses. **Do not file the clamp-not-snap as a
+bug** — it is the documented, deliberate precedent, not an oversight.
+`bandNMode` is DISCRETE: automate it with `hold`, never a ramp, and modulation
+refuses it outright. `bandNFreq`/`bandNQ` are filter coefficients, so
+modulation only WARNS on them (the `eq.peak1Freq` zipper problem) rather than
+refusing.
+
+Two more result-echo-only fields, present in `fx_add`/`fx_set_param` results and
+`project_snapshot` but **NOT** in `fx_describe`'s schema: `latencySamples`
+(always `0`) and `kneeDb` (a fixed `6`, not a param — the compressor's own
+default knee, shared rather than re-exposed).
+
+#### The 32-param shape makes the shared 64-slot budget a REAL risk, not a style note
+
+⚠️⚠️ **AUTOMATION LANES AND MODULATED EFFECT PARAMS SHARE ONE 64-ENTRY CAP PER
+MIXER STRIP**, and one fully-automated `dynamicEQ` instance is 32 of them — HALF
+a strip's entire budget, on its own, before any other effect on that strip is
+touched.
+
+⛔ **THE TWO TOOLS THAT SPEND THIS BUDGET DISAGREE ON WHAT HAPPENS PAST IT, AND
+THAT ASYMMETRY IS THE ACTUAL TRAP.** `mod_add_route` checks the combined total
+before adding and REFUSES past the cap, naming both contributors so nothing is
+silently lost. `automation_add_lane` does **NOT** perform this check — it
+appends unconditionally and returns success every time. The cap is enforced
+later, on the render side: `AutomationSchedule`'s build keeps only the FIRST 64
+effect-param tracks (`AutomationSchedule.swift`, `maxEffectParamTracks = 64`,
+`.prefix(64)`) and drops everything past that with **no error and no warning
+anywhere on the wire**. A 65th lane an agent adds via `automation_add_lane` gets
+a normal success response and then simply never reaches the render thread —
+this tree's characteristic failure mode of something that looks live and does
+nothing. Automate the bands actually being ridden rather than reaching for all
+32 params on two instances at once, and if a strip is running close to the cap,
+count `automation_add_lane` calls yourself — the tool will not stop you.
+
 ### Overlap masks a retrigger. The BUILT-IN SAMPLER slurs for real in `legato`; nothing else does.
 
 ⚠️ **CORRECTED TWICE, IN OPPOSITE DIRECTIONS, AND THE SECOND CORRECTION IS THE POINT.**
@@ -967,6 +1315,83 @@ The app lifts it for you at the start of a take, at the end of a take, on
 `transport_panic`, and when a project closes — so it cannot outlive the take it
 was pressed in. The human shortcut for the same pedal is **Tab**, while Musical
 Typing is on.
+
+## There is no `deEsser` kind — the de-esser is a MODE on `compressor`
+
+This section exists because of a specific, predictable wrong turn: you will be
+asked to "de-ess the vocal", you will call `fx_describe`, you will scan the kind
+list for `deEsser`, you will not find it, and you will reach for an EQ instead.
+An EQ is the wrong tool — it dulls the whole vocal permanently to fix a sound
+that happens for 80 milliseconds at a time.
+
+**A de-esser IS a compressor.** Same `thresholdDb`, `ratio`, `attackMs`,
+`releaseMs`. The only difference is that the part which DECIDES when to turn
+down listens to a filtered copy of the signal instead of the whole thing. So it
+ships as three appended params on `compressor`:
+
+| param | what it does |
+|---|---|
+| `detectorMode` | `0` **off, the default** · `1` band-pass detector · `2` high-pass detector |
+| `detectorFreqHz` | band centre (mode 1) or corner (mode 2). Default 6500. Park it on the "sss" — 5000–9000 Hz on most voices |
+| `detectorQ` | mode 1: the band's WIDTH (bandwidth = freq ÷ Q). mode 2: the corner's RESONANCE |
+
+A working starting point, and the whole recipe:
+
+```
+fx_add     { trackId: <vocal>, kind: "compressor", params: {
+               thresholdDb: -28, ratio: 6, attackMs: 1, releaseMs: 60,
+               detectorMode: 1, detectorFreqHz: 6500, detectorQ: 2 } }
+```
+
+Then move `thresholdDb` — **that** is the "how much de-essing" knob, not
+`ratio`.
+
+### The four things that actually catch people
+
+- **`detectorMode` 0 is not "a gentle de-esser", it is OFF.** Every compressor
+  in every project that predates this feature decodes to 0 and renders
+  bit-for-bit what it always did. If you set the frequency and the Q but forget
+  the mode, you have changed nothing at all — and nothing will warn you, because
+  those two params are legitimately inert at mode 0.
+
+- **⛔ It is WIDEBAND, not split-band, and this is the one that surprises
+  people.** When the detector fires, the **whole signal ducks** — lows included
+  — for as long as the "sss" lasts. It does *not* carve the sibilant band out
+  and leave the rest playing. That is inaudible on a solo voice (an "s" is
+  short, and the lows under it are not what anyone is listening to) and
+  **audible on a full mix, so do not put one on the master bus**. It is also
+  exactly why the kind still reports `latencySamples: 0` and cannot shift an
+  existing project in time.
+
+- **`detectorQ` means two different things and both are live.** At mode 1 it is
+  the band's width, and the band peaks at 0 dB at *every* Q — so widening it
+  does not quietly move your threshold. At mode 2 it is the high-pass corner's
+  resonance, where the response **at** the corner **is** Q: the default 2 puts a
+  deliberate +6 dB emphasis right where sibilance starts, which is why mode 2
+  ducks harder than mode 1 at identical settings. Set 0.707 if you want a flat
+  corner.
+
+- **With a sidechain key attached, it is the KEY that gets filtered.** The key
+  *is* the detector's input, so the two features compose rather than fight:
+  `fx_set_sidechain` plus `detectorMode: 1` is "duck this track whenever *that*
+  track gets sibilant", in two calls.
+
+### Reading it back
+
+`fx_add` / `fx_set_param` echo `resolvedDetectorMode` (`"off"` / `"bandPass"` /
+`"highPass"` — the **snapped** value the render thread uses, so a stored `1.4`
+comes back as `"bandPass"`), `detectorBandwidthHz`, `detectorBandwidthApplies`
+(0 outside mode 1, because a high-pass has no width) and a constant
+`latencySamples: 0`. None of those four is part of `fx_describe`'s schema —
+they are per-instance echoes on the insert's `params` object.
+
+### Automating it
+
+`detectorMode` is DISCRETE: automate it with **hold** steps, never a ramp, and
+modulation refuses it outright. `detectorFreqHz` and `detectorQ` are filter
+corners — modulation **warns** on them, because recomputed biquad coefficients
+zipper at any rate (the `eq.peak1Freq` problem, not the rate-aliasing one).
+Automating them between sections is fine; an LFO on them is not what you want.
 
 ## Etiquette (every agent follows this)
 

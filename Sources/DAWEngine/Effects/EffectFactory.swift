@@ -59,6 +59,14 @@ enum EffectFactory {
             return StereoWidthEffect(params: descriptor.resolvedStereoWidth)
         case .phaser:
             return PhaserEffect(params: descriptor.resolvedPhaser)
+        case .transientShaper:
+            return TransientShaperEffect(params: descriptor.resolvedTransientShaper)
+        case .freqShifter:
+            return FreqShifterEffect(params: descriptor.resolvedFreqShifter)
+        case .clipper:
+            return ClipperEffect(params: descriptor.resolvedClipper)
+        case .dynamicEQ:
+            return DynamicEQEffect(params: descriptor.resolvedDynamicEQ)
         case .audioUnit:
             // Reached only when the registry has no prepared instance yet
             // (the chain state consults its provider first): bit-exact
@@ -107,6 +115,15 @@ enum EffectFactory {
             (instance as? StereoWidthEffect)?.apply(params: descriptor.resolvedStereoWidth)
         case .phaser:
             (instance as? PhaserEffect)?.apply(params: descriptor.resolvedPhaser)
+        case .transientShaper:
+            (instance as? TransientShaperEffect)?
+                .apply(params: descriptor.resolvedTransientShaper)
+        case .freqShifter:
+            (instance as? FreqShifterEffect)?.apply(params: descriptor.resolvedFreqShifter)
+        case .clipper:
+            (instance as? ClipperEffect)?.apply(params: descriptor.resolvedClipper)
+        case .dynamicEQ:
+            (instance as? DynamicEQEffect)?.apply(params: descriptor.resolvedDynamicEQ)
         case .audioUnit:
             // AU params are not on the generic surface in v0 — no-op.
             break

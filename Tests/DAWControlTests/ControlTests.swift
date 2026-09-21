@@ -542,8 +542,12 @@ struct CommandRouterTests {
         ))
         #expect(!badKind.ok)
         // soundBank joined the list in m10-n-1 (wire-valid via Kind.allCases;
-        // the bank param itself is the m10-n-2 wire delta).
-        #expect(badKind.error == "kind must be one of testTone|polySynth|sampler|audioUnit|soundBank")
+        // the bank param itself is the m10-n-2 wire delta). drumSynth joined at
+        // m39-dm the same way — the message is DERIVED from Kind.allCases, so
+        // this literal is the pin that proves the derivation still reaches the
+        // wire, and it moves once per new kind by design.
+        #expect(badKind.error
+                == "kind must be one of testTone|polySynth|sampler|audioUnit|soundBank|drumSynth")
 
         let badWave = await router.handle(ControlRequest(
             id: "2", command: "track.setInstrument",
@@ -1652,6 +1656,23 @@ struct CommandRouterTests {
             // route exercise with a real answer, which is exactly what this
             // loop is for. It needs only the trackId.
             "instrument.describeSynth": ["trackId": .string(instTrackID)],
+            // m39-dm: all three STAY IN THE LOOP for the describeSynth reason
+            // directly above — every instrument track carries a drum kit (the
+            // default one) whether or not the drum machine is the ACTIVE
+            // instrument, so none of them can hit the "unconfigured, therefore
+            // refuses" state that excludes instrument.describeSampler. They
+            // answer on this poly-synth track with isActiveInstrument: false,
+            // which is a real route exercise with a real answer.
+            // `instrument.listDrumPresets` takes no params and needs no entry.
+            "instrument.setDrumParam": ["trackId": .string(instTrackID),
+                                        "name": .string("kick.decay"),
+                                        "value": .number(0.4)],
+            "instrument.describeDrumKit": ["trackId": .string(instTrackID)],
+            // Wholesale: this REPLACES the kick.decay written two entries above.
+            // Harmless here — the loop proves routes, not values — but noted so
+            // nobody later reads an ordering bug into it.
+            "instrument.loadDrumPreset": ["trackId": .string(instTrackID),
+                                          "name": .string("909")],
             // m23-h: track.reorder sits at the END of allCommands, by which
             // point track.remove has already deleted the shared audio trackID —
             // so it moves the INSTRUMENT track, which survives the whole loop

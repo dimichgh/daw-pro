@@ -335,6 +335,12 @@ public final class CommandRouter {
         // PadPreviewCommandTests, which pins a verb at note.audition + 1).
         // NOTE: no quoted string in this comment, deliberately (the m25-d rule).
         "instrument.describeSynth",
+        // m39-dm — the drum machine's four verbs, placed next to the other
+        // instrument describe/configure verbs rather than at the tail.
+        "instrument.setDrumParam",
+        "instrument.describeDrumKit",
+        "instrument.listDrumPresets",
+        "instrument.loadDrumPreset",
         "instrument.probeLiveness",
         "mixer.setMasterVolume",
         "mixer.applyPreset",
@@ -1566,9 +1572,22 @@ public final class CommandRouter {
                     "noiseLevel", "noiseColor", "drift",
                     "resonanceBoost", "drive", "velocityToCutoff", "keyToCutoff",
                     "voiceJitter", "envelopeCurve",
-                    "audioUnit", "soundBank"], verb: "track.setInstrument")
+                    "audioUnit", "soundBank", "drumKit"], verb: "track.setInstrument")
             let instTrackID = try params.requireTrackID()
             let kind = try parseInstrumentKind(params["kind"])
+            // m39-dm — the kit overlays onto the track's CURRENT kit, so
+            // `{drumKit:{kick:{decay:0.9}}}` moves one parameter and leaves the
+            // other seventy-four standing. Parsed BEFORE the edit so a bad name
+            // throws and records no undo entry (the `validateSamplerZones`
+            // precedent).
+            let drumKitOverlay: DrumKitParams?
+            if let raw = params["drumKit"] {
+                let current = store.tracks.first { $0.id == instTrackID }?
+                    .instrument?.drumKit ?? DrumKitParams()
+                drumKitOverlay = try Self.parseDrumKit(raw, base: current)
+            } else {
+                drumKitOverlay = nil
+            }
             let waveform = try parseWaveform(params["waveform"])
             // The sampler object overlays onto the track's CURRENT sampler
             // config, so `{sampler: {release: 0.4}}` changes one global and
@@ -1698,7 +1717,8 @@ public final class CommandRouter {
                     PolySynthDescription.meaning("envelopeCurve")),
                 sampler: sampler,
                 audioUnit: audioUnit,
-                soundBank: soundBank
+                soundBank: soundBank,
+                drumKit: drumKitOverlay
             ) else { throw ControlError.noTrack(instTrackID) }
             var instPayload = instrumentJSON(descriptor, trackID: instTrackID)
             // ONLY when non-empty: an always-present empty array would read as
@@ -2191,6 +2211,127 @@ public final class CommandRouter {
             return .success(request.id, .object(PolySynthDescription.payload(
                 trackID: describeSynthTrackID,
                 descriptor: describeSynthTrack.instrument ?? .default)))
+
+        case "instrument.setDrumParam":
+            // m39-dm — THE PER-PARAMETER PATH, and there is exactly one of it
+            // for all 75 names.
+            //
+            // ⛔ The alternative was 75 more optional arguments on
+            // `track.setInstrument`. That signature already carries 22, and
+            // `ProjectStore.swift` records that every one must be
+            // hand-mirrored in its rebuild or it DESTROYS ITSELF on every
+            // unrelated call. Seventy-five more would be unmaintainable by
+            // construction — so the name-addressing decision buys a single
+            // setter with no list to keep in sync.
+            //
+            // `name` is a dotted `<scope>.<param>`. A typo is refused with the
+            // valid names for that scope rather than a bare "unknown", the same
+            // rule `mod.addRoute` follows. Value clamps to the spec range.
+            try params.rejectUnknownKeys(["trackId", "name", "value"],
+                                         verb: "instrument.setDrumParam")
+            let drumParamTrackID = try params.requireTrackID()
+            guard let drumParamName = params["name"]?.stringValue, !drumParamName.isEmpty else {
+                throw ControlError("name is required — a dotted drum parameter like 'kick.decay'")
+            }
+            guard let drumParamValue = params["value"]?.doubleValue else {
+                throw ControlError("value is required and must be a number")
+            }
+            guard drumParamValue.isFinite else {
+                // NaN survives every clamp (all comparisons against it are
+                // false) and the render thread turns several of these into
+                // sample counts with `Int(...)`, which TRAPS. Refuse, never clamp.
+                throw ControlError("value must be a finite number")
+            }
+            guard DrumKitParams.spec(forParamName: drumParamName) != nil else {
+                throw ControlError(Self.drumParamRefusal(drumParamName))
+            }
+            guard let drumParamDescriptor = try store.setInstrument(
+                id: drumParamTrackID,
+                drumParam: (name: drumParamName, value: drumParamValue)
+            ) else { throw ControlError.noTrack(drumParamTrackID) }
+            return .success(request.id, .object([
+                "trackId": .string(drumParamTrackID.uuidString),
+                "name": .string(drumParamName),
+                // ⚠️ The STORED value, re-read from the descriptor — not the
+                // value the caller sent. They differ whenever a clamp bit, and
+                // echoing the request back would hide that.
+                "value": .number(drumParamDescriptor.resolvedDrumKit
+                    .value(forParamName: drumParamName) ?? drumParamValue),
+                "requested": .number(drumParamValue),
+                "kind": .string(drumParamDescriptor.kind.rawValue),
+                "isActiveInstrument": .bool(drumParamDescriptor.kind == .drumSynth),
+            ]))
+
+        case "instrument.describeDrumKit":
+            // m39-dm — the drum machine's self-description, modelled on
+            // `instrument.describeSynth`'s three load-bearing features:
+            //
+            // ① `warnings`. Four settings are GATED BY A SECOND SETTING and do
+            //    nothing on their own. A setting that is accepted, stored,
+            //    echoed back and silent is this tree's characteristic failure.
+            // ② `isActiveInstrument`. `InstrumentDescriptor` carries EVERY
+            //    kind's payload across kind switches, so a track can hold a
+            //    fully-dialled kit while playing a sound bank. This answers for
+            //    the kit either way and says which.
+            // ③ `routesUsed`/`routeBudget`. There are 75 names and
+            //    `ModulationLimits.maxRoutes` is 64, so they cannot all be
+            //    routed at once. The ceiling is reported BEFORE it bites rather
+            //    than discovered by a route going missing.
+            try params.rejectUnknownKeys(["trackId"], verb: "instrument.describeDrumKit")
+            let describeKitTrackID = try params.requireTrackID()
+            guard let describeKitTrack = store.tracks.first(where: {
+                $0.id == describeKitTrackID
+            }) else { throw ControlError.noTrack(describeKitTrackID) }
+            guard describeKitTrack.kind == .instrument else {
+                throw ProjectError.instrumentRequiresInstrumentTrack(describeKitTrack.kind)
+            }
+            return .success(request.id, .object(Self.drumKitDescription(
+                trackID: describeKitTrackID,
+                descriptor: describeKitTrack.instrument ?? .default,
+                routesUsed: describeKitTrack.modulationRoutes.count)))
+
+        case "instrument.listDrumPresets":
+            // Read-only. The two LINEAGES plus three, and they differ in
+            // NUMBERS rather than topology — which is why this instrument has
+            // no `character` enum and no discrete parameter at all.
+            try params.rejectUnknownKeys([], verb: "instrument.listDrumPresets")
+            return .success(request.id, .object([
+                "presets": .array(DrumKitParams.presets.map { preset in
+                    .object([
+                        "name": .string(preset.name),
+                        "summary": .string(preset.summary),
+                    ])
+                }),
+                "count": .number(Double(DrumKitParams.presets.count)),
+            ]))
+
+        case "instrument.loadDrumPreset":
+            // ⚠️ WHOLESALE. Loading a preset REPLACES all 75 values — it is not
+            // an overlay — and the response says so rather than leaving a
+            // caller to discover it by diffing.
+            try params.rejectUnknownKeys(["trackId", "name"],
+                                         verb: "instrument.loadDrumPreset")
+            let loadPresetTrackID = try params.requireTrackID()
+            guard let loadPresetName = params["name"]?.stringValue else {
+                throw ControlError("name is required")
+            }
+            guard let preset = DrumKitParams.preset(named: loadPresetName) else {
+                throw ControlError("unknown drum preset '\(loadPresetName)' — valid names: "
+                    + DrumKitParams.presets.map(\.name).joined(separator: ", "))
+            }
+            guard let loadPresetDescriptor = try store.setInstrument(
+                id: loadPresetTrackID, drumKit: preset.params
+            ) else { throw ControlError.noTrack(loadPresetTrackID) }
+            return .success(request.id, .object([
+                "trackId": .string(loadPresetTrackID.uuidString),
+                "name": .string(preset.name),
+                "summary": .string(preset.summary),
+                "replacedAllParameters": .bool(true),
+                "parameterCount": .number(Double(DrumKitParams.paramSpecs.count)),
+                "kind": .string(loadPresetDescriptor.kind.rawValue),
+                "isActiveInstrument": .bool(loadPresetDescriptor.kind == .drumSynth),
+                "drumKit": Self.drumKitJSON(loadPresetDescriptor.resolvedDrumKit),
+            ]))
 
         case "instrument.probeLiveness":
             // m31-f ② — "does this instrument have more than one timbre?", as
@@ -10497,6 +10638,55 @@ public final class CommandRouter {
                 "kneeDb": .number(comp.kneeDb),
                 "makeupDb": .number(comp.makeupDb),
                 "mix": .number(comp.mix),
+                "detectorMode": .number(comp.detectorMode),
+                "detectorFreqHz": .number(comp.detectorFreqHz),
+                "detectorQ": .number(comp.detectorQ),
+                // DERIVED, through `CompressorParams`, the one home, never
+                // re-derived here — that is how the record and the source come
+                // to disagree while both look right.
+                //
+                // ⛔ THESE APPEAR IN `fx.add` / `fx.setParam` RESULTS AND IN
+                // `project.snapshot`, AND **NOT** IN `fx.describe`, WHICH IS A
+                // DIFFERENT CASE ENTIRELY (built from `Kind.allCases` +
+                // `EffectParamSpec.specs`). No `note:` on this kind may claim
+                // otherwise - that exact false wire claim shipped in three
+                // places at once on 2026-09-19.
+                //
+                // The SNAPPED mode, because the stored one need not be: the
+                // `clipper.mode` precedent, where
+                // `fx.setParam` clamps to the range but does not snap, so a
+                // stored 1.4 renders as 1.
+                // ⛔ NOT `phaser.stages` — that citation stood at four
+                // sites here for several cycles and is MEASURABLY FALSE.
+                // `PhaserParams`' init runs `Self.snappedStages(stages)`
+                // (Effects.swift, commented "SNAPPED, not merely
+                // clamped"), so a written 5 reads back as 6 — it snaps the
+                // STORED value, the opposite of this precedent. Corrected
+                // 2026-09-20 after a subagent measured it rather than
+                // trusting the brief that repeated it; `SKILL.md` had
+                // contradicted itself on this for just as long (its own
+                // phaser entry says it snaps). Cite `clipper.mode` only.
+                "resolvedDetectorMode": .string({
+                    switch CompressorParams.detectorMode(at: comp.detectorMode) {
+                    case .off: return "off"
+                    case .bandPass: return "bandPass"
+                    case .highPass: return "highPass"
+                    }
+                }()),
+                // The band's width in Hz (freq / Q), which neither knob shows
+                // on its own. Reported at EVERY mode and honestly labelled as
+                // band-pass-only by `detectorBandwidthApplies`: a number that
+                // is present but meaningless is worse than one that says so.
+                "detectorBandwidthHz": .number(CompressorParams.detectorBandwidthHz(
+                    freqHz: comp.detectorFreqHz, q: comp.detectorQ)),
+                "detectorBandwidthApplies": .number(
+                    CompressorParams.detectorMode(at: comp.detectorMode) == .bandPass ? 1 : 0),
+                // ⛔ A CONSTANT 0 AT EVERY SETTING, echoed for the reason the
+                // saturator echoes its param-DEPENDENT number: so "did turning
+                // the de-esser on shift my timing?" is answerable off the wire
+                // instead of out of source. A wideband de-esser filters the
+                // DETECTOR, which needs no lookahead. The answer is no.
+                "latencySamples": .number(0),
             ])
         case .limiter:
             let limiter = effect.resolvedLimiter
@@ -10537,6 +10727,35 @@ public final class CommandRouter {
                 "driveDb": .number(saturator.driveDb),
                 "mix": .number(saturator.mix),
                 "outputDb": .number(saturator.outputDb),
+                "oversampling": .number(saturator.oversampling),
+                // DERIVED, through `SaturatorParams` / `OversamplerDesign`, the
+                // one homes, never re-derived here.
+                //
+                // ⛔ THESE APPEAR IN `fx.add` / `fx.setParam` RESULTS AND IN
+                // `project.snapshot`, AND **NOT** IN `fx.describe`, WHICH IS A
+                // DIFFERENT CASE ENTIRELY (built from `Kind.allCases` +
+                // `EffectParamSpec.specs`). No `note:` on this kind may claim
+                // otherwise - that exact false wire claim shipped in three
+                // places at once on 2026-09-19.
+                //
+                // The SNAPPED value, because the stored one need not be: the
+                // `clipper.oversampling` precedent, where
+                // `fx.setParam` clamps to the range but does not snap, so a
+                // stored 3 renders as 4.
+                "resolvedOversampling": .number(Double(
+                    SaturatorParams.oversamplingFactor(at: saturator.oversampling))),
+                // ⚠️⚠️ NOT A CONSTANT ON THIS KIND, UNLIKE `clipper`. 0 samples
+                // at oversampling 1 and 32 at 2 or 4 - so an agent that changes
+                // the factor and wants to know "did that shift my timing?" MUST
+                // read this back rather than assume. Delay compensation removes
+                // it either way; the number is here so the honesty is on the
+                // wire instead of in the source.
+                "latencySamples": .number(Double(
+                    SaturatorParams.latencySamples(oversampling: saturator.oversampling))),
+                // How clean "clean" is, when the factor is above 1. A CONSTANT
+                // of the filter family, echoed for the same reason the clipper
+                // echoes it: so the answer is available without reading source.
+                "aliasRejectionDb": .number(-OversamplerDesign.stopbandAttenuationDb),
             ])
         case .gate:
             let gate = effect.resolvedGate
@@ -10715,6 +10934,148 @@ public final class CommandRouter {
                     PhaserParams.firstNotchHzAtSweepFloor(
                         centerHz: phaser.centerHz, stages: phaser.stages)),
             ])
+        case .transientShaper:
+            let shaper = effect.resolvedTransientShaper
+            return .object([
+                "attackDb": .number(shaper.attackDb),
+                "sustainDb": .number(shaper.sustainDb),
+                "attackMs": .number(shaper.attackMs),
+                "sustainMs": .number(shaper.sustainMs),
+                "outputDb": .number(shaper.outputDb),
+                "mix": .number(shaper.mix),
+                // DERIVED, through `TransientShaperParams`, the one home, never
+                // re-derived here — that is how the record and the source come
+                // to disagree while both look right.
+                //
+                // ⛔ THESE APPEAR IN `fx.add` / `fx.setParam` RESULTS AND IN
+                // `project.snapshot`, AND **NOT** IN `fx.describe`, WHICH IS A
+                // DIFFERENT CASE ENTIRELY (built from `Kind.allCases` +
+                // `EffectParamSpec.specs`). Getting that backwards shipped a
+                // false wire claim in three places at once on 2026-09-19; no
+                // `note:` on this kind may say `fx.describe` reports any of
+                // these.
+                //
+                // `attackWindowMs` is PER-INSTANCE (it follows `attackMs`): the
+                // width of the window over which attack shaping is at FULL
+                // strength for a step onset. The other two are CONSTANTS,
+                // echoed so an agent can answer "what does attackDb +6 actually
+                // promise?" and "why did nothing happen on my quiet stem?"
+                // straight off the wire instead of reading source.
+                "attackWindowMs": .number(
+                    TransientShaperParams.attackWindowMs(attackMs: shaper.attackMs)),
+                "fullShapeDifferentialDb": .number(
+                    TransientShaperParams.fullShapeDifferentialDb),
+                "detectorFloorDb": .number(TransientShaperParams.detectorFloorDb),
+            ])
+        case .freqShifter:
+            let shifter = effect.resolvedFreqShifter
+            return .object([
+                "shiftHz": .number(shifter.shiftHz),
+                "fineHz": .number(shifter.fineHz),
+                "stereoSpreadHz": .number(shifter.stereoSpreadHz),
+                "mix": .number(shifter.mix),
+                "outputDb": .number(shifter.outputDb),
+                // DERIVED, through `FreqShifterParams`, the one home, never
+                // re-derived here.
+                //
+                // ⛔ THESE APPEAR IN `fx.add` / `fx.setParam` RESULTS AND IN
+                // `project.snapshot`, AND **NOT** IN `fx.describe`, WHICH IS A
+                // DIFFERENT CASE ENTIRELY (built from `Kind.allCases` +
+                // `EffectParamSpec.specs`). No `note:` on this kind may claim
+                // otherwise - that exact false wire claim shipped in three
+                // places at once on 2026-09-19.
+                //
+                // `effectiveShiftHz` is PER-INSTANCE and is the number that
+                // actually reaches the oscillator: `shiftHz + fineHz`, clamped
+                // to `shiftHz`'s own range. An agent that sets both and reads
+                // back only `shiftHz` would otherwise be off by up to 20 Hz.
+                "effectiveShiftHz": .number(FreqShifterParams.effectiveShiftHz(
+                    shiftHz: shifter.shiftHz, fineHz: shifter.fineHz)),
+                // The QUALITY number, and the honest one: how far below the
+                // wanted sideband the unwanted one sits. Constant for the
+                // shipped Hilbert network, derived from its MEASURED worst-case
+                // phase error rather than asserted.
+                "sidebandRejectionDb": .number(FreqShifterParams.sidebandRejectionDb),
+                "hilbertPhaseErrorDeg": .number(FreqShifterParams.worstPhaseErrorDeg),
+            ])
+        case .clipper:
+            let clipper = effect.resolvedClipper
+            return .object([
+                "driveDb": .number(clipper.driveDb),
+                "ceilingDb": .number(clipper.ceilingDb),
+                "mode": .number(clipper.mode),
+                "oversampling": .number(clipper.oversampling),
+                "mix": .number(clipper.mix),
+                "outputDb": .number(clipper.outputDb),
+                // DERIVED, through `ClipperParams` / `OversamplerDesign`, the
+                // one homes, never re-derived here.
+                //
+                // ⛔ THESE APPEAR IN `fx.add` / `fx.setParam` RESULTS AND IN
+                // `project.snapshot`, AND **NOT** IN `fx.describe`, WHICH IS A
+                // DIFFERENT CASE ENTIRELY (built from `Kind.allCases` +
+                // `EffectParamSpec.specs`). No `note:` on this kind may claim
+                // otherwise - that exact false wire claim shipped in three
+                // places at once on 2026-09-19.
+                //
+                // `clipThresholdDbfs` is the number an agent actually needs and
+                // cannot read off either knob alone: the INPUT level at which
+                // clipping starts, `ceilingDb - driveDb`.
+                "clipThresholdDbfs": .number(ClipperParams.clipThresholdDbfs(
+                    driveDb: clipper.driveDb, ceilingDb: clipper.ceilingDb)),
+                // The guaranteed SAMPLE ceiling after the output trim - a
+                // positive `outputDb` really does raise it, and saying so here
+                // is cheaper than letting someone discover it on a bounce.
+                "wetCeilingDbfs": .number(ClipperParams.wetCeilingDbfs(
+                    ceilingDb: clipper.ceilingDb, outputDb: clipper.outputDb)),
+                // The SNAPPED values, because the stored ones need not be: the
+                // `clipper.mode` precedent, where `fx.setParam` clamps to the
+                // range but does not snap, so a stored 3 renders as 4. These
+                // two are what the render thread actually uses.
+                "resolvedMode": .string(
+                    ClipperParams.mode(at: clipper.mode) == .soft ? "soft" : "hard"),
+                "resolvedOversampling": .number(Double(
+                    ClipperParams.oversamplingFactor(at: clipper.oversampling))),
+                // CONSTANTS, echoed so an agent can answer "will this shift my
+                // timing?" and "how clean is clean?" off the wire rather than
+                // out of source. Latency is the same at every factor by design.
+                "latencySamples": .number(Double(ClipperParams.latencySamples)),
+                "aliasRejectionDb": .number(-OversamplerDesign.stopbandAttenuationDb),
+            ])
+        case .dynamicEQ:
+            // m39-af — 32 params, emitted from `DynamicEQParams.paramNames` (the
+            // ONE name↔field home) rather than hand-listed, so one band cannot
+            // drift from the others here while the schema stays right.
+            let dyn = effect.resolvedDynamicEQ
+            var fields: [String: JSONValue] = [:]
+            for name in DynamicEQParams.paramNames {
+                guard let value = dyn.value(forParamName: name) else { continue }
+                fields[name] = .number(value)
+            }
+            // DERIVED echoes, through `DynamicEQParams`, the one home, never
+            // re-derived here. ⛔ They appear in `fx.add` / `fx.setParam` results
+            // and in `project.snapshot`, NOT in `fx.describe` (which is built
+            // from `Kind.allCases` + `EffectParamSpec.specs`) — no `note:` on
+            // this kind may claim otherwise.
+            //
+            // The SNAPPED modes, because the stored values need not be: the
+            // `clipper.mode` precedent, where `fx.setParam` clamps to the range
+            // but does not snap. These four are what the render thread uses.
+            for band in 1...DynamicEQParams.bandCount {
+                let raw = dyn.value(forParamName: "band\(band)Mode") ?? 0
+                let label: String
+                switch DynamicEQParams.mode(at: raw) {
+                case .off: label = "off"
+                case .above: label = "above"
+                case .below: label = "below"
+                }
+                fields["band\(band)ModeLabel"] = .string(label)
+            }
+            // CONSTANTS, echoed so an agent can answer "will this shift my
+            // timing?" and "how still is still?" off the wire rather than out of
+            // source. The latency is a literal 0 at every setting of every param.
+            fields["latencySamples"] = .number(0)
+            fields["kneeDb"] = .number(DynamicEQParams.kneeDb)
+            return .object(fields)
         case .audioUnit:
             // Hosted AU: the component triple + display name. AU parameters
             // are not on the generic surface in v0, and captured state never
@@ -13399,12 +13760,227 @@ public final class CommandRouter {
         // settings are stored-but-INERT are `instrument.describeSynth`'s job;
         // this object stays exactly what the caller sent.
         Self.mergePolySynthRichnessJSON(poly, into: &polyObject)
-        return .object([
+        var payload: [String: JSONValue] = [
             "kind": .string(d.kind.rawValue),
             "polySynth": .object(polyObject),
             "sampler": .object(samplerObject),
             "honoredControllers": .object(supportObject),
-        ])
+        ]
+        // m39-dm — the drum kit, on the same ONLY-WHEN-SET rule as every key
+        // above: a project that never touched the drum machine keeps its
+        // pre-m39-dm wire shape byte-for-byte, and "never configured" stays
+        // distinguishable from "configured to the factory values" on a round
+        // trip. `nil` reads as the factory kit (`resolvedDrumKit`), which
+        // `instrument.describeDrumKit` reports explicitly.
+        if let drumKit = d.drumKit {
+            payload["drumKit"] = Self.drumKitJSON(drumKit)
+        }
+        return .object(payload)
+    }
+
+    /// Wire JSON for a drum kit: nested by voice, keyed by LEAF name, driven
+    /// off `DrumKitParams.paramSpecs`.
+    ///
+    /// ⭐ TABLE-DRIVEN, NOT HAND-WRITTEN. Seventy-five hand-typed keys here
+    /// would be a second list to keep in sync with the model's, and this file
+    /// already records what happens when two such lists drift. A 76th parameter
+    /// appears on the wire with no edit to this function.
+    static func drumKitJSON(_ kit: DrumKitParams) -> JSONValue {
+        var payload: [String: JSONValue] = [:]
+        for voice in DrumVoice.allCases {
+            var voiceObject: [String: JSONValue] = [:]
+            for spec in DrumKitParams.paramSpecs where spec.voice == voice {
+                voiceObject[spec.leaf.rawValue] = .number(kit[keyPath: spec.keyPath])
+            }
+            // Only-when-set, like every optional above: `chokeGroup` absent
+            // means "chokes nothing", which is NOT the same fact as group 0.
+            if let group = kit[voice].chokeGroup {
+                voiceObject["chokeGroup"] = .number(Double(group))
+            }
+            voiceObject["note"] = .number(Double(voice.note))
+            payload[voice.rawValue] = .object(voiceObject)
+        }
+        for spec in DrumKitParams.paramSpecs where spec.voice == nil {
+            payload[spec.leaf.rawValue] = .number(kit[keyPath: spec.keyPath])
+        }
+        return .object(payload)
+    }
+
+    /// Parses a `drumKit` wire object into params, starting from `base` so a
+    /// PARTIAL object overlays rather than resetting the 74 keys it omits.
+    ///
+    /// ⛔ THE OVERLAY DIRECTION IS THE WHOLE POINT. Building a fresh
+    /// `DrumKitParams()` here and filling in what the caller sent would make
+    /// `{drumKit:{kick:{decay:0.9}}}` silently reset the other seventy-four
+    /// parameters to factory — data loss with a success response, the exact
+    /// shape `ProjectStore.setInstrument`'s own warning describes.
+    static func parseDrumKit(_ value: JSONValue, base: DrumKitParams) throws -> DrumKitParams {
+        guard case .object(let root) = value else {
+            throw ControlError("drumKit must be an object")
+        }
+        var kit = base
+        let voiceNames = Set(DrumVoice.allCases.map(\.rawValue))
+        for (key, entry) in root {
+            if let voice = DrumVoice(rawValue: key) {
+                guard case .object(let voiceObject) = entry else {
+                    throw ControlError("drumKit.\(key) must be an object")
+                }
+                for (leafKey, leafValue) in voiceObject {
+                    // `note` is DERIVED and read-only: it is emitted so a
+                    // caller knows which pitch triggers the voice, and ignored
+                    // on input rather than silently accepted (the m26-h
+                    // read-only-provenance rule).
+                    if leafKey == "note" { continue }
+                    if leafKey == "chokeGroup" {
+                        if case .null = leafValue {
+                            kit[voice].chokeGroup = nil
+                        } else if let number = leafValue.doubleValue {
+                            kit[voice].chokeGroup =
+                                Int(number).clamped(to: SamplerZone.chokeGroupRange)
+                        } else {
+                            throw ControlError(
+                                "drumKit.\(key).chokeGroup must be a number or null")
+                        }
+                        continue
+                    }
+                    let name = "\(key).\(leafKey)"
+                    guard let number = leafValue.doubleValue else {
+                        throw ControlError("drumKit.\(name) must be a number")
+                    }
+                    guard kit.setValue(number, forParamName: name) else {
+                        throw ControlError(Self.drumParamRefusal(name))
+                    }
+                }
+            } else if !voiceNames.contains(key) {
+                // A kit-scope leaf, or an unknown key. Both go through the
+                // same named refusal rather than being ignored.
+                let name = "kit.\(key)"
+                guard let number = entry.doubleValue else {
+                    throw ControlError("drumKit.\(key) must be a number")
+                }
+                guard kit.setValue(number, forParamName: name) else {
+                    throw ControlError(Self.drumParamRefusal(name))
+                }
+            }
+        }
+        return kit
+    }
+
+    /// `instrument.describeDrumKit`'s payload. Table-driven end to end, so a
+    /// 76th parameter is described without an edit here.
+    static func drumKitDescription(trackID: UUID, descriptor: InstrumentDescriptor,
+                                   routesUsed: Int) -> [String: JSONValue] {
+        let kit = descriptor.resolvedDrumKit
+        let specs = DrumKitParams.paramSpecs
+
+        var voices: [String: JSONValue] = [:]
+        for voice in DrumVoice.allCases {
+            var parameters: [String: JSONValue] = [:]
+            for spec in specs where spec.voice == voice {
+                parameters[spec.leaf.rawValue] = Self.drumParamDescription(spec, kit: kit)
+            }
+            var voiceObject: [String: JSONValue] = [
+                "displayName": .string(voice.displayName),
+                "note": .number(Double(voice.note)),
+                "parameters": .object(parameters),
+            ]
+            if let group = kit[voice].chokeGroup {
+                voiceObject["chokeGroup"] = .number(Double(group))
+            }
+            voices[voice.rawValue] = .object(voiceObject)
+        }
+        var kitParameters: [String: JSONValue] = [:]
+        for spec in specs where spec.voice == nil {
+            kitParameters[spec.leaf.rawValue] = Self.drumParamDescription(spec, kit: kit)
+        }
+
+        return [
+            "trackId": .string(trackID.uuidString),
+            "kind": .string(descriptor.kind.rawValue),
+            // The kit is CARRIED across kind switches, so a track can hold a
+            // dialled kit while playing something else. Say which.
+            "isActiveInstrument": .bool(descriptor.kind == .drumSynth),
+            "isConfigured": .bool(descriptor.drumKit != nil),
+            "voices": .object(voices),
+            "kit": .object(kitParameters),
+            "parameterCount": .number(Double(specs.count)),
+            "order": .array(specs.map { .string($0.name) }),
+            "presets": .array(DrumKitParams.presets.map { .string($0.name) }),
+            "routesUsed": .number(Double(routesUsed)),
+            "routeBudget": .number(Double(ModulationLimits.maxRoutes)),
+            "warnings": .array(Self.drumKitWarnings(kit).map { .string($0) }),
+        ]
+    }
+
+    private static func drumParamDescription(_ spec: DrumParamSpec,
+                                             kit: DrumKitParams) -> JSONValue {
+        var object: [String: JSONValue] = [
+            "name": .string(spec.name),
+            "value": .number(kit[keyPath: spec.keyPath]),
+            "default": .number(spec.defaultValue),
+            "min": .number(spec.range.lowerBound),
+            "max": .number(spec.range.upperBound),
+            "unit": .string(spec.unit),
+            "curve": .string(spec.curve.rawValue),
+            // Every drum parameter is modulatable — this is the first built-in
+            // instrument with no discrete parameter at all.
+            "modulatable": .bool(true),
+            "appliesAtNextNoteOn": .bool(spec.appliesAtNextNoteOn),
+        ]
+        if let note = spec.note { object["meaning"] = .string(note) }
+        return .object(object)
+    }
+
+    /// ⛔ THE GATED SETTINGS. Each of these is accepted, stored and echoed back
+    /// while doing NOTHING, because a second setting neutralises it. Saying so
+    /// is the whole reason this verb has a `warnings` array.
+    static func drumKitWarnings(_ kit: DrumKitParams) -> [String] {
+        var warnings: [String] = []
+        if kit.kick.pitchAmount <= 0 {
+            warnings.append("kick.pitchDecay does nothing while kick.pitchAmount is 0 — "
+                + "there is no pitch sweep for it to shape.")
+        }
+        if kit.clap.snap >= 0.999 {
+            warnings.append("clap.spread has almost no audible effect at clap.snap 1.0 — "
+                + "the tail dominates and the individual retriggered pulses are buried.")
+        }
+        if kit.cymbal.decay < 0.2 {
+            warnings.append("cymbal.tone has little effect below about 0.2 s of decay — "
+                + "the short high band dominates the whole sound at that length.")
+        }
+        if kit.velocityToTone <= 0 {
+            warnings.append("kit.velocityToTone is 0, so every voice's velocity parameter "
+                + "moves LEVEL only. Amplitude alone is what makes a programmed kit tick "
+                + "rather than groove.")
+        }
+        for voice in DrumVoice.allCases where kit[voice].velocity <= 0 {
+            warnings.append("\(voice.rawValue).velocity is 0, so every hit on that voice is "
+                + "identical regardless of MIDI velocity. That is correct for a "
+                + "machine-even pattern and deliberate if you set it.")
+        }
+        for voice in DrumVoice.allCases where kit[voice].level <= 0 {
+            warnings.append("\(voice.rawValue).level is 0 — that voice is silent.")
+        }
+        if kit.gain <= 0 { warnings.append("kit.gain is 0 — the whole kit is silent.") }
+        return warnings
+    }
+
+    /// The refusal text for an unknown drum parameter name. ⭐ It NAMES THE
+    /// VALID SET rather than only saying "unknown", the same rule
+    /// `mod.addRoute`'s instrument-param refusal follows — a typo like
+    /// `kik.tune` should teach, not just fail.
+    static func drumParamRefusal(_ name: String) -> String {
+        let scope = name.split(separator: ".", maxSplits: 1).first.map(String.init) ?? ""
+        let scopes = DrumVoice.allCases.map(\.rawValue) + ["kit"]
+        if !scopes.contains(scope) {
+            return "unknown drum parameter '\(name)' — the scope must be one of "
+                + scopes.joined(separator: ", ")
+        }
+        let valid = DrumKitParams.paramSpecs
+            .filter { ($0.voice?.rawValue ?? "kit") == scope }
+            .map(\.name)
+        return "unknown drum parameter '\(name)' — valid names for \(scope): "
+            + valid.joined(separator: ", ")
     }
 
     /// m39-g — the fifteen richness fields as only-when-SET wire keys, merged

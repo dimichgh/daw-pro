@@ -65,11 +65,11 @@ struct EffectEditorModelTests {
         let track = store.addTrack(kind: .audio)
         let model = Self.makeStoreBacked(store)
         // ≥3 kinds explicitly, then the full sweep (eq = 10 legacy + 12 m22-a;
-        // compressor = 6 legacy + m23-ck's mix; limiter = 2 + m23-ch's
-        // truePeak). These counts are DELIBERATELY literal — the sweep below
-        // proves rows follow the schema, and only a literal catches a schema
-        // row that vanished.
-        for (kind, count) in [(EffectDescriptor.Kind.eq, 22), (.compressor, 7), (.limiter, 3)] {
+        // compressor = 6 legacy + m23-ck's mix + m39-ae's THREE de-ess params;
+        // limiter = 2 + m23-ch's truePeak). These counts are DELIBERATELY
+        // literal — the sweep below proves rows follow the schema, and only a
+        // literal catches a schema row that vanished.
+        for (kind, count) in [(EffectDescriptor.Kind.eq, 22), (.compressor, 10), (.limiter, 3)] {
             let fx = try! store.addEffect(toTrack: track.id, kind: kind)
             model.prepare(trackID: track.id, effectID: fx.id, targetLabel: "on Test")
             #expect(model.specs.count == count, "\(kind) row count")
@@ -325,11 +325,21 @@ struct EffectEditorModelTests {
         // that `delay.timeMs` is NOT here: it ships today and a declared curve
         // must not MOVE an existing control, so the two kinds deliberately
         // disagree about the same parameter name.
+        // ⭐ m39-y ADDED TWO, both TIME constants and both with a written
+        // reason: `transientShaper.attackMs` (0.1…50 ms = 8.97 octaves, the
+        // widest span of any exemption so far, with the musically useful third
+        // under 5 ms) and `transientShaper.sustainMs` (20…1000 ms = 5.64
+        // octaves). ⚠️ `compressor.attackMs` and `gate.attackMs` are NOT here
+        // and stay LINEAR: they ship today and a declared curve must not MOVE
+        // an existing control — the same deliberate cross-kind disagreement
+        // `delay.timeMs` vs `tapeDelay.timeMs` already records.
         #expect(divergent == ["flanger.depthMs", "flanger.delayMs",
                               "hallReverb.decaySeconds", "hallReverb.sizeMeters",
                               "hallReverb.lowDecayMultiplier",
                               "hallReverb.highDecayMultiplier",
-                              "tapeDelay.timeMs"],
+                              "tapeDelay.timeMs",
+                              "transientShaper.attackMs",
+                              "transientShaper.sustainMs"],
                 Comment(rawValue: "params declared against the pre-m39-a oracle: "
                     + "\(divergent.sorted()) — each needs an entry in "
                     + "ParamCurveConformanceTests.deliberateExemptions with its reason"))
@@ -498,6 +508,11 @@ struct EffectEditorModelTests {
             ("LOW PASS", ["lowPassFreq", "lowPassSlopeDbPerOct", "lowPassEnabled"]),
         ]))
         #expect(matches(layout(.compressor), [
+            // m39-ae: DE-ESS is FIRST — signal-flow order, because the detector
+            // filter is upstream of the threshold that reads it. It is also the
+            // one section on this card a novice cannot name from the parameter
+            // names alone, which is why it gets spelled-out labels.
+            ("DE-ESS", ["detectorMode", "detectorFreqHz", "detectorQ"]),
             ("TRIGGER", ["thresholdDb", "ratio", "kneeDb"]),
             ("TIME", ["attackMs", "releaseMs"]),
             // m23-ck: the parallel dry/wet blend joins OUTPUT after makeup.
@@ -519,7 +534,11 @@ struct EffectEditorModelTests {
             ("OUTPUT", ["mix"]),
         ]))
         #expect(matches(layout(.saturator), [
+            // m39-ad: CHARACTER joins between DRIVE and OUTPUT, carrying
+            // `oversampling` under the clipper's own "Quality" label — the same
+            // control on the same primitive, so it reads the same on both cards.
             ("DRIVE", ["driveDb"]),
+            ("CHARACTER", ["oversampling"]),
             ("OUTPUT", ["mix", "outputDb"]),
         ]))
         #expect(matches(layout(.gate), [
@@ -603,11 +622,78 @@ struct EffectEditorModelTests {
         // because `knobStyle(for:)` reads the RANGE. ⚠️ `phaser.depthOctaves`
         // (0…4) and `phaser.stages` (2…12) are deliberately NOT here: neither
         // range crosses zero, so neither has a centre to detent to.
+        // ⭐ CHECKED for m39-y: THREE at once, and this is the first kind to
+        // contribute more than one. `transientShaper.attackDb` and
+        // `sustainDb` are −20…+20 and their zero is a genuine detent — it is
+        // the UNSHAPED position, and the two sides are "more of the hit" and
+        // "less of the hit" rather than more and less of one thing.
+        // `outputDb` is −24…+24 and its zero is unity trim, the
+        // `saturator.outputDb` shape exactly. A SIXTH unrelated kind earns the
+        // centre-out knob purely because `knobStyle(for:)` reads the RANGE.
+        // ⚠️ `transientShaper.mix` (0…1) and the two ms params are deliberately
+        // NOT here: none of their ranges crosses zero, so none has a centre to
+        // detent to.
+        // CHECKED for m39-z: FOUR at once, beating m39-y's three, and for this
+        // kind the centre detent is not a nicety - it is THE CONTROL.
+        // `shiftHz`, `fineHz` and `stereoSpreadHz` are all bipolar because THE
+        // SIGN IS THE DIRECTION (shift up vs down; which side leads), so their
+        // zero is the genuine no-effect position and a user has to be able to
+        // find it by feel while sweeping THROUGH it. `outputDb` is the
+        // `saturator.outputDb` unity-trim shape again. `freqShifter.mix` (0-1)
+        // is deliberately NOT here for the usual reason.
+        // ⭐ CHECKED for m39-ac: TWO, and the first is the interesting one.
+        // `clipper.driveDb` is −12…+36 where `saturator.driveDb` — the same name
+        // on a neighbouring kind — is 0…36 and is NOT here. That is deliberate,
+        // not drift. A saturator's drive IS the effect, so 0 means "off" and the
+        // range starts there. A clipper's ceiling is the effect and drive is how
+        // hard you push INTO it, so 0 is unity and NEGATIVE drive is a real
+        // setting: backing a hot source off a fixed ceiling, rather than moving
+        // the ceiling and changing what the number promises. So zero is a
+        // genuine detent and a user has to be able to find it while sweeping
+        // through. ⚠️ Its detent sits at 25 % of travel, not half, because the
+        // range is deliberately asymmetric — `knobStyle(for:)` reads the range
+        // and places the detent at the real zero, which is the whole point of
+        // deriving it rather than declaring it. `clipper.outputDb` is −24…+24,
+        // the `saturator.outputDb` unity-trim shape exactly. ⚠️
+        // `clipper.ceilingDb` (−24…0) is deliberately NOT here: zero is an
+        // ENDPOINT of that range, not an interior neutral, so there is no
+        // centre to detent to. `mode`, `oversampling` and `mix` do not cross
+        // zero either.
         #expect(bipolar == [
             "eq.lowShelfGainDb", "eq.peak1GainDb", "eq.peak2GainDb",
             "eq.highShelfGainDb", "saturator.outputDb", "djFilter.position",
             "flanger.feedback", "hallReverb.earlyLateBalance", "phaser.feedback",
+            "transientShaper.attackDb", "transientShaper.sustainDb",
+            "transientShaper.outputDb",
+            "freqShifter.shiftHz", "freqShifter.fineHz",
+            "freqShifter.stereoSpreadHz", "freqShifter.outputDb",
+            "clipper.driveDb", "clipper.outputDb",
+            "dynamicEQ.band1RangeDb", "dynamicEQ.band2RangeDb",
+            "dynamicEQ.band3RangeDb", "dynamicEQ.band4RangeDb",
         ])
+        // ⭐⭐ CHECKED for m39-af: FOUR at once — the largest single addition to
+        // this list — and on this kind the centre detent is THE CONTROL, more
+        // literally than on any kind before it. `bandNRangeDb`'s SIGN IS THE
+        // DIRECTION the band moves: negative turns the band down when it
+        // triggers, positive turns it up, and ZERO is a genuine no-effect
+        // position (`rangeSign` is exactly 0 there, so the render path's apply
+        // branch never fires and the band is bit-exact flat however hard it is
+        // driven). A user sweeping through that zero has to be able to feel it.
+        // ⚠️ The kind's other 28 params are deliberately NOT here and each for a
+        // structural reason, not an oversight: `bandNThresholdDb` is −60…0, so
+        // zero is an ENDPOINT rather than an interior neutral (the
+        // `clipper.ceilingDb` shape exactly); `bandNFreq` (20…20 000),
+        // `bandNQ` (0.1…18), `bandNRatio` (1…20) and both time constants have
+        // strictly positive ranges; `bandNMode` is 0…2, where 0 is an endpoint
+        // AND the value is discrete.
+        for band in 1...4 {
+            let range = EffectParamSpec.specs(for: .dynamicEQ)
+                .first { $0.name == "band\(band)RangeDb" }!
+            // −24…+24 is symmetric about zero, so the detent sits at exactly
+            // half travel — the `eq.peak1GainDb` shape, which is the range it
+            // mirrors.
+            #expect(EffectEditorModel.knobFillAnchor(for: range) == 0.5)
+        }
         // The phaser's detent also sits at exactly half travel, because its
         // range is symmetric about zero like the flanger's and the DJ filter's.
         let phaserFeedback = EffectParamSpec.specs(for: .phaser)
@@ -747,12 +833,49 @@ struct EffectEditorModelTests {
 
     @Test("HP/LP slopes are two-state chip params reading 12 or 24 dB/oct")
     func slopeChips() {
+        // ⚠️⚠️ THIS LEG RESTATED THE SOURCE'S OWN EXPRESSION AND THAT COST A
+        // SHIPPED BUG (m39-ag). It read `== spec.name.hasSuffix("SlopeDbPerOct")`
+        // — the source's exact text — so it proved only that the two had not
+        // drifted apart, and it could not notice that the DJ FILTER'S slope is
+        // the bare `slopeDbPerOct` with a LOWERCASE s, which that suffix does
+        // not match. `djFilter.slopeDbPerOct` therefore rendered as a KNOB over
+        // a two-value topology switch, and this test stayed green the whole
+        // time. `EffectChoiceParamTests.everyDiscreteParamAvoidsTheKnob` is the
+        // leg that actually checks, deriving the discrete set from
+        // `EffectParamSpec.modulatable == .refused`.
+        //
+        // The expectation below is now written against the PARAM'S OWN SNAP —
+        // a param is a slope param iff `EQParams.snapSlope` is what governs it,
+        // evidenced by a real store write of 15 landing on 12 — rather than
+        // against a spelling.
+        let sweepStore = ProjectStore()
+        let sweepTrack = sweepStore.addTrack(kind: .audio)
+        var snapped: [String] = []
         for kind in Self.builtInKinds {
+            let sweepFX = try! sweepStore.addEffect(toTrack: sweepTrack.id, kind: kind)
             for spec in EffectParamSpec.specs(for: kind) {
-                #expect(EffectEditorModel.isSlopeParam(spec)
-                        == spec.name.hasSuffix("SlopeDbPerOct"), "\(kind).\(spec.name)")
+                // 15 is between the two legal slopes and inside no other param's
+                // "interesting" region; a slope param snaps it to 12.
+                let governedBySnapSlope: Bool
+                if spec.range.contains(15), spec.unit == "dB/oct" {
+                    let updated = try! sweepStore.setEffectParam(
+                        trackID: sweepTrack.id, effectID: sweepFX.id, name: spec.name, value: 15)
+                    let stored = EffectEditorModel.paramValue(spec.name, in: updated)
+                    governedBySnapSlope = stored == 12
+                } else {
+                    governedBySnapSlope = false
+                }
+                if governedBySnapSlope { snapped.append("\(kind).\(spec.name)") }
+                #expect(EffectEditorModel.isSlopeParam(spec) == governedBySnapSlope,
+                        "\(kind).\(spec.name): a 15 write snapped to 12 = \(governedBySnapSlope), but isSlopeParam says \(EffectEditorModel.isSlopeParam(spec))")
             }
+            try! sweepStore.removeEffect(trackID: sweepTrack.id, effectID: sweepFX.id)
         }
+        print("[measured] slope-snapped params: \(snapped)")
+        // Non-vacuity, and the DJ filter is named: the sweep must see all THREE
+        // — two EQ corners plus the one whose lowercase name hid it.
+        #expect(snapped.count == 3, "the slope sweep saw \(snapped)")
+        #expect(snapped.contains("djFilter.slopeDbPerOct"))
         let spec = EffectParamSpec.specs(for: .eq).first { $0.name == "highPassSlopeDbPerOct" }!
         // A slope is neither a toggle nor a percent nor a cyan level readout.
         #expect(!EffectEditorModel.isToggleParam(spec))

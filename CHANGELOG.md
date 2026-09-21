@@ -1,5 +1,543 @@
 # Changelog
 
+## 2026-09-20j — An EQ band that only moves when the music makes it move
+
+**A normal EQ turns a frequency down and leaves it down, whatever happens next.
+A compressor turns *everything* down when one part of the music gets loud. The
+new `dynamicEQ` insert does neither: it turns *one frequency* down — or up —
+*only while that frequency itself* is loud, or quiet, and leaves the rest of the
+sound completely alone.** Four independent bells, each with its own centre,
+width, threshold, ratio, depth, attack and release. It is the tool for a vocal
+that is only harsh on the loud notes, a boxy 300 Hz that only appears when the
+singer pushes, a snare that rings at one pitch, or a bass that gets muddy only
+on the low notes.
+
+**Two knobs give four different moves, and the second one is just a minus sign.**
+`bandNMode` picks *which side* of the threshold wakes the band up — above it, or
+below it — and the *sign* of `bandNRangeDb` picks which way the band then moves.
+So: above + negative turns a frequency **down when it gets loud** (the familiar
+de-harsh move); above + positive turns it **up when it gets loud**; below +
+positive brings something **back up when it gets quiet**, which is how you keep
+air in a fading phrase; below + negative turns it **down when it gets quiet**,
+which cleans up rumble between words.
+
+**⭐ A freshly added Dynamic EQ does NOTHING AT ALL — not "almost nothing", but
+bit-for-bit nothing.** Every band starts switched off, and an off band's filter
+is not even run. That was proven on rendered audio over a fixture containing
+silence, full-scale peaks, denormals and *negative zero*, comparing raw bit
+patterns rather than a tolerance — because the one way to get this subtly wrong
+is to add `0.0 × something` to every sample, which is inaudible, passes every
+level test, and turns `-0.0` into `+0.0`.
+
+**⭐⭐ The measurement that says this is a dynamic *EQ* and not a dynamic volume
+control.** On the shipped demo set, each variant's band at 3 kHz moves by 1.6 to
+9.7 dB while everything below 400 Hz moves by **0.005 to 0.106 dB** — a
+separation of 92:1 to 509:1. A unit that had quietly become a compressor would
+match the headline number and fail that dull one by an order of magnitude, so
+the gate asserts the *relation* between the two rather than either alone. The
+out-of-band budget is not one round number for all four: a boost disturbs the
+rest of the spectrum several times as much as a cut of the same size, because
+the side path adds *(G−1)* times a band-pass and *G−1* is +2.98 for a 12 dB
+boost against −0.87 for an 18 dB cut. The gate computes each variant's own skirt
+from its own range and Q, and a flat budget — which the first draft used — is
+simply a false statement about the filter.
+
+**⚠️ The fixture had to be rebuilt before any of that meant anything.** Its first
+cut held one long chord, and the 3 kHz level across that sustain measured 0.2 dB
+of movement: a dynamic EQ on a source with no in-band dynamics is a static EQ,
+and the two depth variants came out 0.069 dB apart while the prose claimed the
+difference was obvious. The shipped fixture is eight chord stabs with **16.9 dB**
+of measured in-band swing (−28.4 dBFS on a stab, −45.3 dBFS in the gap), and
+every threshold in the set was then derived from that number instead of guessed.
+
+**⛔⛔ And the bug this could have shipped with, green.** A dynamic EQ band can
+move *upward*, which no compressor can — so its envelope has a sign, and the
+compressor's own smoothing line does not transfer. Copying it snaps any
+positive envelope to zero on every single sample, which means **every boosting
+band silently does nothing, forever**, while every cut still works perfectly.
+That defect was built on purpose and measured: both boosting variants rendered
+**byte-identical to the no-effect control** — the effect completely absent —
+while both cutting variants were bit-for-bit unaffected. Every level test that
+exercises only downward bands passes either way. Two named tests and the byte
+gate each catch it, and the gate's failure message names the mechanism.
+
+**What it deliberately does not have, and why.** No shelves — the obvious way to
+build one measured a **+1.28 dB boost at 274.5 Hz while being asked for a 9 dB
+cut at 200 Hz** — measured here, through this tree's own shelf section, and
+pinned by `DynamicEQResponseTests`; a defect, not a character, and a wide bell
+does the job cleanly. No
+wet/dry mix — the band's depth *is* the mix. No gain-reduction meter yet: four
+bands have four movements and the mixer's meter can only draw one number, so
+rather than show a confidently wrong one it shows none for now (an agent can
+watch a band move with `fx.spectrum`). It adds **zero latency** at every
+setting, so adding one shifts nothing in your project.
+
+**⚠️ One honest wart, stated where you read it.** This kind's `Q` does not mean
+quite what the ordinary EQ's `Q` means: at 1 kHz and Q 2 a band here is about
+704 Hz wide where the EQ's is 498, and this one *widens* as it works harder.
+That is the price of the topology that lets the gain move every sample without
+clicking, it is measured rather than asserted, and it is written into the
+control's own description.
+
+*Not yet reachable from the MCP server — the kind ships complete in the app and
+over the control protocol; its MCP surface is the next step.*
+
+## 2026-09-20i — A de-esser that is a compressor, and a compressor that did not move
+
+**A singer's "s" and "sh" sounds carry far more energy than the rest of the
+voice, and a microphone makes it worse.** The fix is a de-esser: it turns the
+voice down for the fraction of a second an "s" lasts, and leaves it alone the
+rest of the time. It is not an EQ — an EQ would dull the whole vocal
+permanently to fix a sound that happens for 80 milliseconds at a time.
+
+**⛔ There is no `deEsser` effect, and there is not going to be one.** A
+de-esser *is* a compressor — same threshold, ratio, attack, release — with one
+difference: the part that decides when to turn down listens to a **filtered**
+copy of the signal instead of the whole thing. So it ships as a mode on the
+compressor you already have. Set **`detectorMode`** to 1 and **`detectorFreqHz`**
+to where the "sss" lives (5000–9000 Hz on most voices), and the compressor stops
+hearing the singing and starts hearing only the hiss. Mode 2 is a high-pass
+detector instead, which catches sibilance that moves around — an "sh" sits lower
+than an "s" — at the cost of also hearing cymbals and breath. If you went
+looking for a separate de-esser and did not find one, that is why, and every
+place an agent might look now says so.
+
+**⭐ Measured, on rendered audio: with no sibilance present, the de-esser leaves
+the signal SAMPLE-FOR-SAMPLE IDENTICAL** — 187 200 samples, not one bit
+different — while an ordinary compressor at the very same settings ducks it by
+3.23 dB. That is the whole difference between the two machines, and it is an
+identity rather than a tolerance because that is what actually happens: the
+detector never crosses the threshold, so the gain is exactly 1.0 and the output
+*is* the input. When sibilance does arrive, it ducks.
+
+**⭐⭐ The test that would have caught the real bug is the boring one.** This
+kind of effect is wideband: when it fires, the whole signal ducks for the length
+of the "sss" — it does not carve the bright band out and leave the rest playing.
+That means it applies *one number* to everything and therefore cannot change the
+balance between two frequencies. Measured drift: **0.0013 dB**. The single most
+likely way to build this wrong is to let the filter slip out of the detector and
+into the audio path, and such a build would still be loud, still be audible,
+still duck on sibilance, and sail past every headline number. It would fail that
+one dull assertion by tens of decibels — and that is not a theory. Exactly that
+defect was built on purpose, at a deliberately subtle five percent, and the
+render harness reported four loud, audible, perfectly healthy files while the
+measurement caught it and named it.
+
+**⛔ The compressor itself did not move one byte, and that was proven rather than
+promised.** `compressor` has been in this app since the fourth milestone; there
+are saved projects with one in a chain and automation lanes riding its knobs.
+Six renders captured from the build *before* this feature existed — including
+one with a **sidechain key**, because that is the code path this work
+restructured — all reproduce exactly on the build after it. The new controls are
+appended after the existing ones so no saved automation lane is repointed, and
+the effect adds **zero latency** at every setting, so nothing shifts in time.
+
+**A filter shared by two effects moved house, and the ring modulator was checked
+for fingerprints.** The 2-pole filter this needed already existed inside the ring
+modulator; it is now a shared primitive. Moving it is an arithmetic claim, so all
+four of the ring modulator's existing demo renders were pinned and reproduced
+bit-for-bit — and the pin was proved capable of noticing: a deliberately altered
+constant reddened all three of them.
+
+**⚠️ Writing the tests found a crash.** A parameter can arrive from an automation
+lane without passing through the usual range check, and converting a very large
+but perfectly finite number to an integer *traps* in Swift. The first version
+guarded against "not a number" and not against "too big", and an expectation
+written to be thorough brought the whole test binary down. On the render thread
+that would have been a crash in the audio callback. Fixed, and the line that
+found it is now a permanent test.
+
+**⛔ And the listening demo taught the opposite of the truth until somebody
+measured it.** The four renders shipped for judging this by ear used a sawtooth
+"voice" with a bright blip standing in for an "sss". Measured afterwards: inside
+the detector's band that blip was only **5.5 dB** louder than the sustained
+notes — a sawtooth's harmonics reach that high almost as loudly as the blip does.
+So every threshold low enough to catch the blip *also* ducked the singing, by
+1.5 dB at the middle setting and 6.2 dB at the strongest, while the written
+description told the listener those notes were being left alone. Nothing in the
+pipeline could see it: four files rendered, four were audible, four were
+distinct, and the prose read plausibly. The voice is now a triangle and the blip
+sits on its own fundamental inside the detector's band, which measures **33.1 dB
+of separation** — and at that separation the entire first note of every de-essed
+variant comes back sample-for-sample identical to a render with no compressor at
+all, while the plain compressor at the identical threshold ducks the same notes
+by 5.0 dB. **The load-bearing number in a listening fixture is the separation
+between what the effect targets and what it must leave alone. Measure it before
+choosing the axis, because every other check will pass without it.**
+
+## 2026-09-20h — The saturator gets the clipper's quality knob, switched off
+
+**The `saturator`** bends the wave instead of cutting it: quiet parts come
+through almost untouched, loud parts squash toward a limit they never quite
+reach, and the bending adds tones that were not there before. That is what
+"warm", "thick" and "fuzzy" are made of. It has always had exactly the same
+fold-back problem the clipper does — push it hard and it makes tones above half
+the sample rate, which have nowhere to go and come **back** as a thin metallic
+fizz on frequencies unrelated to the music. Its own source comment has admitted
+that in writing since the day it shipped. It now has the cure: an
+**oversampling** control, 1, 2 or 4, running the bend at 2× or 4× the rate and
+filtering on the way back down.
+
+**⭐ Measured: switching from 1 to 4 drops the folded-back energy by 90.28 dB,
+with the two real harmonics unmoved to 0.000 dB.** That is the clipper's own
+number (91.05 dB) reproduced by a second, differently-shaped nonlinearity
+through the same filter — which is the best kind of agreement, because nothing
+was shared between the two measurements except the filter itself. A deliberately
+broken build (no filter on the way up) collapsed it to 1.11 dB while still
+rendering six loud, distinct, perfectly audible files.
+
+**⛔ It defaults to 1, which is OFF, and that is the entire point of this
+release.** The clipper defaults to 4 and could, because it was brand new. This
+effect is not: there are already saved projects with a saturator in a chain, and
+if adding this control changed what they sound like — or shifted them 32 samples
+in time, which the filters cost — every one of them would quietly change the
+next time it was opened. So at 1 the machinery is skipped outright and the
+effect is **bit-for-bit** what it has always been.
+
+**⭐ That is a measurement, not a promise.** A render of an untouched saturator
+is pinned to the exact file hash it produced on the last build before this
+parameter existed, alongside a no-effect control hash so that an unrelated
+change somewhere else in the engine reports *"the pipeline moved, re-pin"*
+rather than falsely accusing this effect. The hashes were then taken a second
+time from an independently rebuilt copy of that old commit and came back
+identical, which is what makes a file hash usable as evidence here at all.
+
+**⚠️ And the check that hash nearly failed to be.** The default blend is
+100 % wet, so the dry half of the mix is multiplied by zero — meaning a
+rewritten blend that rounds differently could change every part-wet saturator in
+every project and the hash of the default would not move by one byte. Measured,
+by planting exactly that: it passed the hash gate and all twenty unit tests. A
+second pinned render at a partial mix now covers it, and catches it.
+
+**⚠️ If you are adding a saturator today and driving it hard, set oversampling
+to 4.** Leaving it at 1 is also a real choice — plenty of records want the grit,
+and it is the only way to hear what the other settings remove.
+
+**One knob on this effect behaves unlike its twin on the clipper, and it is
+worth knowing:** here it changes the effect's **latency** (0 samples at 1, 32 at
+2 or 4). Delay compensation removes that automatically, so tracks still line up,
+and the number comes back in every `fx.add` / `fx.setParam` result. **⭐ "Tracks
+still line up" is measured by rendering, not asserted:** two tracks playing the
+same single click, one of them through a 4× saturator, come out of the mix on
+the **same output sample** — one click at double height rather than two clicks
+0.67 ms apart — and the same pair at the default never drifts in the first
+place. Breaking the latency report on purpose splits that back into two
+half-height clicks exactly 32 samples apart, which is what the test is there to
+catch. Because of
+it, this knob cannot be drawn as an automation lane — the request is refused
+outright rather than silently ignored — since moving it mid-playback would leave
+the project's delay compensation stale with nothing to report it. Step it
+between sections instead. The identically named knob on the clipper *is*
+automatable, because that kind's latency never moves.
+
+## 2026-09-20g — The clipper, and the thing you cannot hear it doing
+
+**`.clipper`** cuts the waveform off flat at a ceiling you set. That is the
+whole idea, and it is what makes it different from the two effects it gets
+confused with: a **limiter** rides a gain to keep peaks down and tries not to be
+heard, and a **saturator** bends the wave with a curve that only ever
+*approaches* its bound, so it cannot promise a ceiling at all. A clipper's flat
+cut leaves corners in the wave, and those corners **are** new harmonics — which
+is where the loudness and the hardness come from, and also why it needs the
+machinery below and the other two do not. There are two modes: **hard** (the
+flat cut) and **soft** (the same ceiling reached through a rounded knee, so
+quiet parts pass untouched), plus input drive, a wet/dry mix and an output trim.
+
+**⛔ The setting that matters is the one you cannot hear being right.** When a
+clipper makes harmonics above half the sample rate — and it always does — those
+harmonics have nowhere to go, so they **fold back** into the audible band and
+land on frequencies that have nothing to do with what you played. That is the
+thin metallic fizz under a harshly clipped sound. The cure is to run the cut at
+2× or 4× the rate and filter on the way back down, which is what the new
+**oversampling** control does. **1× is deliberately still offered**, because it
+is the only way to hear what the other settings remove — and plenty of records
+want that grit.
+
+**⭐ Measured, because on this one nothing else counts: switching from 1× to 4×
+drops the folded-back energy by 91.05 dB, with the real harmonics unmoved to
+0.000 dB.** An oversampled clipper and a naive one are both loud, both peak the
+same, and render different files — so *sounding fine* and *the bytes changed*
+both prove nothing here. Three deliberately broken builds (the factor never
+reaching the filter, no filter on the way up, no filter on the way down) each
+collapsed that 91 dB to under 1.3 dB, and every one of them still rendered five
+loud, distinct, perfectly audible files.
+
+**⚠️ And the hardest bug in this release was in the test material, not the
+code.** The first demo drove the tone to 0.832 dB *below* the ceiling, so the
+clipper applied gain and nothing else — while every automated check that looks
+at loudness, at file hashes or at whether a human could hear a difference said
+yes. Only the measurement of the fold-back caught it.
+
+The effect declares a constant **32 samples** of latency, and that number is
+deliberately the same at 1×, 2× and 4× — so switching the oversampling setting
+mid-session cannot shift the track's timing relative to the rest of the project,
+which a factor-dependent figure would. (Measured on the effect itself; whether
+the mixer's delay compensation then acts on that figure for built-in inserts was
+not measured here, and the offline mixdown demonstrably does not.) At `mix = 0`
+it passes audio through bit-for-bit, delayed by those 32 samples. Available on
+every track and on the master, through the mixer, the `fx.*` control commands
+and the MCP tools.
+
+## 2026-09-20f — The copilot can finally load a sampler
+
+The AI assistant **inside the app** could not select the sampler or a sound
+bank. Its tool catalogue offered `testTone`, `polySynth` and `audioUnit` while
+the app has shipped `sampler` and `soundBank` for months — so an external agent
+could load the sampler that the entire chop-and-pads workflow is built on, and
+the assistant sitting in the window could not. Both are now offered, and a test
+derives the list from the instrument enum itself, so it cannot drift again.
+
+**The same rot had a second home that the original finding missed.** The MCP
+server's README advertised four of the five kinds too, and documented no
+sound-bank parameter at all — found by *reading the prose*, which no count-based
+gate can do. (The MCP server's own schema was correct throughout.)
+
+**⚠️ And the descriptions now warn about a silent success.** A sampler with no
+zones, an Audio Unit with no plug-in chosen, and a sound bank with no bank
+selected are each perfectly legal states that report success and then play
+nothing. Each track remembers the settings it was last given, so switching back
+to one restores it — but switching to one that was never set up in the app
+leaves a silent track and a cheerful "done". The tools now say so.
+
+## 2026-09-20e — Every partial moved by the same Hz: the frequency shifter
+
+**`.freqShifter`** moves every partial by the same number of **Hz**. A pitch
+shifter multiplies every partial by the same **ratio**. That single difference
+is the whole kind: a harmonic series 100/200/300 Hz shifted by +100 becomes
+200/300/400 Hz, which is no longer a harmonic series, so the ear stops hearing a
+note and starts hearing a bell. ⛔ **It cannot play in tune and no setting makes
+it** — that is the feature. Five parameters: `shiftHz` (coarse), `fineHz`,
+`stereoSpreadHz`, `mix`, `outputDb`.
+
+**⛔ It is also not `.ringMod`, and that distinction is a measured number rather
+than a claim.** A ring modulator is DOUBLE-sideband — it emits both `f + fc` and
+`|f − fc|` and the input itself vanishes. This is SINGLE-sideband: one sideband
+survives and the other is rejected. **Measured off rendered audio with a
+Goertzel probe: wanted sideband −6.02 dB, unwanted image −55.77 dB, carrier
+leakage −153.8 dB — 49.75 dB of rejection.**
+
+**⭐ Two independent instruments agree to 0.1 dB.** The Hilbert network is ten
+first-order all-pass sections in z⁻² (5 + 5, one branch carrying an extra z⁻¹),
+whose coefficients were *designed here* by minimax fit rather than copied. Its
+worst phase error is **0.376° over `f/fs ∈ [0.0002, 0.4998]`** — 9.6 Hz to
+23 990 Hz at 48 kHz — which predicts `20·log10(tan(ε/2))` = **−49.67 dB**. The
+rendered measurement reads −49.75 dB. `FreqShifterParamsTests` Law 1 re-derives
+the phase response *from the shipped coefficient array* rather than restating
+the result, so editing a digit reddens a test instead of quietly degrading the
+sound.
+
+**⚠️ The sign of one operator was the whole risk.** The other plausible
+transcription of an all-pass section, `y[n] = a·(x[n] − y[n−2]) + x[n−2]`, is
+also a perfectly good all-pass — and it destroys the quadrature, bringing the
+unwanted sideband back at **equal amplitude**. It still sounds metallic, and it
+passes any test that only asks whether the output changed. Planted: rejection
+collapses from 50.23 dB to **0.01 dB**, the physics gate fails by name, and the
+demo harness's own byte and audibility checks pass the broken build completely.
+
+**The sign of `shiftHz` is the direction, and there is no mode switch.** Running
+the oscillator backwards turns the upper-sideband formula into the lower one for
+free, so up and down are one formula with no branch — and the control sweeps
+continuously *through* zero, which a discrete direction parameter could never do
+(it would also be `Modulatable: refused` by rule 6.0.5). `fineHz` exists because
+the famous use of this effect is the tiny one: 1–20 Hz beats slowly against the
+dry signal for a thickness no chorus produces, and that zone is 1 % of the coarse
+knob's travel with no logarithmic taper available to a range that crosses zero.
+
+**⚠️ Shifting down past 0 Hz reflects, and that is real.** A 100 Hz tone shifted
+−300 Hz returns at 200 Hz, measured. Every analog Bode shifter does this.
+
+**`latencySamples == 0`**, asserted on the unit and on the chain total with a
+`.limiter` as the positive control. At **`mix == 0` the buffer is never
+written** — bit-exact dry compared as float *bit patterns* over a fixture
+carrying −0.0 and subnormals, with every other knob non-default, while the
+network and both oscillators keep running so raising `mix` is phase-coherent.
+`outputDb` trims the shifted copy only, which is what keeps that law true at
+every trim setting.
+
+**The insert label did not fit and the name changed because of it.** "Frequency
+Shifter" measures **88.156 pt** against the mixer's 85 pt built-in budget and
+would have shipped truncated; the shipped name is **"Frequency Shift"** at
+78.153 pt. "Transient Shaper" (83.907 pt) remains the widest built-in name.
+
+**Eleven plants, each run, each restored.** The all-pass sign, the missing z⁻¹,
+a single edited coefficient, a dropped `fineHz`, a lost sign, a deleted
+`mix == 0` guard, a deleted interpolation, a declared latency, a `Range`
+iteration in the render loop (20 480 000 malloc events), and both compiler-silent
+persistence sites. ⚠️ Two of the first round proved nothing and were re-run: a
+`--filter` that matched zero tests reported "passed", and the first draft of the
+smoothing leg measured a single-sample jump that a phase-continuous oscillator
+can never produce — its plant left it green. The replacement asserts the
+accumulated phase against the left-endpoint sum derived from the loop. ⚠️ The
+allocation probe was also found to be order-dependently flaky (0, 2, 5, 6 events
+on identical code) because `static let` arrays are lazily initialised on first
+touch; a warm-up outside the measured region fixed it, and it now reads 0 across
+five consecutive runs.
+
+**⛔⛔ Verified independently afterwards, and the verification is the part worth
+keeping: the demo harness would have shipped a ring modulator without
+complaint.** Zeroing the Q branch — which reduces `I·cos + Q·sin` to `I·cos`,
+textbook double-sideband — left `render-variants.mjs` exiting 0 with every
+variant marked audible, while sideband rejection collapsed from **50.23 dB to
+9.54 dB**. A third instrument built for the check (a pure-python Goertzel over
+ffmpeg-decoded renders, sharing no code with the gate) read the same 50.23 dB on
+the shipped build and flipped its verdict to "not a shifter" on the planted one.
+**Audibility and byte-distinctness say nothing about whether the effect did its
+job; only the three-bin physics gate does.**
+
+## 2026-09-20d — Punch and body, separately: the transient shaper
+
+**`.transientShaper`** is the insert for "more punch", "snappier drums", "tame
+the click" and "less room on the kit". It changes how HARD a sound starts and
+how LONG it rings, and nothing in between — six parameters: `attackDb` (punch),
+`sustainDb` (body), `attackMs`, `sustainMs`, `outputDb`, `mix`.
+
+**⛔ It is not a compressor and it has no threshold, deliberately.** A
+compressor watches absolute LEVEL, so its setting means something different at
+every fader position and turning the track down turns the effect off. This
+watches how fast the signal is rising or falling relative to *its own* running
+average, in the linear amplitude domain, with the two differentials taken as
+**dB ratios**. That one choice is what makes it level-independent — a linear
+one-pole has a level-proportional step response, so the ratio is invariant under
+input gain. **Measured: the same burst at −12 dBFS and at −32 dBFS produces gain
+trajectories agreeing to 1.65e−06 dB, sample for sample, with 15 dB of real
+shaping present at both levels.** The test plants the classic wrong formulation
+(a linear *difference*) and it reddens.
+
+**The two ends of a sound are independent, and that is the product.** At
+`attackDb +9` the window 50–200 ms after each onset moves **0.00 dB**, while the
+same pair inside the attack window moves **+9.00 dB**; `attackDb ±6` lands
+**+6.000 / −6.000 dB** on the peak of `attackWindowMs`. `sustainDb ±9` moves the
+80–200 ms window by **∓8.892 dB** while leaving the attack window at 0.00 dB —
+and the sign is asserted separately from the magnitude, because implementing it
+backwards is the likeliest error and a magnitude-only test cannot see it.
+
+**Zero lookahead, `latencySamples == 0`, a deliberate refusal.** It adds no new
+latency source to the insert PDC measured sample-exact at m25-n — asserted on
+the unit *and* on the chain total, with a `.limiter` as the positive control
+that the chain accessor can report a non-zero at all. The honest cost is that a
+cut leaves the first ~2 samples of a leading edge unattenuated. At its defaults
+the insert is **bit-exact dry**: identical output, sample for sample, compared
+as float *bit patterns* over a fixture carrying signed zeros and subnormals.
+
+**⭐ The demo proves punch rather than volume, which a level change cannot
+fake.** Two four-variant sets on a staccato pluck — a pad would have been the
+worst possible source, since an effect that acts only on onsets and decays does
+nothing to a held chord and every variant would have come out near-identical
+while still reporting success. Every variant is trimmed with `outputDb` to the
+same **−26.4 LUFS (0.00 LU spread)**, and at that constant loudness true peak
+walks **−16.5 → −14.2 → −11.2 → −7.7 dBTP** across the attack axis and the
+opposite way, **−11.7 → −17.5**, across the sustain axis. Crest factor measured
+independently with `ffmpeg astats`: **12.5 → 14.9 → 17.9 → 21.2 dB** at an RMS
+that never moves more than 0.1 dB.
+
+**⚠️ Two things this cost that are worth recording.** A transcription error in
+the window law — `ln(1/(1 − 10^(−12/20)))` written as `ln(1/10^(−12/20))` —
+shipped past a clean build and past twelve green legs, giving a full-shaping
+window 4.8× too wide. Only the leg asserting a *number* caught it: the attack
+CUT measured −3.15 dB where it had to measure −6.00, while the BOOST still read
+a clean +6.00. And the design's own fixture would have put the independence
+window inside the −70 dBFS detector gate, where both renders are trivially
+identical — a vacuous pass in this tree's characteristic shape; the tail is
+longer now, and the gate has its own leg.
+
+**⭐⭐ And the eight-site count is now recorded.** `EffectDescriptor` has
+**eight** hand-written per-kind rebuild sites, not the six that were folklore:
+the six in `ProjectDocument.swift`, plus `MixerPresets.withFreshID()` (a preset
+containing the kind would stamp onto a strip with every parameter silently reset
+to default) and `ProjectStore`'s display-name `default:` arm (it would ship as
+"TransientShaper" in every undo label). Both are compiler-silent, because
+`EffectDescriptor.init`'s parameters are all nil-defaulted, and neither is a
+surface the kind-surface gate can see. Both now carry `Kind.allCases`-driven
+censuses, so the next kind is covered without anyone remembering they exist.
+
+## 2026-09-20c — Sixteen Levels: one slice, played as an instrument
+
+**"It does not increase pitch when it is moved on the note scale. Is it
+expected?"** It was, and the reason is one line in the chopper: every slice is
+written `minPitch == maxPitch == rootPitch` — one key wide. The sampler
+transposes perfectly well (`baseIncrement = exp2((pitch − rootPitch) / 12)`), but
+a one-key zone has no pitch above its own root to reach, so walking up the
+keyboard walks onto the *next slice*, and past the last one onto silence.
+
+That default is right — *"a slice is a fragment of a record; letting it sound
+across a whole keyboard by default makes overlapping garbage on a chord"* — and
+the chopper's own comment had always named the escape hatch nobody built:
+*"chromatic play is one `sampler.zonePatches` call away (widen maxPitch) — the
+'16 Levels' pattern."* Now it is built.
+
+**LEVELS on the pad grid.** Press it, hit the pad holding the slice you want, and
+all sixteen pads become that slice a semitone apart — pad 1 as recorded, each pad
+up one semitone. The pads stop showing slice numbers and show the interval
+instead, with the unshifted pad marked. EXIT LEVELS puts the chop back.
+
+**⛔ It adds a zone; it never edits one, and that is the whole design.** The two
+obvious builds — widen the chosen slice in place, or swap the keymap for sixteen
+transposed copies and remember the original in the view model — are both
+data-loss shapes. A keymap is the only home a chop has, and a "remembered"
+original that lives in a view model is gone when the window closes or the app
+quits: you would open a saved project and find ninety hand-placed slices replaced
+by sixteen copies of slice 7. So the spread is **one new zone at a pitch range no
+existing zone occupies**, and the grid moves there. Your chop keeps playing on
+its own notes the whole time, the reconstruction MIDI clip still triggers its own
+slices, and quitting inside LEVELS loses nothing because nothing was taken away.
+
+The free window is a decidable function with its own tests, not a hard-coded
+octave: a ninety-slice chop based at 36 reaches note 125, so "just put it an
+octave up" would have fallen off the top of MIDI. It prefers the sixteen keys
+directly below the chop, then directly above, then the lowest window that fits —
+and **returns nothing, loudly, when the keymap genuinely fills the keyboard**,
+rather than overlapping something and producing pads that sometimes play the
+spread and sometimes play a slice.
+
+Proven by planting the data-loss build — widening the source zone in place — and
+watching the guard redden on exactly the right assertion, with the source zone's
+`maxPitch` visibly stuck at 53 after exit.
+
+## 2026-09-20b — Pads learn what happens when you let go, and a refusal learns your words
+
+Two defects from one user session. Neither was findable by a gate: the first was
+accurate, the second was working as designed.
+
+**"Over the maxSlices limit of 9 — raise maxSlices, lower sensitivity, raise
+minSliceSeconds."** Every number in that sentence was right and every remedy
+would have worked. The user was looking at a panel whose sliders say **MOST PADS
+TO MAKE** and **HOW MANY HITS TO CATCH**, and none of those three words is on
+their screen. The chop card now translates the store's refusal into the
+vocabulary of the controls beside it. **The store's own string is untouched** —
+agents read it, tests pin it byte-exact, and a UI problem must not be fixed by
+changing a wire contract. A test asserts both halves at once: the person's copy
+loses `maxSlices` and keeps 90, 9, 96 and "trim the clip"; the wire's copy keeps
+`maxSlices`, `minSliceSeconds` and the raw UUID.
+
+**A click on a pad was a 50 ms blip, and nothing said why.** The pads have always
+been a true gate — hold to play, let go to stop — which is what an MPC's NOTE ON
+mode does and exactly what you want for stutters and rolls. Its partner was
+missing. `SliceToSampler` writes no `oneShot` on the zones it creates, so every
+chop inherits the sampler's global `false`, and the default envelope release is
+0.05 s. Tap a pad holding two seconds of vocal and the mouse-down and mouse-up
+land in the same frame: loaded pad, lit light, almost no sound.
+
+The grid now carries a **LET GO: STOPS / PLAYS ON** switch beside the bank chips.
+**No new wire command and no new MCP tool** — `SamplerParams.oneShot` has shipped
+for milestones and `instrument_set_sampler_param` already sets it. This is a new
+surface onto an existing capability, put where the hand is, and it writes through
+`store.setInstrument(id:sampler:)` — the same one home the sampler editor card
+uses, so the row, the card and the wire cannot hold three opinions. It reads the
+sampler live rather than caching, so an agent's `oneShot` write moves the row.
+
+**One thing is reported rather than fixed:** in PLAYS ON the pad light goes dark
+while the slice is still sounding. The light is driven by the held-pitch set,
+which is the hand's ledger, and the engine deliberately plays a one-shot voice
+past note-off. Making the light true needs a note-ended signal back from the
+engine. Until then the mode's own tooltip says so, because a grid that quietly
+claims silence over audible sound is the failure this whole subsystem is arranged
+against.
+
+**Also honest about what was left alone:** the reason the ceiling was 9 is that
+`ValueSlider` is jump-to-point — a single click at ~8% across a 1–96 track sets
+9. That is a documented pointer convention used throughout the app, so changing
+how every slider answers a click is a design decision, not a bug fix.
+
 ## 2026-09-20 — The pad grid: a human can finally reach the chopper
 
 **`clip.sliceToSampler` has had no door.** Measured 2026-09-19 with positive

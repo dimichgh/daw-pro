@@ -102,6 +102,21 @@ public enum MIDIControllerRouting {
             return .inert(reason: "the test-tone instrument plays notes only and consumes no "
                 + "controllers at all")
 
+        case .drumSynth:
+            // ⭐ HONEST, NOT CONVENIENT. The drum machine reads NOTE VELOCITY
+            // (that is the whole accent mechanism) but velocity is not a
+            // controller — it rides on the note-on. No CC, no pitch bend and no
+            // aftertouch reaches a voice: a one-shot latches its parameters at
+            // trigger and has nothing left to steer. Saying `.routed` here to
+            // look generous would put an INERT-lane warning's opposite in front
+            // of the user, which is the failure this whole taxonomy exists to
+            // prevent. Parameters are steered by `mod.addRoute` instead, and
+            // all 75 of them are reachable that way.
+            return .inert(reason: "the drum machine's voices are one-shots that latch every "
+                + "parameter when a note starts, so no controller steers them. It DOES respond "
+                + "to note velocity (see kit.velocityToTone and kit.accentThreshold), and every "
+                + "one of its 75 parameters can be modulated with mod.addRoute")
+
         case .polySynth:
             switch type {
             case .pitchBend:
@@ -186,7 +201,7 @@ public enum MIDIControllerRouting {
         guard let instrument else { return false }
         switch instrument.kind {
         case .audioUnit, .soundBank: return true
-        case .sampler, .polySynth, .testTone: return false
+        case .sampler, .polySynth, .testTone, .drumSynth: return false
         }
     }
 
@@ -330,7 +345,7 @@ public enum MIDIControllerRouting {
         switch instrument.kind {
         case .soundBank, .audioUnit:
             return EffortField.hostedAUOfflineModulationSamplingHz / 2
-        case .sampler, .polySynth, .testTone: return nil
+        case .sampler, .polySynth, .testTone, .drumSynth: return nil
         }
     }
 
@@ -460,7 +475,7 @@ public enum MIDIControllerRouting {
         guard let instrument else { return nil }
         switch instrument.kind {
         case .soundBank, .audioUnit: return EffortField.hostedAUOfflineModulationSamplingHz
-        case .sampler, .polySynth, .testTone: return nil
+        case .sampler, .polySynth, .testTone, .drumSynth: return nil
         }
     }
 

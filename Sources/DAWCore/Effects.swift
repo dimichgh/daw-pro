@@ -19,7 +19,11 @@ public struct EffectDescriptor: Identifiable, Codable, Sendable, Equatable {
         case reverb
         /// Stereo delay with filtered feedback + optional ping-pong — M4 (iv).
         case delay
-        /// tanh drive/waveshaper (no oversampling in v0) — M4 (iv).
+        /// tanh drive/waveshaper — M4 (iv); optional 2×/4× oversampling added
+        /// by m39-ad. ⛔ NOT `.clipper`: tanh only ever APPROACHES its bound, so
+        /// this kind can never promise a peak ceiling. ⚠️ `oversampling`
+        /// DEFAULTS TO 1 (off) because this kind shipped without it — see
+        /// `SaturatorParams`.
         case saturator
         /// Downward noise gate with attack/hold/release — M4 (iv).
         case gate
@@ -152,6 +156,115 @@ public struct EffectDescriptor: Identifiable, Codable, Sendable, Equatable {
         /// this app runs at, so the `tan()` guard that would flatten the sweep
         /// top never engages — `PhaserParams.maxCornerHz` pins it.
         case phaser
+        /// Transient shaper (m39-y) — changes how HARD a sound starts and how
+        /// LONG it rings, and NOTHING in between. A gain-only insert driven by
+        /// a three-envelope differential follower in the LINEAR amplitude
+        /// domain whose differentials are taken as dB RATIOS, which is what
+        /// makes it level-independent: it compares the signal to ITSELF, so
+        /// turning the fader down does not turn the effect down.
+        /// ⛔ NOT a compressor — no threshold, deliberately (see
+        /// `TransientShaperParams`). Zero lookahead, `latencySamples == 0`, so
+        /// it adds no new latency source to the insert PDC measured at m25-n.
+        case transientShaper
+        /// Frequency shifter (m39-z) — moves every partial by the same number
+        /// of **Hz**, which is NOT what a pitch shifter does. A pitch shifter
+        /// multiplies every partial by the same RATIO and so preserves the
+        /// harmonic series; this ADDS a constant, so 100/200/300 Hz becomes
+        /// 200/300/400 Hz — no longer a harmonic series at all. That
+        /// INHARMONICITY is the effect: metallic, bell-like, clangorous at
+        /// large shifts, and a slow beating chorus at ±1–20 Hz.
+        /// ⛔ NOT a ring modulator either: a ring mod is DOUBLE-sideband (it
+        /// emits both sum AND difference and the input vanishes), while this is
+        /// SINGLE-sideband — one sideband only, the other rejected by
+        /// `FreqShifterParams.sidebandRejectionDb`. `.ringMod` is the other
+        /// kind and they are not substitutes.
+        case freqShifter
+        /// Clipper (m39-ac) — the first caller of the shared `Oversampler`
+        /// primitive. A hard ceiling: everything above `ceilingDb` is CUT OFF,
+        /// which is how loud modern masters and hard-hitting drums are made.
+        /// ⛔ NOT `.saturator`, and the difference is exact rather than a
+        /// matter of degree: tanh only ever APPROACHES its bound, so a
+        /// saturator has no ceiling a peak can be guaranteed to sit under.
+        /// Both of this kind's modes reach `ceilingDb` at a FINITE input and
+        /// stay there — `hard` immediately, `soft` at 1.5× the ceiling through
+        /// a cubic knee — so the output really is bounded.
+        /// ⛔ NOT `.limiter` either: a limiter RIDES A GAIN to avoid clipping
+        /// and keeps the waveform's shape; this one changes the waveform on
+        /// purpose, which is where the loudness and the bite come from.
+        /// ⭐ The thing that makes it worth building is `oversampling`: hard
+        /// clipping generates harmonics far above Nyquist that FOLD BACK as
+        /// inharmonic noise, and running the shaper at 2× or 4× moves the fold
+        /// out of the audio band. `oversampling: 1` is kept as a user-visible
+        /// setting precisely so that difference can be heard, and it is what
+        /// `scripts/gates/m39ac-clipper-physics.mjs` measures.
+        case clipper
+        /// Dynamic EQ (m39-af) — FOUR identical bell bands in series, each one a
+        /// single side-path biquad whose gain is driven by that band's OWN
+        /// filtered level. `docs/design/2026-09-20-dynamic-eq.md` is the
+        /// settled design and the source of truth for the algorithm.
+        ///
+        /// ⛔ **NOT `.eq`, and the difference is the POLES.** Each band here is
+        /// written in the side-path (Regalia–Mitra) form
+        /// `H(z) = 1 + (G − 1)·BP(z)`, where `BP` is the constant-0-dB-PEAK
+        /// band-pass (`EQFilterResponse.bandPassSection`). Expanded, that is
+        /// `[(1 + Gα) − 2cos(ω₀)z⁻¹ + (1 − Gα)z⁻²] / [(1 + α) − 2cos(ω₀)z⁻¹ +
+        /// (1 − α)z⁻²]` — **the denominator does not contain G**, so the poles
+        /// are fixed by `(freq, Q, sampleRate)` alone and the gain can move at
+        /// AUDIO RATE without recomputing one coefficient. `.eq`'s RBJ peaking
+        /// sections have `1 ± α/A` in the denominator: their poles move with
+        /// gain, which is exactly why they cannot be made dynamic without a
+        /// control-stride decision. DO NOT "fix" this into RBJ.
+        ///
+        /// ⚠️ **THE PRICE OF THAT, STATED RATHER THAN HIDDEN: `Q` DOES NOT MEAN
+        /// THE SAME THING HERE AS IT DOES ON `.eq`.** An RBJ peaking band's
+        /// half-gain bandwidth is CONSTANT with gain (**498.4 Hz** at 1 kHz /
+        /// Q 2 / 48 kHz, at +3, +6, +12 AND +18 dB). A side-path bell's WIDENS
+        /// with gain (**592.3 / 703.8 / 993.4 / 1401.2 Hz** at those same
+        /// gains). Both reach exactly the requested gain at the centre.
+        /// `DynamicEQResponseTests` re-derives both series from
+        /// `EQFilterResponse` and pins them.
+        ///
+        /// ⚠️ Those six figures are MEASURED HERE, by two independent methods
+        /// (bisection and a 0.01 Hz grid scan, agreeing to 0.01 Hz), and they
+        /// are NOT the figures in `docs/design/2026-09-20-dynamic-eq.md` §0,
+        /// which reads 499.3 / 592.5 / 705.1 / 994.4 / 1402.2. The design's
+        /// numbers are high by 0.2-1.4 Hz — a grid-resolution artefact in the
+        /// spike's scratch script, not a difference in the filter: its peak-gain
+        /// figure (4.63e-14 dB) reproduces here to fifteen digits, so both
+        /// computed the same section. The design's conclusion is untouched; only
+        /// its last digit was.
+        ///
+        /// ⚠️ **THE BANDS ARE IN SERIES, so band 3's detector hears what bands 1
+        /// and 2 already did to the signal.** That is standard and arguably
+        /// right — band 3 should react to the signal as it now is — but it looks
+        /// like a bug from the outside, so it is written down here. Series also
+        /// makes two overlapping bands compose as a PRODUCT (dB-additive, what
+        /// an EQ curve display and every user's intuition assume) where a
+        /// parallel sum would overshoot.
+        ///
+        /// ⛔ **BELLS ONLY IN v1, AND THE REASON IS A MEASUREMENT, NOT TASTE.**
+        /// The obvious side-path shelf — `1 + (G − 1)·LP` on a 2nd-order
+        /// Butterworth low-pass — **BOOSTS BY +0.82 dB AT THE CORNER WHEN ASKED
+        /// FOR A 9 dB CUT.** That is a defect. A first-order section is clean
+        /// but has no Q, is 6 dB/oct only, and is not boost/cut symmetric, so it
+        /// would need a different param block and break the uniform
+        /// `slot = (band−1)·8 + p` arithmetic. A wide bell (Q ≈ 0.5–0.7) at
+        /// 8 kHz is the serviceable stand-in for a dynamic high shelf.
+        ///
+        /// ⭐ **`latencySamples` IS A LITERAL 0 AT EVERY SETTING OF EVERY
+        /// PARAM** — minimum-phase IIR, no delay line, no lookahead. (A bell has
+        /// frequency-dependent GROUP delay; that is not reportable latency and
+        /// PDC neither can nor should compensate it. `.eq` has the same property
+        /// and reports 0 too.) That is why `Automation.swift` has **no entry**
+        /// for this kind: the saturator's refusal is about PARAMETER-DEPENDENT
+        /// LATENCY, and the reason does not exist here. All 32 slots take lanes.
+        ///
+        /// ⚠️ **NO GAIN-REDUCTION METER IN v1, DELIBERATELY.** Four bands have
+        /// four movements; `GainReductionReporting` publishes ONE number into a
+        /// meter the mixer draws as a compressor's, so a max-of-bands would be
+        /// confidently wrong about WHICH band moved. Absent beats wrong. Agents
+        /// can watch a band move with `fx.spectrum`.
+        case dynamicEQ
         /// A hosted Audio Unit effect ('aufx', see `audioUnit`) — M4 (v).
         case audioUnit
     }
@@ -177,6 +290,10 @@ public struct EffectDescriptor: Identifiable, Codable, Sendable, Equatable {
     public var tapeDelay: TapeDelayParams?
     public var stereoWidth: StereoWidthParams?
     public var phaser: PhaserParams?
+    public var transientShaper: TransientShaperParams?
+    public var freqShifter: FreqShifterParams?
+    public var clipper: ClipperParams?
+    public var dynamicEQ: DynamicEQParams?
     /// Hosted Audio Unit selection (additive optional, reusing the instrument
     /// `AudioUnitConfig`: component triple + display names + saved
     /// `fullStateForDocument`). Unlike the instrument rule, `kind ==
@@ -212,6 +329,12 @@ public struct EffectDescriptor: Identifiable, Codable, Sendable, Equatable {
     public var resolvedTapeDelay: TapeDelayParams { tapeDelay ?? TapeDelayParams() }
     public var resolvedStereoWidth: StereoWidthParams { stereoWidth ?? StereoWidthParams() }
     public var resolvedPhaser: PhaserParams { phaser ?? PhaserParams() }
+    public var resolvedTransientShaper: TransientShaperParams {
+        transientShaper ?? TransientShaperParams()
+    }
+    public var resolvedFreqShifter: FreqShifterParams { freqShifter ?? FreqShifterParams() }
+    public var resolvedClipper: ClipperParams { clipper ?? ClipperParams() }
+    public var resolvedDynamicEQ: DynamicEQParams { dynamicEQ ?? DynamicEQParams() }
 
     public init(
         id: UUID = UUID(),
@@ -235,6 +358,10 @@ public struct EffectDescriptor: Identifiable, Codable, Sendable, Equatable {
         tapeDelay: TapeDelayParams? = nil,
         stereoWidth: StereoWidthParams? = nil,
         phaser: PhaserParams? = nil,
+        transientShaper: TransientShaperParams? = nil,
+        freqShifter: FreqShifterParams? = nil,
+        clipper: ClipperParams? = nil,
+        dynamicEQ: DynamicEQParams? = nil,
         audioUnit: AudioUnitConfig? = nil,
         sidechainSourceTrackID: UUID? = nil
     ) {
@@ -259,6 +386,10 @@ public struct EffectDescriptor: Identifiable, Codable, Sendable, Equatable {
         self.tapeDelay = tapeDelay
         self.stereoWidth = stereoWidth
         self.phaser = phaser
+        self.transientShaper = transientShaper
+        self.freqShifter = freqShifter
+        self.clipper = clipper
+        self.dynamicEQ = dynamicEQ
         self.audioUnit = audioUnit
         self.sidechainSourceTrackID = sidechainSourceTrackID
     }
@@ -550,6 +681,70 @@ public struct CompressorParams: Codable, Sendable, Equatable {
     /// doing). At `mix: 0` the effect is silent-passing while the meter still
     /// shows reduction; that is deliberate.
     public var mix: Double
+    /// **THE DE-ESSER (m39-ae)** — WHAT THE DETECTOR LISTENS TO. The audio
+    /// path is untouched by this knob; only the signal that DECIDES how much
+    /// gain to apply is filtered.
+    ///
+    /// - `0` — **OFF, and the DEFAULT.** The detector reads the signal flat,
+    ///   exactly as it has since M4 (iii). Every project saved before m39-ae
+    ///   omits this key, decodes to 0, and renders BIT-FOR-BIT what it always
+    ///   did — pinned off rendered audio by
+    ///   `scripts/gates/m39ae-compressor-default-bytes.mjs`.
+    /// - `1` — **BAND-PASS.** The detector hears a one-band slice around
+    ///   `detectorFreqHz`, width set by `detectorQ`. This is the classic
+    ///   de-esser: park the band on the "sss" (5–9 kHz on most voices) and the
+    ///   unit ignores everything else.
+    /// - `2` — **HIGH-PASS.** The detector hears everything ABOVE
+    ///   `detectorFreqHz`. Catches sibilance that MOVES — an "sh" sits lower
+    ///   than an "s" — at the cost of also hearing cymbals and breath.
+    ///
+    /// Anything else snaps through `detectorMode(at:)` (the `clipper.mode`
+    /// precedent: `fx.setParam` clamps to the range but does not snap, so a
+    /// stored 1.4 renders as 1).
+    ///
+    /// ## ⛔ IT IS A WIDEBAND DE-ESSER, AND THAT IS A REAL DISTINCTION
+    ///
+    /// When the detector fires, **the whole signal ducks** — lows included —
+    /// for as long as the "sss" lasts. It does NOT carve out the sibilant band
+    /// and leave the rest playing; that is a SPLIT-BAND de-esser, a different
+    /// machine, and it is deliberately not what this is. Wideband is what the
+    /// classic hardware did, it needs no crossover, and — the reason that
+    /// matters here — it adds **ZERO latency**, so `latencySamples` stays 0 and
+    /// no existing project shifts in time. On a voice the ducking is inaudible
+    /// because an "s" is short and the lows under it are not what you are
+    /// listening to; on a full mix it is audible and you should not use it
+    /// there.
+    ///
+    /// ## What it composes with
+    ///
+    /// The filter sits on the DETECTOR, which is the same place a sidechain key
+    /// already sits. With a key attached the key is what gets filtered — the
+    /// dry signal is still always this effect's own main input (see `mix`
+    /// above). Both together are "duck this track when THAT track gets
+    /// sibilant", which is a real move and costs nothing extra.
+    ///
+    /// ⚠️ The GR meter keeps reporting what the detector computed, exactly as
+    /// it does for `mix` and makeup. With the de-esser on, a meter reading of
+    /// 0 during a vowel is the effect working, not the effect failing.
+    public var detectorMode: Double
+    /// De-ess band centre (mode 1) or corner (mode 2), Hz. Default 6500 — the
+    /// middle of where "sss" lives on most voices. Inert at `detectorMode` 0,
+    /// where it is not read at all.
+    public var detectorFreqHz: Double
+    /// De-ess band resonance. Default 2.
+    ///
+    /// ⚠️ **IT MEANS TWO DIFFERENT THINGS AND BOTH ARE LIVE**, which is worth
+    /// one sentence here rather than a support question later:
+    /// - mode 1 (band-pass): the band's WIDTH. Bandwidth is
+    ///   `detectorFreqHz / detectorQ`, so 2 is about an octave and a half.
+    ///   The peak is 0 dB at EVERY Q (the constant-peak-gain form — see
+    ///   `EQFilterResponse.bandPassSection`), so widening the band does not
+    ///   quietly move the threshold.
+    /// - mode 2 (high-pass): the corner's RESONANCE. It is a plain 2-pole
+    ///   high-pass whose response AT the corner is `detectorQ` itself, so the
+    ///   default 2 puts a deliberate +6 dB emphasis right where sibilance
+    ///   starts. Set 0.707 for a flat Butterworth corner.
+    public var detectorQ: Double
 
     public static let thresholdRange: ClosedRange<Double> = -60...0
     public static let ratioRange: ClosedRange<Double> = 1...20
@@ -558,6 +753,59 @@ public struct CompressorParams: Codable, Sendable, Equatable {
     public static let kneeRange: ClosedRange<Double> = 0...24
     public static let makeupRange: ClosedRange<Double> = 0...24
     public static let mixRange: ClosedRange<Double> = 0...1
+    /// 0 off · 1 band-pass · 2 high-pass. A RANGE rather than an enum on the
+    /// wire, because `fx.setParam`'s surface is numeric — the `clipper.mode`
+    /// and `limiter.truePeak` shape.
+    public static let detectorModeRange: ClosedRange<Double> = 0...2
+    /// 1 kHz…16 kHz. The floor is deliberately not lower: a de-ess band under
+    /// a kilohertz is not de-essing, it is frequency-selective compression
+    /// with a confusing name, and letting the band sit on the fundamental is
+    /// the single easiest way to make this unit sound broken.
+    public static let detectorFreqRange: ClosedRange<Double> = 1_000...16_000
+    public static let detectorQRange: ClosedRange<Double> = 0.3...8
+
+    /// How the detector reads a signal. The value type is INTERNAL to the
+    /// engine's decision; the wire and the model both carry the `Double`.
+    public enum DetectorMode: Int, Sendable, Equatable {
+        case off = 0, bandPass = 1, highPass = 2
+    }
+
+    /// The ONE HOME for the snap, so the engine, the wire readback and any test
+    /// all answer the same question the same way. `ClipperParams.mode(at:)`
+    /// verbatim in shape, and the shape is load-bearing in two places:
+    ///
+    /// ⛔⛔ **`isFinite` IS NOT ENOUGH, AND THIS COST A CRASH TO LEARN.** `Int()`
+    /// on a `Double` traps whenever the result would not fit — so `Int(1e300)`
+    /// TRAPS even though 1e300 is perfectly finite. The first version of this
+    /// function guarded only `isFinite` and `CompressorDeEssParamsTests
+    /// .snapIsTotal` brought the whole test binary down with
+    /// "Double value cannot be converted to Int". On the render thread, where a
+    /// field-by-field automation poke BYPASSES the clamping init and can deliver
+    /// any `Double` at all, that would have been a crash in the audio callback.
+    /// The `.clamped(to:)` must come BEFORE the conversion, not after.
+    ///
+    /// ⚠️ An out-of-range value therefore CLAMPS (99 → `.highPass`) rather than
+    /// falling back to off. That is deliberate consistency with the clipper's
+    /// mode and with the documented contract of every parameter on this wire —
+    /// "out-of-range values clamp rather than erroring" — and a de-esser is not
+    /// the place to invent an exception. Non-finite is the one case that cannot
+    /// be clamped meaningfully, and it falls back to the DEFAULT (`.off`), the
+    /// same rule the clipper applies with its own default.
+    public static func detectorMode(at value: Double) -> DetectorMode {
+        guard value.isFinite else { return .off }
+        let index = Int(value.clamped(to: detectorModeRange).rounded())
+        return DetectorMode(rawValue: index) ?? .off
+    }
+
+    /// The de-ess band's −3 dB width in Hz, derived — `detectorFreqHz / Q`.
+    /// Echoed on the wire so an agent can ask "how wide is my band?" without
+    /// re-deriving it, and so this file stays the only place that knows.
+    /// Meaningless in mode 2 (a high-pass has no width); the wire says so.
+    public static func detectorBandwidthHz(freqHz: Double, q: Double) -> Double {
+        let f = freqHz.clamped(to: detectorFreqRange)
+        let qq = q.clamped(to: detectorQRange)
+        return f / qq
+    }
 
     public init(
         thresholdDb: Double = -18,
@@ -566,7 +814,10 @@ public struct CompressorParams: Codable, Sendable, Equatable {
         releaseMs: Double = 100,
         kneeDb: Double = 6,
         makeupDb: Double = 0,
-        mix: Double = 1
+        mix: Double = 1,
+        detectorMode: Double = 0,
+        detectorFreqHz: Double = 6_500,
+        detectorQ: Double = 2
     ) {
         self.thresholdDb = thresholdDb.clamped(to: Self.thresholdRange)
         self.ratio = ratio.clamped(to: Self.ratioRange)
@@ -575,15 +826,29 @@ public struct CompressorParams: Codable, Sendable, Equatable {
         self.kneeDb = kneeDb.clamped(to: Self.kneeRange)
         self.makeupDb = makeupDb.clamped(to: Self.makeupRange)
         self.mix = mix.clamped(to: Self.mixRange)
+        self.detectorMode = detectorMode.clamped(to: Self.detectorModeRange)
+        self.detectorFreqHz = detectorFreqHz.clamped(to: Self.detectorFreqRange)
+        self.detectorQ = detectorQ.clamped(to: Self.detectorQRange)
     }
 
     private enum CodingKeys: String, CodingKey {
         case thresholdDb, ratio, attackMs, releaseMs, kneeDb, makeupDb, mix
+        // m39-ae — APPENDED. `CodingKeys` order carries no meaning (JSON is
+        // keyed), but the file reads as a history and appending keeps it one.
+        case detectorMode, detectorFreqHz, detectorQ
     }
 
     /// Decoding routes through the clamping init. `mix` defaults to 1 (fully
     /// wet) when the key is ABSENT — every project saved before m23-ck omits
     /// it, and must decode to exactly today's behaviour.
+    ///
+    /// ⛔ m39-ae adds three keys under the SAME LAW, and it is the stricter
+    /// case: `mix` 1 is "fully wet", which at least LOOKS like a setting, but
+    /// `detectorMode` 0 is "this feature is switched off entirely". Every
+    /// project saved before m39-ae omits all three keys, and must decode to a
+    /// compressor whose detector is flat — which is what 0 means. The other two
+    /// defaults (6500 Hz, Q 2) are inert at mode 0 and exist so that a user who
+    /// switches the mode on gets a usable band rather than a corner at zero.
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         self.init(
@@ -593,7 +858,10 @@ public struct CompressorParams: Codable, Sendable, Equatable {
             releaseMs: try c.decodeIfPresent(Double.self, forKey: .releaseMs) ?? 100,
             kneeDb: try c.decodeIfPresent(Double.self, forKey: .kneeDb) ?? 6,
             makeupDb: try c.decodeIfPresent(Double.self, forKey: .makeupDb) ?? 0,
-            mix: try c.decodeIfPresent(Double.self, forKey: .mix) ?? 1)
+            mix: try c.decodeIfPresent(Double.self, forKey: .mix) ?? 1,
+            detectorMode: try c.decodeIfPresent(Double.self, forKey: .detectorMode) ?? 0,
+            detectorFreqHz: try c.decodeIfPresent(Double.self, forKey: .detectorFreqHz) ?? 6_500,
+            detectorQ: try c.decodeIfPresent(Double.self, forKey: .detectorQ) ?? 2)
     }
 }
 
@@ -843,32 +1111,127 @@ public struct DelayParams: Codable, Sendable, Equatable {
     }
 }
 
-/// Parameters for the built-in tanh saturator (M4 iv). Clamped on init
-/// (GainParams pattern). v0 has no oversampling.
+/// Parameters for the built-in tanh saturator (M4 iv, oversampling added by
+/// m39-ad). Clamped on init (GainParams pattern).
+///
+/// ## ⛔⛔ THE DEFAULT OF `oversampling` IS 1 AND IT IS NOT A QUALITY CHOICE
+///
+/// `.clipper` — the other caller of `Oversampler` — defaults to 4, and it could,
+/// because it was a brand-new kind on the day the control was written. THIS KIND
+/// IS NOT. `.saturator` has shipped since M4 (iv) and there are already saved
+/// projects with one in a chain. A default of 2 or 4 would change what every one
+/// of those projects SOUNDS like AND shift it in time by the 32 samples the
+/// filters cost — silently, on the next open.
+///
+/// So the default is 1, at which `SaturatorEffect` SKIPS the oversampling path
+/// outright rather than running it at factor 1, and reports `latencySamples == 0`.
+/// The result is bit-for-bit v0. That is not an argument, it is a measured claim:
+/// `scripts/gates/m39ad-saturator-default-bytes.mjs` pins the sha256 of a render
+/// of an untouched saturator, captured from the last build in which this struct
+/// had three fields, and a CONTROL hash of the same fixture with no effect at all
+/// so a change in the surrounding pipeline cannot be mistaken for a change here.
+/// The repo's binding precedent is the "bend range default stays 2.0" ruling.
+///
+/// ⚠️ **`latencySamples` IS THEREFORE PARAMETER-DEPENDENT ON THIS KIND — 0 at
+/// factor 1, 32 at 2 and 4 — WHICH `.clipper` DELIBERATELY AVOIDED.** That is
+/// only safe because of two properties, and BOTH are required:
+///
+///  1. the factor can be changed ONLY by a main-actor `apply(params:)`, which
+///     always runs inside `PlaybackGraph.applyParameters`, whose TAIL calls
+///     `recomputeCompensation` — so the PDC plan is rebuilt in the SAME pass that
+///     moved the latency (`EffectFactory.applyParams` has exactly one production
+///     call site, `EffectChainState.sync`, and it is inside that function);
+///  2. `oversampling` is INERT TO AUTOMATION (`SaturatorEffect.storeAutomatedParam`
+///     ignores its slot, the `delay.sync`/`delay.division` precedent), so the
+///     RENDER thread can never move the factor behind the plan's back.
+///
+/// Break either one and this becomes the silent staleness `OversamplerDesign` §3
+/// warns about. See `SaturatorEffect`'s DESIGN §3.
 public struct SaturatorParams: Codable, Sendable, Equatable {
     public var driveDb: Double
     public var mix: Double
     public var outputDb: Double
+    /// Oversampling factor: 1, 2 or 4. DISCRETE — `Modulatable: refused` AND
+    /// NOT AUTOMATABLE, snapped through `oversamplingFactor(at:)`.
+    ///
+    /// ⛔ Appended LAST on purpose: the INDEX of a spec in
+    /// `EffectParamSpec.specs(for: .saturator)` IS the automation slot, and this
+    /// kind's first three slots are in saved user automation lanes already.
+    public var oversampling: Double
 
+    /// ⚠️ 0…36, NOT the clipper's −12…36, and the difference is deliberate. A
+    /// clipper's drive is a trim around a ceiling that already exists, so pulling
+    /// it negative is a real setting. A saturator's drive IS the effect: 0 means
+    /// "do nothing", and there is nothing below that.
     public static let driveRange: ClosedRange<Double> = 0...36
     public static let mixRange: ClosedRange<Double> = 0...1
     public static let outputRange: ClosedRange<Double> = -12...12
+    /// Same 1…4 as the clipper's — the roster is the filter family's
+    /// (`OversamplerDesign.supportedFactors`), not the kind's.
+    public static let oversamplingRange: ClosedRange<Double> = 1...4
 
-    public init(driveDb: Double = 12, mix: Double = 1, outputDb: Double = 0) {
+    /// Snaps a raw wire value onto a supported factor (1, 2 or 4).
+    ///
+    /// ⛔ **FORWARDS TO `ClipperParams.oversamplingFactor(at:)` RATHER THAN
+    /// RESTATING ITS THRESHOLDS, AND THAT IS THE POINT.** The snapping rule —
+    /// `< 1.5 → 1`, `< 3.0 → 2`, else 4, every tie resolving UPWARD — is a
+    /// property of `OversamplerDesign.supportedFactors`, which both kinds share.
+    /// A second copy here would be a second statement of one fact, free to drift;
+    /// `SaturatorParamsTests` re-derives this from the roster by brute force AND
+    /// pins it against the clipper's over a dense sweep, so the shared home
+    /// cannot drift away from either caller.
+    ///
+    /// ⚠️ The two kinds share the SNAP and share nothing else: not the default
+    /// (4 there, 1 here), not the latency behaviour (constant there,
+    /// factor-dependent here), not the drive range.
+    public static func oversamplingFactor(at value: Double) -> Int {
+        ClipperParams.oversamplingFactor(at: value)
+    }
+
+    /// ⛔ **THE LATENCY THIS KIND REPORTS, IN SAMPLES, AS A FUNCTION OF THE
+    /// FACTOR — 0 at 1, `OversamplerDesign.latencySamples` (32) at 2 and 4.**
+    /// The ONE home: `SaturatorEffect.latencySamples`, the wire echo and the
+    /// tests all read this, never a second copy.
+    ///
+    /// The 0 at factor 1 is the whole preservation promise. `Oversampler`'s
+    /// factor-1 kernel IS a pure 32-sample delay (`OversamplerDesign` §3), so
+    /// running it at 1 would cost 32 samples of shift for no benefit at all —
+    /// which on a shipped kind is exactly the regression the default exists to
+    /// refuse. The effect skips the path instead.
+    public static func latencySamples(oversampling: Double) -> Int {
+        oversamplingFactor(at: oversampling) == 1 ? 0 : OversamplerDesign.latencySamples
+    }
+
+    public init(driveDb: Double = 12, mix: Double = 1, outputDb: Double = 0,
+                oversampling: Double = 1) {
         self.driveDb = driveDb.clamped(to: Self.driveRange)
         self.mix = mix.clamped(to: Self.mixRange)
         self.outputDb = outputDb.clamped(to: Self.outputRange)
+        // Non-finite guard ahead of the snap: `oversamplingFactor(at:)` reaches
+        // an `Int()` conversion that would TRAP on a NaN (the
+        // `RingModParams.waveform` precedent). It guards internally too; this
+        // reads as the intent rather than relying on the callee's.
+        self.oversampling = Double(
+            Self.oversamplingFactor(at: oversampling.isFinite ? oversampling : 1))
     }
 
-    private enum CodingKeys: String, CodingKey { case driveDb, mix, outputDb }
+    private enum CodingKeys: String, CodingKey {
+        case driveDb, mix, outputDb, oversampling
+    }
 
-    /// Decoding routes through the clamping init.
+    /// Decoding routes through the clamping/snapping init.
+    ///
+    /// ⛔ `?? 1` ON `oversampling` IS THE MIGRATION. Every project saved before
+    /// m39-ad has no `oversampling` key at all, so it decodes to 1 — which is
+    /// the setting at which this effect is bit-for-bit what it was when that
+    /// project was saved. Any other fallback would silently re-voice old work.
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         self.init(
             driveDb: try c.decodeIfPresent(Double.self, forKey: .driveDb) ?? 12,
             mix: try c.decodeIfPresent(Double.self, forKey: .mix) ?? 1,
-            outputDb: try c.decodeIfPresent(Double.self, forKey: .outputDb) ?? 0)
+            outputDb: try c.decodeIfPresent(Double.self, forKey: .outputDb) ?? 0,
+            oversampling: try c.decodeIfPresent(Double.self, forKey: .oversampling) ?? 1)
     }
 }
 
@@ -2117,10 +2480,20 @@ public struct TapeDelayParams: Codable, Sendable, Equatable {
     ///
     /// The tanh math is the `SaturatorEffect` family's, lifted rather than
     /// imported (the `.djFilter` / SVF precedent): `DAWCore` stays engine-free.
-    /// ⚠️ ALIAS HONESTY: there is no oversampling here, exactly as in
-    /// `SaturatorEffect` v0, so odd harmonics generated above Nyquist fold
-    /// back. The record-path low-pass sits AFTER this stage and removes most of
-    /// what is generated in band, but it cannot remove what has already folded.
+    /// ⚠️ ALIAS HONESTY: there is no oversampling here, so odd harmonics
+    /// generated above Nyquist fold back. The record-path low-pass sits AFTER
+    /// this stage and removes most of what is generated in band, but it cannot
+    /// remove what has already folded.
+    ///
+    /// ⚠️ DATED 2026-09-20 (m39-ad): this used to read "exactly as in
+    /// `SaturatorEffect` v0", and that comparison is now WRONG. The `.saturator`
+    /// kind grew an OPT-IN `oversampling` param (1/2/4, default 1). At its
+    /// default it is still byte-for-byte the un-oversampled v0 — which is why
+    /// the shape of the caveat is unchanged — but a user who raises that knob
+    /// gets ~90 dB less alias floor there and NOTHING here. The tape delay was
+    /// deliberately not given the same knob in m39-ad: its shaper sits inside a
+    /// FEEDBACK loop, so an oversampler's group delay would lengthen the echo
+    /// time itself, which is a different and larger design question.
     public static func saturated(_ x: Double, driveGain g: Double, amount d: Double) -> Double {
         guard x.isFinite, g.isFinite, g > 0, d.isFinite else { return 0 }
         return x + d * (tanh(g * x) / g - x)
@@ -2666,6 +3039,991 @@ public struct PhaserParams: Codable, Sendable, Equatable {
     }
 }
 
+/// Parameters for the built-in transient shaper (m39-y) — the insert that
+/// changes how HARD a sound starts and how LONG it rings, without touching its
+/// level in between. `docs/design/2026-09-20-transient-shaper.md` is the design
+/// and §3 is the detector; this struct is the ONE HOME for every law the DSP,
+/// the tests, `fx.describe`'s notes and `Commands.effectParamsJSON` read.
+///
+/// ⛔ **IT IS NOT A COMPRESSOR AND IT HAS NO THRESHOLD, DELIBERATELY.** A
+/// compressor responds to ABSOLUTE LEVEL; this responds to the RATE OF CHANGE of
+/// the signal relative to ITS OWN lagged reference. The differentials are taken
+/// as **dB RATIOS of two LINEAR envelopes**, and that single choice is what makes
+/// the effect level-independent: a linear one-pole has a level-proportional step
+/// response, so `envFast / envAttack` — and therefore the differential in dB — is
+/// invariant under a change of input gain. Turning the fader down does NOT turn
+/// the effect down. ⚠️ The plausible wrong formulation is a LINEAR DIFFERENCE
+/// (`envFast − envAttack`), which is level-DEPENDENT and would make every knob
+/// mean something different at every fader position;
+/// `TransientShaperTests` L6 plants exactly that and reddens.
+///
+/// ⛔ **`attackDb` IS A MAXIMUM, NOT A PROMISE.** The full amount lands only where
+/// the differential reaches `fullShapeDifferentialDb` (12 dB). Below that the
+/// shaping is proportional, which is what makes it sound natural instead of
+/// pumping — and it is why this kind ships a declared normalisation rather than a
+/// dimensionless −1…+1 knob: "+6 dB raises the first `attackWindowMs` by 6.00 ±
+/// 0.5 dB" is falsifiable, and "attack at +0.5" is not.
+///
+/// ⛔ **ZERO LOOKAHEAD, `latencySamples == 0`, and that is a deliberate refusal.**
+/// The honest cost is that a CUT leaves the first ~2 samples of a leading edge
+/// unattenuated (a sub-0.05 ms tick). The alternative — a lookahead ring buffer —
+/// costs a NEW DECLARED LATENCY SOURCE entering the insert-PDC guarantee that
+/// m25-n measured sample-exact, for two samples. ⛔ A future implementer who adds
+/// lookahead MUST declare it in `latencySamples` and re-measure against m25-n.
+public struct TransientShaperParams: Codable, Sendable, Equatable {
+    /// How much louder (or quieter) to make the FRONT of each sound, in dB.
+    /// A MAXIMUM — see `shapedFraction`.
+    public var attackDb: Double
+    /// How much louder (or quieter) to make the RING-OUT after the hit, in dB.
+    /// ⚠️ POSITIVE LENGTHENS the tail, negative shortens it. See the note on
+    /// `shapedFraction` for the sign convention and why the other plausible
+    /// formulation was rejected.
+    public var sustainDb: Double
+    /// How long the front of a sound counts as "the hit", in ms — the symmetric
+    /// lag time constant of the attack reference envelope. ⚠️ NOT a fade time
+    /// and NOT a delay.
+    public var attackMs: Double
+    /// How far into the tail the effect keeps working, in ms — the RELEASE time
+    /// constant of the sustain reference envelope.
+    public var sustainMs: Double
+    /// Static output trim in dB, applied after the shaping. Load-bearing rather
+    /// than a nicety: a transient shaper changes CREST FACTOR, and comparing
+    /// punch honestly means levelling the loudness first.
+    public var outputDb: Double
+    /// Dry/wet blend of the SHAPED gain against unity. 1 (the default) is fully
+    /// wet, and at all-default settings that is bit-exact dry (see below).
+    public var mix: Double
+
+    public static let attackDbRange: ClosedRange<Double> = -20...20
+    public static let sustainDbRange: ClosedRange<Double> = -20...20
+    public static let attackMsRange: ClosedRange<Double> = 0.1...50
+    public static let sustainMsRange: ClosedRange<Double> = 20...1_000
+    public static let outputDbRange: ClosedRange<Double> = -24...24
+    public static let mixRange: ClosedRange<Double> = 0...1
+
+    // MARK: The laws — ONE HOME each, read by the DSP, the tests, the notes and
+    // the wire. Nothing below is re-derived anywhere else.
+
+    /// ⛔ THE NORMALISATION. The differential, in dB, at which shaping is at FULL
+    /// strength. `attackDb: +6` means "up to +6 dB, reached where the signal is
+    /// 12 dB above its own lagged reference". Echoed on the wire so an agent can
+    /// know what a setting promises without reading source.
+    public static let fullShapeDifferentialDb = 12.0
+
+    /// ⛔ THE ABSOLUTE DETECTOR FLOOR. Below this the detector is HARD-GATED —
+    /// both differentials are forced to 0, not merely clamped. Without it the
+    /// ratio of two near-zero envelopes is noise and the unit would apply up to
+    /// ±20 dB of shaping to room tone. −70 dBFS is below any musically intended
+    /// content and far above the float noise floor.
+    public static let detectorFloorDb = -70.0
+
+    /// The hard ceiling on the SUMMED shaping, in dB, before `outputDb`. Both
+    /// amounts can reach 20 and could otherwise sum to 40.
+    public static let maxShapeDb = 24.0
+
+    /// FIXED, not a knob: the fast envelope's attack time constant in ms. ~2.4
+    /// samples at 48 kHz — fast enough that "the signal" is the signal.
+    public static let fastAttackMs = 0.05
+
+    /// FIXED, not a knob: the fast envelope's release time constant in ms. Long
+    /// enough to bridge a rectified waveform's zero crossings (the
+    /// `CompressorEffect` detector's own 5 ms, for its reason), short enough
+    /// that a real decay still reads as a decay.
+    public static let fastReleaseMs = 5.0
+
+    /// ⛔ THE GAIN LAW. 0 at no differential, 1 at `fullShapeDifferentialDb` or
+    /// more, linear in dB in between. THE ONE HOME for what an `attackDb` of +6
+    /// actually means.
+    ///
+    /// ⚠️ **THE SUSTAIN SIGN, STATED SO IT CANNOT BE IMPLEMENTED BACKWARDS.**
+    /// The sustain differential is POSITIVE DURING A DECAY (the signal has
+    /// fallen below its own slow reference), and `sustainDb` ADDS gain
+    /// proportional to it. So `sustainDb: +9` applies up to +9 dB during the
+    /// ring-out and LENGTHENS it; `−9` applies up to −9 dB and SHORTENS it.
+    /// There is a second, equally plausible formulation — "pull the signal back
+    /// up toward its slow reference", with no user scalar — and it is NOT this
+    /// one: it would make the amount unsettable and leave the demo no
+    /// measurable number.
+    ///
+    /// A non-finite differential is "no answer", not "very large": it returns 0.
+    public static func shapedFraction(differentialDb: Double) -> Double {
+        guard differentialDb.isFinite, differentialDb > 0 else { return 0 }
+        return min(differentialDb / fullShapeDifferentialDb, 1.0)
+    }
+
+    /// ⛔ THE WINDOW LAW — the width, in ms, over which attack shaping is at FULL
+    /// strength for a STEP onset. DERIVED, not asserted: full shaping needs a
+    /// differential ≥ 12 dB, i.e. `A/f ≤ 10^(−12/20) = 0.25119`; for a symmetric
+    /// one-pole lag `A(t) = 1 − e^(−t/τ)` that holds while
+    /// `t ≤ τ·ln(1/0.74881) = 0.28927·τ`.
+    ///
+    /// ⚠️ This is the STEP-ONSET window. A slow swell has a smaller differential
+    /// and gets proportionally less for longer; that is the effect working, not
+    /// a discrepancy. Echoed per-instance on the wire as `attackWindowMs` by
+    /// `fx.add` / `fx.setParam` results and `project.snapshot` — ⛔ NOT by
+    /// `fx.describe`, which is a different surface entirely.
+    /// ⚠️ The denominator is `1 − 10^(−12/20)`, NOT `10^(−12/20)`. Dropping the
+    /// `1 −` gives 1.3816 instead of 0.28927 — a window 4.8× too wide, which
+    /// reads as plausible and makes an attack CUT measure −3.15 dB where it
+    /// should measure −6.00. MEASURED: that exact transcription error was made
+    /// while implementing this and was caught only because A2 asserts a number.
+    /// `TransientShaperParamsTests` Law 2 re-derives it INDEPENDENTLY rather
+    /// than restating the constant.
+    public static let fullShapeWindowFraction =
+        log(1.0 / (1.0 - pow(10.0, -fullShapeDifferentialDb / 20.0)))
+
+    public static func attackWindowMs(attackMs: Double) -> Double {
+        let ms = (attackMs.isFinite ? attackMs : 5).clamped(to: attackMsRange)
+        return ms * fullShapeWindowFraction
+    }
+
+    /// The one-pole feedback coefficient for a time constant of `ms`
+    /// milliseconds at `sampleRate` Hz — `e^(−1/(ms·rate))`, the convention
+    /// `CompressorEffect` already ships, under which the envelope covers 63.2 %
+    /// of a step in exactly `ms`. Kept here rather than in the engine so the
+    /// tests, the window law and the DSP cannot drift apart.
+    ///
+    /// Non-finite or non-positive inputs return 0 (an instant follower) rather
+    /// than propagating: these reach the render thread.
+    public static func onePoleCoefficient(ms: Double, sampleRate: Double) -> Double {
+        guard ms.isFinite, ms > 0, sampleRate.isFinite, sampleRate > 0 else { return 0 }
+        return exp(-1.0 / (ms * 0.001 * sampleRate))
+    }
+
+    /// The detector floor as a LINEAR amplitude — `10^(−70/20)` ≈ 3.1623e−4.
+    /// One home, so the note's number and the DSP's comparison cannot disagree.
+    public static var detectorFloorLinear: Double { pow(10.0, detectorFloorDb / 20.0) }
+
+    /// ⭐ **BIT-EXACT DRY AT DEFAULTS, BY IEEE AND NOT BY TOLERANCE.** At
+    /// `attackDb = sustainDb = outputDb = 0` and `mix = 1` the shaped gain is
+    /// `pow(10, 0) == 1.0` exactly, and `1·1.0 + 0.0 == 1.0`; multiplying a
+    /// `Float` by `1.0f` is the identity. This is what makes the identity half
+    /// of the byte/bit gates possible, and it is rule 6.0.7's requirement.
+    public var isBitExactDry: Bool {
+        attackDb == 0 && sustainDb == 0 && outputDb == 0 && mix == 1
+    }
+
+    public init(attackDb: Double = 0, sustainDb: Double = 0, attackMs: Double = 5,
+                sustainMs: Double = 200, outputDb: Double = 0, mix: Double = 1) {
+        // Non-finite guards ahead of every clamp: `clamped(to:)` on a NaN
+        // returns the NaN (both comparisons in `min(max(…))` are false against
+        // NaN), and these values reach `exp`, `log10`, `pow` and two gain
+        // multiplies on the render thread. A NaN would poison the smoothing
+        // accumulators permanently.
+        self.attackDb = (attackDb.isFinite ? attackDb : 0).clamped(to: Self.attackDbRange)
+        self.sustainDb = (sustainDb.isFinite ? sustainDb : 0).clamped(to: Self.sustainDbRange)
+        self.attackMs = (attackMs.isFinite ? attackMs : 5).clamped(to: Self.attackMsRange)
+        self.sustainMs = (sustainMs.isFinite ? sustainMs : 200)
+            .clamped(to: Self.sustainMsRange)
+        self.outputDb = (outputDb.isFinite ? outputDb : 0).clamped(to: Self.outputDbRange)
+        self.mix = (mix.isFinite ? mix : 1).clamped(to: Self.mixRange)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case attackDb, sustainDb, attackMs, sustainMs, outputDb, mix
+    }
+
+    /// Decoding routes through the clamping init, `decodeIfPresent ?? default`
+    /// per field, so a partial object decodes (the `ChorusParams` pattern).
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            attackDb: try c.decodeIfPresent(Double.self, forKey: .attackDb) ?? 0,
+            sustainDb: try c.decodeIfPresent(Double.self, forKey: .sustainDb) ?? 0,
+            attackMs: try c.decodeIfPresent(Double.self, forKey: .attackMs) ?? 5,
+            sustainMs: try c.decodeIfPresent(Double.self, forKey: .sustainMs) ?? 200,
+            outputDb: try c.decodeIfPresent(Double.self, forKey: .outputDb) ?? 0,
+            mix: try c.decodeIfPresent(Double.self, forKey: .mix) ?? 1)
+    }
+}
+
+/// Parameters for the built-in FREQUENCY SHIFTER (m39-z), plus **the one home**
+/// for its Hilbert-network coefficients and every number derived from them.
+/// `Sources/DAWEngine/Effects/FreqShifterEffect.swift`'s file comment is the
+/// design; this struct is the contract it and the tests both read.
+///
+/// ⛔ **A FREQUENCY SHIFTER IS NOT A PITCH SHIFTER.** A pitch shifter multiplies
+/// every partial by the same RATIO, so 100/200/300 Hz becomes 200/400/600 —
+/// still a harmonic series, still one note. This ADDS a constant number of Hz,
+/// so 100/200/300 becomes 200/300/400 — **no longer a harmonic series at all**.
+/// The result is inharmonic on purpose: metallic, bell-like, clangorous.
+///
+/// ⛔ **AND IT IS NOT A RING MODULATOR.** `.ringMod` is DOUBLE-sideband: it emits
+/// both `f + fc` and `|f − fc|` and the input itself vanishes. This is
+/// SINGLE-sideband: **one** sideband survives and the other is rejected by
+/// `sidebandRejectionDb`. That rejection figure is the entire quality measure of
+/// this effect, which is why it is derived here from the shipped coefficients
+/// rather than asserted as a literal.
+public struct FreqShifterParams: Codable, Sendable, Equatable {
+    /// Coarse shift in Hz. **The SIGN IS THE DIRECTION** — positive shifts every
+    /// partial UP, negative DOWN. There is deliberately no separate direction
+    /// switch: a discrete param would be `Modulatable: refused` by rule 6.0.5
+    /// and would make the single most expressive axis un-automatable through 0.
+    public var shiftHz: Double
+    /// Fine shift in Hz, SUMMED with `shiftHz`. Exists for resolution, not for
+    /// range: the classic ±1–20 Hz beating/chorus trick lives in 1 % of
+    /// `shiftHz`'s travel, and `.logarithmic` cannot rescue a range that crosses
+    /// 0 (rule 6.0.2). Two linear knobs can.
+    public var fineHz: Double
+    /// Difference in shift between left and right, in Hz: left gets
+    /// `+stereoSpreadHz/2`, right `−stereoSpreadHz/2`. At small values this is
+    /// what turns the effect into a wide, slowly-churning chorus that no pitch
+    /// shifter can produce.
+    public var stereoSpreadHz: Double
+    /// Dry/wet blend. ⛔ At `mix == 0` the buffer is NEVER WRITTEN — bit-exact
+    /// dry by IEEE (rule 6.0.7) — while the Hilbert network and both
+    /// oscillators keep running, so raising `mix` later is phase-coherent.
+    public var mix: Double
+    /// Static output trim in dB. Load-bearing, not a nicety: the analytic
+    /// signal's envelope can exceed the real input's peak, so a full-wet shift
+    /// can be LOUDER than the source even though no gain was applied.
+    public var outputDb: Double
+
+    public static let shiftHzRange: ClosedRange<Double> = -2_000...2_000
+    public static let fineHzRange: ClosedRange<Double> = -20...20
+    public static let stereoSpreadHzRange: ClosedRange<Double> = -20...20
+    public static let mixRange: ClosedRange<Double> = 0...1
+    public static let outputDbRange: ClosedRange<Double> = -24...24
+
+    // MARK: - THE HILBERT NETWORK — one home, read by the DSP and by the tests
+
+    /// ⛔ **THE COEFFICIENT SET. Changing a digit here changes the effect's
+    /// measured quality, and `FreqShifterParamsTests` Law 1 re-derives the phase
+    /// response FROM THESE NUMBERS rather than restating the result — so an edit
+    /// reddens a test instead of quietly degrading the rejection.**
+    ///
+    /// Each entry is the coefficient `a` of a first-order all-pass **in z⁻²**:
+    ///
+    ///     H(z) = (a − z⁻²) / (1 − a·z⁻²)
+    ///     y[n] = a·(x[n] + y[n−2]) − x[n−2]
+    ///
+    /// ⚠️ **THE SIGN CONVENTION IS LOAD-BEARING AND EASY TO GET WRONG.** The
+    /// other plausible transcription, `y[n] = a·(x[n] − y[n−2]) + x[n−2]`, is
+    /// `H(z) = (a + z⁻²)/(1 + a·z⁻²)` — also a perfectly good all-pass, but a
+    /// DIFFERENT one. MEASURED while building this: with that form the two
+    /// branches stop being in quadrature, the unwanted sideband comes back at
+    /// EQUAL amplitude, and the effect silently degrades into a ring modulator
+    /// (both sidebands, 0.03 dB apart) while still sounding "metallic" and still
+    /// passing any test that only asks whether the output changed.
+    ///
+    /// `hilbertI` carries an EXTRA one-sample delay (`z⁻¹`); `hilbertQ` does not.
+    /// That delay is part of the network, not an implementation detail — without
+    /// it the branches are ~0° apart rather than ~90°.
+    public static let hilbertI: [Double] = [
+        0.417_239_444_064_827,
+        0.831_244_898_601_317,
+        0.961_045_309_293_653,
+        0.991_625_575_319_332,
+        0.999_009_677_476_390,
+    ]
+    public static let hilbertQ: [Double] = [
+        0.134_046_221_513_092,
+        0.670_324_550_368_111,
+        0.917_937_420_220_126,
+        0.981_751_952_533_010,
+        0.996_418_483_623_862,
+    ]
+
+    /// The design band, as a fraction of the SAMPLE RATE. ⚠️ **This band is
+    /// normalised, so it moves in Hz when the session rate changes** — that is
+    /// inherent to a fixed-coefficient IIR network and is why it is stated as a
+    /// fraction here and converted by `designBandHz(sampleRate:)` rather than
+    /// written down in Hz anywhere.
+    public static let designBandLowFraction = 0.0002
+    public static let designBandHighFraction = 0.4998
+
+    /// ⛔ **THE MEASURED WORST-CASE PHASE ERROR, IN DEGREES, over the design
+    /// band.** The pair's phase difference is 90° ± this. `FreqShifterParamsTests`
+    /// Law 1 re-derives it from `hilbertI`/`hilbertQ` on a dense grid and fails
+    /// if the two disagree by more than a hair, so this constant cannot rot away
+    /// from the coefficients it describes.
+    public static let worstPhaseErrorDeg = 0.376_46
+
+    /// ⛔ **THE QUALITY NUMBER. How far below the wanted sideband the UNWANTED
+    /// one sits, in dB (negative).** DERIVED, never asserted: a quadrature pair
+    /// in error by `ε` leaks the opposite sideband at `tan(ε/2)`.
+    ///
+    /// ⚠️ It is `tan(ε/2)`, NOT `sin(ε)` or `ε/2`. At these tiny angles all three
+    /// agree to within 0.01 dB, so a wrong one would look right — which is
+    /// exactly why the end-to-end demo gate measures the rejection off a
+    /// RENDERED WAV with a Goertzel probe instead of trusting this line.
+    public static var sidebandRejectionDb: Double {
+        20.0 * log10(tan(worstPhaseErrorDeg * Double.pi / 180.0 / 2.0))
+    }
+
+    /// The design band in Hz at a given sample rate. Below `low` the rejection
+    /// degrades fast — at 48 kHz `low` is 9.6 Hz, comfortably under the audio
+    /// band; at 96 kHz it is 19.2 Hz, which only just covers it.
+    public static func designBandHz(sampleRate: Double) -> (low: Double, high: Double) {
+        guard sampleRate.isFinite, sampleRate > 0 else { return (0, 0) }
+        return (designBandLowFraction * sampleRate, designBandHighFraction * sampleRate)
+    }
+
+    /// ⛔ **THE EFFECTIVE SHIFT LAW — the ONE place `shiftHz` and `fineHz` are
+    /// summed.** The sum is clamped to `shiftHz`'s range so the two knobs
+    /// together can never ask for more than the coarse knob's declared maximum;
+    /// without this, ±2000 + ±20 would silently make the real range ±2020 and
+    /// `fx.describe` would be lying by 20 Hz.
+    public static func effectiveShiftHz(shiftHz: Double, fineHz: Double) -> Double {
+        let coarse = (shiftHz.isFinite ? shiftHz : 0).clamped(to: shiftHzRange)
+        let fine = (fineHz.isFinite ? fineHz : 0).clamped(to: fineHzRange)
+        return (coarse + fine).clamped(to: shiftHzRange)
+    }
+
+    /// Where a partial at `inputHz` LANDS, in Hz — the whole effect in one
+    /// function, and the thing `fx.add` echoes so an agent can predict the sound
+    /// without rendering it.
+    ///
+    /// ⚠️ **THE FOLD IS REAL PHYSICS, NOT A BUG.** Shifting DOWN by more than a
+    /// partial's own frequency drives it below 0 Hz; the output is a real signal,
+    /// so it reflects back up as `|f + Δ|` with its phase inverted. A 100 Hz tone
+    /// shifted −300 Hz comes back at 200 Hz. Every analog Bode shifter does this
+    /// and it is half of why large downward shifts sound the way they do.
+    public static func shiftedHz(inputHz: Double, effectiveShiftHz: Double) -> Double {
+        guard inputHz.isFinite, effectiveShiftHz.isFinite else { return 0 }
+        return abs(inputHz + effectiveShiftHz)
+    }
+
+    public init(shiftHz: Double = 0, fineHz: Double = 0, stereoSpreadHz: Double = 0,
+                mix: Double = 0.5, outputDb: Double = 0) {
+        // Non-finite guards ahead of every clamp: `clamped(to:)` on a NaN
+        // returns the NaN, and these reach a phase accumulator on the render
+        // thread. A NaN phase has NO path back — every later sample is NaN too,
+        // so the strip is silenced permanently (the `RingModEffect` precedent).
+        self.shiftHz = (shiftHz.isFinite ? shiftHz : 0).clamped(to: Self.shiftHzRange)
+        self.fineHz = (fineHz.isFinite ? fineHz : 0).clamped(to: Self.fineHzRange)
+        self.stereoSpreadHz = (stereoSpreadHz.isFinite ? stereoSpreadHz : 0)
+            .clamped(to: Self.stereoSpreadHzRange)
+        self.mix = (mix.isFinite ? mix : 0.5).clamped(to: Self.mixRange)
+        self.outputDb = (outputDb.isFinite ? outputDb : 0).clamped(to: Self.outputDbRange)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case shiftHz, fineHz, stereoSpreadHz, mix, outputDb
+    }
+
+    /// Decoding routes through the clamping init, `decodeIfPresent ?? default`
+    /// per field, so a partial object decodes (the `ChorusParams` pattern).
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            shiftHz: try c.decodeIfPresent(Double.self, forKey: .shiftHz) ?? 0,
+            fineHz: try c.decodeIfPresent(Double.self, forKey: .fineHz) ?? 0,
+            stereoSpreadHz: try c.decodeIfPresent(Double.self, forKey: .stereoSpreadHz) ?? 0,
+            mix: try c.decodeIfPresent(Double.self, forKey: .mix) ?? 0.5,
+            outputDb: try c.decodeIfPresent(Double.self, forKey: .outputDb) ?? 0)
+    }
+}
+
+/// Parameters for the built-in clipper (m39-ac) — the first caller of the
+/// shared `Oversampler` primitive (`OversamplerDesign` is its frozen contract).
+///
+/// ## What this kind is, against the two it is nearest
+///
+/// A clipper puts a HARD CEILING on the waveform: everything above it is cut
+/// off and the corners that leaves are new harmonics. That is where the
+/// loudness comes from, and it is why a clipped kick reads as "harder" rather
+/// than merely "louder".
+///
+/// ⛔ **NOT `.saturator`.** `tanh` only ever APPROACHES its bound — there is no
+/// finite input at which a saturator's output equals its maximum, so a
+/// saturator cannot promise a peak ceiling. BOTH modes here reach `ceilingDb`
+/// at a finite input and stay there: `hard` at exactly the ceiling, `soft` at
+/// `softKneeRatio` (1.5) times it, through a cubic knee that arrives with zero
+/// slope. That is the whole distinction and it is exact, not stylistic.
+///
+/// ⛔ **NOT `.limiter`.** A limiter rides a GAIN to keep peaks under a ceiling
+/// and preserves the waveform's shape; this deliberately deforms the waveform.
+/// A limiter is what you use when you must not hear it. This is what you use
+/// when you want to.
+///
+/// ## The only real quality number this effect has
+///
+/// Hard clipping generates harmonics that extend far past Nyquist. Sampled at
+/// the base rate they FOLD BACK as inharmonic tones — not "distortion" in the
+/// musical sense but grit that sits at frequencies unrelated to anything
+/// playing. Running the shaper at 2× or 4× moves the fold out of the audio
+/// band, and the residue is bounded by the decimation filter's stopband
+/// (`OversamplerDesign.stopbandAttenuationDb`).
+///
+/// ⭐ **`oversampling: 1` IS A SHIPPED SETTING, NOT A DEGRADED ONE.** Keeping it
+/// is what lets a user (and `scripts/gates/m39ac-clipper-physics.mjs`) hear and
+/// MEASURE the difference; plenty of records want the grit.
+///
+/// ## Latency
+///
+/// `OversamplerDesign.latencySamples` = 32 base-rate samples, **the same at
+/// every factor, including 1×**, and at every sample rate. The effect reports
+/// it, PDC compensates it, and the dry half of `mix` is delayed to match so the
+/// blend stays phase-coherent. See `OversamplerDesign` §3 for why a
+/// factor-dependent latency would have been a silent correctness bug.
+public struct ClipperParams: Codable, Sendable, Equatable {
+    /// Gain INTO the shaper, in dB. This is the control that decides how much
+    /// clipping happens: the ceiling sets where, the drive sets how far past it
+    /// the signal is pushed.
+    public var driveDb: Double
+    /// The ceiling, in dBFS. Output samples are bounded by this, exactly.
+    public var ceilingDb: Double
+    /// Shape: 0 = hard, 1 = soft. DISCRETE — `Modulatable: refused` (rule
+    /// 6.0.5), snapped through `mode(at:)`.
+    public var mode: Double
+    /// Oversampling factor: 1, 2 or 4. DISCRETE — `Modulatable: refused`,
+    /// snapped through `oversamplingFactor(at:)`.
+    public var oversampling: Double
+    /// Dry/wet. ⛔ At `mix == 0` the output is the input DELAYED BY
+    /// `latencySamples`, bit-exact — see `Kind.clipper` and the effect file for
+    /// why this kind's identity law is a delayed identity rather than rule
+    /// 6.0.7's untouched-buffer one.
+    public var mix: Double
+    /// Static output trim in dB, applied to the WET copy before the blend.
+    public var outputDb: Double
+
+    /// ⚠️ NEGATIVE drive is deliberately reachable: with a low ceiling and a
+    /// negative drive this becomes a gentle wave-shaper rather than a loudness
+    /// tool, and denying it would be denying the range rather than protecting
+    /// anyone.
+    public static let driveDbRange: ClosedRange<Double> = -12...36
+    /// ⚠️ The upper bound is 0 dBFS, not +24: a ceiling ABOVE full scale is not
+    /// a ceiling, it is a guarantee the effect cannot keep once the signal
+    /// leaves as 16- or 24-bit integer samples.
+    public static let ceilingDbRange: ClosedRange<Double> = -24...0
+    public static let modeRange: ClosedRange<Double> = 0...1
+    public static let oversamplingRange: ClosedRange<Double> = 1...4
+    public static let mixRange: ClosedRange<Double> = 0...1
+    public static let outputDbRange: ClosedRange<Double> = -24...24
+
+    /// The two shapes. Raw values are the wire numbers and are FROZEN.
+    public enum Mode: Int, Sendable, CaseIterable {
+        /// `y = clamp(x, −c, c)`. A corner at the ceiling: maximum new
+        /// harmonic content, maximum bite, and the reason oversampling exists.
+        case hard = 0
+        /// A cubic knee that reaches the ceiling at `softKneeRatio·c` with zero
+        /// slope. Unity gain for small signals — unlike a tanh saturator, which
+        /// changes the level of everything.
+        case soft = 1
+    }
+
+    /// ⛔ **THE SOFT MODE'S KNEE RATIO.** The input, as a multiple of the
+    /// ceiling, at which the soft shape first TOUCHES the ceiling. Below it the
+    /// curve bends; at and above it the output is flat at the ceiling.
+    ///
+    /// It is 3/2 and it is FORCED, not chosen: for `f(u) = u − a·u³` the two
+    /// requirements "unity slope at 0" (so quiet material passes untouched) and
+    /// "reaches 1 with zero slope" (so the knee meets the flat top smoothly)
+    /// have exactly one solution, `a = 4/27` and `u* = 3/2`. Changing either
+    /// number breaks one of the two properties.
+    public static let softKneeRatio = 1.5
+    /// The cubic term's coefficient, `4/27`. See `softKneeRatio`.
+    public static let softCubicCoefficient = 4.0 / 27.0
+
+    /// The round-trip latency this kind reports, in samples — through
+    /// `OversamplerDesign`, the one home, never a second copy.
+    public static var latencySamples: Int { OversamplerDesign.latencySamples }
+
+    /// ⛔ **THE SHAPING LAW — the ONE home, read by the render thread, by the
+    /// tests and by nothing else.** `x` is the DRIVEN sample;
+    /// `ceilingLinear` is `10^(ceilingDb/20)`.
+    ///
+    /// Both branches are bounded by `ceilingLinear` for every finite input, and
+    /// the soft branch is C¹ everywhere (see `softKneeRatio`). A non-finite
+    /// input returns 0 rather than propagating: NaN reaching the decimation
+    /// filter's history would poison every later output sample, with no path
+    /// back (the `RingModEffect` phase-accumulator precedent, same reasoning).
+    public static func shaped(_ x: Double, ceilingLinear: Double, soft: Bool) -> Double {
+        guard x.isFinite, ceilingLinear.isFinite, ceilingLinear > 0 else { return 0 }
+        if !soft {
+            return min(max(x, -ceilingLinear), ceilingLinear)
+        }
+        let u = x / ceilingLinear
+        if u >= softKneeRatio { return ceilingLinear }
+        if u <= -softKneeRatio { return -ceilingLinear }
+        return ceilingLinear * (u - softCubicCoefficient * u * u * u)
+    }
+
+    /// Snaps a raw wire value onto a mode. The `RingModParams.waveform(at:)`
+    /// precedent: rounds, clamps, and falls back rather than trapping, because
+    /// a field-by-field automation overlay poke bypasses `init`'s clamping.
+    public static func mode(at value: Double) -> Mode {
+        guard value.isFinite else { return .hard }
+        let index = Int(value.clamped(to: modeRange).rounded())
+        return Mode(rawValue: index) ?? .hard
+    }
+
+    /// Snaps a raw wire value onto a supported factor (1, 2 or 4).
+    ///
+    /// ⚠️ **3 SNAPS UP TO 4, NOT DOWN TO 2, AND THE TIE IS BROKEN ON PURPOSE.**
+    /// 3 is exactly equidistant; resolving it toward the higher factor means an
+    /// agent that writes a plausible-but-unsupported number gets MORE alias
+    /// rejection than it asked for rather than less. The same rule makes 1.5
+    /// resolve to 2.
+    ///
+    /// ⛔⛔ **EXPLICIT THRESHOLDS, NOT A SEARCH OVER
+    /// `OversamplerDesign.supportedFactors`, AND THAT IS A RENDER-SAFETY
+    /// REQUIREMENT RATHER THAN A STYLE CHOICE.** This runs on the RENDER THREAD
+    /// (`ClipperEffect.deriveRenderParams`, reached from `storeAutomatedParam`),
+    /// and iterating a Swift `Array` there allocates at `-Onone`: MEASURED at
+    /// 163 296 malloc events over 2 000 quanta while the allocation gate asserts
+    /// an absolute zero. `ClipperParamsTests` P4b re-derives this function from
+    /// the roster by brute force and fails if the two ever disagree, so the
+    /// hand-written thresholds cannot drift away from the documented list.
+    public static func oversamplingFactor(at value: Double) -> Int {
+        guard value.isFinite else { return OversamplerDesign.maxFactor }
+        let clamped = value.clamped(to: oversamplingRange)
+        // Midpoints of 1|2 and 2|4, each resolving a tie UPWARD.
+        if clamped < 1.5 { return 1 }
+        if clamped < 3.0 { return 2 }
+        return 4
+    }
+
+    /// ⛔ **WHERE CLIPPING STARTS, in dBFS at the INPUT.** `ceilingDb −
+    /// driveDb`, i.e. the input level that lands exactly on the ceiling after
+    /// the drive. This is the number an agent actually needs and cannot read
+    /// off either knob alone, and it is echoed in every `fx.add` /
+    /// `fx.setParam` result.
+    public static func clipThresholdDbfs(driveDb: Double, ceilingDb: Double) -> Double {
+        let drive = (driveDb.isFinite ? driveDb : 0).clamped(to: driveDbRange)
+        let ceiling = (ceilingDb.isFinite ? ceilingDb : 0).clamped(to: ceilingDbRange)
+        return ceiling - drive
+    }
+
+    /// The guaranteed SAMPLE ceiling of the wet path in dBFS, `ceilingDb +
+    /// outputDb`. ⚠️ A sample ceiling, not a TRUE-PEAK ceiling: see
+    /// `interSampleOvershootDb`.
+    public static func wetCeilingDbfs(ceilingDb: Double, outputDb: Double) -> Double {
+        let ceiling = (ceilingDb.isFinite ? ceilingDb : 0).clamped(to: ceilingDbRange)
+        let trim = (outputDb.isFinite ? outputDb : 0).clamped(to: outputDbRange)
+        return ceiling + trim
+    }
+
+    public init(driveDb: Double = 0, ceilingDb: Double = -0.3, mode: Double = 0,
+                oversampling: Double = 4, mix: Double = 1, outputDb: Double = 0) {
+        // Non-finite guards ahead of every clamp: `clamped(to:)` on a NaN
+        // returns the NaN, and `oversampling` reaches an `Int()` conversion
+        // that would TRAP on one (the `RingModParams.waveform` precedent).
+        self.driveDb = (driveDb.isFinite ? driveDb : 0).clamped(to: Self.driveDbRange)
+        self.ceilingDb = (ceilingDb.isFinite ? ceilingDb : -0.3).clamped(to: Self.ceilingDbRange)
+        self.mode = Double(Self.mode(at: mode).rawValue)
+        self.oversampling = Double(Self.oversamplingFactor(at: oversampling))
+        self.mix = (mix.isFinite ? mix : 1).clamped(to: Self.mixRange)
+        self.outputDb = (outputDb.isFinite ? outputDb : 0).clamped(to: Self.outputDbRange)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case driveDb, ceilingDb, mode, oversampling, mix, outputDb
+    }
+
+    /// Decoding routes through the clamping/snapping init, `decodeIfPresent ??
+    /// default` per field, so a partial object decodes (the `ChorusParams`
+    /// pattern).
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            driveDb: try c.decodeIfPresent(Double.self, forKey: .driveDb) ?? 0,
+            ceilingDb: try c.decodeIfPresent(Double.self, forKey: .ceilingDb) ?? -0.3,
+            mode: try c.decodeIfPresent(Double.self, forKey: .mode) ?? 0,
+            oversampling: try c.decodeIfPresent(Double.self, forKey: .oversampling) ?? 4,
+            mix: try c.decodeIfPresent(Double.self, forKey: .mix) ?? 1,
+            outputDb: try c.decodeIfPresent(Double.self, forKey: .outputDb) ?? 0)
+    }
+}
+
+/// Parameters for the built-in dynamic EQ (m39-af) — the second caller of
+/// `EQFilterResponse.bandPassSection`. See `EffectDescriptor.Kind.dynamicEQ`
+/// for what the kind is and `docs/design/2026-09-20-dynamic-eq.md` for why.
+///
+/// ## Shape: FOUR IDENTICAL BANDS, EIGHT PARAMS EACH, BAND-MAJOR
+///
+/// `slot = (band − 1)·8 + p`, so `band1Mode` is slot 0 and `band4ReleaseMs` is
+/// slot 31. That arithmetic is the whole reason the bands are uniform: a
+/// reviewer can check 32 slots by checking 8 and multiplying.
+/// `DynamicEQParamsTests` pins the 32 names against literals in order.
+///
+/// ⛔ **APPEND-ONLY, and the reason is NOT the one the tree used to give.** A
+/// persisted automation lane stores the param NAME, not an index
+/// (`Automation.swift:81-84`); the INDEX is derived per session from
+/// `specs(for:)` (`AutomationSchedule.resolveEffectParamLanes`). What reordering
+/// would actually break is the alignment between `specs(for:)` and
+/// `DynamicEQEffect.storeAutomatedParam`'s slot switch — two tables in two
+/// modules that no compiler rule compares — and a lane landing outside that
+/// switch's `(0...31)` guard is **silently inert**: nothing logs, nothing fails,
+/// the user's automation simply does nothing. Live `(effectID, paramSlot)`
+/// cursors exist in-session too. ⚠️ And a param RENAME is a MIGRATION, not a
+/// refactor: it orphans every saved lane pointing at the old name (recoverable
+/// by restoring the name — the document round-trips lanes verbatim — but don't).
+///
+/// ⚠️ **ONE FULLY-AUTOMATED INSTANCE IS HALF A STRIP'S BUDGET.** Effect-param
+/// automation lanes and modulated effect params SHARE ONE 64-entry cap per
+/// strip (`Modulation.swift:434-438`), and the excess is dropped by a bare
+/// `.prefix` with no warning. 32 slots is half of that in one insert. It is the
+/// single real cost of a 32-param kind and it is stated in `fx.describe`.
+///
+/// ## What is deliberately NOT here
+///
+/// · **`kneeDb`** — fixed at 6 dB, the compressor's own default (`Self.kneeDb`).
+///   Saves 4 slots on a control almost nobody moves.
+/// · **`mix`** — a dynamic EQ's wet/dry IS the band gain. A second blend stage
+///   would be a confusing duplicate (`.djFilter` set the no-`mix` precedent).
+/// · **a per-band `enabled`** — `mode == 0` IS the bypass, and it is a TRUE
+///   no-op: the section is not even stepped, which is strictly better than a
+///   gain-0 bypass.
+/// · **a per-band static `gainDb`** (the Pro-Q model) — 4 more slots, and it
+///   would destroy the free transparency null (a band with static gain is never
+///   exactly `H = 1`, so it must be stepped even at rest). `.eq → .dynamicEQ`
+///   chains today with zero new code and `.eq` is the better static EQ.
+/// · **lookahead** — it would make `latencySamples` PARAMETER-DEPENDENT, which
+///   forces a PDC rebuild the render thread cannot do and a refused automation
+///   lane. The `m39-ad` precedent.
+///
+/// Each of those is a clean additive append if it is ever wanted; each would
+/// then acquire a `Codable` decode default, which is the moment the byte
+/// gate stops being able to see it (design §10 G2).
+public struct DynamicEQParams: Codable, Sendable, Equatable {
+    // ⛔ BAND-MAJOR AND FROZEN. Declaration order here is documentation; the
+    // authority on slot order is `EffectParamSpec.specs(for: .dynamicEQ)`, and
+    // `DynamicEQParamsTests.slotOrderIsFrozen` asserts the two agree.
+    public var band1Mode: Double
+    public var band1Freq: Double
+    public var band1Q: Double
+    public var band1ThresholdDb: Double
+    public var band1Ratio: Double
+    public var band1RangeDb: Double
+    public var band1AttackMs: Double
+    public var band1ReleaseMs: Double
+
+    public var band2Mode: Double
+    public var band2Freq: Double
+    public var band2Q: Double
+    public var band2ThresholdDb: Double
+    public var band2Ratio: Double
+    public var band2RangeDb: Double
+    public var band2AttackMs: Double
+    public var band2ReleaseMs: Double
+
+    public var band3Mode: Double
+    public var band3Freq: Double
+    public var band3Q: Double
+    public var band3ThresholdDb: Double
+    public var band3Ratio: Double
+    public var band3RangeDb: Double
+    public var band3AttackMs: Double
+    public var band3ReleaseMs: Double
+
+    public var band4Mode: Double
+    public var band4Freq: Double
+    public var band4Q: Double
+    public var band4ThresholdDb: Double
+    public var band4Ratio: Double
+    public var band4RangeDb: Double
+    public var band4AttackMs: Double
+    public var band4ReleaseMs: Double
+
+    public static let bandCount = 4
+    public static let paramsPerBand = 8
+    /// 32. The automation-slot count and the `(0...31)` guard's upper bound.
+    public static var slotCount: Int { bandCount * paramsPerBand }
+
+    /// ⛔ **EVERY RANGE IS MIRRORED FROM AN EXISTING CONSTANT, NEVER RE-SPELLED.**
+    /// A second spelling of the same range is how two controls in one tree come
+    /// to disagree — the argument `EQFilterResponse.swift:144-148` already makes
+    /// about the Nyquist clamp.
+    public static var freqRange: ClosedRange<Double> { EQParams.peakFreqRange }
+    public static var qRange: ClosedRange<Double> { EQParams.qRange }
+    public static var rangeDbRange: ClosedRange<Double> { EQParams.gainDbRange }
+    public static var thresholdRange: ClosedRange<Double> { CompressorParams.thresholdRange }
+    public static var ratioRange: ClosedRange<Double> { CompressorParams.ratioRange }
+    public static var attackRange: ClosedRange<Double> { CompressorParams.attackRange }
+    public static var releaseRange: ClosedRange<Double> { CompressorParams.releaseRange }
+    public static let modeRange: ClosedRange<Double> = 0...2
+
+    /// ⛔ **HARD-CODED AT THE COMPRESSOR'S OWN DEFAULT**, not exposed. Read by
+    /// the render thread and by the tests, and by nothing else — one home.
+    /// ⚠️ A 6 dB knee starts working 3 dB BELOW the threshold: `depth` is zero
+    /// only while `2·over ≤ −6`, i.e. `L ≤ T − 3`. At `over == 0` exactly the
+    /// knee already gives `0.5625 dB` at ratio 4. Any test that wants a null
+    /// from a band that is ON must hold the in-band level at or below `T − 3`.
+    public static let kneeDb = 6.0
+
+    /// The four default centres, spread so the cards read left-to-right like an
+    /// EQ. `band` is 1-based.
+    public static func defaultFreq(band: Int) -> Double {
+        switch band {
+        case 1: return 120
+        case 2: return 500
+        case 3: return 3_000
+        default: return 8_000
+        }
+    }
+
+    /// Which side of the threshold triggers the band. Raw values are the wire
+    /// numbers and are FROZEN.
+    ///
+    /// ⭐ The DIRECTION the band then moves is the SIGN of `rangeDb`, not a
+    /// third control — two params, four musically distinct behaviours:
+    /// above+negative = cut when loud (de-ess, de-harsh, tame a boxy 300 Hz);
+    /// above+positive = boost when loud (upward excitement);
+    /// below+positive = boost when quiet (restore air on a quiet passage);
+    /// below+negative = cut when quiet (one-band downward expansion).
+    public enum Mode: Int, Sendable, CaseIterable {
+        /// ⛔ A TRUE no-op: the section is not stepped at all. The default.
+        case off = 0
+        case above = 1
+        case below = 2
+    }
+
+    /// Snaps a raw wire value onto a mode. The `ClipperParams.mode(at:)` /
+    /// `RingModParams.waveform(at:)` precedent: rounds, clamps and falls back
+    /// rather than trapping, because `Int()` **TRAPS** on a NaN and a
+    /// field-by-field automation overlay poke bypasses `init`'s clamping.
+    public static func mode(at value: Double) -> Mode {
+        guard value.isFinite else { return .off }
+        let index = Int(value.clamped(to: modeRange).rounded())
+        return Mode(rawValue: index) ?? .off
+    }
+
+    /// The 32 param names in SLOT ORDER — the one home for the name↔slot
+    /// mapping, so `specs(for:)`, the wire surface and the tests cannot fork.
+    /// Not render-thread state: built once, read off the main actor.
+    public static let paramNames: [String] = (1...bandCount).flatMap { band in
+        ["band\(band)Mode", "band\(band)Freq", "band\(band)Q", "band\(band)ThresholdDb",
+         "band\(band)Ratio", "band\(band)RangeDb", "band\(band)AttackMs",
+         "band\(band)ReleaseMs"]
+    }
+
+    /// Reads one param by wire name; nil for an unknown name. ⚠️ Not on the
+    /// render path — `DynamicEQEffect` addresses params by SLOT, never by name.
+    public func value(forParamName name: String) -> Double? {
+        switch name {
+        case "band1Mode": return band1Mode
+        case "band1Freq": return band1Freq
+        case "band1Q": return band1Q
+        case "band1ThresholdDb": return band1ThresholdDb
+        case "band1Ratio": return band1Ratio
+        case "band1RangeDb": return band1RangeDb
+        case "band1AttackMs": return band1AttackMs
+        case "band1ReleaseMs": return band1ReleaseMs
+        case "band2Mode": return band2Mode
+        case "band2Freq": return band2Freq
+        case "band2Q": return band2Q
+        case "band2ThresholdDb": return band2ThresholdDb
+        case "band2Ratio": return band2Ratio
+        case "band2RangeDb": return band2RangeDb
+        case "band2AttackMs": return band2AttackMs
+        case "band2ReleaseMs": return band2ReleaseMs
+        case "band3Mode": return band3Mode
+        case "band3Freq": return band3Freq
+        case "band3Q": return band3Q
+        case "band3ThresholdDb": return band3ThresholdDb
+        case "band3Ratio": return band3Ratio
+        case "band3RangeDb": return band3RangeDb
+        case "band3AttackMs": return band3AttackMs
+        case "band3ReleaseMs": return band3ReleaseMs
+        case "band4Mode": return band4Mode
+        case "band4Freq": return band4Freq
+        case "band4Q": return band4Q
+        case "band4ThresholdDb": return band4ThresholdDb
+        case "band4Ratio": return band4Ratio
+        case "band4RangeDb": return band4RangeDb
+        case "band4AttackMs": return band4AttackMs
+        case "band4ReleaseMs": return band4ReleaseMs
+        default: return nil
+        }
+    }
+
+    /// Writes one param by wire name; false for an unknown name (the caller
+    /// leaves the descriptor untouched). The value arrives already clamped to
+    /// the spec range by `ProjectStore.setEffectParam` — the `setVolume`
+    /// precedent — and the render side re-clamps anyway.
+    public mutating func setValue(_ value: Double, forParamName name: String) -> Bool {
+        switch name {
+        case "band1Mode": band1Mode = value
+        case "band1Freq": band1Freq = value
+        case "band1Q": band1Q = value
+        case "band1ThresholdDb": band1ThresholdDb = value
+        case "band1Ratio": band1Ratio = value
+        case "band1RangeDb": band1RangeDb = value
+        case "band1AttackMs": band1AttackMs = value
+        case "band1ReleaseMs": band1ReleaseMs = value
+        case "band2Mode": band2Mode = value
+        case "band2Freq": band2Freq = value
+        case "band2Q": band2Q = value
+        case "band2ThresholdDb": band2ThresholdDb = value
+        case "band2Ratio": band2Ratio = value
+        case "band2RangeDb": band2RangeDb = value
+        case "band2AttackMs": band2AttackMs = value
+        case "band2ReleaseMs": band2ReleaseMs = value
+        case "band3Mode": band3Mode = value
+        case "band3Freq": band3Freq = value
+        case "band3Q": band3Q = value
+        case "band3ThresholdDb": band3ThresholdDb = value
+        case "band3Ratio": band3Ratio = value
+        case "band3RangeDb": band3RangeDb = value
+        case "band3AttackMs": band3AttackMs = value
+        case "band3ReleaseMs": band3ReleaseMs = value
+        case "band4Mode": band4Mode = value
+        case "band4Freq": band4Freq = value
+        case "band4Q": band4Q = value
+        case "band4ThresholdDb": band4ThresholdDb = value
+        case "band4Ratio": band4Ratio = value
+        case "band4RangeDb": band4RangeDb = value
+        case "band4AttackMs": band4AttackMs = value
+        case "band4ReleaseMs": band4ReleaseMs = value
+        default: return false
+        }
+        return true
+    }
+
+    /// ⛔ **ALL 32 DEFAULT `mode` TO 0 = OFF, SO A FRESHLY ADDED DYNAMIC EQ IS
+    /// BIT-EXACT TRANSPARENT.** That mirrors `.eq` (a fresh EQ does nothing) and
+    /// makes the neutrality gate the DEFAULT render rather than a special
+    /// configuration. The discoverability cost is real and is paid in
+    /// `fx.describe` prose.
+    ///
+    /// Non-finite guards ahead of every clamp: `clamped(to:)` on a NaN returns
+    /// the NaN, and `mode` reaches an `Int()` conversion that would TRAP on one.
+    public init(
+        band1Mode: Double = 0, band1Freq: Double = 120, band1Q: Double = 2,
+        band1ThresholdDb: Double = -18, band1Ratio: Double = 4, band1RangeDb: Double = -6,
+        band1AttackMs: Double = 10, band1ReleaseMs: Double = 100,
+        band2Mode: Double = 0, band2Freq: Double = 500, band2Q: Double = 2,
+        band2ThresholdDb: Double = -18, band2Ratio: Double = 4, band2RangeDb: Double = -6,
+        band2AttackMs: Double = 10, band2ReleaseMs: Double = 100,
+        band3Mode: Double = 0, band3Freq: Double = 3_000, band3Q: Double = 2,
+        band3ThresholdDb: Double = -18, band3Ratio: Double = 4, band3RangeDb: Double = -6,
+        band3AttackMs: Double = 10, band3ReleaseMs: Double = 100,
+        band4Mode: Double = 0, band4Freq: Double = 8_000, band4Q: Double = 2,
+        band4ThresholdDb: Double = -18, band4Ratio: Double = 4, band4RangeDb: Double = -6,
+        band4AttackMs: Double = 10, band4ReleaseMs: Double = 100
+    ) {
+        self.band1Mode = Double(Self.mode(at: band1Mode).rawValue)
+        self.band1Freq = Self.clampFreq(band1Freq, band: 1)
+        self.band1Q = Self.clampQ(band1Q)
+        self.band1ThresholdDb = Self.clampThreshold(band1ThresholdDb)
+        self.band1Ratio = Self.clampRatio(band1Ratio)
+        self.band1RangeDb = Self.clampRangeDb(band1RangeDb)
+        self.band1AttackMs = Self.clampAttack(band1AttackMs)
+        self.band1ReleaseMs = Self.clampRelease(band1ReleaseMs)
+        self.band2Mode = Double(Self.mode(at: band2Mode).rawValue)
+        self.band2Freq = Self.clampFreq(band2Freq, band: 2)
+        self.band2Q = Self.clampQ(band2Q)
+        self.band2ThresholdDb = Self.clampThreshold(band2ThresholdDb)
+        self.band2Ratio = Self.clampRatio(band2Ratio)
+        self.band2RangeDb = Self.clampRangeDb(band2RangeDb)
+        self.band2AttackMs = Self.clampAttack(band2AttackMs)
+        self.band2ReleaseMs = Self.clampRelease(band2ReleaseMs)
+        self.band3Mode = Double(Self.mode(at: band3Mode).rawValue)
+        self.band3Freq = Self.clampFreq(band3Freq, band: 3)
+        self.band3Q = Self.clampQ(band3Q)
+        self.band3ThresholdDb = Self.clampThreshold(band3ThresholdDb)
+        self.band3Ratio = Self.clampRatio(band3Ratio)
+        self.band3RangeDb = Self.clampRangeDb(band3RangeDb)
+        self.band3AttackMs = Self.clampAttack(band3AttackMs)
+        self.band3ReleaseMs = Self.clampRelease(band3ReleaseMs)
+        self.band4Mode = Double(Self.mode(at: band4Mode).rawValue)
+        self.band4Freq = Self.clampFreq(band4Freq, band: 4)
+        self.band4Q = Self.clampQ(band4Q)
+        self.band4ThresholdDb = Self.clampThreshold(band4ThresholdDb)
+        self.band4Ratio = Self.clampRatio(band4Ratio)
+        self.band4RangeDb = Self.clampRangeDb(band4RangeDb)
+        self.band4AttackMs = Self.clampAttack(band4AttackMs)
+        self.band4ReleaseMs = Self.clampRelease(band4ReleaseMs)
+    }
+
+    private static func clampFreq(_ v: Double, band: Int) -> Double {
+        (v.isFinite ? v : defaultFreq(band: band)).clamped(to: freqRange)
+    }
+    private static func clampQ(_ v: Double) -> Double {
+        (v.isFinite ? v : 2).clamped(to: qRange)
+    }
+    private static func clampThreshold(_ v: Double) -> Double {
+        (v.isFinite ? v : -18).clamped(to: thresholdRange)
+    }
+    private static func clampRatio(_ v: Double) -> Double {
+        (v.isFinite ? v : 4).clamped(to: ratioRange)
+    }
+    private static func clampRangeDb(_ v: Double) -> Double {
+        (v.isFinite ? v : -6).clamped(to: rangeDbRange)
+    }
+    private static func clampAttack(_ v: Double) -> Double {
+        (v.isFinite ? v : 10).clamped(to: attackRange)
+    }
+    private static func clampRelease(_ v: Double) -> Double {
+        (v.isFinite ? v : 100).clamped(to: releaseRange)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case band1Mode, band1Freq, band1Q, band1ThresholdDb
+        case band1Ratio, band1RangeDb, band1AttackMs, band1ReleaseMs
+        case band2Mode, band2Freq, band2Q, band2ThresholdDb
+        case band2Ratio, band2RangeDb, band2AttackMs, band2ReleaseMs
+        case band3Mode, band3Freq, band3Q, band3ThresholdDb
+        case band3Ratio, band3RangeDb, band3AttackMs, band3ReleaseMs
+        case band4Mode, band4Freq, band4Q, band4ThresholdDb
+        case band4Ratio, band4RangeDb, band4AttackMs, band4ReleaseMs
+    }
+
+    /// ⛔⛔ **EVERY KEY IS REQUIRED — `decode`, NOT `decodeIfPresent ?? default`
+    /// — AND THAT IS THE POINT OF THIS DECODER.** The tree's law is that
+    /// bit-exactness needs BOTH a decode test AND a byte gate, because a byte
+    /// gate over rendered demos is **blind to a `Codable` decode default**: the
+    /// demo harness builds params through `fx.add` → the MEMBERWISE init, so
+    /// `init(from:)` never runs. Proven by plant this cycle — a `?? 0 → ?? 1` on
+    /// a decode default passed the byte gate (exit 0, MISSED) while the same
+    /// change to the memberwise default was caught. **v1 ships with no `??` at
+    /// all, so there is nothing for the byte gate to be blind to**, and
+    /// `DynamicEQParamsTests` freezes that by asserting a JSON missing any key
+    /// THROWS.
+    ///
+    /// ⚠️ This DIVERGES from the design's literal "synthesized `Codable`, no
+    /// custom `init(from:)`" while keeping its stated REASON intact. Synthesized
+    /// decoding would bypass the clamping init, making this the ONE params
+    /// struct of 22 that does not clamp on decode. Required keys through the
+    /// clamping init gives both properties.
+    ///
+    /// ⛔ **THE FIRST v2 APPEND CHANGES THIS.** The moment this kind gains an
+    /// additive optional (a `shape`, a `gainDb`, a `detectorSource`) it
+    /// inherits the `EQParams` v2 pattern and ACQUIRES a decode default the byte
+    /// gate cannot see. That is the moment to re-run the non-interchangeability
+    /// plant in both directions and record the result — claiming the pair is
+    /// proven now, when there is no decode default to plant on, would be an
+    /// assumption dressed as a measurement (design §10 G2).
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            band1Mode: try c.decode(Double.self, forKey: .band1Mode),
+            band1Freq: try c.decode(Double.self, forKey: .band1Freq),
+            band1Q: try c.decode(Double.self, forKey: .band1Q),
+            band1ThresholdDb: try c.decode(Double.self, forKey: .band1ThresholdDb),
+            band1Ratio: try c.decode(Double.self, forKey: .band1Ratio),
+            band1RangeDb: try c.decode(Double.self, forKey: .band1RangeDb),
+            band1AttackMs: try c.decode(Double.self, forKey: .band1AttackMs),
+            band1ReleaseMs: try c.decode(Double.self, forKey: .band1ReleaseMs),
+            band2Mode: try c.decode(Double.self, forKey: .band2Mode),
+            band2Freq: try c.decode(Double.self, forKey: .band2Freq),
+            band2Q: try c.decode(Double.self, forKey: .band2Q),
+            band2ThresholdDb: try c.decode(Double.self, forKey: .band2ThresholdDb),
+            band2Ratio: try c.decode(Double.self, forKey: .band2Ratio),
+            band2RangeDb: try c.decode(Double.self, forKey: .band2RangeDb),
+            band2AttackMs: try c.decode(Double.self, forKey: .band2AttackMs),
+            band2ReleaseMs: try c.decode(Double.self, forKey: .band2ReleaseMs),
+            band3Mode: try c.decode(Double.self, forKey: .band3Mode),
+            band3Freq: try c.decode(Double.self, forKey: .band3Freq),
+            band3Q: try c.decode(Double.self, forKey: .band3Q),
+            band3ThresholdDb: try c.decode(Double.self, forKey: .band3ThresholdDb),
+            band3Ratio: try c.decode(Double.self, forKey: .band3Ratio),
+            band3RangeDb: try c.decode(Double.self, forKey: .band3RangeDb),
+            band3AttackMs: try c.decode(Double.self, forKey: .band3AttackMs),
+            band3ReleaseMs: try c.decode(Double.self, forKey: .band3ReleaseMs),
+            band4Mode: try c.decode(Double.self, forKey: .band4Mode),
+            band4Freq: try c.decode(Double.self, forKey: .band4Freq),
+            band4Q: try c.decode(Double.self, forKey: .band4Q),
+            band4ThresholdDb: try c.decode(Double.self, forKey: .band4ThresholdDb),
+            band4Ratio: try c.decode(Double.self, forKey: .band4Ratio),
+            band4RangeDb: try c.decode(Double.self, forKey: .band4RangeDb),
+            band4AttackMs: try c.decode(Double.self, forKey: .band4AttackMs),
+            band4ReleaseMs: try c.decode(Double.self, forKey: .band4ReleaseMs))
+    }
+}
+
 /// Static parameter schema for every effect kind — the single source of truth
 /// for `fx.describe`, control-layer validation, and MCP tool schemas.
 public struct EffectParamSpec: Sendable, Equatable {
@@ -2860,6 +4218,60 @@ public struct EffectParamSpec: Sendable, Equatable {
                                     + "that keeps the original transients. With a sidechain key "
                                     + "attached the key still only drives the DETECTOR — the dry "
                                     + "half of the blend is always this effect's own input."),
+                // ⛔⛔ m39-ae THE DE-ESSER — APPENDED at slots 7/8/9 so the
+                // automation slot indices of the six original params (0…5) and
+                // of m23-ck's `mix` (6) never move. `.compressor` has been
+                // shipped for a very long time; an INSERT here would silently
+                // repoint every automation lane in every saved project, with no
+                // error anywhere.
+                EffectParamSpec(name: "detectorMode", range: CompressorParams.detectorModeRange,
+                                defaultValue: 0, unit: "linear", curve: .linear,
+                                modulatable: .refused,
+                                note: "⭐ THIS IS THE DE-ESSER. There is no separate 'deEsser' "
+                                    + "effect kind — a de-esser IS a compressor that only listens "
+                                    + "to the sibilant band, so it lives here. 0 (the default) is "
+                                    + "OFF: the detector hears the signal flat, which is exactly "
+                                    + "what this kind has always done, bit-for-bit. 1 is "
+                                    + "BAND-PASS: the detector hears only a band around "
+                                    + "detectorFreqHz — park it on the 'sss' (5000-9000 Hz on most "
+                                    + "voices) and the compressor ignores everything else. 2 is "
+                                    + "HIGH-PASS: the detector hears everything above "
+                                    + "detectorFreqHz, which catches sibilance that moves around "
+                                    + "(an 'sh' sits lower than an 's') but also hears cymbals and "
+                                    + "breath. ⛔ WIDEBAND, NOT SPLIT-BAND: when it fires the WHOLE "
+                                    + "signal ducks for the length of the 'sss', it does not carve "
+                                    + "the band out and leave the rest playing. That is why it "
+                                    + "adds ZERO latency and why an existing project cannot shift "
+                                    + "in time. Great on a vocal track, wrong on a full mix. "
+                                    + "⚠️ DISCRETE - automate it with hold steps, never a ramp, and "
+                                    + "modulation refuses it outright. Values snap to the nearest "
+                                    + "of 0/1/2."),
+                EffectParamSpec(name: "detectorFreqHz", range: CompressorParams.detectorFreqRange,
+                                defaultValue: 6_500, unit: "Hz", curve: .logarithmic,
+                                modulatable: .warned,
+                                note: "Where the de-ess detector listens: the band CENTRE at "
+                                    + "detectorMode 1, the corner at mode 2. INERT at mode 0 — the "
+                                    + "detector does not read it at all, so setting it on a plain "
+                                    + "compressor is a no-op rather than a mistake. 6500 (the "
+                                    + "default) is the middle of where 'sss' lives; a deeper voice "
+                                    + "wants 5000-6000 and a bright one 7000-9000. ⚠️ MODULATION IS "
+                                    + "WARNED, not refused: this is a FILTER corner, and moving it "
+                                    + "recomputes biquad coefficients — the eq.peak1Freq problem, "
+                                    + "so it zippers at any rate. Automation between sections is "
+                                    + "fine; an LFO on it is not what you want."),
+                EffectParamSpec(name: "detectorQ", range: CompressorParams.detectorQRange,
+                                defaultValue: 2, unit: "linear", curve: .linear,
+                                modulatable: .warned,
+                                note: "⚠️ MEANS TWO DIFFERENT THINGS, both live. At detectorMode 1 "
+                                    + "it is the band's WIDTH: bandwidth is detectorFreqHz / Q, so "
+                                    + "the default 2 is about an octave and a half, and the band's "
+                                    + "peak is 0 dB at EVERY Q — widening it does not quietly move "
+                                    + "your threshold. At detectorMode 2 it is the high-pass "
+                                    + "corner's RESONANCE: the response AT the corner IS Q, so the "
+                                    + "default 2 puts a deliberate +6 dB emphasis right where "
+                                    + "sibilance starts; use 0.707 for a flat Butterworth corner. "
+                                    + "INERT at mode 0. Warned for modulation for the same "
+                                    + "coefficient-zipper reason as detectorFreqHz."),
             ]
         case .limiter:
             return [
@@ -2994,6 +4406,13 @@ public struct EffectParamSpec: Sendable, Equatable {
                                     + "while sync is 1. Not automatable."),
             ]
         case .saturator:
+            // ⛔⛔ ORDER IS FROZEN AND APPEND-ONLY FOREVER. The INDEX of a spec
+            // in this array IS the automation slot number
+            // (`storeAutomatedParam(slot:value:)`), and unlike `.clipper` this
+            // kind HAS SHIPPED — there are saved user automation lanes pointing
+            // at slots 0, 1 and 2 right now. m39-ad's `oversampling` is
+            // therefore APPENDED at slot 3; putting it anywhere else would
+            // silently repoint every one of those lanes.
             return [
                 EffectParamSpec(name: "driveDb", range: SaturatorParams.driveRange,
                                 defaultValue: 12, unit: "dB", curve: .linear, modulatable: .yes),
@@ -3001,6 +4420,39 @@ public struct EffectParamSpec: Sendable, Equatable {
                                 defaultValue: 1, unit: "linear", curve: .linear, modulatable: .yes),
                 EffectParamSpec(name: "outputDb", range: SaturatorParams.outputRange,
                                 defaultValue: 0, unit: "dB", curve: .linear, modulatable: .yes),
+                EffectParamSpec(name: "oversampling",
+                                range: SaturatorParams.oversamplingRange,
+                                defaultValue: 1, unit: "x", curve: .linear,
+                                modulatable: .refused,
+                                note: "\u{2B50} THE QUALITY CONTROL. Bending a wave creates new "
+                                    + "tones far above anything you can hear. Digital audio "
+                                    + "cannot store those, so they FOLD BACK down into the music "
+                                    + "as tones that have no musical relationship to what is "
+                                    + "playing - a thin metallic fizz sitting behind the sound, "
+                                    + "worst on bright material, on high notes, and at high "
+                                    + "drive. Running the saturator at 2 or 4 times the session's "
+                                    + "sample rate pushes that fold up out of the way and then "
+                                    + "filters it off. \u{26A0} THE DEFAULT IS 1, WHICH IS OFF, "
+                                    + "AND THAT IS DELIBERATE RATHER THAN A RECOMMENDATION. This "
+                                    + "effect shipped long before this control existed, so "
+                                    + "projects already using it must keep sounding exactly as "
+                                    + "they did; at 1 the machinery is skipped entirely and the "
+                                    + "result is bit-for-bit what it always was. IF YOU ARE "
+                                    + "ADDING A SATURATOR TODAY AND DRIVING IT HARD, SET THIS TO "
+                                    + "4. 1 is also a real creative setting - plenty of records "
+                                    + "want that grit, and it is the only way to hear what the "
+                                    + "other settings remove. \u{26A0} Only 1, 2 and 4 exist; 3 "
+                                    + "rounds UP to 4. It costs CPU roughly in proportion to the "
+                                    + "number. \u{26A0}\u{26A0} UNLIKE THE `clipper`'s SETTING OF "
+                                    + "THE SAME NAME, THIS ONE CHANGES THE EFFECT'S LATENCY: 0 "
+                                    + "samples at 1, and 32 samples at 2 or 4. Delay compensation "
+                                    + "removes those 32 automatically so the track still lines up "
+                                    + "- read `latencySamples` in the fx.add / fx.setParam result "
+                                    + "to see which you have. \u{26A0} NOT AUTOMATABLE and not "
+                                    + "modulatable: it is a switch, changing it mid-sound restarts "
+                                    + "the internal filters (a tiny click), and it is the one "
+                                    + "setting on this effect that moves the latency, which only "
+                                    + "a deliberate edit may do."),
             ]
         case .gate:
             return [
@@ -3735,10 +5187,13 @@ public struct EffectParamSpec: Sendable, Equatable {
                                     + "make the echo louder or push the feedback loop into "
                                     + "runaway - it does the opposite, and that is what lets a "
                                     + "0.99 feedback howl musically instead of clipping. ⚠️ NO "
-                                    + "OVERSAMPLING (the `saturator` kind's v0 caveat applies "
-                                    + "here too): harmonics generated above half the sample rate "
-                                    + "fold back as inharmonic content, most audible on bright "
-                                    + "sources at high drive."),
+                                    + "OVERSAMPLING here: harmonics generated above half the "
+                                    + "sample rate fold back as inharmonic content, most audible "
+                                    + "on bright sources at high drive. The separate `saturator` "
+                                    + "kind DOES have an `oversampling` knob you can raise to "
+                                    + "clean that up; this one does not, because its shaper sits "
+                                    + "inside the echo's feedback loop where the extra filtering "
+                                    + "would lengthen the echo time itself."),
                 EffectParamSpec(name: "highCutHz", range: TapeDelayParams.highCutRange,
                                 defaultValue: 6_000, unit: "Hz", curve: .logarithmic,
                                 modulatable: .yes,
@@ -4000,11 +5455,535 @@ public struct EffectParamSpec: Sendable, Equatable {
                                     + "to mono. Check a mono fold-down before committing to a "
                                     + "large value. On a mono track this does nothing at all."),
             ]
+        case .transientShaper:
+            // ⛔⛔ ORDER IS FROZEN AND APPEND-ONLY FOREVER. The INDEX of a spec
+            // in this array IS the automation slot number
+            // (`storeAutomatedParam(slot:value:)`). Inserting a param in the
+            // middle silently re-points every saved automation lane on every
+            // existing instance of this effect. A future `lookahead`,
+            // `detectMode` or `stereoLink` APPENDS at slot 6+, which is always
+            // safe — and nothing here is a reserved slot, because a
+            // reserved-but-inert param buys an ordering that was never at risk
+            // and puts a lie in `fx.describe`.
+            //
+            // ⚠️ The three dB params and `mix` are `.linear` BY FORCE, not by
+            // taste: their ranges cross or touch 0, and `.logarithmic` /
+            // `.decibel` require `lo > 0` (`ParamCurveConformanceTests`'
+            // `multiplicativeCurvesHaveAPositiveLowerBound`) with a SILENT
+            // runtime fallback to linear if they do not.
+            return [
+                EffectParamSpec(name: "attackDb", range: TransientShaperParams.attackDbRange,
+                                defaultValue: 0, unit: "dB", curve: .linear,
+                                modulatable: .yes,
+                                note: "PUNCH. How much louder or quieter to make the FRONT of "
+                                    + "each sound - the stick hitting the drum, the pick hitting "
+                                    + "the string - without touching the rest of it. Positive "
+                                    + "adds punch and makes a kit sound closer and more "
+                                    + "aggressive; negative rounds the hit off and pushes it back "
+                                    + "into the room, which is the fastest way to tame a clicky "
+                                    + "kick or an over-close snare. \u{2B50} THE NUMBER IS A "
+                                    + "MAXIMUM, NOT A PROMISE: +6 means 'up to +6 dB', and the "
+                                    + "full amount only lands on a hit whose start is at least 12 "
+                                    + "dB louder than its own running average "
+                                    + "(`fullShapeDifferentialDb`, reported in every fx.add and "
+                                    + "fx.setParam RESULT). A soft, slow-swelling sound has a "
+                                    + "smaller difference and gets proportionally less - which is "
+                                    + "what makes this feel natural rather than pumping. It works "
+                                    + "at ANY fader level: the detector compares the sound to "
+                                    + "ITSELF, so turning the track down does not turn the effect "
+                                    + "down. \u{26A0} LEVEL WARNING, because it is real and not a "
+                                    + "mixing choice: a positive setting RAISES PEAKS, so check "
+                                    + "your headroom or trim it back with `outputDb`. Nothing "
+                                    + "happens at all below -70 dBFS (`detectorFloorDb`) - that "
+                                    + "is deliberate, so room tone and noise are never shaped. "
+                                    + "The curve is linear because the range crosses 0 and a "
+                                    + "logarithmic taper cannot."),
+                EffectParamSpec(name: "sustainDb", range: TransientShaperParams.sustainDbRange,
+                                defaultValue: 0, unit: "dB", curve: .linear,
+                                modulatable: .yes,
+                                note: "BODY. How much more (or less) of the ring-out AFTER the "
+                                    + "hit - the tail of a snare, the decay of a piano note, the "
+                                    + "room a drum was recorded in. \u{2B50} POSITIVE LENGTHENS "
+                                    + "the tail and negative SHORTENS it, which is the opposite "
+                                    + "way round from what some people expect: +9 holds the "
+                                    + "ring-out up as it falls, so you hear more of the room; -9 "
+                                    + "pulls it down faster, which is how you get a tight, dry, "
+                                    + "close-miked kit out of a roomy recording without a gate. "
+                                    + "\u{26A0} It does NOT ring forever at +9 - the reference "
+                                    + "the effect compares against is itself decaying, so the "
+                                    + "boost saturates and then falls away. You get a longer "
+                                    + "tail, not an infinite one. Like `attackDb` this is a "
+                                    + "MAXIMUM reached only at a full 12 dB difference, it is "
+                                    + "level-independent, and it does nothing below -70 dBFS. "
+                                    + "The two controls are INDEPENDENT by construction: setting "
+                                    + "this one does not move the front of the sound, which is "
+                                    + "the whole reason this is a transient shaper and not a "
+                                    + "compressor."),
+                EffectParamSpec(name: "attackMs", range: TransientShaperParams.attackMsRange,
+                                defaultValue: 5, unit: "ms", curve: .logarithmic,
+                                modulatable: .yes,
+                                note: "PUNCH LENGTH. How long the FRONT of a sound lasts, as far "
+                                    + "as this effect is concerned - not a fade time and not a "
+                                    + "delay. It sets how quickly the effect stops treating a "
+                                    + "sound as 'still starting'. SHORT (0.1-3 ms) catches only "
+                                    + "the very tip: the click of a kick beater, the snap of a "
+                                    + "snare's stick. MEDIUM (5 ms, the default) is the body of a "
+                                    + "drum hit and suits a whole loop. LONG (20-50 ms) reaches "
+                                    + "into plucks and piano notes, where the 'attack' genuinely "
+                                    + "is that long. \u{2B50} The window over which the boost is "
+                                    + "at FULL strength is about 0.29 times this number - so 5 ms "
+                                    + "gives roughly 1.4 ms of full punch, and 30 ms gives about "
+                                    + "8.7 ms. You do not have to work that out: it is reported "
+                                    + "as `attackWindowMs` in every fx.add and fx.setParam "
+                                    + "RESULT. Too long and the effect stops sounding like punch "
+                                    + "and starts sounding like a volume ride; too short and it "
+                                    + "only sharpens the click without adding weight. The curve "
+                                    + "is logarithmic because the useful range spans nine octaves "
+                                    + "and most of what you want lives under 5 ms, which a linear "
+                                    + "knob would bury in its first tenth."),
+                EffectParamSpec(name: "sustainMs", range: TransientShaperParams.sustainMsRange,
+                                defaultValue: 200, unit: "ms", curve: .logarithmic,
+                                modulatable: .yes,
+                                note: "BODY LENGTH. How far into the tail `sustainDb` keeps "
+                                    + "working, in milliseconds. SHORT (20-80 ms) only catches "
+                                    + "the immediate drop after a hit, which tightens a kit "
+                                    + "without changing the room; the default 200 ms covers a "
+                                    + "normal snare or tom decay; LONG (500-1000 ms) reaches into "
+                                    + "cymbal wash, piano pedal and reverb tails, where a "
+                                    + "negative `sustainDb` starts working like a very gentle, "
+                                    + "very musical gate. \u{26A0} Set this LONGER than the decay "
+                                    + "you want to affect, not shorter - if it ends before the "
+                                    + "tail does, the last part of the tail is left untouched and "
+                                    + "you hear the effect stop. It has no effect at all while "
+                                    + "`sustainDb` is 0, which is the default. The curve is "
+                                    + "logarithmic because the range spans nearly six octaves."),
+                EffectParamSpec(name: "outputDb", range: TransientShaperParams.outputDbRange,
+                                defaultValue: 0, unit: "dB", curve: .linear,
+                                modulatable: .yes,
+                                note: "OUTPUT TRIM. A plain level control applied after the "
+                                    + "shaping - no detector, no dependence on the material. "
+                                    + "\u{2B50} IT IS NOT A NICETY, IT IS HOW YOU JUDGE THE "
+                                    + "EFFECT HONESTLY: adding punch genuinely raises the "
+                                    + "loudness, and a listener reliably calls the louder version "
+                                    + "the better one. Trim here until the shaped and unshaped "
+                                    + "versions measure the same loudness, and what is left is "
+                                    + "the punch itself. That works because this effect changes "
+                                    + "the CREST FACTOR - the gap between the peaks and the "
+                                    + "average - which is exactly what loudness matching does "
+                                    + "NOT flatten out. Also the place to claw back headroom "
+                                    + "after a positive `attackDb`. The curve is linear because "
+                                    + "the range crosses 0."),
+                EffectParamSpec(name: "mix", range: TransientShaperParams.mixRange,
+                                defaultValue: 1, unit: "linear", curve: .linear,
+                                modulatable: .yes,
+                                note: "Blend the shaped sound back with the untouched one. 1 "
+                                    + "(the default) is fully shaped; 0.5 is half. \u{26A0} "
+                                    + "Unlike most dry/wet controls this one is rarely what you "
+                                    + "want: the effect is already proportional to how much of a "
+                                    + "transient there is, so turning `attackDb` down is usually "
+                                    + "a better way to get less of it, and `mix` mainly earns its "
+                                    + "place for automating the whole effect in and out of a "
+                                    + "section. \u{2B50} AT THE DEFAULTS THIS INSERT IS BIT-EXACT "
+                                    + "DRY - with `attackDb`, `sustainDb` and `outputDb` all 0 "
+                                    + "the output is identical to the input sample for sample, "
+                                    + "not merely close - so a freshly added transient shaper "
+                                    + "provably changes nothing until you move something. The "
+                                    + "curve is linear because the range touches 0."),
+            ]
+        case .freqShifter:
+            // ⛔⛔ ORDER IS FROZEN AND APPEND-ONLY FOREVER. The INDEX of a spec
+            // in this array IS the automation slot number
+            // (`storeAutomatedParam(slot:value:)`). A future `feedback`,
+            // `driveDb` or `carrierMode` APPENDS at slot 5+, which is always
+            // safe. Nothing here is a reserved slot.
+            //
+            // ⚠️ EVERY curve is `.linear` BY FORCE, not by taste: four of the
+            // five ranges CROSS 0 and `mix`'s TOUCHES it, and
+            // `.logarithmic`/`.decibel` require `lo > 0` with a SILENT runtime
+            // fallback (`ParamCurveConformanceTests`'
+            // `multiplicativeCurvesHaveAPositiveLowerBound`). `fineHz` exists
+            // precisely BECAUSE the log curve that would fix `shiftHz`'s
+            // resolution is unavailable to a bipolar range.
+            return [
+                EffectParamSpec(name: "shiftHz", range: FreqShifterParams.shiftHzRange,
+                                defaultValue: 0, unit: "Hz", curve: .linear,
+                                modulatable: .yes,
+                                note: "HOW FAR TO SHIFT, in Hz - and the SIGN IS THE DIRECTION: "
+                                    + "positive moves everything UP, negative DOWN. There is no "
+                                    + "separate up/down switch on purpose, so you can sweep "
+                                    + "smoothly through zero. \u{2B50} THIS IS NOT A PITCH "
+                                    + "CONTROL AND IT WILL NOT PLAY IN TUNE. A pitch shifter "
+                                    + "MULTIPLIES every frequency by the same amount, so a note "
+                                    + "stays a note. This ADDS the same number of Hz to every "
+                                    + "frequency, which breaks the maths that makes a sound "
+                                    + "musical: a note built from 100, 200 and 300 Hz shifted by "
+                                    + "100 becomes 200, 300 and 400 Hz, which the ear hears as a "
+                                    + "BELL or a piece of METAL rather than a note. That is the "
+                                    + "whole point of the effect - if you want it in tune, you "
+                                    + "want a pitch shifter instead. SMALL amounts (under about "
+                                    + "20 Hz, where `fineHz` is the better knob) give a slow "
+                                    + "beating, swirling thickness. LARGE amounts (hundreds of "
+                                    + "Hz) are clangorous sound design. \u{26A0} Shifting DOWN by "
+                                    + "more than a sound's own frequency pushes it below 0 Hz and "
+                                    + "it REFLECTS back up again - a 100 Hz tone shifted -300 Hz "
+                                    + "returns at 200 Hz. That is real behaviour that analog "
+                                    + "frequency shifters have too, not a fault. Large UPWARD "
+                                    + "shifts can likewise push high content past the top of the "
+                                    + "sample rate, where it folds back down. The curve is linear "
+                                    + "because the range crosses 0."),
+                EffectParamSpec(name: "fineHz", range: FreqShifterParams.fineHzRange,
+                                defaultValue: 0, unit: "Hz", curve: .linear,
+                                modulatable: .yes,
+                                note: "THE SAME CONTROL, BUT FINE - added on top of `shiftHz`. "
+                                    + "\u{2B50} THIS IS THE ONE YOU WANT FOR THE CLASSIC TRICK. A "
+                                    + "shift of only 1-20 Hz does not sound like a shift at all: "
+                                    + "it makes the sound beat slowly against itself, which "
+                                    + "thickens and widens it in a way a chorus cannot, and is "
+                                    + "the oldest fix in live sound for a microphone that is "
+                                    + "about to feed back. It needs its own knob because 5 Hz is "
+                                    + "a quarter of one percent of `shiftHz`'s travel, so on the "
+                                    + "coarse control it lives in a sliver too small to set or "
+                                    + "automate. The two are simply ADDED, and their sum is "
+                                    + "capped at the coarse control's own limit so the pair can "
+                                    + "never exceed what this effect says its range is. The curve "
+                                    + "is linear because the range crosses 0."),
+                EffectParamSpec(name: "stereoSpreadHz",
+                                range: FreqShifterParams.stereoSpreadHzRange,
+                                defaultValue: 0, unit: "Hz", curve: .linear,
+                                modulatable: .yes,
+                                note: "SHIFT THE TWO SPEAKERS BY DIFFERENT AMOUNTS - left gets "
+                                    + "half of this added, right gets half subtracted. At 0 (the "
+                                    + "default) both sides are identical and the result stays "
+                                    + "mono-compatible. \u{2B50} A VALUE OF 1-6 Hz IS THE WIDEST "
+                                    + "THIS EFFECT GETS: the two sides drift slowly in and out of "
+                                    + "step with each other, so the sound appears to churn "
+                                    + "between the speakers without any delay or reverb being "
+                                    + "involved. Pair it with a small `fineHz` for a lush "
+                                    + "chorus-like wash, or leave `shiftHz` large and this small "
+                                    + "for a metallic texture that still has a stereo image. "
+                                    + "\u{26A0} Because the two sides genuinely differ, a mono "
+                                    + "fold-down will partly cancel - check mono if the mix has "
+                                    + "to survive it. It does nothing on a mono track. The curve "
+                                    + "is linear because the range crosses 0."),
+                EffectParamSpec(name: "mix", range: FreqShifterParams.mixRange,
+                                defaultValue: 0.5, unit: "linear", curve: .linear,
+                                modulatable: .yes,
+                                note: "Blend the shifted sound against the untouched one. "
+                                    + "\u{2B50} THIS CONTROL MATTERS MORE HERE THAN ON MOST "
+                                    + "EFFECTS. At 1 (fully shifted) the original note is GONE - "
+                                    + "there is nothing in tune left - which is what you want for "
+                                    + "bells and metal, and rarely what you want on a lead vocal "
+                                    + "or a bass. The default 0.5 keeps the original present so "
+                                    + "the shifted copy reads as colour on top of it, and it is "
+                                    + "also what makes small `fineHz` values beat against the dry "
+                                    + "signal instead of just sitting there. \u{26A0} At exactly "
+                                    + "0 this insert is BIT-EXACT DRY - the output is identical "
+                                    + "to the input sample for sample, not merely close - while "
+                                    + "the effect keeps running underneath, so raising it again "
+                                    + "fades in smoothly rather than jumping. The curve is linear "
+                                    + "because the range touches 0."),
+                EffectParamSpec(name: "outputDb", range: FreqShifterParams.outputDbRange,
+                                defaultValue: 0, unit: "dB", curve: .linear,
+                                modulatable: .yes,
+                                note: "OUTPUT TRIM for the SHIFTED COPY ONLY - it is applied "
+                                    + "before the `mix` blend, so it never touches the dry "
+                                    + "signal and `mix` 0 stays exactly dry however this is set. "
+                                    + "\u{2B50} IT EARNS "
+                                    + "ITS PLACE BECAUSE THIS EFFECT CAN GET LOUDER ALL BY "
+                                    + "ITSELF, which surprises people: the method works by "
+                                    + "building a 90-degree-rotated copy of the signal, and the "
+                                    + "combination of the two can peak higher than the original "
+                                    + "did even though nothing was amplified. On dense material "
+                                    + "at full `mix` expect to pull a couple of dB back here. "
+                                    + "Also the place to loudness-match the shifted and unshifted "
+                                    + "versions so you judge the character rather than the "
+                                    + "level. The curve is linear because the range crosses 0."),
+            ]
+        case .clipper:
+            // ⛔⛔ ORDER IS FROZEN AND APPEND-ONLY FOREVER. The INDEX of a spec
+            // in this array IS the automation slot number
+            // (`storeAutomatedParam(slot:value:)`). A future `kneeDb`,
+            // `linkChannels` or `dcFilter` APPENDS at slot 6+, which is always
+            // safe. Nothing here is a reserved slot.
+            //
+            // ⚠️ EVERY curve is `.linear`, and for two different reasons.
+            // `driveDb`/`ceilingDb`/`outputDb`/`mix` are linear BY FORCE: their
+            // ranges cross or touch 0 and `.logarithmic`/`.decibel` require
+            // `lo > 0` with a SILENT runtime fallback
+            // (`ParamCurveConformanceTests`). `oversampling` is linear BY RULE:
+            // `ParamCurveConformanceTests` pins the biconditional "every
+            // logarithmic param is Hz-unit", and a factor is not a frequency —
+            // a log taper here would be the only exception in the whole table.
+            return [
+                EffectParamSpec(name: "driveDb", range: ClipperParams.driveDbRange,
+                                defaultValue: 0, unit: "dB", curve: .linear,
+                                modulatable: .yes,
+                                note: "HOW HARD YOU PUSH THE SOUND INTO THE CEILING - the control "
+                                    + "that decides how much clipping actually happens. The "
+                                    + "ceiling says WHERE the cut is; this says how far past it "
+                                    + "the sound is driven, and therefore how much gets cut off. "
+                                    + "0 (the default) changes nothing on its own, so a freshly "
+                                    + "added clipper only touches peaks that were already above "
+                                    + "the ceiling. \u{2B50} THE USEFUL NUMBER IS NEITHER KNOB ON "
+                                    + "ITS OWN: clipping starts at an INPUT level of `ceilingDb - "
+                                    + "driveDb` dBFS, reported as `clipThresholdDbfs` in every "
+                                    + "fx.add and fx.setParam RESULT. So ceiling -0.3 with drive "
+                                    + "6 starts clipping anything above -6.3 dBFS. \u{26A0} IT "
+                                    + "GETS LOUDER AND LOUDER IS NOT BETTER: driving harder "
+                                    + "raises the average level while the peaks stay pinned at "
+                                    + "the ceiling, and a listener reliably calls the louder "
+                                    + "version the better one. Pull `outputDb` back until the "
+                                    + "clipped and unclipped versions measure the same loudness "
+                                    + "before you decide. Negative values are allowed and are a "
+                                    + "real setting: with a low ceiling and a negative drive this "
+                                    + "becomes a quiet, gentle wave-shaper instead of a loudness "
+                                    + "tool. The curve is linear because the range crosses 0."),
+                EffectParamSpec(name: "ceilingDb", range: ClipperParams.ceilingDbRange,
+                                defaultValue: -0.3, unit: "dBFS", curve: .linear,
+                                modulatable: .yes,
+                                note: "THE CEILING. No output sample goes above this level - that "
+                                    + "is a guarantee, not a tendency, and it is what makes this "
+                                    + "a clipper rather than a saturator (a saturator's curve "
+                                    + "only ever APPROACHES its limit, so it can never promise "
+                                    + "one). The default -0.3 dBFS is the usual safe mastering "
+                                    + "ceiling: just under full scale, with a little room for "
+                                    + "what an MP3 encoder does later. Lower it (-3, -6) and you "
+                                    + "are choosing to clip much more of the material, which is a "
+                                    + "sound-design move rather than a mastering one. "
+                                    + "\u{26A0} SAMPLE CEILING, NOT TRUE-PEAK CEILING, and the "
+                                    + "difference is real: the samples are bounded exactly, but "
+                                    + "the smooth wave drawn THROUGH them can ride slightly "
+                                    + "higher between samples, and that is what a broadcast "
+                                    + "true-peak meter reads. Expect up to about a decibel of it "
+                                    + "with oversampling on; it is the honest cost of removing "
+                                    + "the aliasing and it is not a bug. If you need a true-peak "
+                                    + "guarantee, put a `limiter` with `truePeak` on after this. "
+                                    + "The range stops at 0 dBFS because a ceiling above full "
+                                    + "scale is not a ceiling. The curve is linear because the "
+                                    + "range touches 0."),
+                EffectParamSpec(name: "mode", range: ClipperParams.modeRange,
+                                defaultValue: 0, unit: "mode", curve: .linear,
+                                modulatable: .refused,
+                                note: "THE SHAPE OF THE CUT. 0 = HARD (the default): the wave is "
+                                    + "sliced off flat at the ceiling, leaving a sharp corner. "
+                                    + "That corner is what makes the bright, aggressive, "
+                                    + "in-your-face sound people reach for a clipper to get, and "
+                                    + "it is also what generates the most content above the "
+                                    + "hearing range - so it is the mode that benefits most from "
+                                    + "`oversampling`. 1 = SOFT: the wave bends into the ceiling "
+                                    + "instead of hitting it, and only goes properly flat once "
+                                    + "the input is 1.5 times the ceiling. Softer, warmer, much "
+                                    + "less obvious, and still a real ceiling - quiet material "
+                                    + "passes through soft mode completely untouched, which is "
+                                    + "the thing a tanh saturator cannot do. \u{26A0} IT IS A "
+                                    + "SWITCH, NOT A BLEND: 0.4 rounds to hard and 0.6 to soft; "
+                                    + "there is no halfway. That is also why modulation refuses "
+                                    + "it - an LFO on a switch is a stutter, not a sweep. "
+                                    + "Automation can still step it between sections."),
+                EffectParamSpec(name: "oversampling", range: ClipperParams.oversamplingRange,
+                                defaultValue: 4, unit: "x", curve: .linear,
+                                modulatable: .refused,
+                                note: "\u{2B50} THE QUALITY CONTROL, AND THE ONLY ONE ON THIS "
+                                    + "EFFECT THAT CHANGES WHAT CLIPPING SOUNDS LIKE WITHOUT "
+                                    + "CHANGING HOW MUCH OF IT THERE IS. Chopping the top off a "
+                                    + "wave creates new tones far above anything you can hear. "
+                                    + "Digital audio cannot store those, so they FOLD BACK down "
+                                    + "into the music as tones that have no musical relationship "
+                                    + "to what is playing - it sounds like a thin metallic fizz "
+                                    + "sitting behind the sound, worst on bright material and on "
+                                    + "high notes. Running the clipper at 2 or 4 times the "
+                                    + "session's sample rate pushes that fold up out of the way "
+                                    + "and then filters it off. 4 (the default) is the clean one; "
+                                    + "2 is the cheaper compromise; 1 turns the machinery OFF "
+                                    + "entirely and lets the fizz through. \u{2B50} 1 IS A REAL "
+                                    + "SETTING, NOT A BROKEN ONE - plenty of records want that "
+                                    + "grit, and it is the only way to hear what the other "
+                                    + "settings are removing. \u{26A0} Only 1, 2 and 4 exist; 3 "
+                                    + "rounds UP to 4. It costs CPU roughly in proportion to the "
+                                    + "number. \u{26A0} It does NOT change the effect's latency - "
+                                    + "that is a fixed 32 samples at every setting, by design, so "
+                                    + "changing this never shifts the track's timing. Modulation "
+                                    + "refuses it because it is a switch, and changing it mid-"
+                                    + "sound restarts the internal filters, which is a tiny click."),
+                EffectParamSpec(name: "mix", range: ClipperParams.mixRange,
+                                defaultValue: 1, unit: "linear", curve: .linear,
+                                modulatable: .yes,
+                                note: "Blend the clipped sound with the untouched one - the "
+                                    + "'parallel clipping' trick, which keeps the transients of "
+                                    + "the original while adding the density of the clipped "
+                                    + "version. 1 (the default) is fully clipped. \u{26A0} AT 0 "
+                                    + "THIS EFFECT IS NOT SILENT AND NOT BYPASSED: it passes the "
+                                    + "input through EXACTLY, sample for sample, but delayed by "
+                                    + "32 samples - the fixed latency every setting of this "
+                                    + "effect has. The project's delay compensation removes that "
+                                    + "delay again, so in the mix it lines up perfectly; it "
+                                    + "matters only if you are comparing raw rendered files by "
+                                    + "eye. The dry half of this blend is delayed by the same 32 "
+                                    + "samples as the clipped half, which is why a partial mix "
+                                    + "stays in phase instead of sounding hollow. The curve is "
+                                    + "linear because the range touches 0."),
+                EffectParamSpec(name: "outputDb", range: ClipperParams.outputDbRange,
+                                defaultValue: 0, unit: "dB", curve: .linear,
+                                modulatable: .yes,
+                                note: "OUTPUT TRIM for the CLIPPED COPY ONLY - applied before the "
+                                    + "`mix` blend, so `mix` 0 stays exactly dry however this is "
+                                    + "set. \u{2B50} IT IS NOT A NICETY, IT IS HOW YOU JUDGE A "
+                                    + "CLIPPER HONESTLY: clipping makes things louder, and louder "
+                                    + "always sounds better for the first few seconds. Trim here "
+                                    + "until the clipped and unclipped versions measure the same "
+                                    + "loudness, and what is left is the actual character. "
+                                    + "\u{26A0} A POSITIVE VALUE HERE BREAKS THE CEILING "
+                                    + "PROMISE - the guarantee is that samples stay under "
+                                    + "`ceilingDb`, and this is applied afterwards, so the real "
+                                    + "guaranteed maximum is `ceilingDb + outputDb` (reported as "
+                                    + "`wetCeilingDbfs` in every fx.add and fx.setParam RESULT). "
+                                    + "Use negative values unless you know why you want the "
+                                    + "other. The curve is linear because the range crosses 0."),
+            ]
+        case .dynamicEQ:
+            // ⛔ BAND-MAJOR, GENERATED FROM ONE BLOCK RATHER THAN SPELLED OUT
+            // FOUR TIMES, AND THAT IS THE POINT. The kind's whole reviewability
+            // claim is `slot = (band−1)·8 + p`; four hand-written blocks of
+            // eight would let one band drift from the others in a way no
+            // compiler and no reviewer would catch. `specs(for:)` is never
+            // called on the render thread (every caller —
+            // `AutomationSchedule.resolveEffectParamLanes`,
+            // `ModulationSnapshotBuilder`, `EffectEditorModel`,
+            // `ProjectStore.setEffectParam` — is main-actor or build-time), so
+            // building the array here costs nothing that matters.
+            // `DynamicEQParamsTests.slotOrderIsFrozen` pins all 32 names, in
+            // order, against literals.
+            return (1...DynamicEQParams.bandCount).flatMap { dynamicEQBandSpecs(band: $0) }
         case .audioUnit:
             // AU parameters are not on the generic name/value surface in v0;
             // bypass/reorder/latency work generically through the chain.
             return []
         }
+    }
+
+    /// One dynamic-EQ band's eight specs, in slot order (m39-af). See the
+    /// `.dynamicEQ` arm above for why this is generated.
+    private static func dynamicEQBandSpecs(band n: Int) -> [EffectParamSpec] {
+        // The shared-budget warning is carried on BAND 1's mode only, not
+        // repeated four times: `fx.describe` returns the whole table in one
+        // response, so an agent reading band3Mode has band1Mode's note in front
+        // of it already.
+        let budgetNote = n == 1
+            ? " \u{26A0}\u{26A0} BUDGET, because this kind is the largest in the app: a fully "
+                + "automated Dynamic EQ is 32 automation lanes, and automation lanes and "
+                + "modulated effect params SHARE ONE 64-entry cap per mixer strip. One of "
+                + "these uses HALF of it. Past 64 the extra lanes are dropped silently, so "
+                + "automate the bands you are actually riding rather than all four."
+            : ""
+        return [
+            EffectParamSpec(
+                name: "band\(n)Mode", range: DynamicEQParams.modeRange,
+                defaultValue: 0, unit: "linear", curve: .linear, modulatable: .refused,
+                note: "\u{2B50} BAND \(n)'s ON SWITCH, and which side of the threshold wakes it "
+                    + "up. 0 (the default) is OFF and it is a TRUE no-op — the band's filter is "
+                    + "not even run, so a freshly added Dynamic EQ is bit-for-bit transparent "
+                    + "until you turn a band on. 1 is ABOVE: the band reacts when the level "
+                    + "INSIDE THIS BAND rises past band\(n)ThresholdDb. 2 is BELOW: it reacts "
+                    + "when that level falls under the threshold. \u{26D4} WHICH WAY the band "
+                    + "then MOVES is the SIGN of band\(n)RangeDb, not a third control, which "
+                    + "gives four musical moves from two knobs: above + negative (the default "
+                    + "sign) turns the band DOWN when it gets loud — de-essing, de-harshing, "
+                    + "taming a boxy 300 Hz, controlling a snare ring; above + positive turns it "
+                    + "UP when it gets loud, which exaggerates a transient's brightness; below + "
+                    + "positive turns it UP when it gets quiet, which restores air under a fade; "
+                    + "below + negative turns it DOWN when it gets quiet, which is one-band "
+                    + "downward expansion for mic rumble between phrases. \u{26A0} MODE 2 SITS "
+                    + "AT FULL RANGE ON SILENCE AND THAT IS CORRECT, NOT A BUG: digital silence "
+                    + "reads as -180 dBFS in the band, which is below every threshold, so a "
+                    + "'below' band is fully triggered. That is what an expander does to "
+                    + "silence. \u{26A0} DISCRETE — automate it with hold steps, never a ramp, "
+                    + "and modulation refuses it outright. Values snap to the nearest of "
+                    + "0/1/2." + budgetNote),
+            EffectParamSpec(
+                name: "band\(n)Freq", range: DynamicEQParams.freqRange,
+                defaultValue: DynamicEQParams.defaultFreq(band: n), unit: "Hz",
+                curve: .logarithmic, modulatable: .warned,
+                note: "Where band \(n) LISTENS and where it MOVES THE GAIN — one filter does "
+                    + "both jobs, which is why band\(n)ThresholdDb means dBFS measured AT THE "
+                    + "BAND CENTRE at every width. The four defaults are spread across the "
+                    + "spectrum (120 / 500 / 3000 / 8000 Hz) so the bands read left to right "
+                    + "like an EQ. INERT while band\(n)Mode is 0 — setting it on an off band is "
+                    + "a no-op rather than a mistake. \u{26A0} MODULATION IS WARNED, not "
+                    + "refused: this is a FILTER corner, so moving it recomputes biquad "
+                    + "coefficients and zippers at any rate (the eq.peak1Freq problem). "
+                    + "Automation between sections is fine; an LFO on it is not what you want."),
+            EffectParamSpec(
+                name: "band\(n)Q", range: DynamicEQParams.qRange,
+                defaultValue: 2, unit: "linear", curve: .linear, modulatable: .warned,
+                note: "How WIDE band \(n) is — higher is narrower. \u{26D4} THIS Q DOES NOT MEAN "
+                    + "WHAT eq.peak1Q MEANS, and the difference is MEASURED rather than "
+                    + "stylistic: at 1 kHz and Q 2 a band here is about 704 Hz wide at half gain "
+                    + "where the EQ's is 498 Hz, and this one WIDENS as the band works harder "
+                    + "(592 / 704 / 993 / 1401 Hz at 3 / 6 / 12 / 18 dB of movement) while the "
+                    + "EQ's stays fixed. That is the deliberate price of this kind's topology: "
+                    + "the band's poles do NOT move with its gain, which is exactly what lets "
+                    + "the gain change every single sample without clicking. Both reach the gain "
+                    + "you asked for at the centre. In practice: 0.5-0.7 for a wide de-harsher "
+                    + "or a stand-in dynamic high shelf, 2 for general tone, 4-8 to chase one "
+                    + "ringing resonance. \u{2B50} The band's PEAK is 0 dB at EVERY Q, so "
+                    + "widening it does not quietly move your threshold. \u{26A0} MODULATION IS "
+                    + "WARNED for the band\(n)Freq reason — it is a filter coefficient."),
+            EffectParamSpec(
+                name: "band\(n)ThresholdDb", range: DynamicEQParams.thresholdRange,
+                defaultValue: -18, unit: "dB", curve: .linear, modulatable: .yes,
+                note: "The level where band \(n) starts working, in dBFS MEASURED INSIDE THE "
+                    + "BAND — not the level of the whole mix. A quiet track can still trigger a "
+                    + "band that is parked on its loudest frequency, which is the point. "
+                    + "\u{26A0} THE SOFT KNEE STARTS 3 dB BELOW THIS NUMBER: the knee is fixed "
+                    + "at 6 dB, so the band is completely still only while the band level is at "
+                    + "or under threshold minus 3, and at exactly the threshold it is already "
+                    + "moving about 0.56 dB at the default 4:1. Do not read 'at threshold' as "
+                    + "'doing nothing'. Start about 6-10 dB under the band's loudest peaks and "
+                    + "lower it until it moves on the problem and not on everything."),
+            EffectParamSpec(
+                name: "band\(n)Ratio", range: DynamicEQParams.ratioRange,
+                defaultValue: 4, unit: "ratio", curve: .linear, modulatable: .yes,
+                note: "How hard band \(n) reacts to how far past the threshold it is: at 4 (the "
+                    + "default) every 4 dB past the threshold asks for 1 dB of movement, capped "
+                    + "by band\(n)RangeDb. \u{26A0} 1 MEANS NO REACTION AT ALL — the band does "
+                    + "nothing however you set the rest, which is the usual cause of 'the "
+                    + "dynamic EQ is not doing anything'. 2-4 is transparent, 8-20 is a clamp. "
+                    + "\u{26A0} THE SAME LAW IS USED IN 'BELOW' MODE as in 'above', "
+                    + "deliberately: one control that means the same thing in both directions "
+                    + "for a user who is not a dynamics specialist. A specialist expecting the "
+                    + "textbook expander form should know it is a recorded decision, not an "
+                    + "oversight."),
+            EffectParamSpec(
+                name: "band\(n)RangeDb", range: DynamicEQParams.rangeDbRange,
+                defaultValue: -6, unit: "dB", curve: .linear, modulatable: .yes,
+                note: "\u{2B50} HOW FAR BAND \(n) MAY MOVE, AND WHICH WAY — the sign IS the "
+                    + "direction. NEGATIVE (the -6 dB default) turns the band DOWN when it "
+                    + "triggers; POSITIVE turns it UP. The magnitude is a hard cap, so the band "
+                    + "can never move further than this however hard it is driven, which is what "
+                    + "makes a dynamic EQ safe to set aggressively. \u{26A0} 0 MAKES THE BAND DO "
+                    + "NOTHING however it is triggered — the filter still runs but the gain "
+                    + "stays exactly flat, bit-for-bit. Read with band\(n)Mode: 'above' plus "
+                    + "negative is the familiar de-esser move; 'below' plus positive brings "
+                    + "something back up when it gets quiet."),
+            EffectParamSpec(
+                name: "band\(n)AttackMs", range: DynamicEQParams.attackRange,
+                defaultValue: 10, unit: "ms", curve: .linear, modulatable: .yes,
+                note: "How fast band \(n) moves TOWARDS its target once it triggers. Short "
+                    + "(0.1-5 ms) catches the front of a sibilant or a pick attack; long "
+                    + "(30-100 ms) lets transients through untouched and only acts on sustained "
+                    + "tone, which is what you want when you are taming a resonance rather than "
+                    + "a consonant. \u{26A0} There is NO lookahead, deliberately, so a very "
+                    + "short attack still cannot act before the sound arrives — that is also why "
+                    + "this effect adds ZERO latency and nothing in your project shifts in time "
+                    + "when you add it."),
+            EffectParamSpec(
+                name: "band\(n)ReleaseMs", range: DynamicEQParams.releaseRange,
+                defaultValue: 100, unit: "ms", curve: .linear, modulatable: .yes,
+                note: "How fast band \(n) returns to flat once the trigger passes. Too short on "
+                    + "a low band pumps audibly; 100 ms (the default) is a safe general value "
+                    + "and 200-500 ms is smoother on bass. On sibilance, short (20-60 ms) is "
+                    + "right — the band has to be back to flat before the next vowel."),
+        ]
     }
 }
 
@@ -4073,6 +6052,13 @@ public extension EffectDescriptor {
             case "kneeDb": return p.kneeDb
             case "makeupDb": return p.makeupDb
             case "mix": return p.mix
+            // m39-ae de-esser — the STORED values, matching the wire's params
+            // object. `detectorMode` rides as its raw number (the `truePeak`
+            // 0/1 and `clipper.mode` convention); the SNAPPED value is a
+            // separate `resolvedDetectorMode` echo on the wire, never here.
+            case "detectorMode": return p.detectorMode
+            case "detectorFreqHz": return p.detectorFreqHz
+            case "detectorQ": return p.detectorQ
             default: return nil
             }
         case .limiter:
@@ -4113,6 +6099,7 @@ public extension EffectDescriptor {
             case "driveDb": return p.driveDb
             case "mix": return p.mix
             case "outputDb": return p.outputDb
+            case "oversampling": return p.oversampling
             default: return nil
             }
         case .gate:
@@ -4234,6 +6221,44 @@ public extension EffectDescriptor {
             case "stereoPhaseDeg": return p.stereoPhaseDeg
             default: return nil
             }
+        case .transientShaper:
+            let p = resolvedTransientShaper
+            switch name {
+            case "attackDb": return p.attackDb
+            case "sustainDb": return p.sustainDb
+            case "attackMs": return p.attackMs
+            case "sustainMs": return p.sustainMs
+            case "outputDb": return p.outputDb
+            case "mix": return p.mix
+            default: return nil
+            }
+        case .freqShifter:
+            let p = resolvedFreqShifter
+            switch name {
+            case "shiftHz": return p.shiftHz
+            case "fineHz": return p.fineHz
+            case "stereoSpreadHz": return p.stereoSpreadHz
+            case "mix": return p.mix
+            case "outputDb": return p.outputDb
+            default: return nil
+            }
+        case .clipper:
+            let p = resolvedClipper
+            switch name {
+            case "driveDb": return p.driveDb
+            case "ceilingDb": return p.ceilingDb
+            case "mode": return p.mode
+            case "oversampling": return p.oversampling
+            case "mix": return p.mix
+            case "outputDb": return p.outputDb
+            default: return nil
+            }
+        case .dynamicEQ:
+            // m39-af — 32 names, so the mapping lives in ONE home
+            // (`DynamicEQParams.value(forParamName:)`) that this arm and
+            // `ProjectStore.applyEffectParam`'s arm both read. Four hand-copied
+            // 32-case switches is four chances for one band to drift.
+            return resolvedDynamicEQ.value(forParamName: name)
         case .audioUnit:
             return nil
         }

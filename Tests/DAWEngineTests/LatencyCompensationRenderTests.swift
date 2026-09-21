@@ -530,6 +530,89 @@ struct LatencyCompensationRenderTests {
         #expect(abs(peak - 0.5) < 0.01)
     }
 
+    /// m39-ad — THE END-TO-END LEG. Everything else about this item proves a
+    /// LINK: `PDCWiringTests` proves the plan moves when the param moves,
+    /// `SaturatorOversamplingTests` L2b proves the effect itself delays by 32,
+    /// and the unit suite proves 0 at the default. None of those renders two
+    /// tracks and looks at where the audio actually LANDS, which is the only
+    /// question a listener has. This does.
+    ///
+    /// ⭐ WHY THIS KIND NEEDS IT WHEN THE LIMITER DID NOT. The limiter's 240
+    /// samples is a constant of the kind. The saturator's is **0 or 32
+    /// depending on a parameter** — the only built-in like that — so the plan
+    /// has to be rebuilt when a user turns a knob, not just when they add an
+    /// effect. An off-by-one in that rebuild is inaudible on the effected track
+    /// (32 samples is 0.67 ms) and shows up only as the rest of the mix
+    /// drifting away from it.
+    ///
+    /// ⭐ `mix: 0` IS THE INSTRUMENT, not a shortcut. At mix 0 the shaper
+    /// contributes nothing and the insert collapses to a PURE 32-sample delay
+    /// line, so an impulse's position is unambiguous — no ringing, no tanh
+    /// rounding, no threshold judgement call. `driveDb: 36` is left at maximum
+    /// precisely to show it cannot matter.
+    @Test("m39-ad end-to-end: a 4x saturator strip and a dry strip land their impulses on the SAME output sample, and at the default they never diverge")
+    func saturatorOversamplingStripAlignsWithADryStrip() throws {
+        let fixtures = try fixtures()
+        /// The round-trip group delay, read from the primitive rather than
+        /// written as 32 — if the design's `tapsPerPhase` ever moves, this test
+        /// moves with it instead of failing for the wrong reason.
+        let oversamplerLatency = OversamplerDesign.latencySamples
+
+        func saturator(oversampling: Double) -> EffectDescriptor {
+            EffectDescriptor(kind: .saturator,
+                             saturator: SaturatorParams(driveDb: 36, mix: 0, outputDb: 0,
+                                                        oversampling: oversampling))
+        }
+
+        // ---- 1. THE HAZARD, SHOWN FIRST. With compensation switched off, a
+        //         4x saturator strip is exactly `oversamplerLatency` late.
+        let latentTracks = [
+            audioTrack(clip: fixtures.impulse),
+            audioTrack(clip: fixtures.impulse, effects: [saturator(oversampling: 4)]),
+        ]
+        let uncompensated = try render(latentTracks, targets: [:])
+        let rawHits = hits(uncompensated.channelData[0], above: 0.15)
+        try #require(rawHits.count == 2,
+                     Comment(rawValue: "expected two separated impulses, got \(rawHits)"))
+        #expect(rawHits[0] == Self.impulseFrame)
+        #expect(rawHits[1] - rawHits[0] == oversamplerLatency)
+
+        // ---- 2. THE FIX, THROUGH THE LIVE PATH. `targets: nil` makes the
+        //         graph derive the plan itself in `applyParameters`, exactly as
+        //         the running engine does — nothing here hand-feeds it 32.
+        let compensated = try render(latentTracks, targets: nil)
+        let alignedHits = hits(compensated.channelData[0], above: 0.15)
+        #expect(alignedHits == [Self.impulseFrame + oversamplerLatency],
+                Comment(rawValue: "expected one coincident impulse, got \(alignedHits)"))
+        // Coherent sum: two 0.25 impulses on one frame. A near-miss alignment
+        // would leave two 0.25 peaks instead of one 0.5.
+        let peak = compensated.channelData[0][Self.impulseFrame + oversamplerLatency]
+        #expect(abs(peak - 0.5) < 0.01, Comment(rawValue: "peak \(peak), expected ~0.5"))
+        #expect(abs(compensated.channelData[0][Self.impulseFrame]) < 1e-6)
+
+        // ---- 3. THE CONTROL, AND THE ITEM'S CENTRAL PROMISE AT PROJECT SCALE.
+        //         The SAME project at the DEFAULT `oversampling: 1` never
+        //         diverges in the first place: one impulse, at the source
+        //         frame, with compensation off AND on. If the default ever
+        //         starts reporting latency, leg 3a gains a second hit and 3b
+        //         moves the peak 32 samples later — and a shipped project's
+        //         timing would have changed under its owner.
+        let defaultTracks = [
+            audioTrack(clip: fixtures.impulse),
+            audioTrack(clip: fixtures.impulse, effects: [saturator(oversampling: 1)]),
+        ]
+        for (label, targets) in [("uncompensated", [UUID: Int]()), ("always-on plan", nil)]
+            as [(String, [UUID: Int]?)] {
+            let rendered = try render(defaultTracks, targets: targets)
+            let defaultHits = hits(rendered.channelData[0], above: 0.15)
+            #expect(defaultHits == [Self.impulseFrame],
+                    Comment(rawValue: "\(label): default saturator must add NO latency, got \(defaultHits)"))
+            let defaultPeak = rendered.channelData[0][Self.impulseFrame]
+            #expect(abs(defaultPeak - 0.5) < 0.01,
+                    Comment(rawValue: "\(label): peak \(defaultPeak), expected ~0.5"))
+        }
+    }
+
     @Test("cross-diff 0.0: limiter + dry + shared send bus renders bit-identically twice under the always-on plan")
     func latentSendBusProjectCrossDiffIsZero() throws {
         // The spec §8.5 harness project: dry track + limiter track, both

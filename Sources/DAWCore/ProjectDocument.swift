@@ -758,6 +758,10 @@ public struct EffectDocument: Codable, Sendable, Equatable {
     /// a params key and proves the comparison reddens. The per-kind tests stay:
     /// they name individual fields and go through the real save/open path.
     public var phaser: PhaserParams?
+    public var transientShaper: TransientShaperParams?
+    public var freqShifter: FreqShifterParams?
+    public var clipper: ClipperParams?
+    public var dynamicEQ: DynamicEQParams?
     /// Hosted Audio Unit selection + inlined state (stateData rides as base64
     /// through Codable's Data default) — the InstrumentDocument.audioUnit
     /// mirror. Additive optional: pre-M4 (v) files have no key and stay
@@ -771,6 +775,10 @@ public struct EffectDocument: Codable, Sendable, Equatable {
         case id, kind, bypassed, gain, eq, compressor, limiter
         case reverb, delay, saturator, gate, chorus, bassEnhancer, bitCrusher
         case djFilter, ringMod, flanger, hallReverb, tapeDelay, stereoWidth, phaser
+        case transientShaper
+        case freqShifter
+        case clipper
+        case dynamicEQ
         case audioUnit
         case sidechainSourceTrackID
     }
@@ -800,6 +808,10 @@ public struct EffectDocument: Codable, Sendable, Equatable {
         tapeDelay = effect.tapeDelay
         stereoWidth = effect.stereoWidth
         phaser = effect.phaser
+        transientShaper = effect.transientShaper
+        freqShifter = effect.freqShifter
+        clipper = effect.clipper
+        dynamicEQ = effect.dynamicEQ
         audioUnit = effect.audioUnit
         sidechainSourceTrackID = effect.sidechainSourceTrackID
     }
@@ -827,6 +839,11 @@ public struct EffectDocument: Codable, Sendable, Equatable {
         tapeDelay = try c.decodeIfPresent(TapeDelayParams.self, forKey: .tapeDelay)
         stereoWidth = try c.decodeIfPresent(StereoWidthParams.self, forKey: .stereoWidth)
         phaser = try c.decodeIfPresent(PhaserParams.self, forKey: .phaser)
+        transientShaper = try c.decodeIfPresent(
+            TransientShaperParams.self, forKey: .transientShaper)
+        freqShifter = try c.decodeIfPresent(FreqShifterParams.self, forKey: .freqShifter)
+        clipper = try c.decodeIfPresent(ClipperParams.self, forKey: .clipper)
+        dynamicEQ = try c.decodeIfPresent(DynamicEQParams.self, forKey: .dynamicEQ)
         audioUnit = try c.decodeIfPresent(AudioUnitConfig.self, forKey: .audioUnit)
         sidechainSourceTrackID = try c.decodeIfPresent(UUID.self, forKey: .sidechainSourceTrackID)
     }
@@ -857,6 +874,10 @@ public struct EffectDocument: Codable, Sendable, Equatable {
         try c.encodeIfPresent(tapeDelay, forKey: .tapeDelay)
         try c.encodeIfPresent(stereoWidth, forKey: .stereoWidth)
         try c.encodeIfPresent(phaser, forKey: .phaser)
+        try c.encodeIfPresent(transientShaper, forKey: .transientShaper)
+        try c.encodeIfPresent(freqShifter, forKey: .freqShifter)
+        try c.encodeIfPresent(clipper, forKey: .clipper)
+        try c.encodeIfPresent(dynamicEQ, forKey: .dynamicEQ)
         try c.encodeIfPresent(audioUnit, forKey: .audioUnit)
         try c.encodeIfPresent(sidechainSourceTrackID, forKey: .sidechainSourceTrackID)
     }
@@ -879,6 +900,10 @@ public struct EffectDocument: Codable, Sendable, Equatable {
                                 tapeDelay: tapeDelay,
                                 stereoWidth: stereoWidth,
                                 phaser: phaser,
+                                transientShaper: transientShaper,
+                                freqShifter: freqShifter,
+                                clipper: clipper,
+                                dynamicEQ: dynamicEQ,
                                 audioUnit: audioUnit,
                                 sidechainSourceTrackID: sidechainSourceTrackID)
     }
@@ -903,8 +928,27 @@ public struct InstrumentDocument: Codable, Sendable, Equatable {
     /// rule): its source is the `"gm"` sentinel or an absolute path — bank
     /// files are deliberately NOT bundle media (design §4.2).
     public var soundBank: SoundBankConfig?
+    /// Drum kit (m39-dm). Additive optional — a pre-drumSynth project has no
+    /// key and stays byte-identical across a round trip.
+    ///
+    /// ⭐ It persists DIRECTLY as `DrumKitParams` rather than through a
+    /// `DrumKitDocument` mirror, following `SoundBankConfig`/`AutomationLane`
+    /// rather than `SamplerDocument`. The mirror exists for the sampler because
+    /// a zone holds a live `URL` that must become a bundle-relative `media/…`
+    /// ref; a drum kit is 75 numbers and eight optional ints with no file
+    /// reference anywhere, so a mirror would be a second hand-maintained list
+    /// of 75 names whose only function is to drift from the first.
+    public var drumKit: DrumKitParams?
 
-    private enum CodingKeys: String, CodingKey { case kind, polySynth, sampler, audioUnit, soundBank }
+    // ⛔⛔ m39-dm — A KEY MISSING FROM THIS ENUM IS THE QUIETEST DEFECT IN THE
+    // WHOLE PERSISTENCE PATH. `CodingKeys` is hand-written; omitting `drumKit`
+    // produces NO compile error, NO runtime error and NO warning — the kit is
+    // simply never written and never read, and every in-memory test passes.
+    // `DrumKitPersistenceTests` round-trips all 75 names through a real bundle
+    // for exactly this reason, and plant P12 deletes this key to prove it.
+    private enum CodingKeys: String, CodingKey {
+        case kind, polySynth, sampler, audioUnit, soundBank, drumKit
+    }
 
     init(from d: InstrumentDescriptor, mediaRefs: [UUID: String?]) {
         kind = d.kind
@@ -914,6 +958,7 @@ public struct InstrumentDocument: Codable, Sendable, Equatable {
         sampler = d.sampler.map { SamplerDocument(from: $0, mediaRefs: mediaRefs) }
         audioUnit = d.audioUnit
         soundBank = d.soundBank
+        drumKit = d.drumKit
     }
 
     public init(from decoder: any Decoder) throws {
@@ -924,6 +969,10 @@ public struct InstrumentDocument: Codable, Sendable, Equatable {
         sampler = try c.decodeIfPresent(SamplerDocument.self, forKey: .sampler)
         audioUnit = try c.decodeIfPresent(AudioUnitConfig.self, forKey: .audioUnit)
         soundBank = try c.decodeIfPresent(SoundBankConfig.self, forKey: .soundBank)
+        // Absent (every pre-m39-dm project) → nil → `resolvedDrumKit` gives the
+        // factory kit, which is exactly what a project that never carried the
+        // key means.
+        drumKit = try c.decodeIfPresent(DrumKitParams.self, forKey: .drumKit)
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -936,6 +985,9 @@ public struct InstrumentDocument: Codable, Sendable, Equatable {
         try c.encodeIfPresent(sampler, forKey: .sampler)
         try c.encodeIfPresent(audioUnit, forKey: .audioUnit)
         try c.encodeIfPresent(soundBank, forKey: .soundBank)
+        // Omitted when absent, so a project that never touched the drum machine
+        // stays byte-identical to a pre-m39-dm save.
+        try c.encodeIfPresent(drumKit, forKey: .drumKit)
     }
 
     /// Rebuilds a runtime `InstrumentDescriptor`, resolving each zone's media
@@ -1023,9 +1075,14 @@ public struct InstrumentDocument: Codable, Sendable, Equatable {
         // The sound-bank config likewise: a bank missing on THIS machine
         // surfaces as a `.failed` status at prepare time (LAW L5), never as a
         // dropped selection.
+        // ⚠️ This is an EXPLICIT initialiser call with all-defaulted arguments,
+        // so a payload omitted here does NOT inherit anything — it takes
+        // `InstrumentDescriptor`'s own nil default and the user's setting is
+        // dropped on every project open, with no error. The `setInstrument`
+        // rebuild carries the same warning for the same reason.
         return InstrumentDescriptor(kind: kind, polySynth: polySynth,
                                     sampler: params, audioUnit: audioUnit,
-                                    soundBank: soundBank)
+                                    soundBank: soundBank, drumKit: drumKit)
     }
 }
 

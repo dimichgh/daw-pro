@@ -118,7 +118,7 @@ function lastLogLine(): any {
 // Instrumentation coverage (both registration paths)
 // ---------------------------------------------------------------------------
 
-test("both registration paths are instrumented: 232 total, empty symmetric difference vs tools/list", async () => {
+test("both registration paths are instrumented: 236 total, empty symmetric difference vs tools/list", async () => {
   const instrumented = instrumentedToolNames();
   // m34-l: 208 -> 209 with `play_sustain`.
   // m34-h-1: 209 -> 216 with the seven-verb `looper_*` LIVE LOOPING family.
@@ -133,7 +133,16 @@ test("both registration paths are instrumented: 232 total, empty symmetric diffe
   // `registerTool` wrapper call through it, so `mod_describe_kinds`/
   // `mod_describe` (direct) and the other seven (wrapper) are ALL
   // instrumented the same way the m23-cw/m39-f pair already proved.
-  assert.equal(instrumented.length, 232, `expected 232 instrumented registrations, got ${instrumented.length}`);
+  // m39-dm MCP mirror: 232 -> 236 with the drum machine's four tools —
+  // `instrument_set_drum_param`/`instrument_load_drum_preset` (wrapper),
+  // `instrument_describe_drum_kit` (wrapper, the `instrument_describe_synth`
+  // precedent), `instrument_list_drum_presets` (direct, the
+  // `instrument_list_sound_banks` precedent) — all four instrumented the
+  // same way, since both registration paths run through the same patched
+  // `server.registerTool` underneath. `track_set_instrument`'s new
+  // `drumSynth` kind and `drumKit` param add zero, being additions to an
+  // already-instrumented tool.
+  assert.equal(instrumented.length, 236, `expected 236 instrumented registrations, got ${instrumented.length}`);
 
   const listed = await client.listTools();
   const listedNames = new Set(listed.tools.map((t) => t.name));

@@ -51,6 +51,9 @@ extension AppModel {
             trackNameForID: { [weak store] id in
                 store?.tracks.first { $0.id == id }?.name
             },
+            oneShot: { [unowned self] in self.padGridOneShot() },
+            setOneShot: { [unowned self] on in self.padGridSetOneShot(on) },
+            setZones: { [unowned self] zones in self.padGridSetZones(zones) },
             chopAction: { [weak store] clipID, settings, mute in
                 guard let store else { throw DebugError("project store unavailable") }
                 return try await store.sliceClipToSampler(
@@ -176,6 +179,69 @@ extension AppModel {
         return track.clips.contains { $0.isAIGenerated }
     }
 
+    /// The pad target's global one-shot flag, or nil when the active track is
+    /// not a built-in sampler.
+    ///
+    /// ⚠️ Resolved through `activeTrackID` and `resolvedSampler` — the SAME two
+    /// steps `padGridZones()` takes, deliberately. A row that read the flag off
+    /// a different track than the one whose pads are drawn would be a setting
+    /// for an instrument the user is not looking at.
+    func padGridOneShot() -> Bool? {
+        padGridSampler()?.oneShot
+    }
+
+    /// Writes it. Returns the store's refusal, or nil on success.
+    ///
+    /// ⛔ **THROUGH `store.setInstrument(id:sampler:)` — the one home.** That is
+    /// the exact method `track.setInstrument`'s sampler payload and the sampler
+    /// editor card's `applySampler` both call, so the pad row, the card and the
+    /// wire cannot end up with three different ideas of what one-shot means.
+    /// It is a WHOLESALE apply (it re-validates every zone file), which is why
+    /// the model guards against a redundant write before calling this.
+    func padGridSetOneShot(_ on: Bool) -> String? {
+        guard let id = activeTrackID, var params = padGridSampler() else {
+            return "This track is not playing the built-in Sampler."
+        }
+        params.oneShot = on
+        do {
+            _ = try store.setInstrument(id: id, sampler: params)
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
+    /// Replaces the pad target's whole keymap. Returns the store's refusal, or
+    /// nil on success. SIXTEEN LEVELS' one write.
+    ///
+    /// ⛔ Same one home as `padGridSetOneShot` — `store.setInstrument(id:sampler:)`
+    /// — so a spread lands through the identical path a wire `track.setInstrument`
+    /// takes, undo included.
+    func padGridSetZones(_ zones: [SamplerZone]) -> String? {
+        guard let id = activeTrackID, var params = padGridSampler() else {
+            return "This track is not playing the built-in Sampler."
+        }
+        params.zones = zones
+        do {
+            _ = try store.setInstrument(id: id, sampler: params)
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
+    /// The active track's sampler params, or nil. ⚠️ ONE resolution, shared by
+    /// the read and the write above: two copies of this guard chain could drift
+    /// into reading one track and writing another.
+    private func padGridSampler() -> SamplerParams? {
+        guard let id = activeTrackID,
+              let track = store.tracks.first(where: { $0.id == id }),
+              track.kind == .instrument,
+              let instrument = track.instrument,
+              instrument.kind == .sampler else { return nil }
+        return instrument.resolvedSampler
+    }
+
     /// What the chop card would consume — the selected clip, described.
     func padGridChopSource() -> PadChopSource? {
         guard let clipID = selectedClipID else { return nil }
@@ -196,7 +262,8 @@ extension AppModel {
 
     /// `debug.padGrid {padDown?, padY?, padUp?, bank?, baseNote?, openChop?,
     /// closeChop?, mode?, sensitivity?, divisions?, gridBeats?, maxSlices?,
-    /// chopBaseNote?, includeHead?, muteSourceTrack?, chop?}` — drives the SAME
+    /// chopBaseNote?, includeHead?, muteSourceTrack?, triggerMode?, levels?,
+    /// levelsFromPad?, exitLevels?, chop?}` — drives the SAME
     /// instances `debug.captureUI` renders, and reports what they hold.
     ///
     /// ⛔ **APP TIER. Deliberately OFF `allCommands` and off MCP**, the
@@ -233,6 +300,13 @@ extension AppModel {
         if let raw = params["chopBaseNote"]?.doubleValue { padGrid.chop.baseNote = Int(raw) }
         if let raw = params["includeHead"]?.boolValue { padGrid.chop.includeHead = raw }
         if let raw = params["muteSourceTrack"]?.boolValue { padGrid.muteSourceTrack = raw }
+        if let raw = params["triggerMode"]?.stringValue {
+            guard let value = PadTriggerMode(rawValue: raw) else {
+                throw DebugError("'\(raw)' is not a pad trigger mode — one of "
+                    + PadTriggerMode.allCases.map(\.rawValue).joined(separator: " "))
+            }
+            padGrid.setTriggerMode(value)
+        }
         if params["openChop"]?.boolValue == true { openChopToPads() }
         if params["closeChop"]?.boolValue == true { closeChopToPads() }
         if let raw = params["padDown"]?.doubleValue {
@@ -242,6 +316,11 @@ extension AppModel {
             padGridDown(index: Int(raw),
                         normalizedY: params["padY"]?.doubleValue ?? 0.5)
         }
+        if params["levels"]?.boolValue == true { padGrid.toggleLevels() }
+        if let raw = params["levelsFromPad"]?.doubleValue {
+            padGrid.enterLevels(fromPad: Int(raw))
+        }
+        if params["exitLevels"]?.boolValue == true { padGrid.exitLevels() }
         if params["padUp"]?.boolValue == true { padGridUp() }
         if params["chop"]?.boolValue == true { runChopToPads() }
         return padGridStateResponse()
@@ -277,6 +356,20 @@ extension AppModel {
                 ])
             } ?? .null,
             "muteSourceTrack": .bool(padGrid.muteSourceTrack),
+            // ⚠️ null is a REAL value here — "the target is not a sampler", not
+            // "false". A gate reading a bool would green on a track with no
+            // pads at all.
+            "triggerMode": padGrid.triggerMode.map { JSONValue.string($0.rawValue) } ?? .null,
+            "triggerModeError": padGrid.lastTriggerModeError.map { JSONValue.string($0) } ?? .null,
+            "levelsArming": .bool(padGrid.levelsArming),
+            "levels": padGrid.levels.map {
+                JSONValue.object([
+                    "sourceOrdinal": .number(Double($0.sourceOrdinal)),
+                    "base": .number(Double($0.base)),
+                    "homeBaseNote": .number(Double($0.homeBaseNote)),
+                ])
+            } ?? .null,
+            "levelsError": padGrid.lastLevelsError.map { JSONValue.string($0) } ?? .null,
             "lastChop": padGrid.lastChop.map {
                 JSONValue.object([
                     "sliceCount": .number(Double($0.sliceCount)),
@@ -299,6 +392,8 @@ extension AppModel {
                     "loaded": .bool(pad.isLoaded),
                     "playing": .bool(pad.isPlaying),
                     "slice": pad.sliceOrdinal.map { JSONValue.number(Double($0)) } ?? .null,
+                    "levelsSemitones":
+                        pad.levelsSemitones.map { JSONValue.number(Double($0)) } ?? .null,
                     "ai": .bool(pad.isAITouched),
                 ])
             }),

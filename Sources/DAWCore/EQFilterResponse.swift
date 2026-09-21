@@ -128,6 +128,46 @@ public enum EQFilterResponse {
         return EQBiquad(b0: b0 / a0, b1: b1 / a0, b2: b2 / a0, a1: a1 / a0, a2: a2 / a0)
     }
 
+    /// One RBJ **band-pass** section at `q`, normalized by a0 — the
+    /// CONSTANT-0-dB-PEAK-GAIN form, not the constant-skirt one (m39-ae).
+    ///
+    /// ⛔ **THE CHOICE OF FORM IS LOAD-BEARING AND IT IS NOT A STYLE CALL.**
+    /// RBJ gives two band-passes. The constant-SKIRT form peaks at `q` — so at
+    /// Q 4 it hands the thing downstream a 12 dB boost that nobody asked for.
+    /// This form peaks at exactly 1.0 (0 dB) at `freq` for EVERY Q, which is
+    /// what its one caller needs: `CompressorEffect`'s de-ess detector compares
+    /// the filtered signal against `thresholdDb`, and a threshold has to mean
+    /// the same number of dBFS whether the detector is banded or broadband.
+    /// With the skirt form, widening the band would silently lower the
+    /// effective threshold.
+    ///
+    /// Same render-thread contract as `gainBand` and `cutSection`: pure libm,
+    /// no allocation. The `min(freq, sampleRate * 0.49)` Nyquist clamp is the
+    /// same one and is written the same way ON PURPOSE — a second spelling of
+    /// the same clamp is how two filters in one tree come to disagree at
+    /// 32 kHz.
+    ///
+    /// ⚠️ This is NOT part of the EQ's 8-slot plan and no EQ band uses it. It
+    /// lives here because this file is the tree's ONE HOME for RBJ coefficient
+    /// math — `RingModEffect` already reaches in for `cutSection` — and a
+    /// second copy of the cookbook inside an effect is exactly the drift this
+    /// file exists to prevent.
+    public static func bandPassSection(freq: Double, q: Double,
+                                       sampleRate: Double) -> EQBiquad {
+        let f = min(freq, sampleRate * 0.49)
+        let w0 = 2.0 * Double.pi * f / sampleRate
+        let cosW0 = cos(w0)
+        let sinW0 = sin(w0)
+        let alpha = sinW0 / (2.0 * q)
+        let b0 = alpha
+        let b1 = 0.0
+        let b2 = -alpha
+        let a0 = 1.0 + alpha
+        let a1 = -2.0 * cosW0
+        let a2 = 1.0 - alpha
+        return EQBiquad(b0: b0 / a0, b1: b1 / a0, b2: b2 / a0, a1: a1 / a0, a2: a2 / a0)
+    }
+
     // MARK: - The render plan (EQEffect's deriveRenderParams, verbatim)
 
     /// Fills caller-owned storage — `coefficients` is `sectionCount` × 5

@@ -83,6 +83,151 @@ struct AutomationCommandTests {
         #expect(bad.error == "automation target does not resolve on that track")
     }
 
+    /// m39-ad. `mcp-server/README.md`, `mcp-server/src/server.ts` and the
+    /// `daw-wire-reference` skill all tell an agent that an `automation.setLane`
+    /// on `saturator.oversampling` "errors like an unknown param". That is a
+    /// claim about THE WIRE, and until this test it was only pinned one layer
+    /// down (`AutomationTarget.valueRange == nil` in DAWCore). A doc sentence
+    /// about an error message deserves an assertion on the error message.
+    ///
+    /// ⭐ THE CONTROL IS THE POINT. `.clipper` has a param with the SAME NAME,
+    /// the same 1/2/4 values and the same snapping, and its lane is ACCEPTED.
+    /// Without that leg, a defect that refused EVERY `oversampling` lane — or
+    /// every lane at all — would look identical to a pass. The asymmetry is
+    /// deliberate and it is the whole reason this pair exists:
+    ///   * `clipper` reports a CONSTANT 32 samples of latency at every factor,
+    ///     so moving its factor from the render thread changes no timing and
+    ///     the plugin-delay-compensation plan stays correct.
+    ///   * `saturator` reports 0 at factor 1 and 32 at 2/4. An automation lane
+    ///     would move that factor from the RENDER thread, where nothing can
+    ///     rebuild the compensation plan — every other track in the project
+    ///     would silently slip 32 samples out of alignment. So the lane is
+    ///     refused at the door instead.
+    @Test("m39-ad: a saturator.oversampling lane is refused on the wire, while the clipper's identical param is accepted")
+    func addLaneRefusesSaturatorOversamplingButAcceptsTheClippers() async throws {
+        let (router, _) = makeRouter()
+        let trackID = await addTrack(router, name: "Vox", kind: "audio")
+
+        func addEffect(_ kind: String) async throws -> String {
+            let response = await router.handle(ControlRequest(
+                id: "fx-\(kind)", command: "fx.add",
+                params: ["trackId": .string(trackID.uuidString), "kind": .string(kind)]
+            ))
+            #expect(response.ok, Comment(rawValue: "fx.add \(kind) failed: \(response.error ?? "-")"))
+            return try #require(response.result?["effectId"]?.stringValue)
+        }
+        let saturatorID = try await addEffect("saturator")
+        let clipperID = try await addEffect("clipper")
+
+        func lane(_ effectID: String, _ param: String) async -> ControlResponse {
+            await addLane(router, trackID: trackID, target: .object([
+                "type": .string("effectParam"),
+                "effectId": .string(effectID),
+                "param": .string(param),
+            ]))
+        }
+
+        // 1. THE CLAIM: refused, with the unknown-param wording the docs quote.
+        let refused = await lane(saturatorID, "oversampling")
+        #expect(!refused.ok)
+        #expect(refused.error == "automation target does not resolve on that track")
+
+        // 2. POSITIVE CONTROL A — the same effect's OTHER params still take a
+        //    lane, so this is a refusal of one param and not of the saturator.
+        for param in ["driveDb", "mix", "outputDb"] {
+            let accepted = await lane(saturatorID, param)
+            #expect(accepted.ok, Comment(rawValue: "saturator.\(param) should still accept a lane"))
+        }
+
+        // 3. POSITIVE CONTROL B — the CONFUSABLE one. Same param name, other
+        //    kind, ACCEPTED. If this ever starts failing, the refusal above has
+        //    been implemented by param NAME instead of by (kind, param).
+        let clipperLane = await lane(clipperID, "oversampling")
+        #expect(clipperLane.ok,
+                Comment(rawValue: "clipper.oversampling must remain automatable: \(clipperLane.error ?? "-")"))
+        #expect(clipperLane.result?["lane"]?["target"]?["param"]?.stringValue == "oversampling")
+
+        // 4. Nothing was half-stored: the track carries exactly the four lanes
+        //    that were accepted, and none of them is the saturator's factor.
+        let snapshot = await router.handle(ControlRequest(id: "snap", command: "project.snapshot"))
+        let tracks = try #require(snapshot.result?["tracks"]?.arrayValue)
+        let vox = try #require(tracks.first(where: { $0["id"]?.stringValue == trackID.uuidString }))
+        let lanes = try #require(vox["automation"]?.arrayValue)
+        #expect(lanes.count == 4, Comment(rawValue: "expected 4 lanes, got \(lanes.count)"))
+        let saturatorLaneParams = lanes
+            .filter { $0["target"]?["effectId"]?.stringValue == saturatorID }
+            .compactMap { $0["target"]?["param"]?.stringValue }
+            .sorted()
+        #expect(saturatorLaneParams == ["driveDb", "mix", "outputDb"])
+    }
+
+    /// ⭐ m39-af — **`.dynamicEQ` REFUSES NO LANE, AND THE OMISSION FROM
+    /// `Automation.swift` IS A DECISION RATHER THAN AN OVERSIGHT.** The two
+    /// reasons this tree has ever refused a lane are both absent from this kind:
+    /// nothing about it needs tempo math off the render thread (the
+    /// `delay.sync` reason), and its `latencySamples` is a LITERAL 0 at every
+    /// setting of every param — minimum-phase IIR, no delay line, no lookahead
+    /// — so there is no PDC plan a render-thread store could leave stale (the
+    /// `saturator.oversampling` reason). Lookahead was rejected for exactly
+    /// this: it would have made the latency parameter-dependent and forced a
+    /// refusal here.
+    ///
+    /// ⚠️ **32 LANES IS HALF A STRIP'S ENTIRE BUDGET** — effect-param lanes and
+    /// modulated effect params share ONE 64-entry cap per strip and the excess
+    /// is dropped by a bare `.prefix`. This test sits at 32 deliberately: it
+    /// proves all 32 resolve AND that 32 still fits, which is the number the
+    /// `band1Mode` note tells an agent about.
+    @Test("m39-af: all 32 dynamicEQ params take an automation lane, and all 32 are stored")
+    func dynamicEQAcceptsALaneOnEveryOneOfItsThirtyTwoParams() async throws {
+        let (router, _) = makeRouter()
+        let trackID = await addTrack(router, name: "Vox", kind: "audio")
+        let fx = await router.handle(ControlRequest(
+            id: "fx", command: "fx.add",
+            params: ["trackId": .string(trackID.uuidString), "kind": .string("dynamicEQ")]
+        ))
+        #expect(fx.ok, Comment(rawValue: "fx.add dynamicEQ failed: \(fx.error ?? "-")"))
+        let effectID = try #require(fx.result?["effectId"]?.stringValue)
+
+        let names = EffectParamSpec.specs(for: .dynamicEQ).map(\.name)
+        #expect(names.count == 32)
+        var refused: [String] = []
+        for name in names {
+            let response = await addLane(router, trackID: trackID, target: .object([
+                "type": .string("effectParam"),
+                "effectId": .string(effectID),
+                "param": .string(name),
+            ]))
+            if !response.ok { refused.append(name) }
+            #expect(response.result?["lane"]?["target"]?["param"]?.stringValue == name
+                        || !response.ok)
+        }
+        #expect(refused.isEmpty, Comment(rawValue: "these dynamicEQ params were refused a "
+            + "lane: \(refused). This kind refuses none — check Automation.swift."))
+
+        // → and all 32 were STORED, not half-accepted. A lane that resolves at
+        //   the door and then vanishes is the failure this leg adds over the
+        //   loop above.
+        let snapshot = await router.handle(ControlRequest(id: "snap", command: "project.snapshot"))
+        let tracks = try #require(snapshot.result?["tracks"]?.arrayValue)
+        let vox = try #require(tracks.first { $0["id"]?.stringValue == trackID.uuidString })
+        let stored = try #require(vox["automation"]?.arrayValue)
+            .compactMap { $0["target"]?["param"]?.stringValue }
+        #expect(Set(stored) == Set(names),
+                Comment(rawValue: "stored \(stored.count) of 32 lanes; missing "
+                    + "\(Set(names).subtracting(stored).sorted())"))
+
+        // ⭐ NEGATIVE CONTROL: a name this kind does NOT have is still refused,
+        // so "all 32 resolved" is a statement about the table rather than about
+        // the door being open to anything.
+        let bogus = await addLane(router, trackID: trackID, target: .object([
+            "type": .string("effectParam"),
+            "effectId": .string(effectID),
+            "param": .string("band5Mode"),
+        ]))
+        #expect(!bogus.ok, "a nonexistent band took a lane")
+        #expect(bogus.error == "automation target does not resolve on that track")
+    }
+
     @Test("addLane rejects a malformed target type before touching the store")
     func addLaneRejectsBadTargetType() async throws {
         let (router, _) = makeRouter()

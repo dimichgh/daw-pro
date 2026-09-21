@@ -539,6 +539,151 @@ private func renderVariant(set: String, variant: [String: Any], outDir: URL) asy
                     bindings[bindAs] = sliceResult.createdTrackId ?? sliceResult.trackId
                 }
 
+            case "instrument.setSamplerParam":
+                // The sampler GLOBALS, so a demo can render what the pad grid's
+                // LET GO switch does. `oneShot` is the one this exists for: a
+                // tap in gate mode is a ~50 ms blip and in one-shot mode is the
+                // whole slice, and that difference is the entire point of the
+                // control — but it is INAUDIBLE in a spec that cannot set it.
+                //
+                // ⚠️ REJECT UNKNOWN KEYS — the `clip.sliceToSampler` reason.
+                let globalKnown: Set<String> = ["trackId", "oneShot", "attack", "release", "gain"]
+                let globalUnknown = params.keys.filter { !globalKnown.contains($0) }.sorted()
+                guard globalUnknown.isEmpty else {
+                    throw DemoRenderError(message:
+                        "instrument.setSamplerParam got unknown key(s) "
+                        + globalUnknown.joined(separator: ", ")
+                        + " — known keys: " + globalKnown.sorted().joined(separator: ", "))
+                }
+                let globalTrackID = try requireID(params, "trackId", bindings: bindings)
+                guard let globalTrack = store.tracks.first(where: { $0.id == globalTrackID }),
+                      let globalInstrument = globalTrack.instrument,
+                      globalInstrument.kind == .sampler else {
+                    throw DemoRenderError(message:
+                        "instrument.setSamplerParam needs a track playing the built-in Sampler")
+                }
+                var globalParams = globalInstrument.resolvedSampler
+                if let v = params["oneShot"] as? Bool { globalParams.oneShot = v }
+                if let v = num(params["attack"]) { globalParams.attack = v }
+                if let v = num(params["release"]) { globalParams.release = v }
+                if let v = num(params["gain"]) { globalParams.gain = v }
+                _ = try store.setInstrument(id: globalTrackID, sampler: globalParams)
+                narrate("  # sampler: oneShot=\(globalParams.oneShot) "
+                        + "release=\(globalParams.release)s")
+
+            case "instrument.spreadSlice":
+                // SIXTEEN LEVELS (m39-levels) in the harness, so a demo can
+                // RENDER what the LEVELS switch does rather than describe it.
+                //
+                // ⛔⛔ **IT CALLS `SixteenLevels.zone(from:base:)` — THE PRODUCT'S
+                // OWN BUILDER — AND THAT IS THE ONLY REASON THIS COMMAND IS
+                // WORTH HAVING.** Hand-rolling a widened zone in the spec JSON
+                // would render a sound the app cannot make, and a demo that
+                // proves the harness can transpose a sample proves nothing
+                // about the feature. (`SixteenLevels` was moved from DAWAppKit
+                // to DAWCore for exactly this: this executable links DAWCore +
+                // DAWEngine only, never a surface module.)
+                //
+                // ⚠️ REJECT UNKNOWN KEYS — the `clip.sliceToSampler` reason.
+                let spreadKnown: Set<String> = ["trackId", "sliceIndex", "base"]
+                let spreadUnknown = params.keys.filter { !spreadKnown.contains($0) }.sorted()
+                guard spreadUnknown.isEmpty else {
+                    throw DemoRenderError(message:
+                        "instrument.spreadSlice got unknown key(s) "
+                        + spreadUnknown.joined(separator: ", ")
+                        + " — known keys: " + spreadKnown.sorted().joined(separator: ", "))
+                }
+                let spreadTrackID = try requireID(params, "trackId", bindings: bindings)
+                guard let spreadTrack = store.tracks.first(where: { $0.id == spreadTrackID }),
+                      let spreadInstrument = spreadTrack.instrument,
+                      spreadInstrument.kind == .sampler else {
+                    throw DemoRenderError(message:
+                        "instrument.spreadSlice needs a track playing the built-in Sampler")
+                }
+                var spreadParams = spreadInstrument.resolvedSampler
+                // 1-based in the spec, because the grid says "slice 3" and a
+                // spec that said 2 for that would be a translation the reader
+                // has to do every time.
+                let sliceOrdinal = Int(num(params["sliceIndex"]) ?? 1)
+                let ordered = spreadParams.zones.sorted { $0.rootPitch < $1.rootPitch }
+                guard sliceOrdinal >= 1, sliceOrdinal <= ordered.count else {
+                    throw DemoRenderError(message:
+                        "instrument.spreadSlice sliceIndex \(sliceOrdinal) is outside "
+                        + "1…\(ordered.count)")
+                }
+                let spreadSource = ordered[sliceOrdinal - 1]
+                guard let spreadBase = num(params["base"]).map({ Int($0) })
+                        ?? SixteenLevels.freeBase(zones: spreadParams.zones) else {
+                    throw DemoRenderError(message:
+                        "instrument.spreadSlice found no free \(SixteenLevels.span)-key window "
+                        + "— this keymap fills the keyboard")
+                }
+                let spreadZone = SixteenLevels.zone(from: spreadSource, base: spreadBase)
+                // ⭐ ADDED, never substituted — the feature's whole design rule.
+                // A harness that REPLACED the keymap here would render a demo of
+                // a build the app deliberately does not ship.
+                spreadParams.zones.append(spreadZone)
+                _ = try store.setInstrument(id: spreadTrackID, sampler: spreadParams)
+                narrate("  # levels: slice \(sliceOrdinal) spread over notes "
+                        + "\(spreadBase)…\(spreadBase + SixteenLevels.span - 1), "
+                        + "\(spreadParams.zones.count) zone(s) on the track")
+
+            // m39-dm: the drum machine's two SPEC-SHAPED verbs. Named and keyed
+            // to match the real wire exactly (`instrument.loadDrumPreset` takes
+            // trackId/name; `instrument.setDrumParam` takes trackId/name/value),
+            // so one spec reads the same whichever render path runs it. The
+            // other two drum verbs are READS — `describeDrumKit` and
+            // `listDrumPresets` — which a deterministic render spec has no use
+            // for, so they are deliberately absent rather than stubbed.
+            //
+            // ⚠️ `drumKit` is NOT added to `track.setInstrument`'s known-key set
+            // above, on purpose. A spec that hand-writes 75 numbers is a
+            // transcription-error farm, and the loud unknown-key error is the
+            // thing that stops one being written by accident.
+            case "instrument.loadDrumPreset":
+                let presetKnown: Set<String> = ["trackId", "name"]
+                let presetUnknown = params.keys.filter { !presetKnown.contains($0) }.sorted()
+                guard presetUnknown.isEmpty else {
+                    throw DemoRenderError(message:
+                        "instrument.loadDrumPreset got unknown key(s) "
+                        + presetUnknown.joined(separator: ", ")
+                        + " — known keys: " + presetKnown.sorted().joined(separator: ", "))
+                }
+                let presetTrackID = try requireID(params, "trackId", bindings: bindings)
+                let presetName = try requireString(params, "name")
+                guard let drumPreset = DrumKitParams.preset(named: presetName) else {
+                    throw DemoRenderError(message:
+                        "unknown drum preset '\(presetName)' — valid names: "
+                        + DrumKitParams.presets.map(\.name).joined(separator: ", "))
+                }
+                _ = try store.setInstrument(id: presetTrackID, drumKit: drumPreset.params)
+                narrate("  # drum kit: loaded preset '\(drumPreset.name)' "
+                        + "(\(DrumKitParams.paramSpecs.count) parameters replaced)")
+
+            case "instrument.setDrumParam":
+                let drumKnown: Set<String> = ["trackId", "name", "value"]
+                let drumUnknown = params.keys.filter { !drumKnown.contains($0) }.sorted()
+                guard drumUnknown.isEmpty else {
+                    throw DemoRenderError(message:
+                        "instrument.setDrumParam got unknown key(s) "
+                        + drumUnknown.joined(separator: ", ")
+                        + " — known keys: " + drumKnown.sorted().joined(separator: ", "))
+                }
+                let drumTrackID = try requireID(params, "trackId", bindings: bindings)
+                let drumName = try requireString(params, "name")
+                guard let drumValue = num(params["value"]), drumValue.isFinite else {
+                    throw DemoRenderError(message:
+                        "instrument.setDrumParam 'value' must be a finite number")
+                }
+                guard DrumKitParams.spec(forParamName: drumName) != nil else {
+                    throw DemoRenderError(message:
+                        "unknown drum parameter '\(drumName)' — names are dotted, "
+                        + "like kick.decay or closedHat.tone")
+                }
+                _ = try store.setInstrument(id: drumTrackID,
+                                            drumParam: (name: drumName, value: drumValue))
+                narrate("  # drum param: \(drumName) = \(drumValue)")
+
             case "fx.add":
                 let trackID = try requireID(params, "trackId", bindings: bindings)
                 guard let kindRaw = str(params["kind"]) else {

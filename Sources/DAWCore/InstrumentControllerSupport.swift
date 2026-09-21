@@ -144,6 +144,7 @@ public enum InstrumentControllerChangeWarnings {
         case .sampler: return "the built-in sampler"
         case .audioUnit: return "the hosted Audio Unit"
         case .soundBank: return "the sound bank"
+        case .drumSynth: return "the drum machine"
         }
     }
 

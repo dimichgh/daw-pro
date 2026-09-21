@@ -123,6 +123,76 @@ public struct PadChopSummary: Equatable, Sendable {
     }
 }
 
+/// What a pad does when you LET GO — the two states the sampler can actually be
+/// in, named by what the user hears rather than by the engine's flag.
+///
+/// ⭐⭐ **THIS IS ONE BOOLEAN THAT ALREADY EXISTED, SURFACED WHERE THE HAND IS.**
+/// `SamplerParams.oneShot` has shipped for milestones, is settable over the wire
+/// (`instrument.setSamplerParam`) and has a toggle on the SAMPLER EDITOR card.
+/// None of that helped: a user chopping a vocal is looking at a pad grid, and
+/// the grid never mentioned that a *click* — mouse down and up inside one
+/// frame — is a complete gate cycle. `SliceToSampler` writes no `oneShot` on its
+/// zones (measured 2026-09-20), so every chop inherits the global `false`, and
+/// the default release is 0.05 s: **a tap on a two-second slice is a 50 ms
+/// blip.** The material is there, the pad is loaded, the light flashes, and
+/// almost nothing is heard.
+///
+/// ⚠️ **AND IT IS NOT A BUG IN THE GATE.** Holding the pad plays the slice and
+/// letting go stops it, exactly as an MPC's NOTE ON mode does; what was missing
+/// was its partner, ONE SHOT, and any way to see which one you were in.
+///
+/// ⚠️ **NAMED `triggerMode`, NOT `release`, ON PURPOSE.** `SamplerParams.release`
+/// already exists and is the amp envelope's release TIME in seconds. A second
+/// `release` meaning "what happens on note-off" would put two different things
+/// one character apart in the same sampler's vocabulary. The hardware word is
+/// used in the CODE; the UI says "LET GO: STOPS / PLAYS ON", which is the same
+/// fact in words a newcomer already has.
+public enum PadTriggerMode: String, Equatable, Sendable, CaseIterable {
+    /// `oneShot == false` — the shipped default. Note-off releases the voice
+    /// over `SamplerParams.release` (0.05 s unless changed).
+    case gate
+    /// `oneShot == true`. The engine drops the note-off on the floor
+    /// (`SamplerInstrument`, the `oneShotState` branch) and the slice runs to
+    /// its own end.
+    case oneShot
+
+    public init(oneShot: Bool) { self = oneShot ? .oneShot : .gate }
+
+    /// The engine's flag. The ONE place this enum converts.
+    public var isOneShot: Bool { self == .oneShot }
+
+    /// ⚠️ Two words each, and they finish the question the row asks —
+    /// "LET GO:" — so the chip completes a sentence rather than naming a mode
+    /// the user has to already know. MPC calls these NOTE ON and ONE SHOT;
+    /// that would be correct and would teach a newcomer nothing.
+    public var label: String {
+        switch self {
+        case .gate: return "STOPS"
+        case .oneShot: return "PLAYS ON"
+        }
+    }
+
+    public var help: String {
+        switch self {
+        case .gate:
+            return "Hold a pad to play, let go to cut it off. A quick click is a "
+                + "quick sound — good for stutters and rolls."
+        case .oneShot:
+            return "A tap plays the whole slice through, however short the tap. "
+                + "What a drum machine does, and what you want for one-hit chops. "
+                // ⚠️ SAID OUT LOUD, because the surface cannot show it. The pad
+                // light is driven by `soundingPitchSet`, which is the HAND's
+                // ledger — it clears on pointer-up while the engine happily
+                // plays the voice to its end. Rather than let the grid quietly
+                // claim silence over audible sound, the mode that causes it
+                // says so. (Making the light true needs a note-ended signal
+                // back from the engine; filed, not faked.)
+                + "The pad light follows your hand, so it goes dark while the "
+                + "slice is still sounding."
+        }
+    }
+}
+
 /// THE PAD GRID's model (m39-pads) — "which square holds which slice, and what
 /// happens when I hit it".
 ///
@@ -183,6 +253,25 @@ public final class PadGridModel {
     private var trackNameForIDProvider: (UUID) -> String?
     /// The clip the user has selected, as the chop panel needs to describe it.
     private var selectedClipProvider: () -> PadChopSource?
+    /// The pad target's global `SamplerParams.oneShot`. **nil means "not a
+    /// built-in sampler"** — a distinct third state from true/false, and the row
+    /// draws disabled on it rather than picking a default and lighting a chip
+    /// that claims a setting the track does not have.
+    private var oneShotProvider: () -> Bool?
+    /// Replaces the pad target's whole keymap. Returns the STORE's refusal or nil.
+    ///
+    /// ⚠️ WHOLESALE, because `setInstrument(id:sampler:)` is — see
+    /// `setOneShotAction`. SIXTEEN LEVELS is the only caller, and it only ever
+    /// hands over `existing + [spread]` or `existing − [spread]`.
+    private var setZonesAction: ([SamplerZone]) -> String?
+    /// Writes it, and returns the STORE's refusal or nil.
+    ///
+    /// ⚠️ **IT RETURNS AN ERROR BECAUSE THE WRITE CAN REALLY FAIL.** A sampler
+    /// apply is wholesale — `setInstrument(id:sampler:)` re-validates every zone
+    /// file — so a chop whose source moved on disk can refuse here. A toggle
+    /// that flipped in the UI and silently did not take is this tree's
+    /// characteristic failure wearing a switch.
+    private var setOneShotAction: (Bool) -> String?
     /// Runs the chop. Wired to `ProjectStore.sliceClipToSampler` — the wire's own
     /// funnel, so the panel and `clip.sliceToSampler` cannot diverge.
     private var chopAction: (UUID, SliceToSamplerSettings, Bool) async throws -> SliceToSamplerResult
@@ -228,11 +317,44 @@ public final class PadGridModel {
     /// beginner's error message on a card that already says which clip it is.
     /// Rule 6: a refusal a newcomer cannot read is one that needed rewriting.
     /// Only the id is replaced — every number and every remedy survives.
+    /// ⭐⭐ **THE UI VOCABULARY MAP — API SPELLING NEVER REACHES A PERSON.**
+    /// The store's refusals are wire contract: agents read them, tests pin them
+    /// byte-exact, and they are written in parameter names (`maxSlices`,
+    /// `sensitivity`, `minSliceSeconds`, `includeHead`). A person reading this
+    /// card sees sliders called "Most pads to make" and "How many hits to
+    /// catch", so the raw sentence tells them to raise a control that does not
+    /// exist on their screen.
+    ///
+    /// ⛔ **MEASURED ON A REAL USER, 2026-09-20.** They hit the pad ceiling and
+    /// were told *"over the maxSlices limit of 9 — Raise maxSlices, lower
+    /// sensitivity, raise minSliceSeconds"* while looking at a panel with none
+    /// of those words on it. Every number and every remedy in the sentence was
+    /// correct; the vocabulary was not theirs.
+    ///
+    /// ⚠️ **TRANSLATION HAPPENS HERE AND ONLY HERE.** Rewriting the store's
+    /// string would change a wire contract to fix a presentation problem —
+    /// which is how a UI fix breaks an agent. Keep this map in step with the
+    /// panel's `sliderRow` / `checkRow` labels; a term added to a refusal
+    /// without a row here simply passes through, which is the safe direction.
+    private static let uiTerms: [(api: String, ui: String)] = [
+        ("maxSlices", "“Most pads to make”"),
+        ("sensitivity", "“How many hits to catch”"),
+        ("minSliceSeconds", "the shortest-piece setting"),
+        ("includeHead", "“Keep the lead-in as pad 1”"),
+        ("baseNote", "“Pad 1 plays note”"),
+    ]
+
     public var lastRefusalForHumans: String? {
         guard let text = lastRefusal else { return nil }
-        guard let source = chopSource else { return text }
-        return text.replacingOccurrences(of: source.clipId.uuidString,
-                                         with: "“\(source.clipName)”")
+        var out = text
+        if let source = chopSource {
+            out = out.replacingOccurrences(of: source.clipId.uuidString,
+                                           with: "“\(source.clipName)”")
+        }
+        for (api, ui) in Self.uiTerms {
+            out = out.replacingOccurrences(of: api, with: ui)
+        }
+        return out
     }
     /// What the last successful chop produced.
     public private(set) var lastChop: PadChopSummary?
@@ -254,6 +376,9 @@ public final class PadGridModel {
                 targetIsAI: @escaping () -> Bool = { false },
                 selectedClip: @escaping () -> PadChopSource? = { nil },
                 trackNameForID: @escaping (UUID) -> String? = { _ in nil },
+                oneShot: @escaping () -> Bool? = { nil },
+                setOneShot: @escaping (Bool) -> String? = { _ in nil },
+                setZones: @escaping ([SamplerZone]) -> String? = { _ in nil },
                 chopAction: @escaping (UUID, SliceToSamplerSettings, Bool) async throws
                     -> SliceToSamplerResult = { _, _, _ in
                         throw ProjectError.engineUnavailable
@@ -264,6 +389,9 @@ public final class PadGridModel {
         self.targetIsAIProvider = targetIsAI
         self.selectedClipProvider = selectedClip
         self.trackNameForIDProvider = trackNameForID
+        self.oneShotProvider = oneShot
+        self.setOneShotAction = setOneShot
+        self.setZonesAction = setZones
         self.chopAction = chopAction
     }
 
@@ -283,6 +411,9 @@ public final class PadGridModel {
                        targetIsAI: (() -> Bool)? = nil,
                        selectedClip: (() -> PadChopSource?)? = nil,
                        trackNameForID: ((UUID) -> String?)? = nil,
+                       oneShot: (() -> Bool?)? = nil,
+                       setOneShot: ((Bool) -> String?)? = nil,
+                       setZones: (([SamplerZone]) -> String?)? = nil,
                        chopAction: ((UUID, SliceToSamplerSettings, Bool) async throws
                                     -> SliceToSamplerResult)? = nil) {
         if let zones { zonesProvider = zones }
@@ -290,6 +421,9 @@ public final class PadGridModel {
         if let targetIsAI { targetIsAIProvider = targetIsAI }
         if let selectedClip { selectedClipProvider = selectedClip }
         if let trackNameForID { trackNameForIDProvider = trackNameForID }
+        if let oneShot { oneShotProvider = oneShot }
+        if let setOneShot { setOneShotAction = setOneShot }
+        if let setZones { setZonesAction = setZones }
         if let chopAction { self.chopAction = chopAction }
         isBound = true
         bump()
@@ -352,6 +486,11 @@ public final class PadGridModel {
                                 startFrame: nil, isAITouched: false)
             }
             let zone = live.first { $0.minPitch <= pitch && pitch <= $0.maxPitch }
+            // ⭐ IN A SPREAD EVERY PAD IS THE SAME ZONE, so the slice number is
+            // replaced by the interval — sixteen squares reading "slice 7"
+            // would each play something different while all claiming to be one
+            // thing. See `PadState.levelsSemitones`.
+            let spread = levels.map { _ in SixteenLevels.semitones(forPad: index) } ?? nil
             return PadState(
                 id: index,
                 pitch: pitch,
@@ -359,9 +498,10 @@ public final class PadGridModel {
                 keyLabel: PadGridGeometry.keyLabel(forPad: index),
                 isLoaded: zone != nil,
                 isPlaying: sounding.contains(pitch),
-                sliceOrdinal: zone.flatMap { ordinals[$0.id] },
+                sliceOrdinal: spread == nil ? zone.flatMap { ordinals[$0.id] } : nil,
                 startFrame: zone?.startFrame,
-                isAITouched: zone != nil && isAI)
+                isAITouched: zone != nil && isAI,
+                levelsSemitones: spread)
         }
     }
 
@@ -416,6 +556,172 @@ public final class PadGridModel {
         bump()
     }
 
+    // MARK: - What a pad does when you let go
+
+    /// The live setting, or nil when the pad target is not a built-in sampler.
+    ///
+    /// ⚠️ **READ THROUGH, NEVER CACHED** — the same law every other reading on
+    /// this model obeys. `instrument.setSamplerParam {oneShot}` over the wire,
+    /// or the one-shot toggle on the sampler editor card, must move this row;
+    /// a stored copy would be a second answer to "what happens when I let go?"
+    /// that goes stale the moment an agent touches the sampler.
+    public var triggerMode: PadTriggerMode? {
+        oneShotProvider().map(PadTriggerMode.init(oneShot:))
+    }
+
+    /// Why the row is dead, in a sentence, or nil when it is live.
+    public var triggerModeUnavailableReason: String? {
+        guard triggerMode == nil else { return nil }
+        guard let name = targetName else {
+            return "Pick a track to choose what a pad does when you let go."
+        }
+        return "“\(name)” is not playing the built-in Sampler, so it has no pads to hold."
+    }
+
+    /// The store's refusal from the last attempt to change it, or nil.
+    public private(set) var lastTriggerModeError: String?
+
+    /// Flips it. A no-op when the value is already set, so a redundant click
+    /// does not pay for a wholesale sampler re-validation.
+    public func setTriggerMode(_ value: PadTriggerMode) {
+        guard triggerMode != value else { return }
+        lastTriggerModeError = setOneShotAction(value.isOneShot)
+        bump()
+    }
+
+    // MARK: - Sixteen Levels
+
+    /// A LIVE spread: which zone was added, which slice it came from, and where
+    /// the grid was standing before, so leaving puts it back.
+    public struct Levels: Equatable, Sendable {
+        /// The zone SIXTEEN LEVELS added. ⚠️ Removal is BY THIS ID and nothing
+        /// else — "remove the widest zone" or "remove the last one" would eat a
+        /// user's own hand-built zone the first time one existed.
+        public var spreadZoneID: UUID
+        /// 1-based slice number of the source, for the header.
+        public var sourceOrdinal: Int
+        /// Pad 1's pitch while the spread is up.
+        public var base: Int
+        /// Where the grid was, to restore on exit.
+        public var homeBaseNote: Int
+        public var homeBank: Int
+    }
+
+    public private(set) var levels: Levels?
+    /// LEVELS was pressed and the grid is waiting for the pad to spread.
+    public private(set) var levelsArming = false
+    public private(set) var lastLevelsError: String?
+
+    public var isLevels: Bool { levels != nil }
+
+    /// The header line for whichever of the three states the grid is in.
+    public var levelsStatus: String? {
+        if let levels {
+            return "Sixteen Levels · slice \(levels.sourceOrdinal) · pad 1 is the "
+                + "slice as recorded, each pad up is a semitone higher"
+        }
+        if levelsArming { return "Hit the pad holding the slice you want to play." }
+        return nil
+    }
+
+    /// Why LEVELS cannot be armed, or nil when it can.
+    public var levelsUnavailableReason: String? {
+        guard levels == nil else { return nil }
+        guard !zones.isEmpty else {
+            return "Chop something onto the pads first — Sixteen Levels spreads one "
+                + "slice across the grid."
+        }
+        guard SixteenLevels.freeBase(zones: zones) != nil else {
+            // ⚠️ NAMED, not a dimmed button. This is reachable — a 96-slice chop
+            // low on the keyboard genuinely leaves no sixteen free notes — and a
+            // control that just refuses to light teaches nothing.
+            return "This kit fills the keyboard, so there is no room for a spread. "
+                + "Chop fewer pieces, or raise “Pad 1 plays note” to free some low keys."
+        }
+        return nil
+    }
+
+    /// LEVELS pressed. Off → arming, arming → off, on → back to the chop.
+    public func toggleLevels() {
+        if levels != nil {
+            exitLevels()
+        } else if levelsArming {
+            levelsArming = false
+            bump()
+        } else if levelsUnavailableReason == nil {
+            levelsArming = true
+            lastLevelsError = nil
+            bump()
+        } else {
+            bump()
+        }
+    }
+
+    /// Spreads the slice under `padIndex` across the grid.
+    ///
+    /// ⛔⛔ **ADDS A ZONE; EDITS NOTHING.** See `SixteenLevels`'s header for why
+    /// the two obvious builds — widening the slice in place, or swapping the
+    /// keymap and remembering the original in this object — are data-loss
+    /// shapes. The chop stays exactly where it was and keeps playing on its own
+    /// notes while the spread is up.
+    @discardableResult
+    public func enterLevels(fromPad padIndex: Int) -> Bool {
+        guard levels == nil else { return false }
+        let live = zones
+        guard let pitch = PadGridGeometry.pitch(forPad: padIndex,
+                                                baseNote: baseNote, bank: bank),
+              let source = live.first(where: { $0.minPitch <= pitch && pitch <= $0.maxPitch })
+        else {
+            lastLevelsError = "That pad is empty — pick one with a slice on it."
+            bump()
+            return false
+        }
+        guard let base = SixteenLevels.freeBase(zones: live) else {
+            lastLevelsError = levelsUnavailableReason
+            bump()
+            return false
+        }
+        let spread = SixteenLevels.zone(from: source, base: base)
+        // ⚠️ THE WRITE FIRST, THE VIEW SECOND. Moving the grid before the store
+        // agreed would leave the pads pointing at sixteen empty notes with a
+        // header announcing a spread — a surface describing an edit that did
+        // not happen.
+        if let refusal = setZonesAction(live + [spread]) {
+            lastLevelsError = refusal
+            bump()
+            return false
+        }
+        levels = Levels(spreadZoneID: spread.id,
+                        sourceOrdinal: Self.sliceOrdinals(zones: live)[source.id] ?? 1,
+                        base: base,
+                        homeBaseNote: baseNote,
+                        homeBank: bank)
+        levelsArming = false
+        lastLevelsError = nil
+        typing.setPadBaseNote(base)
+        typing.setPadBank(0)
+        bump()
+        return true
+    }
+
+    /// Takes the spread away and puts the grid back on the chop.
+    ///
+    /// ⚠️ **THE GRID MOVES HOME EVEN IF THE REMOVAL IS REFUSED.** Leaving the
+    /// user parked on a spread they asked to leave, because the store could not
+    /// write, would strand them in a mode with no way out; the refusal is shown
+    /// instead. The worst case is one extra zone on unused notes, which the
+    /// sampler card can delete — strictly better than a trapped surface.
+    public func exitLevels() {
+        guard let live = levels else { return }
+        let refusal = setZonesAction(zones.filter { $0.id != live.spreadZoneID })
+        lastLevelsError = refusal
+        typing.setPadBaseNote(live.homeBaseNote)
+        typing.setPadBank(live.homeBank)
+        levels = nil
+        levelsArming = false
+        bump()
+    }
+
     // MARK: - Hitting a pad
 
     /// The pointer struck a pad of the current bank.
@@ -426,6 +732,14 @@ public final class PadGridModel {
     /// `PadGridGeometry.velocity(atNormalizedY:)` for why the velocity is shared
     /// rather than per-hit.
     public func padDown(index: Int, normalizedY: Double) {
+        // ⚠️ ARMING SWALLOWS THE HIT, AND DOES NOT SOUND IT. A tap that both
+        // picked the slice and played it would leave the user unsure which of
+        // the two just happened — and the sound would be the LAST thing they
+        // heard from this keymap anyway, since entering re-bases the grid.
+        if levelsArming {
+            enterLevels(fromPad: index)
+            return
+        }
         guard let pitch = PadGridGeometry.pitch(forPad: index,
                                                 baseNote: baseNote, bank: bank) else { return }
         // ⚠️ VELOCITY FIRST, THEN THE NOTE. `push()` reads `velocity` at the

@@ -1,0 +1,843 @@
+{
+  "set": "deesser-bytes",
+  "description": "m39-ae, THE BYTE PIN FOR THE SHIPPED COMPRESSOR. This set is a MEASUREMENT FIXTURE and not a demo: nothing in it mentions the de-esser at all, and that is the point. `.compressor` shipped long before m39-ae, so there are already user projects with one in a chain; if adding a de-ess detector changed what those projects render, every one of them would quietly change on the next open. So this fixture describes the compressor as it was, and scripts/gates/m39ae-compressor-default-bytes.mjs pins its renders as file hashes.\n\nTHE MATERIAL, and why it is what it is. One instrument track plays a sustained low sine (MIDI 64 = 329.63 Hz) for the whole 7.75 beats-worth of render, and a high sine (MIDI 117 = 7040 Hz) joins it at beat 8 = 4.0 s. That STEP is deliberate: a compressor at a steady level settles to a constant gain and pins nothing about its timing, whereas a step makes attackMs, releaseMs and the soft knee all live inside the pinned bytes. The two pitches are the same two the physics fixture (deesser.json) measures, so the two sets are directly comparable.\n\nTWO FAMILIES, because the keyed detector is a DIFFERENT BRANCH of the code. Family 1 (no-compressor / comp-default / comp-partial) inserts the compressor straight onto the instrument track and is self-keyed. Family 2 (bus-control / bus-selfkeyed / bus-keyed) sends the same voice to a bus, puts the same compressor there, and adds a second track whose pulse drives fx.setSidechain on the last variant only. m39-ae restructures the loop that reads the KEY buffers; a fixture with no keyed variant would pin the wrong half of the change. bus-selfkeyed and bus-keyed differ by exactly ONE command, so a difference between them is attributable to the key and to nothing else.\n\nEVERY VARIANT'S SOURCE IS IDENTICAL WITHIN ITS FAMILY. That is what makes the controls controls: if no-compressor's hash moves, something in the synth, the mixer, the offline renderer or the wav writer moved, and the gate refuses to score rather than blaming the compressor. If bus-control's hash moves, the same is true of the send/bus path.\n\nWHY mix 0.37 AND NOT 1. Measured on the saturator during m39-ad and it cost a whole afternoon: at mix 1 the DRY term of the blend is multiplied by zero, so an algebraically identical but differently-rounded blend is bit-exact there and passes a default-only pin AND every unit test. Only a mix strictly between 0 and 1 has every term live. kneeDb 2 (rather than the default 6 or a hard 0) is there for the same reason one step down: it keeps the quadratic knee branch on the pinned path.",
+  "variants": [
+    {
+      "name": "no-compressor",
+      "axis": "THE CONTROL: the identical source with NO effect in the chain at all, so a moved hash here means the render pipeline moved and not the compressor.",
+      "render": {
+        "durationSeconds": 9
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Voice",
+            "kind": "instrument"
+          },
+          "as": "voice"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$voice",
+            "kind": "polySynth",
+            "waveform": "sine",
+            "attack": 0.02,
+            "decay": 0,
+            "sustain": 1,
+            "release": 0.2,
+            "cutoffHz": 18000,
+            "resonance": 0,
+            "gain": 0.5,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$voice",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 64,
+                "startBeat": 0,
+                "lengthBeats": 15.5,
+                "velocity": 100
+              },
+              {
+                "pitch": 117,
+                "startBeat": 8,
+                "lengthBeats": 7.5,
+                "velocity": 100
+              }
+            ]
+          }
+        }
+      ],
+      "role": "control"
+    },
+    {
+      "name": "comp-default",
+      "axis": "a compressor added with NOTHING set - every knob at its shipped default. PINNED: it must render what it rendered before the de-ess detector existed.",
+      "render": {
+        "durationSeconds": 9
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Voice",
+            "kind": "instrument"
+          },
+          "as": "voice"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$voice",
+            "kind": "polySynth",
+            "waveform": "sine",
+            "attack": 0.02,
+            "decay": 0,
+            "sustain": 1,
+            "release": 0.2,
+            "cutoffHz": 18000,
+            "resonance": 0,
+            "gain": 0.5,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$voice",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 64,
+                "startBeat": 0,
+                "lengthBeats": 15.5,
+                "velocity": 100
+              },
+              {
+                "pitch": 117,
+                "startBeat": 8,
+                "lengthBeats": 7.5,
+                "velocity": 100
+              }
+            ]
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$voice",
+            "kind": "compressor"
+          },
+          "as": "comp"
+        }
+      ]
+    },
+    {
+      "name": "comp-partial",
+      "axis": "a compressor at NON-default settings with a PARTIAL blend (mix 0.37) and a nonzero knee, so the dry term, the makeup and the quadratic knee branch are all live. PINNED for the reason sat-partial exists: a default-only pin cannot see the blend.",
+      "render": {
+        "durationSeconds": 9
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Voice",
+            "kind": "instrument"
+          },
+          "as": "voice"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$voice",
+            "kind": "polySynth",
+            "waveform": "sine",
+            "attack": 0.02,
+            "decay": 0,
+            "sustain": 1,
+            "release": 0.2,
+            "cutoffHz": 18000,
+            "resonance": 0,
+            "gain": 0.5,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$voice",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 64,
+                "startBeat": 0,
+                "lengthBeats": 15.5,
+                "velocity": 100
+              },
+              {
+                "pitch": 117,
+                "startBeat": 8,
+                "lengthBeats": 7.5,
+                "velocity": 100
+              }
+            ]
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$voice",
+            "kind": "compressor",
+            "params": {
+              "thresholdDb": -24,
+              "ratio": 6,
+              "attackMs": 3,
+              "releaseMs": 80,
+              "kneeDb": 2,
+              "makeupDb": 4,
+              "mix": 0.37
+            }
+          },
+          "as": "comp"
+        }
+      ]
+    },
+    {
+      "name": "bus-control",
+      "axis": "THE SECOND CONTROL: family 2's source (voice + key track + bus + send) with NO effect anywhere, so the send/bus half of the pipeline is pinned separately from the insert.",
+      "render": {
+        "durationSeconds": 9
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Voice",
+            "kind": "instrument"
+          },
+          "as": "voice"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$voice",
+            "kind": "polySynth",
+            "waveform": "sine",
+            "attack": 0.02,
+            "decay": 0,
+            "sustain": 1,
+            "release": 0.2,
+            "cutoffHz": 18000,
+            "resonance": 0,
+            "gain": 0.5,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$voice",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 64,
+                "startBeat": 0,
+                "lengthBeats": 15.5,
+                "velocity": 100
+              },
+              {
+                "pitch": 117,
+                "startBeat": 8,
+                "lengthBeats": 7.5,
+                "velocity": 100
+              }
+            ]
+          }
+        },
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Key",
+            "kind": "instrument"
+          },
+          "as": "key"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$key",
+            "kind": "polySynth",
+            "waveform": "sine",
+            "attack": 0.001,
+            "decay": 0.1,
+            "sustain": 0,
+            "release": 0.05,
+            "cutoffHz": 400,
+            "resonance": 0.1,
+            "gain": 0.9,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$key",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 36,
+                "startBeat": 0,
+                "lengthBeats": 0.12,
+                "velocity": 110
+              },
+              {
+                "pitch": 36,
+                "startBeat": 1,
+                "lengthBeats": 0.12,
+                "velocity": 110
+              },
+              {
+                "pitch": 36,
+                "startBeat": 2,
+                "lengthBeats": 0.12,
+                "velocity": 110
+              },
+              {
+                "pitch": 36,
+                "startBeat": 3,
+                "lengthBeats": 0.12,
+                "velocity": 110
+              },
+              {
+                "pitch": 36,
+                "startBeat": 4,
+                "lengthBeats": 0.12,
+                "velocity": 110
+              },
+              {
+                "pitch": 36,
+                "startBeat": 5,
+                "lengthBeats": 0.12,
+                "velocity": 110
+              },
+              {
+                "pitch": 36,
+                "startBeat": 6,
+                "lengthBeats": 0.12,
+                "velocity": 110
+              },
+              {
+                "pitch": 36,
+                "startBeat": 7,
+                "lengthBeats": 0.12,
+                "velocity": 110
+              },
+              {
+                "pitch": 36,
+                "startBeat": 8,
+                "lengthBeats": 0.12,
+                "velocity": 110
+              },
+              {
+                "pitch": 36,
+                "startBeat": 9,
+                "lengthBeats": 0.12,
+                "velocity": 110
+              },
+              {
+                "pitch": 36,
+                "startBeat": 10,
+                "lengthBeats": 0.12,
+                "velocity": 110
+              },
+              {
+                "pitch": 36,
+                "startBeat": 11,
+                "lengthBeats": 0.12,
+                "velocity": 110
+              },
+              {
+                "pitch": 36,
+                "startBeat": 12,
+                "lengthBeats": 0.12,
+                "velocity": 110
+              },
+              {
+                "pitch": 36,
+                "startBeat": 13,
+                "lengthBeats": 0.12,
+                "velocity": 110
+              },
+              {
+                "pitch": 36,
+                "startBeat": 14,
+                "lengthBeats": 0.12,
+                "velocity": 110
+              },
+              {
+                "pitch": 36,
+                "startBeat": 15,
+                "lengthBeats": 0.12,
+                "velocity": 110
+              }
+            ]
+          }
+        },
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Voice Bus",
+            "kind": "bus"
+          },
+          "as": "bus"
+        },
+        {
+          "command": "track.addSend",
+          "params": {
+            "trackId": "$voice",
+            "busId": "$bus",
+            "level": 1
+          }
+        }
+      ],
+      "role": "control"
+    },
+    {
+      "name": "bus-selfkeyed",
+      "axis": "the SAME compressor on the bus, SELF-keyed (no fx.setSidechain). The partner of bus-keyed: the two differ by exactly one command.",
+      "render": {
+        "durationSeconds": 9
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Voice",
+            "kind": "instrument"
+          },
+          "as": "voice"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$voice",
+            "kind": "polySynth",
+            "waveform": "sine",
+            "attack": 0.02,
+            "decay": 0,
+            "sustain": 1,
+            "release": 0.2,
+            "cutoffHz": 18000,
+            "resonance": 0,
+            "gain": 0.5,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$voice",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 64,
+                "startBeat": 0,
+                "lengthBeats": 15.5,
+                "velocity": 100
+              },
+              {
+                "pitch": 117,
+                "startBeat": 8,
+                "lengthBeats": 7.5,
+                "velocity": 100
+              }
+            ]
+          }
+        },
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Key",
+            "kind": "instrument"
+          },
+          "as": "key"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$key",
+            "kind": "polySynth",
+            "waveform": "sine",
+            "attack": 0.001,
+            "decay": 0.1,
+            "sustain": 0,
+            "release": 0.05,
+            "cutoffHz": 400,
+            "resonance": 0.1,
+            "gain": 0.9,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$key",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 36,
+                "startBeat": 0,
+                "lengthBeats": 0.12,
+                "velocity": 110
+              },
+              {
+                "pitch": 36,
+                "startBeat": 1,
+                "lengthBeats": 0.12,
+                "velocity": 110
+              },
+              {
+                "pitch": 36,
+                "startBeat": 2,
+                "lengthBeats": 0.12,
+                "velocity": 110
+              },
+              {
+                "pitch": 36,
+                "startBeat": 3,
+                "lengthBeats": 0.12,
+                "velocity": 110
+              },
+              {
+                "pitch": 36,
+                "startBeat": 4,
+                "lengthBeats": 0.12,
+                "velocity": 110
+              },
+              {
+                "pitch": 36,
+                "startBeat": 5,
+                "lengthBeats": 0.12,
+                "velocity": 110
+              },
+              {
+                "pitch": 36,
+                "startBeat": 6,
+                "lengthBeats": 0.12,
+                "velocity": 110
+              },
+              {
+                "pitch": 36,
+                "startBeat": 7,
+                "lengthBeats": 0.12,
+                "velocity": 110
+              },
+              {
+                "pitch": 36,
+                "startBeat": 8,
+                "lengthBeats": 0.12,
+                "velocity": 110
+              },
+              {
+                "pitch": 36,
+                "startBeat": 9,
+                "lengthBeats": 0.12,
+                "velocity": 110
+              },
+              {
+                "pitch": 36,
+                "startBeat": 10,
+                "lengthBeats": 0.12,
+                "velocity": 110
+              },
+              {
+                "pitch": 36,
+                "startBeat": 11,
+                "lengthBeats": 0.12,
+                "velocity": 110
+              },
+              {
+                "pitch": 36,
+                "startBeat": 12,
+                "lengthBeats": 0.12,
+                "velocity": 110
+              },
+              {
+                "pitch": 36,
+                "startBeat": 13,
+                "lengthBeats": 0.12,
+                "velocity": 110
+              },
+              {
+                "pitch": 36,
+                "startBeat": 14,
+                "lengthBeats": 0.12,
+                "velocity": 110
+              },
+              {
+                "pitch": 36,
+                "startBeat": 15,
+                "lengthBeats": 0.12,
+                "velocity": 110
+              }
+            ]
+          }
+        },
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Voice Bus",
+            "kind": "bus"
+          },
+          "as": "bus"
+        },
+        {
+          "command": "track.addSend",
+          "params": {
+            "trackId": "$voice",
+            "busId": "$bus",
+            "level": 1
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$bus",
+            "kind": "compressor",
+            "params": {
+              "thresholdDb": -24,
+              "ratio": 6,
+              "attackMs": 3,
+              "releaseMs": 80,
+              "kneeDb": 2,
+              "makeupDb": 4,
+              "mix": 0.37
+            }
+          },
+          "as": "comp"
+        }
+      ]
+    },
+    {
+      "name": "bus-keyed",
+      "axis": "the SAME compressor on the bus, KEYED from the Key track. ⛔ THIS IS THE VARIANT THAT COVERS THE BRANCH m39-ae RESTRUCTURES: the keyed detector loop. A self-keyed-only pin cannot see a regression there.",
+      "render": {
+        "durationSeconds": 9
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Voice",
+            "kind": "instrument"
+          },
+          "as": "voice"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$voice",
+            "kind": "polySynth",
+            "waveform": "sine",
+            "attack": 0.02,
+            "decay": 0,
+            "sustain": 1,
+            "release": 0.2,
+            "cutoffHz": 18000,
+            "resonance": 0,
+            "gain": 0.5,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$voice",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 64,
+                "startBeat": 0,
+                "lengthBeats": 15.5,
+                "velocity": 100
+              },
+              {
+                "pitch": 117,
+                "startBeat": 8,
+                "lengthBeats": 7.5,
+                "velocity": 100
+              }
+            ]
+          }
+        },
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Key",
+            "kind": "instrument"
+          },
+          "as": "key"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$key",
+            "kind": "polySynth",
+            "waveform": "sine",
+            "attack": 0.001,
+            "decay": 0.1,
+            "sustain": 0,
+            "release": 0.05,
+            "cutoffHz": 400,
+            "resonance": 0.1,
+            "gain": 0.9,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$key",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 36,
+                "startBeat": 0,
+                "lengthBeats": 0.12,
+                "velocity": 110
+              },
+              {
+                "pitch": 36,
+                "startBeat": 1,
+                "lengthBeats": 0.12,
+                "velocity": 110
+              },
+              {
+                "pitch": 36,
+                "startBeat": 2,
+                "lengthBeats": 0.12,
+                "velocity": 110
+              },
+              {
+                "pitch": 36,
+                "startBeat": 3,
+                "lengthBeats": 0.12,
+                "velocity": 110
+              },
+              {
+                "pitch": 36,
+                "startBeat": 4,
+                "lengthBeats": 0.12,
+                "velocity": 110
+              },
+              {
+                "pitch": 36,
+                "startBeat": 5,
+                "lengthBeats": 0.12,
+                "velocity": 110
+              },
+              {
+                "pitch": 36,
+                "startBeat": 6,
+                "lengthBeats": 0.12,
+                "velocity": 110
+              },
+              {
+                "pitch": 36,
+                "startBeat": 7,
+                "lengthBeats": 0.12,
+                "velocity": 110
+              },
+              {
+                "pitch": 36,
+                "startBeat": 8,
+                "lengthBeats": 0.12,
+                "velocity": 110
+              },
+              {
+                "pitch": 36,
+                "startBeat": 9,
+                "lengthBeats": 0.12,
+                "velocity": 110
+              },
+              {
+                "pitch": 36,
+                "startBeat": 10,
+                "lengthBeats": 0.12,
+                "velocity": 110
+              },
+              {
+                "pitch": 36,
+                "startBeat": 11,
+                "lengthBeats": 0.12,
+                "velocity": 110
+              },
+              {
+                "pitch": 36,
+                "startBeat": 12,
+                "lengthBeats": 0.12,
+                "velocity": 110
+              },
+              {
+                "pitch": 36,
+                "startBeat": 13,
+                "lengthBeats": 0.12,
+                "velocity": 110
+              },
+              {
+                "pitch": 36,
+                "startBeat": 14,
+                "lengthBeats": 0.12,
+                "velocity": 110
+              },
+              {
+                "pitch": 36,
+                "startBeat": 15,
+                "lengthBeats": 0.12,
+                "velocity": 110
+              }
+            ]
+          }
+        },
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Voice Bus",
+            "kind": "bus"
+          },
+          "as": "bus"
+        },
+        {
+          "command": "track.addSend",
+          "params": {
+            "trackId": "$voice",
+            "busId": "$bus",
+            "level": 1
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$bus",
+            "kind": "compressor",
+            "params": {
+              "thresholdDb": -24,
+              "ratio": 6,
+              "attackMs": 3,
+              "releaseMs": 80,
+              "kneeDb": 2,
+              "makeupDb": 4,
+              "mix": 0.37
+            }
+          },
+          "as": "comp"
+        },
+        {
+          "command": "fx.setSidechain",
+          "params": {
+            "trackId": "$bus",
+            "effectId": "$comp",
+            "sourceTrackId": "$key"
+          }
+        }
+      ]
+    }
+  ]
+}

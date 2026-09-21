@@ -119,6 +119,103 @@ struct PolySynthEditorModelTests {
         #expect(PolySynthEditorModel.waveformLabel(.sine) == "Sine")
     }
 
+    // MARK: - m39-ah: the DISCRETE census (the instrument twin of
+    //         `EffectChoiceParamTests.everyDiscreteParamAvoidsTheKnob`)
+
+    /// ⭐⭐ **THE INSTRUMENT-SIDE CENSUS, AND IT WAS FILED AGAINST A DEFECT THAT
+    /// TURNED OUT NOT TO EXIST.** m39-ah was briefed as "`PolySynthEditorOverlay`
+    /// draws every parameter as a rotary knob, so discrete choices render as
+    /// knobs" — the m39-ag defect, instrument side. It is **false as stated**:
+    /// `waveform` already draws as the OSC segmented picker
+    /// (`PolySynthEditorOverlay.oscSection`) and the card's knob table holds
+    /// seven genuinely continuous params. The intersection is empty TODAY.
+    ///
+    /// ⛔ **WHAT IS TRUE IS THAT NOTHING HELD IT THERE.**
+    /// `PolySynthEditorOverlay.groupSection` calls `knobCell(spec, width:)` with
+    /// **no dispatch arms at all**, and the only thing keeping a discrete param
+    /// off that path was that nobody had added one to `specs`. The nearest
+    /// existing check, `groupCoverage`, asserts the hardcoded literal
+    /// `!grouped.contains("waveform")` — which pins the one name already known
+    /// and cannot see the next one. That is precisely the shape that let
+    /// `djFilter.slopeDbPerOct` ship as a rotary over a 12/24 topology switch.
+    ///
+    /// ⛔⛔ **THE ORACLE IS DAWCore's, NOT THIS MODULE'S, AND THAT IS THE WHOLE
+    /// POINT.** `InstrumentParamSpec.discreteParamNames(for:)`
+    /// (`Sources/DAWCore/InstrumentParams.swift`) exists so
+    /// `ProjectStore+Modulation` can refuse an LFO route with
+    /// `modulationTargetUnsupported(.discrete)` — a render-safety concern with
+    /// nothing whatever to do with drawing. The SUBJECT is
+    /// `PolySynthEditorModel.specs`, the card's knob table, in a different
+    /// module. **Neither side references the other**, so this test cannot pass
+    /// by restating its own subject — the m32-e trap, where the pinning test
+    /// restated the source expression and two binary params shipped as knobs
+    /// with the suite green.
+    @Test("CENSUS: no DISCRETE poly synth param reaches the card's knob table")
+    func everyDiscreteInstrumentParamAvoidsTheKnob() {
+        // The ORACLE — DAWCore's, maintained for modulation refusal.
+        let discrete = InstrumentParamSpec.discreteParamNames(for: .polySynth)
+        // The SUBJECT — every name the card draws as a rotary.
+        let knobbed = Set(PolySynthEditorModel.specs.map(\.name))
+
+        // Where each discrete param actually lives, CLASSIFIED rather than
+        // assumed: one that is nowhere is named as such instead of quietly
+        // passing because it happens not to be on a knob.
+        var homes: [String: String] = [:]
+        for name in discrete {
+            if knobbed.contains(name) {
+                homes[name] = "KNOB — the defect"
+            } else if name == "waveform" {
+                // Structural, not a spelling check: the picker's population IS
+                // the domain's whole enum, so every legal value of this
+                // discrete param is reachable from the card.
+                homes[name] = PolySynthEditorModel.waveforms == PolySynthParams.Waveform.allCases
+                    ? "oscPicker" : "oscPicker (INCOMPLETE — not every legal value is offered)"
+            } else {
+                homes[name] = "absent from the card"
+            }
+        }
+
+        let offenders = homes.filter { $0.value.hasPrefix("KNOB") }.keys.sorted()
+        #expect(offenders.isEmpty,
+                "these DISCRETE instrument params render as rotary knobs over a continuum that does not exist — give each a chip or a picker (docs/DESIGN-LANGUAGE.md, the m39-ag law): \(offenders)")
+
+        // Non-vacuity, MEASURED rather than assumed: a census over an empty
+        // oracle proves nothing at all, and prints so a reader can see the
+        // population it actually swept.
+        print("[measured] poly synth discrete params \(discrete.sorted()) -> "
+              + "\(homes.sorted { $0.key < $1.key })")
+        print("[measured] poly synth knob table (\(knobbed.count)): \(knobbed.sorted())")
+        #expect(discrete.count == 2, "the discrete oracle returned \(discrete.sorted())")
+        #expect(knobbed.count == 7, "the knob table holds \(knobbed.sorted())")
+        #expect(homes["waveform"] == "oscPicker")
+
+        // ⛔ `pedalHoldLimit` IS SETTABLE ON THE WIRE AND INVISIBLE ON THE CARD:
+        // `track.setInstrument` accepts it (`Commands.swift`), `PolySynthParams`
+        // persists it, `PolySynthInstrument` honours it at voice-steal time, and
+        // `instrument.describeSynth` publishes it — but no view in `DAWApp` or
+        // model in `DAWAppKit` mentions the name. That is the
+        // settable-but-invisible shape m34-u closed for the sampler's
+        // `voiceMode`, still open here (and on the sampler, whose own
+        // `pedalHoldLimit` is equally absent). It is pinned as an ABSENCE rather
+        // than left unmentioned, so whoever gives it a face must come through
+        // this test and give it a NON-KNOB one: a 1…128 note count whose nil
+        // means "unlimited" is a stepper or a chip, never a rotary.
+        #expect(homes["pedalHoldLimit"] == "absent from the card")
+
+        // ⭐ THE CONVERSE, so the census fails in the other direction too. Every
+        // name the card knobs must be one DAWCore itself models as continuous —
+        // a discrete param that arrives on the card WITHOUT reaching the oracle
+        // reddens here, and so does a continuous param DAWCore gains that the
+        // card never grows a control for.
+        let continuous = InstrumentParamSpec.specs(for: .polySynth)
+        #expect(Set(continuous.map(\.name)) == knobbed,
+                "the card's knob table and DAWCore's continuous registry disagree — card \(knobbed.sorted()) vs registry \(continuous.map(\.name).sorted())")
+        for spec in continuous {
+            #expect(spec.modulatable != .refused,
+                    "\(spec.name) is drawn as a knob but DAWCore refuses it as discrete")
+        }
+    }
+
     // MARK: - Knob geometry (log cutoff, linear everything else)
 
     @Test("the cutoff is logarithmic; times and levels are linear")

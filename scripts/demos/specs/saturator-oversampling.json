@@ -1,0 +1,358 @@
+{
+  "set": "saturator-oversampling",
+  "description": "m39-ad, the `saturator` insert's new `oversampling` control and the Oversampler primitive under it. THIS SET IS A MEASUREMENT FIXTURE FIRST AND A DEMO SECOND, and the material is chosen for that: every variant plays ONE SUSTAINED SINE at MIDI 115 = 6271.927 Hz for the whole render, with the synth's filter wide open and no unison detune, so the source spectrum is a single known line and nothing else. It is the same fixture shape as clipper-physics.json, deliberately, so the two kinds' numbers are comparable.\n\nWHAT A SATURATOR IS, in plain words. It bends the wave instead of cutting it. Quiet parts come through almost untouched; loud parts get squashed toward a limit but never quite reach it. That bending ADDS new tones that were not in the original - which is the point, and is why saturation sounds warm, thick or fuzzy depending on how hard you push it.\n\nWHAT IT IS NOT: a `clipper`. A clipper slices the top off the wave flat and PROMISES a ceiling - no sample ever comes out above it. A saturator's curve only ever APPROACHES its limit, so it can never promise one. Use the clipper when a level must not be exceeded; use the saturator when you want the sound to thicken. They are confused constantly and they are not interchangeable.\n\nWHY THE ONLY NUMBER THAT MATTERS HERE IS THE ALIAS FLOOR. A saturator with oversampling and one without are BOTH LOUD. Same loudness, same peak, same warmth on most material, and they render byte-distinct files - so audibility cannot tell them apart and neither can a byte-difference check (measured in this tree on 2026-09-20: a completely inert shaper produced four distinct renders and exited 0 with audible=true on every one). What oversampling actually does, and the ONLY thing it does, is suppress the energy the bending folds back below Nyquist. So this set exists to make that energy measurable, and scripts/gates/m39ad-saturator-physics.mjs measures it.\n\nWHY A BARE SINE AND NOT MUSIC. tanh - the curve this saturator uses - is odd-symmetric, so a single sine at f0 comes out as f0 plus ODD harmonics only, exactly like hard clipping. At 48 kHz just two of them fit below Nyquist: f0 itself and 3*f0 = 18815.8 Hz. Every higher odd harmonic is above Nyquist and FOLDS, landing at 1921 Hz (H15), 4097 Hz (H7), 8447 Hz (H9), 14465 Hz (H13) and 16640 Hz (H5). None of those is a multiple of f0, so every one of them is EMPTY before the effect runs and anything found there afterwards is aliasing and can be nothing else. On a chord or a drum loop those bins already contain music, the measurement would read the material instead of the effect, and a build whose oversampling had quietly stopped working would pass while sounding roughly as it should.\n\nWHY THE DEFAULT IS 1 AND WILL STAY 1, which is the opposite of the clipper's default of 4. The saturator SHIPPED LONG BEFORE this control existed, so there are already projects using it. If adding oversampling changed what those projects sound like, or shifted them in time by the 32 samples the filters cost, then every one of them would quietly change on the next open. So `oversampling` defaults to 1, at which the whole oversampling path is SKIPPED - not run at factor 1, skipped - and the effect is bit-for-bit what it always was, with zero added latency. The `sat-default` variant here is that promise, frozen as a file hash and checked by scripts/gates/m39ad-saturator-default-bytes.mjs. The clipper had no such history and could default to 4 freely.\n\nWHAT TO LISTEN FOR, variant by variant. 'no-saturator' is the bare tone: a plain steady electronic pitch. 'sat-default' is a freshly added saturator with nothing changed - a gentle thickening, and the variant whose bytes are pinned. 'sat-1x' pushes the drive to the maximum with oversampling OFF - listen for a thin metallic fizz sitting UNDERNEATH the tone, at pitches that have nothing to do with it. That fizz is the fold-back, and it is what the other two variants remove. 'sat-2x' has clearly less of it; 'sat-4x' has essentially none - the same loudness, the same thickness, just the tone and its one real harmonic.\n\nWHY THE DRIVE IS +36 dB ON THE THREE OVERSAMPLING VARIANTS, measured rather than chosen. The synth tone arrives at the insert peaking at -18.832 dBFS (measured with ffmpeg astats on the 'no-saturator' render, which is the same signal with the insert absent). tanh only bends the wave where the wave is LARGE, so the fixture has to make it large: +36 dB of drive lifts the peak to +17.2 dBFS going into the curve, where tanh is flat to five decimal places and the output is effectively a square wave. That is the deepest saturation this effect can produce, which puts the odd harmonics - and therefore the fold-back - far above the render's noise floor. THIS IS NOT A DETAIL. A saturator driven gently produces almost no harmonics at all, every variant would render as a clean quiet tone, and a gate measuring the alias bins would be measuring silence and calling it success. The effect's own fixed drive compensation (it divides the output by the square root of the drive, so pushing harder does not simply get louder) brings the result back down to about -18 dBFS on its own, which is why no output trim is needed here.\n\nBE PRECISE ABOUT WHAT IS LOUDNESS-MATCHED AND WHAT IS NOT. The three oversampling variants are matched to each other by construction - identical settings apart from the one control - so an A/B AMONG THEM is a fair listening test of the aliasing alone. They are NOT matched to the control or to 'sat-default'; saturation flattens the wave, which raises its RMS at the same peak. Louder reads as better, so do not judge 'saturator vs no saturator' by ear on this set; judge 1x vs 4x.",
+  "variants": [
+    {
+      "name": "no-saturator",
+      "axis": "no saturator at all - the bare tone, so the five measured alias bins are known to be empty before the effect runs",
+      "render": {
+        "durationSeconds": 9
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Tone",
+            "kind": "instrument"
+          },
+          "as": "tone"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$tone",
+            "kind": "polySynth",
+            "waveform": "sine",
+            "attack": 0.02,
+            "decay": 0.0,
+            "sustain": 1.0,
+            "release": 0.2,
+            "cutoffHz": 18000,
+            "resonance": 0.0,
+            "gain": 0.6,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$tone",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 115,
+                "startBeat": 0.0,
+                "lengthBeats": 15.5
+              }
+            ]
+          }
+        }
+      ],
+      "role": "control"
+    },
+    {
+      "name": "sat-default",
+      "axis": "a saturator added with NOTHING set - every knob at its shipped default. THE BYTES OF THIS RENDER ARE PINNED: they must be identical to what the same fixture produced before `oversampling` existed at all.",
+      "render": {
+        "durationSeconds": 9
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Tone",
+            "kind": "instrument"
+          },
+          "as": "tone"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$tone",
+            "kind": "polySynth",
+            "waveform": "sine",
+            "attack": 0.02,
+            "decay": 0.0,
+            "sustain": 1.0,
+            "release": 0.2,
+            "cutoffHz": 18000,
+            "resonance": 0.0,
+            "gain": 0.6,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$tone",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 115,
+                "startBeat": 0.0,
+                "lengthBeats": 15.5
+              }
+            ]
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$tone",
+            "kind": "saturator"
+          },
+          "as": "sat"
+        }
+      ]
+    },
+    {
+      "name": "sat-partial",
+      "axis": "a saturator at NON-default settings with a PARTIAL blend - drive 29, mix 0.37, trim -5, and again NO oversampling key. THE BYTES OF THIS RENDER ARE PINNED TOO, and it is not redundant with sat-default: at the default mix of 1 the dry half of the blend is multiplied by zero, so sat-default cannot see a change in the blend at all. Measured during this build: an algebraically identical but differently-rounded blend passed sat-default and every unit test, and only a partial mix could tell.",
+      "render": {
+        "durationSeconds": 9
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Tone",
+            "kind": "instrument"
+          },
+          "as": "tone"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$tone",
+            "kind": "polySynth",
+            "waveform": "sine",
+            "attack": 0.02,
+            "decay": 0.0,
+            "sustain": 1.0,
+            "release": 0.2,
+            "cutoffHz": 18000,
+            "resonance": 0.0,
+            "gain": 0.6,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$tone",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 115,
+                "startBeat": 0.0,
+                "lengthBeats": 15.5
+              }
+            ]
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$tone",
+            "kind": "saturator",
+            "params": {
+              "driveDb": 29,
+              "mix": 0.37,
+              "outputDb": -5
+            }
+          },
+          "as": "sat"
+        }
+      ]
+    },
+    {
+      "name": "sat-1x",
+      "axis": "oversampling 1 - the saturator driven as hard as it goes with the machinery OFF, so the harmonics above Nyquist fold straight back into the audio band. This is the 'before'.",
+      "render": {
+        "durationSeconds": 9
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Tone",
+            "kind": "instrument"
+          },
+          "as": "tone"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$tone",
+            "kind": "polySynth",
+            "waveform": "sine",
+            "attack": 0.02,
+            "decay": 0.0,
+            "sustain": 1.0,
+            "release": 0.2,
+            "cutoffHz": 18000,
+            "resonance": 0.0,
+            "gain": 0.6,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$tone",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 115,
+                "startBeat": 0.0,
+                "lengthBeats": 15.5
+              }
+            ]
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$tone",
+            "kind": "saturator",
+            "params": {
+              "driveDb": 36,
+              "mix": 1,
+              "outputDb": 0,
+              "oversampling": 1
+            }
+          },
+          "as": "sat"
+        }
+      ]
+    },
+    {
+      "name": "sat-2x",
+      "axis": "oversampling 2 - the same saturation run at twice the rate, which moves most of the fold out of the band",
+      "render": {
+        "durationSeconds": 9
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Tone",
+            "kind": "instrument"
+          },
+          "as": "tone"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$tone",
+            "kind": "polySynth",
+            "waveform": "sine",
+            "attack": 0.02,
+            "decay": 0.0,
+            "sustain": 1.0,
+            "release": 0.2,
+            "cutoffHz": 18000,
+            "resonance": 0.0,
+            "gain": 0.6,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$tone",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 115,
+                "startBeat": 0.0,
+                "lengthBeats": 15.5
+              }
+            ]
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$tone",
+            "kind": "saturator",
+            "params": {
+              "driveDb": 36,
+              "mix": 1,
+              "outputDb": 0,
+              "oversampling": 2
+            }
+          },
+          "as": "sat"
+        }
+      ]
+    },
+    {
+      "name": "sat-4x",
+      "axis": "oversampling 4 - the same saturation again, with the fold essentially gone. Identical loudness and identical real harmonics to sat-1x; the ONLY difference is the fizz that is no longer there.",
+      "render": {
+        "durationSeconds": 9
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Tone",
+            "kind": "instrument"
+          },
+          "as": "tone"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$tone",
+            "kind": "polySynth",
+            "waveform": "sine",
+            "attack": 0.02,
+            "decay": 0.0,
+            "sustain": 1.0,
+            "release": 0.2,
+            "cutoffHz": 18000,
+            "resonance": 0.0,
+            "gain": 0.6,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$tone",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 115,
+                "startBeat": 0.0,
+                "lengthBeats": 15.5
+              }
+            ]
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$tone",
+            "kind": "saturator",
+            "params": {
+              "driveDb": 36,
+              "mix": 1,
+              "outputDb": 0,
+              "oversampling": 4
+            }
+          },
+          "as": "sat"
+        }
+      ]
+    }
+  ]
+}

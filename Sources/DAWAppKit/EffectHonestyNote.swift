@@ -84,7 +84,66 @@ public struct EffectHonestyNote: Sendable, Equatable {
             return bassEnhancer
         case .gain, .eq, .compressor, .limiter, .reverb, .delay, .saturator,
              .gate, .chorus, .bitCrusher, .djFilter, .ringMod, .flanger,
-             .hallReverb, .tapeDelay, .stereoWidth, .phaser, .audioUnit:
+             .hallReverb, .tapeDelay, .stereoWidth, .phaser, .transientShaper,
+             .freqShifter, .clipper, .dynamicEQ, .audioUnit:
+            // `dynamicEQ` (m39-af) was put to the same test and lands here
+            // DELIBERATELY, alongside `.eq` — the design asked for exactly this
+            // placement. An honesty note exists for a kind whose NAME
+            // OVER-PROMISES; "dynamic EQ" promises EQ that moves with the
+            // signal, and that is precisely what it does. The two things a user
+            // could be surprised by are real and both live where a user reads
+            // them rather than in a card-level confession: that this kind's `Q`
+            // does not mean what `.eq`'s `Q` means (a measured difference,
+            // stated with its numbers in `bandNQ`'s own `note:`), and that
+            // `mode: below` sits at FULL range on digital silence (stated in
+            // `bandNMode`'s). Both belong to ONE control each, both carry a
+            // number, and `fx.describe` surfaces both verbatim.
+            // ⚠️ The honest case FOR a note here is the ABSENT GAIN-REDUCTION
+            // METER — a dynamic effect with no visible feedback is hard to
+            // trust. But that is a missing FEATURE, filed as a follow-up
+            // needing a protocol widening, not a gap between the name and the
+            // behaviour, and an honesty note would be the wrong instrument for
+            // it: it would tell the user the kind is not what it says, when the
+            // truth is that the kind is exactly what it says and we have not
+            // yet drawn it.
+            // `clipper` (m39-ac) was put to the same test and lands here
+            // DELIBERATELY, and it is the CLOSEST CALL since `stereoWidth`.
+            // The case FOR a note is real: a clipper makes things louder, and
+            // louder is the one change a listener reliably mistakes for
+            // better — so a user can credit the effect for a difference that
+            // is only level. But that is a property of how you AUDITION any
+            // loudness tool, not a gap between what this kind promises and
+            // what it does. It promises a hard ceiling and it delivers one,
+            // exactly, at a finite input, in both modes. The two things that
+            // could surprise — that the sample ceiling is not a TRUE-PEAK
+            // ceiling, and that `oversampling: 1` deliberately lets the
+            // folded-back fizz through — each belong to ONE control, have a
+            // number attached, and are stated in that control's own `note:`,
+            // which `fx.describe` surfaces verbatim. An honesty note is for a
+            // kind whose NAME over-promises; "clipper" promises clipping.
+            // `freqShifter` (m39-z) was put to the same test and lands here
+            // DELIBERATELY. An honesty note exists for a kind whose NAME
+            // over-promises — and this one's under-promises if anything. It
+            // says it shifts frequency and it shifts frequency, by exactly the
+            // number of Hz asked for, measured. The thing a user could be
+            // surprised by is that it is NOT a pitch shifter: moving every
+            // partial by the same Hz (rather than the same ratio) breaks the
+            // harmonic series and makes the source clangorous. But that is the
+            // EFFECT, not a shortfall in it — the inharmonicity is the reason
+            // the kind exists, it is the first thing `shiftHz`'s own `note:`
+            // says, and `fx.describe` surfaces that note verbatim. Nothing is
+            // hidden and nothing under-delivers, so there is nothing to
+            // confess.
+            // `transientShaper` (m39-y) was put to the same test and lands
+            // here DELIBERATELY, not by grouping convenience. It does not
+            // promise revelation: it promises punch and it delivers punch. The
+            // thing a user could be surprised by — that `attackDb: +6` is a
+            // MAXIMUM reached only at a full 12 dB differential, and that
+            // nothing at all happens below −70 dBFS — is real, but it is stated
+            // in the param's own `note:` and surfaced verbatim by
+            // `fx.describe`, which is where a number's caveat belongs. An
+            // honesty note is for a kind whose NAME over-promises; this one's
+            // does not.
             // `stereoWidth` (m23-dj) was put to the same test and lands with
             // the rest, but it is the CLOSEST CALL in the list and the
             // reasoning is worth keeping. It does not promise revelation: it

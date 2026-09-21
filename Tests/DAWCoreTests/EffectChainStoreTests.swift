@@ -347,4 +347,84 @@ struct EffectChainStoreTests {
         #expect(updated.resolvedGain.invertPolarity)
         #expect(updated.resolvedGain.gainLinear == 1)
     }
+
+    // MARK: - m39-y L10 (B8): the display-name `default:` arm
+
+    /// ⛔⛔ **`ProjectStore.effectDisplayName` IS NOT EXHAUSTIVE AND ITS OWN
+    /// COMMENT SAYS SO** — *"The compiler cannot catch that — this switch is not
+    /// exhaustive."* A kind with no case falls through a `default:` arm that
+    /// title-cases the RAW VALUE, so `.transientShaper` would ship as
+    /// "Add TransientShaper to 'Drums'" in every undo label. The compiler
+    /// passes; `scripts/gates/effect-kind-surface.mjs` is whole-file PRESENCE
+    /// and passes; every other test passes. The name is `private static`, so
+    /// the UNDO LABEL is the only surface it reaches — which is exactly what
+    /// this leg reads.
+    ///
+    /// ⭐ Driven by `Kind.allCases`, so the NEXT multi-word kind is covered
+    /// without anyone remembering this test exists.
+    @Test("m39-y L10b — every multi-word kind spells its display name out in the undo label")
+    func multiWordKindsNeverFallThroughTheDisplayNameDefault() throws {
+        let store = ProjectStore()
+        let t = store.addTrack(name: "Vox", kind: .audio)
+        var checked = 0
+        for kind in EffectDescriptor.Kind.allCases
+        where kind != .audioUnit && kind.rawValue.contains(where: \.isUppercase) {
+            // One fresh track per kind: the chain cap is 16 and there are more
+            // multi-word kinds than that would allow on one strip soon enough.
+            let strip = store.addTrack(name: "S\(checked)", kind: .audio)
+            _ = try store.addEffect(toTrack: strip.id, kind: kind)
+            let label = store.undoLabel ?? ""
+            let fellThrough = "Add "
+                + kind.rawValue.prefix(1).uppercased() + kind.rawValue.dropFirst()
+                + " to 'S\(checked)'"
+            #expect(label != fellThrough,
+                    "\(kind.rawValue) produced \(label) — it fell through the display-name default: arm and ships as camelCase")
+            checked += 1
+        }
+        // NON-VACUITY: the sweep found multi-word kinds to check at all.
+        #expect(checked >= 8, "only \(checked) multi-word kinds swept — vacuous")
+        _ = t
+    }
+
+    @Test("m39-y L10b-named — .transientShaper reads as \"Transient Shaper\" in the undo label")
+    func transientShaperUndoLabelIsSpelledOut() throws {
+        let store = ProjectStore()
+        let t = store.addTrack(name: "Drums", kind: .audio)
+        _ = try store.addEffect(toTrack: t.id, kind: .transientShaper)
+        print("[measured] m39-y undo label: \(store.undoLabel ?? "nil")")
+        #expect(store.undoLabel == "Add Transient Shaper to 'Drums'")
+        // ⭐ POSITIVE CONTROL on the instrument: a kind whose name is known to
+        // be spelled out reads correctly through the SAME accessor, so the
+        // assertion above is a measurement rather than a lucky string.
+        let other = store.addTrack(name: "Bass", kind: .audio)
+        _ = try store.addEffect(toTrack: other.id, kind: .bassEnhancer)
+        #expect(store.undoLabel == "Add Bass Enhancer to 'Bass'")
+    }
+
+    /// m39-y: the six wire names reach their six fields through the store's
+    /// `applyEffectParam` arm, and an unknown name is refused rather than
+    /// silently landing somewhere.
+    @Test("m39-y — setEffectParam maps all six transientShaper names onto their own fields")
+    func transientShaperParamsMapOntoTheirFields() throws {
+        let store = ProjectStore()
+        let t = store.addTrack(name: "Drums", kind: .audio)
+        let fx = try store.addEffect(toTrack: t.id, kind: .transientShaper)
+        for (name, value) in [("attackDb", 7.25), ("sustainDb", -11.5),
+                              ("attackMs", 0.8), ("sustainMs", 675.0),
+                              ("outputDb", -4.25), ("mix", 0.62)] {
+            _ = try store.setEffectParam(trackID: t.id, effectID: fx.id,
+                                         name: name, value: value)
+        }
+        let params = track(store, t.id).effects[0].resolvedTransientShaper
+        #expect(params.attackDb == 7.25)
+        #expect(params.sustainDb == -11.5)
+        #expect(params.attackMs == 0.8)
+        #expect(params.sustainMs == 675)
+        #expect(params.outputDb == -4.25)
+        #expect(params.mix == 0.62)
+        // Out-of-range clamps silently to the spec range (the house rule).
+        _ = try store.setEffectParam(trackID: t.id, effectID: fx.id,
+                                     name: "attackDb", value: 999)
+        #expect(track(store, t.id).effects[0].resolvedTransientShaper.attackDb == 20)
+    }
 }

@@ -520,6 +520,8 @@ struct EffectEditorOverlay: View {
                             slopeCell(item)
                         } else if EffectEditorModel.isDivisionParam(item.spec) {
                             divisionCell(item)
+                        } else if EffectEditorModel.isChoiceParam(item.spec) {
+                            choiceCell(item)
                         } else if item.spec.name == "timeMs", model.delaySyncActive {
                             syncedTimeCell(item)
                         } else {
@@ -588,6 +590,90 @@ struct EffectEditorOverlay: View {
         .frame(width: Self.cellWidth)
         .help("\(item.label) — click to switch on or off.")
         .accessibilityValue(on ? "on" : "off")
+    }
+
+    /// The m39-ag DISCRETE CHOICE chip — the one cell for every param whose
+    /// legal values are a small finite set: the dynamic EQ's four `bandNMode`
+    /// switches, the compressor's de-ess `detectorMode`, the clipper's `mode`,
+    /// the clipper's and saturator's `oversampling`, the ring mod's `waveform`,
+    /// the phaser's `stages` and the hall reverb's `freeze`.
+    ///
+    /// ⭐ THIS CELL EXISTS BECAUSE THE CARD WAS LYING. Every one of these fell
+    /// through to `knobCell` and drew a rotary with a meaningless number under
+    /// it — `band1Mode`, a three-way off/above/below switch and the single most
+    /// important control on the Dynamic EQ card, labelled `LISTEN` and reading
+    /// **`0.00`**. Four of them on that one card. The snapped truth already
+    /// existed on the wire (`band1ModeLabel` = "off"/"above"/"below"); only the
+    /// card did not show it.
+    ///
+    /// The house compact menu chip, the `divisionCell` idiom (itself the
+    /// QuantizePanel grid-picker idiom) — no new control invented. Geometry
+    /// follows `toggleCell` instead: the chip centres in the 36 pt knob slot
+    /// with no caption under it, because the label above already names the
+    /// control and a second word would only repeat it.
+    ///
+    /// Every option writes an exact LEGAL value through the SAME
+    /// `model.set(name:value:)` path the knob uses, so a burst of card edits is
+    /// still exactly ONE undo entry (m17-a) and the wire surface is unchanged.
+    /// Neutral chrome, never cyan: these are topology/character choices, not
+    /// levels (DESIGN-LANGUAGE Rule 3, the `slopeCell` precedent).
+    private func choiceCell(_ item: EffectParamGroup.Item) -> some View {
+        let spec = item.spec
+        let current = model.value(for: spec)
+        // The label is read through the KIND'S OWN snap, so a stored 0.4 —
+        // reachable, because `fx.setParam` clamps without rounding — draws the
+        // setting actually in force rather than the number sitting in the field.
+        let currentLabel = EffectEditorModel.choiceLabel(value: current, spec: spec)
+        let options = EffectEditorModel.choices(for: spec)
+        return VStack(spacing: 4) {
+            Text(item.label.uppercased())
+                .font(.system(size: 8, weight: .semibold))
+                .tracking(0.8)
+                .foregroundStyle(DAWTheme.textDim)
+                .lineLimit(1)
+            Menu {
+                ForEach(options, id: \.value) { option in
+                    Button {
+                        model.set(name: spec.name, value: option.value)
+                    } label: {
+                        if option.label == currentLabel {
+                            Label(option.label, systemImage: "checkmark")
+                        } else {
+                            Text(option.label)
+                        }
+                    }
+                }
+            } label: {
+                HStack(spacing: 5) {
+                    Text(currentLabel)
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .tracking(0.6)
+                        .foregroundStyle(DAWTheme.textPrimary)
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 7, weight: .semibold))
+                        .foregroundStyle(DAWTheme.textDim)
+                }
+                .padding(.horizontal, 10)
+                .frame(height: 20)
+                .background(DAWTheme.panelRaised)
+                .clipShape(Capsule())
+                .overlay(Capsule().stroke(DAWTheme.hairline, lineWidth: 1))
+            }
+            .menuStyle(.button)
+            .buttonStyle(.plain)
+            .menuIndicator(.hidden)
+            // `.fixedSize()` means an over-long label OVERFLOWS the cell rather
+            // than truncating (a control label never truncates, m22-g) — so the
+            // budget is held by arithmetic instead:
+            // `EffectChoiceParamTests.choiceChipLabelsFitTheCell`.
+            .fixedSize()
+            // Centre the chip in the knob-slot height so the row reads level
+            // (the `toggleCell` rule).
+            .frame(height: 36)
+        }
+        .frame(width: Self.cellWidth)
+        .help("\(item.label) — \(currentLabel). Click to choose.")
+        .accessibilityValue(currentLabel)
     }
 
     /// The m22-f DIVISION picker — the synced delay's note length. An 18-way
