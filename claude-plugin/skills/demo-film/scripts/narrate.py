@@ -131,9 +131,45 @@ def measure(path):
     return d, (r[0] if r else -99.0)
 
 
+def edges(path, win=0.040):
+    """RMS of the first and last `win` seconds, in dB.
+
+    ⛔⛔ THIS EXISTS BECAUSE A CLIPPED WORD PASSED EVERY OTHER GATE.
+    An observer found the `kits` line missing its leading word — "It ships with
+    five kits" was delivered as "ships with five kits" — plus 60 ms of
+    speech-level audio cut off the tail. The similarity gate below could not
+    see it: one missing word in seventy moves Whisper similarity by less than
+    the threshold, so the take scored fine and shipped.
+
+    The signature is unmistakable once you look for it. Speech does not begin
+    at full amplitude — every utterance opens from silence. A file whose FIRST
+    frame is already at speaking level did not start at the beginning of the
+    word; it started in the middle of one. Same at the end.
+    """
+    d, _ = measure(path)
+    if d <= win * 3:
+        return -99.0, -99.0
+    head = _ff(path, f"atrim=0:{win},astats=metadata=1", "RMS level dB")
+    tail = _ff(path, f"atrim={max(d - win, 0):.3f}:{d:.3f},astats=metadata=1", "RMS level dB")
+    return (head[0] if head else -99.0), (tail[0] if tail else -99.0)
+
+
+# A frame of real speech sits near -20 dB; true silence reads below -60. -45 is
+# comfortably between, so this fires on a cut phoneme and not on a soft onset.
+EDGE_MAX_DB = -45.0
+
+
 def evaluate(src, path):
     """(score, note). An infinite score means REJECTED."""
     d, rms = measure(path)
+    # Checked BEFORE transcription: it is far cheaper, and a clipped take is
+    # rejected regardless of what the transcript says.
+    h, t = edges(path)
+    if h > EDGE_MAX_DB or t > EDGE_MAX_DB:
+        which = ("start" if h > EDGE_MAX_DB else "") + \
+                ("+end" if (h > EDGE_MAX_DB and t > EDGE_MAX_DB) else
+                 ("end" if t > EDGE_MAX_DB else ""))
+        return float("inf"), f"clipped at {which} (head {h:.0f}dB tail {t:.0f}dB)"
     words = max(1, len(src.split()))
     spw = d / words
     if not (RMS_MIN <= rms <= RMS_MAX):

@@ -1,0 +1,20 @@
+{
+  "title": "Fate — Beethoven, 1808 | DAW Pro",
+  "description": "The four notes everyone can hum, over the same kit and the same chain. Only the motif is Beethoven's — the arrangement around it is ours, and the film says so.\n\nBeethoven, 1808 · C minor · 128 BPM\n\nThree variants were made one axis apart: same drum machine, same kit, same drum patterns, same effect chain, same 64-bar structure, same tempo. Only the melody changes — so a preference between them means something.\n\nThe four-note motif is Beethoven's, from the Fifth Symphony (1808), long in the public domain. Its pitches were traced from the LilyPond source text Mutopia publishes beside its engravings. Everything after that motif is ours, not his — worth saying plainly rather than leaving you to assume.\n\nThe picture is a constant-Q spectrogram: the octave rulers run left to right from C1 to C7, so a note sits at the same place across the frame every time it is played, which a normal spectrogram does not give you. Stereo waveform below, playhead and progress across the bottom.\n\nDAW Pro is a macOS digital audio workstation built so an AI agent can drive it as well as a person can — every instrument, effect and mix move here was made inside it.\n\nMade with DAW Pro.",
+  "tags": [
+    "DAW Pro",
+    "music production",
+    "audio software",
+    "macOS",
+    "music visualizer",
+    "spectrogram",
+    "drum machine",
+    "electronic music",
+    "techno",
+    "synthesizer"
+  ],
+  "categoryId": "10",
+  "privacyStatus": "private",
+  "containsSyntheticMedia": false,
+  "madeForKids": false
+}

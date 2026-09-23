@@ -1,0 +1,20 @@
+{
+  "title": "Mountain King — Grieg, 1875 #Shorts",
+  "description": "Grieg's creeping ostinato from Peer Gynt, put over the same drum machine and the same effect chain. Public domain since 1977.\n\nGrieg, 1875 · B minor · 128 BPM\n\nThree variants were made one axis apart: same drum machine, same kit, same drum patterns, same effect chain, same 64-bar structure, same tempo. Only the melody changes — so a preference between them means something.\n\nThe melody is Edvard Grieg's, from Peer Gynt (1875), long in the public domain. Its pitches were traced from the LilyPond source text Mutopia publishes beside its engravings, rather than read off an image.\n\nThis is a 38-second cut chosen to contain the piece's climax rather than to start at a round number. The full version is on the channel.\n\nThe picture is a constant-Q spectrogram: the octave rulers run left to right from C1 to C7, so a note sits at the same place across the frame every time it is played, which a normal spectrogram does not give you. Stereo waveform below, playhead and progress across the bottom.\n\nDAW Pro is a macOS digital audio workstation built so an AI agent can drive it as well as a person can — every instrument, effect and mix move here was made inside it.\n\nMade with DAW Pro.",
+  "tags": [
+    "DAW Pro",
+    "music production",
+    "audio software",
+    "macOS",
+    "music visualizer",
+    "spectrogram",
+    "drum machine",
+    "electronic music",
+    "techno",
+    "synthesizer"
+  ],
+  "categoryId": "10",
+  "privacyStatus": "private",
+  "containsSyntheticMedia": false,
+  "madeForKids": false
+}

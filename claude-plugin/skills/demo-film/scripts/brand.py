@@ -15,6 +15,7 @@ on playback. Both cards go through the same VF chain and the same encoder flags.
 
     python3 brand.py intro --audio sting.wav --out intro.mp4
     python3 brand.py outro --holder "Your Name" --out outro.mp4
+    python3 brand.py outro --no-disclaimer --out outro.mp4   # nothing narrated
 """
 import argparse, math, os, subprocess, sys, tempfile
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
@@ -23,11 +24,37 @@ W, H, FPS = 1920, 1080, 30
 
 # ---------------------------------------------------------------- geometry
 # Shorts are portrait, and every offset below was hand-placed for 1920x1080.
-# So the landscape numbers are kept VERBATIM as the 16:9 branch rather than
-# re-derived from ratios: re-deriving them moved several by a pixel of
-# rounding, which would have broken the byte-identical pin on the five shipped
-# cards. The portrait branch is its own composition, not a squeezed copy.
+# So the landscape numbers are kept as the 16:9 branch rather than re-derived
+# from ratios. The portrait branch is its own composition, not a squeezed copy.
+#
+# ⚠ THE BYTE-IDENTICAL PIN ON THE FIVE SHIPPED CARDS IS GONE, DELIBERATELY.
+# The outro group (O_*) is now multiplied by OUTRO_TYPE below, so a re-render
+# of those cards will NOT match the old bytes. Nothing here is a regression to
+# chase: it is the legibility fix, and this comment is the record of it. The
+# intro group is untouched and its numbers are still verbatim.
 LAYOUT = {}
+
+# ---- OUTRO TYPE SCALE (measured, 2026-09-21) --------------------------------
+# These films are watched small. At a 400 px playback width a 1920-wide frame
+# is shown at 0.208x, and the outro card's own type measured, as CAP HEIGHTS at
+# that size: wordmark 13.5 px, sub-label 4.17 px, © line 6.25 px, "All rights
+# reserved." 4.17 px, line2 3.96 px, disclaimer 3.75 px. Everything under the
+# wordmark was at or below ~4 px — the same order as the app-panel text the
+# reviewer could not read.
+#
+# Sizes and offsets scale TOGETHER, which is what keeps this a type scale
+# rather than a re-layout — the same card, drawn larger. Palette untouched.
+#
+# ⚠ 1.6, NOT THE 1.8 THAT MAXIMISES LEGIBILITY — AND THE REASON IS HIERARCHY.
+# At 1.8 the outro wordmark reaches 166 pt against the INTRO wordmark's 150,
+# so the closing card would out-shout the opening one. An end card is the last
+# thing on screen, not the loudest: the title card opens the film and should
+# stay the dominant mark. 1.6 gives 147 pt, just under the intro, and still
+# carries the sub-label from an illegible 4.17 px cap height to ~6.7 px at a
+# 400 px playback width. The trade is the disclaimer landing near 5.6 px —
+# acceptable, because it is fine print AND because it is now omitted entirely
+# from anything without narration (--no-disclaimer).
+OUTRO_TYPE = 1.6
 
 
 def set_size(w, h):
@@ -36,15 +63,21 @@ def set_size(w, h):
     W, H = int(w), int(h)
     portrait = H > W
     if not portrait:
+        # `o()` is the outro type scale. It multiplies the O_* sizes AND the
+        # O_*_DY offsets, so the card grows as one composition instead of
+        # colliding with itself. TRACK values scale too, or the letterspacing
+        # reads tighter at the larger size than it did at the smaller one.
+        o = lambda v: int(round(v * OUTRO_TYPE))
         LAYOUT = dict(
             TEXT_Y=240, F_WORD=150, TRACK_WORD=14, RULE_HALF=330, RULE_DY=190,
             SUB_DY=218, F_SUB=40, TRACK_SUB=8, BY_DY=308, F_BY=38,
             BASE_Y=int(H * 0.88), BAR_SPAN=0.80, BAR_H=0.24, SWEEP=0.40,
             GLOW_IN=26, N_BARS=72,
-            O_GLOW=22, O_F_WORD=92, O_WORD_DY=-190, O_F_SUB=28, O_SUB_DY=-96,
-            O_RULE_HALF=250, O_RULE_DY=-14, O_F_COPY=42, O_COPY_DY=10,
-            O_F_ARR=28, O_ARR_DY=74, O_F_L2=26, O_L2_DY=152,
-            O_F_DISC=24, O_DISC_DY=196,
+            O_GLOW=o(22), O_F_WORD=o(92), O_WORD_DY=o(-190), O_F_SUB=o(28),
+            O_SUB_DY=o(-96), O_RULE_HALF=o(250), O_RULE_DY=o(-14),
+            O_F_COPY=o(42), O_COPY_DY=o(10), O_F_ARR=o(28), O_ARR_DY=o(74),
+            O_F_L2=o(26), O_L2_DY=o(152), O_F_DISC=o(24), O_DISC_DY=o(196),
+            O_TRACK_WORD=o(9), O_TRACK_SUB=o(6),
         )
     else:
         # Type is scaled from the WIDTH, then boosted: a phone screen is held
@@ -62,6 +95,12 @@ def set_size(w, h):
             O_SUB_DY=r(-96), O_RULE_HALF=r(250), O_RULE_DY=r(-14),
             O_F_COPY=r(42), O_COPY_DY=r(10), O_F_ARR=r(28), O_ARR_DY=r(74),
             O_F_L2=r(26), O_L2_DY=r(152), O_F_DISC=r(24), O_DISC_DY=r(196),
+            # Literals, not r(): these are the values outro_frame used to
+            # hardcode, and a Short is already boosted 1.55x and watched at
+            # phone width, where its wordmark measures ~21 px cap. Scaling the
+            # tracking here too would change the shipped portrait cards for no
+            # legibility gain.
+            O_TRACK_WORD=9, O_TRACK_SUB=6,
         )
 BG      = (11, 13, 18)
 CYAN    = (62, 230, 255)
@@ -251,9 +290,41 @@ def intro_frame(i, n, env, on_black=False, sub=None):
     return base
 
 
-def outro_frame(i, n, holder, line2, year, sub=None):
+def outro_shift(line2, show_disclaimer=True):
+    """How far to slide the outro block when the disclaimer is dropped.
+
+    The card's lines sit at fixed offsets from the vertical centre, so simply
+    not drawing the last one leaves the block hanging high with a hole under
+    it. Re-centring means moving everything down by HALF the height that was
+    removed, which puts the remaining lines back around the same optical
+    centre — no gap where the disclaimer used to be.
+
+    Returns 0 whenever nothing was actually removed, so the default card stays
+    pixel-for-pixel what it has always been at a given type scale.
+    """
+    L = LAYOUT
+    if show_disclaimer or not BRAND["disclaimer"]:
+        return 0
+    bottom = lambda text, f: (f.getbbox(text)[3] if text else 0)
+    full = L["O_DISC_DY"] + bottom(BRAND["disclaimer"], font(SF, L["O_F_DISC"]))
+    if line2:
+        trimmed = L["O_L2_DY"] + bottom(line2, font(SF, L["O_F_L2"]))
+    else:
+        trimmed = L["O_ARR_DY"] + bottom("All rights reserved.",
+                                         font(SF, L["O_F_ARR"]))
+    return int(round(max(0, full - trimmed) / 2))
+
+
+def outro_frame(i, n, holder, line2, year, sub=None, show_disclaimer=True):
     """Crisp text over a blurred glow pass — the same two-layer trick as the
-    intro. Blurring the finished frame turns white text grey."""
+    intro. Blurring the finished frame turns white text grey.
+
+    ⚠ `show_disclaimer` is not cosmetic. brand.json's disclaimer says
+    "Narration is a synthetic voice", and six visualiser videos containing no
+    speech at all shipped carrying it — a card asserting something about the
+    film that was not true of the film. A line about narration belongs only on
+    something narrated, so the caller has to say which this is.
+    """
     sub = BRAND["sub"] if sub is None else sub
     from PIL import ImageChops
     t = i / (n - 1)
@@ -261,25 +332,29 @@ def outro_frame(i, n, holder, line2, year, sub=None):
     base = Image.new("RGB", (W, H), BG)
     gl = Image.new("RGB", (W, H), (0, 0, 0))
     gd = ImageDraw.Draw(gl)
-    cy = H // 2
+    # ⚠ The shift has to reach BOTH passes, which is why it lives in `cy`.
+    # Move only the sharp text and the bloom stays where it was, which reads
+    # as a printing misregistration rather than as a design.
+    cy = H // 2 + outro_shift(line2, show_disclaimer)
     a = ease(min(1.0, t / 0.20)) * (1.0 if t < 0.82 else 1 - ease((t - 0.82) / 0.18))
     fade = lambda c: tuple(int(v * a) for v in c)
+    tw, ts = L["O_TRACK_WORD"], L["O_TRACK_SUB"]
 
     rh, ry = L["O_RULE_HALF"], cy + L["O_RULE_DY"]
     gd.line([(W/2 - rh, ry), (W/2 + rh, ry)], fill=fade(CYAN), width=4)
-    centre(gd, sub, font(MONO, L["O_F_SUB"]), cy + L["O_SUB_DY"], fade(VIOLET), track=6)
+    centre(gd, sub, font(MONO, L["O_F_SUB"]), cy + L["O_SUB_DY"], fade(VIOLET), track=ts)
     base = ImageChops.add(base, gl.filter(ImageFilter.GaussianBlur(L["O_GLOW"])))
 
     d = ImageDraw.Draw(base)
     centre(d, BRAND["wordmark"], font(SF, L["O_F_WORD"]), cy + L["O_WORD_DY"],
-           fade(WHITE), track=9)
-    centre(d, sub, font(MONO, L["O_F_SUB"]), cy + L["O_SUB_DY"], fade(VIOLET), track=6)
+           fade(WHITE), track=tw)
+    centre(d, sub, font(MONO, L["O_F_SUB"]), cy + L["O_SUB_DY"], fade(VIOLET), track=ts)
     d.line([(W/2 - rh, ry), (W/2 + rh, ry)], fill=fade(CYAN), width=3)
     centre(d, f"© {year} {holder}", font(SF, L["O_F_COPY"]), cy + L["O_COPY_DY"], fade(WHITE))
     centre(d, "All rights reserved.", font(SF, L["O_F_ARR"]), cy + L["O_ARR_DY"], fade(DIM))
     if line2:
         centre(d, line2, font(SF, L["O_F_L2"]), cy + L["O_L2_DY"], fade(DIM))
-    if BRAND["disclaimer"]:
+    if show_disclaimer and BRAND["disclaimer"]:
         centre(d, BRAND["disclaimer"], font(SF, L["O_F_DISC"]), cy + L["O_DISC_DY"], fade(DIM))
     return base
 
@@ -389,6 +464,16 @@ def main():
     # The per-video cards say one thing, channel-level cards another. Spaced
     # letters, because the mark is drawn letter-by-letter with tracking.
     ap.add_argument("--sub", default=None)
+    # ⚠ outro: the brand disclaimer is a CLAIM ABOUT THE FILM, not decoration.
+    # Six visualisers with no speech in them shipped saying "Narration is a
+    # synthetic voice", because this line was stamped unconditionally. Pass
+    # --no-disclaimer on anything that is not narrated; the remaining lines
+    # re-centre so there is no gap where it was.
+    ap.add_argument("--no-disclaimer", dest="disclaimer", action="store_false",
+                    default=True,
+                    help="outro: omit the brand.json disclaimer line. Use it on "
+                         "any video with NO narration — the default line claims "
+                         "there is a synthetic voice, which would be false.")
     a = ap.parse_args()
 
     try:
@@ -414,7 +499,8 @@ def main():
         for i in range(n):
             im = (intro_frame(i, n, env, on_black=bool(a.background), sub=sub)
                   if a.kind == "intro"
-                  else outro_frame(i, n, holder, line2, a.year, sub=sub))
+                  else outro_frame(i, n, holder, line2, a.year, sub=sub,
+                                   show_disclaimer=a.disclaimer))
             im.save(os.path.join(tmp, f"f{i:04d}.png"))
         if a.kind == "intro" and a.background:
             composite(tmp, a.background, a.seconds, a.out, a.audio)
@@ -423,6 +509,12 @@ def main():
     print(f"WROTE {a.out}  ({a.seconds:.1f}s, {n} frames)")
     if a.kind == "outro":
         print(f"  copyright holder used: {holder!r} — set it in brand.json or --holder")
+        # Printed either way: a claim about the film that is silently present
+        # is exactly how six un-narrated videos came to carry one.
+        print("  disclaimer  : "
+              + (repr(BRAND["disclaimer"]) if a.disclaimer and BRAND["disclaimer"]
+                 else "OMITTED (--no-disclaimer)" if not a.disclaimer
+                 else "none set in brand.json"))
 
 
 if __name__ == "__main__":

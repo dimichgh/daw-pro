@@ -38,7 +38,7 @@
     "mono": "/System/Library/Fonts/SFNSMono.ttf"
   },
   "channelSub": "A G E N T I C",
-  "tagline": "An AI that mixes \u2014 and measures whether it worked.",
+  "tagline": "An AI that mixes — and measures whether it worked.",
   "themes": {
     "theory": {
       "sub": "T H E O R Y",
@@ -127,6 +127,21 @@
           255,
           120,
           220
+        ]
+      }
+    },
+    "features": {
+      "sub": "W H A T ' S   N E W",
+      "palette": {
+        "cyan": [
+          62,
+          230,
+          255
+        ],
+        "violet": [
+          255,
+          201,
+          64
         ]
       }
     }

@@ -1,0 +1,197 @@
+{
+  "_why": "Every stage names its OWN burst directory and its OWN loop file. An observer found the previous cut reused two burst names across eight stages and three loop files across ten, and assemble.py's play_audio() always takes the first playMax seconds — so several beats were byte-identical audio over byte-identical footage, under captions describing different things. assemble.py now refuses to build if two stages collide on either axis.",
+  "video": {
+    "width": 1920,
+    "height": 1080,
+    "fps": 30,
+    "cut": 4.2,
+    "bed": 0.16,
+    "playMax": 14
+  },
+  "stages": [
+    {
+      "id": "open",
+      "narration": "Everything you are about to hear was made inside this app. No samples. No plug-ins from anyone else. A drum machine we built, nine effects in a chain, and one filter sweep that an agent drew by hand. Here is what is new, and here is how it was put together.",
+      "shots": [
+        "machine-room/shots/12-mixer.png"
+      ],
+      "loop": "mr-open.wav",
+      "cut": 5,
+      "burst": "open",
+      "holdLast": true
+    },
+    {
+      "id": "whats-new",
+      "narration": "The app now has twenty-two built-in effects you can drop onto a track. Eleven of those are new. And there is something that was not there at all before: our own drum machine. Not a sampler playing back recordings of drums. A synthesiser that builds every drum from scratch, each time you hit it.",
+      "shots": [
+        "machine-room/shots/22-master-limiter-card.png",
+        "machine-room/shots/04-kit-909.png"
+      ],
+      "loop": "mr-whatsnew.wav",
+      "cut": 6.5,
+      "burst": "whats-new",
+      "cutOn": [
+        2
+      ],
+      "cutAt": [
+        4.533
+      ],
+      "_shots": "03-drum-track.png is byte-identical to 04-kit-909.png, which the next stage holds for 38 s. Using the pattern shot here keeps two adjacent stages from showing one picture."
+    },
+    {
+      "id": "drum-machine",
+      "narration": "It has eight voices. Kick, snare, closed hat, open hat, clap, tom, rim and cymbal. Between them they expose seventy-five parameters. How long the kick rings on. How bright the snare sits. How hard each voice is driven. Every one of those is just a number, which means an agent can reach all seventy-five of them directly.",
+      "shots": [
+        "machine-room/shots/06-drum-notes-in-roll.png"
+      ],
+      "loop": "mr-drums.wav",
+      "cut": 8,
+      "burst": "drum-machine"
+    },
+    {
+      "id": "kits",
+      "narration": "It ships with five kits. Eight oh eight. Nine oh nine. Acoustic. Lo fi. And trap. Loading one is a single command, and it moves seventeen parameters at once. Listen to what that does. The eight oh eight kick rings on. The nine oh nine stops dead, much shorter. And the trap kick runs on longest of all. Same eight voices. Completely different record.",
+      "shots": [
+        "machine-room/shots/05-drum-pattern.png",
+        "machine-room/shots/12-mixer.png"
+      ],
+      "holdLast": true,
+      "loop": "kits-ab.wav",
+      "bedEligible": false,
+      "cut": 6,
+      "stillsOnly": true,
+      "_stillsOnly": "Its audio is three isolated kick hits with digital silence between them — a rendered A/B demo, not a performance. Motion footage of the arrangement would be a different performance playing underneath.",
+      "cutOn": [
+        7
+      ],
+      "cutAt": [
+        7.825
+      ]
+    },
+    {
+      "id": "effects",
+      "_cut": "Eight sentences naming eight effects over eight cards. The previous cut divided the time EVENLY, so 'A saturator' played over the PHASER card and 'A phaser' over HALL REVERB. cutAt is generated from the actual narration timing by sync-cuts.mjs.",
+      "narration": "Then the effects. A transient shaper, to make the drums hit harder. A clipper, to stop them poking through the ceiling. A dynamic E Q, which turns the bass down only at the moments the bass gets too loud. A saturator. A phaser. A hall reverb. A tape delay. And a D J filter, which is the one knob most dance music actually lives on.",
+      "shots": [
+        "machine-room/shots/13-fx-transientShaper.png",
+        "machine-room/shots/14-fx-clipper.png",
+        "machine-room/shots/15-fx-dynamicEQ.png",
+        "machine-room/shots/16-fx-saturator.png",
+        "machine-room/shots/17-fx-phaser.png",
+        "machine-room/shots/18-fx-hallReverb.png",
+        "machine-room/shots/20-fx-tapeDelay.png",
+        "machine-room/shots/19-fx-djFilter.png"
+      ],
+      "loop": "mr-effects.wav",
+      "cut": 2.1,
+      "burst": "effects",
+      "cutOn": [
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8
+      ],
+      "cutAt": [
+        3.462,
+        5.726,
+        9.731,
+        10.69,
+        11.432,
+        12.475,
+        13.429
+      ]
+    },
+    {
+      "id": "build-one",
+      "narration": "So how do you build one? You start with an empty session. You mark out the sections, so the track has a shape before it has a single note: intro, build, drop, breakdown, and a second drop. You add a track, and you put the drum machine on it. You load the nine oh nine. You write the pattern. Then bass. Then chords. Then the tune on top. Nothing here was played by hand. Every note, every knob, and every marker arrived as a command over a socket.",
+      "shots": [
+        "machine-room/shots/01-empty.png",
+        "machine-room/shots/02-markers.png",
+        "machine-room/shots/05-drum-pattern.png",
+        "machine-room/shots/07-bass.png",
+        "machine-room/shots/08-pad.png",
+        "machine-room/shots/09-lead.png"
+      ],
+      "loop": "mr-buildone.wav",
+      "cut": 3.3,
+      "burst": "build-one",
+      "cutOn": [
+        2,
+        3,
+        6,
+        7,
+        8
+      ],
+      "cutAt": [
+        2.463,
+        8.614,
+        12.764,
+        13.404,
+        14.148
+      ]
+    },
+    {
+      "id": "the-drop",
+      "narration": "And here is the trick that makes a track build. One D J filter sits across the whole mix, and an automation lane opens the filter across sixty four bars. Closed, everything sounds like it is playing in the room next door. Wide open, the filter is a perfect bypass. It does nothing at all, and that is exactly what a drop is: the lid coming off. Measured against the intro, the drop is six decibels louder and thirty decibels brighter.",
+      "shots": [
+        "machine-room/shots/11-filter-sweep-automation.png",
+        "machine-room/shots/21-bus-filter-card.png",
+        "machine-room/shots/23-bus-filter-open.png"
+      ],
+      "loop": "mr-thedrop.wav",
+      "burst": "the-drop",
+      "cut": 9.6,
+      "cutOn": [
+        2,
+        3
+      ],
+      "cutAt": [
+        7.752,
+        10.756
+      ]
+    },
+    {
+      "id": "honest",
+      "narration": "One thing this film will not pretend about. The drum machine has no editor panel yet. Ask the app to open one, and it tells you so itself: Drums plays the drum machine, which has no editor card yet. Its seventy five parameters are on the wire. You can play it, program it, and reshape every sound in it from an agent. You just cannot grab a knob for it with a mouse. Not yet.",
+      "shots": [
+        "machine-room/shots/06-drum-notes-in-roll.png"
+      ],
+      "loop": "mr-honest.wav",
+      "cut": 9,
+      "holdLast": true,
+      "burst": "honest"
+    },
+    {
+      "id": "variants",
+      "_shots": "These MUST be the Grieg arrangement's own stills, not Machine Room's. The previous cut showed machine-room pictures while the narration named Grieg and Beethoven; the audio was right and the picture was not.",
+      "narration": "Same drum machine. Same effects. Same arrangement, bar for bar. The only thing that changes is the tune. First, an original. Then Grieg's In the Hall of the Mountain King, from eighteen seventy five, traced note for note from the published score. Then the four notes everybody can hum: Beethoven's Fifth, eighteen oh eight. Both are long out of copyright.",
+      "shots": [
+        "mountain-king/shots/09-lead.png",
+        "mountain-king/shots/10-lead-notes-in-roll.png"
+      ],
+      "loop": "mk-variants.wav",
+      "cut": 8.5,
+      "burst": "variants",
+      "cutOn": [
+        5
+      ],
+      "cutAt": [
+        6.284
+      ]
+    },
+    {
+      "id": "close",
+      "narration": "Three versions, one axis apart. They share everything except the melody, so if one of them lands better than the others, that preference actually means something. Pick one, and tell me which.",
+      "shots": [
+        "fate/shots/10-lead-notes-in-roll.png"
+      ],
+      "holdLast": true,
+      "loop": "fate-close.wav",
+      "cut": 9.8,
+      "burst": "close"
+    }
+  ]
+}

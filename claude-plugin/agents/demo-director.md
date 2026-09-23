@@ -63,6 +63,132 @@ that says the wrong words. Every line goes through the transcribe-and-compare
 gate in `narrate.py`, and the finished film gets spot-transcribed with a
 negative control.
 
+**The cloned voice IS available, and it ships INSIDE THIS REPO:**
+
+```bash
+eval "$(claude-plugin/skills/demo-film/scripts/speech-server.sh start)"   # exports OMLX_BASE
+…                                                                         # narrate.py
+claude-plugin/skills/demo-film/scripts/speech-server.sh stop              # ALWAYS — tens of GB
+```
+
+The binary is `plugins/narrated-film/.venv/bin/omlx`. ⛔ **Never use port 8000** —
+it is the default and therefore the collision; two film builds have killed each
+other's server on it. The script derives a private port and prints `OMLX_BASE`.
+
+⛔ **`omlx` is NOT on `$PATH`, and that is not the same as missing** — and do
+**not** probe `import mlx_omni_server`: the package is `omlx`, and a wrong module
+name raises the same `ModuleNotFoundError` as a missing one. A session ran both
+probes, concluded the voice needed gigabytes of downloads, and shipped a
+finished film narrated by the macOS `say` voice. Everything was installed.
+Models are cached (`VoxCPM2-bf16`, `whisper-large-v3-turbo-asr-fp16`).
+
+**Never substitute a different voice** — one consistent cloned voice across every
+film is the point. If you cannot start the server, stop and say so rather than
+silently swapping it.
+
+**Films live in `scripts/video/<wave>/`**, sources tracked and `out/` gitignored
+— follow the existing waves (`session/`, `lessons/`, `series/`, `shorts/`,
+`comp/`, `features/`) instead of inventing a home in a scratchpad.
+
+**Every film gets an intro and an outro card.** `brand.py intro|outro --brand
+<brand.json> --theme <theme>`, then `assemble.py --intro … --outro …`. They are
+optional flags, so forgetting them yields a valid, unbranded film and no error.
+Every other wave has `out/intro.mp4` and `out/outro.mp4`; if yours does not, you
+forgot. Use the plugin venv's python — the system one has no Pillow.
+
+⛔ **A film is not a slideshow.** `debug.captureUI` runs at ~3.5 fps and cannot
+film movement, so stills cut on a timer are all you will get from it. For every
+beat where music plays, record the app with the transport RUNNING via
+`scripts/video/screenrec/` (real 30 fps) and feed it as a `burst` — the playhead
+sweeping and the meters moving. **Stay on the track that is playing**; feature
+panels belong in the intro, or where the voice names the control it is reading.
+Rebuild with `--no-shots` first so no editor card is left parked over the take,
+and prove the recording moves with `freezedetect` plus a static control.
+
+⛔⛔ **ONE RECORDING AND ONE AUDIO EXCERPT PER STAGE — this rejected a third
+cut.** An observer measured 72% of 9278 frames bit-frozen: eight play beats
+built from two clips, two moments 187 s apart showing the same app clock. Three
+mechanisms all default to *identical* and nothing compares them: `play_audio()`
+always trims the FIRST `playMax` seconds (so two stages sharing a `loop` are
+byte-identical), `burst` is a directory name two stages can share, and **a
+missing burst dir falls through to stills SILENTLY** — a stage never recorded
+looks exactly like one that never wanted a recording. Give every stage its own
+burst dir and its own excerpt, and keep the gate in `assemble.py` that refuses
+to build on a collision.
+
+⛔ **Silence the output DEVICE, never the master fader.** `setMasterVolume 0`
+leaves `-inf dB` on the master in your footage under audible music — it shipped
+three times. Route staging to BlackHole: `output.setDevice {uid:
+"BlackHole2ch_UID"}` (`uid` is the only accepted key), then **read back
+`isSelected`** — not `current`, which does not exist — and refuse to play if it
+does not confirm, or a failed setter means full-volume playback in the user's
+room. `isDefault` is separate and stays on their own device; never move it.
+
+⛔ **Cut the picture on sentences, not a timer.** `stills()` divides time evenly
+and never reads the words; that put "A saturator" over the PHASER card. Map
+sentence indices to shots in the manifest, print the table, and read it.
+
+⛔ **Boilerplate is an assertion.** The outro's "Narration is a synthetic voice"
+was stamped unconditionally onto six wordless visualisers. Pass
+`brand.py outro … --no-disclaimer` for anything with no speech in it, and check
+every stock line against the artifact it is going on.
+
+⛔⛔ **Build into the repo, not the session scratchpad.** The scratchpad path
+carries the **session UUID**: a film built there lives in one directory the next
+session cannot name and a cleanup can take, while the scripts keep running and
+silently rebuild from an empty tree. Give each script one base definition —
+`FILM="${FEATURES_HOME:-$(cd "$(dirname "$0")" && pwd)}"`, or
+`process.env.FEATURES_HOME || new URL(".", import.meta.url).pathname` — resolved
+from the script rather than the cwd, and gitignore the output dirs. If you ever
+have to rescue one: copy the artifact subtrees **by name**, because the
+scratchpad holds stale copies of the scripts too and a plain mirror reverts them.
+
+**Manifest keys that exist because of the above:** `playOffset` (seconds into
+`loop`; two stages sharing a loop AND an offset are refused), `burst` (a
+directory holding `clip.mp4` or a `f%04d.png` + `meta.json` sequence — one per
+stage, and a recording not placed inside it is silently ignored), `cutOn`
+(sentence indices driving the picture changes, one fewer than `shots`).
+
+**A narrated number is a claim with an expiry date.** A line like "the drop is
+six decibels louder" is only true of the render it was measured against; change
+an instrument and it moves. `narrate.py` keeps any existing take over 20 KB, so
+the stale sentence gets re-spoken over the new music with every gate green. Run
+`sync-claims.py` after each build: it re-measures, rewrites the line, and moves
+the old wav to `vo/rejected/` so narration must re-record it.
+
+**Three quiet failures worth knowing by name.** (1) `narrate.py` has NO argparse
+— it takes `MANIFEST`/`OUT_DIR` from the environment, and flags are ignored in
+silence, writing narration somewhere the assembler never looks. (2) An
+unconditional "ALL BUILDS COMPLETE" banner printed while two of six builds had
+failed; a banner must carry the verdict, and a stale output file looks exactly
+like a fresh one until you compare mtimes. (3) `view.panelLayout` accepts only
+`arrange` or `mix` — the piano roll is not a workspace, it opens by selecting a
+clip. Select clips BY NAME and fail loudly; an out-of-range index used to select
+nothing at all and film the wrong view.
+
+**Motion is not always right, and opting out is a declaration.** A beat whose
+audio is a rendered demonstration — isolated hits, an A/B, a swept tone — must
+not run a full arrangement underneath; they are different performances and it
+shows. Set `"stillsOnly": true` on that stage. Never leave a stage with no burst
+and no flag: one that lost its recording must stay distinguishable from one that
+never wanted it.
+
+**Hold the display awake while recording** — `caffeinate -d -i -u -w $$ &`.
+ScreenCaptureKit returns ZERO frames once the display sleeps, while still
+finding the window and writing a valid, empty mp4.
+
+**Calibrate a gate against a known-bad artefact.** `freezedetect` flagged every
+take on every run here; swept −60 to −30 dB, no threshold separates real footage
+from a frozen clip, because a DAW window is ~95% static chrome. Use peak pixel
+difference between frames 16 s apart instead (real 181–255, frozen 3). A gate
+that cries wolf every run teaches you to ignore the one time it is right.
+
+**Prove the playhead moves before spending a take on it.** `transport.play`
+succeeds whether or not anything plays — seek past the end of the content and
+the recorder captures a flawless video of a motionless app. Read
+`project.overview().transport.positionBeats` twice ~1.2 s apart and require it
+to have advanced.
+
 **Do not use generation models for lesson material** unless the user asks.
 Write notes by hand and use SoundFont/sampler instruments — a lesson has to be
 exactly the thing being taught, and a generated take is not.
