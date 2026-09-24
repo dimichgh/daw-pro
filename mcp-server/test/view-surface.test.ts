@@ -1,6 +1,9 @@
 /**
  * view-surface.test.ts — round-trip coverage for the M35 `view.*` tools
- * (`view_capture`, `view_select_clip`, `view_panel_layout`, `view_open_editor`).
+ * (`view_capture`, `view_select_clip`, `view_panel_layout`, `view_open_editor`)
+ * plus the pitch-editor command-surface door's `view_open_pitch_editor`
+ * (`docs/design/2026-09-22-pitch-editor-ui.md` §9 — `view_select_clip`'s
+ * sibling for the second bottom pane).
  *
  * Same stub-bridge pattern as `vc.test.ts` (itself following
  * `connection-info.test.ts` / `clip-time-range.test.ts`): the REAL `McpServer`
@@ -186,12 +189,13 @@ test("view_select_clip requires clipId and rejects extras at the MCP boundary", 
   assert.equal(calls.length, 0);
 });
 
-test("view_select_clip's description teaches all three reason values", async () => {
+test("view_select_clip's description teaches all four reason values", async () => {
   const { tools } = await client.listTools();
   const tool = tools.find((t) => t.name === "view_select_clip");
   assert.ok(tool, "view_select_clip is registered");
   for (const reason of [
     "piano-roll-opened",
+    "pitch-editor-open",
     "audio-clip-has-no-editor",
     "workspace-is-not-arrange",
   ]) {
@@ -201,6 +205,29 @@ test("view_select_clip's description teaches all three reason values", async () 
       `the description must teach the ${reason} branch`
     );
   }
+});
+
+test("view_select_clip's response shape carries pitchEditorOpen alongside editorOpen", async () => {
+  const stubbed = {
+    clipId: CLIP_ID,
+    trackId: TRACK_ID,
+    clipKind: "audio",
+    editorOpen: false,
+    pitchEditorOpen: true,
+    reason: "pitch-editor-open",
+    workspace: "arrange",
+  };
+  queuedResult = stubbed;
+
+  const result = await client.callTool({
+    name: "view_select_clip",
+    arguments: { clipId: CLIP_ID },
+  });
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const r = result as any;
+  assert.ok(!r.isError);
+  assert.deepEqual(parseJSON(r), stubbed);
 });
 
 // ---------------------------------------------------------------------------
@@ -262,6 +289,106 @@ test("view_panel_layout's workspace enum rejects anything but arrange|mix", asyn
 });
 
 // ---------------------------------------------------------------------------
+// view_open_pitch_editor
+// ---------------------------------------------------------------------------
+
+test("view_open_pitch_editor forwards clipId and round-trips the response", async () => {
+  const stubbed = {
+    clipId: CLIP_ID,
+    trackId: TRACK_ID,
+    opened: true,
+    reason: "pitch-editor-opened",
+    workspace: "arrange",
+  };
+  queuedResult = stubbed;
+
+  const result = await client.callTool({
+    name: "view_open_pitch_editor",
+    arguments: { clipId: CLIP_ID },
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.command, "view.openPitchEditor");
+  assert.deepEqual(calls[0]!.params, { clipId: CLIP_ID });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const r = result as any;
+  assert.ok(!r.isError, "opening the pitch editor on an audio clip is a SUCCESS");
+  assert.deepEqual(parseJSON(r), stubbed);
+});
+
+test("view_open_pitch_editor: opened:false with workspace-is-not-arrange is still a SUCCESS, not an error", async () => {
+  const stubbed = {
+    clipId: CLIP_ID,
+    trackId: TRACK_ID,
+    opened: false,
+    reason: "workspace-is-not-arrange",
+    workspace: "mix",
+  };
+  queuedResult = stubbed;
+
+  const result = await client.callTool({
+    name: "view_open_pitch_editor",
+    arguments: { clipId: CLIP_ID },
+  });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const r = result as any;
+  assert.ok(!r.isError, "latched-but-not-visible is a success carrying an honest reason, not an error");
+  assert.deepEqual(parseJSON(r), stubbed);
+});
+
+test("view_open_pitch_editor requires clipId and rejects extras at the MCP boundary", async () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let r = (await client.callTool({ name: "view_open_pitch_editor", arguments: {} })) as any;
+  assert.ok(r.isError);
+  r = (await client.callTool({
+    name: "view_open_pitch_editor",
+    arguments: { clipId: "not-a-uuid" },
+  })) as any;
+  assert.ok(r.isError);
+  r = (await client.callTool({
+    name: "view_open_pitch_editor",
+    arguments: { clipId: CLIP_ID, bogus: true },
+  })) as any;
+  assert.ok(r.isError);
+  assert.equal(calls.length, 0);
+});
+
+test("view_open_pitch_editor surfaces the app's MIDI-clip refusal as an MCP tool error, message verbatim", async () => {
+  queuedError = new Error(
+    `clip "Lead Vocal" (${CLIP_ID}) is a MIDI clip — the pitch editor tunes a SUNG OR ` +
+      "PLAYED AUDIO recording; a MIDI clip is already notes with a definite pitch. Open " +
+      "its piano roll instead with view.selectClip."
+  );
+
+  const result = await client.callTool({
+    name: "view_open_pitch_editor",
+    arguments: { clipId: CLIP_ID },
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.command, "view.openPitchEditor");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const r = result as any;
+  assert.ok(r.isError, "a MIDI clip must be a loud error, never a soft reply");
+  assert.match(r.content[0].text as string, /is a MIDI clip/);
+});
+
+test("view_open_pitch_editor's headless refusal surfaces as a tool ERROR, not a blank success", async () => {
+  queuedError = new Error(
+    "view.openPitchEditor needs the app UI — this control session is headless (there is " +
+      "no pitch editor pane to open). Launch DAWApp/DAWPro.app and retry."
+  );
+  const result = await client.callTool({
+    name: "view_open_pitch_editor",
+    arguments: { clipId: CLIP_ID },
+  });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const r = result as any;
+  assert.ok(r.isError);
+  assert.match(r.content[0].text as string, /headless/);
+});
+
+// ---------------------------------------------------------------------------
 // view_open_editor
 // ---------------------------------------------------------------------------
 
@@ -313,7 +440,7 @@ test("view_open_editor requires trackId and rejects extras at the MCP boundary",
   assert.equal(calls.length, 0);
 });
 
-test("all four view_* tools are registered with beginner-readable descriptions", async () => {
+test("all five view_* tools are registered with beginner-readable descriptions", async () => {
   const { tools } = await client.listTools();
   const names = tools.map((t) => t.name);
   for (const name of [
@@ -321,6 +448,7 @@ test("all four view_* tools are registered with beginner-readable descriptions",
     "view_select_clip",
     "view_panel_layout",
     "view_open_editor",
+    "view_open_pitch_editor",
   ]) {
     assert.ok(names.includes(name), `${name} must be registered`);
     const tool = tools.find((t) => t.name === name)!;

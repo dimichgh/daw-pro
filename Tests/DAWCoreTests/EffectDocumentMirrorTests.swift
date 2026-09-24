@@ -99,8 +99,9 @@ struct EffectDocumentMirrorTests {
                                                        mix: 0.37, preDelayMs: 23,
                                                        width: 0.85)),
         .delay: EffectDescriptor(kind: .delay, delay: nonDefaultDelay()),
-        // m39-ad. `oversampling` 4 (DEFAULT 1, unlike the clipper's default of
-        // 4) so a mirror site that dropped the new field reddens. ⚠️ 4 is an
+        // m39-ad. `oversampling` 4 (DEFAULT 1 — as a NEW clipper's has also been
+        // since the 2026-09-20 ruling) so a mirror site that dropped the new
+        // field reddens. ⚠️ 4 is an
         // exact supported factor, so `SaturatorParams.init`'s SNAPPING leaves
         // it unchanged — a fixture whose value the init rewrote would make the
         // round-trip compare equal for the wrong reason.
@@ -171,7 +172,8 @@ struct EffectDocumentMirrorTests {
                                            stereoSpreadHz: 3.75, mix: 0.83,
                                            outputDb: -5.5)),
         // m39-ac. EVERY field non-default, including BOTH discrete ones —
-        // `mode` 1 (soft, default hard) and `oversampling` 2 (default 4) — so a
+        // `mode` 1 (soft, default hard) and `oversampling` 2 (1 for a new
+        // clipper, 4 for a pre-ruling one saved without params — 2 is neither) — so a
         // mirror site that dropped either snapped field reddens. ⚠️ The two
         // discrete values are chosen to survive `ClipperParams.init`'s SNAPPING
         // unchanged (1 and 2 are exact), because a fixture whose value the init

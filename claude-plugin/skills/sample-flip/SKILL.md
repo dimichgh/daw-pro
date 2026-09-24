@@ -37,7 +37,7 @@ plugin's chairs are curated per domain:
 |---|---|---|
 | Open/name/save the project, set the tempo | **producer** | `project_new`, `project_save`, `project_open`, `transport_set_tempo`, `track_add`, `marker_add` |
 | Analyze, find chops, chop, write the new pattern | **composer** | `clip_analyze_audio`, `clip_detect_transients`, `clip_slice_to_sampler`, `clip_quantize_audio`, `clip_add_midi`, `clip_get_notes`/`clip_set_notes`, `clip_add_audio`, `track_add` |
-| Shape the pads and the tone | **sound-designer** | `clip_slice_to_sampler`, `instrument_describe_sampler`, `instrument_set_sampler_zones`, `instrument_set_sampler_param`, `track_set_instrument`, `fx_add`/`fx_set_param`/`fx_describe` |
+| Shape the pads and the tone | **sound-designer** | `clip_slice_to_sampler`, `instrument_describe_sampler`, `instrument_set_sampler_zones`, `instrument_set_sampler_param`, `instrument_spread_slice`, `instrument_set_spread_direction`, `track_set_instrument`, `fx_add`/`fx_set_param`/`fx_describe` |
 | Rearrange the chopped clips on the timeline | **arranger** | `clip_move`, `clip_split`, `clip_duplicate`, `clip_remove`, `clip_crossfade`, `clip_set_fades` |
 | Levels, buses, the crush on a whole drum bus | **mix-engineer** | `fx_add`/`fx_set_param`, `track_set_volume`/`_pan`, `render_measure_loudness` |
 | Bounce, and the resample loop's render half | **finisher** | `render_bounce`, `render_stems`, `render_measure_loudness`, `audio_profile_file` |
@@ -169,7 +169,7 @@ pads to make something new. This is the MPC / SP-1200 / Recycle chop.
 | `maxSlices` | refusal ceiling, default 32, hard cap 96 |
 | `minSliceSeconds` | minimum pad width, default 0.05. ⭐ **This — not `sensitivity` — is the pad-count knob.** Onsets closer together than this are merged, so raising it is how you get fewer, longer pads out of busy material. |
 | `snapWindowMs` | boundary snap half-width, default 3; 0 disables |
-| `includeHead` | keep the audio BEFORE the first slice point as the first pad, default false |
+| `includeHead` | keep the audio BEFORE the first slice point as the first pad, default false — **read only in `mode: "transients"`**; accepted but inert in `"divisions"`/`"grid"`, where pad 1 already starts at the window edge |
 | `generateMIDI` | write the reconstruction clip, default true |
 | `atBeat` | where the reconstruction lands, default the source clip's own start |
 | `velocityFromStrength` | map detector strength to velocity instead of 127, default false |
@@ -205,18 +205,31 @@ Things worth knowing before you call it:
   warning catches a badly missed head, not a musically important one. A third
   of a second is a whole downbeat. **Check `headSeconds` against the material
   yourself every time**, and if it holds anything you want, re-run with
-  `includeHead: true`.
+  `includeHead: true`. This whole bullet is about `mode: "transients"` — the
+  only mode where anything can be DISCARDED as a head; in `"divisions"`/
+  `"grid"` pad 1 already starts at the window edge, `headSeconds` there is
+  just pad 1's own length, and `includeHead: true` changes nothing.
 - ⚠️ **`clip_detect_transients`' `count` does NOT predict how many pads you
   get.** It is the raw onset count before `minSliceSeconds` merging and the
   `maxSlices` ceiling — measured 43 onsets producing 36 pads on the same clip.
   Use it to confirm the detector found *something*; use `sliceCount` in the
   chop's own response for what you actually got.
-- ⚠️ **`divisions: N` gives you N−1 pads unless you pass `includeHead: true`.**
-  N cuts across the clip yield N spans, and the first one — the head, before
-  the first cut — is discarded by default like any other head. Ask for 8 and
-  count 7. (The accompanying warning text mentions "the detector" and "the
-  first onset" even in `divisions` mode, where no detector ran; ignore that
-  wording, the arithmetic above is what happened.)
+- ⚠️ **`divisions: N` gives you exactly N pads, and `"grid"` gives its full
+  cell count — `includeHead` cannot shrink either one.** Only `mode:
+  "transients"` reads `includeHead` at all (a detector is the only boundary
+  source that can leave a pre-roll head before its first cut); in
+  `"divisions"`/`"grid"` the window's own start IS the first cut by
+  construction, so pad 1 always begins there whether `includeHead` is true,
+  false, or omitted. **This was a real, measured defect until m33-d
+  (2026-09-24):** honoring `includeHead: false` in those two modes used to
+  turn "8 equal pieces" of a clip into 7 pads, silently dropping the first
+  eighth of the audio from every pad, and warning about a detector that
+  never ran. `includeHead` is still ACCEPTED (never rejected) in every mode,
+  so a caller who learned the old `includeHead: true` workaround keeps its
+  exact result going forward. (The accompanying warning text still mentions
+  "the detector" and "the first onset" even in `divisions`/`grid` mode,
+  where no detector ran; ignore that wording — it names the mechanism from
+  `"transients"` mode, not what happened here.)
 - **Refusals, all of which change nothing:** a MIDI clip; a time-STRETCHED or
   PITCH-SHIFTED clip (pads read RAW source frames, so the reconstruction would
   not match what you hear — un-stretch, clear the pitch, or bounce first);
@@ -311,9 +324,13 @@ the sound of the genre.
 Practical consequences:
 
 - **Play a pad chromatically to repitch it.** Pad 1 sits at `baseNote`
-  (default 36). Widen one pad's `maxPitch` (step 7) and it answers a whole
-  range — this is the classic "16 Levels" move, one chop spread across the
-  keyboard.
+  (default 36). Use `instrument_spread_slice` to copy one zone across sixteen
+  pads, one semitone apart — this is the classic "16 Levels" move, one chop
+  spread across the keyboard. `direction: "up"` (the default) plays the slice as
+  recorded on pad 1, with pads 2–16 pitched +1…+15 semitones above it;
+  `direction: "centered"` plays it unshifted on pad 9, running −8…+7 around it.
+  Call `instrument_set_spread_direction` later to flip between directions without
+  rebuilding the spread.
 - **Transpose the whole reconstruction** by shifting every note in the MIDI
   clip: the flip speeds up and pitches up together, like a record played fast.
 - **`tuneCents` fine-tunes on the same rate** — cents of detune per zone, for

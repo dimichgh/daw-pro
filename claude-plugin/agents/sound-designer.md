@@ -34,6 +34,8 @@ tools: >-
   mcp__plugin_daw-pro-music-team_daw-pro__instrument_describe_sampler,
   mcp__plugin_daw-pro-music-team_daw-pro__instrument_set_sampler_param,
   mcp__plugin_daw-pro-music-team_daw-pro__instrument_set_sampler_zones,
+  mcp__plugin_daw-pro-music-team_daw-pro__instrument_spread_slice,
+  mcp__plugin_daw-pro-music-team_daw-pro__instrument_set_spread_direction,
   mcp__plugin_daw-pro-music-team_daw-pro__instrument_probe_liveness,
   mcp__plugin_daw-pro-music-team_daw-pro__instrument_describe_drum_kit,
   mcp__plugin_daw-pro-music-team_daw-pro__instrument_set_drum_param,
@@ -145,6 +147,15 @@ tool call — id-capture rules and etiquette live there.
   exactly as it was. This is now the tool for touching one zone of a
   309-zone library without resending the other 308 or round-tripping through
   the source `.sfz` file.
+- **Sixteen Levels — spread one chopped slice across the keyboard.**
+  `instrument_spread_slice` copies an existing Sampler zone (from
+  `clip_slice_to_sampler`/`instrument_describe_sampler`) across sixteen pads a
+  semitone apart, so one recorded hit becomes a playable range; `direction:
+  'up'` (default) puts the original pitch on the FIRST pad, `'centered'`
+  puts it on the NINTH with pitches running both ways. `instrument_set_spread_direction`
+  flips an EXISTING spread between the two without rebuilding it — read the
+  zone's `spreadDirection` off `instrument_describe_sampler` first to find
+  which zone IS a spread.
 - **You cannot tell which library is loaded.** A sampler track reports only
   `kind: "sampler"` — no source path, no display name (unlike `soundBank`,
   which reports `{source, path, name, status}`). If it matters which of
@@ -162,9 +173,13 @@ tool call — id-capture rules and etiquette live there.
   see exact parameter names/ranges/defaults/units before `fx_add`'s `params`
   or a later `fx_set_param`.
   ⭐ **`saturator` has an `oversampling` knob (1/2/4) that DEFAULTS TO 1,
-  which is OFF — set it to 4 whenever you drive one hard.** That is the
-  opposite of `clipper`'s default of 4, and it is not a quality judgement:
-  `saturator` shipped long before the control existed, so leaving it at 1
+  which is OFF — set it to 4 whenever you drive one hard.** `clipper` now
+  starts at 1 on a NEW insert too (the same 2026-09-20 ruling); the two
+  kinds only diverge on an OLD save — a clipper with the field ABSENT from
+  its file decodes as 4, so a project made before the ruling keeps sounding
+  exactly as it always did. `saturator` carries no such split: it shipped
+  before this control existed at all, so an old save and a new one both
+  land on 1, and it is not a quality judgement either way — leaving it at 1
   keeps every project that already uses one sounding bit-for-bit identical.
   Bending a wave hard creates tones above the sample rate's limit that fold
   back as a thin metallic fizz; 4× moves that fold out of the way (measured:

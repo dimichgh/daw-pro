@@ -95,21 +95,14 @@ public enum PitchCorrectionPreset: String, Codable, Sendable, CaseIterable, Iden
     /// The three that share one ladder, weakest first. `hardTune` is
     /// deliberately absent: it is not a stronger `tight`, it is a different
     /// algorithm, and a UI that presents all four as one slider would be
-    /// lying about what the last stop does.
+    /// lying about what the last stop does. (Offered — `offeredInUI` — is not
+    /// the same question as on-the-ladder.)
     public static let ladder: [PitchCorrectionPreset] = [.gentle, .natural, .tight]
 
-    /// ⛔ **WHAT THE UI MAY DRAW TODAY — and this is NOT `ladder` under
-    /// another name, even though it is currently the same three.**
-    ///
-    /// `hardTune` is withheld from every on-screen door because **the app
-    /// cannot currently produce it.** The render path calls
-    /// `StretchCurvePlan.make` with `contour: []`, so a set with
-    /// `driftScale`/`vibratoScale` ≠ 1 has nothing to resolve its shaping
-    /// against: every segment lands in `unresolvedShapingSegmentIDs`, which no
-    /// caller reads, and only the constant per-note offset survives. Measured
-    /// on a real vocal, `hardTune` asks for a median 62.1 cents against
-    /// `tight`'s 18.8 — so it would not even be inaudible, it would be a
-    /// *stronger Tight* wearing the label "the robot effect".
+    /// **WHAT THE UI MAY DRAW — ALL FOUR, since contour-to-render
+    /// (2026-09-24).** Kept as a NAMED list rather than replaced by `allCases`
+    /// at the draw sites, because the rule below is still the rule and this is
+    /// where it is enforced.
     ///
     /// ⭐ THE RULE THIS SERVES: a control whose label promises one result and
     /// whose mechanism delivers another is worse than a missing control,
@@ -117,13 +110,25 @@ public enum PitchCorrectionPreset: String, Codable, Sendable, CaseIterable, Iden
     /// This tree has shipped that shape before (`drumKit` without `kind` — a
     /// silent, inaudible success) and the cost was that nobody could see it.
     ///
-    /// ⚠️ **THE WIRE AND MCP DO NOT FILTER.** `clip.autoCorrectPitch` still
-    /// accepts `hardTune` and returns the degradation in its `warnings`, so an
-    /// agent can ask for it knowingly. Only the pixels withhold it, because
-    /// only the pixels have no room to explain.
+    /// **WHY `hardTune` WAS WITHHELD, AND WHY IT NO LONGER IS — MEASURED BOTH
+    /// TIMES.** Until 2026-09-24 the render built every curve with
+    /// `contour: []`, so Hard Tune's flattening resolved to nothing and it
+    /// rendered as a *stronger Tight* wearing the label "the robot effect" —
+    /// on the real dry vocal its within-note wander came back 62.8 → 63.8
+    /// cents, indistinguishable from Tight's 62.8 → 63.8. The render now
+    /// shapes against the detected whole-file contour (`PitchRenderContour`),
+    /// and through that product path the same vocal comes back 62.8 → 18.2
+    /// cents (median 70 % cut per note) while Tight still moves it 1 %. The
+    /// label is now true, so the button is offered.
     ///
-    /// **Remove this property — not edit it — once the contour reaches the
-    /// render path.** If it ever diverges from `ladder` for a reason OTHER
-    /// than an unfinished mechanism, that reason belongs here in writing.
-    public static let offeredInUI: [PitchCorrectionPreset] = [.gentle, .natural, .tight]
+    /// ⚠️ **WHAT IS STILL TRUE AND A UI SHOULD SAY:** if the pitch detector
+    /// cannot run (a build missing the model), Hard Tune renders its fallback
+    /// — notes on pitch, wobble kept — and the engine posts a
+    /// `clip-pitch-contour-unavailable` notice. That is a failure the product
+    /// reports, not the mechanism the label describes.
+    ///
+    /// If this ever diverges from `allCases` again, the reason belongs here in
+    /// writing, and `PitchCorrectionPresetTests.uiDoorOffersEveryPresetTheRenderHonours`
+    /// must be changed with it.
+    public static let offeredInUI: [PitchCorrectionPreset] = [.gentle, .natural, .tight, .hardTune]
 }

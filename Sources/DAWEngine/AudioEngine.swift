@@ -41,12 +41,37 @@ public final class AudioEngine: AudioEngineControlling {
     /// tests can point it at a temp directory before use — the resolver and
     /// mixdown paths read it dynamically through self.
     var stretchCache = StretchRenderCache()
-    /// The stretch mirror of `auDesired`: the params each clip's render kick
-    /// was last spawned for, so repeated reconcile passes never double-spawn
-    /// (the cache coalesces same-key jobs anyway; this also dedupes the
+    /// The stretch mirror of `auDesired`: the render KEY
+    /// (`StretchRenderCache.RenderKeys.resolved`) each clip's render kick was
+    /// last spawned for, so repeated reconcile passes never double-spawn (the
+    /// cache coalesces same-key jobs anyway; this also dedupes the
     /// completion-restart wrapper) and a FAILED render is not retried until
-    /// the params change (spec §5: retry by re-editing).
-    private var stretchDesired: [UUID: StretchRenderCache.Params] = [:]
+    /// what it renders changes (spec §5: retry by re-editing).
+    ///
+    /// ⛔ **THIS USED TO HOLD `Params` AND THAT WAS A SILENCE BUG** (measured
+    /// 2026-09-24 through this engine and on staging). `Params` holds no source
+    /// file and compares Doubles with `==`, while the key starts with the
+    /// source's path ‖ size ‖ mtime and hashes bit patterns. A save repoints
+    /// every imported clip at its bundle copy with every parameter unchanged,
+    /// so the resolver missed the cache at the new key and this guard refused
+    /// the render: the clip scheduled as silence for the rest of the session,
+    /// its status idle, and every play posted "still being prepared" about a
+    /// render nobody was running. Semitones +0.0 → −0.0 did the same at the
+    /// next re-resolve. Keying this on the key itself makes the guard agree
+    /// with the cache by construction — and so it also retries when the file
+    /// at the SAME path changes size/mtime, which re-keys the render too.
+    private var stretchDesired: [UUID: String] = [:]
+    /// contour-to-render: the params each clip's "plays WITHOUT flattening"
+    /// notice was last posted for — so the resolver, which re-runs whenever a
+    /// clip's node is rebuilt, says it once per (clip, edit) per session.
+    ///
+    /// Deliberately `Params`, NOT the render key `stretchDesired` compares: the
+    /// notice's subject is the EDIT ("your tuning plays without flattening"),
+    /// so a save that repoints the clip and re-renders it into the same
+    /// fallback is the same fact and must not be said twice. If the new
+    /// render is NOT short, `contourShortfall` answers nil and the entry
+    /// clears, so a later shortfall is still reported.
+    private var contourNoticePosted: [UUID: StretchRenderCache.Params] = [:]
     /// Offline transient-map cache (M5 iii-e). `var` internal so tests can
     /// point it at a temp directory before use — the same seam as
     /// `stretchCache`. Analysis runs in the cache's detached task; nothing
@@ -2138,21 +2163,40 @@ public final class AudioEngine: AudioEngineControlling {
     private func resolveStretch(clip: Clip) -> PlaybackGraph.StretchResolution {
         guard let source = clip.audioFileURL else { return .pending }
         let params = StretchRenderCache.Params(clip: clip)
-        if let rendered = stretchCache.cachedURL(source: source, params: params) {
+        // ONE key derivation per resolve, shared by the committed lookup and
+        // the kick's dedupe — the same stat + digest `cachedURL` paid here on
+        // its own before, so the guard costs nothing new.
+        guard let keys = try? stretchCache.keys(source: source, params: params) else {
+            // Unreadable source (missing / not yet mounted): no key, so no
+            // render could start — `renderIfNeeded` derives this same key
+            // first and throws before touching any status. Nothing is kicked
+            // or remembered; the clip stays pending and the next resolve
+            // (every reconcile pass, while it has no node) retries the stat,
+            // so media that comes back renders then.
+            return .pending
+        }
+        if let rendered = stretchCache.committedURL(for: keys) {
+            // The moment the clip is handed audio to PLAY is the moment to say
+            // what that audio is — including a fallback served from disk with
+            // no render this session (contour-to-render).
+            postContourShortfallNoticeIfNeeded(clip: clip, source: source, params: params,
+                                               everyTime: false)
             return .ready(rendered)
         }
-        kickStretchRender(clipID: clip.id, source: source, params: params)
+        kickStretchRender(clipID: clip.id, source: source, params: params, key: keys.resolved)
         return .pending
     }
 
     /// Fire-and-forget render kick with completion restart (the
     /// `syncAudioUnitInstruments` async-prepare shape): at most one wrapper
-    /// per (clip, params) — the guard also stops a FAILED render from
-    /// re-spawning every reconcile pass; a param edit (new params) retries.
+    /// per (clip, render key) — the guard also stops a FAILED render from
+    /// re-spawning every reconcile pass; anything that re-keys the render
+    /// (a param edit, a repointed source, a rewritten file) retries. See
+    /// `stretchDesired` for why this compares the key and not `Params`.
     private func kickStretchRender(clipID: UUID, source: URL,
-                                   params: StretchRenderCache.Params) {
-        guard stretchDesired[clipID] != params else { return }
-        stretchDesired[clipID] = params
+                                   params: StretchRenderCache.Params, key: String) {
+        guard stretchDesired[clipID] != key else { return }
+        stretchDesired[clipID] = key
         Task { @MainActor [weak self] in
             guard let self else { return }
             do {
@@ -2161,7 +2205,7 @@ public final class AudioEngine: AudioEngineControlling {
             } catch {
                 return  // superseded or failed — status(forClip:) carries it
             }
-            guard self.stretchDesired[clipID] == params else { return }  // stale
+            guard self.stretchDesired[clipID] == key else { return }  // stale
             // M3 vi-a precedent: invalidate the clip's schedule entry, then
             // re-enter tracksDidChange — reconcile opens the rendered CAF and
             // the existing restart seam resumes playback with it.
@@ -2170,10 +2214,42 @@ public final class AudioEngine: AudioEngineControlling {
         }
     }
 
+    /// contour-to-render: a clip whose edits ask for flattening (Hard Tune, a
+    /// vibrato/drift scale) but PLAYS its constant-offset fallback — audible,
+    /// on pitch, and not what was asked for. Say so in words a singer can act
+    /// on (design §7.2: a visible notice, never a silent substitution).
+    ///
+    /// Asked through `StretchRenderCache.contourShortfall`, which answers from
+    /// what is COMMITTED rather than from whether a job ran — so a fallback
+    /// served from disk in a later session (edits from another detector
+    /// generation) is reported exactly like one rendered in this one.
+    /// Playback (`everyTime: false`) says it once per (clip, params) per
+    /// session, since the resolver re-runs whenever the clip's node is
+    /// rebuilt; every bounce says it again (`everyTime: true`). The render
+    /// job's completion restart re-enters the resolver, so a fallback
+    /// rendered THIS session is reported through the same door.
+    private func postContourShortfallNoticeIfNeeded(clip: Clip, source: URL,
+                                                   params: StretchRenderCache.Params,
+                                                   everyTime: Bool) {
+        guard let reason = stretchCache.contourShortfall(source: source, params: params) else {
+            contourNoticePosted[clip.id] = nil
+            return
+        }
+        if !everyTime {
+            guard contourNoticePosted[clip.id] != params else { return }
+            contourNoticePosted[clip.id] = params
+        }
+        engineNoticeHandler?(EngineNoticeEvent(
+            code: "clip-pitch-contour-unavailable",
+            message: "'\(clip.name)' plays its tuning WITHOUT flattening: the notes still land "
+                + "on pitch, but the wobble inside each note is kept, because \(reason).",
+            beat: clip.startBeat))
+    }
+
     /// Prunes per-clip stretch state for clips that no longer exist or are
     /// back to identity params, cancelling their in-flight jobs.
     private func syncStretchRenders(_ tracks: [Track]) {
-        guard !stretchDesired.isEmpty else { return }
+        guard !stretchDesired.isEmpty || !contourNoticePosted.isEmpty else { return }
         var live: Set<UUID> = []
         for track in tracks where track.kind == .audio {
             for clip in track.clips where StretchRenderCache.needsRender(clip) {
@@ -2183,6 +2259,9 @@ public final class AudioEngine: AudioEngineControlling {
         for clipID in stretchDesired.keys where !live.contains(clipID) {
             stretchDesired[clipID] = nil
             stretchCache.cancelJob(forClip: clipID)
+        }
+        for clipID in contourNoticePosted.keys where !live.contains(clipID) {
+            contourNoticePosted[clipID] = nil
         }
     }
 
@@ -2265,6 +2344,19 @@ public final class AudioEngine: AudioEngineControlling {
                 fileAt: url, fromSeconds: fromSeconds, durationSeconds: durationSeconds,
                 confidenceThreshold: confidenceThreshold, silenceFloorDbfs: silenceFloorDbfs)
         }.value
+    }
+
+    /// ⭐ THE contour the render uses for a clip whose source is `url`
+    /// (contour-to-render) — the display's door to
+    /// `PitchContourCache.renderContour`, through THIS engine's render cache:
+    /// the same cache directory and the same detector `performRender` shapes
+    /// against, so a picture drawn from the result is the contour the sound was
+    /// made from. Whole file from source second 0, cached, off the main actor.
+    /// Unlike `detectPitch` above it IS cached — it is not a diagnostic read,
+    /// it is the render's own input.
+    public func renderPitchContour(inFileAt url: URL,
+                                   analysisVersion: Int) async -> PitchRenderContour {
+        await stretchCache.renderContour(source: url, analysisVersion: analysisVersion)
     }
 
     /// Total fixed insert-chain latency for one track's strip, in samples at
@@ -2479,9 +2571,14 @@ public final class AudioEngine: AudioEngineControlling {
         for track in tracks where track.kind == .audio {
             for clip in track.clips where StretchRenderCache.needsRender(clip) {
                 guard let source = clip.audioFileURL else { continue }
+                let params = StretchRenderCache.Params(clip: clip)
                 _ = try? await stretchCache.renderIfNeeded(
-                    clipID: clip.id, source: source,
-                    params: StretchRenderCache.Params(clip: clip))
+                    clipID: clip.id, source: source, params: params)
+                // A bounce of a fallback render is a bounce WITHOUT the
+                // flattening that was asked for — the same notice live
+                // playback posts, every bounce.
+                postContourShortfallNoticeIfNeeded(clip: clip, source: source, params: params,
+                                                   everyTime: true)
             }
         }
         // A fresh OfflineRenderer builds its own AVAudioEngine + PlaybackGraph

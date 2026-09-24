@@ -220,14 +220,18 @@ struct ModulationTests {
         #expect(specs.filter { $0.modulatable == .warned }.isEmpty)
         #expect(specs.filter { $0.modulatable == .refused }.map(\.name) == ["oversampling"])
         #expect(specs.map(\.name) == ["driveDb", "mix", "outputDb", "oversampling"])
-        // ⛔ AND THE DEFAULT IS 1, NOT THE CLIPPER'S 4. This is the whole of
-        // m39-ad: a shipped kind may not change what it does at its default.
+        // ⛔ AND THE DEFAULT IS 1. This is the whole of m39-ad: a shipped kind
+        // may not change what it does at its default.
         #expect(specs[3].defaultValue == 1)
+        // ⭐ AND SINCE THE USER'S 2026-09-20 RULING THE CLIPPER'S IS 1 TOO — for a
+        // NEW clipper. (It shipped at 4, and a clipper SAVED without params
+        // still resolves to 4 through `ClipperParams.legacy`; that half is
+        // pinned in `ClipperParamsTests` P9 and `ClipperDefaultOversamplingTests`.)
         #expect(EffectParamSpec.specs(for: .clipper)
-                .first { $0.name == "oversampling" }?.defaultValue == 4,
+                .first { $0.name == "oversampling" }?.defaultValue == 1,
                 Comment(rawValue:
-                    "the clipper's default must stay 4 — the two kinds share the control "
-                    + "and deliberately not the default"))
+                    "a new clipper's oversampling default must be 1 (OFF) — the user ruled "
+                    + "that new effects of either oversampled kind start with it off"))
     }
 
     /// m39-ac's own contribution, asserted separately from the total so a

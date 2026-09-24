@@ -110,25 +110,45 @@ struct PitchCorrectionPresetTests {
                 == ["gentle", "natural", "tight", "hardTune"])
     }
 
-    /// The UI door withholds `hardTune` because the render path cannot yet
-    /// produce it. This pins the WHY, not just the list: if someone threads
-    /// the contour and forgets this property, `offeredInUI` silently keeps
-    /// hiding a preset that works.
-    @Test("the UI door withholds exactly hardTune, and for a reason that is still true")
-    func uiDoorWithholdsHardTune() {
-        #expect(PitchCorrectionPreset.offeredInUI == [.gentle, .natural, .tight])
-        let withheld = Set(PitchCorrectionPreset.allCases)
-            .subtracting(PitchCorrectionPreset.offeredInUI)
-        #expect(withheld == [.hardTune])
-        // The reason: every withheld preset must be one that needs the contour.
-        for p in withheld {
-            #expect(!p.options().preserveVibrato,
-                    "\(p.rawValue) is hidden yet needs no contour — the stated reason is false")
+    /// The UI door used to withhold `hardTune` because the render path built
+    /// every curve with `contour: []` and so could not produce it. Since
+    /// contour-to-render the render resolves a flattening set against the
+    /// detected contour — `ContourToRenderTests.hardTuneFlattensThroughTheProductPath`
+    /// measures it on the rendered audio, with a no-contour control that must
+    /// come out the other way — so the reason is gone and the door offers all
+    /// four.
+    ///
+    /// This pins BOTH halves of the old reasoning, so it cannot quietly come
+    /// back: the one preset that needs the contour is offered, AND it is the
+    /// one that needs the contour (so if a fifth, contour-free preset were
+    /// hidden for no stated reason, or Hard Tune stopped needing the contour,
+    /// this would say so).
+    @Test("the UI door offers every preset the render honours — Hard Tune included, now that the contour reaches the render")
+    func uiDoorOffersEveryPresetTheRenderHonours() {
+        #expect(PitchCorrectionPreset.offeredInUI == PitchCorrectionPreset.allCases,
+                "a preset is withheld from the UI — say why in `offeredInUI`'s doc and change this test with it")
+        #expect(PitchCorrectionPreset.offeredInUI.last == .hardTune,
+                "the ladder must read weakest → strongest before the different-algorithm stop")
+        // The one offered preset that needs the contour is exactly the one
+        // that used to be withheld for lacking it.
+        let needsContour = PitchCorrectionPreset.offeredInUI.filter { !$0.options().preserveVibrato }
+        #expect(needsContour == [.hardTune])
+        // And a Hard Tune pass DOES ask the render for the contour — the thing
+        // the render now supplies. If the policy stopped asking, the label
+        // "replaces your pitch" would be false again.
+        let frames = (0..<40).map { i in
+            ClipPitchFrame(timeSeconds: Double(i) * 0.016,
+                           frequencyHz: 224 * pow(2, 40 * sin(Double(i) * 0.55) / 1200),
+                           confidence: 0.95, levelDbfs: -20, absence: nil)
         }
-        // …and every OFFERED preset must be one that renders correctly today.
-        for p in PitchCorrectionPreset.offeredInUI {
-            #expect(p.options().preserveVibrato,
-                    "\(p.rawValue) is offered on screen but needs a contour the renderer never supplies")
+        let set = PitchAutoCorrect.editSet(contour: frames, frameRateHz: 62.5,
+                                           options: PitchCorrectionPreset.hardTune.options())
+        #expect(set.needsDetectedContour)
+        for preset in PitchCorrectionPreset.ladder {
+            let ladderSet = PitchAutoCorrect.editSet(contour: frames, frameRateHz: 62.5,
+                                                     options: preset.options())
+            #expect(!ladderSet.needsDetectedContour,
+                    "\(preset.rawValue) now needs the contour — it would re-key every cached render of it")
         }
     }
 

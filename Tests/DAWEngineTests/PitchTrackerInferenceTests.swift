@@ -69,6 +69,21 @@ struct PitchTrackerInferenceTests {
         #expect(data.count == 397_987)
         let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
         #expect(digest == "7e2390db8379cd9e1e2b22828e55b45b57c8559e4c8335678c717dc245c18176")
+        // The source's own copy of the identity — the one the detected-contour
+        // cache keys on — must be THIS file's digest, or a swapped model would
+        // keep serving contours (and renders shaped against them) the old
+        // network produced.
+        #expect(SwiftF0PitchTracker.weightsSHA256 == digest,
+                "SwiftF0PitchTracker.weightsSHA256 no longer names the bundled model — the contour cache would not re-key on a model swap")
+        // …and the runtime that executes it identifies itself for real: a
+        // "-unknown" here would key every contour on nothing, so a runtime
+        // bump could no longer re-key them.
+        let runtime = SwiftF0PitchTracker.runtimeIdentity
+        let version = runtime.dropFirst("onnxruntime-".count).split(separator: ".")
+        let isMajorMinorPatch = runtime.hasPrefix("onnxruntime-") && version.count == 3
+            && version.allSatisfy { part in part.allSatisfy { $0.isNumber } }
+        #expect(isMajorMinorPatch,
+                "the linked ONNX Runtime did not report a major.minor.patch version: \(runtime)")
     }
 
     // MARK: - The negative control, first

@@ -4073,18 +4073,18 @@ private struct ClipBlock: View {
             // file-less clip through `detectClipPitch`'s own teaching refusal, so both
             // halves of the gate are real refusals the user never has to meet.
             //
-            // ⛔ **THREE PRESETS, NOT FOUR — `offeredInUI`, NEVER `allCases`.**
-            // `hardTune` is withheld from every on-screen door because the render path
-            // calls `StretchCurvePlan.make` with `contour: []`, so the one preset that
-            // flips `preserveVibrato` has nothing to resolve its shaping against and
-            // degrades to a constant per-note offset — measured at a median 62.1 cents
-            // against tight's 18.8, i.e. a STRONGER TIGHT wearing the label "the robot
-            // effect". The wire and MCP still accept it, with a warning in the reply;
-            // only the pixels withhold it, because only the pixels have no room to
-            // explain. `PitchCorrectionPreset.offeredInUI`'s own doc holds the full
-            // reason, and `uiDoorWithholdsHardTune` pins both the list and the reason.
-            // With three there is no hairline separating the ladder from Hard Tune —
-            // the thing it would have separated is not on the menu.
+            // ⭐ **`offeredInUI`, NEVER `allCases` — AND SINCE 2026-09-24 THAT IS ALL
+            // FOUR.** Hard Tune was withheld while the render built every curve with
+            // no contour, so it played as a stronger Tight wearing the label "the
+            // robot effect". The render now shapes against the detected whole-file
+            // contour and the label is true, so the menu offers it.
+            // `PitchCorrectionPreset.offeredInUI`'s own doc holds the measurement
+            // (62.8 → 18.2 cents on the real vocal), and
+            // `uiDoorOffersEveryPresetTheRenderHonours` pins the list. Hard Tune is
+            // listed LAST with no hairline before it — the same flat order as the
+            // note editor's four chips. It is a different algorithm, not a fourth
+            // rung (`PitchCorrectionPreset.ladder`); its tooltip, the preset's own
+            // `summary`, is what says so.
             //
             // The label is the preset's `displayName` and the tooltip its `summary`,
             // both taken VERBATIM from `PitchCorrectionPresets.swift` (design §6.1:

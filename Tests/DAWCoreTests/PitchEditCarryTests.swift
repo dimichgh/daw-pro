@@ -85,7 +85,14 @@ private func plantedSet() -> PitchEditSet {
                         pitchOffsetCents: -18.5),
             NoteSegment(id: segBID, startSeconds: 1.10, endSeconds: 1.80,
                         detectedHz: 246.94, detectedConfidence: 0.83,
-                        pitchOffsetCents: 11.25, vibratoScale: 0.5),
+                        pitchOffsetCents: 11.25, vibratoScale: 0.5,
+                        // m23-ap C5a: the generator rides the carry paths too.
+                        // The set travels whole, so this is structural rather
+                        // than a new site — planted so the claim is MEASURED
+                        // at every carry site instead of being argued from the
+                        // shape of the code.
+                        vibratoRateHz: 5.5, vibratoDepthCents: 93,
+                        vibratoOnsetSeconds: 0.2),
         ],
         retuneMs: 120)
 }
@@ -168,6 +175,9 @@ struct PitchEditCarryTests {
         #expect(second.pitchEdits?.retuneMs == 120)
         #expect(second.pitchEdits?.segments[1].pitchOffsetCents == 11.25)
         #expect(second.pitchEdits?.segments[1].vibratoScale == 0.5)
+        #expect(second.pitchEdits?.segments[1].vibratoRateHz == 5.5)
+        #expect(second.pitchEdits?.segments[1].vibratoDepthCents == 93)
+        #expect(second.pitchEdits?.segments[1].vibratoOnsetSeconds == 0.2)
 
         // And the stored clips agree with the returned values.
         #expect(store.tracks[0].clips[0].pitchEdits == planted)

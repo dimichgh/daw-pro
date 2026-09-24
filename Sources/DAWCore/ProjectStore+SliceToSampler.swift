@@ -17,7 +17,10 @@ public struct SliceToSamplerResult: Codable, Sendable, Equatable {
     public var frameCount: Int
     public var sliceCount: Int
     /// Audio before the first slice point. Always present — see
-    /// `SliceToSamplerPlan.Result.headSeconds`.
+    /// `SliceToSamplerPlan.Result.headSeconds`. ⚠️ Only `"transients"` can
+    /// DROP it (and warns when it does). In `"divisions"`/`"grid"` that audio
+    /// IS pad 1 (`slices[0].startFrame` is the window start), so this is pad
+    /// 1's own length there and nothing was discarded (m33-d).
     public var headSeconds: Double
     public var slices: [SliceReport]
     public var warnings: [String]

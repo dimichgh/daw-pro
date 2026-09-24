@@ -3206,6 +3206,12 @@ final class AppModel {
     /// act.**
     private var pitchEditorRequestedClipID: UUID?
 
+    /// m23-ap C-F3: the preset doors' "ask before replacing hand edits" gate,
+    /// and the one request its confirm card shows. ONE gate for both doors
+    /// (the clip menu and the note editor's chips), because both reach
+    /// `tuneVocalFromContextMenu`. Behaviour in `PitchCorrectionStaging.swift`.
+    let pitchPresetReplaceGate = PitchPresetReplaceGate()
+
     /// The clip the PITCH EDITOR is actually open on: the explicit request,
     /// re-resolved against the live store and filtered to AUDIO.
     ///
@@ -4186,7 +4192,9 @@ final class AppModel {
         clipStretchStatuses[clipID] ?? .idle
     }
 
-    /// Kicks a bounded poll cycle after a stretch edit: the engine debounces
+    /// Kicks a bounded poll cycle after any edit that re-keys a clip's render
+    /// (a stretch, transpose, formant or tuning edit, or a save that repoints
+    /// its media — `ClipRenderSignature`, p2-render-indicator): the engine debounces
     /// 250 ms then renders in the background, so we sample `clipStretchStatus` at
     /// 10 Hz for a grace window (catching the debounce → rendering → done arc) and
     /// stop once nothing is pending past the deadline.
@@ -5401,6 +5409,17 @@ final class AppModel {
                 return self.insertLabelsDebug(params)
             case "debug.pianoRollBarOps":
                 return self.pianoRollBarOpsDebug(params)
+            // m23-ap Phase 2, item p2-c — the pitch editor's echo (design
+            // §12.4). Handler in `PitchEditorDebugStaging.swift` (the
+            // m23-cq-1 shape: debug tier, off allCommands/MCP, kept out of
+            // this file). Read-only, no params.
+            case "debug.pitchEditor":
+                return self.pitchEditorDebug()
+            // m23-ap C-F3 — the preset door and its "Replace your hand
+            // edits?" card, driven through the MENU'S OWN funnel. Handler in
+            // `PitchCorrectionStaging.swift` (debug tier, off allCommands/MCP).
+            case "debug.tuneVocal":
+                return try self.tuneVocalDebug(params)
             case "debug.stepSequencer":
                 return try self.stepSequencerDebug(params)
             // m23-ct — MUSICAL TYPING, both surfaces. Handler in
@@ -5667,7 +5686,8 @@ final class AppModel {
     }
 
     /// `debug.panelLayout {sidebarWidth?, editorFraction?, rowHeight?,
-    /// pianoRollPPB?, pitchEditorPPB?, pianoRollRowHeight?, mixerInsertsCollapsed?, followPlayhead?, auditionEnabled?,
+    /// pianoRollPPB?, pitchEditorPPB?, pianoRollRowHeight?, pitchEditorRowHeight?,
+    /// mixerInsertsCollapsed?, followPlayhead?, auditionEnabled?,
     /// waveformNormalize?, waveformVerticalZoom?, editorMaximized?,
     /// pianoRollMinimap?, pianoRollCenterPitch?, reset?}` —
     /// stages the adjustable window layout (beta m10-d)
@@ -5703,6 +5723,13 @@ final class AppModel {
         // owns only what determines WHAT A CAPTURE CAN SEE and accepts exactly
         // two keys, so this one is a rejected unknown key there, deliberately.
         if let z = params["pitchEditorPPB"]?.doubleValue { panelLayout.setPitchEditorPPB(CGFloat(z)) }
+        // m23-ap C4 — the pitch editor's VERTICAL zoom, same tier and same
+        // argument as its horizontal twin above. ⚠️ `pitchEditorRowHeight`, NOT
+        // `pianoRollRowHeight`: three slots on this axis name three different
+        // surfaces (see `PanelLayoutStore.pitchEditorRowHeightKey`).
+        if let r = params["pitchEditorRowHeight"]?.doubleValue {
+            panelLayout.setPitchEditorRowHeight(CGFloat(r))
+        }
         // m25-b-4: the roll's VERTICAL zoom — one more `PanelLayoutStore` slot, and
         // it rides here for the reason recorded above rather than as a new verb: a
         // pitch-row height changes no project byte and no sound, so it is view
@@ -5803,6 +5830,7 @@ final class AppModel {
             "pianoRollPPB": .number(Double(panelLayout.pianoRollPPB)),
             "pitchEditorPPB": .number(Double(panelLayout.pitchEditorPPB)),
             "pianoRollRowHeight": .number(Double(panelLayout.pianoRollRowHeight)),
+            "pitchEditorRowHeight": .number(Double(panelLayout.pitchEditorRowHeight)),
             "mixerInsertsCollapsed": .bool(panelLayout.mixerInsertsCollapsed),
             "followPlayhead": .bool(panelLayout.followPlayhead),
             "auditionEnabled": .bool(panelLayout.auditionEnabled),
@@ -6288,6 +6316,32 @@ final class AppModel {
     func zoomPitchEditorOut() { panelLayout.setPitchEditorPPB(PianoRollZoom.zoomedOut(panelLayout.pitchEditorPPB)) }
     func zoomPitchEditorReset() { panelLayout.setPitchEditorPPB(PianoRollZoom.defaultPixelsPerBeat) }
 
+    /// The pitch editor's VERTICAL zoom entry points (m23-ap C4) — the
+    /// semitone-row height. `rowZoomIn`'s shape, one surface over, on the ONE
+    /// persisted `panelLayout.pitchEditorRowHeight` slot and the SHARED
+    /// `PianoRollZoom` ladder.
+    ///
+    /// ⚠️ **DRIVEN BY THE PANE'S OWN ZOOM CLUSTER, NOT BY ⌃⌘=/−/0.** Those menu
+    /// items call `rowZoomIn/Out/Reset`, which write the ROLL's slot
+    /// unconditionally — so while the pitch editor is engaged they still target
+    /// the roll. That is a real routing gap and it is REPORTED rather than
+    /// patched here: `rowZoom*` is deliberately off `EditorSurfaceRouter`
+    /// (`rowZoomIn`'s own doc argues why, on the ground that the arrange has no
+    /// counterpart), and now that this pane DOES have one, changing it is a
+    /// change to that tested policy and belongs with it.
+    ///
+    /// ⚠️ NOTHING HERE MAY CALL `editorEngagement.engage` — the self-confirming
+    /// latch `EditorSurfaceOwnershipSiteTests.noZoomEntryPointEngages` pins.
+    func pitchEditorRowZoomIn() {
+        panelLayout.setPitchEditorRowHeight(PianoRollZoom.tallerRow(panelLayout.pitchEditorRowHeight))
+    }
+    func pitchEditorRowZoomOut() {
+        panelLayout.setPitchEditorRowHeight(PianoRollZoom.shorterRow(panelLayout.pitchEditorRowHeight))
+    }
+    func pitchEditorRowZoomReset() {
+        panelLayout.setPitchEditorRowHeight(PianoRollZoom.defaultRowHeight)
+    }
+
     // MARK: Piano-roll VERTICAL zoom — pitch-row height (m25-b-4)
 
     /// The roll's vertical zoom entry points. Same shape as the horizontal three
@@ -6763,6 +6817,7 @@ final class AppModel {
             "pianoRollPPB": .number(Double(panelLayout.pianoRollPPB)),
             "pitchEditorPPB": .number(Double(panelLayout.pitchEditorPPB)),
             "pianoRollRowHeight": .number(Double(panelLayout.pianoRollRowHeight)),
+            "pitchEditorRowHeight": .number(Double(panelLayout.pitchEditorRowHeight)),
             // THE INSTRUMENT, NOT AN INPUT (m23-al). Reported here beside the
             // verdict precisely so the DIVERGENCE between SwiftUI focus and the
             // active surface is visible on the wire rather than being the bug.

@@ -175,12 +175,21 @@ extension AppModel: ViewUIControlling {
         }
         selectedClipID = clipID
         let editorOpen = openEditorClip?.id == clipID && workspaceMode == .arrange
+        // m23-ap Phase 2, item p2-c (design §9.2) — `editorOpen`'s sibling for
+        // the SECOND bottom pane, the SAME shape: derived from
+        // `openPitchEditorClip` (§3.6's one rule for "is the pitch editor on
+        // screen"), never from `!clip.isMIDI` directly. The two can never both
+        // be true (§3.6: the panes are mutually exclusive by construction),
+        // so there is no ordering question between them the way there is
+        // between `editorOpen` and the MIDI/workspace checks below.
+        let pitchEditorOpen = openPitchEditorClip?.id == clipID && workspaceMode == .arrange
         // ⚠️ THE BRANCH ORDER IS THE CONTRACT: `reason` is decided FROM
-        // `editorOpen`, never alongside it. Testing `clip.isMIDI` first would
-        // compute the same fact a second way, and the two could disagree — a
-        // MIDI clip in Arrange whose `openEditorClip` resolves nil (the focus
-        // setter refusing, a stale id, any future filter on that property)
-        // would answer `reason: piano-roll-opened, editorOpen: false`, a
+        // `editorOpen`/`pitchEditorOpen`, never alongside them. Testing
+        // `clip.isMIDI` first would compute the same fact a second way, and
+        // the two could disagree — a MIDI clip in Arrange whose
+        // `openEditorClip` resolves nil (the focus setter refusing, a stale
+        // id, any future filter on that property) would answer
+        // `reason: piano-roll-opened, editorOpen: false`, a
         // self-contradicting reply on the one verb whose entire item is
         // honesty. They agree today only because `openEditorClip` happens to
         // filter on `isMIDI` too, and "they agree today" is exactly the m27
@@ -188,6 +197,13 @@ extension AppModel: ViewUIControlling {
         let reason: ViewSelectClipResult.Reason
         if editorOpen {
             reason = .pianoRollOpened
+        } else if pitchEditorOpen {
+            // m23-ap Phase 2, item p2-c — checked BEFORE the bare
+            // `!clip.isMIDI` fallback: an audio clip the pitch editor is
+            // already open on is no longer honestly described as "has no
+            // editor open on it" (§9.2 — `audioClipHasNoEditor`'s string is
+            // now only half true for this clip).
+            reason = .pitchEditorOpen
         } else if !clip.isMIDI {
             reason = .audioClipHasNoEditor
         } else if workspaceMode != .arrange {
@@ -207,7 +223,50 @@ extension AppModel: ViewUIControlling {
             trackID: track.id,
             clipKind: clip.isMIDI ? "midi" : "audio",
             editorOpen: editorOpen,
+            pitchEditorOpen: pitchEditorOpen,
             reason: reason,
+            workspace: workspaceMode.rawValue)
+    }
+
+    // MARK: - view.openPitchEditor
+
+    /// Opens the pitch editor on an audio clip (m23-ap Phase 2, item p2-c) —
+    /// `selectClipForView`'s sibling for the SECOND bottom pane.
+    ///
+    /// ⚠️ THE CLIP LOOKUP AND THE MIDI REFUSAL ARE NOT HERE. They live in
+    /// `Commands.swift`'s router-side handler for `view.openPitchEditor`,
+    /// because `DAWApp` has no test target — a refusal written only in this
+    /// file would be untestable, and a planted "accepts a MIDI clip" defect
+    /// would fail no test (the `ViewSurfaceCommandTests`
+    /// `headlessRefusals`/`unknownKeyRejection` shape only reaches router-side
+    /// code). By the time this runs, the router has already confirmed
+    /// `clipID` names an existing, non-MIDI clip.
+    func openPitchEditorForView(_ clipID: UUID) throws -> ViewOpenPitchEditorResult {
+        guard let track = store.tracks.first(where: { track in
+            track.clips.contains { $0.id == clipID }
+        }) else {
+            // Structurally unreachable — the router already found this clip
+            // — stated rather than trusted (the `openEffectEditorForView`
+            // "master chain hosts built-ins only" precedent).
+            throw DebugError(
+                "clip \(clipID.uuidString) was not found while opening the pitch editor — this "
+                + "is a bug in the app's focus path, not in your call; please report it.")
+        }
+        openPitchEditor(clipID: clipID)
+        guard openPitchEditorClip?.id == clipID else {
+            // Also structurally unreachable for an audio clip (the router
+            // already excluded MIDI) — the same defensive shape
+            // `openInstrumentEditorForView` uses for its own post-condition.
+            throw DebugError(
+                "the pitch editor refused to open on \"\(track.name)\" — this is a bug in the "
+                + "app's focus path, not in your call; please report it.")
+        }
+        let opened = workspaceMode == .arrange
+        return ViewOpenPitchEditorResult(
+            clipID: clipID,
+            trackID: track.id,
+            opened: opened,
+            reason: opened ? .pitchEditorOpened : .workspaceIsNotArrange,
             workspace: workspaceMode.rawValue)
     }
 

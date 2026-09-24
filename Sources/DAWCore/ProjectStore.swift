@@ -374,8 +374,9 @@ public final class ProjectStore {
     /// empty).
     public private(set) var engineNotices: [EngineNotice] = []
 
-    /// Ring bound: at most this many DISTINCT codes are retained (16 — the
-    /// engine currently posts 6 codes, so the cap is generous headroom, and
+    /// Ring bound: at most this many DISTINCT codes are retained (16 — 10
+    /// codes are posted today, censused on `EngineNoticeEvent.code` 2026-09-24,
+    /// so the cap is still headroom, and
     /// the popover list stays readable). Overflow evicts the STALEST entry
     /// (smallest `lastAt` — the least-recently-posted code), keeping live
     /// problems visible.
@@ -2693,7 +2694,10 @@ public final class ProjectStore {
         guard masterEffects.count < Self.maxEffectsPerChain else {
             throw ProjectError.chainFull(Self.maxEffectsPerChain)
         }
-        let effect = EffectDescriptor(kind: kind)
+        // ⭐ `newlyAdded` — the one home for a new insert's starting params. A
+        // new CLIPPER carries explicit params (1× oversampling, the 2026-09-20
+        // ruling) so it can never be mistaken for a pre-ruling one on reload.
+        let effect = EffectDescriptor.newlyAdded(kind: kind)
         let count = masterEffects.count
         let insertAt = min(max(0, index ?? count), count)
         performEdit("Add \(Self.effectDisplayName(kind)) to Master") {
@@ -3324,8 +3328,12 @@ public final class ProjectStore {
         guard kind != .audioUnit || audioUnit != nil else {
             throw ProjectError.audioUnitEffectRequiresComponent
         }
-        let effect = EffectDescriptor(kind: kind,
-                                      audioUnit: kind == .audioUnit ? audioUnit : nil)
+        // ⭐ `newlyAdded` — the one home for a new insert's starting params
+        // (see `addMasterEffect`). ⛔ Do not go back to `EffectDescriptor(kind:)`
+        // here: for a clipper that builds a NO-params descriptor, which
+        // `resolvedClipper` reads as a pre-ruling clipper at 4×.
+        let effect = EffectDescriptor.newlyAdded(kind: kind,
+                                                 audioUnit: kind == .audioUnit ? audioUnit : nil)
         let name = tracks[ti].name
         let count = tracks[ti].effects.count
         let insertAt = min(max(0, index ?? count), count)
@@ -5351,8 +5359,9 @@ public final class ProjectStore {
     /// inserted right after it as the right half. One undo step, NO coalescing.
     ///
     /// - Audio: the right half's `startOffsetSeconds` advances by the left half's
-    ///   duration — the tempo-map integral over [clip.startBeat, atBeat]
-    ///   (m12-b; with the Phase-A trivial map this is exactly the old
+    ///   duration IN SOURCE SECONDS — the tempo-map integral over
+    ///   [clip.startBeat, atBeat] divided by the stretch ratio (m12-b; C2-0.
+    ///   With the Phase-A trivial map and ratio 1 this is exactly the old
     ///   `splitBeats · 60 / tempoBPM`).
     /// - MIDI: notes partition by start beat — a note starting before the split
     ///   stays left (truncated to the split boundary if it overhangs); a note at
@@ -5373,6 +5382,11 @@ public final class ProjectStore {
         let firstLength = relBeat
         let secondLength = clip.lengthBeats - relBeat
         let splitSeconds = transport.tempoMap.seconds(from: clip.startBeat, to: atBeat)
+        // `splitSeconds` is TIMELINE seconds; `startOffsetSeconds` is SOURCE
+        // seconds (the engine reads the stretched render at offset × ratio), so
+        // the right half advances by `splitSeconds / ratio` (C2-0 / F13 — the
+        // `CompFlattener` rule, Takes.swift). Zero-guarded like that site.
+        let ratio = clip.stretchRatio > 0 ? clip.stretchRatio : 1
 
         // Partition MIDI notes (nil for audio clips stays nil on both sides).
         var firstNotes: [MIDINote]?
@@ -5420,8 +5434,10 @@ public final class ProjectStore {
         // Stretch params (M5 ii-c) copy verbatim to BOTH halves: the engine's
         // render (ii-d) covers the WHOLE source file, so both halves read the
         // same stretched material — the split junction is seamless by
-        // construction (spec §3). The offset math above is unchanged; ii-d maps
-        // `startOffsetSeconds` through the ratio at schedule time.
+        // construction (spec §3) — PROVIDED the right half's offset advances
+        // in SOURCE seconds (`splitSeconds / ratio`, C2-0), because ii-d maps
+        // `startOffsetSeconds` back through × ratio at schedule time. Until
+        // C2-0 this comment said the offset math needed no change; it did.
         let first = Clip(
             id: clip.id, name: clip.name,
             startBeat: clip.startBeat, lengthBeats: firstLength,
@@ -5457,7 +5473,7 @@ public final class ProjectStore {
             startBeat: clip.startBeat + firstLength, lengthBeats: secondLength,
             audioFileURL: clip.audioFileURL, notes: secondNotes,
             isAIGenerated: clip.isAIGenerated,
-            startOffsetSeconds: clip.startOffsetSeconds + splitSeconds, gainDb: clip.gainDb,
+            startOffsetSeconds: clip.startOffsetSeconds + splitSeconds / ratio, gainDb: clip.gainDb,
             fadeInBeats: secondIn, fadeOutBeats: secondOut,
             fadeInCurve: .linear, fadeOutCurve: clip.fadeOutCurve,
             stretchRatio: clip.stretchRatio, pitchShiftSemitones: clip.pitchShiftSemitones,
@@ -5481,8 +5497,9 @@ public final class ProjectStore {
     /// The clip CONTENT stays fixed on the timeline, so only the visible window
     /// moves:
     /// - Leading-edge move: `startOffsetSeconds` advances by the start delta
-    ///   converted beats -> seconds at the current tempo (clamped >= 0), so an
-    ///   audio clip keeps playing the right region of its source.
+    ///   converted beats -> seconds at the current tempo, ÷ the stretch ratio
+    ///   (source seconds, C2-0; clamped >= 0), so an audio clip keeps playing
+    ///   the right region of its source.
     /// - MIDI notes shift by the start delta and are DROPPED when they fall
     ///   wholly outside the new window, or TRUNCATED where they cross either
     ///   edge (a note thinner than `MIDINote.minLengthBeats` after truncation is
@@ -5518,9 +5535,12 @@ public final class ProjectStore {
         let newStart = max(0, newStartBeat)
         let newLength = max(Self.minClipLengthBeats, newLengthBeats)
         let delta = newStart - oldStart  // > 0 trims the leading edge inward
-        // Signed integral over the trimmed span (m12-b, design row 13).
+        // Signed integral over the trimmed span (m12-b, design row 13). That
+        // is TIMELINE seconds; ÷ the ratio makes it the SOURCE seconds
+        // `startOffsetSeconds` is kept in (C2-0 / F13, the splitClip rule).
+        let ratio = clip.stretchRatio > 0 ? clip.stretchRatio : 1
         let newOffset = max(0, clip.startOffsetSeconds
-            + transport.tempoMap.seconds(from: oldStart, to: newStart))
+            + transport.tempoMap.seconds(from: oldStart, to: newStart) / ratio)
 
         var newNotes: [MIDINote]?
         if let notes = clip.notes {
@@ -6597,9 +6617,14 @@ public final class ProjectStore {
         guard newLength >= minClipLengthBeats else { return nil }
         let start = max(0, newStart)
         let delta = start - clip.startBeat  // > 0 trims the leading edge inward
-        // Signed integral over the covered span (m12-b, design row 15).
+        // Signed integral over the covered span (m12-b, design row 15). That
+        // is TIMELINE seconds; ÷ the ratio makes it the SOURCE seconds
+        // `startOffsetSeconds` is kept in (C2-0 / F13 — must agree with
+        // `applyTrimWindow`, or a journalled and an un-journalled trim of a
+        // stretched clip would play different audio).
+        let ratio = clip.stretchRatio > 0 ? clip.stretchRatio : 1
         let newOffset = max(0, clip.startOffsetSeconds
-            + tempoMap.seconds(from: clip.startBeat, to: start))
+            + tempoMap.seconds(from: clip.startBeat, to: start) / ratio)
         var newNotes: [MIDINote]?
         if let notes = clip.notes {
             newNotes = notes.compactMap { note -> MIDINote? in

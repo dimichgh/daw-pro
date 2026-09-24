@@ -67,6 +67,15 @@ struct PadGridView: View {
     var levelsUnavailableReason: String?
     var levelsError: String?
     var onToggleLevels: () -> Void = {}
+    /// Which way the spread runs (m39-levels-2): the LIVE spread's own direction
+    /// while one is up, else the choice for the next one. ⚠️ NO DEFAULT, on
+    /// purpose, and the same for `onSetSpreadDirection`: a defaulted pair would
+    /// let a call site compile without wiring the toggle, which would then draw
+    /// UP forever and do nothing when clicked.
+    var spreadDirection: SixteenLevels.Direction
+    /// Why the toggle is dead, when it is — the LEVELS button's own reason.
+    var spreadDirectionUnavailableReason: String?
+    var onSetSpreadDirection: (SixteenLevels.Direction) -> Void
 
     /// Pad edge, and the gap between pads. Generous: this is a surface fingers
     /// aim at, and the design language asks for generous spacing before it asks
@@ -362,10 +371,52 @@ struct PadGridView: View {
                     .foregroundStyle(DAWTheme.textFaint)
             }
             Spacer(minLength: 8)
-            levelsButton
+            // ⭐ THE TOGGLE SITS BESIDE THE BUTTON IT QUALIFIES — the placement
+            // the user picked ("A small up/centred toggle beside LEVELS"). Left
+            // of it, so every state of the button still reads as a phrase:
+            // "UP · LEVELS", "CENTRED · PICK A PAD", "CENTRED · EXIT LEVELS".
+            HStack(spacing: 6) {
+                spreadDirectionToggle
+                levelsButton
+            }
         }
         // ⚠️ The ROW answers for the dead case; see `triggerModeUnavailableReason`.
         .help(triggerModeUnavailableReason ?? "")
+    }
+
+    // MARK: - Which way a spread runs (m39-levels-2)
+
+    /// UP / CENTRED. Before a spread it chooses how the next one runs; with a
+    /// spread up it flips that spread, and the pads' numbers follow.
+    ///
+    /// ⚠️ **DIM WHEN LEVELS IS DEAD, with the same reason** — a direction for a
+    /// spread that cannot be made is not a setting, and a live-looking toggle
+    /// beside a dead button would invite a click that explains nothing.
+    private var spreadDirectionToggle: some View {
+        HStack(spacing: 0) {
+            ForEach(SixteenLevels.Direction.allCases, id: \.self) { value in
+                spreadDirectionChip(value)
+            }
+        }
+        .background(DAWTheme.panelRaised)
+        .clipShape(RoundedRectangle(cornerRadius: 5))
+        .overlay(RoundedRectangle(cornerRadius: 5).stroke(DAWTheme.hairline, lineWidth: 1))
+        .opacity(spreadDirectionUnavailableReason != nil ? 0.45 : 1)
+    }
+
+    private func spreadDirectionChip(_ value: SixteenLevels.Direction) -> some View {
+        let isOn = spreadDirection == value
+        return Button { onSetSpreadDirection(value) } label: {
+            Text(value.label)
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .foregroundStyle(isOn ? DAWTheme.background : DAWTheme.textDim)
+                .frame(height: 18)
+                .padding(.horizontal, 7)
+                .background(isOn ? DAWTheme.playback : Color.clear)
+        }
+        .buttonStyle(.plain)
+        .disabled(spreadDirectionUnavailableReason != nil)
+        .help(spreadDirectionUnavailableReason ?? value.help)
     }
 
     private func triggerModeChip(_ value: PadTriggerMode) -> some View {
@@ -410,7 +461,12 @@ struct PadGridView: View {
         // nothing teaches nothing.
         .help(levelsUnavailableReason
               ?? "Spread one slice across all sixteen pads, a semitone apart, "
-              + "so you can play it. Your chop is untouched and comes back when you exit.")
+              + "so you can play it. UP / CENTRED beside this chooses which way it runs. "
+              + "Your chop is untouched and comes back when you exit. "
+              // m39-levels-3: with a spread already on the kit (after
+              // reopening a project, or one an agent made), LEVELS goes to it
+              // instead of making another — the header line says so first.
+              + "If this kit already has a spread, LEVELS takes you to it.")
     }
 
     private func bankChip(_ index: Int) -> some View {
@@ -437,6 +493,14 @@ struct PadGridView: View {
             return "This bank runs past the top of MIDI — there is no note here to play."
         }
         let key = state.keyLabel.map { "Key “\($0)”. " } ?? ""
+        // ⛔ A SPREAD PAD IS LOADED AND HAS NO SLICE NUMBER — its ordinal is
+        // withheld on purpose (see `PadState.levelsSemitones`). Before
+        // m39-levels-2 that fell through to the "Empty" branch below, so every
+        // pad of a spread told the pointer it was empty while it played.
+        if let semitones = state.levelsSemitones {
+            return key + Self.spreadSentence(semitones) + ", note \(state.noteName)."
+                + (state.isAITouched ? " AI-generated material." : "")
+        }
         guard state.isLoaded, let ordinal = state.sliceOrdinal else {
             return key + "Empty — note \(state.noteName). Chop a clip onto the pads to fill it."
         }
@@ -446,9 +510,24 @@ struct PadGridView: View {
 
     private func accessibilityText(_ state: PadState) -> String {
         guard state.pitch != nil else { return "Pad out of MIDI range" }
+        if let semitones = state.levelsSemitones {
+            return "Pad playing " + Self.spreadSentence(semitones).lowercased()
+                + ", note \(state.noteName)"
+        }
         guard state.isLoaded, let ordinal = state.sliceOrdinal else {
             return "Empty pad, note \(state.noteName)"
         }
         return "Pad playing slice \(ordinal), note \(state.noteName)"
+    }
+
+    /// What one spread pad plays, in words — "The slice 3 semitones lower".
+    private static func spreadSentence(_ semitones: Int) -> String {
+        switch semitones {
+        case 0: return "The slice exactly as recorded"
+        case 1: return "The slice 1 semitone higher"
+        case -1: return "The slice 1 semitone lower"
+        case let up where up > 0: return "The slice \(up) semitones higher"
+        default: return "The slice \(-semitones) semitones lower"
+        }
     }
 }

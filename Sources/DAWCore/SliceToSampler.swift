@@ -30,6 +30,10 @@ public struct SliceToSamplerSettings: Sendable, Equatable {
     /// Hard refusal ceiling on the number of pads produced.
     public var maxSlices: Int
     /// Keep the material BEFORE the first boundary as pad 1.
+    ///
+    /// ⚠️ **Only `.transients` reads it** (see `effectiveIncludeHead`). In
+    /// `.divisions` and `.grid` pad 1 ALWAYS starts at the window, and this
+    /// flag changes nothing.
     public var includeHead: Bool
     /// MIDI note of pad 1; pad i sits at `baseNote + i`.
     public var baseNote: Int
@@ -94,6 +98,37 @@ public struct SliceToSamplerSettings: Sendable, Equatable {
     /// for the caller who passes `minSliceSeconds: 0.004`.)
     public var effectiveSnapWindowSeconds: Double {
         min(snapWindowSeconds, minSliceSeconds / 2)
+    }
+
+    /// ⭐ Whether pad 1 ACTUALLY starts at the window edge (m33-d) — the ONE
+    /// rule `validateSliceCount`, the pad starts and the head warning all read.
+    ///
+    /// Only a DETECTOR leaves material before its first boundary that may be
+    /// pre-roll, and deciding that is all `includeHead` is for. In `.divisions`
+    /// and `.grid` the window's start IS the first cut, by construction: the
+    /// boundary helpers return only the INTERIOR cuts (their contract — they are
+    /// shared with `clip.quantizeAudio`, which emits a head and a tail itself),
+    /// so the first piece reaches the planner looking exactly like a head.
+    ///
+    /// ⛔ MEASURED 2026-09-24: honouring `includeHead: false` there turned "8
+    /// equal pieces" of a 1.93 s loop into 7 pads, dropped the first eighth of
+    /// the audio from every pad, and warned about a detector that never ran.
+    ///
+    /// `includeHead: true` in those modes still means N pads — the head is
+    /// counted once, never twice — so a caller that learned that workaround
+    /// keeps its exact result.
+    public var effectiveIncludeHead: Bool {
+        includeHead || !includeHeadIsEffective
+    }
+
+    /// Does `includeHead` reach the chop at all? Only where a detector picks
+    /// the first boundary. ⭐ THE ONE HOME for that mode rule: the chop card
+    /// dims its "Keep the lead-in" toggle on exactly this (DESIGN-LANGUAGE:
+    /// "a setting that cannot reach the sound stays live, goes dim, and says
+    /// so") and `effectiveIncludeHead` derives from it, so the card and the
+    /// planner cannot come to disagree about which modes read the flag.
+    public var includeHeadIsEffective: Bool {
+        mode == .transients
     }
 }
 
@@ -181,7 +216,8 @@ public enum SliceToSamplerPlan {
         /// Material before the first boundary, in seconds. ALWAYS reported —
         /// `includeHead` defaults false because that material is usually
         /// pre-roll, but a detector that misses the first hit would otherwise
-        /// silently eat a downbeat.
+        /// silently eat a downbeat. In `.divisions`/`.grid` the head is always
+        /// pad 1 (`effectiveIncludeHead`), so there this is pad 1's own length.
         public var headSeconds: Double
         public var warnings: [String]
     }
@@ -197,7 +233,10 @@ public enum SliceToSamplerPlan {
     public static func validateSliceCount(boundaryCount: Int,
                                           settings: SliceToSamplerSettings,
                                           clipId: UUID) throws {
-        let slices = boundaryCount + (settings.includeHead ? 1 : 0)
+        // `effectiveIncludeHead`, not `includeHead`: the ceilings must count the
+        // pads `compute` will REALLY make, or "8 equal pieces" under a ceiling
+        // of 7 would pass here and land 8 pads.
+        let slices = boundaryCount + (settings.effectiveIncludeHead ? 1 : 0)
         guard slices >= 1 else {
             throw ProjectError.audioQuantizeNoTransients(clipId)
         }
@@ -253,13 +292,15 @@ public enum SliceToSamplerPlan {
         let windowStartFrame = min(max(Int((windowStart * rate).rounded()), 0), lastFrame)
         let windowEndFrame = min(max(Int((windowEnd * rate).rounded()), 0), geometry.frameCount)
 
-        // Pad starts: the head (window edge) when asked for, then every
-        // snapped boundary. `headOffset` is how far the boundary arrays are
-        // shifted relative to the pad arrays.
-        let headOffset = settings.includeHead ? 1 : 0
+        // Pad starts: the head (window edge) when it is kept — asked for in
+        // `.transients`, ALWAYS in `.divisions`/`.grid` (see
+        // `effectiveIncludeHead`) — then every snapped boundary. `headOffset`
+        // is how far the boundary arrays are shifted relative to the pad arrays.
+        let keepsHead = settings.effectiveIncludeHead
+        let headOffset = keepsHead ? 1 : 0
         var starts: [Int] = []
         starts.reserveCapacity(geometry.boundaryFrames.count + headOffset)
-        if settings.includeHead { starts.append(windowStartFrame) }
+        if keepsHead { starts.append(windowStartFrame) }
         starts.append(contentsOf: geometry.boundaryFrames)
         let count = starts.count
 
@@ -357,13 +398,10 @@ public enum SliceToSamplerPlan {
         let headSeconds = max(0, (firstBoundarySeconds ?? windowEnd) - windowStart)
         // ClampNotice doctrine: warn, never reject, and only when something
         // actually happened — noise is ignored, taking the warning that
-        // mattered with it.
-        if !settings.includeHead && headSeconds > 2 * settings.minSliceSeconds {
-            warnings.append(
-                "\(ClampNotice.number(headSeconds)) s of audio before the first slice point was "
-                + "discarded (pad 1 starts at the first onset, like an MPC or Recycle). "
-                + "Pass includeHead: true to keep it as pad 1 — worth doing if the detector "
-                + "missed the downbeat")
+        // mattered with it. `keepsHead`, so this can only fire where a
+        // DETECTOR ran: the sentence blames one.
+        if !keepsHead && headSeconds > 2 * settings.minSliceSeconds {
+            warnings.append(headDiscardedWarning(headSeconds: headSeconds))
         }
         if settings.effectiveSnapWindowSeconds < settings.snapWindowSeconds {
             warnings.append(
@@ -378,5 +416,21 @@ public enum SliceToSamplerPlan {
                       midiClipStartBeat: midiClipStart,
                       midiClipLengthBeats: max(MIDINote.minLengthBeats, clip.lengthBeats),
                       headSeconds: headSeconds, warnings: warnings)
+    }
+
+    /// The WIRE's sentence for a dropped head — built in ONE place (m33-d).
+    ///
+    /// ⚠️ **PUBLIC SO THE PAD GRID CAN RECOGNISE IT, NOT SO ANYONE CAN REWORD
+    /// IT.** It is wire contract, written for an agent, and it names the
+    /// `includeHead` parameter precisely — which is exactly why a PERSON must
+    /// not read it: the pad grid has no control by that name. The grid shows its
+    /// own sentence instead (`PadGridModel.chopWarningsForHumans`) and knows it
+    /// is looking at THIS warning by exact equality against the result's own
+    /// `headSeconds`, so the two texts cannot drift apart without a test seeing.
+    public static func headDiscardedWarning(headSeconds: Double) -> String {
+        "\(ClampNotice.number(headSeconds)) s of audio before the first slice point was "
+            + "discarded (pad 1 starts at the first onset, like an MPC or Recycle). "
+            + "Pass includeHead: true to keep it as pad 1 — worth doing if the detector "
+            + "missed the downbeat"
     }
 }

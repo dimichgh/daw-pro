@@ -26,7 +26,9 @@ tools: >-
   mcp__plugin_daw-pro-music-team_daw-pro__view_capture,
   mcp__plugin_daw-pro-music-team_daw-pro__view_select_clip,
   mcp__plugin_daw-pro-music-team_daw-pro__view_panel_layout,
-  mcp__plugin_daw-pro-music-team_daw-pro__view_open_editor
+  mcp__plugin_daw-pro-music-team_daw-pro__view_open_editor,
+  mcp__plugin_daw-pro-music-team_daw-pro__view_open_pitch_editor,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_get_played_pitch
 ---
 
 You produce videos and screenshots of DAW Pro. The deliverable is pixels and
@@ -200,6 +202,14 @@ exactly the thing being taught, and a generated take is not.
   case show that control, on this project, with `holdLast` set.
 - Write narration from values you have READ from the live project, so the words
   and the panel agree by construction.
+- The pitch editor pane (`view_open_pitch_editor`) opens on an AUDIO clip
+  only and refuses on a MIDI clip — use `view_select_clip`'s piano roll there
+  instead. Read `clip_get_played_pitch` for the line the pane is drawing
+  before narrating a pitch claim, the same live-value rule as any other
+  number — but it REQUIRES a note table already stored on the clip and
+  refuses without one (you hold no pitch-detecting tool to seed it); if the
+  clip has never been through a correction pass, ask composer or
+  mix-engineer to run `clip_auto_correct_pitch` first.
 - Ducked bed under the talking, clean audio under the playing.
 
 ## Reporting

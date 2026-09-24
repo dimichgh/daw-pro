@@ -101,16 +101,23 @@ import Foundation
 //    byte-identical and no existing cache entry was orphaned.
 //  * ~~No wire verb, no MCP tool, no UI.~~ **WIRE + MCP LANDED**
 //    (`clip.autoCorrectPitch` / `clip.clearPitchEdits` / `clip.getPitchEdits`).
-//    **UI is still absent**: `PitchEditorModel` (DAWAppKit) is the headless
-//    model only; no view exists yet.
+//    ~~**UI is still absent**~~ **UI LANDED**: the clip menu's *Tune Vocal*
+//    and `PitchEditorView` both draw `PitchCorrectionPreset.offeredInUI`
+//    (all four since contour-to-render — Hard Tune included).
 //  * ~~No store operations.~~ **LANDED** in `ProjectStore+PitchCorrection.swift`,
 //    using the `PitchCorrectionUndoKey` coalescing strings below.
 //
-// STILL GENUINELY ABSENT: the render path passes `contour: []`, so
-// `preserveVibrato: false` (the `.hardTune` preset) degrades to a constant
-// per-note offset and populates `unresolvedShapingSegmentIDs`, which no caller
-// reads. That is the one remaining hole, and it is user-visible as Hard Tune
-// sounding like Tight.
+// ~~STILL GENUINELY ABSENT: the render path passes `contour: []`.~~ **CLOSED
+// (contour-to-render, 2026-09-24).** `StretchRenderCache.performRender` now
+// fetches-or-detects the WHOLE-FILE contour through ONE seam
+// (`PitchContourCache.renderContour`, cached beside the renders, keyed by
+// content — design §7.2/§7.3) whenever a set asks for shaping, and builds the
+// curve through `PitchRenderContour.curve(editSet:…)`. Measured on the real dry
+// vocal through that path: Hard Tune cuts within-note wander 62.8 → 18.2 cents
+// (median 70 % per note) where Tight moves it by 1 %. When detection cannot
+// run, the render still falls back to the constant per-note offset and names
+// the segments in `unresolvedShapingSegmentIDs` — that fallback is now a
+// failure path with a visible engine notice, not the product's only behaviour.
 //
 // Everything here is pure, value-typed, and total: same inputs ⇒ byte-identical
 // outputs, no clock, no I/O, no actor. None of it is reachable from the render
@@ -304,16 +311,125 @@ public struct NoteSegment: Identifiable, Codable, Sendable, Equatable {
     /// returns vibrato 1.06×/1.15×/1.20× deeper than asked at 1/5/8 Hz
     /// (phase-0 §8), so a control that said "50 cents" would deliver 57.
     /// Do not label this as a depth in cents anywhere.
+    ///
+    /// ⚠️ ~~AND IT DOES NOT RENDER TODAY.~~ **IT RENDERS (contour-to-render,
+    /// 2026-09-24)** — the render resolves it against the detected whole-file
+    /// contour (`PitchRenderContour`). It still names itself in
+    /// `PitchCorrectionCurve.unresolvedShapingSegmentIDs` when that contour
+    /// is unavailable (detection failed, or the set was made by another
+    /// detector generation), and the render then keeps only the constant
+    /// offset. The GENERATOR below is deliberately independent of it — see
+    /// its banner.
     public var vibratoScale: Double
+
+    // ───────────────────────────────────────────────────────────────────────
+    // m23-ap Phase 2 / C5a — THE GENERATOR. Read the banner before the fields.
+    // ───────────────────────────────────────────────────────────────────────
+    //
+    // ⛔ **`vibratoScale` ABOVE CANNOT EXPRESS "ADD MORE CYCLES", AND NO
+    // AMOUNT OF UI CAN FIX THAT.** It is a MULTIPLIER on the detected contour:
+    // multiplying changes how deep an existing wobble is and can never change
+    // its RATE, and on a note sung without vibrato it yields nothing however
+    // large it gets (`0 × anything = 0`). The reference app's readout moving
+    // from `Vibrato 5.5 Hz ±93 c` to `Vibrato 7.8 Hz ±32 c` is SYNTHESIS.
+    // Design `docs/design/2026-09-22-pitch-editor-ui.md` §7.5 conflict 2.
+    //
+    // **THE THREE FIELDS BELOW ARE A GENERATOR, NOT A SCALE**, and the two
+    // mechanisms are deliberately separate rather than merged into one number:
+    //
+    //  * `vibratoScale` is RELATIVE — a fraction of a quantity nobody has
+    //    written down (the sung modulation), resolvable only with the detected
+    //    contour in hand.
+    //  * `vibratoDepthCents` is ABSOLUTE — a number of cents, resolvable with
+    //    nothing but itself, which is why it renders through the shipped path
+    //    and `vibratoScale` does not.
+    //
+    // One stored number cannot be both. A UI that wants ONE axis running
+    // `sung → flat → synthesised` (which is what the reference frames show, as
+    // one continuous edit of one note) maps that axis onto BOTH fields in one
+    // atomic edit: the flat half drives `vibratoScale` 1 → 0, and the
+    // synthesised half drives `vibratoDepthCents` 0 → N. The natural zero the
+    // axis passes through is exactly the point where both are at zero.
+    //
+    // **THE GENERATOR ADDS; IT DOES NOT REPLACE.** Replacement is
+    // `vibratoScale: 0` set in the same edit — see `PitchCorrectionCurve`'s
+    // banner for the full argument and for what does and does not render.
+
+    /// Rate of the SYNTHESISED vibrato, Hz. `0` = no generator.
+    ///
+    /// ⚠️ **THE CEILING IS MEASURED, NOT PICKED** — see
+    /// `vibratoRateHzRange`. Above it the renderer's 30 ms hop cannot carry
+    /// the shape, and a readout printing the rate would be printing a request
+    /// rather than a result.
+    public var vibratoRateHz: Double
+
+    /// Peak deviation of the SYNTHESISED vibrato, cents. `0` = INERT: the
+    /// generator contributes exactly nothing and the curve is bit-identical to
+    /// a curve built before this field existed.
+    ///
+    /// ⚠️ **A PEAK, NOT A PEAK-TO-PEAK.** `±93 c` in the reference readout is
+    /// this number at 93: the contour swings 93 cents above and 93 below the
+    /// note's corrected centre, a 186-cent total excursion.
+    ///
+    /// ⚠️⚠️ **WHAT COMES BACK IS AN OFFSET, NOT A GAIN — AND SAYING IT THE
+    /// OTHER WAY ROUND IS HOW THIS TREE'S TWO EXISTING VIBRATO-DEPTH
+    /// MEASUREMENTS CAME TO DISAGREE.** Measured through the shipping render
+    /// path by `NoteVibratoGeneratorTests` §C, at 5.5 Hz, as the error between
+    /// what was asked and what the rendered f0 actually carries:
+    ///
+    ///     ±16 c → −3.3    ±32 c → +0.4    ±50 c → +7.3
+    ///     ±70 c → +6.7    ±93 c → +6.5   ±140 c → −2.4
+    ///
+    /// The chain adds a roughly DEPTH-INDEPENDENT excess excursion of a few
+    /// cents, which grows with RATE (≈+3 at 1 Hz, +7 at 5.5, +10 at 8). Quoted
+    /// as a ratio the same data reads 0.80×–1.16×, which invites a
+    /// compensation table for a multiplicative error that is not there.
+    ///
+    /// **This is what reconciles the banner's own 1.06×/1.15×/1.20× with
+    /// `PitchCurveRenderTests`' 0.966×/0.969×/1.043×: neither is wrong and
+    /// neither is rotted** (the banner's figures were re-run 2026-09-23 and
+    /// still reproduce). They are ratios taken at a single depth, ±50 cents,
+    /// which is the depth at which this offset is largest relative to the ask.
+    ///
+    /// ⭐ **THE HONEST BOUND FOR A READOUT: ±7 cents at typical rates.** So a
+    /// whole-cent display overstates the resolution — round to the nearest 5.
+    /// NO PRE-COMPENSATION IS APPLIED, deliberately: correcting a chain that
+    /// is itself several cents out is the closed loop this file's banner
+    /// (constraint 2) says will not close.
+    public var vibratoDepthCents: Double
+
+    /// How long after the note's START the synthesised vibrato takes to reach
+    /// full depth, seconds. `0` = full depth immediately.
+    ///
+    /// Musically this is the difference between a vibrato and a test tone: a
+    /// singer's vibrato builds over the sustain rather than arriving with the
+    /// consonant. The fade is the same C¹ `smoothstep` the boundary ramps use,
+    /// so the generator never introduces a corner the ramp would then have to
+    /// smooth.
+    ///
+    /// ⚠️ Measured from `startSeconds`, which `PitchEditSet.canonical` can
+    /// TRUNCATE (first-wins overlap healing). That is deliberate: the onset is
+    /// an ENVELOPE, so a shortened note should re-anchor its fade. The
+    /// generator's PHASE deliberately does not — see `PitchCorrectionCurve`.
+    public var vibratoOnsetSeconds: Double
 
     /// Phase 4 — carried so the schema does not change under a saved project
     /// later. **No renderer reads it today.**
     public var formantOffsetSemitones: Double
-    /// Phase 3 — carried, unread. Per-note timing has a hard ceiling
-    /// (`maxCleanStretch = 2`) that phase 3 must clamp against; this field is
-    /// deliberately NOT clamped to an invented range here, only sanitised
-    /// against NaN, because inventing phase 3's limit now would ship a number
-    /// nobody measured.
+    /// Per-note timing (m23-ap C2): how far this note's start / end edge has
+    /// moved, read as EDITED seconds. The edited start is `startSeconds +
+    /// timeStartDeltaSeconds`, and the edited end is `endSeconds +
+    /// timeEndDeltaSeconds` (design `2026-09-24-pitch-editor-timing-and-freehand.md`
+    /// §3.1). `PitchTimeWarp.make` reads them since C2-1. ⚠️ **The render does
+    /// not read them until C2-3.** Until then a retimed set renders untimed,
+    /// under a key the digest's time-warp block has already moved.
+    ///
+    /// Per-note timing has a hard ceiling (`maxCleanStretch = 2`) that the
+    /// setter must clamp against (design §3.7). This field is deliberately
+    /// NOT clamped to an invented range here, only sanitised against NaN,
+    /// because every limit lives in the setter. A hand-written set that
+    /// ignores them is healed by `PitchTimeWarp` and reported through its
+    /// `healed` flag.
     public var timeStartDeltaSeconds: Double
     public var timeEndDeltaSeconds: Double
     /// Phase 4 — carried, unread. Shares `Clip.gainDbRange` rather than
@@ -330,16 +446,130 @@ public struct NoteSegment: Identifiable, Codable, Sendable, Equatable {
     /// ±24 semitones, matching the whole-clip pitch range.
     public static let formantOffsetSemitonesRange: ClosedRange<Double> = -24...24
 
+    /// **THE CEILING IS AN ENGINE LIMIT, MEASURED, NOT A TASTE DECISION** —
+    /// the same kind of number as `PitchEditSet.engineMinimumRetuneMs`, and
+    /// arrived at the same way.
+    ///
+    /// The curve is read ONCE PER ANALYSIS HOP (`css_interval_samples` = 1440
+    /// frames = 30 ms at 48 kHz, MEASURED by
+    /// `OfflineStretcherCurveTests.hopIsMeasuredNotDerived`). A generated sine
+    /// is therefore delivered as a ZERO-ORDER HOLD sampled at 33.33 Hz, whose
+    /// Nyquist is **16.67 Hz**. A request above that does not come back
+    /// shallow — it comes back as a DIFFERENT, LOWER rate (aliased), which is
+    /// the one failure a rate readout could not survive.
+    ///
+    /// **8 Hz IS THE SHIPPED CEILING AND IT WAS MOVED DOWN FROM 10 BY A
+    /// MEASUREMENT, NOT BY TASTE.** Aliasing is not what binds first — the
+    /// SHAPE goes before the rate does. Measured through the shipping render
+    /// path (`NoteVibratoGeneratorTests` §C), the non-sinusoidal energy the
+    /// chain adds to the rendered f0, over the tracker's own ~0.8 cent floor,
+    /// as a fraction of the depth requested at ±93 cents:
+    ///
+    ///     3.0 Hz  3.7 %   ·   4.5 Hz  6.9 %   ·   5.5 Hz 10.1 %
+    ///     6.5 Hz 14.5 %   ·   7.8 Hz 23.8 %   ·  10.0 Hz 61.7 %
+    ///
+    /// At 10 Hz a ±93 cent request comes back with 58 cents of content that is
+    /// not the sine that was asked for: a staircase, not a vibrato. Its FITTED
+    /// depth still reads 0.98×, which is exactly the trap — the headline
+    /// metric looks excellent while the shape is gone. 8 Hz is the last rate
+    /// at which a printed number describes what a listener gets.
+    ///
+    /// It also covers the reference app's own deepest readout (7.8 Hz) and the
+    /// whole of human sung vibrato (4–8 Hz), and sits well under the grid's
+    /// 16.67 Hz alias limit — which is the OTHER limit, the one that turns a
+    /// request into a different and LOWER rate, and is pinned separately.
+    public static let vibratoRateHzRange: ClosedRange<Double> = 0...8
+
+    /// 0 (inert) to 200 cents peak — two semitones each way.
+    ///
+    /// A BOUNDED PICK, not a measurement, and marked as one. It is set from
+    /// the reference app's own deepest observed readout (±93 c) with headroom,
+    /// so a user cannot ask for something the readout has never been seen to
+    /// show. Nothing measured says 200 is where the chain stops being honest;
+    /// what IS measured is the delivery ratio, in `NoteVibratoGeneratorTests`.
+    public static let vibratoDepthCentsRange: ClosedRange<Double> = 0...200
+
+    /// 0 (immediate) to 5 seconds. Bounded rather than measured; 5 s is longer
+    /// than any note this editor segments, so the clamp can never be the
+    /// reason a fade fails to complete.
+    public static let vibratoOnsetSecondsRange: ClosedRange<Double> = 0...5
+
     /// True when this segment asks the curve for nothing — a detected note the
     /// user has not edited. Such a segment is still worth persisting (it is the
     /// note table an editor draws), which is why this is NOT the emptiness test
     /// persistence uses.
+    ///
+    /// ⚠️⚠️ **`vibratoRateHz` AND `vibratoOnsetSeconds` ARE DELIBERATELY NOT
+    /// HERE, AND THAT IS THE OPPOSITE OF THE RULE THE PHASE-3/4 FIELDS
+    /// FOLLOW.** `formantOffsetSemitones` and the timing deltas break identity
+    /// even though nothing reads them, on the stated ground that a field
+    /// nobody renders today might render tomorrow and stale audio is worse
+    /// than a needless render. Rate and onset are the other case and the
+    /// distinction is structural, not a preference:
+    ///
+    ///  * Those fields are UNREAD, so their render effect is UNKNOWN.
+    ///  * Rate and onset are READ, and they enter the curve only as
+    ///    `depthSemitones × envelope(t) × sin(…)`. At `vibratoDepthCents == 0`
+    ///    that product is exactly zero for every `t`, for every rate and every
+    ///    onset. Their inertness is arithmetic, not a guess about the future.
+    ///
+    /// And the cost of getting it the other way round is NOT symmetric here.
+    /// §6.4's rule is that a set which renders as nothing must reach
+    /// `OfflineStretcher.isIdentity` and play its source BYTE-FOR-BYTE. A
+    /// half-set control (a rate chosen, a depth still at zero — exactly what a
+    /// UI holds mid-gesture) that broke identity would push an untouched clip
+    /// through a full stretch render, and a ratio-1 stretch is not its own
+    /// input. So the conservative direction for THESE two is to stay out.
+    /// `NoteVibratoGeneratorTests` pins both halves of this.
     public var isIdentity: Bool {
         pitchOffsetCents == 0 && driftScale == 1 && vibratoScale == 1
+            && vibratoDepthCents == 0
             && formantOffsetSemitones == 0
             && timeStartDeltaSeconds == 0 && timeEndDeltaSeconds == 0
             && amplitudeDb == 0
     }
+
+    /// True when ANY per-note edit field departs from its default — "has
+    /// anyone touched this note" (m23-ap C-0, design 2026-09-24 §4.4), the
+    /// question the pitch editor's accent and the `debug.pitchEditor` spy ask.
+    ///
+    /// ⚠️ **DELIBERATELY WIDER THAN `!isIdentity`, AND THE DIFFERENCE IS EXACTLY
+    /// THE TWO FIELDS THAT DOC EXCLUDES.** A generator rate (or onset) with a
+    /// zero depth renders as nothing, which is why identity leaves them out —
+    /// but it IS a stored edit, and a spy that called that note untouched would
+    /// report a write that took as one that did not. Before this existed the
+    /// spy read `pitchOffsetCents != 0` alone, so a Hard-Tuned note that sat
+    /// already in tune (offset 0, both scales 0) read as untouched.
+    public var isEdited: Bool {
+        !isIdentity || vibratoRateHz != 0 || vibratoOnsetSeconds != 0
+    }
+
+    /// True when the synthesised generator contributes anything at all.
+    /// The ONE predicate for that question — the curve, the digest and any
+    /// future readout all read this rather than restating `!= 0`.
+    public var hasGeneratedVibrato: Bool { vibratoDepthCents != 0 }
+
+    /// True when either edge of this note has been retimed (m23-ap C2-1,
+    /// timing design §3.2).
+    ///
+    /// ⭐ **THE ONE PREDICATE FOR "IS THIS NOTE RETIMED"**, following the
+    /// `hasGeneratedVibrato` rule. The digest's time-warp block,
+    /// `PitchTimeWarp.make`, the render's warped branch and the editor all ask
+    /// this, and none of them restates it. `-0.0` is no edit, which is how
+    /// `isIdentity` already reads it.
+    public var hasTimeEdits: Bool { timeStartDeltaSeconds != 0 || timeEndDeltaSeconds != 0 }
+
+    /// True when this segment's rendered curve depends on the DETECTED
+    /// CONTOUR — a drift or vibrato scale other than 1, which is a fraction of
+    /// a quantity only the contour carries.
+    ///
+    /// ⭐ **THE ONE PREDICATE FOR "DOES THIS NEED THE CONTOUR".**
+    /// `PitchCorrectionCurve.make` uses it to decide what to resolve, and the
+    /// render cache uses it (through `PitchEditSet.needsDetectedContour`) to
+    /// decide whether the contour enters the render's key. Two spellings of
+    /// this test that disagreed would render against a contour the key did not
+    /// name — stale audio that looks like a working cache.
+    public var wantsContourShaping: Bool { driftScale != 1 || vibratoScale != 1 }
 
     /// Note length in source seconds; never negative.
     public var durationSeconds: Double { max(0, endSeconds - startSeconds) }
@@ -353,6 +583,9 @@ public struct NoteSegment: Identifiable, Codable, Sendable, Equatable {
         pitchOffsetCents: Double = 0,
         driftScale: Double = 1,
         vibratoScale: Double = 1,
+        vibratoRateHz: Double = 0,
+        vibratoDepthCents: Double = 0,
+        vibratoOnsetSeconds: Double = 0,
         formantOffsetSemitones: Double = 0,
         timeStartDeltaSeconds: Double = 0,
         timeEndDeltaSeconds: Double = 0,
@@ -376,6 +609,17 @@ public struct NoteSegment: Identifiable, Codable, Sendable, Equatable {
             .finite(driftScale, default: 1).clamped(to: Self.shapeScaleRange)
         self.vibratoScale = PitchCorrectionMath
             .finite(vibratoScale, default: 1).clamped(to: Self.shapeScaleRange)
+        // A non-finite rate/depth/onset reverts to INERT rather than to some
+        // other number: the defaults here are the only values that guarantee
+        // the generator contributes exactly nothing, and a damaged project
+        // must degrade to silence from this feature, never to a wobble nobody
+        // asked for.
+        self.vibratoRateHz = PitchCorrectionMath
+            .finite(vibratoRateHz, default: 0).clamped(to: Self.vibratoRateHzRange)
+        self.vibratoDepthCents = PitchCorrectionMath
+            .finite(vibratoDepthCents, default: 0).clamped(to: Self.vibratoDepthCentsRange)
+        self.vibratoOnsetSeconds = PitchCorrectionMath
+            .finite(vibratoOnsetSeconds, default: 0).clamped(to: Self.vibratoOnsetSecondsRange)
         self.formantOffsetSemitones = PitchCorrectionMath
             .finite(formantOffsetSemitones, default: 0)
             .clamped(to: Self.formantOffsetSemitonesRange)
@@ -388,6 +632,7 @@ public struct NoteSegment: Identifiable, Codable, Sendable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case id, startSeconds, endSeconds, detectedHz, detectedConfidence
         case pitchOffsetCents, driftScale, vibratoScale
+        case vibratoRateHz, vibratoDepthCents, vibratoOnsetSeconds
         case formantOffsetSemitones, timeStartDeltaSeconds, timeEndDeltaSeconds, amplitudeDb
     }
 
@@ -405,6 +650,11 @@ public struct NoteSegment: Identifiable, Codable, Sendable, Equatable {
             pitchOffsetCents: try c.decodeIfPresent(Double.self, forKey: .pitchOffsetCents) ?? 0,
             driftScale: try c.decodeIfPresent(Double.self, forKey: .driftScale) ?? 1,
             vibratoScale: try c.decodeIfPresent(Double.self, forKey: .vibratoScale) ?? 1,
+            vibratoRateHz: try c.decodeIfPresent(Double.self, forKey: .vibratoRateHz) ?? 0,
+            vibratoDepthCents: try c.decodeIfPresent(
+                Double.self, forKey: .vibratoDepthCents) ?? 0,
+            vibratoOnsetSeconds: try c.decodeIfPresent(
+                Double.self, forKey: .vibratoOnsetSeconds) ?? 0,
             formantOffsetSemitones: try c.decodeIfPresent(
                 Double.self, forKey: .formantOffsetSemitones) ?? 0,
             timeStartDeltaSeconds: try c.decodeIfPresent(
@@ -429,6 +679,17 @@ public struct NoteSegment: Identifiable, Codable, Sendable, Equatable {
         if pitchOffsetCents != 0 { try c.encode(pitchOffsetCents, forKey: .pitchOffsetCents) }
         if driftScale != 1 { try c.encode(driftScale, forKey: .driftScale) }
         if vibratoScale != 1 { try c.encode(vibratoScale, forKey: .vibratoScale) }
+        // Omit-when-default, same rule as every other edit field: a project
+        // saved before the generator existed and one saved after it, with the
+        // generator untouched, produce the SAME KEYS. That is what makes the
+        // byte-identical claim in `NoteVibratoGeneratorTests` §A structural.
+        if vibratoRateHz != 0 { try c.encode(vibratoRateHz, forKey: .vibratoRateHz) }
+        if vibratoDepthCents != 0 {
+            try c.encode(vibratoDepthCents, forKey: .vibratoDepthCents)
+        }
+        if vibratoOnsetSeconds != 0 {
+            try c.encode(vibratoOnsetSeconds, forKey: .vibratoOnsetSeconds)
+        }
         if formantOffsetSemitones != 0 {
             try c.encode(formantOffsetSemitones, forKey: .formantOffsetSemitones)
         }
@@ -477,6 +738,25 @@ public struct PitchEditSet: Codable, Sendable, Equatable {
     /// return is not proof it took).
     public var retuneMs: Double
 
+    /// **What the LAST auto-correct pass wrote, as a content stamp** (m23-ap
+    /// C-F3) — or nil when no pass wrote this set (a table the note editor
+    /// seeded) or the set predates the field (a project saved before
+    /// 2026-09-24).
+    ///
+    /// It exists for ONE question, `hasHandEditsSinceAutoCorrect`: "would
+    /// replacing this set throw away work a preset cannot re-create?" Only
+    /// `ProjectStore.autoCorrectClipPitch` writes it. Every other writer — a
+    /// note drag, a split, every per-note setter still to come — leaves it
+    /// alone, so the content moves away from the stamp and the question
+    /// answers itself without any setter knowing this field exists. The whole
+    /// mechanism is argued in `PitchEditProvenance.swift`.
+    ///
+    /// ⚠️ **NOT RENDER MATERIAL, AND DELIBERATELY ABSENT FROM
+    /// `PitchEditSetDigest.hex`** (the render key, in DAWEngine): two sets
+    /// with identical notes render identically whoever wrote them. Omitted
+    /// from the payload when nil, so a legacy set re-saves byte-identically.
+    public var autoCorrectStamp: String?
+
     /// The shortest ramp the renderer can honour: one 30 ms analysis hop at
     /// 48 kHz (phase-0 §2/§6 — the curve is read once per chunk, and a mid-hop
     /// request waits exactly one full hop, not a fraction of one).
@@ -505,6 +785,19 @@ public struct PitchEditSet: Codable, Sendable, Equatable {
     /// as nothing and is still worth saving, because it is the note table the
     /// editor draws and re-detecting it costs a model run.
     public var isIdentity: Bool { segments.allSatisfy(\.isIdentity) }
+
+    /// True when rendering this set needs the DETECTED contour: at least one
+    /// segment asks for drift/vibrato shaping (`NoteSegment.wantsContourShaping`,
+    /// the one predicate). The preset LADDER never does (it keeps both scales
+    /// at 1); `hardTune` always does. A set for which this is false renders —
+    /// and keys — exactly as it did before the contour reached the render.
+    public var needsDetectedContour: Bool { segments.contains(where: \.wantsContourShaping) }
+
+    /// True when any note is retimed: `NoteSegment.hasTimeEdits`, the one
+    /// predicate (m23-ap C2-1). When this is false, `PitchTimeWarp.make`
+    /// returns nil, the digest emits no time-warp block, and a render takes
+    /// today's linear loop byte for byte. Timing is invisible until it is used.
+    public var hasTimeEdits: Bool { segments.contains(where: \.hasTimeEdits) }
 
     public static let empty = PitchEditSet(analysisVersion: currentAnalysisVersion, segments: [])
 
@@ -549,7 +842,7 @@ public struct PitchEditSet: Codable, Sendable, Equatable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case analysisVersion, segments, retuneMs
+        case analysisVersion, segments, retuneMs, autoCorrectStamp
     }
 
     public init(from decoder: any Decoder) throws {
@@ -560,15 +853,19 @@ public struct PitchEditSet: Codable, Sendable, Equatable {
             segments: try c.decodeIfPresent([NoteSegment].self, forKey: .segments) ?? [],
             retuneMs: try c.decodeIfPresent(Double.self, forKey: .retuneMs)
                 ?? Self.engineMinimumRetuneMs)
+        // Absent (every set saved before C-F3) stays nil, which reads as "may
+        // carry hand edits" — the CONFIRM answer, never the silent one.
+        self.autoCorrectStamp = try c.decodeIfPresent(String.self, forKey: .autoCorrectStamp)
     }
 
-    /// `retuneMs` is omitted at the floor, the same omit-when-default rule the
-    /// rest of the clip payload follows.
+    /// `retuneMs` is omitted at the floor and `autoCorrectStamp` when nil, the
+    /// same omit-when-default rule the rest of the clip payload follows.
     public func encode(to encoder: any Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(analysisVersion, forKey: .analysisVersion)
         try c.encode(segments, forKey: .segments)
         if retuneMs != Self.engineMinimumRetuneMs { try c.encode(retuneMs, forKey: .retuneMs) }
+        if let autoCorrectStamp { try c.encode(autoCorrectStamp, forKey: .autoCorrectStamp) }
     }
 }
 
@@ -606,7 +903,16 @@ public enum PitchCorrectionUndoKey {
         "pitch.drift:\(clipID.uuidString):\(segmentID.uuidString)"
     }
 
-    /// A vibrato-scale drag on one note.
+    /// A vibrato drag on one note.
+    ///
+    /// ⭐ **ONE KEY FOR BOTH MECHANISMS, DELIBERATELY.** The reference app's
+    /// gesture runs one note from sung → flat → synthesised without letting
+    /// go, which writes `vibratoScale` on the way down and
+    /// `vibratoRateHz`/`vibratoDepthCents` on the way up. A second key for the
+    /// generator would split ONE drag into TWO undo entries at the moment the
+    /// axis crossed zero — the user would have to undo twice to get back to
+    /// where they started, and the halfway state they land in is one they
+    /// never saw. The key is the rule, so the rule is stated at the key.
     public static func vibrato(clipID: UUID, segmentID: UUID) -> String {
         "pitch.vibrato:\(clipID.uuidString):\(segmentID.uuidString)"
     }
@@ -637,12 +943,87 @@ public enum PitchCorrectionUndoKey {
 ///     * `pitchOffsetCents` — the note's constant correction;
 ///     * `(driftScale − 1) × drift(t)` — macro pitch wander, relative to the
 ///       note's detected centre;
-///     * `(vibratoScale − 1) × vibrato(t)` — periodic modulation, likewise.
+///     * `(vibratoScale − 1) × vibrato(t)` — periodic modulation, likewise;
+///     * **the SYNTHESISED generator** (m23-ap C5a) —
+///       `depth × fade(t) × sin(2π · rate · t)`.
+///
+/// ⭐ **TWO TIME AXES, ONE RULE (m23-ap C2-1, timing design §3.4 step 4).**
+/// On a curve with a `timeWarp`, the generator (its phase AND its fade) runs
+/// in EDITED seconds, `W(t)`. The gates and both shaping terms stay in SOURCE
+/// seconds. The shaping terms describe the sung audio, and the stretcher moves
+/// the sung audio together with the note. The generator is a rate the user
+/// chose, so it must keep that rate when the note is stretched. Evaluated in
+/// source time, a 5.5 Hz wobble on a note stretched 1.4× would play at about
+/// 3.9 Hz. A curve WITHOUT a warp takes no edited-time arithmetic at all.
+/// See `semitones(atSourceSecond:editedSecond:)`.
 ///
 /// The two shaping terms are ZERO whenever their scales are 1, which is the
 /// entire Phase-1 policy: a preserve-vibrato correction is a CONSTANT per note,
 /// so the performance's modulation passes through untouched by construction
 /// rather than by a filter that tries to leave it alone.
+///
+/// ═══════════════════════════════════════════════════════════════════════════
+/// ⭐⭐ THE GENERATOR: WHY IT **ADDS** AND DOES NOT **REPLACE**
+/// ═══════════════════════════════════════════════════════════════════════════
+///
+/// This is the load-bearing decision of m23-ap C5a, and it was made on a
+/// structural argument rather than a taste one.
+///
+/// A curve value is a DELTA the renderer transposes the source BY. The source
+/// already contains whatever the singer did. So:
+///
+///  * **ADD** is `+ generated(t)`. It needs nothing but the stored numbers.
+///  * **REPLACE** is `− sung(t) + generated(t)`. The `− sung(t)` half requires
+///    the DETECTED CONTOUR, because you cannot cancel what you have not
+///    measured.
+///
+/// And the tree already has a mechanism for `− sung(t)`: `vibratoScale = 0`.
+/// Making the generator replace would therefore mint a SECOND way to say
+/// "remove the sung wobble", with its own failure mode, beside one that is
+/// already shipped, already tested and already reports its own unavailability
+/// through `unresolvedShapingSegmentIDs`. So:
+///
+/// ⭐ **REPLACE IS A COMPOSITION, NOT A MODE: `vibratoScale: 0` AND a
+/// generator, set in ONE edit.** The reference app's own sequence — one note
+/// going sung → flat → synthesised under one continuous gesture — is exactly
+/// that composition, and it is why the UI's single axis has a natural zero:
+/// zero is where the flatten has finished and the generator has not started.
+///
+/// ⚠️ ~~AND HALF OF THAT DOES NOT RENDER TODAY.~~ **BOTH HALVES RENDER
+/// (contour-to-render, 2026-09-24):** the render resolves `vibratoScale: 0`
+/// against the detected whole-file contour, so "replace" now sounds like
+/// replace. What survives is the FAILURE path: when the contour is
+/// unavailable (detection failed, or the set came from another detector
+/// generation) the flatten half resolves to nothing, the segment is named in
+/// `unresolvedShapingSegmentIDs`, the engine posts a notice, and a replace
+/// gesture sounds like "add" for that render. **A UI that offers replace
+/// should read `PitchRenderContour`'s resolution and say so.** It is NOT
+/// papered over here by making the generator subtract a contour it does not
+/// have.
+///
+/// **THE PHASE IS ANCHORED AT SOURCE SECOND ZERO — `sin(2π · rate · t)` — NOT
+/// AT THE NOTE'S START**, and that choice is defensive:
+///
+///  * `PitchEditSet.canonical` heals overlaps FIRST-WINS by moving a later
+///    segment's `startSeconds` forward. A start-anchored phase would silently
+///    re-phase the vibrato of a note the user never touched.
+///  * Splitting a note (editor C3) makes two segments from one. Start-anchored,
+///    identical generator settings would restart the sine at the split; at
+///    source second 0 the two halves stay one continuous vibrato.
+///
+/// The ENVELOPE (`vibratoOnsetSeconds`) is anchored at the note start instead,
+/// because a fade-in is a statement about the note and a shortened note should
+/// re-anchor its fade. `generatorIsContinuousAcrossASplit` pins the phase half.
+/// On a retimed curve both anchors move onto the edited axis: the phase is
+/// `sin(2π · rate · W(t))`, which is anchored at edited second 0 (`W(0) = 0`),
+/// and the fade is anchored at `W(startSeconds)`.
+///
+/// **EXTENSION SEAM (editor C5b, freehand ⌘+drag).** The generator is a TERM
+/// IN A SUM, not "the note's shape". A later per-note contour OVERRIDE is
+/// another term in the same sum inside the same gate, and adding one does not
+/// disturb anything here. What it WOULD need is a rule for override + generator
+/// together; that is a UI decision, not a representation one, and nothing in
+/// this layout forecloses it.
 ///
 /// **Smoothness, honestly.** Inside a note with default scales the curve is
 /// CONSTANT, and each boundary is a smoothstep — C¹ everywhere, which is what
@@ -674,6 +1055,25 @@ public struct PitchCorrectionCurve: Sendable, Equatable {
         /// Time of `shapingSemitones[0]`, and the frame spacing.
         let shapingStartSeconds: Double
         let shapingStepSeconds: Double
+
+        /// `vibratoDepthCents / 100`. **EXACTLY ZERO means no generator**, and
+        /// the evaluator branches on it rather than adding a zero — see the
+        /// `-0.0` note in `semitones(atSourceSecond:)`.
+        let vibratoDepthSemitones: Double
+        /// `2π × vibratoRateHz`, precomputed so the hot loop is one multiply.
+        let vibratoRadiansPerSecond: Double
+        /// Fade-in length, seconds, from `envelopeStartSeconds`.
+        let vibratoOnsetSeconds: Double
+        /// The note's start ON THE GENERATOR'S AXIS, which is the ENVELOPE's
+        /// anchor. Deliberately NOT the phase's anchor; see the class banner.
+        ///
+        /// On an untimed curve this is `startSeconds`, the same Double, never
+        /// passed through anything. On a retimed curve it is
+        /// `W(startSeconds)`, computed once in `make`, because the generator
+        /// runs in edited time (C2-1). Precomputing it branches on the
+        /// warp's PRESENCE, so an untimed curve's fade is bit-identical to
+        /// the pre-C2 fade by construction.
+        let envelopeStartSeconds: Double
     }
 
     /// The whole-clip term this curve subsumes.
@@ -691,16 +1091,36 @@ public struct PitchCorrectionCurve: Sendable, Equatable {
     /// warnings about; returning a curve that silently omits the shaping with
     /// no way to know would be worse. A caller that finds this non-empty should
     /// re-run detection before rendering.
+    ///
+    /// Since contour-to-render (2026-09-24) the render builds its curve from
+    /// `PitchRenderContour`, so this is non-empty in exactly two situations:
+    /// the contour is not `.detected` (the render's fallback — the engine also
+    /// posts a notice), or it is but carries fewer than two voiced frames
+    /// inside a segment (a note the detector did not hear as voiced).
     public let unresolvedShapingSegmentIDs: [UUID]
+
+    /// The per-note timing map this curve was built with, or `nil` for an
+    /// untimed curve (m23-ap C2-1, timing design §3.2 "Where W lives at run
+    /// time").
+    ///
+    /// Stored so that the synthesised generator can run in edited time, and so
+    /// that this type's `Equatable` compares W too. A display that forgot to
+    /// pass W then fails an equality gate against the render on any retimed
+    /// set. `nil` is not an identity map: it means "no time edits", and every
+    /// evaluation branches on it rather than evaluating an identity W (IEEE
+    /// `a + (t − a)·1.0` is not `t` bit for bit).
+    public let timeWarp: PitchTimeWarp?
 
     fileprivate let spans: [Span]
 
     fileprivate init(clipPitchShiftSemitones: Double,
                      spans: [Span],
-                     unresolvedShapingSegmentIDs: [UUID]) {
+                     unresolvedShapingSegmentIDs: [UUID],
+                     timeWarp: PitchTimeWarp?) {
         self.clipPitchShiftSemitones = clipPitchShiftSemitones
         self.spans = spans
         self.unresolvedShapingSegmentIDs = unresolvedShapingSegmentIDs
+        self.timeWarp = timeWarp
     }
 
     /// Window over which macro DRIFT is separated from periodic VIBRATO: drift
@@ -724,18 +1144,47 @@ public struct PitchCorrectionCurve: Sendable, Equatable {
     ///   - contour: the DETECTED per-frame pitch, source-file seconds. Needed
     ///     only by segments whose `driftScale`/`vibratoScale` depart from 1;
     ///     pass `[]` when there is none and read
-    ///     `unresolvedShapingSegmentIDs` afterwards.
+    ///     `unresolvedShapingSegmentIDs` afterwards. ⚠️ The RENDER does not
+    ///     call this with a contour directly — it calls
+    ///     `PitchRenderContour.curve(editSet:clipPitchShiftSemitones:)`, which
+    ///     supplies the contour AND the offset below together.
+    ///   - contourValueOffsetSeconds: where, relative to each frame's
+    ///     `timeSeconds`, that frame's pitch belongs. `0` (the default) treats
+    ///     a frame as a point sample at its timestamp, which is what every
+    ///     synthetic model contour in the tests is. A DETECTOR frame is not: its
+    ///     `timeSeconds` is the frame START and its value describes the
+    ///     interval `[t, t + 1/frameRate)`, so `PitchRenderContour` passes half
+    ///     a frame. **MEASURED, not assumed:** SwiftF0's contour of a known
+    ///     5.5 Hz vibrato LEADS the sung pitch by 8.58 ms (half a frame is
+    ///     8.0), and on the real dry vocal Hard Tune's residual wander is
+    ///     24.2 c at +0 ms, 18.2 c at +8, 17.7 c at +12, 20.0 c at +16, 25.2 c
+    ///     at +24 — the centre of the frame sits on the minimum. Only the TIME
+    ///     AXIS of the shaping moves; which frames belong to a segment is still
+    ///     decided on `timeSeconds`, the same frame-start convention
+    ///     `PitchNoteSplitter` (over `PitchAutoCorrect.voicedRuns`) builds
+    ///     segment boundaries in.
     ///   - clipPitchShiftSemitones: `Clip.pitchShiftSemitones`, which this
     ///     curve SUBSUMES.
+    ///   - timeWarp: the set's per-note timing map, built by the caller with
+    ///     `PitchTimeWarp.make(editSet:sourceDurationSeconds:)` from THIS
+    ///     `editSet`, or `nil` (the default) for an untimed curve. Every
+    ///     caller that passes nothing gets exactly the pre-C2 curve, because
+    ///     `nil` takes no edited-time arithmetic anywhere. ⚠️ A retimed set
+    ///     built WITHOUT its warp plays its synthesised wobble in source time,
+    ///     which is at the wrong rate on a stretched note.
     public static func make(editSet: PitchEditSet,
                             contour: [ClipPitchFrame] = [],
-                            clipPitchShiftSemitones: Double = 0) -> PitchCorrectionCurve {
+                            contourValueOffsetSeconds: Double = 0,
+                            clipPitchShiftSemitones: Double = 0,
+                            timeWarp: PitchTimeWarp? = nil) -> PitchCorrectionCurve {
         let base = PitchCorrectionMath.finite(clipPitchShiftSemitones, default: 0)
         guard !editSet.segments.isEmpty else {
             return PitchCorrectionCurve(clipPitchShiftSemitones: base,
-                                        spans: [], unresolvedShapingSegmentIDs: [])
+                                        spans: [], unresolvedShapingSegmentIDs: [],
+                                        timeWarp: timeWarp)
         }
         let ramp = editSet.retuneMs / 1000
+        let valueOffset = PitchCorrectionMath.finite(contourValueOffsetSeconds, default: 0)
         // Voiced frames only, ascending. An unvoiced frame carries no pitch and
         // is not turned into one — it simply is not here.
         let voiced = contour
@@ -747,7 +1196,7 @@ public struct PitchCorrectionCurve: Sendable, Equatable {
         spans.reserveCapacity(editSet.segments.count)
 
         for segment in editSet.segments {
-            let wantsShaping = segment.driftScale != 1 || segment.vibratoScale != 1
+            let wantsShaping = segment.wantsContourShaping
             var shaping: [Double] = []
             var shapingStart = 0.0
             var shapingStep = 0.0
@@ -775,7 +1224,10 @@ public struct PitchCorrectionCurve: Sendable, Equatable {
                             return ((segment.driftScale - 1) * macro
                                 + (segment.vibratoScale - 1) * vibrato) / 100
                         }
-                        shapingStart = frames[0].timeSeconds
+                        // `+ valueOffset` is the ONLY place the offset
+                        // enters: at the default 0 this line is exactly the
+                        // one every pre-offset curve was built with.
+                        shapingStart = frames[0].timeSeconds + valueOffset
                         shapingStep = step
                     }
                 }
@@ -789,11 +1241,25 @@ public struct PitchCorrectionCurve: Sendable, Equatable {
                 constantSemitones: segment.pitchOffsetCents / 100,
                 shapingSemitones: shaping,
                 shapingStartSeconds: shapingStart,
-                shapingStepSeconds: shapingStep))
+                shapingStepSeconds: shapingStep,
+                // ⚠️ `hasGeneratedVibrato` is the ONE predicate; a literal
+                // `!= 0` here would be the second home. A segment with a rate
+                // but no depth collapses to EXACTLY 0.0 rather than to a very
+                // small number, which is what lets the evaluator skip the
+                // whole term rather than add a zero to it.
+                vibratoDepthSemitones: segment.hasGeneratedVibrato
+                    ? segment.vibratoDepthCents / 100 : 0,
+                vibratoRadiansPerSecond: 2 * .pi * segment.vibratoRateHz,
+                vibratoOnsetSeconds: segment.vibratoOnsetSeconds,
+                // Branch on the warp's PRESENCE: an untimed curve stores the
+                // same Double it always did, never an identity W's output.
+                envelopeStartSeconds: timeWarp?.editedSecond(
+                    forSourceSecond: segment.startSeconds) ?? segment.startSeconds))
         }
         return PitchCorrectionCurve(clipPitchShiftSemitones: base,
                                     spans: spans,
-                                    unresolvedShapingSegmentIDs: unresolved)
+                                    unresolvedShapingSegmentIDs: unresolved,
+                                    timeWarp: timeWarp)
     }
 
     /// Absolute pitch, in semitones, that the renderer should be transposing by
@@ -803,9 +1269,37 @@ public struct PitchCorrectionCurve: Sendable, Equatable {
     /// than propagating a NaN, and a result that somehow came out non-finite
     /// does the same — this value ends up driving a transpose curve, and a NaN
     /// there is an audible catastrophe, not a log line.
+    ///
+    /// On a retimed curve this computes the edited second itself,
+    /// `timeWarp.editedSecond(forSourceSecond:)`. On an untimed curve it passes
+    /// `nil` through optional chaining, so no W is ever evaluated.
     public func semitones(atSourceSecond sourceSecond: Double) -> Double {
+        semitones(atSourceSecond: sourceSecond,
+                  editedSecond: timeWarp?.editedSecond(forSourceSecond: sourceSecond))
+    }
+
+    /// The evaluator, for a caller that already holds both seconds (m23-ap
+    /// C2-1, timing design §3.4 step 4).
+    ///
+    /// The render starts from an EDITED second (the delivered output frame
+    /// divided by `ratio · sampleRate`), maps it to source through
+    /// `timeWarp.sourceSecond(forEditedSecond:)`, and passes both. That avoids
+    /// a W(W⁻¹(e)) round trip that would not return `e` bit for bit.
+    ///
+    /// - Parameter editedSecond: the edited second that `sourceSecond` plays
+    ///   at: `timeWarp.editedSecond(forSourceSecond: sourceSecond)`. Pass
+    ///   `nil` exactly when the curve has no `timeWarp`. The synthesised
+    ///   generator runs on `editedSecond ?? sourceSecond`, and the gates and
+    ///   shaping terms run on `sourceSecond`. A non-finite `editedSecond` is
+    ///   treated like a non-finite `sourceSecond`: the whole-clip term.
+    public func semitones(atSourceSecond sourceSecond: Double,
+                          editedSecond: Double?) -> Double {
         guard sourceSecond.isFinite else { return clipPitchShiftSemitones }
         guard !spans.isEmpty else { return clipPitchShiftSemitones }
+        if let editedSecond, !editedSecond.isFinite { return clipPitchShiftSemitones }
+        // ⭐ BRANCH ON PRESENCE, never evaluate an identity W: with no warp the
+        // generator reads `sourceSecond` itself, exactly as it did before C2.
+        let generatorSecond = editedSecond ?? sourceSecond
 
         var weighted = 0.0
         var totalGate = 0.0
@@ -821,7 +1315,38 @@ public struct PitchCorrectionCurve: Sendable, Equatable {
             // Flush a vanishing gate rather than accumulating denormals into
             // the blend.
             if gate > 1e-12 {
-                weighted += gate * (span.constantSemitones + Self.shaping(span, at: sourceSecond))
+                // ⚠️ **THE BRANCH IS DEFENSIVE, NOT LOAD-BEARING — AND THAT IS
+                // A MEASUREMENT, NOT A GUESS.** The reasoning that put it here
+                // was: `x + 0.0` is `x` for every finite `x` EXCEPT `-0.0`,
+                // where it is `+0.0`, so adding an always-zero term could flip
+                // a bit pattern on its way to `Float(…)` and
+                // `css_set_transpose_semitones`.
+                //
+                // That hazard is REAL in general and UNREACHABLE here, and it
+                // was checked rather than argued: removing this branch and
+                // adding the term unconditionally was planted as a defect and
+                // the §A render/digest goldens **passed**. The reason is the
+                // line directly above — `span.constantSemitones + shaping(…)`
+                // already adds `shaping`'s positive-zero literal, and IEEE
+                // round-to-nearest gives `-0.0 + 0.0 == +0.0`, so
+                // `contribution` is never `-0.0` by the time the generator
+                // could touch it.
+                //
+                // The branch stays because it is free, it skips a call per
+                // span per hop, and it keeps the invariance structural if
+                // `shaping` ever learns to return a signed zero. It is NOT
+                // what the byte gates are standing on, and saying otherwise
+                // would be a protection nobody has ever seen fire.
+                //
+                // C2-1: the gate and the shaping stay in SOURCE time, and the
+                // generator runs on `generatorSecond` (EDITED time on a
+                // retimed curve). See the type banner, "two time axes".
+                var contribution = span.constantSemitones
+                    + Self.shaping(span, at: sourceSecond)
+                if span.vibratoDepthSemitones != 0 {
+                    contribution += Self.generatedVibrato(span, at: generatorSecond)
+                }
+                weighted += gate * contribution
                 totalGate += gate
             }
             index += 1
@@ -874,6 +1399,43 @@ public struct PitchCorrectionCurve: Sendable, Equatable {
             + span.shapingSemitones[lower + 1] * fraction
     }
 
+    /// The SYNTHESISED vibrato term, semitones, before the boundary gate.
+    ///
+    /// `depth × fade(t) × sin(2π · rate · t)`, with the phase anchored at
+    /// SOURCE SECOND ZERO and the fade anchored at the NOTE'S START — see the
+    /// type's banner for why those two anchors differ on purpose.
+    ///
+    /// `t` is on the GENERATOR'S axis: source seconds on an untimed curve,
+    /// EDITED seconds on a retimed one (C2-1), and `span.envelopeStartSeconds`
+    /// is already on the same axis. The phase stays anchored at axis zero,
+    /// which is source zero because `W(0) = 0`.
+    ///
+    /// Total and inert-by-construction: a zero depth or a zero rate returns
+    /// exactly `0`, and a non-finite `t` cannot reach here (the evaluator
+    /// rejects it first). The caller does NOT call this when the depth is
+    /// zero, so the guard below is a second line of defence rather than the
+    /// mechanism the byte gates rely on.
+    fileprivate static func generatedVibrato(_ span: Span, at t: Double) -> Double {
+        let depth = span.vibratoDepthSemitones
+        guard depth != 0, span.vibratoRadiansPerSecond != 0 else { return 0 }
+        // The same C¹ smoothstep the boundary ramps use, so a fade-in never
+        // introduces a corner the ramp would then have to smooth. `<= 0`
+        // rather than `== 0` because a decoded onset is clamped, never
+        // trusted.
+        let fade: Double
+        if span.vibratoOnsetSeconds <= 0 {
+            fade = 1
+        } else {
+            fade = smoothstep((t - span.envelopeStartSeconds) / span.vibratoOnsetSeconds)
+        }
+        // SLOT (C5a-1, vibrato-handle design §7.1 and §7.6): the stored phase
+        // anchor lands here as `sin(ω · (t − anchorOnThisAxis))`, where the
+        // anchor is precomputed in `make` as `W(vibratoPhaseAnchorSeconds)` on
+        // a retimed curve and as the stored value verbatim otherwise, exactly
+        // like `envelopeStartSeconds`.
+        return depth * fade * sin(span.vibratoRadiansPerSecond * t)
+    }
+
     /// Binary search for the first span whose ramped window could still be open
     /// at `t` — i.e. the first with `endSeconds + halfRamp > t`.
     fileprivate static func firstSpanIndex(_ spans: [Span], notEndedBefore t: Double) -> Int {
@@ -888,6 +1450,111 @@ public struct PitchCorrectionCurve: Sendable, Equatable {
             }
         }
         return low
+    }
+}
+
+// MARK: - The contour a render shapes against
+
+/// ⭐ **THE CONTOUR THE RENDER USES FOR A CLIP — and the ONE place a curve is
+/// built from it.**
+///
+/// Produced by exactly one function, the engine's
+/// `PitchContourCache.renderContour(source:analysisVersion:…)` (reached from
+/// outside the engine through `AudioEngineControlling.renderPitchContour`).
+/// `StretchRenderCache.performRender` calls that function and then
+/// `curve(editSet:clipPitchShiftSemitones:)` below; a display that wants its
+/// picture to agree with the sound calls the SAME two things, so there is no
+/// second contour and no second way to turn one into a curve.
+///
+/// **What `.detected` carries** (design §7.3 — the contour is regenerable
+/// analysis, cached beside the renders, never persisted in `.dawproj`):
+///  * the WHOLE source file, analysed from source second 0 — never the clip's
+///    trim window — so it is a pure function of the file and does not move
+///    when the clip is trimmed or split;
+///  * `ClipPitchFrame.timeSeconds` in SOURCE-FILE-ABSOLUTE seconds, never
+///    rebased to the clip;
+///  * this build's detector at the product's own detection settings
+///    (`PitchDetectionDefaults`), which are what `clip.autoCorrectPitch`
+///    segments with.
+///
+/// It is an ENUM so "a contour" and "a reason there is none" cannot both be
+/// present: every non-`detected` case renders the constant per-note offsets
+/// only and leaves the shaping segments in `unresolvedShapingSegmentIDs`.
+public enum PitchRenderContour: Sendable, Equatable {
+    /// The whole-file detection, fresh or from the cache.
+    case detected(PitchDetectionResult)
+    /// The edit set was built by a different detector generation than this
+    /// build runs. Design §7.2: a contour/version mismatch must be a visible
+    /// re-detection notice, NEVER a silent substitution of this build's
+    /// contour under edits made against another's — so nothing is resolved.
+    case analysisVersionMismatch(editSet: Int, detector: Int)
+    /// Detection could not run or failed (missing model, unreadable file,
+    /// runtime error). The render falls back to the constant offsets.
+    case unavailable(reason: String)
+
+    /// The detection, or `nil` when there is none to shape against.
+    public var detection: PitchDetectionResult? {
+        if case .detected(let result) = self { return result }
+        return nil
+    }
+
+    /// The frames the render shapes against — `[]` for every case but
+    /// `.detected`, which is exactly the contour the render used before this
+    /// type existed.
+    public var frames: [ClipPitchFrame] { detection?.frames ?? [] }
+
+    /// Where a detector frame's value belongs relative to its `timeSeconds`:
+    /// the CENTRE of the frame, half a frame period. See
+    /// `PitchCorrectionCurve.make`'s `contourValueOffsetSeconds` for the
+    /// measurement that put it there. `0` whenever there is no detection.
+    public var frameValueOffsetSeconds: Double {
+        guard let rate = detection?.frameRateHz, rate.isFinite, rate > 0 else { return 0 }
+        return 0.5 / rate
+    }
+
+    /// **THE VERSION OF THE CONTOUR-SHAPING ARITHMETIC** — bump it whenever a
+    /// curve built by `curve(editSet:…)` from an UNCHANGED edit set and an
+    /// UNCHANGED contour would come out different: the drift/vibrato separator
+    /// (`PitchCorrectionCurve.driftWindowSeconds` and the moving average
+    /// behind it), `frameValueOffsetSeconds`, or the shaping expression in
+    /// `PitchCorrectionCurve.make`.
+    ///
+    /// It sits in every CONTOUR-SHAPED render's cache key and in no other
+    /// (`StretchRenderCache.renderKeys`), so a bump re-renders exactly the
+    /// renders whose audio it changes. Neither the edit-set digest nor the
+    /// contour's key can see these choices — they are code, not data — so
+    /// without this a better separator would ship and every cached render
+    /// shaped by the old one would keep playing as if it were current.
+    /// (`StretchRenderCache.stretchEngineVersion` would also re-key them, but
+    /// it re-renders EVERY stretched clip on every disk, including all the
+    /// contour-free ones this cannot affect.)
+    ///
+    /// ⚠️ The separator IS the likeliest thing to change: on a 5.5 Hz vibrato
+    /// the 250 ms window passes 121 % of the wobble into "vibrato", so
+    /// `vibratoScale: 0` on its own over-corrects wherever the detector reads
+    /// the depth fully (measured 2026-09-24: 34 % wander cut at B3, where
+    /// SwiftF0 reads 97 % of the depth, against 56 % at A3, where it reads
+    /// 80 %; Hard Tune — drift AND vibrato at 0, which cancels the split —
+    /// cuts 48–58 % at both, through the product render). Most of what is
+    /// left in every case is the renderer, not the arithmetic: the same
+    /// curves evaluated WITHOUT the stretcher leave 2.6–8.2 cents.
+    /// `ContourShapingSweepTests` (DAWEngineTests, env-gated) re-derives all
+    /// of these.
+    public static let shapingVersion = 1
+
+    /// **THE curve a render of `editSet` plays.** `StretchCurvePlan` builds its
+    /// curve through this and nothing else; a display must too.
+    ///
+    /// `timeWarp` (m23-ap C2-1) is `PitchTimeWarp.make(editSet:
+    /// sourceDurationSeconds:)` for THIS `editSet`, or `nil` for an untimed
+    /// set. Passing nothing is exactly the pre-C2 call.
+    public func curve(editSet: PitchEditSet,
+                      clipPitchShiftSemitones: Double,
+                      timeWarp: PitchTimeWarp? = nil) -> PitchCorrectionCurve {
+        PitchCorrectionCurve.make(editSet: editSet, contour: frames,
+                                  contourValueOffsetSeconds: frameValueOffsetSeconds,
+                                  clipPitchShiftSemitones: clipPitchShiftSemitones,
+                                  timeWarp: timeWarp)
     }
 }
 
@@ -936,17 +1603,23 @@ public struct PitchAutoCorrectOptions: Codable, Sendable, Equatable {
     }
 }
 
-/// One run of consecutive VOICED frames — a provisional note.
+/// One run of consecutive VOICED frames — a stretch the singer never stopped in.
 ///
-/// ⚠️ **THE SEAM PHASE 2 REPLACES.** Design §11.2 gives segmentation its own
-/// design doc, and this is deliberately the dumbest thing that is not wrong: a
-/// note is a maximal run of voiced frames, and a hole ends it. It does NOT
-/// split a legato phrase where the singer changes note without stopping — two
-/// slurred notes come out as ONE run with a median somewhere between them, and
-/// a test pins exactly that so the limitation is visible rather than discovered.
-/// Onset evidence (`detectTransients`) and a target-change splitter are
-/// Phase 2's problem; inventing one here would build on a foundation §11.2 says
-/// is still being designed.
+/// ⭐ **THIS IS THE RUN RULE, NOT THE NOTE RULE** (p2-seg, design
+/// `docs/design/2026-09-24-pitch-note-splitting.md` §0). A run is a maximal
+/// stretch of voiced frames; a hole, or a gap in the analysis, ends it. A run
+/// can hold several NOTES — a legato phrase where the singer changes note
+/// without stopping is ONE run, and `voicedRuns` on it returns ONE element on
+/// purpose (`legatoSlurSplitsAtTheNoteChange` pins that too).
+///
+/// Notes are found INSIDE runs by `PitchNoteSplitter.parts(in:frameRateHz:onsetSeconds:)`,
+/// and the two note-table builders (`PitchAutoCorrect.editSet`,
+/// `PitchNoteTable.detected`) read those parts, never runs. What stays on runs,
+/// deliberately: the editor's measured contour and the played line, which are
+/// drawn per RUN so a note boundary never draws a hole where the singer never
+/// stopped (`PitchPlayedLine`, `PitchEditorModel.contourRuns`). A run that has
+/// no note change inside it comes out of the splitter as exactly this value,
+/// field for field (design §2.4).
 public struct VoicedRun: Sendable, Equatable {
     public let startSeconds: Double
     public let endSeconds: Double
@@ -969,6 +1642,42 @@ public struct VoicedRun: Sendable, Equatable {
     }
 }
 
+/// What a flattening pass (`preserveVibrato: false` — Hard Tune) does to a
+/// `.transition` part: a slide into, between or out of held notes (p2-seg,
+/// design `docs/design/2026-09-24-pitch-note-splitting.md` §3.2).
+///
+/// ONE AXIS, and the user's to pick (§9 Q1). Every shape writes the SAME note
+/// table — one segment per part, each with its own part's median as
+/// `detectedHz` — and sets only the correction values (offset, drift and
+/// vibrato scales), so the notes the editor draws never depend on the pick.
+/// The preserve-vibrato presets ignore the shape (a transition is identity for
+/// them in every shape, §3.4). THE product's shape is the one constant
+/// `PitchAutoCorrect.slideShape`.
+///
+/// (b) "Robot staircase" is deliberately NOT a case: shipping it needs engine
+/// and model work (S6), and its listening prototype produced no audible steps
+/// (§15.1).
+public enum PitchSlideShape: String, Sendable, Equatable, CaseIterable {
+    /// **(c) "Today's sound"** — every part of a split run, held and transition
+    /// alike, is locked to the nearest note of the WHOLE run's median and
+    /// flattened: the pre-p2-seg pin, played on the split table. ⚠️ It is not
+    /// byte-identical to a pre-p2-seg render of a split run: each segment's
+    /// shaping is held at its own edge and crossfaded with its neighbour where
+    /// one segment used to interpolate straight through.
+    case runPin
+    /// **(d) "Straight to the note"** — a transition keeps its own `detectedHz`
+    /// but aims at the note of the held part it leads INTO (a tail-off: the one
+    /// it leaves; §12 item 2), flattened, so the voice starts on the locked note.
+    case straightToNote
+    /// **(a-T) "Slide kept, note locked"** — a transition is an IDENTITY
+    /// segment: the singer's own slide plays as sung, then the held note snaps
+    /// on through the retune crossfade. The Melodyne-style two-part shape.
+    case slideKeptNoteLocked
+    /// **(a-N) "In-between note"** — a transition is locked, like a held note,
+    /// to the nearest note of its OWN median: two stepped pitches.
+    case inBetweenNote
+}
+
 /// The auto-correct policy: a detected contour plus options in, a populated
 /// `PitchEditSet` out. Pure — no clock, no I/O, no store, no engine.
 public enum PitchAutoCorrect {
@@ -981,8 +1690,9 @@ public enum PitchAutoCorrect {
     /// it whole.
     public static let minimumNoteSeconds: Double = 0.06
 
-    /// Split a contour into provisional notes. See `VoicedRun` for what this
-    /// deliberately does not do.
+    /// Split a contour into voiced RUNS — the run rule (see `VoicedRun`). Notes
+    /// inside a run are `PitchNoteSplitter`'s job, which calls this first and
+    /// never re-derives a run edge.
     ///
     /// **Holes end runs and are never crossed.** An unvoiced frame carries no
     /// pitch (`frequencyHz == nil`), and this treats that as the END of the
@@ -1032,20 +1742,71 @@ public enum PitchAutoCorrect {
         return runs
     }
 
+    /// ⭐ **THE SLIDE-SHAPE POLICY — ONE CONSTANT** (p2-seg, design §3, §4.4).
+    /// What a `preserveVibrato: false` pass (Hard Tune) does to a `.transition`
+    /// part; see `PitchSlideShape` for each shape and `editSet` for the table.
+    ///
+    /// ⭐ **THE USER'S PICK (2026-09-24): (a-T) "Slide kept, note locked"** —
+    /// chosen from renders of their own take on the handoff page, among (c),
+    /// (d), (a-T) and (a-N) (design §9 Q1, §15.1). It was also the design's
+    /// recommendation. The other three stay as cases, each with its test, so a
+    /// later change of mind is this one line plus a gate re-run. It is
+    /// deliberately NOT a `PitchAutoCorrectOptions` field or a wire key: the
+    /// options are Codable and echoed as `appliedOptions`, and one shape is the
+    /// product's answer, not a per-call knob (§4.4 — more than one would each
+    /// become a named, additive, optional key with an MCP field and a test).
+    /// ⚠️ **The MCP `clip_auto_correct_pitch` description states this default**
+    /// (`mcp-server/src/server.ts`: every preset stores a slide AS SUNG). That
+    /// holds only while this is (a-T) — preserve-vibrato presets are identity in
+    /// every shape, Hard Tune only under (a-T) — so changing this line changes
+    /// that text too. (a-N) also turns an over-split wobble edge into a locked
+    /// note: 6 of 29 ±80 c edges would lock to a different semitone
+    /// (`PitchWobbleDetectorTests`, measured 2026-09-24).
+    public static let slideShape: PitchSlideShape = .slideKeptNoteLocked
+
     /// **THE POLICY.** Detected contour + options ⇒ a populated `PitchEditSet`.
     ///
     /// `strength == 0` returns `PitchEditSet.empty` — no segments, no offsets,
     /// and a curve that is bit-for-bit the clip's own constant shift. That is
     /// the structural identity the whole feature must collapse to, so it is a
     /// short-circuit and not an arithmetic coincidence.
+    ///
+    /// ⭐ **ONE SEGMENT PER NOTE PART** (p2-seg). The notes are
+    /// `PitchNoteSplitter.parts` — the same call `PitchNoteTable.detected` makes,
+    /// so this writes exactly the notes the editor draws, for every preset and
+    /// every slide shape (design §4.5). Each segment keeps its OWN part's median
+    /// as `detectedHz` (what was sung — the editor stays honest); the preset and
+    /// the shape set only the correction values:
+    ///
+    ///     options                  .held part                  .transition part
+    ///     preserveVibrato: true    its own nearest note,       IDENTITY, in every
+    ///       (Gentle/Natural/Tight) one constant (§3.4)         shape (§3.4)
+    ///     false, (c) .runPin       the WHOLE run's note        the WHOLE run's note
+    ///     false, (d) .straightTo…  its own note                its destination's note
+    ///     false, (a-T) .slideKept… its own note                IDENTITY (as sung)
+    ///     false, (a-N) .inBetween… its own note                its own nearest note
+    ///
+    /// "Note" is `options.scale.nearestAllowedMidi` of the named median, reached
+    /// with `strength` and flattened with `1 − strength` — today's arithmetic, for
+    /// one part. A run with no note change is ONE `.held` part equal to its
+    /// `VoicedRun`, and every row maps it to exactly the segment this function
+    /// wrote before p2-seg (design §2.4; `PitchNoteSplitterTests` checks it field
+    /// by field against a frozen copy of that function).
+    ///
+    /// - Parameter slideShape: THE policy constant `slideShape` by default; every
+    ///   production caller leaves it there. A test passes each case.
     public static func editSet(contour frames: [ClipPitchFrame],
                                frameRateHz: Double,
                                options: PitchAutoCorrectOptions,
-                               analysisVersion: Int = PitchEditSet.currentAnalysisVersion)
+                               analysisVersion: Int = PitchEditSet.currentAnalysisVersion,
+                               slideShape: PitchSlideShape = PitchAutoCorrect.slideShape)
     -> PitchEditSet {
         guard options.strength > 0 else { return .empty }
-        let runs = voicedRuns(in: frames, frameRateHz: frameRateHz)
-        guard !runs.isEmpty else {
+        // f0 alone decides where notes are: onset placement (S3) is not scheduled
+        // (design §12 item 3), so no onsets are passed.
+        let parts = PitchNoteSplitter.parts(in: frames, frameRateHz: frameRateHz,
+                                            onsetSeconds: [])
+        guard !parts.isEmpty else {
             return PitchEditSet(analysisVersion: analysisVersion,
                                 segments: [], retuneMs: options.retuneMs)
         }
@@ -1054,22 +1815,85 @@ public enum PitchAutoCorrect {
         // replaces the contour outright.
         let shapeScale = options.preserveVibrato ? 1 : (1 - options.strength)
 
-        let segments = runs.map { run -> NoteSegment in
-            let detectedMidi = PitchCorrectionMath.midi(fromHz: run.centreHz)
-            let targetMidi = options.scale.nearestAllowedMidi(to: detectedMidi)
-            let offset = options.strength * (targetMidi - detectedMidi) * 100
-            return NoteSegment(
-                startSeconds: run.startSeconds,
-                endSeconds: run.endSeconds,
-                detectedHz: run.centreHz,
-                detectedConfidence: run.medianConfidence,
-                pitchOffsetCents: offset,
-                driftScale: shapeScale,
-                vibratoScale: shapeScale)
+        let segments = parts.indices.map { index -> NoteSegment in
+            segment(forPart: index, of: parts, options: options,
+                    shapeScale: shapeScale, slideShape: slideShape)
         }
         return PitchEditSet(analysisVersion: analysisVersion,
                             segments: segments,
                             retuneMs: options.retuneMs)
+    }
+
+    /// One part's segment: the table on `editSet`, and nothing else.
+    private static func segment(forPart index: Int, of parts: [NotePart],
+                                options: PitchAutoCorrectOptions, shapeScale: Double,
+                                slideShape: PitchSlideShape) -> NoteSegment {
+        let part = parts[index]
+        // Today's per-note arithmetic, for ONE part, aimed at the nearest allowed
+        // note to `aimHz`. Aimed at the part's own median it is, expression for
+        // expression, what this function computed per run before p2-seg.
+        func locked(aimingAt aimHz: Double) -> NoteSegment {
+            let detectedMidi = PitchCorrectionMath.midi(fromHz: part.centreHz)
+            let targetMidi = options.scale.nearestAllowedMidi(
+                to: PitchCorrectionMath.midi(fromHz: aimHz))
+            let offset = options.strength * (targetMidi - detectedMidi) * 100
+            return NoteSegment(
+                startSeconds: part.startSeconds,
+                endSeconds: part.endSeconds,
+                detectedHz: part.centreHz,
+                detectedConfidence: part.medianConfidence,
+                pitchOffsetCents: offset,
+                driftScale: shapeScale,
+                vibratoScale: shapeScale)
+        }
+        // IDENTITY: the note as sung — offset 0, both scales 1. A real, editable
+        // note rather than a gap: a gap would sound the same (the curve is
+        // identity where nothing covers a time) but would leave a voiced stretch
+        // with no note drawn over it, which the editor has never drawn and the
+        // user could not grab (design §3.2 (a-T)).
+        func asSung() -> NoteSegment {
+            NoteSegment(startSeconds: part.startSeconds, endSeconds: part.endSeconds,
+                        detectedHz: part.centreHz, detectedConfidence: part.medianConfidence)
+        }
+        switch part.kind {
+        case .held:
+            return locked(aimingAt: !options.preserveVibrato && slideShape == .runPin
+                          ? part.runCentreHz : part.centreHz)
+        case .transition:
+            // §3.4: a slide has no centre to move; moving it by one constant would
+            // shift the whole sweep by an arbitrary amount. Identity in EVERY shape.
+            guard !options.preserveVibrato else { return asSung() }
+            switch slideShape {
+            case .runPin:
+                return locked(aimingAt: part.runCentreHz)
+            case .straightToNote:
+                return locked(aimingAt: destination(ofTransition: index, in: parts).centreHz)
+            case .slideKeptNoteLocked:
+                return asSung()
+            case .inBetweenNote:
+                return locked(aimingAt: part.centreHz)
+            }
+        }
+    }
+
+    /// The held part a transition takes its target from under (d), design §12
+    /// item 2: a lead-in or a link takes the held note it leads INTO; a tail-off
+    /// takes the held note it leaves. Structurally a transition always has a held
+    /// part in its own run; the last line is a total fallback (its own median,
+    /// i.e. (a-N)), never a neighbouring run's note.
+    static func destination(ofTransition index: Int, in parts: [NotePart]) -> NotePart {
+        let run = parts[index].runIndex
+        var j = index + 1
+        while j < parts.count, parts[j].runIndex == run {
+            if parts[j].kind == .held { return parts[j] }
+            j += 1
+        }
+        j = index - 1
+        while j >= 0, parts[j].runIndex == run {
+            if parts[j].kind == .held { return parts[j] }
+            j -= 1
+        }
+        return parts[index]
     }
 
     /// Convenience over a whole `clip.detectPitch` response — forwards to the
@@ -1078,10 +1902,11 @@ public enum PitchAutoCorrect {
     /// the backend and the backend may change.
     public static func editSet(from result: PitchDetectionResult,
                                options: PitchAutoCorrectOptions,
-                               analysisVersion: Int = PitchEditSet.currentAnalysisVersion)
+                               analysisVersion: Int = PitchEditSet.currentAnalysisVersion,
+                               slideShape: PitchSlideShape = PitchAutoCorrect.slideShape)
     -> PitchEditSet {
         editSet(contour: result.frames, frameRateHz: result.frameRateHz,
-                options: options, analysisVersion: analysisVersion)
+                options: options, analysisVersion: analysisVersion, slideShape: slideShape)
     }
 }
 
@@ -1100,6 +1925,23 @@ public enum PitchAutoCorrect {
 /// `PitchDetection.swift` a hand-kept twin of `PitchObservation`, and it is
 /// why this cannot simply call theirs.
 public enum PitchCorrectionMath {
+    /// **THE DETECTOR'S RESOLUTION FLOOR, cents — ITS ONE HOME** (design
+    /// `2026-09-24-pitch-editor-vibrato-handle.md` §8.3): half of one
+    /// 25.79-cent SwiftF0 output bin, this file's header constraint 1. Nothing
+    /// finer than this may be claimed about a detected pitch.
+    ///
+    /// ⚠️ It bounds a SINGLE VALUE's quantisation error, not a fitted sine's:
+    /// a wobble toggling between two adjacent outputs has a fundamental of
+    /// up to 4/π × 12.90 = 16.4 cents whatever its true depth — see the
+    /// `PitchWobbleEstimate` banner. So it is NOT the floor for calling
+    /// something a wobble: that is `PitchWobbleEstimate.reportFloorCents`
+    /// (20 c, design §18.1.4). `PitchEditorReadout.centsResolutionFloor`
+    /// (DAWAppKit) aliases this, so no readout can disagree with it about what
+    /// the detector resolves. (§18.1.7 names C5a-F6: this half-bin figure was
+    /// derived from a lattice model the product is not; re-derive it from
+    /// product data.)
+    public static let detectorResolutionFloorCents: Double = 12.90
+
     /// Replace a NaN or an infinity with a stated default. Used at every
     /// boundary this file has: a bad number becomes a known one HERE rather
     /// than becoming a NaN in a transpose curve later.

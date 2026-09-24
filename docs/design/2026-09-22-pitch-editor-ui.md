@@ -880,67 +880,186 @@ loudness gate that passed a render clipping at +1.5 dBTP. So:
 
 ---
 
-## 7. INCREMENT C — the interaction model. ⏸ **AWAITING THE TUNE X VIDEO**
+## 7. INCREMENT C — the interaction model. ✅ **SPEC RECEIVED 2026-09-23**
 
-**This section is deliberately unfilled. Do not implement from a guess, and do not
-let a plausible-sounding paragraph appear here without the video or the user's word.**
+The user supplied six frames of SLIMZ TUNE X plus a written brief. §7.1's forks
+are answered below. ⚠️ **Two of the answers contradict things §7.2 recorded as
+settled, and one of them cannot be built at all in the current representation.
+Both are called out rather than absorbed — see §7.5.**
 
-### 7.1 What the video is expected to settle
+### 7.1 THE USER'S BRIEF, VERBATIM
 
-Each of these is a real fork where the reasonable options lead to different code,
-and picking wrong is expensive to undo:
+> "in editor, I should be able to drag the segments like note to higher or lower
+> or make the narrower or expand, split the segment into smaller nonte segments
+> and manipulate them similarly, zoom in/out, in each segment it should have more
+> detailed curve that I should be able to smoth or add more cycles or pull tops
+> or bottoms up or down, change the curve with mouse, not just some dots, but
+> with say CMD + mouse I can change the shape the way I want."
 
-1. **What a vertical drag on a blob does** — free pitch, or snap to the nearest
-   scale degree, or snap with a modifier to go free? (This decides whether
-   `PitchCorrectionScale` is consulted on every drag tick or only on commit.)
-2. **Whether there is a tool palette** (a pointer/pitch/time/split/glue set, the
-   Melodyne model) **or one contextual tool** whose behaviour depends on where in
-   the blob you grab it (the Logic Flex-Pitch model). This is the single largest
-   structural fork: a palette needs mode state, a hover legend and a keyboard
-   cycle; a contextual tool needs a zone model like `ClipZone`.
-3. **What a double-click does** — audition, split at the pointer, reset the note to
-   detected, or open a per-note detail?
-4. **Whether multi-select exists**, and by what gesture (marquee? shift-click?). If
-   it does, §8 needs a group undo key that `PitchCorrectionUndoKey` does **not**
-   currently provide.
-5. **Split and merge gestures** — the §11.2 list names them, so they are in scope;
-   how they are reached is not decided.
-6. **What the note handles are.** TUNE X's blobs appear to carry separate affordances
-   (a pitch centre, drift, vibrato). Which sub-handles exist decides how many undo
-   keys are live and whether `driftScale`/`vibratoScale` are reachable at all in v1.
-7. **In-editor keys** — DELETE, ⌘A, arrows. ⚠️ Every one of these is already
-   arbitrated for the arrange and the roll by `DeleteMenuPolicy`,
-   `SelectAllMenuPolicy`, `ClipboardMenuPolicy` and `handleArrangeNudgeKey`'s six
-   guards. **A third claimant is a routing change, not a view change**, and this
-   tree has measured a three-way focus fight once already (m23-al). Do not add an
-   `.onKeyPress` to the pitch editor without routing it.
+### 7.2 WHAT IS OBSERVED IN THE FRAMES — and what is inference
 
-### 7.2 What is ALREADY decided and the video cannot change
+⭐ **THE DISCIPLINE THAT MATTERS HERE: fluent prose about a picture is not a look
+at the picture.** This tree shipped a viz caption saying "the octave rulers run
+horizontally… same height" onto 44 videos when the rulers ran left-to-right. So
+each line below is marked **[SEEN]** — legible in a frame — or **[INFERRED]** —
+a reading of what the frames imply. Only [SEEN] lines may be treated as fact.
 
-These are measurements and invariants, not preferences:
+**Layout**
+- [SEEN] Notes are purple rounded rectangles on pitch rows, dark background,
+  faint horizontal semitone lines and vertical time gridlines.
+- [SEEN] The detected pitch contour is a **white line that runs THROUGH and
+  BEYOND the blob** — it is not clipped to the blob's bounds. In frame 5 the
+  vibrato excursions extend well above and below the rectangle.
+- [SEEN] A single small **filled dot sits at the top-centre** of each blob.
+- [SEEN] Time ruler marks `10`, `10.2`, `10.3` — seconds, one decimal.
+- [SEEN] Top right: a `1/16` chip and a `C#` chip, side by side.
+- [SEEN] A persistent **horizontal tool palette along the bottom**, 9 slots:
+  pointer, scissors, pencil, a note-ish glyph, a horizontal double arrow `↔`,
+  a bar-chart glyph, a slider glyph, a gear, and a waveform glyph.
+- [SEEN] The palette answers §7.1 fork 2: **IT IS A TOOL PALETTE, not one
+  contextual tool.** The pointer slot is highlighted in frames 1 and 2.
+- [SEEN] In frames 3–6 a **separate rounded purple button carrying the waveform
+  glyph floats above the palette**, near the time ruler, clearly active.
+- [INFERRED] That floating button is the engaged tool's indicator, detached from
+  the palette; its position near the cursor suggests it follows the work area.
 
-- **No pitch DSP on the render thread** (§5.9). If the video shows real-time
-  scrubbed pitch preview, we implement it as cached-render + debounce or not at all.
-- **`vibratoScale` is keep/flatten, never a calibrated depth** (§5.5.5).
-- **No smoothing, no bridged holes, no sub-13-cent readouts** (§5.5.1–3).
-- **The editor addresses clips by id** (m23-q condition 4).
-- **Per-note TIMING is Phase 3, not Phase 2.** `timeStartDeltaSeconds` /
-  `timeEndDeltaSeconds` exist on `NoteSegment` and must stay untouched by this
-  phase even if the video shows horizontal dragging. §10.
-- **Formant and gain are Phase 4** (`formantOffsetSemitones`, `amplitudeDb`). Same.
+**The shape tool**
+- [SEEN] Frame 4 shows a **large glowing CIRCLE centred on the contour inside the
+  blob**, roughly one third of the blob's width across.
+- [INFERRED] That circle is a **brush radius** — the region of the contour a drag
+  affects — not a selection lasso; nothing in the frames shows it selecting.
+- [SEEN] Frames 5 and 6 show a tooltip beside the cursor reading
+  **`Vibrato 5.5 Hz ±93 c`** and **`Vibrato 7.8 Hz ±32 c`** respectively.
+- [SEEN] Between those two frames the contour changes from FEWER, DEEPER cycles
+  (5.5 Hz, ±93 c) to MORE, SHALLOWER cycles (7.8 Hz, ±32 c).
+- [INFERRED] Therefore one drag controls both axes: **rate on one axis, depth on
+  the other.** Which axis is which is NOT legible — the cursor sits in a similar
+  place in both frames. **Pick one, make it discoverable, do not claim the video
+  said so.**
+- [SEEN] Frames 2 and 3 show the same note with a visibly FLATTER, smoother
+  contour than frame 1 — consistent with a smoothing action having been applied.
+- [INFERRED] Smoothing and vibrato-adding are the same tool in opposite
+  directions, or two states of it. Not legible which.
 
-### 7.3 What to do while the video is outstanding
+**Not visible in any frame, and therefore still open**
+- Double-click behaviour (§7.1 fork 3) — never shown.
+- Multi-select (fork 4) — never shown; no marquee, no multiple highlights.
+- Merge (fork 5) — the scissors implies split; nothing implies merge.
+- What the top-centre dot DOES. It is drawn in every frame and never dragged.
+- Keyboard (fork 7) — no key is pressed in any frame.
 
-**Build Increment A.** It is the whole read-only surface and none of it is at risk
-from the video. If Increment A ships and the video still has not arrived, the next
-thing is **Increment B behind its prerequisite ladder**, not a guessed interaction.
+### 7.2b ⚠️ CORRECTION — THE FRAMES ARE ONE CONTINUOUS EDIT OF ONE NOTE
 
-⚠️ **Do not file Increment C as "blocked on the user".** It is blocked on an
-artifact the user volunteered, which is a different thing: a nudge is appropriate,
-a ruling is not required, and the milestone is not frozen — two increments are
-unblocked in front of it.
+The user confirmed: *"this images are sequence of editing the segment."* Read as
+a sequence rather than six independent screenshots, three of §7.2's inferences
+change, and one of them changes what gets BUILT.
 
----
+**The sequence, by timestamp:**
+1. `10.11.31` — the note as sung: ~5 moderate vibrato cycles.
+2. `10.12.16` — **the same note, contour now FLAT.** Cursor is down at the
+   palette, on the waveform glyph.
+3. `10.12.26` — still flat; the waveform tool is now ACTIVE (floating button).
+4. `10.12.35` — the glowing circle appears on the contour. Still flat.
+5. `10.12.45` — deep slow vibrato. `Vibrato 5.5 Hz ±93 c`.
+6. `10.13.02` — more cycles, shallower. `Vibrato 7.8 Hz ±32 c`.
+
+**⭐ WHAT THIS CORRECTS**
+
+- **FLATTEN AND ADD ARE ONE TOOL, ONE CONTINUOUS RANGE.** §7.2 listed this as an
+  inference; the sequence makes it the obvious reading — the same note goes
+  sung → flat → synthesised within one session with one tool engaged.
+- **⛔⛔⛔ THE GLOWING CIRCLE IS THE SCREEN RECORDER'S CLICK HIGHLIGHT. IT IS NOT
+  PART OF THE PRODUCT AT ALL.** The user said so directly. **I read it as a
+  product feature TWICE and designed from it both times** — first as a brush
+  radius, then, after the sequence correction, as a grab affordance on a per-note
+  control. Both readings are retracted. They are left visible here rather than
+  edited away because the failure is the instructive part.
+  ⭐⭐ **THE LAW: A SCREEN RECORDING'S OWN CHROME IS NOT THE UI BEING RECORDED.**
+  Click halos, cursor rings, keypress overlays and zoom-follow are the capture
+  tool's, and they are the most confident-looking pixels in the frame because
+  they are drawn last and brightest. When a reference is a recording, the
+  question "would this element exist if a person were sitting at the machine?"
+  has to be asked of every glowing thing before it becomes a requirement.
+  **What survives, and it is still useful:** the click landed ON THE CONTOUR
+  LINE, left-of-centre inside the blob — so the tool is engaged by grabbing the
+  curve itself, not a handle and not the blob body.
+- **The per-note conclusion stands on its own evidence, not on the circle.** In
+  frames 5 and 6 the new vibrato spans the WHOLE blob although the click was at
+  one point inside it. A region-limited edit cannot do that. So
+  `Vibrato 5.5 Hz ±93 c` is a property OF THE NOTE — Melodyne's Pitch Modulation
+  tool, not a freehand pencil.
+- **Rate and depth move together on one gesture** (5.5→7.8 Hz while 93→32 c).
+  Which pointer axis drives which is STILL not legible; cursor travel between
+  those frames is small and mostly vertical. **Still a choice to make, not a
+  fact to read off.**
+
+**⛔ AND THE USER'S WORDS ASK FOR SOMETHING THE FRAMES DO NOT SHOW.** *"change
+the curve with mouse, not just some dots, but with say CMD + mouse I can change
+the shape the way I want"* is FREEHAND, REGIONAL editing — a pencil over part of
+a contour. The frames show a per-note parametric control. **These are two
+different features and both were asked for.** Build them as two:
+
+- **C5a — per-note vibrato** (rate + depth, one handle, the readout). What the
+  frames show. Needs the generator.
+- **C5b — freehand contour drawing** (⌘+drag reshapes the curve under the
+  pointer). What the sentence asks for. Needs a per-note contour override, which
+  is a bigger representation than rate+depth — it is a curve, not two numbers.
+
+Do not let C5a's readout imply C5b exists, or vice versa.
+
+### 7.3 THE BUILD ORDER
+
+| | What | Depends on |
+|---|---|---|
+| **C1** | Blob drag: vertical = pitch. Snap to scale, ⌥ for free. | Increment A |
+| **C2** | Blob edges: drag to narrow/expand. **§7.5 conflict 1.** | C1 |
+| **C3** | Scissors: split a segment; the halves behave as C1/C2. | C1 |
+| **C4** | Zoom in/out, both axes. | Increment A |
+| **C5a** | Per-note vibrato: one handle, rate + depth, flatten↔add. **§7.5 conflict 2.** | C1 |
+| **C5b** | Freehand ⌘+drag contour reshaping — a curve override, NOT two numbers. | C5a |
+
+C1, C3 and C4 are buildable today against the shipped representation. C2 and C5
+are not — see below.
+
+### 7.4 What §7.2's old text got RIGHT and keeps
+
+- No pitch DSP on the render thread. The brush must be cached-render + debounce.
+- No bridged holes, no sub-13-cent readouts. ⚠️ **The `±93 c` and `±32 c` readouts
+  in the frames are FINE** — those are depths of an excursion, not a claim to
+  resolve a 13-cent difference.
+- Clips addressed by id.
+- **One `performEdit` on gesture END** (§8.2). A brush drag is the worst possible
+  case for per-tick commits: it re-keys the render cache at pointer rate and the
+  vocal goes silent for the whole gesture.
+
+### 7.5 ⛔⛔ TWO CONFLICTS THE USER SHOULD SEE BEFORE EITHER IS BUILT
+
+**CONFLICT 1 — "make the narrower or expand" is per-note TIMING, which §10 puts
+in Phase 3.** `NoteSegment.timeStartDeltaSeconds`/`timeEndDeltaSeconds` already
+exist and are deliberately untouched by Phase 2. This is not a technical
+objection — it is a scope one, and the user can simply move it. What it costs:
+per-note time-stretch is a DIFFERENT operation from pitch (it moves audio in
+time, so it interacts with clip length, neighbouring notes, and the stretch
+ratio the render already applies). Cheap to draw, not cheap to render.
+
+**CONFLICT 2 — ⛔⛔ "add more cycles" CANNOT BE EXPRESSED BY `vibratoScale`, AND
+THIS IS A REPRESENTATION GAP, NOT A UI GAP.** `NoteSegment.vibratoScale` is a
+MULTIPLIER on the detected contour. Multiplying a contour changes how deep its
+existing wobble is; it cannot change the RATE, and on a note sung with no vibrato
+it produces nothing however large it gets — `0 × anything = 0`.
+
+The frames show `5.5 Hz ±93 c` becoming `7.8 Hz ±32 c`: **the rate changed.**
+That is synthesis, not scaling. Delivering it needs new fields on `NoteSegment`
+(a vibrato rate in Hz and a depth in cents, absolute rather than relative), a
+decision about whether synthesised vibrato REPLACES or ADDS TO the sung contour,
+and a renderer that can generate it. §5.5.5's "keep/flatten, never a calibrated
+depth" was the right call FOR A MULTIPLIER and stops being the right call for a
+generator — it does not block this, it describes a different mechanism.
+
+⚠️ **AND THE EXISTING MEASUREMENT STILL BITES:** `vibratoScale` was measured
+returning **1.06×–1.20× deeper than asked**. A generator must be measured the
+same way before any number is printed next to a cursor, or the `±93 c` readout
+is decoration.
 
 ## 8. Undo — how a drag coalesces, measured against the mechanism
 
@@ -1395,3 +1514,63 @@ identity-not-presence assertion; the `CompFlattener.flatten` correction to §7.5
 **⚠️ Not re-derived here, deliberately:** the wire command total and the MCP tool
 total. `node scripts/gates/doc-count-drift.mjs` is the pin; a `grep -c` on
 `registerTool(` lies. Any item landing a verb re-measures rather than quoting.
+
+---
+
+## 17. Addendum 2026-09-24: automatic note splitting has no owner (item p2-seg)
+
+**Found by measurement on the user's own take**, not by review. The busy-line check
+(2026-09-24, audio-dsp-engineer; the vibrato doc §18.5 has the full record) found the detector
+honest on this take and found the Hard Tune risk in SEGMENTATION instead.
+
+**The mechanism** [READ]. `PitchAutoCorrect.voicedRuns` (`PitchCorrection.swift:1605-1699`) makes
+one note of each unbroken voiced run. Its own doc comment says this is deliberate and temporary:
+it "does NOT split a legato phrase where the singer changes note without stopping", and it is
+"THE SEAM PHASE 2 REPLACES". Hard Tune then flattens the whole run to its snapped median
+(`:1721`, `shapeScale = 0` at strength 1).
+
+**What it does on the user's take** [MEASURED in two renders, exact YIN: the handoff page's
+`pitch-04-hard-tune.mp3` and the rebuilt bundle's `livelook-hardtune.wav`]. A slide into a held note
+becomes ONE note pinned near the middle of the slide. At 22.61–23.22 s a D#2→B2 slide is pinned to G#2: the start moves
++4.97 st and the held tail −2.23 st on average. 4 of 42 notes move more than 3 st and 11 more
+than 2 st, up to 5.06 st. Gentle, Natural and Tight shift each run by one constant, so they are
+not affected in the same way.
+
+**Why it is unowned.** m23-q §11.2 puts "segmentation into notes" inside Phase 2 (1.5–2 weeks),
+and m23-q F1 says this is where Melodyne-class tools actually fail. §10 above does NOT defer it.
+But §7.3's build order (C1–C5b) and §15's item list (p2-a…p2-g) are all manual editing. The
+manual route exists today: cut the note with C3's scissors (`clip.splitNote`) and drag each half.
+
+### p2-seg — split a voiced run where the singer changes note
+
+- **Route:** `daw-architect` first, for a SHORT design (skeleton on disk first, a read budget,
+  one decision per section), then `audio-dsp-engineer` for the DAWCore work.
+- **Inputs, from m23-q F1:** f0 stability and `detectTransients` onsets. Word boundaries stay
+  Phase 4 (§10 item 4).
+- **Constraints already paid for:**
+  - no second onset detector (§10 item 11);
+  - holes stay note ends and are never bridged (§5, P3);
+  - DAWCore stays pure.
+- **Both failure directions are real.** F1 names over-splitting too ("a legato slide split into
+  three notes", "a vibrato peak read as a neighbour note"). A splitter that fixes the 22.6 s slide
+  by chopping every wobble is not a fix.
+- **The design question the architect must answer, not assume:** what Hard Tune should do to the
+  slide itself. There are at least three shapes: (a) the slide becomes its own short note or a
+  transition into the held note (the Melodyne shape); (b) every frame snaps to its nearest scale
+  note, making a staircase (the classic hard auto-tune sound); (c) today's median pin. Behaviour
+  the user hears is theirs to pick. Render the candidates on their own take and ask ONE listening
+  question (one axis, 3–4 options), per the listening rule.
+- **Gates:**
+  - the physics on the user's take: under Hard Tune, the held tail at ~23.05–23.2 s must read
+    a note NEXT TO what was sung there (sung A#2+41 c, so A#2 or B2, each ±30 c) in the RENDER,
+    with an independent tracker. G#2 or anything further away fails.
+    **RED BASELINE, measured 2026-09-24:** it reads G#2+9 c (sung A#2+41 c), and the 16.8–17.0 s
+    held note, sung ≈ D3 (product frames D3−1 c, wobbling ±85 c; an earlier "C#3+13 c" was a
+    tracker-mask artefact, p2-seg design §11.4), reads A#2−11 c: about 4 st low. Scripts: session scratchpad `busyline/physics-ht-*.py`;
+  - the invariance control: a run with no note change must give the SAME segment as today's
+    `voicedRuns`, byte for byte, on the existing fixtures. The boring control catches the bug;
+  - an over-split fixture: a steady note with a ±40 c, 5.5 Hz wobble stays ONE note;
+  - the existing test that pins today's legato behaviour is REWRITTEN on purpose and named in
+    the report, never silently deleted.
+- **Stored edits:** a changed splitter changes segment boundaries for NEW passes only. It must never re-segment a clip that already has stored edits (the C-F3
+  `replaceExisting` rule and the hand-edit stamp stay in force).

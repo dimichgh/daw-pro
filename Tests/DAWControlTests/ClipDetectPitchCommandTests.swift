@@ -37,6 +37,14 @@ final class FakePitchDetectionEngine: AudioEngineControlling {
     var lastConfidenceThreshold: Double?
     var lastSilenceFloorDbfs: Double?
 
+    // swift-app review, 2026-09-24 (C-F3 race re-check): a hook invoked
+    // right before `detectPitch` returns, so a test can simulate "something
+    // else wrote to the store WHILE detection was still running" — the exact
+    // gap `autoCorrectClipPitch` opens between its pre-check and its write.
+    // `nil` (the default) changes no existing test's behaviour: nothing ran
+    // through this hook before this field existed.
+    var beforeReturning: (() -> Void)?
+
     func detectPitch(inFileAt url: URL, fromSeconds: Double, durationSeconds: Double,
                      confidenceThreshold: Double,
                      silenceFloorDbfs: Double) async throws -> PitchDetectionResult {
@@ -46,7 +54,31 @@ final class FakePitchDetectionEngine: AudioEngineControlling {
         lastDurationSeconds = durationSeconds
         lastConfidenceThreshold = confidenceThreshold
         lastSilenceFloorDbfs = silenceFloorDbfs
+        beforeReturning?()
         return stubResult
+    }
+
+    // m23-ap C-0c (`clip.getPlayedPitch`): the render's own whole-file
+    // contour door. Defaults to `.detected(stubResult)` — the SAME frames
+    // `detectPitch` returns — rather than the protocol's own `.unavailable`
+    // default, so any test built on `stubResult` (or `makeMelodicEngine()`/
+    // `makeLongNoteEngine()` in `PitchCorrectionCommandTests.swift`) gets a
+    // CONSISTENT render contour for free with no extra setup. Purely
+    // ADDITIVE: no existing test calls `renderPitchContour` (nothing
+    // exercised the seam before C-0c), so this default cannot change any
+    // test's observed behaviour — set `renderContourToReturn` explicitly
+    // for a test that needs `.unavailable`/`.analysisVersionMismatch`
+    // instead.
+    var renderContourCalls = 0
+    var lastRenderContourURL: URL?
+    var lastRenderContourAnalysisVersion: Int?
+    var renderContourToReturn: PitchRenderContour?
+
+    func renderPitchContour(inFileAt url: URL, analysisVersion: Int) async -> PitchRenderContour {
+        renderContourCalls += 1
+        lastRenderContourURL = url
+        lastRenderContourAnalysisVersion = analysisVersion
+        return renderContourToReturn ?? .detected(stubResult)
     }
 
     func prepare() throws { isRunning = true }

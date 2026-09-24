@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import DAWAppKit
 import DAWCore
@@ -16,10 +17,21 @@ import DAWCore
 // ⛔ THREE RULES THIS FILE CAN BREAK SILENTLY, ALL THREE MEASURED ELSEWHERE
 // ═══════════════════════════════════════════════════════════════════════════
 //
-//  1. **A HOLE IS THE SIGNAL. NEVER BRIDGE ONE** (§5.5.1). The contour is drawn
-//     as N separate polylines — one `Path` per detected note — never one `Path`
-//     that `addLine`s across an unvoiced stretch. A single path would invent
-//     pitch where none was measured, and it is the obvious implementation.
+//  1. **A HOLE IS THE SIGNAL. NEVER BRIDGE ONE** (§5.5.1). The line is drawn
+//     as N separate polylines — one `Path` per voiced RUN (never per note: a
+//     split puts two notes in one run, and the line must not break at the
+//     cut) — never one `Path` that `addLine`s across an unvoiced stretch. A
+//     single path would invent pitch where none was measured, and it is the
+//     obvious implementation.
+//
+//  ⭐ **THE LINE IS WHAT THE RENDER WILL PLAY, NOT WHAT THE SINGER SANG** (m23-ap
+//     C-0, design 2026-09-24 §4). It is `PitchPlayedLine` — the render's own
+//     contour through the render's own curve, transpose included — so a note
+//     dragged up a semitone carries its wobble INSIDE the moved blob, and the
+//     ghost left at the sung pitch is an OUTLINE ONLY. Before C-0 the line was
+//     the detected contour: the wobble stayed behind in the ghost while the
+//     audio played it at the new pitch, and the user saw the picture disagree
+//     with the sound.
 //  2. **NO SMOOTHING** (§5.5.2). SwiftF0's output is an argmax over 256
 //     log-spaced bins: 25.79 cents per bin. The visible staircase IS the
 //     detector's resolution; a curve through it draws a precision nobody has.
@@ -83,7 +95,78 @@ final class PitchEditorChromeLedger {
     /// One per report. Counted, never reasoned about.
     private(set) var ticks = 0
 
+    // MARK: The interaction half (m23-ap Increment C)
+
+    /// `PitchEditorTool.rawValue` of the slot the palette drew as ACTIVE.
+    private(set) var toolKey = ""
+    /// Every palette slot's label, in the order drawn.
+    private(set) var paletteLabels: [String] = []
+    /// The active tool's drawn help prose — DRAWN, not a tooltip, for the
+    /// `EQCurveEditor.help` reason this whole type exists for.
+    private(set) var toolHelp = ""
+    /// The live drag's readout, verbatim, or "" when nothing is being dragged.
+    /// ⚠️ "" and "+0 cents" are DIFFERENT facts and this must not merge them:
+    /// the first is "no drag", the second would be a claim of a zero-cent move
+    /// that `PitchEditorReadout`'s floor forbids anyone from making.
+    private(set) var dragReadout = ""
+    /// The refusal prose on screen, or "".
+    private(set) var refusalText = ""
+    /// How many commits the MODEL has emitted, as the palette last saw it.
+    /// ⭐ This is the number that makes a per-tick commit VISIBLE from outside
+    /// the view: it can only move on a gesture end.
+    private(set) var commitCount = 0
+    /// One per interaction report. Counted, never reasoned about.
+    private(set) var interactionTicks = 0
+
+    // MARK: The played line (m23-ap C-0, design 2026-09-24 §4.4)
+
+    /// `PitchPlayedLine.Basis.key` of the line the surface strokes —
+    /// `"render"` or `"estimate"` — or "" before the first report.
+    private(set) var lineBasisKey = ""
+    /// `PitchPlayedLine.Basis.reason` — why the line is an estimate, or `nil`
+    /// when it is the render's own. (The drawn caption below equals it for an
+    /// estimate; for a render-basis line the caption, if any, is the
+    /// unresolved-notes sentence instead.)
+    private(set) var lineReason: String?
+    /// The caption the palette DREW about the line, verbatim, or "".
+    private(set) var lineCaptionText = ""
+    /// `PitchEditorLineCaption.Kind.rawValue` of that caption, or "".
+    private(set) var lineCaptionKind = ""
+    /// The notes drawn with the amber "no steady pitch" outline.
+    private(set) var unresolvedNoteIDs: [UUID] = []
+    /// The clip transpose the surface drew at.
+    private(set) var clipPitchShiftSemitones: Double = 0
+    /// Per drawn note, the played line's min / median / max midi.
+    private(set) var perNote: [PitchPlayedLine.NoteSummary] = []
+    /// One per played-line report. Counted, never reasoned about.
+    private(set) var lineTicks = 0
+
     init() {}
+
+    func recordPlayedLine(basisKey: String, reason: String?, captionText: String,
+                          captionKind: String, unresolvedNoteIDs: [UUID],
+                          clipPitchShiftSemitones: Double,
+                          perNote: [PitchPlayedLine.NoteSummary]) {
+        lineTicks += 1
+        self.lineBasisKey = basisKey
+        self.lineReason = reason
+        self.lineCaptionText = captionText
+        self.lineCaptionKind = captionKind
+        self.unresolvedNoteIDs = unresolvedNoteIDs
+        self.clipPitchShiftSemitones = clipPitchShiftSemitones
+        self.perNote = perNote
+    }
+
+    func recordInteraction(toolKey: String, paletteLabels: [String], toolHelp: String,
+                           dragReadout: String, refusalText: String, commitCount: Int) {
+        interactionTicks += 1
+        self.toolKey = toolKey
+        self.paletteLabels = paletteLabels
+        self.toolHelp = toolHelp
+        self.dragReadout = dragReadout
+        self.refusalText = refusalText
+        self.commitCount = commitCount
+    }
 
     func record(statusKey: String, statusText: String, caption: String,
                 presetLabels: [String], presetSummaries: [String],
@@ -99,6 +182,13 @@ final class PitchEditorChromeLedger {
     }
 
     func clear() {
+        toolKey = ""
+        paletteLabels = []
+        toolHelp = ""
+        dragReadout = ""
+        refusalText = ""
+        commitCount = 0
+        interactionTicks = 0
         statusKey = ""
         statusText = ""
         captionText = ""
@@ -107,6 +197,14 @@ final class PitchEditorChromeLedger {
         noteCount = 0
         tuningApplied = false
         ticks = 0
+        lineBasisKey = ""
+        lineReason = nil
+        lineCaptionText = ""
+        lineCaptionKind = ""
+        unresolvedNoteIDs = []
+        clipPitchShiftSemitones = 0
+        perNote = []
+        lineTicks = 0
     }
 }
 
@@ -116,13 +214,15 @@ final class PitchEditorChromeLedger {
 /// actor before the `@Sendable` closure (CANVAS CONTRACT, m16-a — a crash
 /// precedent exists, `docs/research/design-m16a-canvas-crash.md`).
 ///
-/// ⭐⭐ **`contour` IS SNAPSHOTTED, NOT COMPUTED HERE, AND THAT IS THE POINT.**
-/// `PitchEditorModel.contourSegments` re-maps EVERY detected frame through the
-/// geometry on each read — O(frames), ~11,250 of them on a three-minute vocal.
-/// Calling it inside the renderer (or rebuilding this context on every transport
-/// tick) would pay that per redraw. It is cached by the view and refreshed on
-/// exactly the two events that can change it: a load completing, and the
-/// geometry moving.
+/// ⭐⭐ **`playedLine` IS SNAPSHOTTED, NOT COMPUTED HERE, AND THAT IS THE POINT.**
+/// `PitchEditorModel.playedLineSegments(excluding:)` re-maps EVERY drawn frame
+/// through the geometry on each call — O(frames), ~11,250 of them on a
+/// three-minute vocal. Calling it inside the renderer (or rebuilding this
+/// context on every transport tick) would pay that per redraw. It is cached by
+/// the view and refreshed on exactly the events that can change it: the line
+/// being rebuilt (`playedLineRevision`), the geometry moving, and a drag
+/// starting or ending (the dragged note's stretch leaves the surface for the
+/// drag overlay and comes back) — never per pointer tick.
 ///
 /// `positionBeats` is deliberately NOT a field — the playhead is its own view —
 /// so a transport tick leaves every field here EQUAL, which is the precondition
@@ -131,15 +231,26 @@ final class PitchEditorChromeLedger {
 /// RATHER THAN ASSUMED** — `KeyboardSidebar` carries the same admission about
 /// its own cadence. Two things are known: the fields are equal by construction,
 /// and `Array`'s `==` short-circuits on an identical buffer, so comparing the
-/// contour is not itself O(frames) for the unchanged case. What nobody has
+/// played line is not itself O(frames) for the unchanged case. What nobody has
 /// measured here is how often SwiftUI re-evaluates this view under a running
 /// transport. **A signpost on the draw closure during playback is what would
 /// settle it**; until someone runs one, do not quote a cadence for this pane.
 struct PitchEditorDrawContext: Equatable {
     var geometry: PitchEditorGeometry
     var blobs: [NoteBlob]
-    /// One polyline per detected note. **Never one path across a hole.**
-    var contour: [[CGPoint]]
+    /// THE PLAYED LINE (m23-ap C-0): one polyline per voiced run, the pitch the
+    /// render will play at each frame. **Never one path across a hole.**
+    var playedLine: [[CGPoint]]
+    /// True when the line is an ESTIMATE (the seam had no frames): it is drawn
+    /// at reduced strength and the palette says why (design §4.4).
+    var lineIsEstimate: Bool
+    /// Notes whose wobble setting could not be applied — an amber dashed
+    /// outline each.
+    var unresolvedNoteIDs: Set<UUID>
+    /// The note being dragged, drawn by `PitchEditorDragOverlay` instead of
+    /// here for the length of the gesture — so the moving note is never drawn
+    /// twice, and never left behind.
+    var hiddenBlobID: UUID?
     var gaps: [PitchEditorGap]
     var peaks: WaveformPeaks?
     /// The m25-e auto-fit scalar, resolved per-view from the headless rules —
@@ -147,13 +258,29 @@ struct PitchEditorDrawContext: Equatable {
     var waveformScale: CGFloat
     /// Whether there are notes to draw at all (`PitchEditorState.drawsNotes`).
     var drawsNotes: Bool
+
+    init(geometry: PitchEditorGeometry, blobs: [NoteBlob], playedLine: [[CGPoint]],
+         lineIsEstimate: Bool = false, unresolvedNoteIDs: Set<UUID> = [],
+         hiddenBlobID: UUID? = nil, gaps: [PitchEditorGap], peaks: WaveformPeaks?,
+         waveformScale: CGFloat, drawsNotes: Bool) {
+        self.geometry = geometry
+        self.blobs = blobs
+        self.playedLine = playedLine
+        self.lineIsEstimate = lineIsEstimate
+        self.unresolvedNoteIDs = unresolvedNoteIDs
+        self.hiddenBlobID = hiddenBlobID
+        self.gaps = gaps
+        self.peaks = peaks
+        self.waveformScale = waveformScale
+        self.drawsNotes = drawsNotes
+    }
 }
 
 // MARK: - The surface
 
 /// The pitch editor's drawing layers (design §5.6, bottom to top): waveform ·
-/// pitch grid · unvoiced stretches · note blobs · contour · note names. **No
-/// playhead** — see `PitchEditorDrawContext`.
+/// pitch grid · unvoiced stretches · note blobs · the played line · note
+/// names. **No playhead** — see `PitchEditorDrawContext`.
 struct PitchEditorSurface: View, Equatable {
     var ctx: PitchEditorDrawContext
 
@@ -172,7 +299,7 @@ struct PitchEditorSurface: View, Equatable {
             Self.drawPitchGrid(&context, size: size, ctx: ctx)
             Self.drawGaps(&context, size: size, ctx: ctx)
             Self.drawBlobs(&context, ctx: ctx)
-            Self.drawContour(&context, ctx: ctx)
+            Self.drawPlayedLine(&context, lines: ctx.playedLine, estimate: ctx.lineIsEstimate)
             Self.drawBlobLabels(&context, ctx: ctx)
         }
     }
@@ -315,7 +442,10 @@ struct PitchEditorSurface: View, Equatable {
     /// and must never be presented as accuracy.
     private nonisolated static func drawBlobs(_ context: inout GraphicsContext,
                                               ctx: PitchEditorDrawContext) {
-        for blob in ctx.blobs {
+        // The dragged note is the DRAG OVERLAY's for the length of the gesture
+        // (it draws the ghost, the moving blob and the moving line) — drawn
+        // here too, it would sit at its committed row under the moving one.
+        for blob in ctx.blobs where blob.id != ctx.hiddenBlobID {
             let rect = ctx.geometry.rect(for: blob)
             let confidence = min(1, max(0, blob.medianConfidence))
             let shape = Path(roundedRect: rect, cornerRadius: min(4, rect.height / 3))
@@ -328,10 +458,51 @@ struct PitchEditorSurface: View, Equatable {
             // visible range. Still no accent: a detected note is not a state
             // (Rule 3), and `textDim` is the app's neutral ink, not a colour.
             context.fill(shape, with: .color(DAWTheme.panelRaised))
-            context.fill(shape, with: .color(DAWTheme.textDim.opacity(0.10 + 0.18 * confidence)))
+            // ⛔ **AN EDITED NOTE MUST NOT LOOK LIKE AN UNTOUCHED ONE — A
+            // DEFECT I COULD ONLY SEE BY RENDERING ONE.** The first pass drew
+            // every blob in the neutral ink at its EDITED position, which is
+            // right, and left the picture unable to say WHICH notes had been
+            // moved: six identical rectangles, three of them changed. The
+            // accent is earned by STATE here, which is the one thing
+            // `docs/DESIGN-LANGUAGE.md` Rule 3 allows it for. `signal`, never
+            // cyan (playback) and never violet (AI-touched content) — a person
+            // tuning their own vocal is neither.
+            let ink = blob.isEdited ? DAWTheme.signal : DAWTheme.textDim
+            context.fill(shape, with: .color(ink.opacity(0.10 + 0.18 * confidence)))
             context.stroke(shape,
-                           with: .color(DAWTheme.textDim.opacity(0.22 + 0.33 * confidence)),
+                           with: .color(ink.opacity(0.22 + 0.33 * confidence)),
                            lineWidth: 1)
+            // C-0 — a note whose wobble setting the render could NOT apply
+            // (no steady pitch heard in it, or no contour to shape against):
+            // an AMBER dashed outline, set 2 pt outside the blob so its own
+            // stroke still reads. Amber is `record` — the warning token the
+            // palette's caption line wears for the same fact, in words.
+            if ctx.unresolvedNoteIDs.contains(blob.id) {
+                let halo = rect.insetBy(dx: -2, dy: -2)
+                context.stroke(Path(roundedRect: halo, cornerRadius: min(5, halo.height / 3)),
+                               with: .color(DAWTheme.record.opacity(0.85)),
+                               style: StrokeStyle(lineWidth: 1, dash: [3, 2]))
+            }
+            guard blob.isMoved else { continue }
+            // ⭐ THE GHOST STAYS AFTER THE DRAG ENDS. Where the note was SUNG
+            // is a fact about the performance, and it is the only thing that
+            // makes "how far did I move this" answerable once the pointer is
+            // up. ⛔ **AN OUTLINE ONLY — NOTHING IS DRAWN INSIDE IT** (C-0).
+            // The line is the PLAYED line and it moved with the note; a wobble
+            // drawn in the ghost is exactly the "left behind" picture the user
+            // reported, of a sound that is no longer there. On the transposed
+            // axis, like everything else (`ghostRect(for:)` says why).
+            let sung = ctx.geometry.ghostRect(for: blob)
+            context.stroke(Path(roundedRect: sung, cornerRadius: min(4, sung.height / 3)),
+                           with: .color(DAWTheme.textDim.opacity(0.40)),
+                           style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
+            if abs(sung.midY - rect.midY) > 1 {
+                var link = Path()
+                link.move(to: CGPoint(x: sung.midX, y: sung.midY))
+                link.addLine(to: CGPoint(x: rect.midX, y: rect.midY))
+                context.stroke(link, with: .color(DAWTheme.signal.opacity(0.35)),
+                               style: StrokeStyle(lineWidth: 1, dash: [2, 2]))
+            }
         }
     }
 
@@ -351,52 +522,69 @@ struct PitchEditorSurface: View, Equatable {
     private nonisolated static func drawBlobLabels(_ context: inout GraphicsContext,
                                                    ctx: PitchEditorDrawContext) {
         guard ctx.geometry.rowHeight >= 11 else { return }
-        for blob in ctx.blobs {
+        for blob in ctx.blobs where blob.id != ctx.hiddenBlobID {
             let rect = ctx.geometry.rect(for: blob)
             guard rect.width >= 20 else { continue }
+            // ⛔ **THE DRAWN NOTE'S NAME, NOT `noteName` — THE SECOND DEFECT
+            // THE RENDER SHOWED.** With the blob drawn at its EDITED pitch, a
+            // label carrying the SUNG note put "B3" on a rectangle sitting on
+            // the C4 row: the picture contradicted itself, and the label is the
+            // part a novice believes. The label names the note this blob IS —
+            // on a transposed clip, the transposed note (C-0) — and where it
+            // came from is said by the ghost outline, a picture of a
+            // measurement rather than a claim in words.
             context.draw(
-                Text(blob.noteName)
+                Text(ctx.geometry.drawnNoteName(for: blob))
                     .font(.system(size: 8, weight: .medium, design: .monospaced))
-                    .foregroundColor(DAWTheme.textSecondary),
+                    .foregroundColor(blob.isEdited ? DAWTheme.signal : DAWTheme.textSecondary),
                 at: CGPoint(x: rect.minX + 1, y: rect.minY - 1), anchor: .bottomLeading)
         }
     }
 
-    // MARK: Layer 5 — the contour
+    // MARK: Layer 5 — the played line
 
-    /// The per-frame detected pitch line, drawn THROUGH the blobs, bloom-under-
-    /// core (the house glow recipe: wide faint stroke, then a bright narrow one —
-    /// `AutomationLaneEditor.drawPolyline`).
+    /// How strong an ESTIMATE line is drawn, as a fraction of the render line
+    /// (design §4.4: `textPrimary` at 45 %). The halo scales with it, so the
+    /// estimate reads as the same line, fainter — not as a different object.
+    nonisolated static let estimateStrength: Double = 0.45 / 0.92
+
+    /// THE PLAYED LINE (m23-ap C-0) — the pitch the render will play at each
+    /// frame — drawn THROUGH the blobs, bloom-under-core (the house glow
+    /// recipe: wide faint stroke, then a bright narrow one —
+    /// `AutomationLaneEditor.drawPolyline`). Shared with `PitchEditorDragOverlay`,
+    /// which strokes the dragged note's stretch of the SAME line with the SAME
+    /// recipe, so the two halves read as one line while the pointer is down.
     ///
-    /// ⛔ **ONE `Path` PER RUN.** `ctx.contour` arrives already split at every
-    /// hole by `PitchEditorModel`; joining them here would be exactly the
+    /// ⛔ **ONE `Path` PER RUN.** `lines` arrives already split at every hole
+    /// by `PitchEditorModel`; joining them here would be exactly the
     /// bridged-hole lie rule 1 forbids, and the loop below is the whole of the
     /// mitigation.
     ///
     /// ⛔ **`textPrimary`, NOT AN ACCENT.** Cyan is playback/position and
-    /// nothing else; violet is AI-touched content and this is a measurement of
-    /// the user's own voice. `lineJoin: .miter` rather than `.round`: the
-    /// 25.79-cent staircase IS the instrument's resolution (rule 2) and a
-    /// rounded join would sand it off.
-    private nonisolated static func drawContour(_ context: inout GraphicsContext,
-                                                ctx: PitchEditorDrawContext) {
-        for points in ctx.contour {
+    /// nothing else; violet is AI-touched content, and a tuned vocal is the
+    /// user's own voice run through a curve they chose. `lineJoin: .miter`
+    /// rather than `.round`: the 25.79-cent staircase IS the instrument's
+    /// resolution (rule 2) and a rounded join would sand it off.
+    nonisolated static func drawPlayedLine(_ context: inout GraphicsContext,
+                                           lines: [[CGPoint]], estimate: Bool) {
+        let strength = estimate ? estimateStrength : 1
+        for points in lines {
             guard points.count > 1 else {
                 // A one-frame run still gets drawn — as a dot. Dropping it would
                 // silently unreport a measurement that exists.
                 if let only = points.first {
                     context.fill(
                         Path(ellipseIn: CGRect(x: only.x - 1, y: only.y - 1, width: 2, height: 2)),
-                        with: .color(DAWTheme.textPrimary.opacity(0.9)))
+                        with: .color(DAWTheme.textPrimary.opacity(0.9 * strength)))
                 }
                 continue
             }
             var line = Path()
             line.move(to: points[0])
             for point in points.dropFirst() { line.addLine(to: point) }
-            context.stroke(line, with: .color(DAWTheme.textPrimary.opacity(0.16)),
+            context.stroke(line, with: .color(DAWTheme.textPrimary.opacity(0.16 * strength)),
                            style: StrokeStyle(lineWidth: 5, lineCap: .butt, lineJoin: .miter))
-            context.stroke(line, with: .color(DAWTheme.textPrimary.opacity(0.92)),
+            context.stroke(line, with: .color(DAWTheme.textPrimary.opacity(0.92 * strength)),
                            style: StrokeStyle(lineWidth: 1.5, lineCap: .butt, lineJoin: .miter))
         }
     }
@@ -458,6 +646,247 @@ private struct PitchAnalysisShimmer: View {
     }
 }
 
+// MARK: - The live drag (m23-ap C1)
+
+/// The moving note, its GHOST at the pitch it was sung at, and the readout.
+///
+/// ⭐⭐ **ITS OWN VIEW, FOR THE SAME REASON THE PLAYHEAD IS.** A pitch drag
+/// changes one number sixty times a second. If the moving blob were drawn by
+/// `PitchEditorSurface`, `PitchEditorDrawContext` would differ on every tick,
+/// `.equatable()` could never skip, and the Canvas would re-stroke several
+/// thousand contour points at pointer rate — the exact cost the surface's
+/// snapshot was built to avoid. Here the draft moves and the surface does not.
+///
+/// ⚠️ **THE COST IS PER POINTER TICK, NOT PER DISPLAY FRAME — AND THE
+/// DISTINCTION IS THE REASON THIS IS ALLOWED TO ALLOCATE AT ALL.** Two `Path`s,
+/// a `Text` and two `CGRect`s are allocations, and the house rule that drawing
+/// code must not allocate per frame is about surfaces that redraw CONTINUOUSLY
+/// (meters, scopes, a `TimelineView` at 60 fps). This layer redraws only while
+/// a finger is down, at pointer rate, over two rectangles and ONE NOTE'S
+/// stretch of the line (C-0: a few dozen points). What it must not do is drag
+/// the WHOLE line — several thousand points — along with it, and that is what
+/// putting it in its own view buys: the surface cuts the dragged stretch out
+/// once when the gesture starts and puts it back once when it ends. Inputs
+/// are captured before the closure either way (CANVAS CONTRACT, m16-a).
+struct PitchEditorDragOverlay: View, Equatable {
+    var geometry: PitchEditorGeometry
+    var draft: PitchEditorDragDraft
+    /// C-0 — the dragged note's stretch of the DRAFT played line
+    /// (`PitchEditorModel.draftLineSegments`): the wobble riding with the
+    /// moving note. The surface leaves exactly this stretch out while the
+    /// pointer is down, so the line is drawn once, in one place.
+    var draftLine: [[CGPoint]] = []
+    /// Whether the line is an estimate (drawn fainter, like the surface's).
+    var lineIsEstimate: Bool = false
+
+    nonisolated static func == (a: Self, b: Self) -> Bool {
+        a.geometry == b.geometry && a.draft == b.draft
+            && a.draftLine == b.draftLine && a.lineIsEstimate == b.lineIsEstimate
+    }
+
+    var body: some View {
+        let geometry = geometry
+        let draft = draft
+        let draftLine = draftLine
+        let estimate = lineIsEstimate
+        return Canvas { @Sendable context, _ in
+            // Both on the TRANSPOSED axis the surface draws on (C-0).
+            let ghost = geometry.rect(startSeconds: draft.startSeconds,
+                                      endSeconds: draft.endSeconds,
+                                      centreMidi: draft.ghostMidi)
+            let live = geometry.rect(startSeconds: draft.startSeconds,
+                                     endSeconds: draft.endSeconds,
+                                     centreMidi: draft.targetMidi)
+
+            // THE GHOST — where the singer actually was. Dashed, dim, no fill,
+            // and ⛔ NOTHING INSIDE IT (C-0): it is a memory of a measurement,
+            // not an object, and the wobble it once held is now drawn where it
+            // will be HEARD, in the moving note below. Without it a novice has
+            // no way to see how far they have moved a note.
+            context.stroke(Path(roundedRect: ghost, cornerRadius: min(4, ghost.height / 3)),
+                           with: .color(DAWTheme.textDim.opacity(0.55)),
+                           style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
+
+            // The connector: one hairline from the ghost's centre to the live
+            // centre, so the distance is a THING on screen and not an inference.
+            if abs(live.midY - ghost.midY) > 1 {
+                var link = Path()
+                link.move(to: CGPoint(x: ghost.midX, y: ghost.midY))
+                link.addLine(to: CGPoint(x: live.midX, y: live.midY))
+                context.stroke(link, with: .color(DAWTheme.signal.opacity(0.45)),
+                               style: StrokeStyle(lineWidth: 1, dash: [2, 2]))
+            }
+
+            // THE MOVING NOTE. `signal` — the accent is EARNED BY STATE here
+            // (Rule 3): this note is being changed right now. Never cyan
+            // (playback) and never violet (AI-touched content) — a person
+            // dragging their own vocal is neither.
+            let shape = Path(roundedRect: live, cornerRadius: min(4, live.height / 3))
+            context.fill(shape, with: .color(DAWTheme.panelRaised))
+            context.fill(shape, with: .color(DAWTheme.signal.opacity(0.30)))
+            context.stroke(shape, with: .color(DAWTheme.signal.opacity(0.85)), lineWidth: 1.5)
+
+            // THE MOVING LINE (C-0) — the dragged note's stretch of what the
+            // render WILL play at this draft, built by the same `make` the
+            // committed line is, and committed nowhere. Over the moving fill,
+            // so the wobble reads inside the note that carries it. A few dozen
+            // points: this is the part of the line that is allowed to move at
+            // pointer rate, and the only part.
+            PitchEditorSurface.drawPlayedLine(&context, lines: draftLine, estimate: estimate)
+
+            // The readout, ABOVE the note and never inside it — the same defect
+            // the note labels were moved out of the blob for: the contour runs
+            // through the middle of a blob and eats anything drawn there.
+            // ⚠️ `draft.readout` is nil BELOW the detector's 12.90-cent floor,
+            // and nil draws NOTHING. A "+0 cents" there would be a precision
+            // claim this chain cannot support (§5.5.3).
+            if let readout = draft.readout {
+                let text = "\(draft.targetNoteName)  \(readout)"
+                context.draw(
+                    Text(text)
+                        .font(.system(size: 9, weight: .medium, design: .monospaced))
+                        .foregroundColor(DAWTheme.signal),
+                    at: CGPoint(x: live.midX, y: live.minY - 3), anchor: .bottom)
+            }
+        }
+        .allowsHitTesting(false)
+    }
+}
+
+// MARK: - The scissors preview (m23-ap C3)
+
+/// Where the cut would land. Drawn only while the scissors tool is engaged and
+/// the pointer is over a note — a cut line hovering over empty space would be
+/// an offer the tool refuses.
+struct PitchEditorCutPreview: View, Equatable {
+    var x: CGFloat
+    var rect: CGRect
+
+    var body: some View {
+        Rectangle()
+            .fill(DAWTheme.signal)
+            .frame(width: 1, height: max(4, rect.height + 8))
+            .glow(DAWTheme.signal, radius: 4, intensity: 0.5)
+            .position(x: x, y: rect.midY)
+            .allowsHitTesting(false)
+    }
+}
+
+// MARK: - The tool palette (m23-ap, design §7.2)
+
+/// The bottom-mounted palette the reference frames show, with the ACTIVE slot
+/// highlighted.
+///
+/// ⚠️⚠️ **TWO SLOTS, NOT NINE.** The reference app's palette has nine; seven of
+/// them are tools this app does not have. See `PitchEditorTool`'s own banner —
+/// seven controls that do nothing when pressed is the fake-affordance failure
+/// `docs/DESIGN-LANGUAGE.md` Rule 3 names, multiplied by seven.
+///
+/// The active tool's HELP is drawn beside the palette rather than hung on a
+/// tooltip: a tooltip is invisible to `view.capture`, so a gate cannot tell a
+/// correct caption from a missing one.
+struct PitchEditorToolPalette: View {
+    var tool: PitchEditorTool
+    /// The live drag's readout, or nil.
+    var dragReadout: String?
+    /// A refusal to show, or nil.
+    var refusal: String?
+    /// C-0 — the one sentence about the LINE (design §4.4), or nil: still
+    /// matching it to the sound, or a way it cannot be the sound.
+    var lineCaption: PitchEditorLineCaption? = nil
+    var onSelect: (PitchEditorTool) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if let refusal {
+                PanelRefusalLine(message: refusal)
+            }
+            // DRAWN, never a tooltip: a tooltip is invisible to `view.capture`,
+            // and "the line you are looking at is an estimate" is exactly the
+            // sentence a captured gate must be able to see (§4.6 test 7).
+            if let lineCaption {
+                switch lineCaption.kind {
+                case .shortfall:
+                    // A real shortfall — the line cannot fully be the sound.
+                    // `PanelRefusalLine`'s amber, the warning token the unresolved
+                    // notes' outline wears for the same fact.
+                    PanelRefusalLine(message: lineCaption.text)
+                case .progress:
+                    // ⚠️ PROGRESS, NOT A WARNING: nothing refused. The header's
+                    // `.analysing` shape — a mini spinner and secondary ink —
+                    // because a warning triangle over a transient is how a
+                    // warning stops meaning anything.
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.mini)
+                        Text(lineCaption.text)
+                            .font(.system(size: 10))
+                            .foregroundStyle(DAWTheme.textSecondary)
+                    }
+                }
+            }
+            HStack(spacing: 8) {
+                ForEach(PitchEditorTool.allCases) { candidate in
+                    let active = candidate == tool
+                    Button { onSelect(candidate) } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: candidate.symbolName)
+                                .font(.system(size: 11, weight: .medium))
+                            Text(candidate.label)
+                                .font(.system(size: 10, weight: .medium))
+                        }
+                        // The ACTIVE slot wears `signal` — an accent earned by
+                        // state, which is the one thing Rule 3 allows it for.
+                        // An inactive slot is neutral ink on the raised panel:
+                        // a tool you are not using is not a state.
+                        .foregroundStyle(active ? DAWTheme.signal : DAWTheme.textSecondary)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 4)
+                        .background(active ? DAWTheme.signal.opacity(0.14) : DAWTheme.panelRaised,
+                                    in: Capsule())
+                        .overlay(Capsule().stroke(
+                            active ? DAWTheme.signal.opacity(0.55) : DAWTheme.hairline,
+                            lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(candidate.label)
+                    .help(candidate.help)
+                }
+                Text(tool.help)
+                    .font(.system(size: 9))
+                    .foregroundStyle(DAWTheme.textDim)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                // The live readout sits with the palette, in SF Mono, so a
+                // number that changes sixty times a second has ONE home on
+                // screen and never re-lays the pane out as it grows a digit.
+                if let dragReadout {
+                    Text(dragReadout)
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(DAWTheme.signal)
+                        .monospacedDigit()
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .background(DAWTheme.panel)
+    }
+}
+
+// MARK: - Zoom (m23-ap C4)
+
+/// What the pane's zoom cluster asks the app for. An enum rather than five
+/// closures so the pane cannot grow a sixth zoom the app does not implement.
+///
+/// ⚠️ **THE PANE DOES NOT WRITE `PanelLayoutStore` ITSELF.** `AppModel`'s
+/// `zoomPitchEditor*` / `pitchEditorRowZoom*` entry points are the one home for
+/// the LADDER, shared with ⌘+/⌘−/⌘0 through `EditorSurfaceRouter`; a button
+/// here calling `setPitchEditorPPB` directly would be a second ladder that
+/// disagrees with the keyboard about what "one step" means.
+enum PitchEditorZoomCommand: Sendable {
+    case timeIn, timeOut, pitchIn, pitchOut, reset
+}
+
 // MARK: - The pane
 
 /// **Open a vocal recording and SEE the notes you sang** — drawn over the
@@ -481,8 +910,13 @@ struct PitchEditorView: View {
     /// Detection, injected. The model never holds the store (the `ClipFixModel`
     /// precedent), which is what lets the suite drive every path.
     var detect: PitchEditorDetectionProvider
-    /// Apply one of the three offered presets (§6.2 Door 2). The caller owns the
-    /// store call and the refusal surface.
+    /// C-0 — THE contour the render uses (`ProjectStore.renderPitchContour`),
+    /// fetched in parallel with `detect` (design 2026-09-24 §4.3). Required,
+    /// not defaulted: a pane built without it would draw an estimate forever
+    /// and caption it as a failure nobody had.
+    var renderContour: PitchEditorRenderContourProvider
+    /// Apply one of the four offered presets (§6.2 Door 2). The caller owns
+    /// the store call and the refusal surface.
     var onApplyPreset: (PitchCorrectionPreset) -> Void
     /// Remove this clip's tuning. Offered only when it carries some.
     var onClearTuning: () -> Void
@@ -491,15 +925,44 @@ struct PitchEditorView: View {
     /// Without this the `.engagedPitchEditor` router case is dead in the app and
     /// ⌘+ never reaches this surface.
     var onEngage: () -> Void
+    /// ONE note edit, submitted on gesture END (m23-ap C1/C3, design §8.2).
+    ///
+    /// ⛔ **THE VIEW NEVER CALLS THIS.** It is handed to `PitchEditorModel` at
+    /// mount and the model is the only caller — which is what makes
+    /// `PitchEditorModelTests.aDragTickNeverCommits` a gate over the real
+    /// cadence instead of a grep over a `DragGesture` closure. If you find
+    /// yourself invoking it from a `.onChanged`, that is the P7b defect: the
+    /// vocal goes silent for the whole drag.
+    var onCommitNoteEdit: (PitchEditorCommit) -> Void
+    /// C4 — both axes. See `PitchEditorZoomCommand`.
+    var onZoom: (PitchEditorZoomCommand) -> Void
     /// The spy seam (`p2-c`'s `debug.pitchEditor`). Optional so a preview and an
     /// offscreen harness stay one-liners.
     var chrome: PitchEditorChromeLedger?
 
     @State private var model: PitchEditorModel
-    /// ⭐ THE O(frames) SNAPSHOT. See `PitchEditorDrawContext`.
-    @State private var contour: [[CGPoint]] = []
+    /// ⭐ THE O(frames) SNAPSHOT — the played line on screen, with the dragged
+    /// note's stretch cut out while a drag is in flight. See
+    /// `PitchEditorDrawContext`.
+    @State private var playedSegments: [[CGPoint]] = []
+    /// Where the pointer is, for the scissors preview. `nil` off the surface.
+    @State private var hoverPoint: CGPoint?
 
     private static let rulerWidth: CGFloat = 52
+
+    /// What decides whether the seam must be asked AGAIN (§4.3 step 6): the
+    /// contour is a function of the file and the detector generation alone,
+    /// never of the edits, so only these two re-fetch it.
+    private struct RenderContourKey: Equatable {
+        let url: URL?
+        let analysisVersion: Int
+    }
+
+    private var renderContourKey: RenderContourKey {
+        RenderContourKey(url: clip.audioFileURL,
+                         analysisVersion: clip.pitchEdits?.analysisVersion
+                            ?? PitchEditSet.currentAnalysisVersion)
+    }
 
     init(clip: Clip,
          tempoMap: TempoMap,
@@ -508,10 +971,13 @@ struct PitchEditorView: View {
          layout: PanelLayoutStore,
          waveforms: WaveformStore,
          detect: @escaping PitchEditorDetectionProvider,
+         renderContour: @escaping PitchEditorRenderContourProvider,
          onApplyPreset: @escaping (PitchCorrectionPreset) -> Void,
          onClearTuning: @escaping () -> Void,
          onClose: @escaping () -> Void,
          onEngage: @escaping () -> Void,
+         onCommitNoteEdit: @escaping (PitchEditorCommit) -> Void = { _ in },
+         onZoom: @escaping (PitchEditorZoomCommand) -> Void = { _ in },
          chrome: PitchEditorChromeLedger? = nil) {
         self.clip = clip
         self.tempoMap = tempoMap
@@ -520,18 +986,26 @@ struct PitchEditorView: View {
         self.layout = layout
         self.waveforms = waveforms
         self.detect = detect
+        self.renderContour = renderContour
         self.onApplyPreset = onApplyPreset
         self.onClearTuning = onClearTuning
         self.onClose = onClose
         self.onEngage = onEngage
+        self.onCommitNoteEdit = onCommitNoteEdit
+        self.onZoom = onZoom
         self.chrome = chrome
         // The pane is mounted under `.id(clip.id)`, so this runs once per clip —
         // a switch REBUILDS rather than migrating a draft, which is the same
         // rule the roll's mount follows (`ContentView`).
-        _model = State(initialValue: PitchEditorModel(
+        let model = PitchEditorModel(
             clipID: clip.id,
             geometry: PitchEditorGeometry(clip: clip, tempoMap: tempoMap,
-                                          pixelsPerBeat: layout.pitchEditorPPB)))
+                                          pixelsPerBeat: layout.pitchEditorPPB,
+                                          rowHeight: layout.pitchEditorRowHeight))
+        // ⭐ THE COMMIT SEAM IS INSTALLED ONCE, HERE, AND NOWHERE ELSE. See
+        // `onCommitNoteEdit`.
+        model.onCommit = onCommitNoteEdit
+        _model = State(initialValue: model)
     }
 
     var body: some View {
@@ -539,26 +1013,177 @@ struct PitchEditorView: View {
             header
             Divider().overlay(DAWTheme.hairline)
             editorBody
+            Divider().overlay(DAWTheme.hairline)
+            palette
         }
         .background(DAWTheme.panel)
         .task {
+            // The clip's STORED notes first, so a clip that was already tuned
+            // draws its tuning from the moment the pane opens rather than
+            // waiting on a detection to finish.
+            model.syncStoredNoteTable(clip.pitchEdits)
             // §5.9: REAL-TIME SAFETY IS STRUCTURAL HERE, NOT CAREFUL.
             // `detectClipPitch` → `AudioEngine.detectPitch` → `Task.detached` →
             // a `nonisolated` analyzer. Nothing on this path is reachable from
             // the render thread.
             await model.load(using: detect)
-            refreshContour()
+            refreshPlayedSegments()
+        }
+        // C-0 §4.3 step 2 — THE SEAM, IN PARALLEL with the detection above (its
+        // own task, so neither waits on the other). `task(id:)` re-asks exactly
+        // when the file or the set's detector generation changes (step 6) and
+        // never for an edit. The engine hops off the main actor itself
+        // (`StretchRenderCache.renderContour`); nothing here blocks.
+        .task(id: renderContourKey) {
+            await model.loadRenderContour(using: renderContour)
         }
         .onChange(of: layout.pitchEditorPPB) { _, ppb in
             model.geometry.pixelsPerBeat = ppb
         }
-        // The two events — and the only two — that can move the contour on
-        // screen: a load completing (above) and the geometry changing (here,
-        // which covers the zoom, and the auto-fit `apply` performs).
-        .onChange(of: model.geometry) { _, _ in refreshContour() }
+        // C4's other axis. One slot, read here, and the ruler sidebar reads the
+        // SAME geometry — so the two columns cannot drift a fraction of a row.
+        .onChange(of: layout.pitchEditorRowHeight) { _, height in
+            model.geometry.rowHeight = height
+        }
+        // ⭐ THE READ-BACK. Every commit returns through the store, into the
+        // clip, and lands here — so what is on screen after a drag is what was
+        // SAVED, not what was asked for. A write that silently did nothing
+        // shows up as a blob — and its line — springing back, which is the
+        // honest picture.
+        .onChange(of: clip.pitchEdits) { _, table in
+            model.syncStoredNoteTable(table)
+        }
+        // C-0 — the clip's transpose can change while the pane is open (the
+        // pane is rebuilt only on a clip SWITCH), and the render plays it.
+        .onChange(of: clip.pitchShiftSemitones) { _, semitones in
+            model.setClipPitchShiftSemitones(semitones)
+        }
+        // ⚠️ `DragGesture.onEnded` DOES NOT FIRE when the window resigns key or
+        // the pane is torn down. A draft left behind would become a phantom
+        // baseline for the next gesture on the next clip.
+        .onDisappear { model.cancelDrag() }
+        // The events — and the only ones — that can move the line on screen:
+        // a load completing (above), the line being rebuilt (an edit read back,
+        // the seam answering, a transpose), the geometry changing (the zoom,
+        // and the auto-fit `apply` performs), and a drag starting or ending
+        // (the dragged stretch leaves for the overlay and comes back). NOT a
+        // pointer tick: the draft moves in the overlay, never here.
+        .onChange(of: model.playedLineRevision) { _, _ in
+            refreshPlayedSegments()
+            recordPlayedLine()
+        }
+        .onChange(of: model.geometry) { _, _ in refreshPlayedSegments() }
+        .onChange(of: model.drag?.segmentID) { _, _ in refreshPlayedSegments() }
+        .onAppear { recordPlayedLine() }
+        .onChange(of: model.state) { _, _ in recordPlayedLine() }
     }
 
-    private func refreshContour() { contour = model.contourSegments }
+    private func refreshPlayedSegments() {
+        playedSegments = model.playedLineSegments(excluding: model.draftSpan)
+    }
+
+    /// Reports the line to the spy ledger (`debug.pitchEditor`'s `playedLine`)
+    /// — the SAME `lineCaption` the palette draws, the same basis and
+    /// unresolved set the surface draws from.
+    private func recordPlayedLine() {
+        let caption = model.lineCaption
+        chrome?.recordPlayedLine(
+            basisKey: model.playedLine.basis.key,
+            reason: model.playedLine.basis.reason,
+            captionText: caption?.text ?? "",
+            captionKind: caption?.kind.rawValue ?? "",
+            // The SAME list the surface outlines (empty while waiting).
+            unresolvedNoteIDs: model.unresolvedNoteIDList,
+            clipPitchShiftSemitones: model.geometry.clipPitchShiftSemitones,
+            perNote: model.playedLineNoteSummaries)
+    }
+
+    // MARK: The palette (m23-ap Increment C)
+
+    /// Bottom-mounted, the reference frames' own placement (§7.2). Reports what
+    /// it DREW to the ledger from the same `let`s it drew from.
+    @ViewBuilder
+    private var palette: some View {
+        let tool = model.tool
+        let readout = model.drag?.readout
+        let refusal = model.refusal
+        // C-0 — the SAME value `recordPlayedLine` reports to the ledger.
+        let lineCaption = model.lineCaption
+        PitchEditorToolPalette(
+            tool: tool,
+            dragReadout: readout,
+            refusal: refusal,
+            lineCaption: lineCaption,
+            onSelect: { chosen in
+                onEngage()
+                model.tool = chosen
+                model.clearRefusal()
+            })
+            .onAppear { recordInteraction() }
+            .onChange(of: model.tool) { _, _ in recordInteraction() }
+            .onChange(of: model.drag) { _, _ in recordInteraction() }
+            .onChange(of: model.refusal) { _, _ in recordInteraction() }
+            .onChange(of: model.commitCount) { _, _ in recordInteraction() }
+    }
+
+    /// ⚠️ **`dragReadout` IS "" WHEN THERE IS NO DRAG AND NEVER "+0 cents".**
+    /// Those are different facts: the second would be a claim that a note moved
+    /// by an amount `PitchEditorReadout`'s ±12.90-cent floor says nobody can
+    /// measure.
+    private func recordInteraction() {
+        chrome?.recordInteraction(
+            toolKey: model.tool.rawValue,
+            paletteLabels: PitchEditorTool.allCases.map(\.label),
+            toolHelp: model.tool.help,
+            dragReadout: model.drag?.readout ?? "",
+            refusalText: model.refusal ?? "",
+            commitCount: model.commitCount)
+    }
+
+    /// Where the scissors would cut, or `nil` when the pointer is not over a
+    /// note. ⚠️ **Resolved through the MODEL's own hit test**, not a second one
+    /// — a preview that used different arithmetic from the cut would draw a
+    /// line where the knife does not land, which is worse than no preview.
+    private var cutPreview: (x: CGFloat, rect: CGRect)? {
+        guard let point = hoverPoint, let blob = model.blob(at: point) else { return nil }
+        return (point.x, model.rect(for: blob))
+    }
+
+    // MARK: The gestures (m23-ap C1 + C3)
+
+    /// ⛔⛔ **NOTHING IN HERE COMMITS.** The model owns the cadence (§8.2): a
+    /// tick updates a draft, and only `endPitchDrag`/`splitNote` can emit. This
+    /// function existing without a single store call is the point of it.
+    private func dragChanged(_ value: DragGesture.Value) {
+        guard state.drawsNotes, model.tool == .pointer else { return }
+        if model.drag == nil {
+            guard let blob = model.blob(at: value.startLocation) else { return }
+            onEngage()
+            model.beginPitchDrag(on: blob)
+        }
+        // ⌥ = free movement, no snap (§7.3 C1). Read from `NSEvent` at the tick
+        // rather than from the gesture value, which carries no modifiers — the
+        // `ControllerLaneStrip` idiom, already shipped one surface over.
+        model.updatePitchDrag(translationHeight: value.translation.height,
+                              free: NSEvent.modifierFlags.contains(.option))
+    }
+
+    /// The ONE place a gesture can produce a store write.
+    private func dragEnded(_ value: DragGesture.Value) {
+        guard state.drawsNotes else { return }
+        onEngage()
+        switch model.tool {
+        case .pointer:
+            // The model emits at most one commit, and none at all when the note
+            // finished where it started.
+            _ = model.endPitchDrag()
+        case .scissors:
+            // The cut lands where the click BEGAN, not where it ended: a cut is
+            // a click, and a hand that slipped two points during it did not
+            // mean to move the knife.
+            _ = model.splitNote(at: value.startLocation)
+        }
+    }
 
     // MARK: Header
 
@@ -579,11 +1204,13 @@ struct PitchEditorView: View {
                     .foregroundStyle(DAWTheme.textPrimary)
                     .lineLimit(1)
                 if clip.hasPitchEdits {
-                    // ⭐ THE SOUND CHANGED AND THE PICTURE DID NOT. This pane
-                    // draws the DETECTED contour, which is what the singer did —
-                    // not the corrected one. Without this badge a novice who
-                    // pressed a preset sees an unchanged screen and concludes
-                    // the tuner did nothing.
+                    // ⭐ SAY THAT THE CLIP IS TUNED, IN WORDS. Since C-0 the line
+                    // IS the corrected one (it is what the render will play),
+                    // so the picture does change when a preset lands — but a
+                    // gentle preset moves most notes by less than a row, and a
+                    // novice who pressed it must not have to read a few pixels
+                    // of line to learn that the tuner did anything. The badge
+                    // is the sentence; the line is the evidence.
                     Text("TUNING APPLIED")
                         .font(.system(size: 8, weight: .bold, design: .monospaced))
                         .tracking(0.6)
@@ -593,6 +1220,7 @@ struct PitchEditorView: View {
                                     in: Capsule())
                 }
                 Spacer(minLength: 0)
+                zoomCluster
                 Button(action: onClose) {
                     Image(systemName: "xmark")
                         .font(.system(size: 10, weight: .semibold))
@@ -631,6 +1259,61 @@ struct PitchEditorView: View {
         .onChange(of: clip.hasPitchEdits) { _, _ in
             recordChrome(status: status, caption: caption, presets: presets)
         }
+    }
+
+    /// C4 — zoom, BOTH AXES, as on-screen buttons.
+    ///
+    /// ⚠️ **BUTTONS, NOT ONLY A CHORD.** ⌘+/⌘−/⌘0 already reach this pane
+    /// through `EditorSurfaceRouter`, and they stay. But the target reader here
+    /// is a NOVICE, and a zoom that exists only as a key combination is a zoom
+    /// most people will never find. The words are spelled out — TIME and PITCH,
+    /// not two magnifying glasses — because "which axis does this one change"
+    /// is exactly the question two identical glyphs cannot answer.
+    @ViewBuilder
+    private var zoomCluster: some View {
+        HStack(spacing: 6) {
+            zoomGroup(title: "TIME",
+                      outHelp: "Show more of the clip at once.",
+                      inHelp: "Spread the notes out along time.",
+                      out: { onZoom(.timeOut) }, into: { onZoom(.timeIn) })
+            zoomGroup(title: "PITCH",
+                      outHelp: "Shorter rows — see more notes up and down.",
+                      inHelp: "Taller rows — see small pitch differences.",
+                      out: { onZoom(.pitchOut) }, into: { onZoom(.pitchIn) })
+            Button("Reset") { onZoom(.reset) }
+                .buttonStyle(.plain)
+                .font(.system(size: 9))
+                .foregroundStyle(DAWTheme.textSecondary)
+                .help("Back to the standard zoom on both axes.")
+        }
+    }
+
+    @ViewBuilder
+    private func zoomGroup(title: String, outHelp: String, inHelp: String,
+                           out: @escaping () -> Void, into: @escaping () -> Void) -> some View {
+        HStack(spacing: 3) {
+            Text(title)
+                .font(.system(size: 8, weight: .semibold, design: .monospaced))
+                .tracking(0.8)
+                .foregroundStyle(DAWTheme.textDim)
+            zoomButton("minus", help: outHelp, action: out)
+            zoomButton("plus", help: inHelp, action: into)
+        }
+    }
+
+    @ViewBuilder
+    private func zoomButton(_ symbol: String, help: String,
+                            action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(DAWTheme.textSecondary)
+                .frame(width: 18, height: 16)
+                .background(DAWTheme.panelRaised, in: RoundedRectangle(cornerRadius: 4))
+                .overlay(RoundedRectangle(cornerRadius: 4).stroke(DAWTheme.hairline, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .help(help)
     }
 
     /// One reporting call site, fed the SAME `let`s the header drew from.
@@ -681,30 +1364,31 @@ struct PitchEditorView: View {
         }
     }
 
-    /// **DOOR 2 — the pitch editor's own header** (§6.2). Three chips, each with
+    /// **DOOR 2 — the pitch editor's own header** (§6.2). FOUR chips, each with
     /// its `summary` rendered as DRAWN PROSE underneath rather than as a
     /// tooltip: a tooltip is invisible to `view.capture`, so a captured gate
     /// cannot tell a correct caption from a missing one. That is the
     /// `EQCurveEditor.help` lesson, verbatim.
     ///
-    /// ⛔⛔ **THREE, NOT FOUR — `offeredInUI`, NEVER `allCases`.** `hardTune` is
-    /// withheld from every on-screen door because **the app cannot currently
-    /// produce it**: the render path calls `StretchCurvePlan.make` with
-    /// `contour: []`, so the only preset with `preserveVibrato: false` has
-    /// nothing to resolve its shaping against and degrades to a constant
-    /// per-note offset — measured on a real vocal it asks for a median 62.1
-    /// cents against `tight`'s 18.8, i.e. it would ship as *a stronger Tight
-    /// wearing the label "the robot effect"*. A control whose label promises one
-    /// result and whose mechanism delivers another is worse than a missing
-    /// control, because nothing in the product can tell the user they were lied
-    /// to. `PitchCorrectionPresetTests.uiDoorWithholdsHardTune` pins both the
-    /// list and the reason. ⚠️ The WIRE still accepts `hardTune` and returns the
-    /// degradation in its warnings — only the pixels withhold it, because only
-    /// the pixels have no room to explain.
+    /// ⭐ **`offeredInUI`, NEVER `allCases` — AND SINCE 2026-09-24 THAT LIST IS
+    /// ALL FOUR.** `hardTune` was withheld while the render built every curve
+    /// with no contour, so its flattening resolved to nothing and it shipped as
+    /// *a stronger Tight wearing the label "the robot effect"*. The render now
+    /// shapes against the detected whole-file contour (contour-to-render), the
+    /// label is true, and the chip is offered —
+    /// `PitchCorrectionPresetTests.uiDoorOffersEveryPresetTheRenderHonours`
+    /// pins the list and its reason. The rule it served still stands: a
+    /// control whose label promises one result and whose mechanism delivers
+    /// another is worse than a missing one. What remains true, and is SAID
+    /// rather than hidden: when the pitch analysis cannot run, Hard Tune plays
+    /// its fallback (notes on pitch, wobble kept) — the engine posts a notice,
+    /// and since C-0 this pane's own line caption names the notes it could not
+    /// flatten.
     ///
-    /// ⚠️ **FOUR BUTTONS, NEVER A SLIDER** — and now three, for the reason above.
-    /// `PitchCorrectionPreset.ladder` exists but a UI that presented the set as
-    /// one dial would be lying about what the last stop does.
+    /// ⚠️ **FOUR BUTTONS, NEVER A SLIDER.** `PitchCorrectionPreset.ladder` holds
+    /// the three that share one axis; Hard Tune is a different algorithm, and a
+    /// UI that presented the four as one dial would be lying about what the
+    /// last stop does.
     @ViewBuilder
     private func presetRow(_ presets: [PitchCorrectionPreset]) -> some View {
         VStack(alignment: .leading, spacing: 5) {
@@ -765,7 +1449,13 @@ struct PitchEditorView: View {
         return PitchEditorDrawContext(
             geometry: model.geometry,
             blobs: model.blobs,
-            contour: contour,
+            // C-0 — THE PLAYED LINE: the snapshot, not a per-body rebuild (see
+            // `playedSegments`), with the dragged note's stretch cut out while
+            // the overlay owns it.
+            playedLine: playedSegments,
+            lineIsEstimate: model.playedLine.basis != .render,
+            unresolvedNoteIDs: model.unresolvedNoteIDs,
+            hiddenBlobID: model.drag?.segmentID,
             gaps: model.gaps,
             peaks: peaks,
             // ONE scalar, resolved from the headless rules before the closure —
@@ -809,9 +1499,39 @@ struct PitchEditorView: View {
                                 .frame(width: max(1, ctx.geometry.contentWidth),
                                        height: ctx.geometry.contentHeight)
                         }
+                        // ⭐ THE DRAFT, IN ITS OWN LAYER. The surface below is
+                        // untouched during a drag — see
+                        // `PitchEditorDragOverlay`'s banner for why that is
+                        // structural and not tidiness.
+                        if let draft = model.drag {
+                            PitchEditorDragOverlay(geometry: ctx.geometry, draft: draft,
+                                                   draftLine: model.draftLineSegments,
+                                                   lineIsEstimate: ctx.lineIsEstimate)
+                                .equatable()
+                                .frame(width: max(1, ctx.geometry.contentWidth),
+                                       height: ctx.geometry.contentHeight)
+                        }
+                        if model.tool == .scissors, let cut = cutPreview {
+                            PitchEditorCutPreview(x: cut.x, rect: cut.rect)
+                                .frame(width: max(1, ctx.geometry.contentWidth),
+                                       height: ctx.geometry.contentHeight)
+                        }
                     }
                     .frame(width: max(1, ctx.geometry.contentWidth),
                            height: ctx.geometry.contentHeight)
+                    .contentShape(Rectangle())
+                    // C1 + C3. `minimumDistance: 0` so a scissors CLICK is a
+                    // gesture too — otherwise a cut would need a wiggle.
+                    .gesture(
+                        DragGesture(minimumDistance: 0)
+                            .onChanged { dragChanged($0) }
+                            .onEnded { dragEnded($0) })
+                    .onContinuousHover { phase in
+                        switch phase {
+                        case .active(let point): hoverPoint = point
+                        case .ended: hoverPoint = nil
+                        }
+                    }
                 }
                 // m23-c1: the transport outside the clip gets a directional
                 // bleed at the VIEWPORT edge — so it hangs off the scroller, not

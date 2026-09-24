@@ -1,3 +1,5 @@
+import AVFAudio
+import CryptoKit
 import CSignalsmithStretch
 import DAWCore
 import Foundation
@@ -421,6 +423,11 @@ struct PitchCurveRenderTests {
         let covered = [
             "id", "startSeconds", "endSeconds", "detectedHz", "detectedConfidence",
             "pitchOffsetCents", "driftScale", "vibratoScale",
+            // m23-ap C5a — the synthesised generator. Hashed in a SUFFIX
+            // BLOCK, not inline, so a set without a generator keeps the bytes
+            // it had before these existed. The exception that buys is pinned
+            // by `generatorFieldsRekeyOnlyWhenTheyCanBeHeard` below.
+            "vibratoRateHz", "vibratoDepthCents", "vibratoOnsetSeconds",
             "formantOffsetSemitones", "timeStartDeltaSeconds",
             "timeEndDeltaSeconds", "amplitudeDb",
         ]
@@ -440,6 +447,10 @@ struct PitchCurveRenderTests {
             { s in s.pitchOffsetCents = 11 },
             { s in s.driftScale = 0.5 },
             { s in s.vibratoScale = 0.5 },
+            // Only DEPTH is listed here. Rate and onset with a zero depth are
+            // audibly and arithmetically inert, so they deliberately do NOT
+            // re-key — pinned as its own case rather than quietly omitted.
+            { s in s.vibratoDepthCents = 45 },
             { s in s.formantOffsetSemitones = 1 },
             { s in s.timeStartDeltaSeconds = 0.01 },
             { s in s.timeEndDeltaSeconds = 0.01 },
@@ -472,6 +483,58 @@ struct PitchCurveRenderTests {
         // Determinism: the same set, built twice, and after a Codable round
         // trip (the shape a reopened project actually arrives in).
         #expect(PitchEditSetDigest.hex(PitchEditSet(segments: [base()])) == reference)
+    }
+
+    /// ⭐⭐ **THE ONE DOCUMENTED EXCEPTION TO "EVERY FIELD RE-KEYS", PINNED
+    /// FROM BOTH SIDES.** `digestCoversEveryStoredField` above asserts that a
+    /// change to a stored field moves the digest. The generator's RATE and
+    /// ONSET break that rule on purpose: with `vibratoDepthCents == 0` they
+    /// contribute exactly zero to the curve for every `t`, so re-keying on
+    /// them would push a clip that renders identically through a fresh
+    /// stretch render — and a ratio-1 stretch is not its own input.
+    ///
+    /// Both halves are asserted, because only asserting "they don't re-key"
+    /// would be indistinguishable from the digest having forgotten them
+    /// entirely — the exact silent omission the reflection census exists to
+    /// catch.
+    @Test("(7) generator rate/onset re-key only once a depth makes them audible")
+    func generatorFieldsRekeyOnlyWhenTheyCanBeHeard() {
+        let id = UUID(uuidString: "77777777-2222-3333-4444-555555555555")!
+        func segment(rate: Double = 0, depth: Double = 0,
+                     onset: Double = 0) -> NoteSegment {
+            NoteSegment(id: id, startSeconds: 1, endSeconds: 2, detectedHz: 220,
+                        detectedConfidence: 0.5, pitchOffsetCents: 10,
+                        vibratoRateHz: rate, vibratoDepthCents: depth,
+                        vibratoOnsetSeconds: onset)
+        }
+        func hex(_ s: NoteSegment) -> String {
+            PitchEditSetDigest.hex(PitchEditSet(segments: [s]))
+        }
+        let plain = hex(segment())
+        #expect(!plain.isEmpty)
+
+        // INERT ⇒ same key. This is the cache-preserving half.
+        #expect(hex(segment(rate: 5.5)) == plain)
+        #expect(hex(segment(onset: 0.3)) == plain)
+        #expect(hex(segment(rate: 5.5, onset: 0.3)) == plain)
+
+        // AUDIBLE ⇒ new key, and the rate and onset are INSIDE it. This is the
+        // half that proves they were not simply forgotten.
+        let deep = hex(segment(depth: 40))
+        #expect(deep != plain)
+        #expect(hex(segment(rate: 5.5, depth: 40)) != deep,
+                """
+                a rate change alongside a real depth left the digest unchanged \
+                — the suffix block is not covering `vibratoRateHz`, and the \
+                render will serve the previous rate's audio.
+                """)
+        #expect(hex(segment(rate: 5.5, depth: 40, onset: 0.3))
+            != hex(segment(rate: 5.5, depth: 40)),
+                """
+                an onset change alongside a real depth left the digest \
+                unchanged — the suffix block is not covering \
+                `vibratoOnsetSeconds`.
+                """)
     }
 
     @Test("(7) determinism survives a save/reopen round trip")
@@ -579,5 +642,374 @@ struct PitchCurveRenderTests {
         Self.log("7", "450-segment digest: \(perCall) ms per call")
         #expect(!last.isEmpty)
         #expect(perCall < 2.0, "digesting one vocal clip costs \(perCall) ms on the main actor")
+    }
+
+    // MARK: - (8) m23-ap C2-1: the time-warp block, and timing invisible until used
+
+    // ⭐ HOW EVERY LITERAL BELOW WAS CAPTURED (the task's own rule: capture on
+    // today's tree BEFORE changing anything). At 2026-09-24 05:58 the tree's
+    // `Package.swift`, `Package.resolved`, `Sources/` and `Tests/` were
+    // rsync'd into an isolated scratch copy. The SHA-256 of the five files
+    // this item touches (`PitchCorrection.swift`, `StretchCurvePlan.swift`,
+    // `StretchRenderCache.swift`, this file, `NoteVibratoGeneratorTests.swift`)
+    // was compared between the copy and the live tree: identical. A
+    // capture-only test in the COPY printed each digest, and was run twice
+    // with identical output. The copy reproduced the four goldens already
+    // committed in `NoteVibratoGeneratorTests` §A (two digests, two renders),
+    // which is the positive control that the capture harness measures what
+    // the suites measure. Nothing here was captured after the change.
+
+    /// The three legacy sets C2-1 must not re-key: plain offsets, a flattened
+    /// set, a generator set. `offset` and `shaping` ARE
+    /// `NoteVibratoGeneratorTests`' `legacyOffsetSet` / `legacyShapingSet`.
+    static let c21LegacyDigestGoldens: [(set: String, hex: String)] = [
+        ("offset", "ec8e1bd8e04e4d8a6861e27ed620ff5772422fee40b8c6fd886e9e712ca77f6a"),
+        ("shaping", "1102f9a9e5bc74e92a449ed9a4a9ee28fe93915fd7e43922ce38bc2318c84a8a"),
+        ("generator", "1931c6528936e6b607f282d24c1a30dcabefc0f1add0d106bf84e4086d279a7b"),
+    ]
+
+    /// Sets that ALREADY carried non-zero time deltas before C2 existed. Their
+    /// pre-C2 renders ignored the deltas, under these keys.
+    static let c21PreC2TimedHex: [(set: String, hex: String)] = [
+        ("delta", "aec7143a81feaabd91aa732a5d50dfacb008418539f4a79a07b4092b0f151558"),
+        ("timingOnly", "5f5a27300b3328ed71f1ba060316e41335e5d603c23c1728253a0cad14be3644"),
+        ("startDelta", "ae03940717ec60ccf2905193efd412e639fad7d0b40db3508f925a1f6da04cef"),
+    ]
+
+    static let c21IdA = UUID(uuidString: "A0000000-0000-4000-8000-000000000001")!
+    static let c21IdB = UUID(uuidString: "A0000000-0000-4000-8000-000000000002")!
+
+    /// Value for value the sets the pre-change capture hashed.
+    static func c21Set(_ name: String) -> PitchEditSet {
+        let idA = c21IdA
+        let idB = c21IdB
+        switch name {
+        case "offset": return NoteVibratoGeneratorTests.legacyOffsetSet()
+        case "shaping": return NoteVibratoGeneratorTests.legacyShapingSet()
+        case "generator":
+            return PitchEditSet(analysisVersion: 1, segments: [
+                NoteSegment(id: idA, startSeconds: 0.25, endSeconds: 1.25,
+                            detectedHz: 220, detectedConfidence: 0.9,
+                            pitchOffsetCents: -37.5,
+                            vibratoRateHz: 5.5, vibratoDepthCents: 40,
+                            vibratoOnsetSeconds: 0.2),
+                NoteSegment(id: idB, startSeconds: 1.25, endSeconds: 1.9,
+                            detectedHz: 233.08, detectedConfidence: 0.81,
+                            pitchOffsetCents: 22.0),
+            ], retuneMs: 45)
+        case "delta":
+            return PitchEditSet(analysisVersion: 1, segments: [
+                NoteSegment(id: idA, startSeconds: 0.5, endSeconds: 1.0,
+                            detectedHz: 220, detectedConfidence: 0.9,
+                            pitchOffsetCents: 25, timeEndDeltaSeconds: 0.1),
+                NoteSegment(id: idB, startSeconds: 1.4, endSeconds: 1.9,
+                            detectedHz: 233.08, detectedConfidence: 0.81,
+                            pitchOffsetCents: -12),
+            ], retuneMs: 30)
+        case "timingOnly":
+            return PitchEditSet(analysisVersion: 1, segments: [
+                NoteSegment(id: idA, startSeconds: 0.5, endSeconds: 1.0,
+                            detectedHz: 220, detectedConfidence: 0.9,
+                            timeEndDeltaSeconds: 0.1),
+                NoteSegment(id: idB, startSeconds: 1.4, endSeconds: 1.9,
+                            detectedHz: 233.08, detectedConfidence: 0.81),
+            ], retuneMs: 30)
+        case "startDelta":
+            return PitchEditSet(analysisVersion: 1, segments: [
+                NoteSegment(id: idA, startSeconds: 0.5, endSeconds: 1.0,
+                            detectedHz: 220, detectedConfidence: 0.9,
+                            pitchOffsetCents: 25, timeStartDeltaSeconds: -0.05),
+            ], retuneMs: 30)
+        default:
+            Issue.record("no C2-1 fixture set named \(name)")
+            return .empty
+        }
+    }
+
+    static func c21SHA(_ bytes: [UInt8]) -> String {
+        var hasher = SHA256()
+        hasher.update(data: Data(bytes))
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// An INDEPENDENT restatement of the digest's pre-C2 byte layout: the
+    /// inline section and the generator block, written out here rather than
+    /// read from `PitchEditSetDigest`. It is validated against the CAPTURED
+    /// pre-C2 goldens before anything is derived from it, so it cannot just
+    /// agree with a production change.
+    static func c21PreC2Material(_ set: PitchEditSet) -> [UInt8] {
+        var bytes: [UInt8] = []
+        func putBits(_ value: UInt64) {
+            withUnsafeBytes(of: value.littleEndian) { bytes.append(contentsOf: $0) }
+        }
+        func putDouble(_ value: Double) { putBits(value.bitPattern) }
+        func putInt(_ value: Int) { putBits(UInt64(bitPattern: Int64(value))) }
+        putBits(1)  // layoutVersion
+        putInt(set.analysisVersion)
+        putDouble(set.retuneMs)
+        putInt(set.segments.count)
+        for s in set.segments {
+            withUnsafeBytes(of: s.id.uuid) { bytes.append(contentsOf: $0) }
+            for value in [s.startSeconds, s.endSeconds, s.detectedHz, s.detectedConfidence,
+                          s.pitchOffsetCents, s.driftScale, s.vibratoScale,
+                          s.formantOffsetSemitones, s.timeStartDeltaSeconds,
+                          s.timeEndDeltaSeconds, s.amplitudeDb] {
+                putDouble(value)
+            }
+        }
+        if set.segments.contains(where: { $0.vibratoDepthCents != 0 }) {
+            putBits(0x5631_4252_4154_4F01)  // the generator block's marker
+            putInt(set.segments.count)
+            for s in set.segments {
+                putDouble(s.vibratoRateHz)
+                putDouble(s.vibratoDepthCents)
+                putDouble(s.vibratoOnsetSeconds)
+            }
+        }
+        return bytes
+    }
+
+    /// The block C2-1 appends, restated: the marker, pinned as a literal here
+    /// because changing it would silently re-key every retimed render, then
+    /// the schedule version.
+    static func c21WarpBlock() -> [UInt8] {
+        var bytes: [UInt8] = []
+        withUnsafeBytes(of: UInt64(0x5431_4D45_5752_5001).littleEndian) {
+            bytes.append(contentsOf: $0)
+        }
+        withUnsafeBytes(of: UInt64(bitPattern: Int64(PitchTimeWarp.scheduleVersion)).littleEndian) {
+            bytes.append(contentsOf: $0)
+        }
+        return bytes
+    }
+
+    /// The design's C2-1 gate (§3.5): the three legacy digests are UNCHANGED.
+    /// Planted in isolation: inverting `hasTimeEdits` turns this red.
+    @Test("(8) C2-1: the three legacy digests are unchanged, and hash no time-warp block")
+    func c21LegacyDigestsUnchanged() {
+        for golden in Self.c21LegacyDigestGoldens {
+            let set = Self.c21Set(golden.set)
+            #expect(!set.hasTimeEdits)
+            #expect(PitchEditSetDigest.hex(set) == golden.hex,
+                    """
+                    the digest of the legacy '\(golden.set)' set MOVED \
+                    (\(PitchEditSetDigest.hex(set))). Every cache entry for it on every \
+                    disk is now orphaned. The time-warp block must be emitted only \
+                    when `PitchEditSet.hasTimeEdits` is true.
+                    """)
+        }
+        // These are the same captures as `NoteVibratoGeneratorTests` §A, taken
+        // on a different day. They must agree, or one of the two is not what it says.
+        #expect(Self.c21LegacyDigestGoldens[0].hex == NoteVibratoGeneratorTests.goldenDigestOffset)
+        #expect(Self.c21LegacyDigestGoldens[1].hex == NoteVibratoGeneratorTests.goldenDigestShaping)
+    }
+
+    /// The stale-key hazard (design F7, §3.5), closed: a set that carried
+    /// deltas BEFORE C2 must NOT keep the key under which its deltas were
+    /// ignored. The re-key must also be EXACTLY the appended block. That is
+    /// proven against an independent restatement of the layout, which is
+    /// itself proven against the captured hexes first. Planted in isolation:
+    /// removing the block turns this red.
+    @Test("(8) C2-1: a set carrying time deltas re-keys against its pre-C2 hex, by exactly the block")
+    func c21TimedSetsRekeyByExactlyTheBlock() {
+        // The restatement reproduces every captured pre-C2 hex: all three
+        // legacy sets and all three timed sets.
+        for golden in Self.c21LegacyDigestGoldens + Self.c21PreC2TimedHex {
+            #expect(Self.c21SHA(Self.c21PreC2Material(Self.c21Set(golden.set))) == golden.hex,
+                    "the test's own layout restatement does not reproduce '\(golden.set)'")
+        }
+        #expect(PitchEditSetDigest.timeWarpSuffixMarker == 0x5431_4D45_5752_5001)
+        for golden in Self.c21PreC2TimedHex {
+            let set = Self.c21Set(golden.set)
+            #expect(set.hasTimeEdits)
+            let now = PitchEditSetDigest.hex(set)
+            #expect(now != golden.hex,
+                    """
+                    '\(golden.set)' carries time deltas and still has its pre-C2 key \
+                    \(golden.hex). That key holds audio rendered with the deltas \
+                    IGNORED, and C2-3's render would serve it as the retimed audio.
+                    """)
+            #expect(now == Self.c21SHA(Self.c21PreC2Material(set) + Self.c21WarpBlock()),
+                    "'\(golden.set)' re-keyed, but not by exactly the time-warp block")
+        }
+        // Block order: generator block, then the time-warp block. (The anchor
+        // block's slot sits between them. It is gated, and absent here.)
+        var both = Self.c21Set("generator")
+        both.segments[1].timeStartDeltaSeconds = 0.02
+        #expect(PitchEditSetDigest.hex(both)
+                == Self.c21SHA(Self.c21PreC2Material(both) + Self.c21WarpBlock()))
+        // A −0.0 delta is no time edit: no block, and the pre-C2 material.
+        var negativeZero = Self.c21Set("offset")
+        negativeZero.segments[0].timeEndDeltaSeconds = -0.0
+        #expect(!negativeZero.hasTimeEdits)
+        #expect(PitchEditSetDigest.hex(negativeZero)
+                == Self.c21SHA(Self.c21PreC2Material(negativeZero)))
+    }
+
+    /// Render through the shipping plan exactly as the capture did: 2 s of a
+    /// 220 Hz sine at 48 kHz, `StretchCurvePlan.make`, the shipping
+    /// compensation. This is `NoteVibratoGeneratorTests.renderThroughShippingPath`
+    /// with a ratio.
+    static func c21Render(_ set: PitchEditSet, ratio: Double) throws -> [Float] {
+        let sr = 48_000.0
+        let input = [M23QSignal.sine(hz: 220, frames: Int(sr * 2.0),
+                                     sampleRate: sr, amplitude: 0.8)]
+        let plan = try #require(StretchCurvePlan.make(
+            editSet: set, clipPitchShiftSemitones: 0, sampleRate: sr, ratio: ratio))
+        #expect(plan.curve.timeWarp == nil,
+                "C2-1 builds no W for the render; C2-3 does, and must move the timed goldens")
+        return try OfflineStretcher.stretchTransposeCurve(
+            input: input, sampleRate: sr, ratio: ratio,
+            semitonesAtOutputFrame: { plan.semitones(atOutputFrame: $0) },
+            formantPreserve: false,
+            compensation: OfflineStretcher.curveLatencyCompensation(sampleRate: sr))[0]
+    }
+
+    /// ⭐ TIMING IS INVISIBLE UNTIL IT IS USED. An untimed set renders the
+    /// bytes it rendered before C2 existed, at two ratios, with a generator
+    /// among them. That generator is what C2-1's edited-time branch sits on.
+    @Test("(8) C2-1: untimed sets render byte-identically to pre-C2")
+    func c21UntimedRendersAreByteIdentical() throws {
+        let goldens: [(set: String, ratio: Double, frames: Int, hex: String)] = [
+            ("offset", 1, 96_000, "7a2a181ea40398a5373f250eb3abbc6991ecec2d6bda2385372a34a412c3839b"),
+            ("shaping", 1, 96_000, "3493573ab3845c0477f58cf4ccb4008d6c4b8804e6d7c7f507dc373f1a00497b"),
+            ("generator", 1, 96_000, "f6b1edfc31bdc207d50871d8799c143844bac46b7b211f7df71237e4f91bccff"),
+            ("generator", 1.5, 144_000, "a807f0c9e2c9fd99029e9b392e8c3c06753badf9ff7395b22667d3f56c2ab3af"),
+        ]
+        for golden in goldens {
+            let set = Self.c21Set(golden.set)
+            #expect(!set.hasTimeEdits)
+            let rendered = try Self.c21Render(set, ratio: golden.ratio)
+            #expect(rendered.count == golden.frames)
+            let hex = NoteVibratoGeneratorTests.renderDigest(rendered)
+            #expect(hex == golden.hex,
+                    "'\(golden.set)' at ratio \(golden.ratio) no longer renders its pre-C2 bytes (\(hex))")
+        }
+    }
+
+    /// ⚠️ **C2-1 ONLY, AND OWED TO C2-3.** C2-1 does not wire W into the
+    /// render, so even a set that CARRIES deltas still renders exactly its
+    /// pre-C2 bytes (deltas ignored). This pins that C2-1 changed no render at
+    /// all. **C2-3 must move these three literals.** That move is its evidence
+    /// that the render reads timing, and a C2-3 that leaves them green has not
+    /// wired anything. Its KEYS already moved (the test above). The audio
+    /// catches up in C2-3.
+    @Test("(8) C2-1 only: sets carrying deltas still render their pre-C2 bytes (C2-3 must move these)")
+    func c21TimedRendersUnchangedUntilC23() throws {
+        let goldens: [(set: String, ratio: Double, frames: Int, hex: String)] = [
+            ("delta", 1, 96_000, "aa608771f0de1c5467f50bd8a99b21f7902fb910f9f444fec12a8f875db8b691"),
+            ("timingOnly", 1, 96_000, "80be09798fdff09b9156e8bb2de7820205c8b61b6f9d350b37f53c8d341f43d5"),
+            ("delta", 1.5, 144_000, "895d2ca7af892e641126301a7b479d72ab5ded08ee21280693e6ab106622afd9"),
+        ]
+        for golden in goldens {
+            let set = Self.c21Set(golden.set)
+            #expect(set.hasTimeEdits)
+            let rendered = try Self.c21Render(set, ratio: golden.ratio)
+            #expect(rendered.count == golden.frames)
+            #expect(NoteVibratoGeneratorTests.renderDigest(rendered) == golden.hex,
+                    "'\(golden.set)' at ratio \(golden.ratio): the render changed in C2-1")
+        }
+    }
+
+    /// Writes a quiet sine to `url` in the given file format and closes it.
+    static func c21WriteFixture(to url: URL, frames: Int, sampleRate: Double,
+                                channels: Int, int16: Bool) throws {
+        let settings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVSampleRateKey: sampleRate,
+            AVNumberOfChannelsKey: channels,
+            AVLinearPCMBitDepthKey: int16 ? 16 : 32,
+            AVLinearPCMIsFloatKey: !int16,
+            AVLinearPCMIsNonInterleaved: false,
+        ]
+        let format = try #require(AVAudioFormat(commonFormat: .pcmFormatFloat32,
+                                                sampleRate: sampleRate,
+                                                channels: AVAudioChannelCount(channels),
+                                                interleaved: false))
+        let buffer = try #require(AVAudioPCMBuffer(pcmFormat: format,
+                                                   frameCapacity: AVAudioFrameCount(frames)))
+        let data = try #require(buffer.floatChannelData)
+        for frame in 0..<frames {
+            let value = Float(0.25 * sin(2 * Double.pi * 440 * Double(frame) / sampleRate))
+            for channel in 0..<channels { data[channel][frame] = value }
+        }
+        buffer.frameLength = AVAudioFrameCount(frames)
+        // Scoped: the writer deallocates, flushing and closing, on return.
+        let file = try AVAudioFile(forWriting: url, settings: settings,
+                                   commonFormat: .pcmFormatFloat32, interleaved: false)
+        try file.write(from: buffer)
+    }
+
+    /// ⭐ **D HAS ONE EXPRESSION, AND ITS TWO SITES AGREE BIT FOR BIT** (design
+    /// §3.2, "Why D is a parameter"). The store and the editor read
+    /// `media.audioFileInfo(at:).durationSeconds` (`AudioFileImporter`). The
+    /// render (C2-3) must compute D with `StretchCurvePlan.sourceDurationSeconds(of:)`
+    /// on the reader `performRender` already opened. If the two ever differ,
+    /// the display's W and the render's W differ in their last piece.
+    ///
+    /// The fixtures are chosen so "bit-identical" DISCRIMINATES: their lengths
+    /// make `Double(n) / sr` and `Double(n) * (1 / sr)` round differently
+    /// (checked in the positive control below). A pin that two expressions
+    /// agree is worthless on lengths where every plausible expression agrees.
+    @Test("(8) C2-1: the importer's D is bit-identical to the render's D on fixture files")
+    func c21ImporterAndRenderAgreeOnD() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("daw-pro-c21-d-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let generated: [(name: String, sr: Double, frames: Int, channels: Int, int16: Bool)] = [
+            ("mono-44k1-f32.wav", 44_100, 100_019, 1, false),
+            ("stereo-48k-i16.wav", 48_000, 81_613, 2, true),
+            ("mono-96k-f32.wav", 96_000, 100_009, 1, false),
+        ]
+        var urls: [URL] = []
+        for fixture in generated {
+            let url = dir.appendingPathComponent(fixture.name)
+            try Self.c21WriteFixture(to: url, frames: fixture.frames, sampleRate: fixture.sr,
+                                     channels: fixture.channels, int16: fixture.int16)
+            let reader = try AVAudioFile(forReading: url)
+            #expect(reader.length == AVAudioFramePosition(fixture.frames),
+                    "\(fixture.name): wrote \(fixture.frames) frames, the file holds \(reader.length)")
+            urls.append(url)
+        }
+        // The committed fixtures: every bundled sample, and a system sound
+        // every macOS install ships (`AudioFileImporterTests` relies on it too).
+        for entry in BundledSamples.catalog {
+            urls.append(try BundledSamples.resolve(entry.wireName))
+        }
+        urls.append(URL(fileURLWithPath: "/System/Library/Sounds/Ping.aiff"))
+
+        // A retimed set whose knots sit inside the shortest fixture, so each
+        // file's W is a real, non-trivial map.
+        let timed = PitchEditSet(segments: [
+            NoteSegment(startSeconds: 0.05, endSeconds: 0.1, detectedHz: 220,
+                        detectedConfidence: 0.9, timeEndDeltaSeconds: 0.01)
+        ])
+        var discriminating = 0
+        for url in urls {
+            let reader = try AVAudioFile(forReading: url)
+            let renderD = StretchCurvePlan.sourceDurationSeconds(of: reader)
+            let importerD = try AudioFileImporter().audioFileInfo(at: url).durationSeconds
+            Self.log("8", "\(url.lastPathComponent): length \(reader.length) @ "
+                + "\(reader.processingFormat.sampleRate) Hz — importer \(importerD), render \(renderD)")
+            #expect(renderD > 0.15, "\(url.lastPathComponent): D = \(renderD)")
+            #expect(renderD.bitPattern == importerD.bitPattern,
+                    """
+                    \(url.lastPathComponent): the render's D (\(renderD)) and the importer's \
+                    D (\(importerD)) differ in bits. The display's W and the render's W \
+                    would then differ in their last piece.
+                    """)
+            #expect(PitchTimeWarp.make(editSet: timed, sourceDurationSeconds: renderD)
+                    == PitchTimeWarp.make(editSet: timed, sourceDurationSeconds: importerD))
+            let sr = reader.processingFormat.sampleRate
+            if (Double(reader.length) / sr).bitPattern != (Double(reader.length) * (1 / sr)).bitPattern {
+                discriminating += 1
+            }
+        }
+        // ⭐ POSITIVE CONTROL: the bit comparison CAN fail on these fixtures,
+        // because a plausible second spelling of D really does differ on them.
+        #expect(discriminating >= 3,
+                "only \(discriminating) fixture(s) distinguish n/sr from n·(1/sr); the pin would be vacuous")
     }
 }

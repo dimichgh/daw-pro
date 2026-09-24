@@ -70,8 +70,8 @@ final class PlaybackGraph {
     /// Identity clips (`StretchRenderCache.needsRender` false) never reach the
     /// resolver — the bypass contract: their schedule is byte-identical to
     /// pre-ii-d. m23-q widened the predicate from `Clip.isStretchIdentity` to
-    /// include pitch edits; see `needsRender` for why that is not simply a
-    /// model change.
+    /// include pitch edits; its one home is now `Clip.rendersThroughStretchCache`
+    /// (m23-ap-p2), which `needsRender` forwards to.
     enum StretchResolution {
         /// The rendered CAF exists — open THIS file instead of the source.
         /// The CAF is timeline-domain audio, so all downstream beat→frame
@@ -599,8 +599,9 @@ final class PlaybackGraph {
 
     /// Engine-notices sink (m15-e, audit F6): one `EngineNoticeEvent` per
     /// schedule-time degradation — the bake-failure fallbacks ("timing wins":
-    /// the clip still sounds, on time, unshaped) and the stretch-pending
-    /// silence transition. Every post happens inside this @MainActor class's
+    /// the clip still sounds, on time, unshaped) and pending-render silence
+    /// (posted by the schedule pass that plays it, never by the edit that
+    /// caused it — m23-ap-p2 p2-notice). Every post happens inside this @MainActor class's
     /// schedule/reconcile code — control plane only, the render thread gains
     /// nothing. AudioEngine forwards into the store's ring; OFFLINE graphs
     /// (OfflineRenderer, bare test graphs) leave it nil by design — a bounce
@@ -609,12 +610,40 @@ final class PlaybackGraph {
     var noticeSink: ((EngineNoticeEvent) -> Void)?
 
     /// Clip ids whose stretch-pending silence has already been NOTICED
-    /// (m15-e): reconcile re-resolves pending clips on every pass, so the
-    /// notice posts once per clip per pending EPISODE — a `.ready` resolution
-    /// re-arms the gate (a later re-edit back into pending posts again).
-    /// Session-bounded; a graph rebuild starts empty and honestly re-posts
-    /// clips that are still silent.
+    /// (m15-e): the notice posts once per clip per pending EPISODE. An
+    /// episode ends when the clip stops being pending by ANY route — its
+    /// render lands (`.ready`), it returns to identity, or it leaves the
+    /// model — because every reconcile pass prunes this set to the clips
+    /// that pass left pending (`stretchPendingClips`); a later re-edit back
+    /// into pending posts again. Session-bounded; a graph rebuild starts
+    /// empty and honestly re-posts clips that are still silent.
     private var stretchPendingNoticed: Set<UUID> = []
+
+    /// One audio clip the LAST reconcile pass left WITHOUT a node because its
+    /// stretch/tuning render is pending — i.e. a clip any schedule pass will
+    /// play as silence (m23-ap-p2 p2-notice).
+    private struct PendingRenderSilence {
+        let clip: Clip
+        let beat: Double
+    }
+
+    /// The pending-render ledger, in track/clip order (so a multi-clip post
+    /// order is deterministic): rebuilt WHOLE by every reconcile pass, read by
+    /// `scheduleAll`, which is where the `clip-stretch-pending` notice posts.
+    ///
+    /// ⚠️ **WHY THE NOTICE IS NOT POSTED WHERE THE CLIP IS FOUND PENDING.**
+    /// Reconcile is what an EDIT runs — `ProjectStore`'s pitch edits call
+    /// `engine.tracksDidChange` with the transport STOPPED — so posting there
+    /// lit the amber chip after every tuning or note drag, claiming a sound
+    /// "played not as set" when nothing had played (measured on staging
+    /// 2026-09-24: 11 ms after `clip.autoCorrectPitch`, no playback sent; the
+    /// render was ready in 0.36–0.83 s). And the play start does NOT
+    /// re-resolve a pending clip: nothing on the play path reconciles, and
+    /// `scheduleAll` walks ClipNodes only, which a pending clip never got. So
+    /// reconcile records, and the schedule pass — reached in the live engine
+    /// only through `AudioEngine.startPlayers` (play, record, seek/tempo/
+    /// edit-while-rolling restarts, rebuild resume, recovery) — reports.
+    private var stretchPendingClips: [PendingRenderSilence] = []
 
     /// Clip ids whose media OPEN failed at graph-build time and have already
     /// posted their `clip-file-missing` notice (m16-c, audit F2): the skipped
@@ -895,6 +924,9 @@ final class PlaybackGraph {
         }
 
         // 2 + 3. Added tracks, then per-track clip diffs by ClipKey.
+        // m23-ap-p2 p2-notice: this pass's pending-render clips, committed to
+        // `stretchPendingClips` with the signatures at the end of the pass.
+        var pendingThisPass: [PendingRenderSilence] = []
         for track in audioTracks {
             let keys = newSignature[track.id] ?? []
             var node: TrackNode
@@ -937,28 +969,30 @@ final class PlaybackGraph {
             for key in keys where node.clips[key.id] == nil {
                 guard let url = key.url else { continue }  // no media (MIDI lands in M3)
                 guard let domainClip = clipByID[key.id] else { continue }
-                // Stretch swap (M5 ii-d): a non-identity clip opens its
-                // rendered CAF instead of the source; while the render is
-                // pending the clip gets NO node — silence, never wrong-speed
-                // audio. The pending clip stays in `signature`, so this loop
-                // re-resolves on every reconcile pass and the engine's
-                // render-completion restart lands the CAF. Identity clips
-                // never invoke the resolver (the bypass contract).
+                // Stretch swap (M5 ii-d): a clip that renders (a stretch,
+                // transpose or tuning — `Clip.rendersThroughStretchCache`)
+                // opens its rendered CAF instead of the source; while the
+                // render is pending the clip gets NO node — silence, never
+                // wrong-speed or untuned audio. The pending clip stays in
+                // `signature`, so this loop re-resolves on every reconcile
+                // pass and the engine's render-completion restart lands the
+                // CAF. Identity clips never invoke the resolver (the bypass
+                // contract).
                 var fileURL = url
                 if StretchRenderCache.needsRender(domainClip) {
                     switch stretchResolver?(domainClip) {
                     case .ready(let rendered):
-                        stretchPendingNoticed.remove(key.id)
+                        // The episode ends here; the pass-end prune of
+                        // `stretchPendingNoticed` re-arms the gate.
                         fileURL = rendered
                     case .pending, nil:
-                        // m15-e (audit F6): the clip is being scheduled as
-                        // SILENCE — surface it once per pending episode.
-                        if stretchPendingNoticed.insert(key.id).inserted {
-                            noticeSink?(EngineNoticeEvent(
-                                code: "clip-stretch-pending",
-                                message: "'\(domainClip.name)' is still being time-stretched — it plays as silence until the stretch is ready.",
-                                beat: key.startBeat))
-                        }
+                        // m15-e (audit F6) → m23-ap-p2 p2-notice: RECORD, do
+                        // not post. A reconcile is what an edit runs, with the
+                        // transport usually stopped; the silence is reported
+                        // when a schedule pass actually plays it
+                        // (`postPendingRenderSilence`, from `scheduleAll`).
+                        pendingThisPass.append(
+                            PendingRenderSilence(clip: domainClip, beat: key.startBeat))
                         continue
                     }
                 }
@@ -1197,6 +1231,12 @@ final class PlaybackGraph {
         instrumentSignature = newInstrumentSignature
         routingSignature = newRoutingSignature
         busSignature = newBusSignature
+        // m23-ap-p2 p2-notice: the ledger is this pass's pending set, WHOLE —
+        // so a clip whose render landed, whose tuning was removed, or which
+        // left the model is never reported at the next play; and an episode
+        // that ended here re-arms its notice.
+        stretchPendingClips = pendingThisPass
+        stretchPendingNoticed.formIntersection(pendingThisPass.map(\.clip.id))
         return changed
     }
 
@@ -2387,6 +2427,9 @@ final class PlaybackGraph {
                 trackNodes[trackID]?.clips.removeValue(forKey: clipID)
             }
         }
+        // Its render just landed: no schedule pass may report it as pending
+        // silence before the reconcile that follows re-resolves it.
+        stretchPendingClips.removeAll { $0.clip.id == clipID }
     }
 
     /// Tears down ONE instrument track's node (unpublish + flush, tap off,
@@ -2669,6 +2712,9 @@ final class PlaybackGraph {
         // Stage the timeline mapping the next startAllPlayers rolls
         // automation with (the pendingEvents convention).
         stagedAutomationStart = (startBeats, tempoMap)
+        // m23-ap-p2 p2-notice: THIS pass is what plays a pending-render clip
+        // as silence, so this is where that is reported — never at the edit.
+        postPendingRenderSilence()
         forEachClip { clip in
             let fileRate = clip.file.processingFormat.sampleRate
             let fileLength = clip.file.length
@@ -2858,6 +2904,41 @@ final class PlaybackGraph {
                 loopUnroll?.midiNoteIDBase[trackID] = build.nextNoteID
             }
         }
+    }
+
+    // MARK: - Pending-render silence notice (m15-e → m23-ap-p2 p2-notice)
+
+    /// Posts `clip-stretch-pending` for every clip in the pending-render
+    /// ledger that has not been noticed in its current episode. Called ONLY
+    /// from `scheduleAll`: in the live engine that is `AudioEngine.startPlayers`
+    /// — a transport start, a record start, a restart while rolling (seek,
+    /// tempo, an edit, a loop change), a rebuild resume, a recovery — so a
+    /// stopped transport posts nothing however many edits reconcile. An
+    /// offline bounce's graph has no `noticeSink` (and waits for its renders).
+    /// Main-actor control code; the render thread gains nothing.
+    private func postPendingRenderSilence() {
+        for pending in stretchPendingClips
+        where stretchPendingNoticed.insert(pending.clip.id).inserted {
+            noticeSink?(EngineNoticeEvent(
+                code: "clip-stretch-pending",
+                message: Self.stretchPendingMessage(for: pending.clip),
+                beat: pending.beat))
+        }
+    }
+
+    /// The `clip-stretch-pending` copy. m23-ap-p2 p2-notice split it: a TUNED
+    /// clip — pitch edits, no time-stretch and no transpose — is waiting for
+    /// its tuned version, and calling that "time-stretched" named something
+    /// the user never did. Every other pending clip keeps the stretch wording
+    /// verbatim, because it really is being time-stretched (a clip that is
+    /// stretched AND tuned included). The code stays `clip-stretch-pending`
+    /// for both: it is a stable wire key, and the ring coalesces by it.
+    static func stretchPendingMessage(for clip: Clip) -> String {
+        if clip.hasPitchEdits && clip.isStretchIdentity {
+            return "The tuned version of '\(clip.name)' is still being prepared — "
+                + "the clip plays as silence until it's ready."
+        }
+        return "'\(clip.name)' is still being time-stretched — it plays as silence until the stretch is ready."
     }
 
     // MARK: - Loop cycle unroll (m14-a L-1, design-m13f-gapless-loop §4-A)
@@ -3676,6 +3757,7 @@ final class PlaybackGraph {
         }
         trackNodes.removeAll()
         signature.removeAll()
+        stretchPendingClips.removeAll()  // no clip is scheduled now, silent or otherwise
         for node in instrumentNodes.values {
             node.renderer.publish(nil)
             node.renderer.requestFlush()

@@ -124,6 +124,12 @@ struct EditorSurfaceOwnershipSiteTests {
         // surface added without a line here is a self-confirming latch nothing
         // is watching for.
         "zoomPitchEditorIn", "zoomPitchEditorOut", "zoomPitchEditorReset",
+        // ⭐ m23-ap C4 — THE SAME PANE'S VERTICAL THREE. A second AXIS brings
+        // three more entry points under the same law, and this list not
+        // extending itself is exactly why they are written out: the roll's
+        // `rowZoom*` trio is absent from here only because it predates the
+        // list, which is a gap worth knowing about rather than a precedent.
+        "pitchEditorRowZoomIn", "pitchEditorRowZoomOut", "pitchEditorRowZoomReset",
     ]
 
     // MARK: - F1: the router may never read SwiftUI focus again

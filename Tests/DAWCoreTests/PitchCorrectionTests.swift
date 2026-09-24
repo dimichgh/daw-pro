@@ -302,6 +302,12 @@ struct PitchAutoCorrectPolicyTests {
                                          centreHz: 445)
         let runs = PitchAutoCorrect.voicedRuns(in: frames, frameRateHz: Contour.frameRateHz)
         try #require(runs.count == 1)
+        // p2-seg §5.2 (design 2026-09-24-pitch-note-splitting.md): a 128 ms scoop
+        // is not a note change. The splitter returns this run as `voicedRuns`
+        // built it, and both builders write the pre-p2-seg table field by field.
+        let invariance = PrePitchNoteSplitReference.invarianceFailures(frames: frames,
+                                                                       frameRateHz: Contour.frameRateHz)
+        #expect(invariance.isEmpty, "\(invariance.prefix(3))")
         let centreCents = Contour.centsFromA440(runs[0].centreHz)
         // The note's centre is where it was HELD: 445 Hz = +19.562 cents.
         #expect(abs(centreCents - 19.562) < 2.0)
@@ -552,21 +558,37 @@ struct PitchAutoCorrectPolicyTests {
         #expect(!nudged.isIdentity)
     }
 
-    /// The segmentation seam Phase 2 replaces, pinned so the limitation is
-    /// VISIBLE rather than discovered by a user. Design §11.2 gives
-    /// segmentation its own design doc; inventing a target-change splitter here
-    /// would build on a foundation that is still being designed.
-    @Test("KNOWN PHASE-2 LIMIT: a legato slur is ONE run, and the pin says so")
-    func legatoSlurIsOneSegmentToday() {
+    /// The segmentation seam Phase 2 replaced (p2-seg, design
+    /// `docs/design/2026-09-24-pitch-note-splitting.md` §5.4). This test was
+    /// `legatoSlurIsOneSegmentToday` — "KNOWN PHASE-2 LIMIT: a legato slur is ONE
+    /// run" — and is REWRITTEN ON PURPOSE, not re-baselined: a note change inside
+    /// an unbroken run is now two notes (`PitchNoteSplitter`), while the RUN rule
+    /// that the played line and the contour depend on still sees one run.
+    @Test("p2-seg: a legato slur splits at the note change, and voicedRuns still sees ONE run")
+    func legatoSlurSplitsAtTheNoteChange() throws {
         // Two pitches, no gap between them — the singer never stopped.
         let frames = Contour.note(startSeconds: 0, durationSeconds: 0.5, centreHz: 440)
             + Contour.note(startSeconds: 0.5, durationSeconds: 0.5, centreHz: 494)
+        let cMajor = PitchCorrectionScale(tonicPitchClass: 0, mode: .major)
         let set = PitchAutoCorrect.editSet(
             contour: frames, frameRateHz: Contour.frameRateHz,
-            options: PitchAutoCorrectOptions(
-                scale: PitchCorrectionScale(tonicPitchClass: 0, mode: .major), strength: 1))
-        // ⚠️ ONE segment — today's honest behaviour, not the desired one.
-        #expect(set.segments.count == 1)
+            options: PitchAutoCorrectOptions(scale: cMajor, strength: 1))
+        // TWO segments, cut where the pitch changes (0.5 s, ± one frame).
+        try #require(set.segments.count == 2)
+        #expect(abs(set.segments[0].endSeconds - 0.5) <= Contour.framePeriod + 1e-9)
+        #expect(set.segments[0].endSeconds == set.segments[1].startSeconds)
+        // Each note keeps ITS OWN median as what was sung (±1 c)…
+        #expect(abs(1200 * log2(set.segments[0].detectedHz / 440)) <= 1)
+        #expect(abs(1200 * log2(set.segments[1].detectedHz / 494)) <= 1)
+        // …and locks to its own note in C major: A4 and B4 — not one note for both.
+        let targets = set.segments.map {
+            PitchCorrectionMath.midi(fromHz: $0.detectedHz) + $0.pitchOffsetCents / 100
+        }
+        #expect(abs(targets[0] - 69) < 1e-9 && abs(targets[1] - 71) < 1e-9, "targets \(targets)")
+        // ⭐ THE RUN RULE IS UNCHANGED: `voicedRuns` on the SAME frames is still
+        // ONE run — the per-run contract the played line and the editor's
+        // measured contour depend on (design §0 point 1).
+        #expect(PitchAutoCorrect.voicedRuns(in: frames, frameRateHz: Contour.frameRateHz).count == 1)
         // NEGATIVE CONTROL / the contrast that shows WHY: insert a 200 ms hole
         // between exactly the same two pitches and it becomes two.
         let separated = Contour.note(startSeconds: 0, durationSeconds: 0.5, centreHz: 440)
@@ -950,6 +972,7 @@ struct PitchEditSetInvariantTests {
             ("pitchOffsetCents", { $0.pitchOffsetCents = -10 }),
             ("driftScale", { $0.driftScale = 0.5 }),
             ("vibratoScale", { $0.vibratoScale = 0 }),
+            ("vibratoDepthCents (m23-ap C5a generator)", { $0.vibratoDepthCents = 45 }),
             ("formantOffsetSemitones (phase 4)", { $0.formantOffsetSemitones = -1.5 }),
             ("timeStartDeltaSeconds (phase 3)", { $0.timeStartDeltaSeconds = 0.01 }),
             ("timeEndDeltaSeconds (phase 3)", { $0.timeEndDeltaSeconds = -0.01 }),
@@ -962,7 +985,39 @@ struct PitchEditSetInvariantTests {
             #expect(Clip(name: "c", pitchEdits: set).hasPitchEdits,
                     "\(name) must make the clip report edits")
         }
-        #expect(cases.count == 7)
+        // Was 7 before m23-ap C5a added `vibratoDepthCents`. The count is the
+        // point: a field added without a row here would slip through.
+        #expect(cases.count == 8)
+
+        // ⭐⭐ **AND THE TWO THAT DELIBERATELY DO NOT**, asserted in the same
+        // place so the list above cannot read as exhaustive when it is not.
+        // `vibratoRateHz` and `vibratoOnsetSeconds` enter the curve only as
+        // `depth × envelope × sin(…)`; at depth 0 that product is exactly zero
+        // for every `t`, so a set carrying them alone renders as NOTHING and
+        // §6.4 requires it to take the byte-for-byte identity bypass. This is
+        // NOT the phase-3/4 "carried but unread" case — those are unread, so
+        // their render effect is unknown; these are read, and provably inert.
+        let inert: [(String, (inout NoteSegment) -> Void)] = [
+            ("vibratoRateHz alone", { $0.vibratoRateHz = 7.8 }),
+            ("vibratoOnsetSeconds alone", { $0.vibratoOnsetSeconds = 0.4 }),
+        ]
+        for (name, mutate) in inert {
+            let set = setWith(mutate)
+            #expect(set.isIdentity, "\(name) must NOT break identity")
+            #expect(!Clip(name: "c", pitchEdits: set).hasPitchEdits,
+                    "\(name) must not make the clip report edits")
+        }
+        // The inertness PROVEN, not asserted: the curve is bit-identical.
+        let untouched = PitchCorrectionCurve.make(editSet: setWith { _ in })
+        for (name, mutate) in inert {
+            let curve = PitchCorrectionCurve.make(editSet: setWith(mutate))
+            for step in 0...100 {
+                let t = Double(step) / 100
+                #expect(curve.semitones(atSourceSecond: t).bitPattern
+                    == untouched.semitones(atSourceSecond: t).bitPattern,
+                        "\(name) changed the curve at \(t)")
+            }
+        }
     }
 
     /// The retune floor is an ENGINE limit — one 30 ms analysis hop at 48 kHz —
@@ -1136,6 +1191,7 @@ struct PitchCorrectionPersistenceTests {
         let segmentJSON = String(decoding: try JSONEncoder().encode(detectedOnly),
                                  as: UTF8.self)
         for key in ["pitchOffsetCents", "driftScale", "vibratoScale",
+                    "vibratoRateHz", "vibratoDepthCents", "vibratoOnsetSeconds",
                     "formantOffsetSemitones", "timeStartDeltaSeconds",
                     "timeEndDeltaSeconds", "amplitudeDb", "retuneMs"] {
             #expect(!segmentJSON.contains(key))
@@ -1250,5 +1306,149 @@ struct PitchCorrectionPersistenceTests {
         for step in -20...60 {
             #expect(curve.semitones(atSourceSecond: Double(step) / 10).isFinite)
         }
+    }
+
+    // MARK: - m23-ap C-F3 — the auto-correct stamp (`PitchEditProvenance.swift`)
+
+    /// OLD PROJECTS. Every set saved before 2026-09-24 has no stamp. It must read
+    /// as "may carry hand edits" (one unnecessary confirm per such clip, then the
+    /// preset re-stamps it) and never as a preset's output (a silent erase).
+    /// Re-saving it must not grow a key.
+    @Test("C-F3: a set saved before the stamp existed reads as 'may carry hand edits', and re-saves with no new key")
+    func legacySetAsksOnceAndGrowsNoKey() throws {
+        let legacy = """
+            {"analysisVersion":1,"segments":[{"id":"\(UUID().uuidString)",\
+            "startSeconds":0.25,"endSeconds":0.8,"detectedHz":445,\
+            "detectedConfidence":0.97,"pitchOffsetCents":-19.5}],"retuneMs":110}
+            """
+        let set = try JSONDecoder().decode(PitchEditSet.self, from: Data(legacy.utf8))
+        #expect(set.autoCorrectStamp == nil)
+        #expect(set.hasHandEditsSinceAutoCorrect == true,
+                "an OLD project's set reads as a preset's output, so a preset would erase any hand edits in it silently")
+        let reencoded = String(decoding: try JSONEncoder().encode(set), as: UTF8.self)
+        #expect(!reencoded.contains("autoCorrectStamp"))
+        // POSITIVE CONTROL for the matcher: a stamped set DOES write the key.
+        let stamped = set.stampedAsAutoCorrectOutput()
+        #expect(String(decoding: try JSONEncoder().encode(stamped), as: UTF8.self)
+            .contains("autoCorrectStamp"))
+        #expect(stamped.hasHandEditsSinceAutoCorrect == false)
+    }
+
+    /// A preset's output must still read as a preset's output after the project
+    /// is saved and reopened, on BOTH paths (the wire's `Clip` Codable and the
+    /// disk's `ProjectDocument`, pretty-printed and key-sorted like the real
+    /// writer). Otherwise every reopen would re-nag every tuned clip.
+    @Test("C-F3: the stamp survives the wire AND the disk path, and still matches after reopening")
+    func stampSurvivesSaveAndReopen() throws {
+        let stamped = editedSet().stampedAsAutoCorrectOutput()
+        #expect(stamped.hasHandEditsSinceAutoCorrect == false)
+
+        let clip = audioClip(pitchEdits: stamped)
+        let wire = try JSONDecoder().decode(Clip.self, from: JSONEncoder().encode(clip))
+        #expect(wire.pitchEdits?.autoCorrectStamp == stamped.autoCorrectStamp)
+        #expect(wire.pitchEdits?.hasHandEditsSinceAutoCorrect == false)
+
+        let document = ProjectDocument(name: "P", transport: TransportState(),
+                                       tracks: [Track(name: "Vox", kind: .audio, clips: [clip])],
+                                       masterVolume: 1,
+                                       mediaRefs: [clip.id: "media/vox.wav"])
+        let writer = JSONEncoder()
+        writer.outputFormatting = [.prettyPrinted, .sortedKeys]   // ProjectBundle's own
+        let reopened = try JSONDecoder().decode(ProjectDocument.self, from: writer.encode(document))
+            .runtimeState(bundleURL: URL(fileURLWithPath: "/tmp/does-not-exist-bundle"))
+        let restored = try #require(reopened.tracks.first?.clips.first?.pitchEdits)
+        #expect(restored.autoCorrectStamp == stamped.autoCorrectStamp)
+        #expect(restored.hasHandEditsSinceAutoCorrect == false,
+                "a preset's output reads as hand-edited after reopening, so every reopen would re-nag")
+        // NEGATIVE CONTROL: the reopened set still NOTICES a change, so the false
+        // above is a match, not a predicate that has stopped looking.
+        var touched = restored
+        touched.segments[0].pitchOffsetCents += 1
+        #expect(touched.hasHandEditsSinceAutoCorrect == true)
+    }
+
+    /// The stamp is not part of its own input, and every edit a hand can make
+    /// today (or soon) moves it. That includes a cut that changes NO pitch,
+    /// which is exactly what `isIdentity`, the render's "bends nothing" test,
+    /// cannot see.
+    @Test("C-F3: the stamp excludes itself, and every stored field moves it, including a split nobody can hear")
+    func stampExcludesItselfAndSeesEveryField() throws {
+        let base = editedSet()
+        let stamped = base.stampedAsAutoCorrectOutput()
+        #expect(stamped.contentStamp == stamped.autoCorrectStamp,
+                "re-stamping a stamped set gives a different answer, so the stamp is part of its own input")
+        #expect(base.contentStamp == stamped.contentStamp)
+
+        // A CHECK on the claim that the type's own `encode` is the census, not a
+        // second source of it: every field a per-note edit can write today,
+        // plus the set-level ones, one at a time.
+        let changes: [(String, (inout PitchEditSet) -> Void)] = [
+            ("pitchOffsetCents", { $0.segments[0].pitchOffsetCents += 1 }),
+            ("driftScale", { $0.segments[0].driftScale = 0.75 }),
+            ("vibratoScale", { $0.segments[0].vibratoScale = 0.5 }),
+            ("vibratoRateHz", { $0.segments[0].vibratoRateHz = 5.5 }),
+            ("vibratoDepthCents", { $0.segments[0].vibratoDepthCents = 30 }),
+            ("vibratoOnsetSeconds", { $0.segments[0].vibratoOnsetSeconds = 0.2 }),
+            ("formantOffsetSemitones", { $0.segments[0].formantOffsetSemitones = 1 }),
+            ("timeStartDeltaSeconds", { $0.segments[0].timeStartDeltaSeconds = 0.01 }),
+            ("timeEndDeltaSeconds", { $0.segments[0].timeEndDeltaSeconds = -0.01 }),
+            ("amplitudeDb", { $0.segments[0].amplitudeDb = -1 }),
+            ("startSeconds", { $0.segments[0].startSeconds += 0.01 }),
+            ("endSeconds", { $0.segments[0].endSeconds -= 0.01 }),
+            ("retuneMs", { $0.retuneMs = 250 }),
+            ("analysisVersion", { $0.analysisVersion += 1 }),
+        ]
+        for (label, change) in changes {
+            var edited = stamped
+            change(&edited)
+            #expect(edited.hasHandEditsSinceAutoCorrect == true,
+                    "a change to \(label) does not register, so a preset would erase it silently")
+        }
+
+        // A CUT OF AN UNTOUCHED NOTE: both halves still bend nothing, so the
+        // render's own question (`isIdentity`) says nothing happened. A preset
+        // would still throw the cut away. The stamp sees it.
+        let whole = PitchEditSet(segments: [
+            NoteSegment(startSeconds: 0, endSeconds: 1, detectedHz: 220, detectedConfidence: 0.9),
+        ]).stampedAsAutoCorrectOutput()
+        var cut = whole
+        let right = try JSONDecoder().decode(NoteSegment.self, from: Data("""
+            {"id":"\(UUID().uuidString)","startSeconds":0.5,"endSeconds":1,\
+            "detectedHz":220,"detectedConfidence":0.9}
+            """.utf8))
+        cut.segments[0].endSeconds = 0.5
+        cut.segments.append(right)
+        #expect(cut.isIdentity, "fixture: the cut must bend nothing, or this proves nothing about isIdentity")
+        #expect(cut.hasHandEditsSinceAutoCorrect == true,
+                "a cut that changes no pitch is invisible to the signal, so a preset would silently re-merge it")
+    }
+
+    /// The cost, MEASURED rather than derived: the doors ask once per preset
+    /// click and the store stamps once per preset write, on the main actor.
+    /// 450 notes is the design's sizing figure for a corrected vocal (§7.3).
+    @Test("C-F3: what the stamp costs at 450 notes (printed; a loose ceiling, not a benchmark)")
+    func stampCostAtVocalScale() {
+        var segments: [NoteSegment] = []
+        for i in 0..<450 {
+            let start = Double(i) * 0.4
+            segments.append(NoteSegment(startSeconds: start, endSeconds: start + 0.3,
+                                        detectedHz: 220 + Double(i % 24), detectedConfidence: 0.93,
+                                        pitchOffsetCents: Double(i % 17) - 8, driftScale: 1,
+                                        vibratoScale: i % 5 == 0 ? 0.5 : 1))
+        }
+        let set = PitchEditSet(segments: segments, retuneMs: 110).stampedAsAutoCorrectOutput()
+        let runs = 20
+        let clock = ContinuousClock()
+        var answers = 0
+        let elapsed = clock.measure {
+            for _ in 0..<runs where set.hasHandEditsSinceAutoCorrect == false { answers += 1 }
+        }
+        let perCallMs = Double(elapsed.components.attoseconds) / 1e15 / Double(runs)
+            + Double(elapsed.components.seconds) * 1000 / Double(runs)
+        print("C-F3 stamp cost: \(String(format: "%.2f", perCallMs)) ms per question at 450 notes (debug build, \(runs) runs)")
+        #expect(answers == runs)
+        // A ceiling that only a pathological regression reaches, because a
+        // loaded machine must not turn a measurement into a flake.
+        #expect(perCallMs < 500)
     }
 }

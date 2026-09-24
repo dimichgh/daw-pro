@@ -7,7 +7,8 @@ import Testing
 
 /// m23-ap Phase 2 — **THE PRESET DOOR'S AUDIBILITY GATE (design §6.4).**
 ///
-/// The clip context menu's *Tune Vocal ▸ Gentle / Natural / Tight* now exists as
+/// The clip context menu's *Tune Vocal ▸ Gentle / Natural / Tight* (and, since
+/// contour-to-render put the detected contour into the render, *Hard Tune*) now exists as
 /// pixels. This suite is the reason anyone should believe it does anything.
 ///
 /// ⛔ **AUDIBILITY IS NOT CORRECTNESS.** Five planted defects in this tree have
@@ -232,6 +233,14 @@ struct PitchPresetRenderGateTests {
         var measured: [PitchCorrectionPreset: Double] = [:]
         var residual: [PitchCorrectionPreset: Double] = [:]
 
+        // The contour the RENDER shapes against: the whole-file detection
+        // `PitchContourCache.renderContour` returns. For this untrimmed fixture
+        // it is the same call as `detected` above (whole file, product
+        // settings), which is exactly why the door's segments and the render's
+        // contour agree here.
+        let renderContour = PitchRenderContour.detected(
+            try PitchContourCache.detectWholeFile(url, .product))
+
         for preset in PitchCorrectionPreset.offeredInUI {
             // ⭐ THE DOOR'S OWN CALL. `preset.options()` is character-for-character
             // what `AppModel.tuneVocalFromContextMenu` passes and what
@@ -244,17 +253,19 @@ struct PitchPresetRenderGateTests {
             #expect(!set.isIdentity,
                     "\(preset.rawValue) produced an IDENTITY set — it would take the constant path and render as if it had never been asked for")
 
+            // The render's own plan: the render contour goes in exactly when
+            // the edits need it (`StretchRenderCache.performRender`'s rule).
             let plan = try #require(
                 StretchCurvePlan.make(
                     editSet: set, clipPitchShiftSemitones: 0,
-                    sampleRate: Self.sampleRate, ratio: 1),
+                    sampleRate: Self.sampleRate, ratio: 1,
+                    contour: set.needsDetectedContour ? renderContour : nil),
                 "\(preset.rawValue) produced no render plan — the curve branch is not reachable for it")
 
-            // ⭐ THE WITHHOLDING REASON, PINNED AT THE RENDER LAYER. The three
-            // offered presets keep `preserveVibrato: true`, so every segment
-            // resolves against no contour at all and NOTHING lands in the
-            // unresolved list. `hardTuneIsTheOnlyPresetTheRenderPathCannotHonour`
-            // is the positive control that this list can be non-empty.
+            // ⭐ EVERY OFFERED PRESET RESOLVES. The ladder keeps
+            // `preserveVibrato: true` and needs no contour; Hard Tune needs one
+            // and now gets it. `withoutTheContourHardTuneDegradesAndSaysSo` is
+            // the positive control that this list CAN be non-empty.
             #expect(plan.curve.unresolvedShapingSegmentIDs.isEmpty,
                     "\(preset.rawValue) has \(plan.curve.unresolvedShapingSegmentIDs.count) segment(s) the render path cannot resolve — it is being offered in the UI and cannot be honoured")
 
@@ -404,8 +415,16 @@ struct PitchPresetRenderGateTests {
                 "\(differing) samples moved between two identical constant-path renders — the reference this suite measures everything against is not deterministic")
     }
 
-    @Test("⛔ hardTune is the ONE preset the render path cannot honour — the reason `offeredInUI` exists, asserted rather than described")
-    func hardTuneIsTheOnlyPresetTheRenderPathCannotHonour() throws {
+    /// Formerly `hardTuneIsTheOnlyPresetTheRenderPathCannotHonour` — the reason
+    /// `offeredInUI` withheld Hard Tune while the render built every curve with
+    /// `contour: []`. That reason is gone (contour-to-render); what remains
+    /// true, and is pinned here, is the FALLBACK: when the render cannot get
+    /// the contour it builds exactly this no-contour plan, Hard Tune degrades
+    /// to constant offsets, and the curve SAYS so through
+    /// `unresolvedShapingSegmentIDs` — while the ladder, which never needed a
+    /// contour, is unaffected either way.
+    @Test("⛔ without the render contour Hard Tune degrades and says so; with it, every offered preset resolves")
+    func withoutTheContourHardTuneDegradesAndSaysSo() throws {
         let dir = try Self.makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
         let url = dir.appendingPathComponent("sharp-a3.wav")
@@ -414,27 +433,35 @@ struct PitchPresetRenderGateTests {
             fileAt: url, fromSeconds: 0, durationSeconds: Self.seconds,
             confidenceThreshold: PitchDetectionDefaults.defaultConfidenceThreshold,
             silenceFloorDbfs: PitchDetectionDefaults.defaultSilenceFloorDbfs)
+        let renderContour = PitchRenderContour.detected(
+            try PitchContourCache.detectWholeFile(url, .product))
 
-        func unresolved(_ preset: PitchCorrectionPreset) throws -> Int {
+        func unresolved(_ preset: PitchCorrectionPreset,
+                        _ contour: PitchRenderContour?) throws -> Int {
             let set = PitchAutoCorrect.editSet(
                 contour: detected.frames, frameRateHz: detected.frameRateHz,
                 options: preset.options())
             let plan = try #require(
                 StretchCurvePlan.make(editSet: set, clipPitchShiftSemitones: 0,
-                                      sampleRate: Self.sampleRate, ratio: 1))
+                                      sampleRate: Self.sampleRate, ratio: 1,
+                                      contour: contour))
             return plan.curve.unresolvedShapingSegmentIDs.count
         }
 
-        // The render path calls `StretchCurvePlan.make` with `contour: []`, so a
-        // segment asking for SHAPING (driftScale/vibratoScale ≠ 1 — only
-        // `preserveVibrato: false` produces one) has nothing to resolve against
-        // and degrades to a constant per-note offset that nobody is told about.
-        // That, and not taste, is why the pixels withhold Hard Tune.
-        #expect(try unresolved(.hardTune) > 0,
-                "hardTune resolved cleanly against an empty contour — if the render path now threads a contour through, `PitchCorrectionPreset.offeredInUI` must be REMOVED (its own doc says so) and the menu drawn from `allCases`")
+        // The fallback: no contour — the render's plan when detection is
+        // unavailable. A segment asking for SHAPING has nothing to resolve
+        // against, degrades to a constant offset, and is NAMED.
+        #expect(try unresolved(.hardTune, nil) > 0,
+                "hardTune resolved cleanly against NO contour — the fallback no longer reports what it could not do")
+        #expect(try unresolved(.hardTune, .unavailable(reason: "planted")) > 0)
+        // The product: the render contour — every offered preset resolves.
         for preset in PitchCorrectionPreset.offeredInUI {
-            #expect(try unresolved(preset) == 0,
-                    "\(preset.rawValue) is offered in the UI and has segments the render path cannot honour")
+            #expect(try unresolved(preset, renderContour) == 0,
+                    "\(preset.rawValue) is offered in the UI and has segments the render cannot resolve even WITH the contour")
+        }
+        // And the ladder never depended on it.
+        for preset in PitchCorrectionPreset.ladder {
+            #expect(try unresolved(preset, nil) == 0)
         }
     }
 }

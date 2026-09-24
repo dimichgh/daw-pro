@@ -75,6 +75,15 @@ public final class PanelLayoutStore {
     /// Same word, different surface, different units, different range — a slot that
     /// borrowed the name would send every future reader to the wrong axis.
     public static let pianoRollRowHeightKey = "pianoRollRowHeight"
+    /// Pitch-editor VERTICAL zoom (m23-ap C4) — the SEMITONE-row height, points.
+    ///
+    /// ⚠️ **A THIRD SLOT ON THIS AXIS, AND ALL THREE ARE DIFFERENT SURFACES.**
+    /// `rowHeight` is the arrange's TRACK lane; `pianoRollRowHeight` is the
+    /// roll's pitch rows; this is the pitch editor's. The two bottom panes get
+    /// separate slots for the reason `pitchEditorPPB` does: they are never on
+    /// screen together (design §3.6), so a shared value would silently rescale
+    /// the roll every time a vocal was inspected.
+    public static let pitchEditorRowHeightKey = "pitchEditorRowHeight"
     /// Mixer INSERTS disclosure (m23-a) — collapsed vs expanded, for the whole
     /// console (the density precedent: the mixer is ONE panel, so its strips do
     /// not each carry their own chrome state). Stored in the shared `Double`
@@ -171,6 +180,11 @@ public final class PanelLayoutStore {
     /// ONE home for the number: `PianoRollZoom.defaultRowHeight`, which
     /// `PianoRollModel.defaultRowHeight` also reads.
     public static let defaultPianoRollRowHeight = PianoRollZoom.defaultRowHeight
+    /// The pitch editor's semitone rows start at the same 14 pt the roll's do
+    /// (m23-ap C4) — `PitchEditorGeometry.defaultRowHeight` is the SAME constant
+    /// from the SAME home, so a session that never touches the zoom draws
+    /// byte-identically to the read-only Increment A.
+    public static let defaultPitchEditorRowHeight = PianoRollZoom.defaultRowHeight
     /// Waveform vertical zoom starts at 1× (m25-e) — no magnification on top of
     /// the fit, the ⌥⌘0 reset target.
     public static let defaultWaveformVerticalZoom = WaveformScale.defaultVerticalZoom
@@ -227,6 +241,11 @@ public final class PanelLayoutStore {
     /// Pitch-row-height bounds (m25-b-4) — one source of truth in `PianoRollZoom`,
     /// where the measured legibility floor and the stated span ceiling are argued.
     public static let pianoRollRowHeightRange: ClosedRange<CGFloat> = PianoRollZoom.rowHeightRange
+    /// Pitch-editor row-height bounds (m23-ap C4) — the SAME range as the roll,
+    /// from the SAME home, for the reason `pitchEditorPPBRange` shares it: a
+    /// second ladder would let the two bottom panes disagree about what "one
+    /// step taller" means.
+    public static let pitchEditorRowHeightRange: ClosedRange<CGFloat> = PianoRollZoom.rowHeightRange
     /// Waveform vertical-zoom bounds (m25-e) — one source of truth in
     /// `WaveformScale`, the `ArrangeZoom`/`PianoRollZoom` discipline.
     public static let waveformVerticalZoomRange: ClosedRange<CGFloat> = WaveformScale.verticalZoomRange
@@ -253,6 +272,10 @@ public final class PanelLayoutStore {
     /// other axis. Read by the note grid, the keyboard gutter, the marquee and the
     /// minimap off the ONE value, so they rescale together by construction.
     public private(set) var pianoRollRowHeight: CGFloat
+    /// Pitch-editor semitone-row height (m23-ap C4) — read by
+    /// `PitchEditorGeometry`, which the surface, the ruler sidebar and the hit
+    /// testing all share, so they rescale together by construction.
+    public private(set) var pitchEditorRowHeight: CGFloat
     /// Whether the mixer console's INSERTS sections are collapsed (m23-a). ONE
     /// value for the whole console — channel strips, bus strips, and the master
     /// chain all read it, the way density is read per-console and never per-strip.
@@ -309,6 +332,9 @@ public final class PanelLayoutStore {
         self.pianoRollRowHeight = Self.loaded(backing, Self.pianoRollRowHeightKey,
                                               default: Self.defaultPianoRollRowHeight,
                                               range: Self.pianoRollRowHeightRange)
+        self.pitchEditorRowHeight = Self.loaded(backing, Self.pitchEditorRowHeightKey,
+                                                default: Self.defaultPitchEditorRowHeight,
+                                                range: Self.pitchEditorRowHeightRange)
         self.mixerInsertsCollapsed = backing.loadValue(forKey: Self.mixerInsertsCollapsedKey)
             .map { $0 != 0 } ?? Self.defaultMixerInsertsCollapsed
         self.followPlayhead = backing.loadValue(forKey: Self.followPlayheadKey)
@@ -387,6 +413,21 @@ public final class PanelLayoutStore {
     public func setPitchEditorPPB(_ value: CGFloat) {
         pitchEditorPPB = value.clamped(to: Self.pitchEditorPPBRange)
         backing.storeValue(Double(pitchEditorPPB), forKey: Self.pitchEditorPPBKey)
+    }
+
+    /// Sets the PITCH-EDITOR vertical zoom (m23-ap C4) — the semitone-row
+    /// height. Clamped like every dimension; write-through like every dimension.
+    ///
+    /// Drivers: the pane's own zoom cluster and
+    /// `debug.panelLayout {pitchEditorRowHeight}`. ⚠️ **NOT the View menu's
+    /// Note Row Height items (⌃⌘=/−/0)** — those write
+    /// `pianoRollRowHeight` unconditionally, so they still target the ROLL
+    /// while this pane is engaged. That is a live routing gap, reported rather
+    /// than silently patched here: routing them on `activeEditorSurface` is a
+    /// change to `EditorSurfaceRouter`'s tested policy and belongs with it.
+    public func setPitchEditorRowHeight(_ value: CGFloat) {
+        pitchEditorRowHeight = value.clamped(to: Self.pitchEditorRowHeightRange)
+        backing.storeValue(Double(pitchEditorRowHeight), forKey: Self.pitchEditorRowHeightKey)
     }
 
     /// Sets the piano-roll VERTICAL zoom (m25-b-4) — the pitch-row height.
@@ -510,6 +551,7 @@ public final class PanelLayoutStore {
         setPianoRollPPB(Self.defaultPianoRollPPB)
         setPitchEditorPPB(Self.defaultPitchEditorPPB)
         setPianoRollRowHeight(Self.defaultPianoRollRowHeight)
+        setPitchEditorRowHeight(Self.defaultPitchEditorRowHeight)
         setMixerInsertsCollapsed(Self.defaultMixerInsertsCollapsed)
         setFollowPlayhead(Self.defaultFollowPlayhead)
         setAuditionEnabled(Self.defaultAuditionEnabled)

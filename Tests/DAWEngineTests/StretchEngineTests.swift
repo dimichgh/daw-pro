@@ -1,6 +1,6 @@
 import AVFAudio
 import CryptoKit
-import DAWCore
+@testable import DAWCore  // C2-0 physics test builds its track directly (`tracks` is internal(set))
 import Foundation
 import Testing
 @testable import DAWEngine
@@ -619,5 +619,196 @@ struct StretchEngineTests {
             NoteSegment(startSeconds: 0.1, endSeconds: 0.4, detectedHz: 220,
                         detectedConfidence: 0.9, pitchOffsetCents: cents)
         ])
+    }
+
+    // MARK: - C2-0 (F13) physics: A SPLIT MUST NOT CHANGE THE SOUND
+    //
+    // `ProjectStoreClipStretchTests` (DAWCoreTests) pins the split/trim offsets
+    // against an oracle written in the same terms as the source, so on its own
+    // it could restate a wrong assumption. This test asks the question in a
+    // different form: it renders a stretched clip WHOLE through the real engine,
+    // splits it through the real store, renders again, and compares the audio.
+    //  - BEFORE the split point the renders must be identical: the left half is
+    //    untouched. That is the invariance control.
+    //  - AFTER it they must match too. Both halves read the SAME stretched
+    //    render (`StretchRenderCache`'s key has no clip id), so a correct split
+    //    is sample-exact by construction.
+    //
+    // It MEASURES any displacement rather than assuming one: a bounded search
+    // finds the lag at which the split render's first post-split 100 ms appear
+    // in the whole render. The undivided offset math predicts
+    // `splitSeconds × (ratio − 1)`: +1 s at ratio 2 (stretched audio SKIPPED),
+    // −0.25 s at ratio 0.5 (REPEATED).
+    //
+    // The source is a linear CHIRP, not a sine. A periodic tone matches itself
+    // at every multiple of its period, so a displaced read could pass a sample
+    // diff by coincidence. A chirp's content is different at every position.
+    //
+    // It lives in THIS suite (beside `startOffsetMapsThroughRatio`, the read
+    // side of the same offset) rather than a new one, which keeps the
+    // `@MainActor` suite count (`MainActorOccupancySiteTests` Leg C) unmoved.
+
+    struct SplitCase: Sendable, CustomTestStringConvertible {
+        let ratio: Double
+        /// SOURCE seconds.
+        let startOffsetSeconds: Double
+        /// Sized so the clip plays exactly to the end of the stretched render.
+        let lengthBeats: Double
+        let splitBeat: Double
+        var testDescription: String { "ratio \(ratio)" }
+    }
+
+    static let splitSampleRate = 48_000.0
+    static let splitSourceSeconds = 3.0
+    static let splitBPM = 120.0  // 1 beat = 0.5 s
+
+    /// `nonisolated`: the `@Test(arguments:)` macro reads it off the main actor.
+    nonisolated static let splitCases: [SplitCase] = [
+        // 3 s × 2 = a 6 s render. Offset 0.25 s of source = render 0.5 s, so the
+        // clip plays render [0.5, 6.0) = 5.5 s = 11 beats. Split 1 s in: the
+        // right half must read render 1.5 s; the undivided math reads 2.5 s, which
+        // also stays inside the file, so the error is a displacement, not silence.
+        SplitCase(ratio: 2, startOffsetSeconds: 0.25, lengthBeats: 11, splitBeat: 2),
+        // 3 s × 0.5 = a 1.5 s render. Offset 0.25 s of source = render 0.125 s,
+        // so the clip plays render [0.125, 1.5) = 1.375 s = 2.75 beats. Split
+        // 0.5 s in: the right half must read render 0.625 s; the undivided math
+        // reads 0.375 s.
+        SplitCase(ratio: 0.5, startOffsetSeconds: 0.25, lengthBeats: 2.75, splitBeat: 1),
+    ]
+
+    @Test("splitting a stretched clip renders identically to the unsplit clip",
+          arguments: splitCases)
+    func splitIsInaudible(_ c: SplitCase) async throws {
+        let dir = try makeTempDir("c2-0-split")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let source = dir.appendingPathComponent("chirp.wav")
+        try Self.writeChirp(to: source)
+
+        // A private cache directory: never the user's real stretch cache.
+        let engine = AudioEngine()
+        engine.stretchCache = StretchRenderCache(directory: dir.appendingPathComponent("cache"))
+
+        let store = ProjectStore()
+        try store.setTempo(Self.splitBPM)
+        let clip = Clip(name: "Chirp", startBeat: 0, lengthBeats: c.lengthBeats,
+                        audioFileURL: source, startOffsetSeconds: c.startOffsetSeconds,
+                        stretchRatio: c.ratio)
+        // Built directly (`tracks` is internal(set), hence `@testable import
+        // DAWCore`): an offset set through the store would need a trim, which
+        // is another C2-0 site, and this test must exercise the split ALONE.
+        store.tracks.append(Track(name: "Vox", kind: .audio, clips: [clip]))
+        let map = store.transport.tempoMap
+        let clipSeconds = map.seconds(from: 0, to: c.lengthBeats)
+        let duration = clipSeconds + 0.25
+
+        let whole = try await engine.renderOffline(
+            tracks: store.tracks, tempoMap: map, masterVolume: 1,
+            fromBeat: 0, durationSeconds: duration, forcedCompensationTargets: nil)
+        let (_, right) = try store.splitClip(trackId: store.tracks[0].id, clipId: clip.id,
+                                             atBeat: c.splitBeat)
+        #expect(store.tracks[0].clips.count == 2)
+        let split = try await engine.renderOffline(
+            tracks: store.tracks, tempoMap: map, masterVolume: 1,
+            fromBeat: 0, durationSeconds: duration, forcedCompensationTargets: nil)
+
+        let w = whole.channelData[0]
+        let s = split.channelData[0]
+        let splitSeconds = map.seconds(from: 0, to: c.splitBeat)
+        let splitFrame = Int((splitSeconds * Self.splitSampleRate).rounded())
+        let endFrame = Int((clipSeconds * Self.splitSampleRate).rounded())
+        try #require(w.count >= endFrame && s.count >= endFrame)
+
+        // Audibility control: a diff over silence proves nothing.
+        let postRMS = TestSignals.rms(w, in: splitFrame..<endFrame)
+        #expect(postRMS > 0.1, "the whole render must be audible after the split: RMS \(postRMS)")
+
+        let preDiff = Self.maxAbsDiff(s, w, in: 0..<splitFrame)
+        let postDiff = Self.maxAbsDiff(s, w, in: splitFrame..<endFrame)
+        let (lag, residual) = Self.bestLag(of: s, in: w, probeStart: splitFrame,
+                                           probeLength: 4_800, validEnd: endFrame)
+        let predictedUndividedLag = Int((splitSeconds * (c.ratio - 1) * Self.splitSampleRate).rounded())
+        let lastHalfSecond = max(splitFrame, endFrame - 24_000)..<endFrame
+        let splitTailRMS = TestSignals.rms(s, in: lastHalfSecond)
+        let wholeTailRMS = TestSignals.rms(w, in: lastHalfSecond)
+        print("[measured] C2-0 physics ratio \(c.ratio): right-half offset \(right.startOffsetSeconds) s; "
+              + "max|split − whole| before the split \(preDiff), after it \(postDiff); "
+              + "measured lag \(lag) frames = \(Double(lag) / Self.splitSampleRate) s "
+              + "(probe residual \(residual)); undivided-math prediction \(predictedUndividedLag) frames; "
+              + "last-0.5 s RMS split \(splitTailRMS) vs whole \(wholeTailRMS)")
+
+        #expect(preDiff == 0, "the left half must render bit-identically: max diff \(preDiff)")
+        #expect(postDiff <= 1e-6,
+                "after the split point the audio must not change: max diff \(postDiff)")
+        #expect(lag == 0,
+                "the right half is displaced by \(lag) frames (\(Double(lag) / Self.splitSampleRate) s)")
+        #expect(residual <= 1e-6, "the post-split probe must match the whole render exactly somewhere")
+    }
+
+    /// Stereo Float32 WAV at 48 kHz, identical channels: a linear chirp
+    /// 200 → 2 000 Hz at amplitude 0.5 across `splitSourceSeconds`.
+    private static func writeChirp(to url: URL) throws {
+        let settings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVSampleRateKey: splitSampleRate,
+            AVNumberOfChannelsKey: 2,
+            AVLinearPCMBitDepthKey: 32,
+            AVLinearPCMIsFloatKey: true,
+            AVLinearPCMIsNonInterleaved: false,
+        ]
+        let file = try AVAudioFile(forWriting: url, settings: settings,
+                                   commonFormat: .pcmFormatFloat32, interleaved: false)
+        let frames = Int(splitSourceSeconds * splitSampleRate)
+        guard let format = AVAudioFormat(commonFormat: .pcmFormatFloat32,
+                                         sampleRate: splitSampleRate, channels: 2,
+                                         interleaved: false),
+              let buffer = AVAudioPCMBuffer(pcmFormat: format,
+                                            frameCapacity: AVAudioFrameCount(frames)),
+              let channels = buffer.floatChannelData else {
+            throw EngineError.renderFailed("fixture buffer allocation failed")
+        }
+        let f0 = 200.0
+        let f1 = 2_000.0
+        for frame in 0..<frames {
+            let t = Double(frame) / splitSampleRate
+            let phase = 2 * Double.pi * (f0 * t + (f1 - f0) * t * t / (2 * splitSourceSeconds))
+            let value = Float(0.5 * sin(phase))
+            channels[0][frame] = value
+            channels[1][frame] = value
+        }
+        buffer.frameLength = AVAudioFrameCount(frames)
+        try file.write(from: buffer)
+    }
+
+    private static func maxAbsDiff(_ a: [Float], _ b: [Float], in range: Range<Int>) -> Float {
+        var worst: Float = 0
+        for frame in range {
+            worst = max(worst, abs(a[frame] - b[frame]))
+        }
+        return worst
+    }
+
+    /// The lag `k` minimising `max |a[p + i] − b[p + i + k]|` over the probe
+    /// `i ∈ [0, probeLength)`, searched over EVERY `k` that keeps `b`'s index
+    /// inside `[0, validEnd)`. Nothing about the expected answer is assumed.
+    /// Early exit keeps it cheap: a candidate stops as soon as its running max
+    /// exceeds the best so far.
+    private static func bestLag(of a: [Float], in b: [Float], probeStart p: Int,
+                                probeLength n: Int, validEnd: Int) -> (lag: Int, residual: Float) {
+        var bestLag = 0
+        var best = Float.infinity
+        for k in (-p)...(validEnd - n - p) {
+            var worst: Float = 0
+            var i = 0
+            while i < n {
+                worst = max(worst, abs(a[p + i] - b[p + i + k]))
+                if worst >= best { break }
+                i += 1
+            }
+            if worst < best {
+                best = worst
+                bestLag = k
+            }
+        }
+        return (bestLag, best)
     }
 }

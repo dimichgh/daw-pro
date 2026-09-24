@@ -262,9 +262,14 @@ extension AppModel {
 
     /// `debug.padGrid {padDown?, padY?, padUp?, bank?, baseNote?, openChop?,
     /// closeChop?, mode?, sensitivity?, divisions?, gridBeats?, maxSlices?,
-    /// chopBaseNote?, includeHead?, muteSourceTrack?, triggerMode?, levels?,
-    /// levelsFromPad?, exitLevels?, chop?}` — drives the SAME
-    /// instances `debug.captureUI` renders, and reports what they hold.
+    /// chopBaseNote?, includeHead?, muteSourceTrack?, triggerMode?,
+    /// spreadDirection?, levels?, levelsFromPad?, exitLevels?, chop?}` — drives
+    /// the SAME instances `debug.captureUI` renders, and reports what they hold.
+    ///
+    /// `spreadDirection` ("up" | "centered", m39-levels-2) is applied BEFORE
+    /// `levels`/`levelsFromPad`, so one call can choose the direction and make
+    /// the spread — and applied to a LIVE spread it flips it, exactly as the
+    /// toggle does, through `PadGridModel.setSpreadDirection`.
     ///
     /// ⛔ **APP TIER. Deliberately OFF `allCommands` and off MCP**, the
     /// `debug.musicalTyping` / `debug.samplerEditor` precedent: a debug verb that
@@ -316,6 +321,13 @@ extension AppModel {
             padGridDown(index: Int(raw),
                         normalizedY: params["padY"]?.doubleValue ?? 0.5)
         }
+        if let raw = params["spreadDirection"]?.stringValue {
+            guard let value = SixteenLevels.Direction(rawValue: raw) else {
+                throw DebugError("'\(raw)' is not a spread direction — one of "
+                    + SixteenLevels.Direction.allCases.map(\.rawValue).joined(separator: " "))
+            }
+            padGrid.setSpreadDirection(value)
+        }
         if params["levels"]?.boolValue == true { padGrid.toggleLevels() }
         if let raw = params["levelsFromPad"]?.doubleValue {
             padGrid.enterLevels(fromPad: Int(raw))
@@ -362,23 +374,46 @@ extension AppModel {
             "triggerMode": padGrid.triggerMode.map { JSONValue.string($0.rawValue) } ?? .null,
             "triggerModeError": padGrid.lastTriggerModeError.map { JSONValue.string($0) } ?? .null,
             "levelsArming": .bool(padGrid.levelsArming),
+            // What the toggle SHOWS — the live spread's own direction when one
+            // is up, else the choice for the next one.
+            "spreadDirection": .string(padGrid.spreadDirection.rawValue),
             "levels": padGrid.levels.map {
                 JSONValue.object([
-                    "sourceOrdinal": .number(Double($0.sourceOrdinal)),
+                    // ⚠️ null is a REAL value (m39-levels-3): no slice on the
+                    // kit is this spread's source any more, and the header
+                    // says so rather than naming one.
+                    "sourceOrdinal": $0.sourceOrdinal
+                        .map { JSONValue.number(Double($0)) } ?? .null,
+                    "spreadZoneId": .string($0.spreadZoneID.uuidString),
                     "base": .number(Double($0.base)),
                     "homeBaseNote": .number(Double($0.homeBaseNote)),
+                    // ⭐ READ OFF THE ZONE, not the toggle: the root IS the
+                    // direction, and null here means the spread zone is gone.
+                    "rootPitch": padGrid.liveSpreadZone
+                        .map { JSONValue.number(Double($0.rootPitch)) } ?? .null,
                 ])
             } ?? .null,
             "levelsError": padGrid.lastLevelsError.map { JSONValue.string($0) } ?? .null,
+            // m39-levels-3: spreads on the kit the grid is NOT standing on —
+            // what `levels: true` goes to, lowest first. A spread reopened
+            // from disk or made by `instrument.spreadSlice` shows up here.
+            "waitingSpreadIds": .array(padGrid.waitingSpreads.map { .string($0.id.uuidString) }),
+            "levelsStatus": padGrid.levelsStatus.map { JSONValue.string($0) } ?? .null,
             "lastChop": padGrid.lastChop.map {
                 JSONValue.object([
                     "sliceCount": .number(Double($0.sliceCount)),
                     "trackName": .string($0.trackName),
                     "createdTrack": .bool($0.createdTrack),
                     "mutedTrackName": $0.mutedTrackName.map { JSONValue.string($0) } ?? .null,
+                    // VERBATIM — the store's (wire) sentences.
                     "warnings": .array($0.warnings.map { .string($0) }),
+                    // What the notice SHOWS a person (m33-d), index-aligned.
+                    "warningsForHumans": .array($0.warningsForHumans.map { .string($0) }),
                 ])
             } ?? .null,
+            // m33-d: does the chop card's lead-in toggle reach the chop in the
+            // chosen mode? (It draws dimmed when false.)
+            "leadInEffective": .bool(padGrid.chop.leadInIsEffective),
             // ⭐ THE PADS THEMSELVES, as the SURFACE derives them — so a gate
             // reads the app's own projection instead of re-deriving pad→pitch
             // from a second copy of the arithmetic (the `keyLabels` rule, one

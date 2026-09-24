@@ -1,3 +1,5 @@
+import DAWAppKit
+import DAWCore
 import Foundation
 import Testing
 
@@ -113,27 +115,30 @@ struct PitchTuneDoorSiteTests {
                 "Tune Vocal fell inside the Pro-only block — invisible in Simple, which is the density the beginner who most needs a one-click tuning is in")
     }
 
-    /// ⛔ **THREE, NOT FOUR — and the list is READ, never retyped.**
+    /// ⛔ **THE NAMED LIST, READ — never `allCases`, never retyped.**
     ///
-    /// `PitchCorrectionPreset.offeredInUI` is `[.gentle, .natural, .tight]`
-    /// today and `allCases` is four. A view drawing `allCases` would offer Hard
-    /// Tune, which the render path cannot honour (it calls
-    /// `StretchCurvePlan.make` with `contour: []`, so the only preset that flips
-    /// `preserveVibrato` degrades to a constant per-note offset — a control
-    /// whose label promises one result and whose mechanism delivers another).
-    /// A view retyping the three as literals would keep offering three on the
-    /// day the property is removed.
+    /// `PitchCorrectionPreset.offeredInUI` is the one place the rule "offer
+    /// only what the render can honour" is enforced. It withheld Hard Tune
+    /// while the render built every curve with `contour: []` (the flattening
+    /// resolved to nothing — a control whose label promised one result and
+    /// whose mechanism delivered another). Since contour-to-render
+    /// (2026-09-24) the render shapes against the detected contour, Hard Tune
+    /// is measured distinct from Tight on the rendered audio, and the list is
+    /// all four. The draw site must STILL read the list: a view drawing
+    /// `allCases` would silently re-offer anything the list withholds in
+    /// future, and one retyping the names as literals would drift from it.
     ///
-    /// `PitchCorrectionPresetTests.uiDoorWithholdsHardTune` pins the VALUE of
-    /// the list and the reason it exists; this pins that the pixels read it.
-    @Test("⛔ the menu draws offeredInUI — three presets, not allCases' four")
+    /// `PitchCorrectionPresetTests.uiDoorOffersEveryPresetTheRenderHonours`
+    /// pins the VALUE of the list and its reason; this pins that the pixels
+    /// read it.
+    @Test("⛔ the menu draws offeredInUI — the named list, never allCases")
     func theMenuDrawsOfferedInUINotAllCases() {
         let lanes = Self.code("DAWApp/Timeline/TimelineLanesView.swift")
         #expect(lanes.contains("ForEach(PitchCorrectionPreset.offeredInUI)"))
         #expect(lanes.contains("PitchCorrectionPreset.allCases") == false,
-                "the clip menu is drawing every preset — Hard Tune would be offered, and the render path cannot produce it")
-        // And no hand-typed twin of the list: the three names must NOT appear as
-        // literal button labels beside the ForEach.
+                "the clip menu is drawing allCases — it would offer whatever `offeredInUI` withholds, bypassing the one place that rule lives")
+        // And no hand-typed twin of the list: the preset names must NOT appear
+        // as literal button labels beside the ForEach.
         #expect(lanes.contains("Button(\"Hard Tune\")") == false)
         #expect(lanes.contains("Button(\"Gentle\")") == false,
                 "the presets are typed out as literal buttons — the list has a second home and they will disagree")
@@ -221,6 +226,241 @@ struct PitchTuneDoorSiteTests {
                 "ContentView does not bind onClearPitchEdits — Remove Tuning draws and does NOTHING. Add `onClearPitchEdits: { clip in model.clearClipTuningFromContextMenu(clipID: clip.id) },` to the TimelineLanesView( call, beside onChopToPads.")
         #expect(content.contains("model.openPitchEditor(clipID: clip.id)"),
                 "ContentView does not bind onOpenPitchEditor — the note editor pane exists and NOTHING CAN OPEN IT. Add `onOpenPitchEditor: { clip in model.openPitchEditor(clipID: clip.id) },` to the TimelineLanesView( call.")
+    }
+
+    // MARK: - C-F3: a preset must ask before it throws away HAND edits (F22)
+
+    /// The text of one member of `extension AppModel`, from its signature to the
+    /// next member at the same indent. A `contains` over the WHOLE file cannot
+    /// say which function a call sits in — and "the store call is behind the
+    /// gate" is a claim about exactly that.
+    private static func member(_ signature: String, in source: String) -> String {
+        guard let start = source.range(of: signature) else {
+            Issue.record("no member `\(signature)` in the source read")
+            return ""
+        }
+        let rest = source[start.upperBound...]
+        var end = rest.endIndex
+        for ender in ["\n    func ", "\n    private func ", "\n    @discardableResult", "\n}\n"] {
+            if let hit = rest.range(of: ender), hit.lowerBound < end { end = hit.lowerBound }
+        }
+        return String(rest[..<end])
+    }
+
+    /// ⛔⛔ **THE DESIGN'S PLANTED DEFECT, WRITTEN RED FIRST: the menu calls the
+    /// preset WITHOUT a confirm on a hand-edited set.**
+    ///
+    /// `autoCorrectClipPitch` REPLACES the clip's whole note table. Before
+    /// C-F3 both preset doors (the clip menu's Tune Vocal ▸ <preset> and the
+    /// note editor's preset chips) went straight to it, so one click erased
+    /// every note the user had moved or split by hand, and said nothing.
+    ///
+    /// The funnel must ask the gate FIRST, and the store call must be reachable
+    /// only through the gate's "apply now" answer or the person's own
+    /// "Replace my edits". The no-nag half (a clip holding only a preset's own
+    /// output switches presets with no dialog) is behaviour, not shape: it is
+    /// pinned by the signal's tests in `PitchCorrectionWriterTests` and by the
+    /// gate's spy tests below.
+    @Test("⛔ C-F3 — the preset funnel asks the gate before the store, and only a yes reaches autoCorrectClipPitch")
+    func presetFunnelAsksBeforeReplacingHandEdits() {
+        let staging = Self.code("DAWApp/PitchCorrectionStaging.swift")
+        // POSITIVE CONTROL: the reader reaches the funnel it is about to judge.
+        #expect(staging.contains("func tuneVocalFromContextMenu(clipID: UUID, preset: PitchCorrectionPreset)"),
+                "POSITIVE CONTROL FAILED: the funnel is not where this test looks, so every assertion below would fail for the wrong reason")
+
+        let funnel = Self.member("func tuneVocalFromContextMenu(clipID: UUID, preset: PitchCorrectionPreset)",
+                                 in: staging)
+        #expect(funnel.contains("pitchPresetReplaceGate.request("),
+                "the preset funnel never asks the gate — a preset click over hand edits erases them with no warning (F22)")
+        #expect(funnel.contains("autoCorrectClipPitch(") == false,
+                "the preset funnel calls the store DIRECTLY — the confirm can be skipped. The store call belongs in `applyTuningPreset`, reached only by `.applyNow` or a confirmed replace")
+        #expect(funnel.contains("case .applyNow:") && funnel.contains("applyTuningPreset(clipID: clipID, preset: preset)"),
+                "the funnel's apply-now branch does not apply — a clip with no hand edits would stop tuning at all")
+
+        // The ONE place the store is called, and the two doors into it.
+        let apply = Self.member("private func applyTuningPreset(clipID: UUID, preset: PitchCorrectionPreset)",
+                                in: staging)
+        #expect(apply.contains("self.store.autoCorrectClipPitch("))
+        let confirm = Self.member("func confirmPresetReplace()", in: staging)
+        #expect(confirm.contains("pitchPresetReplaceGate.confirm()") && confirm.contains("applyTuningPreset("),
+                "\"Replace my edits\" does not apply the preset it was asked about")
+        let cancel = Self.member("func cancelPresetReplace()", in: staging)
+        #expect(cancel.contains("pitchPresetReplaceGate.cancel()"))
+        #expect(cancel.contains("applyTuningPreset(") == false,
+                "Cancel applies the preset — the one outcome Cancel must never have")
+
+        // The gate reads THE signal — the store's own "hand-edited since the last
+        // preset" answer, never a second estimate of it.
+        let gate = Self.code("DAWAppKit/PitchPresetReplaceGate.swift")
+        #expect(gate.contains("hasHandEditsSinceAutoCorrect"),
+                "the gate does not consult PitchEditSet.hasHandEditsSinceAutoCorrect — it is deciding on something else")
+        // And AppModel owns one gate, so both doors share its one pending request.
+        let app = Self.code("DAWApp/DAWProApp.swift")
+        #expect(app.contains("let pitchPresetReplaceGate = PitchPresetReplaceGate()"))
+    }
+
+    /// ⛔ **A GATE THAT HOLDS A REQUEST WITH NOTHING ON SCREEN IS A PRESET CLICK
+    /// THAT DOES NOTHING.** The card must be mounted in the WINDOW (an `NSAlert`
+    /// or a `.confirmationDialog` is a stock grey panel AND is invisible to
+    /// `debug.captureUI`), bound to the pending request, with its two answers
+    /// wired to the funnels above.
+    ///
+    /// The binding lives in the card's own file (`presetReplaceConfirmOverlay`)
+    /// because `ContentView.body`'s modifier chain is at the type-checker's
+    /// limit: the inline `.overlay { if let … }` this test first asked for made
+    /// `swift build` fail with "unable to type-check this expression in
+    /// reasonable time". ContentView must still CALL the mount. Without that one
+    /// line, every other assertion here passes over a card nothing draws.
+    @Test("⛔ C-F3 — ContentView mounts the replace card on the pending request, and both answers are wired")
+    func replaceCardIsMountedAndWired() {
+        let content = Self.code("DAWApp/ContentView.swift")
+        #expect(content.contains("model.openChopToPads(clipID: clip.id)"),
+                "POSITIVE CONTROL FAILED: this reader cannot see a binding that exists, so the assertions below would fail for the wrong reason")
+        #expect(content.contains(".presetReplaceConfirmOverlay(model)"),
+                "ContentView never mounts the replace card — the gate would hold the click and the user would see nothing happen")
+
+        let card = Self.code("DAWApp/PresetReplaceConfirmCard.swift")
+        #expect(card.contains("if let request = model.pitchPresetReplaceGate.pending {"),
+                "the mount is not bound to the gate's pending request")
+        #expect(card.contains("PresetReplaceConfirmCard("))
+        #expect(card.contains("onReplace: { model.confirmPresetReplace() }"))
+        #expect(card.contains("onCancel: { model.cancelPresetReplace() }"))
+        // The words come from ONE home the unit tests read (`PitchPresetReplaceCopy`),
+        // never retyped in the view.
+        #expect(card.contains("PitchPresetReplaceCopy("))
+        #expect(card.contains("copy.confirmLabel") && card.contains("copy.cancelLabel"))
+        #expect(card.contains("\"Replace my edits\"") == false,
+                "the card retypes its own button label — the copy has a second home and the two will drift")
+        // Esc cancels; the DESTRUCTIVE answer is never the default (Return must
+        // not erase anybody's work).
+        #expect(card.contains(".keyboardShortcut(.cancelAction)"))
+        #expect(card.contains(".keyboardShortcut(.defaultAction)") == false)
+        #expect(card.contains("role: .destructive"))
+    }
+
+    @Test("⛔ C-F3 — debug.tuneVocal drives the MENU'S funnel, never the store, and stays off the public command table")
+    func tuneVocalSeamDrivesTheMenuFunnel() {
+        let app = Self.code("DAWApp/DAWProApp.swift")
+        #expect(app.contains("case \"debug.tuneVocal\":"))
+        let staging = Self.code("DAWApp/PitchCorrectionStaging.swift")
+        let seam = Self.member("func tuneVocalDebug(_ params: [String: JSONValue]) throws -> JSONValue",
+                               in: staging)
+        #expect(seam.contains("tuneVocalFromContextMenu(clipID: clipID, preset: preset)"))
+        #expect(seam.contains("confirmPresetReplace()") && seam.contains("cancelPresetReplace()"))
+        #expect(seam.contains("autoCorrectClipPitch(") == false,
+                "the seam calls the store directly — a capture through it would photograph a door no person walks through")
+        let commands = Self.code("DAWControl/Commands.swift")
+        #expect(commands.contains("\"clip.autoCorrectPitch\""),
+                "POSITIVE CONTROL FAILED: this reader cannot see a verb that is in the table")
+        #expect(commands.contains("debug.tuneVocal") == false,
+                "debug.tuneVocal joined the public table — it would move the wire count and hand agents a view-shaped route")
+    }
+
+    // MARK: - C-F3: the gate's BEHAVIOUR (spy tests, not greps)
+    //
+    // `DAWApp` has no test target, so the decision lives in the headless
+    // `PitchPresetReplaceGate` and is exercised here. Not a `@MainActor` suite:
+    // `MainActorOccupancySiteTests` caps those. Each test is `@MainActor` itself.
+
+    /// A preset's own output, stamped as the store stamps it.
+    private static func presetOutput() -> PitchEditSet {
+        PitchEditSet(segments: [
+            NoteSegment(startSeconds: 0, endSeconds: 1, detectedHz: 225,
+                        detectedConfidence: 0.9, pitchOffsetCents: -33),
+            NoteSegment(startSeconds: 1.2, endSeconds: 2, detectedHz: 250,
+                        detectedConfidence: 0.9, pitchOffsetCents: -17),
+        ], retuneMs: 110).stampedAsAutoCorrectOutput()
+    }
+
+    /// The same set after one note was dragged by hand.
+    private static func handEdited() -> PitchEditSet {
+        var set = presetOutput()
+        set.segments[0].pitchOffsetCents = 12
+        return set
+    }
+
+    @Test("C-F3 gate: a preset's own output applies NOW — no card, nothing held (the comparison workflow)")
+    @MainActor
+    func gateLetsPresetSwitchesThrough() {
+        let gate = PitchPresetReplaceGate()
+        let clip = UUID()
+        for preset in PitchCorrectionPreset.offeredInUI {
+            #expect(gate.request(preset, clipID: clip, clipName: "Lead",
+                                 current: Self.presetOutput()) == .applyNow,
+                    "switching to \(preset.displayName) over a preset's own output asked first — the comparison workflow would be nagged on every click")
+            #expect(gate.pending == nil)
+        }
+        // A clip with no tuning has nothing to lose.
+        #expect(gate.request(.natural, clipID: clip, clipName: "Lead", current: nil) == .applyNow)
+        #expect(gate.pending == nil)
+    }
+
+    @Test("C-F3 gate: hand edits HOLD the click, and Replace hands back exactly that request, once")
+    @MainActor
+    func gateHoldsTheClickAndReplacesOnce() {
+        let gate = PitchPresetReplaceGate()
+        let clip = UUID()
+        #expect(gate.request(.tight, clipID: clip, clipName: "Lead",
+                             current: Self.handEdited()) == .askFirst,
+                "a preset over hand edits applied without asking (F22)")
+        let asked = PitchPresetReplaceRequest(clipID: clip, clipName: "Lead", preset: .tight)
+        #expect(gate.pending == asked)
+        #expect(gate.confirm() == asked, "Replace applied something other than what the card showed")
+        #expect(gate.pending == nil)
+        #expect(gate.confirm() == nil, "a second press applied a preset nobody was asked about")
+    }
+
+    @Test("C-F3 gate: Cancel applies NOTHING, and a Replace after Cancel applies nothing either")
+    @MainActor
+    func gateCancelAppliesNothing() {
+        let gate = PitchPresetReplaceGate()
+        #expect(gate.request(.hardTune, clipID: UUID(), clipName: "Lead",
+                             current: Self.handEdited()) == .askFirst)
+        gate.cancel()
+        #expect(gate.pending == nil)
+        #expect(gate.confirm() == nil, "a Replace after Cancel still applied the preset")
+    }
+
+    @Test("C-F3 card words: for a novice — the preset, the clip, only the edits that exist, and Undo")
+    func replaceCopyIsHonest() {
+        let copy = PitchPresetReplaceCopy(
+            PitchPresetReplaceRequest(clipID: UUID(), clipName: "Lead Vocal", preset: .natural))
+        #expect(copy.title == "Replace your hand edits?")
+        #expect(copy.confirmLabel == "Replace my edits")
+        #expect(copy.cancelLabel == "Cancel")
+        #expect(copy.body.contains("Natural"), "the card does not name the preset that was clicked")
+        #expect(copy.body.contains("“Lead Vocal”"))
+        #expect(copy.body.contains(PitchPresetReplaceCopy.handEdits))
+        #expect(copy.undoNote.contains("Undo (⌘Z)"))
+        // ONLY what a hand can do today. A warning that lists losses nobody could
+        // have made teaches people to stop reading warnings. No jargon either.
+        for word in ["timing", "drawn", "shape", "wobble", "vibrato", "segment", "cents", "preset"] {
+            #expect(!copy.body.lowercased().contains(word),
+                    "the card's sentence says '\(word)' — either an edit nobody can make yet, or a word a non-musician does not know")
+        }
+        // An unnamed clip gets words, not a pair of empty quotes.
+        let unnamed = PitchPresetReplaceCopy(
+            PitchPresetReplaceRequest(clipID: UUID(), clipName: "", preset: .gentle))
+        #expect(unnamed.body.contains("this clip"))
+        #expect(!unnamed.body.contains("“”"))
+    }
+
+    /// ⚠️ TRIPWIRE. The card names moves and splits because those are the only
+    /// hand edits the note editor can make. When it gains a tool (drawn shapes,
+    /// timing), the sentence must grow with it. The signal needs no change,
+    /// because any write already reads as a hand edit.
+    @Test("C-F3 tripwire: the card names every kind of hand edit the editor's tools make")
+    func replaceCopyNamesEveryEditorTool() {
+        let tools = PitchEditorTool.allCases.map(\.rawValue)
+        #expect(PitchEditorTool.allCases == [.pointer, .scissors],
+                """
+                The note editor gained a tool (\(tools)). "Replace your hand edits?" \
+                still names only moves and splits: add the new edit's words to \
+                PitchPresetReplaceCopy.handEdits, then update this list.
+                """)
+        #expect(PitchEditorTool.pointer.label == "Move" && PitchEditorTool.scissors.label == "Split")
+        #expect(PitchPresetReplaceCopy.handEdits.contains("moved"))
+        #expect(PitchPresetReplaceCopy.handEdits.contains("split"))
     }
 
     /// ⭐ THE PANE SHIPPED WITH NO WAY IN, AND THAT IS WHY THIS TEST EXISTS.

@@ -97,6 +97,15 @@ public struct ViewSelectClipResult: Sendable {
         /// the roll's mount point is the Arrange workspace, so it is not on
         /// screen. Call `view.panelLayout {workspace:"arrange"}` and it will be.
         case workspaceIsNotArrange = "workspace-is-not-arrange"
+        /// m23-ap Phase 2, item p2-c — design §9.2. An AUDIO clip, selected,
+        /// AND the PITCH editor is already open on this exact clip (opened
+        /// earlier by `view.openPitchEditor`, and the latch survived because
+        /// nothing else was selected in between). Distinct from
+        /// `audioClipHasNoEditor`: that string is now only half true for
+        /// this clip — audio has no NOTE editor, but it can carry a PITCH
+        /// one — so a caller must not read `audioClipHasNoEditor` as "this
+        /// clip has nothing on screen."
+        case pitchEditorOpen = "pitch-editor-open"
     }
 
     /// The clip now focused (always the id that was asked for — a selection
@@ -112,16 +121,74 @@ public struct ViewSelectClipResult: Sendable {
     /// screen") plus the workspace term — never from `clip.isMIDI` directly, so
     /// the reply and the screen cannot diverge.
     public var editorOpen: Bool
+    /// m23-ap Phase 2, item p2-c — design §9.2. `editorOpen`'s sibling for the
+    /// SECOND bottom pane: whether the PITCH editor is actually mounted on
+    /// this clip. Derived from `AppModel.openPitchEditorClip` (§3.6's one
+    /// rule for "is the pitch editor on screen") plus the workspace term, the
+    /// same shape as `editorOpen` — the two can never both be true, because
+    /// the two panes are mutually exclusive by construction (§3.6).
+    /// ⚠️ `view.selectClip` still never OPENS the pitch editor — this only
+    /// reports whether one that was already open (via `view.openPitchEditor`)
+    /// is still open on the clip just selected.
+    public var pitchEditorOpen: Bool
     public var reason: Reason
     /// The workspace the window is showing right now (`"arrange"` / `"mix"`).
     public var workspace: String
 
     public init(clipID: UUID, trackID: UUID, clipKind: String,
-                editorOpen: Bool, reason: Reason, workspace: String) {
+                editorOpen: Bool, pitchEditorOpen: Bool = false, reason: Reason,
+                workspace: String) {
         self.clipID = clipID
         self.trackID = trackID
         self.clipKind = clipKind
         self.editorOpen = editorOpen
+        self.pitchEditorOpen = pitchEditorOpen
+        self.reason = reason
+        self.workspace = workspace
+    }
+}
+
+/// What `view.openPitchEditor` actually did (m23-ap Phase 2, item p2-c) —
+/// `view.selectClip`'s sibling for the SECOND bottom pane (design §3.6, §9.1).
+///
+/// ⭐ **ONLY TWO REASONS, NOT THREE, AND THAT ASYMMETRY WITH `ViewSelectClipResult`
+/// IS DELIBERATE.** A clip-kind mismatch (a MIDI clip) is a THROW here, never a
+/// soft reason: `view.openPitchEditor` is an explicit "open THIS editor" act —
+/// the `view.openEditor` precedent, where a target with no editor is refused
+/// loudly — not a general "select and see what happens" query like
+/// `view.selectClip`. Only the ORTHOGONAL "which workspace is showing" axis
+/// gets a soft reason, because the pane's mount point is the Arrange workspace
+/// and this verb deliberately does not flip the workspace for the caller (the
+/// `view.selectClip` precedent, verbatim: silently changing a surface the
+/// caller did not ask about would yank a human's view out from under them).
+public struct ViewOpenPitchEditorResult: Sendable {
+    public enum Reason: String, Sendable {
+        /// An audio clip, opened, and the Arrange workspace is showing: the
+        /// pane is on screen.
+        case pitchEditorOpened = "pitch-editor-opened"
+        /// An audio clip, latched open (the NEXT `view.capture` after a
+        /// `view.panelLayout {workspace:"arrange"}` will show it) — but the
+        /// Mix console is showing right now, so the pane is not visible yet.
+        case workspaceIsNotArrange = "workspace-is-not-arrange"
+    }
+
+    /// The clip the pane is now latched to (always the id that was asked
+    /// for).
+    public var clipID: UUID
+    /// The track it lives on.
+    public var trackID: UUID
+    /// Whether the pane is ACTUALLY mounted on screen right now — false only
+    /// for the workspace case, never for a refusal (a refusal throws instead
+    /// of returning `opened:false`, the `view.openEditor` rule).
+    public var opened: Bool
+    public var reason: Reason
+    /// The workspace the window is showing right now (`"arrange"` / `"mix"`).
+    public var workspace: String
+
+    public init(clipID: UUID, trackID: UUID, opened: Bool, reason: Reason, workspace: String) {
+        self.clipID = clipID
+        self.trackID = trackID
+        self.opened = opened
         self.reason = reason
         self.workspace = workspace
     }
@@ -258,4 +325,16 @@ public protocol ViewUIControlling: AnyObject {
     /// `plugin.*` window seam. Throws readably when the target does not exist or
     /// carries no editable unit.
     func openViewEditor(_ target: ViewEditorTarget) async throws -> ViewEditorResult
+
+    /// Opens the pitch editor on an AUDIO clip — `selectClipForView`'s sibling
+    /// for the SECOND bottom pane (m23-ap Phase 2, item p2-c, design §3.6/§9.1).
+    ///
+    /// ⚠️ **THE CALLER (the `view.openPitchEditor` router case) HAS ALREADY
+    /// CONFIRMED `clipID` NAMES AN EXISTING, NON-MIDI CLIP** — `DAWApp` has no
+    /// test target, so that lookup and refusal live router-side, headlessly
+    /// testable, rather than here. An implementation may still throw (a
+    /// structurally-near-impossible post-condition failure, the
+    /// `openInstrumentEditorForView` precedent), but it must not re-decide
+    /// clip-kind eligibility.
+    func openPitchEditorForView(_ clipID: UUID) throws -> ViewOpenPitchEditorResult
 }

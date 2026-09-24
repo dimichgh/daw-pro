@@ -197,6 +197,12 @@ public struct EffectDescriptor: Identifiable, Codable, Sendable, Equatable {
         /// out of the audio band. `oversampling: 1` is kept as a user-visible
         /// setting precisely so that difference can be heard, and it is what
         /// `scripts/gates/m39ac-clipper-physics.mjs` measures.
+        /// ⚠️ **A NEW CLIPPER STARTS AT 1 (OFF); A SAVED ONE KEEPS WHAT IT HAD.**
+        /// It shipped at 4; on 2026-09-20 the user picked "Off by default, on
+        /// when I ask" for a NEW effect of this kind or `.saturator` (the option
+        /// read "Free, grittier, and plenty of records want that"). See
+        /// `ClipperParams.defaultOversampling` and `ClipperParams.legacyOversampling`
+        /// for how both are true at once.
         case clipper
         /// Dynamic EQ (m39-af) — FOUR identical bell bands in series, each one a
         /// single side-path biquad whose gain is driven by that band's OWN
@@ -333,7 +339,20 @@ public struct EffectDescriptor: Identifiable, Codable, Sendable, Equatable {
         transientShaper ?? TransientShaperParams()
     }
     public var resolvedFreqShifter: FreqShifterParams { freqShifter ?? FreqShifterParams() }
-    public var resolvedClipper: ClipperParams { clipper ?? ClipperParams() }
+    /// ⛔⛔ **NOT `ClipperParams()` — AND THAT IS THE WHOLE OF THE 2026-09-20 RULING'S
+    /// SAFETY.** A clipper descriptor with NO params is what every build before
+    /// the ruling saved for a clipper nobody had touched: `addEffect` left
+    /// `clipper` nil and `EffectDocument` OMITS a nil params object, so the file
+    /// says only `{"id", "kind": "clipper"}` (captured from that build, verbatim,
+    /// in `ClipperDefaultOversamplingTests`). Those clippers were rendering at 4×,
+    /// so absence must go on meaning 4× — `ClipperParams.legacy`. Resolving it
+    /// to the NEW default would silently turn the oversampling off in every
+    /// saved project that has a clipper, which is exactly the tone change a
+    /// shipped kind may never make.
+    ///
+    /// New clippers never reach this fallback: `newlyAdded(kind:)` gives them
+    /// explicit params, so their 1 is WRITTEN to the file rather than implied.
+    public var resolvedClipper: ClipperParams { clipper ?? ClipperParams.legacy }
     public var resolvedDynamicEQ: DynamicEQParams { dynamicEQ ?? DynamicEQParams() }
 
     public init(
@@ -392,6 +411,29 @@ public struct EffectDescriptor: Identifiable, Codable, Sendable, Equatable {
         self.dynamicEQ = dynamicEQ
         self.audioUnit = audioUnit
         self.sidechainSourceTrackID = sidechainSourceTrackID
+    }
+
+    /// ⭐ **THE ONE HOME FOR "WHAT A BRAND-NEW INSERT OF `kind` STARTS AS"** —
+    /// `ProjectStore.addEffect` and `addMasterEffect` both build through here,
+    /// and every other way an effect is born (the wire's `fx.add`, the mixer's
+    /// add menu, `DemoRender`) goes through those two.
+    ///
+    /// Every kind starts with NO params (they resolve to the kind's defaults
+    /// and a defaults-only effect stays compact on disk) — except `.clipper`,
+    /// which starts with EXPLICIT `ClipperParams()`. That is the mechanism of
+    /// the 2026-09-20 ruling: a clipper with no params means "saved by a build
+    /// that shipped at 4×" (`resolvedClipper`), so a NEW clipper must carry its
+    /// 1× in the file, where no later change to any default can reinterpret it.
+    public static func newlyAdded(kind: Kind, audioUnit: AudioUnitConfig? = nil)
+        -> EffectDescriptor {
+        switch kind {
+        case .clipper:
+            return EffectDescriptor(kind: .clipper, clipper: ClipperParams())
+        case .audioUnit:
+            return EffectDescriptor(kind: .audioUnit, audioUnit: audioUnit)
+        default:
+            return EffectDescriptor(kind: kind)
+        }
     }
 }
 
@@ -1114,14 +1156,23 @@ public struct DelayParams: Codable, Sendable, Equatable {
 /// Parameters for the built-in tanh saturator (M4 iv, oversampling added by
 /// m39-ad). Clamped on init (GainParams pattern).
 ///
-/// ## ⛔⛔ THE DEFAULT OF `oversampling` IS 1 AND IT IS NOT A QUALITY CHOICE
+/// ## ⛔⛔ THE DEFAULT OF `oversampling` IS 1 AND IT WAS NOT A QUALITY CHOICE
 ///
-/// `.clipper` — the other caller of `Oversampler` — defaults to 4, and it could,
+/// `.clipper` — the other caller of `Oversampler` — shipped at 4, and it could,
 /// because it was a brand-new kind on the day the control was written. THIS KIND
-/// IS NOT. `.saturator` has shipped since M4 (iv) and there are already saved
+/// WAS NOT. `.saturator` has shipped since M4 (iv) and there are already saved
 /// projects with one in a chain. A default of 2 or 4 would change what every one
 /// of those projects SOUNDS like AND shift it in time by the 32 samples the
 /// filters cost — silently, on the next open.
+///
+/// ⭐ **AND SINCE 2026-09-20 IT IS ALSO THE USER'S CHOICE.** Asked on a handoff
+/// card whether the fizz-removal is worth the CPU — an answer the card said
+/// would set what a NEW effect of either kind starts at — they picked "Off by
+/// default, on when I ask" (the option read *"Free, grittier, and plenty of
+/// records want that."*). So this default stays exactly where it is, and the clipper's NEW inserts moved to
+/// match it (`ClipperParams.defaultOversampling`) — while every clipper already
+/// saved keeps its 4 (`ClipperParams.legacyOversampling`). The two kinds now
+/// agree on what a new one starts at; they still differ in LATENCY at 1×.
 ///
 /// So the default is 1, at which `SaturatorEffect` SKIPS the oversampling path
 /// outright rather than running it at factor 1, and reports `latencySamples == 0`.
@@ -3450,6 +3501,31 @@ public struct FreqShifterParams: Codable, Sendable, Equatable {
 /// is what lets a user (and `scripts/gates/m39ac-clipper-physics.mjs`) hear and
 /// MEASURE the difference; plenty of records want the grit.
 ///
+/// ## ⛔⛔ TWO DEFAULTS, AND WHICH ONE APPLIES IS DECIDED BY THE FILE
+///
+/// This kind shipped with `oversampling` defaulting to 4. On 2026-09-20 the user
+/// picked "Off by default, on when I ask" for a NEW clipper (and a new
+/// saturator) — the option read *"Free, grittier, and plenty of records want
+/// that"*. A shipped kind may not change tone, so both statements have to hold
+/// at once:
+///
+///  · **`defaultOversampling` = 1** — what `ClipperParams()` gives, what
+///    `EffectParamSpec` reports, and what `EffectDescriptor.newlyAdded` WRITES
+///    into every new clipper as an explicit value;
+///  · **`legacyOversampling` = 4, FROZEN** — what ABSENCE means. A clipper
+///    saved before the ruling that nobody touched has NO params object in its
+///    file at all (`EffectDocument` omits a nil one), and a params object with
+///    no `oversampling` key can only have come from outside our own encoder
+///    (which always writes all six). Both were rendering at 4×, so both keep
+///    resolving to 4× — through `EffectDescriptor.resolvedClipper` and through
+///    `init(from:)` below.
+///
+/// ⚠️ **NEVER "TIDY" EITHER FALLBACK ONTO THE NEW DEFAULT.** A render byte gate
+/// cannot see a `Codable` decode default (proven by a planted defect on
+/// 2026-09-20), which is why `ClipperDefaultOversamplingTests` checks the
+/// DECODE of a document captured from the pre-ruling build as well as the
+/// bytes of its render.
+///
 /// ## Latency
 ///
 /// `OversamplerDesign.latencySamples` = 32 base-rate samples, **the same at
@@ -3491,6 +3567,21 @@ public struct ClipperParams: Codable, Sendable, Equatable {
     public static let oversamplingRange: ClosedRange<Double> = 1...4
     public static let mixRange: ClosedRange<Double> = 0...1
     public static let outputDbRange: ClosedRange<Double> = -24...24
+
+    /// What a NEW clipper's `oversampling` starts at: 1, OFF. The user's ruling
+    /// of 2026-09-20 — see "TWO DEFAULTS" in the type doc.
+    public static let defaultOversampling: Double = 1
+
+    /// ⛔ **FROZEN — NEVER CHANGE THIS NUMBER.** What a clipper saved WITHOUT an
+    /// explicit `oversampling` means: 4, the default every build before the
+    /// 2026-09-20 ruling shipped with. It is not a quality preference; it is a
+    /// record of what those files were rendering.
+    public static let legacyOversampling: Double = 4
+
+    /// What a clipper descriptor carrying NO params resolves to — a pre-ruling
+    /// clipper nobody touched. Every field but `oversampling` is the ordinary
+    /// default, because those defaults never moved.
+    public static let legacy = ClipperParams(oversampling: legacyOversampling)
 
     /// The two shapes. Raw values are the wire numbers and are FROZEN.
     public enum Mode: Int, Sendable, CaseIterable {
@@ -3595,8 +3686,13 @@ public struct ClipperParams: Codable, Sendable, Equatable {
         return ceiling + trim
     }
 
+    /// ⚠️ `oversampling` defaults to `defaultOversampling` (1) — a NEW clipper.
+    /// A non-finite value still snaps through `oversamplingFactor(at:)` to the
+    /// top factor, the render thread's own rule (one home); JSON has no NaN, so
+    /// that path can never decide what a saved project sounds like.
     public init(driveDb: Double = 0, ceilingDb: Double = -0.3, mode: Double = 0,
-                oversampling: Double = 4, mix: Double = 1, outputDb: Double = 0) {
+                oversampling: Double = ClipperParams.defaultOversampling,
+                mix: Double = 1, outputDb: Double = 0) {
         // Non-finite guards ahead of every clamp: `clamped(to:)` on a NaN
         // returns the NaN, and `oversampling` reaches an `Int()` conversion
         // that would TRAP on one (the `RingModParams.waveform` precedent).
@@ -3615,13 +3711,21 @@ public struct ClipperParams: Codable, Sendable, Equatable {
     /// Decoding routes through the clamping/snapping init, `decodeIfPresent ??
     /// default` per field, so a partial object decodes (the `ChorusParams`
     /// pattern).
+    ///
+    /// ⛔⛔ **EXCEPT `oversampling`, WHOSE ABSENCE MEANS `legacyOversampling` (4),
+    /// NOT THE NEW DEFAULT.** Our own encoder writes all six keys, so an object
+    /// without this one came from somewhere else — a hand-edited file, an older
+    /// tool — and whatever wrote it was describing a clipper that rendered at 4×.
+    /// Flipping this fallback to `defaultOversampling` is the planted defect
+    /// `ClipperDefaultOversamplingTests` is built to catch.
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         self.init(
             driveDb: try c.decodeIfPresent(Double.self, forKey: .driveDb) ?? 0,
             ceilingDb: try c.decodeIfPresent(Double.self, forKey: .ceilingDb) ?? -0.3,
             mode: try c.decodeIfPresent(Double.self, forKey: .mode) ?? 0,
-            oversampling: try c.decodeIfPresent(Double.self, forKey: .oversampling) ?? 4,
+            oversampling: try c.decodeIfPresent(Double.self, forKey: .oversampling)
+                ?? Self.legacyOversampling,
             mix: try c.decodeIfPresent(Double.self, forKey: .mix) ?? 1,
             outputDb: try c.decodeIfPresent(Double.self, forKey: .outputDb) ?? 0)
     }
@@ -5780,8 +5884,14 @@ public struct EffectParamSpec: Sendable, Equatable {
                                     + "there is no halfway. That is also why modulation refuses "
                                     + "it - an LFO on a switch is a stutter, not a sweep. "
                                     + "Automation can still step it between sections."),
+                // ⛔ `defaultValue` IS THE NEW-CLIPPER DEFAULT (1, the user's
+                // 2026-09-20 ruling) — NOT what an untouched clipper in an OLD
+                // project resolves to, which stays 4
+                // (`ClipperParams.legacyOversampling`). The note says both,
+                // because `fx.describe` hands it to agents verbatim.
                 EffectParamSpec(name: "oversampling", range: ClipperParams.oversamplingRange,
-                                defaultValue: 4, unit: "x", curve: .linear,
+                                defaultValue: ClipperParams.defaultOversampling, unit: "x",
+                                curve: .linear,
                                 modulatable: .refused,
                                 note: "\u{2B50} THE QUALITY CONTROL, AND THE ONLY ONE ON THIS "
                                     + "EFFECT THAT CHANGES WHAT CLIPPING SOUNDS LIKE WITHOUT "
@@ -5793,12 +5903,17 @@ public struct EffectParamSpec: Sendable, Equatable {
                                     + "sitting behind the sound, worst on bright material and on "
                                     + "high notes. Running the clipper at 2 or 4 times the "
                                     + "session's sample rate pushes that fold up out of the way "
-                                    + "and then filters it off. 4 (the default) is the clean one; "
-                                    + "2 is the cheaper compromise; 1 turns the machinery OFF "
-                                    + "entirely and lets the fizz through. \u{2B50} 1 IS A REAL "
-                                    + "SETTING, NOT A BROKEN ONE - plenty of records want that "
-                                    + "grit, and it is the only way to hear what the other "
-                                    + "settings are removing. \u{26A0} Only 1, 2 and 4 exist; 3 "
+                                    + "and then filters it off. 4 is the clean one; 2 is the "
+                                    + "cheaper compromise; 1 turns the machinery OFF entirely and "
+                                    + "lets the fizz through. \u{2B50} 1 IS THE DEFAULT FOR A "
+                                    + "NEWLY ADDED CLIPPER (it costs no extra CPU), and it is a "
+                                    + "real setting, not a broken one - plenty of records want "
+                                    + "that grit, and it is the only way to hear what the other "
+                                    + "settings are removing. Set 4 when the fizz bothers you. "
+                                    + "\u{26A0} A CLIPPER ALREADY SAVED IN A PROJECT KEEPS WHAT IT "
+                                    + "HAD - one added before this default changed, and never "
+                                    + "adjusted, still reads and renders 4, so an old project "
+                                    + "sounds exactly as it did. \u{26A0} Only 1, 2 and 4 exist; 3 "
                                     + "rounds UP to 4. It costs CPU roughly in proportion to the "
                                     + "number. \u{26A0} It does NOT change the effect's latency - "
                                     + "that is a fixed 32 samples at every setting, by design, so "

@@ -74,16 +74,60 @@ by re-running the decomposition below, whose arithmetic then matched a live
 — the generated plugin bundle itself, `claude-plugin/server/index.mjs`, is a
 RELEASE-STEP regen this item did NOT run; treat the bundle as stale until
 that regen happens, the `daw-pro-project` §2026-09-20s precedent**) —
-**239 (42 direct + 197 wrapper, MEASURED 2026-09-22 at the m23-q Phase 2
-close)**; it was 236 (42 + 194) before that, and 232 (41 + 191) before the
-drum machine, with a negative control (a name that is not a tool) correctly
-absent. The bijection test, `mcp-server/test/audit-tools.test.ts`, defines
-`tool count = commands + |exception table B| + |exception table C|` — **234**
+**245 (42 direct + 203 wrapper, MEASURED 2026-09-24 at the m23-ap C-0c
+close)**; it was 244 (42 + 202) before that, 242 (42 + 200) before that, 239
+(42 + 197) before that, 236 (42 + 194) before that, and 232 (41 + 191)
+before the drum
+machine, with a
+negative control (a name that is not a tool) correctly absent. The bijection
+test, `mcp-server/test/audit-tools.test.ts`, defines
+`tool count = commands + |exception table B| + |exception table C|` — **240**
 MIRRORED commands + 3 Table-B tools with no backing command at all
 (`generate_image`, `generate_lyrics`, `generate_song_suno` — they call a
 generation provider directly) + 2 Table-C tools that bridge to an EXISTING
 command, `track.setInstrument`, under a friendlier name/shape
-(`instrument_set_sampler_param`, `instrument_set_sampler_zones`) = **239**.
+(`instrument_set_sampler_param`, `instrument_set_sampler_zones`) = **245**.
+✅ **CLOSED, the pitch-editor command-surface door (2026-09-24,
+`docs/design/2026-09-22-pitch-editor-ui.md` §9): the pane had no command
+door at all — no way to open it, read it, or edit a note over the wire.
+`view.openPitchEditor`/`clip.setNotePitch`/`clip.splitNote` close that gap
+(`Commands.swift` 234 -> 237), mirrored 1:1 by `view_open_pitch_editor`/
+`clip_set_note_pitch`/`clip_split_note` (all three via the strict-schema
+wrapper — real, typo-worth-catching params on every one, the
+`view_select_clip`/`clip_auto_correct_pitch` precedents), no exception-table
+entry needed.** The command count and the mirrored count agree again
+(237 = 237); do not reopen this note for a future gap without renaming it.
+✅ **CLOSED, m39-levels-2 wire (2026-09-24): SIXTEEN LEVELS' model API
+(`Sources/DAWCore/SixteenLevels.swift`'s `ProjectStore` extension —
+`addSixteenLevelsSpread`/`setSixteenLevelsDirection`) shipped earlier with
+no wire door reaching it at all. `instrument.spreadSlice`/
+`instrument.setSpreadDirection` close that gap (`Commands.swift`
+237 -> 239), mirrored 1:1 by `instrument_spread_slice`/
+`instrument_set_spread_direction` (both via the strict-schema wrapper, the
+`instrument_describe_sampler`/`instrument_set_sampler_zones` precedent), no
+exception-table entry needed.** The command count and the mirrored count
+agree again (239 = 239); do not reopen this note for a future gap without
+renaming it.
+✅ **CLOSED, m23-ap C-0c wire (2026-09-24): the read-only twin of
+`clip_set_note_pitch`/`clip_split_note` — the pitch line a clip's render
+will actually PLAY, frame by frame, after every edit, through the SAME
+function the pitch editor draws with
+(`Sources/DAWCore/PitchPlayedLine.swift`, design `docs/design/2026-09-24-
+pitch-editor-timing-and-freehand.md` §4.5). `clip.getPlayedPitch` closes
+that gap (`Commands.swift` 239 -> 240), mirrored 1:1 by
+`clip_get_played_pitch` (strict-schema wrapper, the `clip_detect_pitch`
+precedent), no exception-table entry needed. The same close's C-F3
+`replaceExisting` optional param on `clip_auto_correct_pitch`/
+`clip.autoCorrectPitch` is a parameter on an EXISTING command/tool and
+moves neither count on its own. ⭐ swift-app review, same day: the
+`replaceExisting:false` refusal now re-checks the table's CURRENT content
+right before the write (not just before detection starts, which left a
+real gap — seconds, on a real vocal — for a hand-edit to land unprotected),
+and `clip.getPitchEdits`/`clip.autoCorrectPitch`/`clip.setNotePitch`/
+`clip.splitNote` all gained an additive `handEditedSinceAutoCorrect`
+boolean. Response-shape/behaviour only — neither count moves.** The
+command count and the mirrored count agree again (240 = 240); do not
+reopen this note for a future gap without renaming it.
 ✅ **CLOSED, m23-cw (2026-09-19): the "215 mirrored of 217 wire" gap this
 paragraph used to flag is gone — `au.listPresets`/`au.loadPreset` are now
 mirrored 1:1 as `au_list_presets`/`au_load_preset`, no exception-table entry
@@ -145,19 +189,35 @@ for all nine, the direct-vs-wrapper strictness split, the nested-strict-gap
 closure on `target` (the discriminated union) and `params` (the m30-c
 precedent), and every one of those verbatim carries.
 ⚠️ The authoritative pins are `mcp-server/test/integration.test.ts`'s
-`assert.equal(result.tools.length, 239)` and `mcp-server/test/mcp-log.test.ts`'s
-`assert.equal(instrumented.length, 239)` — **NOT** a `grep -c 'registerTool('`,
+`assert.equal(result.tools.length, 245)` and `mcp-server/test/mcp-log.test.ts`'s
+`assert.equal(instrumented.length, 245)` — **NOT** a `grep -c 'registerTool('`,
 which is a known liar on this file and previously anchored this paragraph at a
 stale 194) and
 `Sources/DAWControl/Commands.swift`
-(**234 commands** — the `CommandRouter.allCommands.count == 234` pin in
+(**240 commands** — the `CommandRouter.allCommands.count == 240` pin in
 `Tests/DAWControlTests/RenderCommandTests.swift`, and in eighteen sibling
 files — **twenty pin lines across nineteen files** (one file carries two),
 counted 2026-09-19 at the m39-f close, re-measured 2026-09-22 at the m23-q
 writer-leg close (231 -> 234, `clip.autoCorrectPitch`/`clip.clearPitchEdits`/
-`clip.getPitchEdits`, appended at the tail); ⚠️ three of the twenty spell it
-`all.count == N` and seventeen `allCommands.count == N`, so grep the LITERAL
-number, not the idiom)
+`clip.getPitchEdits`, appended at the tail), re-measured again 2026-09-24 at
+the pitch-editor command-surface-door close (234 -> 237,
+`view.openPitchEditor`/`clip.setNotePitch`/`clip.splitNote`, inserted BESIDE
+early-array siblings — `view.openEditor` and `clip.sliceToSampler` — NOT
+appended at the tail, specifically because a near-tail insertion was tried
+first and measured to break 99 `dropLast(N)` pins across 26 files; an
+early-sibling anchor breaks only the 20 plain `.count == N` pins instead,
+zero `dropLast` pins), re-measured again 2026-09-24 at the m39-levels-2
+wire close (237 -> 239, `instrument.spreadSlice`/`instrument.setSpreadDirection`,
+placed next to `instrument.describeSampler`, NOT at the tail; still the same
+20 pin lines across 19 files, values only), re-measured again 2026-09-24 at
+the m23-ap C-0c close (239 -> 240, `clip.getPlayedPitch`, placed next to
+`clip.splitNote` — the same early-array pitch-editor-door cluster the
+command-surface-door close above used, NOT at the tail; still the same 20
+pin lines across 19 files, values only — verified by a fresh grep for the
+literal `239`, not carried over: zero remaining, 20 lines at `== 240`); ⚠️
+three of the twenty spell it `all.count == N` and
+seventeen `allCommands.count == N`, so grep the LITERAL number, not the
+idiom)
 in the DAW Pro repo — not memory, and not the app's own in-app Copilot
 catalog (`Sources/DAWControl/CopilotCatalog.swift`), which is a **different,
 smaller, differently-named** tool set for a different AI (the app's built-in
@@ -852,10 +912,19 @@ two kinds, and an agent that carries a habit across will be wrong three ways.**
 
 | | `clipper` | `saturator` |
 |---|---|---|
-| default | **4** | **1 (OFF)** |
+| default, a NEW insert | **1 (OFF)**, since the 2026-09-20 ruling below | **1 (OFF)** |
 | latency | **constant 32** at every factor | **0 at 1, 32 at 2/4** |
 | automation lane on it | allowed (use `hold`) | **REFUSED — the lane errors** |
 | `mix: 0` | delayed identity, `in[n−32]` | **untouched buffer** at 1; `in[n−32]` at 2/4 |
+
+⚠️ **`clipper`'s default is NOT single-valued the way `saturator`'s is.** A
+NEW clipper starts at `1`, same as saturator — but a clipper SAVED before the
+2026-09-20 ruling, with no `oversampling` key in its file at all, decodes to
+**4**, because that is what it was actually rendering at. `saturator` has no
+equivalent split: it shipped with no such control at all, so an old save and
+a new one both land on `1`. Never "tidy" either clipper fallback onto the
+other's value — `ClipperParams.defaultOversampling` (1, new) and
+`ClipperParams.legacyOversampling` (4, absent-in-file) are both FROZEN.
 
 #### Why the default is 1, and why that is not "the worse setting"
 

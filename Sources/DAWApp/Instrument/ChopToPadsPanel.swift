@@ -221,11 +221,25 @@ struct ChopToPadsPanel: View {
                           + "existing keymap.") {
                 model.chop.baseNote = Int($0.rounded())
             }
+            // ⭐ LIVE IN EVERY MODE, DIM WHERE IT CANNOT REACH THE CHOP (m33-d).
+            // "Equal pieces" and "On the beat" always start pad 1 at the clip's
+            // start, so the flag is inert there — but the wire still accepts it,
+            // and "tick it, then switch to Every hit" must keep working, so it is
+            // dimmed and explained rather than disabled or hidden (DESIGN-LANGUAGE,
+            // "a setting that cannot reach the sound stays live, goes dim, and
+            // says so"). Both read the domain's one rule via `leadInIsEffective`.
             checkRow(isOn: model.chop.includeHead,
-                     label: "Keep the lead-in as pad 1",
-                     help: "Pad 1 normally starts at the first hit, like an MPC. Turn this "
-                         + "on if the chop is eating a downbeat.") {
+                     label: PadChopSettings.leadInLabel,
+                     help: model.chop.leadInHelp,
+                     dimmed: !model.chop.leadInIsEffective) {
                 model.chop.includeHead.toggle()
+            }
+            if let note = model.chop.leadInInertNote {
+                Text(note)
+                    .font(.system(size: 10))
+                    .foregroundStyle(DAWTheme.textDim)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .help(model.chop.leadInHelp)
             }
         }
     }
@@ -316,14 +330,17 @@ struct ChopToPadsPanel: View {
         .help(help)
     }
 
-    private func checkRow(isOn: Bool, label: String, help: String,
+    /// `dimmed` draws the row in `textFaint` with no accent — still clickable.
+    /// It is the "cannot reach the sound" state, not a disabled one.
+    private func checkRow(isOn: Bool, label: String, help: String, dimmed: Bool = false,
                           action: @escaping () -> Void) -> some View {
-        Button(action: action) {
+        let accent = dimmed ? DAWTheme.textFaint : DAWTheme.playback
+        return Button(action: action) {
             HStack(spacing: 8) {
                 RoundedRectangle(cornerRadius: 3)
-                    .fill(isOn ? DAWTheme.playback : Color.clear)
+                    .fill(isOn ? accent : Color.clear)
                     .overlay(RoundedRectangle(cornerRadius: 3)
-                        .stroke(isOn ? DAWTheme.playback : DAWTheme.textFaint, lineWidth: 1))
+                        .stroke(isOn ? accent : DAWTheme.textFaint, lineWidth: 1))
                     .overlay {
                         if isOn {
                             Image(systemName: "checkmark")
@@ -334,7 +351,7 @@ struct ChopToPadsPanel: View {
                     .frame(width: 13, height: 13)
                 Text(label)
                     .font(.system(size: 11))
-                    .foregroundStyle(DAWTheme.textSecondary)
+                    .foregroundStyle(dimmed ? DAWTheme.textFaint : DAWTheme.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
                     .multilineTextAlignment(.leading)
                 Spacer(minLength: 0)

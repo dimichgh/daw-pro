@@ -41,6 +41,12 @@ tools: >-
   mcp__plugin_daw-pro-music-team_daw-pro__automation_set_lane_enabled,
   mcp__plugin_daw-pro-music-team_daw-pro__clip_set_gain,
   mcp__plugin_daw-pro-music-team_daw-pro__clip_set_gain_envelope,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_auto_correct_pitch,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_get_pitch_edits,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_clear_pitch_edits,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_set_note_pitch,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_split_note,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_get_played_pitch,
   mcp__plugin_daw-pro-music-team_daw-pro__render_measure_loudness,
   mcp__plugin_daw-pro-music-team_daw-pro__fx_spectrum,
   mcp__plugin_daw-pro-music-team_daw-pro__frequency_reference,
@@ -151,6 +157,15 @@ there.
   `render_stems{includeMixdown}` — its file is named `00 Mixdown.wav` but is
   a stem-class render, NOT a `render_mixdown`; the one that carries the fade
   is `includeMasteredMixdown` → `00 Mastered Mix.wav`.
+- **Tuning a vocal or lead take.** `clip_auto_correct_pitch` detects and
+  applies a preset (`gentle`/`natural`/`tight`/`hardTune`) or a hand-set
+  strength/retune; check `clip_get_pitch_edits`'s `handEditedSinceAutoCorrect`
+  first and pass `replaceExisting: false` to refuse overwriting hand edits
+  instead of silently replacing them. `clip_set_note_pitch`/`clip_split_note`
+  nudge or cut ONE note but need a note table already stored (run
+  auto-correct first — neither one runs its own pitch detection); read
+  `clip_get_played_pitch` for the line the render actually plays after your
+  edits.
 - **Get a live signal before you read one.** You hold PLAYBACK transport —
   `transport_play`, `transport_stop`, `transport_seek` — for exactly one
   reason: `mixer_master_analysis` and `mixer_live_loudness` both read the

@@ -243,6 +243,17 @@ struct ContentView: View {
                 )
             }
         }
+        // m23-ap C-F3 — "Replace your hand edits?" Raised by EITHER preset door
+        // (the clip menu's Tune Vocal ▸ <preset>, the note editor's chips) when
+        // the clip carries notes moved or split by hand, and never when it holds
+        // only a preset's own output. In-window, over a scrim (the
+        // RecoveryOfferView shape), so `debug.captureUI` photographs it.
+        // ⚠️ A METHOD, NOT AN INLINE `.overlay { if let … }`: this chain is at
+        // the type-checker's limit, and that one closure made `swift build`
+        // fail with "unable to type-check this expression in reasonable time"
+        // (MEASURED, 2026-09-24). The binding lives in
+        // `PresetReplaceConfirmCard.swift`.
+        .presetReplaceConfirmOverlay(model)
         // Engine-notices popover (m15-e, audit F6): a bottom-anchored dark-glass
         // card listing schedule-time degradations, opened by the transport-bar
         // notices chip (and `debug.postEngineNotice`). Rendered INSIDE the window
@@ -355,25 +366,22 @@ struct ContentView: View {
         // runs off the main actor inside `refresh()`.
         .task { await model.settings.refresh() }
         .onChange(of: firstMIDIClipID) { _, _ in maybeAutoOpen() }
-        // Any clip stretch/pitch/formant change (from a drag OR the control port)
-        // kicks the engine-status poll, so the timeline shimmers a clip while its
-        // offline stretch render is pending and clears when it lands (M5 ii-e).
-        .onChange(of: stretchSignature) { _, _ in model.noteStretchEdit() }
+        // Any change to what a clip's offline render is keyed on (a stretch,
+        // transpose or formant edit, a TUNING: preset, note drag, split, clear,
+        // or a save that repoints the clip's media), from a drag OR the control
+        // port, kicks the engine-status poll, so the timeline shimmers the clip
+        // while its render is pending and clears when it lands (M5 ii-e;
+        // p2-render-indicator — this used to watch ratio/semitones/formant only,
+        // so a tuned clip's render never shimmered).
+        .onChange(of: renderSignature) { _, _ in model.noteStretchEdit() }
     }
 
-    /// Hash of every clip's stretch parameters — changes exactly when a stretch
-    /// edit lands, driving the render-status poll (`.onChange` above).
-    private var stretchSignature: Int {
-        var hasher = Hasher()
-        for track in store.tracks {
-            for clip in track.clips {
-                hasher.combine(clip.id)
-                hasher.combine(clip.stretchRatio)
-                hasher.combine(clip.pitchShiftSemitones)
-                hasher.combine(clip.formantPreserve)
-            }
-        }
-        return hasher.finalize()
+    /// The render-key inputs of every clip that plays from a render. Built by
+    /// `ClipRenderSignature` (DAWAppKit, tested headless), whose doc lists what
+    /// it mirrors from the engine's key and why. It drives the render-status
+    /// poll (`.onChange` above).
+    private var renderSignature: ClipRenderSignature {
+        ClipRenderSignature(tracks: store.tracks)
     }
 
     /// The instrument + AU-effect picker modals (m10-n / m13-g), extracted from
@@ -981,6 +989,11 @@ struct ContentView: View {
                 // Detection is injected so the pane's model never holds the
                 // store (the `ClipFixModel` precedent, design §5.4).
                 detect: { id in try await store.detectClipPitch(clipId: id) },
+                // C-0 — THE CONTOUR THE RENDER SHAPES AGAINST, through the
+                // store's one door (the same one `clip.getPlayedPitch` asks),
+                // so the line the pane draws comes from the analysis the
+                // render plays and never from the window detection above.
+                renderContour: { id in await store.renderPitchContour(clipId: id) },
                 // Door 2 (§6.2) — THROUGH THE SAME FUNNEL DOOR 1 CALLS, never
                 // through a second `store.autoCorrectClipPitch` of its own.
                 //
@@ -1008,6 +1021,26 @@ struct ContentView: View {
                 // m23-al: the pane reports that the user just ACTED inside it.
                 // THIS is what ⌘+/⌘−/⌘0 route on, via `EditorSurfaceRouter`.
                 onEngage: { model.editorEngagement.engage(.pitchEditor) },
+                // m23-ap C1/C3 — ONE store write per gesture, through the SAME
+                // `ProjectStore` the wire will call. The cadence is enforced in
+                // `PitchEditorModel`, not here: this closure is handed to the
+                // model at mount and the model is its only caller.
+                onCommitNoteEdit: { commit in
+                    model.commitPitchNoteEdit(clipID: clip.id, commit: commit)
+                },
+                // m23-ap C4 — both axes, through `AppModel`'s own zoom entry
+                // points so the buttons and ⌘+/⌘−/⌘0 share ONE ladder.
+                onZoom: { command in
+                    switch command {
+                    case .timeIn: model.zoomPitchEditorIn()
+                    case .timeOut: model.zoomPitchEditorOut()
+                    case .pitchIn: model.pitchEditorRowZoomIn()
+                    case .pitchOut: model.pitchEditorRowZoomOut()
+                    case .reset:
+                        model.zoomPitchEditorReset()
+                        model.pitchEditorRowZoomReset()
+                    }
+                },
                 // The spy seam: the header reports the very strings it drew, so
                 // p2-c's `debug.pitchEditor` echo can publish the screen rather
                 // than a re-derivation of it.

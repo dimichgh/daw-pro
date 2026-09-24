@@ -13,7 +13,10 @@ Standing questions (pick these up first):
 
 Answered:
 - ~~Suno official API~~ — none exists publicly (2026-07-05); pivoted to local ACE-Step-1.5 → `2026-07-05-ace-step-local-song-generation.md`.
-- ~~DiffSinger-class local singing synthesis~~ — superseded: ACE-Step-1.5 sings, locally.
+- ~~DiffSinger-class local singing synthesis~~ — superseded for WHOLE-SONG generation only (ACE-Step-1.5
+  sings, locally). REOPENED 2026-09-24 for singing GIVEN lyrics on GIVEN notes of a MIDI lead: ACE-Step
+  has no MIDI or score input (checked against its upstream tutorial) →
+  `2026-09-24-lyrics-sung-on-a-melody.md` (SoulX-Singer, Apache-2.0, score + lyrics, English; spike first).
 - ~~SFZ / DecentSampler `.dspreset` import feasibility (m18-h)~~ — DONE both halves: format research
   (opcode census, `.dspreset` survey, licensing) → `2026-07-16-spike-sfz-dspreset-formats.md`;
   mapping design + estimate → `2026-07-16-spike-sfz-dspreset-design.md` (**GO**, 10–11 days across

@@ -260,7 +260,11 @@ struct SliceToSamplerCommandTests {
         let response = await chop(router, clipID: clipID,
                                   ["mode": .string("divisions"), "divisions": .number(4)])
         #expect(response.ok)
-        #expect(response.result?["sliceCount"]?.doubleValue == 3)   // 3 interior boundaries
+        // ⛔ m33-d: this read `== 3 // 3 interior boundaries` and PINNED THE BUG —
+        // under a title promising "N equal parts". 3 interior cuts make FOUR
+        // pieces, and the first used to be discarded as detector pre-roll in a
+        // mode that runs no detector. Four pieces asked for, four pads.
+        #expect(response.result?["sliceCount"]?.doubleValue == 4)
         #expect(engine.detectCalls == 0)                            // no detection paid for
         #expect(engine.lastBoundarySeconds == [0.5, 1.0, 1.5])
         let slices = try #require(response.result?["slices"]?.arrayValue)
@@ -279,6 +283,89 @@ struct SliceToSamplerCommandTests {
         #expect(engine.detectCalls == 0)
         // 120 BPM → beats 1/2/3 = 0.5/1.0/1.5 s.
         #expect(engine.lastBoundarySeconds == [0.5, 1.0, 1.5])
+    }
+
+    // MARK: - Equal pieces / on the beat: every piece is a pad (m33-d)
+
+    /// ⛔ THE STAGING MEASUREMENT, reproduced: a 1.93 s loop chopped into
+    /// "Equal pieces = 8" made 7 pads and warned that "0.241 s of audio before
+    /// the first slice point was discarded" — 0.241 × 8 = 1.93, one whole piece.
+    @Test("⛔ REPRO (staging 2026-09-24): a 1.93 s loop in 8 equal pieces is 8 pads, not 7")
+    func equalPiecesStagingRepro() async throws {
+        let engine = FakeTransientEngine()
+        engine.stubFrameCount = 85_113                          // 1.93 s at 44.1 kHz
+        let store = ProjectStore()
+        store.media = FakeMedia(info: AudioFileInfo(
+            durationSeconds: 1.93, sampleRate: 44_100, channelCount: 2))
+        store.engine = engine
+        let router = CommandRouter(store: store)
+        let (_, clipID) = try await addAudioClip(router)
+
+        let response = await chop(router, clipID: clipID,
+                                  ["mode": .string("divisions"), "divisions": .number(8)])
+        #expect(response.ok)
+        let result = try #require(response.result)
+        #expect(result["sliceCount"]?.doubleValue == 8)
+        let slices = try #require(result["slices"]?.arrayValue)
+        #expect(slices.first?["startFrame"]?.doubleValue == 0)
+        // The last pad reaches the file end, so nothing after it is lost either.
+        #expect(slices.last?["endFrame"] == nil)
+        let warnings = (result["warnings"]?.arrayValue ?? []).compactMap(\.stringValue)
+        #expect(!warnings.contains { $0.contains("discarded") }, "\(warnings)")
+        #expect(engine.detectCalls == 0)
+    }
+
+    @Test("⭐ Equal pieces N over the wire: N pads over the WHOLE window, pad 1 at its start",
+          arguments: [2, 8, 9])
+    func equalPiecesOverTheWire(n: Int) async throws {
+        for trimmed in [false, true] {
+            let engine = FakeTransientEngine()
+            let (router, _) = makeRouter(engine: engine)
+            let (trackID, clipID) = try await addAudioClip(router)
+            if trimmed {
+                // Beat 1 → 3 of the 2 s clip = source [0.5, 1.5) s: a window that
+                // starts late AND stops before the file does.
+                let trim = await router.handle(ControlRequest(
+                    id: "tr", command: "clip.trim",
+                    params: ["trackId": .string(trackID), "clipId": .string(clipID),
+                             "newStartBeat": .number(1), "newLengthBeats": .number(2)]))
+                #expect(trim.ok)
+            }
+            let response = await chop(router, clipID: clipID,
+                                      ["mode": .string("divisions"),
+                                       "divisions": .number(Double(n))])
+            let label = "n=\(n) trimmed=\(trimmed)"
+            #expect(response.ok, "\(label)")
+            let result = try #require(response.result)
+            #expect(result["sliceCount"]?.doubleValue == Double(n), "\(label)")
+            let slices = try #require(result["slices"]?.arrayValue)
+            let starts = slices.compactMap { $0["startFrame"]?.doubleValue }
+            let fileEnd = 88_200.0
+            let ends = slices.map { $0["endFrame"]?.doubleValue ?? fileEnd }
+            #expect(starts.first == (trimmed ? 22_050 : 0), "\(label) starts \(starts)")
+            #expect(ends.last == (trimmed ? 66_150 : fileEnd), "\(label) ends \(ends)")
+            // Contiguous: every pad ends where the next begins.
+            #expect(Array(ends.dropLast()) == Array(starts.dropFirst()), "\(label)")
+            let covered = zip(starts, ends).map { $1 - $0 }.reduce(0, +)
+            #expect(covered == (trimmed ? 44_100 : fileEnd), "\(label) covered \(covered)")
+        }
+    }
+
+    @Test("⭐ On the beat over the wire: an on-grid clip's FIRST beat is a pad too")
+    func gridFirstBeatIsAPad() async throws {
+        let engine = engineWithThreeOnsets()
+        let (router, _) = makeRouter(engine: engine)
+        let (_, clipID) = try await addAudioClip(router)
+        // 2 s at 120 BPM = 4 beats: a quarter-note grid is FOUR cells.
+        let response = await chop(router, clipID: clipID,
+                                  ["mode": .string("grid"), "gridBeats": .number(1)])
+        #expect(response.ok)
+        let result = try #require(response.result)
+        #expect(result["sliceCount"]?.doubleValue == 4)
+        let slices = try #require(result["slices"]?.arrayValue)
+        #expect(slices.first?["startFrame"]?.doubleValue == 0)
+        let warnings = (result["warnings"]?.arrayValue ?? []).compactMap(\.stringValue)
+        #expect(!warnings.contains { $0.contains("discarded") }, "\(warnings)")
     }
 
     /// ⭐ The m12-c rejection is GRID-ONLY, and its positive control lives in

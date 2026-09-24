@@ -4362,7 +4362,13 @@ registerTool(
       "the response has no `zones` key at all (just the summary); pass either one and you " +
       "get a paged `zones` array (the exact shape track_set_instrument echoes back, ids " +
       "included) plus `offset`, `limit`, `returnedZones`, and `truncated` so you know " +
-      "whether to page further.",
+      "whether to page further. " +
+      "⭐ Each zone in that page ALSO carries `spreadDirection` (m39-levels-2): 'up' or " +
+      "'centered' when this zone is a Sixteen Levels spread (one chopped slice copied " +
+      "across sixteen pads at different pitches — see instrument_spread_slice), or null " +
+      "when it is an ordinary chopped slice, not a spread (true of most zones). Read off " +
+      "the zone itself, never a cached flag, so it can never disagree with what the pad " +
+      "actually plays.",
     inputSchema: {
       trackId: z.string().min(1).describe("Id of the instrument track to describe, from project_snapshot."),
       offset: z
@@ -4394,6 +4400,131 @@ registerTool(
   },
   async ({ trackId, offset, limit }) =>
     toToolResult(() => bridge.send("instrument.describeSampler", { trackId, offset, limit }))
+);
+
+// ---------------------------------------------------------------------------
+// Sixteen Levels (m39-levels-2) — spread one chopped Sampler slice across
+// sixteen pads at different pitches, and flip which way an existing spread
+// runs. Ground truth: Sources/DAWCore/SixteenLevels.swift's file header (the
+// design rule: ADD a zone, never edit one) and Sources/DAWControl/
+// Commands.swift's `instrument.spreadSlice` / `instrument.setSpreadDirection`
+// handlers.
+// ---------------------------------------------------------------------------
+
+registerTool(
+  "instrument_spread_slice",
+  {
+    title: "Spread one chopped slice across sixteen pads at different pitches",
+    description:
+      "Take ONE slice you already chopped onto a Sampler track (see instrument_describe_sampler " +
+        "or clip_slice_to_sampler) and copy it across SIXTEEN pads, each a semitone apart — " +
+        "'Sixteen Levels'. A slice is a short recording of one sound; on its own it only plays " +
+        "back at the pitch it was recorded at, so this is how you get a whole playable range out " +
+        "of one chopped sound (a vocal 'ah', a drum hit, a bass note) instead of hearing the same " +
+        "pitch every time you hit a pad. It ADDS one brand-new pad zone and changes nothing else " +
+        "— the slice you started from, and every other pad, are untouched, so leaving Sixteen " +
+        "Levels later costs nothing, because nothing was taken away. " +
+        "`direction` picks where the ORIGINAL, as-recorded slice sits among the sixteen: 'up' " +
+        "(the default) makes the slice's own pitch the LOWEST of the sixteen — it plays on the " +
+        "FIRST pad, and every pad after that is one semitone higher, so the sound only ever " +
+        "climbs as you move up the row. 'centered' puts the original recording in the MIDDLE — " +
+        "the NINTH pad, eight pads up — with eight pads BELOW it pitched down and seven pads " +
+        "ABOVE it pitched up, so one spread reaches both a deeper and a brighter version of the " +
+        "sound. Call instrument_describe_sampler FIRST to find the id of the " +
+        "slice you want to spread (`zoneId`) — every entry in its `zones` list has one. Refuses " +
+        "readably when the track isn't playing the built-in Sampler, when `zoneId` doesn't match " +
+        "any zone on it, or when the keyboard is already so full of chopped slices that there is " +
+        "no free run of sixteen keys left anywhere (chop fewer pieces, or move the chop up to " +
+        "free some low keys). Returns the new pad zone: its `id`, the range of keys it plays on " +
+        "(`minPitch`/`maxPitch`), its `rootPitch` (the one key that plays it exactly as recorded, " +
+        "with no pitch shift), and `spreadDirection` ('up' or 'centered') confirming which way it " +
+        "ran.",
+    inputSchema: {
+      trackId: z
+        .string()
+        .min(1)
+        .describe("Id of the INSTRUMENT track whose Sampler holds the slice, from project_snapshot."),
+      zoneId: z
+        .string()
+        .min(1)
+        .describe(
+          "Id of the ALREADY-CHOPPED slice (a Sampler zone) to spread across sixteen pads — read " +
+            "it from instrument_describe_sampler's `zones` list, or from clip_slice_to_sampler's " +
+            "own result right after chopping. This zone is left exactly as it was; spreading " +
+            "makes a new, separate zone next to it."
+        ),
+      direction: z
+        .enum(["up", "centered"])
+        .optional()
+        .describe(
+          "Which pad plays the slice at its ORIGINAL, as-recorded pitch. 'up' (the default): the " +
+            "FIRST of the sixteen pads — the sound only ever climbs in pitch as you move up the " +
+            "row. 'centered': the NINTH pad, in the middle of the sixteen — eight pads below it " +
+            "play it pitched DOWN, seven pads above it play it pitched UP. Omit for 'up'."
+        ),
+    },
+  },
+  async ({ trackId, zoneId, direction }) =>
+    toToolResult(() =>
+      bridge.send("instrument.spreadSlice", {
+        trackId,
+        zoneId,
+        ...(direction !== undefined ? { direction } : {}),
+      })
+    )
+);
+
+registerTool(
+  "instrument_set_spread_direction",
+  {
+    title: "Flip an existing Sixteen Levels spread between 'up' and 'centered'",
+    description:
+      "Change which way an EXISTING Sixteen Levels spread runs (see instrument_spread_slice) " +
+        "without rebuilding it — one small edit that moves only that spread's own root key; its " +
+        "audio, its sixteen keys, and every other pad on the Sampler are untouched. 'up': the " +
+        "FIRST of the sixteen pads plays the slice's own original, as-recorded pitch, and every " +
+        "pad above it climbs one semitone higher — the sound only ever gets brighter as you move " +
+        "up the row. 'centered': the NINTH pad (the middle one) plays the original recording, " +
+        "with eight pads below it pitched DOWN and seven pads above it pitched UP. Call " +
+        "instrument_describe_sampler FIRST to find the spread's own zone id (`spreadZoneId`) — " +
+        "its `zones` list reports each zone's current `spreadDirection` ('up' / 'centered' / " +
+        "null), so you can tell which zone IS a spread before naming one here. Refuses readably " +
+        "when `spreadZoneId` doesn't match any zone on the track, or when it names a zone " +
+        "instrument_spread_slice did not make — a zone has to be exactly sixteen keys wide and " +
+        "rooted on its first or ninth key to count as a spread, so a slice you chopped by hand " +
+        "is never silently re-rooted by this call. Asking for the direction a spread is ALREADY " +
+        "running is a harmless no-op: nothing is written and there is no extra undo step to step " +
+        "back through. Returns the zone PLUS `changed` (a boolean) so you can tell a real flip " +
+        "from a no-op — read the returned zone's own `spreadDirection` back rather than assuming " +
+        "the direction you asked for took effect.",
+    inputSchema: {
+      trackId: z
+        .string()
+        .min(1)
+        .describe("Id of the INSTRUMENT track whose Sampler holds the spread, from project_snapshot."),
+      spreadZoneId: z
+        .string()
+        .min(1)
+        .describe(
+          "Id of the SPREAD zone to flip — the one instrument_spread_slice made, or any zone " +
+            "whose spreadDirection instrument_describe_sampler reports as non-null. NOT the " +
+            "original slice it was spread from."
+        ),
+      direction: z
+        .enum(["up", "centered"])
+        .describe(
+          "The direction to run this spread in. 'up': the FIRST pad plays the slice's own " +
+            "original, as-recorded pitch, climbing one semitone per pad above it. 'centered': " +
+            "the NINTH pad (the middle one) plays the original, with eight pads below it pitched " +
+            "down and seven above it pitched up. Required — there is no default, since picking " +
+            "which way to flip is the whole point of the call."
+        ),
+    },
+  },
+  async ({ trackId, spreadZoneId, direction }) =>
+    toToolResult(() =>
+      bridge.send("instrument.setSpreadDirection", { trackId, spreadZoneId, direction })
+    )
 );
 
 registerTool(
@@ -5132,11 +5263,14 @@ const fxKindSchema = z
       "0.333 = 1/8 triplet; the snapshot echoes a human `divisionLabel` like \"1/8d\"). " +
       "`saturator` " +
       "is a tanh-based drive/colour stage: `driveDb`, `mix`, `outputDb`, " +
-      "`oversampling`. ⭐ `oversampling` (1/2/4) DEFAULTS TO 1, the OPPOSITE of " +
-      "`clipper`'s default of 4, and deliberately: this kind shipped before the " +
-      "control existed, so at 1 the machinery is skipped entirely and the effect is " +
-      "bit-for-bit what it always was. Set it to 4 on a new insert you are driving " +
-      "hard - that is what removes the metallic fold-back fizz. ⚠⚠ IT " +
+      "`oversampling`. ⭐ `oversampling` (1/2/4) DEFAULTS TO 1 - the SAME number a " +
+      "NEW `clipper` now defaults to (2026-09-20 ruling, \"free, grittier\"), but " +
+      "for a different reason here: this kind shipped before the control existed, " +
+      "so at 1 the machinery is skipped entirely and the effect is bit-for-bit what " +
+      "it always was. Unlike `clipper` - whose OLDER inserts, saved before that " +
+      "ruling, still resolve to 4 - this kind's inserts have always been 1. Set it " +
+      "to 4 on a new insert you are driving hard - that is what removes the " +
+      "metallic fold-back fizz. ⚠⚠ IT " +
       "CHANGES THE EFFECT'S LATENCY (0 samples at 1, 32 at 2 or 4), unlike " +
       "`clipper` whose 32 is constant; read `latencySamples` back from the result. " +
       "⚠ It is DISCRETE and is neither automatable nor modulatable. `gate` is a " +
@@ -5526,13 +5660,18 @@ const fxKindSchema = z
       "`mode` (0 hard, 1 soft, default 0) is the shape of the cut: hard " +
       "slices flat and is the bright aggressive one, soft bends into the " +
       "ceiling through a knee and leaves quiet material completely " +
-      "untouched. ⭐ `oversampling` (1, 2 or 4, default 4) IS THE QUALITY " +
-      "CONTROL AND THE REASON THIS KIND EXISTS: chopping a wave creates " +
-      "tones above what digital audio can store, which FOLD BACK into the " +
-      "music as a thin metallic fizz unrelated to anything playing. Running " +
-      "the shaper at 2x or 4x moves that fold out of the way. 1 turns it OFF " +
-      "and is a REAL setting - plenty of records want the grit, and it is " +
-      "the only way to hear what 4 is removing. Only 1, 2 and 4 exist; 3 " +
+      "untouched. ⭐ `oversampling` (1, 2 or 4; a NEW clipper starts at 1, " +
+      "oversampling OFF - the 2026-09-20 ruling, \"free, grittier, and " +
+      "plenty of records want that\") IS THE QUALITY CONTROL AND THE REASON " +
+      "THIS KIND EXISTS: chopping a wave creates tones above what digital " +
+      "audio can store, which FOLD BACK into the music as a thin metallic " +
+      "fizz unrelated to anything playing. Running the shaper at 2x or 4x " +
+      "moves that fold out of the way - set it to 2 or 4 to remove the " +
+      "fizz. 1 is a REAL setting, not a degraded one, and it is the only " +
+      "way to hear what 2/4 remove. ⚠️ A clipper in an OLDER project that " +
+      "never had this value set (saved before the 2026-09-20 ruling) keeps " +
+      "resolving to 4, unchanged - read it back rather than assuming. Only " +
+      "1, 2 and 4 exist; 3 " +
       "rounds UP. `mix` (0-1, default 1) blends the clipped and dry signals " +
       "for parallel clipping; `outputDb` (-24 to 24, default 0) is a trim " +
       "and it is LOAD-BEARING, because clipping makes things louder and " +
@@ -5899,16 +6038,22 @@ registerTool(
       "it when it is a MIDI clip. Use this before view_capture to photograph a " +
       "clip's notes, or to point the app's editing surface at the clip you are " +
       "about to work on. Returns {clipId, trackId, clipKind (\"midi\" or " +
-      "\"audio\"), editorOpen, reason, workspace}. `reason` tells you honestly " +
-      "what happened and is worth branching on: \"piano-roll-opened\" (a MIDI " +
-      "clip in the Arrange workspace — the editor is on screen), " +
-      "\"audio-clip-has-no-editor\" (the clip IS selected, but audio has no " +
-      "note editor, so nothing opened — this is a success, not an error; use " +
-      "clip_analyze_audio or clip_transcribe for audio), or " +
-      "\"workspace-is-not-arrange\" (a MIDI clip, selected, but the Mix " +
-      "console is showing, so the roll is not visible — call view_panel_layout " +
-      "with workspace:\"arrange\" and it will be). It deliberately does NOT " +
-      "switch the workspace for you. An unknown clipId is an error.",
+      "\"audio\"), editorOpen, pitchEditorOpen, reason, workspace}. `reason` " +
+      "tells you honestly what happened and is worth branching on: " +
+      "\"piano-roll-opened\" (a MIDI clip in the Arrange workspace — the note " +
+      "editor is on screen, editorOpen:true), \"pitch-editor-open\" (an AUDIO " +
+      "clip that view_open_pitch_editor already opened the PITCH editor on, and " +
+      "it is still open, pitchEditorOpen:true), \"audio-clip-has-no-editor\" " +
+      "(the clip IS selected, but audio has no NOTE editor and no pitch editor " +
+      "is open on it either — this is a success, not an error; open the pitch " +
+      "editor with view_open_pitch_editor, or use clip_analyze_audio / " +
+      "clip_transcribe), or \"workspace-is-not-arrange\" (a MIDI clip, " +
+      "selected, but the Mix console is showing, so the roll is not visible — " +
+      "call view_panel_layout with workspace:\"arrange\" and it will be). It " +
+      "deliberately does NOT switch the workspace for you, and it never OPENS " +
+      "the pitch editor itself (that is view_open_pitch_editor's own, explicit " +
+      "act) — it only reports whether one opened earlier is still showing. An " +
+      "unknown clipId is an error.",
     inputSchema: {
       clipId: z
         .string()
@@ -5917,6 +6062,41 @@ registerTool(
     },
   },
   async ({ clipId }) => toToolResult(() => bridge.send("view.selectClip", { clipId }))
+);
+
+registerTool(
+  "view_open_pitch_editor",
+  {
+    title: "Open the pitch (note-tuning) editor on a vocal or other audio clip",
+    description:
+      "Opens the PITCH editor -- the second bottom pane, view_select_clip's " +
+      "sibling for AUDIO clips -- on one clip: a waveform with each detected " +
+      "sung note drawn as a blob against a piano-keyboard ruler. This is an " +
+      "EXPLICIT act, unlike the piano roll (which opens automatically when you " +
+      "select a MIDI clip): pitch detection is monophonic, so opening it on " +
+      "every audio-clip selection would claim a capability the app cannot " +
+      "support on a drum loop, a full mix, or any recording that is not one " +
+      "voice singing alone. It refuses -- an error, not a soft reply -- if " +
+      "clipId names a MIDI clip: a MIDI clip is already notes with a definite " +
+      "pitch, open its piano roll with view_select_clip instead. Returns " +
+      "{clipId, trackId, opened, reason, workspace}. `opened` is true and " +
+      "`reason` is \"pitch-editor-opened\" when the pane is actually on " +
+      "screen; if the Mix console is showing instead of Arrange, the pane is " +
+      "latched open but not visible yet -- opened:false, " +
+      "reason:\"workspace-is-not-arrange\" -- call view_panel_layout with " +
+      "workspace:\"arrange\" and it will appear (this call deliberately does " +
+      "not switch the workspace for you). The pane only DRAWS notes; to " +
+      "actually MOVE one, first make sure the clip carries a stored note " +
+      "table (clip_auto_correct_pitch), then use clip_set_note_pitch / " +
+      "clip_split_note. An unknown clipId is an error.",
+    inputSchema: {
+      clipId: z
+        .string()
+        .uuid()
+        .describe("Id of the AUDIO clip to open the pitch editor on, from project_snapshot."),
+    },
+  },
+  async ({ clipId }) => toToolResult(() => bridge.send("view.openPitchEditor", { clipId }))
 );
 
 registerTool(
@@ -6563,9 +6743,12 @@ server.registerTool(
       "`saturator` (tanh drive " +
       "colour — driveDb/mix/outputDb/oversampling: BENDS the wave instead of cutting " +
       "it, so it can never promise a ceiling the way `clipper` can. ⭐ " +
-      "`oversampling` 1/2/4 DEFAULTS TO 1 - the opposite of `clipper`'s 4 - because " +
-      "this kind shipped before the control existed and projects already using one " +
-      "must keep sounding identical; at 1 it is bit-for-bit what it always was. Set " +
+      "`oversampling` 1/2/4 DEFAULTS TO 1 - the SAME number a NEW `clipper` now " +
+      "defaults to (2026-09-20, \"free, grittier\"), but for a different reason " +
+      "here: this kind shipped before the control existed and projects already " +
+      "using one must keep sounding identical; at 1 it is bit-for-bit what it " +
+      "always was. `clipper`'s OLDER inserts, saved before that ruling, still " +
+      "resolve to 4 - this kind's have always been 1. Set " +
       "it to 4 on a new insert you are driving hard. ⚠⚠ It CHANGES THE " +
       "LATENCY here (0 at 1, 32 at 2/4), unlike `clipper`; it is DISCRETE and " +
       "neither automatable nor modulatable), `gate` (noise gate — thresholdDb/attackMs/holdMs/" +
@@ -6705,11 +6888,14 @@ server.registerTool(
       "⛔ NOT `limiter` either - a limiter rides a gain and keeps the " +
       "waveform's shape; this deforms it on purpose. Clipping starts at an " +
       "INPUT level of `ceilingDb - driveDb`, echoed as `clipThresholdDbfs`. " +
-      "⭐ `oversampling` (1/2/4, default 4) is the quality control and " +
-      "the reason the kind exists: clipping makes tones above Nyquist that " +
-      "FOLD BACK as an inharmonic metallic fizz, and 2x or 4x moves the fold " +
-      "out of the audio band. 1 is a real setting that lets the fizz " +
-      "through. ⚠️ The ceiling bounds SAMPLES, not TRUE PEAK - the " +
+      "⭐ `oversampling` (1/2/4; a NEW clipper starts at 1, oversampling OFF " +
+      "- the 2026-09-20 ruling, \"free, grittier\") is the quality control " +
+      "and the reason the kind exists: clipping makes tones above Nyquist " +
+      "that FOLD BACK as an inharmonic metallic fizz, and 2x or 4x moves " +
+      "the fold out of the audio band. 1 is a real setting that lets the " +
+      "fizz through, not a degraded one. ⚠️ A clipper in an OLDER project " +
+      "that never had this value set keeps resolving to 4, unchanged. The " +
+      "ceiling bounds SAMPLES, not TRUE PEAK - the " +
       "wave between samples can ride about a decibel higher; follow with a " +
       "`limiter` at `truePeak` 1 if you need that guarantee. ⚠️ " +
       "`mode` and `oversampling` are DISCRETE: automate them with `hold`, " +
@@ -7815,8 +8001,8 @@ registerTool(
       "keeps the clip's current value. AUDIO CLIPS ONLY (a MIDI clip is rejected). " +
       "Rendering is ASYNCHRONOUS: after a large change the clip may be briefly " +
       "SILENT while the engine renders — poll project_snapshot's per-clip " +
-      "`stretchRendering` flag (this lands with the ii-d engine wire; the parameters " +
-      "persist now). Returns the updated clip.",
+      "`stretchRendering` flag (and `stretchError` if the render failed). Returns the " +
+      "updated clip.",
     inputSchema: {
       trackId: z.string().min(1).describe("Id of the track that owns the clip, from project_snapshot."),
       clipId: z.string().uuid().describe("Id of the AUDIO clip to stretch, from project_snapshot."),
@@ -7868,8 +8054,8 @@ registerTool(
       "to 0.25..4 (if the clamp bites, the final length is re-derived to keep the " +
       "source window intact). Fades re-clamp to the new length. AUDIO CLIPS ONLY. " +
       "Like clip_set_stretch, rendering is asynchronous — the clip may be briefly " +
-      "silent after a big change (poll project_snapshot's `stretchRendering` once the " +
-      "ii-d engine wire lands). Returns the updated clip.",
+      "silent after a big change (poll project_snapshot's per-clip `stretchRendering`). " +
+      "Returns the updated clip.",
     inputSchema: {
       trackId: z.string().min(1).describe("Id of the track that owns the clip, from project_snapshot."),
       clipId: z.string().uuid().describe("Id of the AUDIO clip to stretch, from project_snapshot."),
@@ -8346,11 +8532,18 @@ registerTool(
       "`mode`: \"transients\" (default -- detected onsets, tuned by `sensitivity`), " +
       "\"divisions\" (N equal parts, needs `divisions` 2..128), or \"grid\" (musical " +
       "grid lines, needs `gridBeats`). Parameters that do not belong to the chosen mode " +
-      "are REJECTED by name rather than silently ignored. " +
-      "`includeHead` (default false) keeps the audio BEFORE the first slice point as pad " +
-      "1 -- off by default because that material is usually pre-roll, but `headSeconds` " +
-      "is always reported and a large discarded head is warned about, so a missed " +
-      "downbeat can never vanish quietly. " +
+      "are REJECTED by name rather than silently ignored -- with ONE exception, " +
+      "`includeHead` (below), accepted in every mode but read only in \"transients\". " +
+      "`includeHead` (default false) matters ONLY in \"transients\" mode: true keeps the " +
+      "audio BEFORE the first detected onset as pad 1 -- off by default because that " +
+      "material is usually pre-roll, but `headSeconds` is always reported and a large " +
+      "discarded head is warned about there, so a missed downbeat can never vanish " +
+      "quietly. In \"divisions\" and \"grid\", pad 1 ALWAYS starts at the clip/window " +
+      "start by construction -- `divisions: N` gives exactly N pads, not N-1 -- so " +
+      "`includeHead` changes nothing there and no warning fires; it is still ACCEPTED " +
+      "(never rejected) so a caller who passes `includeHead: true` out of habit keeps " +
+      "its exact result. `headSeconds` in those two modes simply reports pad 1's own " +
+      "length. " +
       "Each boundary is SNAPPED once (within +/-`snapWindowMs`, default 3) to the " +
       "quietest nearby frame and shared by both adjacent pads, so a pad played on its own " +
       "does not click; every pad also gets a 0 ms attack (keeps the transient) and a 10 " +
@@ -8471,8 +8664,11 @@ registerTool(
         .boolean()
         .optional()
         .describe(
-          "Keep the audio BEFORE the first slice point as pad 1 (default false). Turn it " +
-            "on when `headSeconds` shows the detector missed the downbeat."
+          "Only matters in mode \"transients\": keep the audio BEFORE the first detected " +
+            "onset as pad 1 (default false) -- turn it on when `headSeconds` shows the " +
+            "detector missed the downbeat. Accepted (not rejected) in \"divisions\"/" +
+            "\"grid\" too, but changes nothing there -- pad 1 already starts at the " +
+            "clip/window start in those modes."
         ),
       baseNote: z
         .number()
@@ -8696,20 +8892,43 @@ registerTool(
       "too quiet to voice) stores nothing and comes back with segmentCount:0 plus a warning " +
       "pointing at clip_detect_pitch's voicedFraction -- check that before assuming the clip " +
       "is simply already in tune. " +
-      "WARNING -- hardTune / any preserveVibrato:false request is UNFINISHED end to end: it " +
-      "asks the render curve to flatten the sung contour onto the target, which needs the " +
-      "detected pitch contour AT RENDER TIME, and the render path does not thread one " +
-      "through yet. Today it renders as a CONSTANT per-note offset -- audibly like 'tight', " +
-      "not the replaced-contour robot effect the name promises. The response's `warnings` " +
-      "repeats this whenever it applies, so you are told rather than finding out by ear. " +
+      "How notes are found: one unbroken sung phrase is split wherever the pitch settles on " +
+      "a new note, so segmentCount counts NOTES, not phrases, and a slide lasting longer than " +
+      "about 130 ms into, between or out of held notes becomes its own segment. Every preset " +
+      "stores such a SLIDE segment as sung -- pitchOffsetCents 0, driftScale 1, vibratoScale " +
+      "1 -- and moves only the held notes (for hardTune this is the chosen 'slide kept, note " +
+      "locked' sound): it is not a note the pass missed, so do not 'finish' it with " +
+      "clip_set_note_pitch. " +
+      "hardTune / any preserveVibrato:false request asks the render curve to flatten the " +
+      "sung contour onto the target, which needs the detected pitch contour AT RENDER TIME " +
+      "-- and, as of the contour-to-render work (2026-09-24), the render path threads one " +
+      "through: measured on a real vocal, Hard Tune's within-note wander drops 62.8 -> 18.2 " +
+      "cents (a 70% median cut), not the near-zero change a constant-offset fallback would " +
+      "give. ⚠️ The one remaining honest caveat: if the pitch detector could not run AT " +
+      "RENDER TIME, THAT render falls back to a constant per-note offset -- audibly like " +
+      "'tight' -- and the app posts a clip-pitch-contour-unavailable notice when it happens. " +
+      "This call cannot know that in advance (it only segments and stores; it never " +
+      "renders), so its own `warnings` field does not speculate about it. " +
+      "The TUNED audio is rendered in the background after this returns: until it lands " +
+      "the clip plays as SILENCE, and project_snapshot marks the clip `stretchRendering: " +
+      "true` (or carries `stretchError` if the render failed) -- poll that before " +
+      "transport_play when you need to hear the result. " +
       "Coalescing: never (this is a structural edit, like split or a whole preset apply -- " +
       "each call is its own undo step). Returns {clipId, hasPitchEdits, analysisVersion, " +
       "retuneMs, segmentCount, isIdentity, appliedOptions: {scale, strength, retuneMs, " +
       "preserveVibrato}, segments: [{id, startSeconds, endSeconds (SOURCE-FILE-absolute " +
-      "seconds, the clip_detect_pitch domain), detectedHz, detectedConfidence, " +
-      "pitchOffsetCents, driftScale, vibratoScale}], warnings} -- every segment field is " +
-      "ALWAYS present, unlike the clip's own on-disk storage which omits defaults, so you " +
-      "can't mistake 'default value' for 'field absent' when reading this back.",
+      "seconds, the clip_detect_pitch/clip_set_note_pitch/clip_split_note domain), " +
+      "detectedHz, detectedConfidence, pitchOffsetCents, driftScale, vibratoScale, " +
+      "vibratoRateHz/vibratoDepthCents/vibratoOnsetSeconds (a synthesised-vibrato generator " +
+      "with no wire writer yet -- always 0 today), formantOffsetSemitones/" +
+      "timeStartDeltaSeconds/timeEndDeltaSeconds/amplitudeDb (carried for a later phase, " +
+      "unread by any renderer today, always 0)}], warnings} -- " +
+      "every segment field is ALWAYS present, unlike the clip's own on-disk storage which " +
+      "omits defaults, so you can't mistake 'default value' for 'field absent' when reading " +
+      "this back. By default this REPLACES whatever was on the clip already (unchanged " +
+      "behavior) -- pass `replaceExisting: false` to refuse instead when the clip's current " +
+      "table carries hand edits since its last auto-correct pass, see that parameter's own " +
+      "description.",
     inputSchema: {
       clipId: z.string().uuid().describe("Id of the AUDIO clip to correct, from project_snapshot."),
       preset: z
@@ -8768,9 +8987,24 @@ registerTool(
             "(the hardTune algorithm) -- see the tool description's render-path warning " +
             "before using this. Overrides a preset's own value when both are given."
         ),
+      replaceExisting: z
+        .boolean()
+        .optional()
+        .describe(
+          "true (the default -- omit this unless you want the false behavior) replaces " +
+            "whatever was on the clip unconditionally, today's behavior, unchanged. false " +
+            "REFUSES with a teaching error if the clip's CURRENT table has hand edits since " +
+            "the last auto-correct pass (a pitch move, a timing change, a drawn shape) -- " +
+            "comparing presets back-to-back (Gentle -> Natural -> Tight) is NOT hand-editing " +
+            "and never trips this, only clip_set_note_pitch/clip_split_note (or the editor) " +
+            "do. Use false when you want to preserve a caller's earlier per-note work rather " +
+            "than silently overwrite it; check clip_get_pitch_edits's `handEditedSinceAutoCorrect` " +
+            "first if you are not sure which state a clip is in -- true means THIS call would " +
+            "refuse right now."
+        ),
     },
   },
-  async ({ clipId, preset, tonicPitchClass, mode, strength, retuneMs, preserveVibrato }) =>
+  async ({ clipId, preset, tonicPitchClass, mode, strength, retuneMs, preserveVibrato, replaceExisting }) =>
     toToolResult(() =>
       bridge.send("clip.autoCorrectPitch", {
         clipId,
@@ -8780,6 +9014,7 @@ registerTool(
         strength,
         retuneMs,
         preserveVibrato,
+        replaceExisting,
       })
     )
 );
@@ -8806,19 +9041,188 @@ registerTool(
   {
     title: "Read back a clip's stored pitch correction",
     description:
-      "STRICTLY READ-ONLY -- see what a prior clip_auto_correct_pitch actually did, or " +
-      "confirm a clip carries no correction at all. Never runs the detector, never edits " +
-      "anything, no undo entry. A clip that was never corrected, or was cleared, reads back " +
-      "hasPitchEdits:false, segmentCount:0, segments:[]. Returns the same shape as " +
-      "clip_auto_correct_pitch minus `appliedOptions` (nothing was applied this call): " +
-      "{clipId, hasPitchEdits, analysisVersion, retuneMs, segmentCount, isIdentity, " +
-      "segments: [{id, startSeconds, endSeconds, detectedHz, detectedConfidence, " +
-      "pitchOffsetCents, driftScale, vibratoScale}], warnings}.",
+      "STRICTLY READ-ONLY -- see what a prior clip_auto_correct_pitch / clip_set_note_pitch " +
+      "/ clip_split_note actually did, or confirm a clip carries no correction at all. Never " +
+      "runs the detector, never edits anything, no undo entry. A clip that was never " +
+      "corrected, or was cleared, reads back hasPitchEdits:false, segmentCount:0, " +
+      "segments:[]. Returns the same shape as clip_auto_correct_pitch minus " +
+      "`appliedOptions` (nothing was applied this call): {clipId, hasPitchEdits, " +
+      "analysisVersion, retuneMs, segmentCount, isIdentity, handEditedSinceAutoCorrect, " +
+      "segments: [{id, startSeconds, " +
+      "endSeconds, detectedHz, detectedConfidence, pitchOffsetCents, driftScale, " +
+      "vibratoScale, vibratoRateHz, vibratoDepthCents, vibratoOnsetSeconds, " +
+      "formantOffsetSemitones, timeStartDeltaSeconds, timeEndDeltaSeconds, amplitudeDb}], " +
+      "warnings}. Use this to find a note's `id`/`startSeconds`/`endSeconds` before calling " +
+      "clip_set_note_pitch or clip_split_note on it. `handEditedSinceAutoCorrect: true` " +
+      "means clip_auto_correct_pitch {replaceExisting:false} would refuse right now -- " +
+      "false means the table is either untouched, empty, or exactly a preset's own last " +
+      "output (switching presets never sets this).",
     inputSchema: {
       clipId: z.string().uuid().describe("Id of the clip to read, from project_snapshot."),
     },
   },
   async ({ clipId }) => toToolResult(() => bridge.send("clip.getPitchEdits", { clipId }))
+);
+
+registerTool(
+  "clip_set_note_pitch",
+  {
+    title: "Drag one sung note's pitch (per-note tuning)",
+    description:
+      "Move ONE detected note's pitch by an ABSOLUTE amount, in cents -- the per-note " +
+      "sibling of clip_auto_correct_pitch's whole-clip presets, and the wire door for the " +
+      "pitch editor's own drag gesture. `cents` is the note's FINAL offset from where it " +
+      "was sung, not a delta: send 50 twice in a row and the note ends up 50 cents sharp " +
+      "both times, not 100 -- a delta API would make a dropped call and a call of zero " +
+      "indistinguishable. Clamped to +/-2400 cents (2 octaves, the same span as the " +
+      "whole-clip pitch-shift control) -- read the response back rather than trusting the " +
+      "number you sent, in case it was clamped. REQUIRES A STORED NOTE TABLE ALREADY ON " +
+      "THE CLIP: there is no pitch detection on this wire path (unlike the in-app editor, " +
+      "which can seed one from what it is already drawing). Run clip_auto_correct_pitch " +
+      "first with a real preset (NOT strength:0 -- that stores nothing, by design, since a " +
+      "strength-0 correction is exactly the identity), then read the note ids back with " +
+      "clip_get_pitch_edits. A MIDI clip, a clip with no stored table, or an unknown " +
+      "segmentId all refuse with a teaching error. Coalescing: two calls on the SAME note " +
+      "within 800ms fold into one undo step (like a continuous drag); a different note " +
+      "always starts a new one. Like clip_auto_correct_pitch, the retuned audio renders in " +
+      "the background (the clip is silent until it lands) -- poll project_snapshot's " +
+      "per-clip `stretchRendering` before playing it. Returns the same full-table shape as " +
+      "clip_get_pitch_edits " +
+      "(every OTHER note included, unchanged) plus `segmentId` (echoing what you sent) and " +
+      "the stored, post-clamp `pitchOffsetCents`.",
+    inputSchema: {
+      clipId: z.string().uuid().describe("Id of the AUDIO clip the note belongs to."),
+      segmentId: z
+        .string()
+        .uuid()
+        .describe("Id of the note (from clip_get_pitch_edits / clip_auto_correct_pitch's `segments`)."),
+      cents: z
+        .number()
+        .describe(
+          "The note's FINAL pitch offset from where it was sung, in cents (100 cents = 1 " +
+            "semitone). Absolute, not a delta. Clamped to +/-2400 (2 octaves)."
+        ),
+    },
+  },
+  async ({ clipId, segmentId, cents }) =>
+    toToolResult(() => bridge.send("clip.setNotePitch", { clipId, segmentId, cents }))
+);
+
+registerTool(
+  "clip_split_note",
+  {
+    title: "Cut one sung note into two, so each half can be tuned separately",
+    description:
+      "Splits ONE detected note into two at a SOURCE-FILE-absolute second (the " +
+      "clip_detect_pitch/clip_get_pitch_edits domain, never clip-local or beat-space) -- " +
+      "the wire door for the pitch editor's scissors tool. Both halves inherit every edit " +
+      "the parent note carried (so splitting an already-tuned note does not silently " +
+      "un-tune half of it), and are then independent -- dragging one with " +
+      "clip_set_note_pitch moves only that half. The LEFT half keeps the parent's own " +
+      "`segmentId`; the RIGHT half gets a new one, returned as `rightSegmentId`. Refuses " +
+      "when either resulting half would be under 60ms long (the renderer's own onset/" +
+      "offset ramp would swallow anything shorter) -- the error names the note's actual " +
+      "span so you can zoom in and pick a point nearer the middle. REQUIRES A STORED NOTE " +
+      "TABLE ALREADY ON THE CLIP, the clip_set_note_pitch rule verbatim: run " +
+      "clip_auto_correct_pitch first, there is no pitch detection on this wire path. " +
+      "Coalescing: never -- a split is structural, so cutting twice in one second is two " +
+      "undo steps, matching two scissor clicks. Returns the same full-table shape as " +
+      "clip_get_pitch_edits plus `leftSegmentId` and `rightSegmentId`.",
+    inputSchema: {
+      clipId: z.string().uuid().describe("Id of the AUDIO clip the note belongs to."),
+      segmentId: z
+        .string()
+        .uuid()
+        .describe("Id of the note to cut (from clip_get_pitch_edits / clip_auto_correct_pitch's `segments`)."),
+      atSourceSeconds: z
+        .number()
+        .describe(
+          "Where to cut, in SOURCE-FILE-absolute seconds (the same domain as a segment's " +
+            "own startSeconds/endSeconds) -- must land at least 60ms inside both of the " +
+            "note's own start and end."
+        ),
+    },
+  },
+  async ({ clipId, segmentId, atSourceSeconds }) =>
+    toToolResult(() => bridge.send("clip.splitNote", { clipId, segmentId, atSourceSeconds }))
+);
+
+registerTool(
+  "clip_get_played_pitch",
+  {
+    title: "Read the pitch this clip will actually play (after every edit)",
+    description:
+      "The pitch this clip will actually play, frame by frame, after every edit -- not what " +
+      "was SUNG (that's clip_detect_pitch), what the RENDER shapes it INTO. This is the same " +
+      "line the in-app pitch editor draws, from the same function, so what you read back here " +
+      "is what a person sees on screen. Use it to ASSERT THE PHYSICS of an edit rather than " +
+      "just its audibility: after clip_set_note_pitch(cents: 50), the moved note's " +
+      "`playedMidi` should read exactly 0.5 semitones higher than before -- checking that is " +
+      "a real test, checking that the clip 'sounds fine' is not. " +
+      "REQUIRES A STORED NOTE TABLE ALREADY ON THE CLIP (the clip_set_note_pitch/" +
+      "clip_split_note rule verbatim -- there is NO pitch detection on this wire path): run " +
+      "clip_auto_correct_pitch first. A MIDI clip is refused (its notes already have a " +
+      "definite pitch). " +
+      "Returns `{clipId, basis, reason?, unresolvedNoteIds, fromSeconds, durationSeconds, " +
+      "maxPoints, decimated, pointCount, totalPointCount, runs}`. `basis` is `'render'` when " +
+      "a real detected contour backs the line, or `'estimate'` (with a `reason`) when it " +
+      "does not -- an unresolved contour on THIS wire path returns an HONEST EMPTY estimate " +
+      "(`runs: []`), never a fabricated one, because this tool never runs its own detection. " +
+      "`unresolvedNoteIds` names notes whose wobble setting could not be applied (their pitch " +
+      "MOVES still play). `runs` is an array of arrays -- ONE PER VOICED RUN, never one per " +
+      "note, so a real gap in the singing stays visually distinct from a note boundary -- " +
+      "each point is `{sourceSeconds, editedSeconds, sungMidi, playedMidi}` in SOURCE-FILE-" +
+      "absolute seconds (the clip_detect_pitch/clip_set_note_pitch domain). `playedMidi` " +
+      "already includes the clip's whole-clip pitch shift; `editedSeconds` equals " +
+      "`sourceSeconds` today (reserved for a future per-note timing feature). " +
+      "SIZE: a 5-minute vocal is roughly 18,900 frames, so the DEFAULT whole-clip call on a " +
+      "real take DOES decimate -- `decimated`/`pointCount`/`totalPointCount` say exactly what " +
+      "happened, always, never silently. Narrow with `fromSeconds`/`durationSeconds` for full " +
+      "resolution on just the part you care about, or raise `maxPoints`. " +
+      "This may compute-and-cache the clip's whole-file pitch analysis on first call (an " +
+      "on-device model pass) -- your FIRST call on a given clip is not a cheap read; later " +
+      "calls reuse the cache.",
+    inputSchema: {
+      clipId: z.string().uuid().describe("Id of the AUDIO clip to read, from project_snapshot."),
+      fromSeconds: z
+        .number()
+        .min(0)
+        .optional()
+        .describe(
+          "Where to start, in SOURCE-FILE-absolute seconds (the clip_detect_pitch domain). " +
+            "Narrows the RETURNED points only -- it never changes how the line is built (the " +
+            "curve is always built from the clip's WHOLE window). Omit both this and " +
+            "`durationSeconds` for every point the clip has. Given alone, runs to the clip's " +
+            "own window end."
+        ),
+      durationSeconds: z
+        .number()
+        .gt(0)
+        .optional()
+        .describe(
+          "How many seconds to return from `fromSeconds`. Given alone (no `fromSeconds`), " +
+            "starts at the clip's own window start -- the clip_detect_pitch default-filling " +
+            "idiom."
+        ),
+      maxPoints: z
+        .number()
+        .int()
+        .min(1)
+        .max(100_000)
+        .optional()
+        .describe(
+          "Caps how many points come back, decimated EVENLY across whatever is in scope " +
+            "(default 2000). Always enforced, window or not -- a narrow window naturally " +
+            "returns full resolution because it usually has fewer points than this cap, not " +
+            "because decimation is disabled. Never drops an entire voiced run, only thins the " +
+            "points inside one; check the response's `decimated` flag rather than assuming."
+        ),
+    },
+  },
+  async ({ clipId, fromSeconds, durationSeconds, maxPoints }) =>
+    toToolResult(() =>
+      bridge.send("clip.getPlayedPitch", { clipId, fromSeconds, durationSeconds, maxPoints })
+    )
 );
 
 registerTool(
@@ -13331,10 +13735,16 @@ server.registerTool(
       "May also include `engineNotices` (m15-e): a top-level array of schedule-time " +
       "DEGRADATION reports — cases where playback proceeded on time but not exactly as " +
       "the project describes (e.g. a fade or gain envelope that couldn't be prepared in " +
-      "time so the clip played without it, or a clip still time-stretching that played as " +
-      "silence). Each entry is `{code, message, beat, count, lastAt}`: `code` is a stable " +
-      "machine key naming the degradation family (the current ones are " +
-      "`clip-fades-skipped`, `clip-envelope-skipped`, `clip-stretch-pending`) that events " +
+      "time so the clip played without it, or a stretched or TUNED clip whose render " +
+      "wasn't ready yet, so it played as silence — reported when playback actually starts " +
+      "over it, never at the edit itself). Each entry is `{code, message, beat, count, " +
+      "lastAt}`: `code` is a stable machine key naming the degradation family (the current " +
+      "ones are `clip-stretch-pending` — a time-stretched, transposed or tuned clip still " +
+      "rendering, one code for all three — plus `clip-fades-skipped`, " +
+      "`clip-envelope-skipped`, `clip-unplayable`, `clip-file-missing`, " +
+      "`clip-pitch-contour-unavailable`, `instrument-unavailable`, " +
+      "`output-device-unavailable`, `engine-exception` and `ai-generation-interrupted`) " +
+      "that events " +
       "are COALESCED by — a recurrence increments `count` and refreshes the entry rather " +
       "than appending; `message` is a human-readable description naming the clip; `beat` " +
       "is the affected clip's start beat (may be null); `count` is how many times this " +
@@ -13344,6 +13754,14 @@ server.registerTool(
       "project_open. The KEY IS ABSENT when there are no notices — its absence means " +
       "playback has been healthy, so poll it after transport_play to check whether " +
       "anything sounded off. " +
+      "Audio clips that play from an offline RENDER rather than straight off their file — " +
+      "a time-stretch or transpose (clip_set_stretch / clip_stretch_to_length) OR a tuning " +
+      "(clip_auto_correct_pitch / clip_set_note_pitch / clip_split_note) — may carry two " +
+      "transient, never-saved fields: `stretchRendering: true` while that render is in " +
+      "flight (the clip plays as SILENCE until it lands) and `stretchError`, a readable " +
+      "reason, when it FAILED (the clip stays silent until the edit changes). Both are " +
+      "ABSENT when there is nothing to report and never appear on an untouched clip; poll " +
+      "until `stretchRendering` clears before transport_play when you need to hear the edit. " +
       "MIDI clips (from " +
       "clip_add_midi) carry a `notes` array (pitch, velocity, startBeat relative " +
       "to the clip, lengthBeats); audio clips do not. MIDI clips may also carry a " +

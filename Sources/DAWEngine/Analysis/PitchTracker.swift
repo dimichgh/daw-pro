@@ -388,6 +388,33 @@ public final class SwiftF0PitchTracker: PitchTracker {
     /// Wider than the sung range in both directions.
     public static let modelFrequencyRange: ClosedRange<Double> = 46.875...2093.75
 
+    /// SHA256 of the vendored `swiftf0.onnx` — THE MODEL'S IDENTITY, as a
+    /// constant rather than a hash computed at run time.
+    ///
+    /// It enters the detected-contour cache key (`PitchContourCache`), so a
+    /// swapped model re-keys every cached contour — and every render shaped
+    /// against one — instead of quietly re-using analysis a different network
+    /// produced. A constant keeps that key derivation free of file I/O (it
+    /// runs on the main actor at every reconcile pass). It cannot drift from
+    /// the file: `PitchTrackerInferenceTests.vendoredWeightsMatchThePinnedArtefact`
+    /// hashes the bundled resource and compares it to THIS value, and
+    /// `VENDORED.md` pins the same digest.
+    public static let weightsSHA256 =
+        "7e2390db8379cd9e1e2b22828e55b45b57c8559e4c8335678c717dc245c18176"
+
+    /// The inference RUNTIME that executes those weights, as the linked
+    /// library reports itself (`ORTVersion()`, e.g. "1.24.2") — read, never
+    /// restated, so it cannot drift from `Package.swift`'s pin.
+    ///
+    /// It is part of the detector's identity for the same reason the weights
+    /// are: the same network run by a different runtime build is not
+    /// guaranteed to produce the same bits, and the contour cache's promise is
+    /// that one key names one contour. So a runtime bump re-keys every cached
+    /// contour and every render shaped against one, once, rather than mixing
+    /// a new runtime's re-detections with an old runtime's renders after a
+    /// cache purge.
+    public static let runtimeIdentity = "onnxruntime-" + (ORTVersion() ?? "unknown")
+
     public var analysisSampleRate: Double { Self.modelSampleRate }
     public var frameRate: Double { Self.modelSampleRate / Double(Self.hopLength) }
     public var detectableRange: ClosedRange<Double> { Self.modelFrequencyRange }

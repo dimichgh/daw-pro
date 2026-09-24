@@ -637,23 +637,26 @@ public struct Clip: Identifiable, Codable, Sendable, Equatable {
     /// real dry vocal the curve path lands on the constant path's pitch to
     /// within a quarter of a cent.
     ///
-    /// ⚠️ **BUT `isStretchIdentity` BELOW IS STILL UNCHANGED, AND THAT IS A
-    /// SECOND HOME, NOT A DESIGN.** The widened predicate lives in
-    /// `StretchRenderCache.needsRender` because this file was locked by a
-    /// concurrent agent when the render leg landed. `paramsIdentityAgreesWithNeedsRender`
-    /// pins the two together so they cannot drift silently. **When the fold
-    /// lands here, `needsRender` collapses to `!clip.isStretchIdentity`, that
-    /// agreement test becomes tautological and must be RETIRED (not left
-    /// passing), and `ClipStretchTests:25–38` + `PitchCorrectionTests:930`
-    /// need re-reading.**
+    /// ✅ **"DOES THIS CLIP RENDER" HAS ONE HOME: `rendersThroughStretchCache`
+    /// below (m23-ap-p2 p2-snapshot, 2026-09-24).** The widened predicate used
+    /// to live in `StretchRenderCache.needsRender` (this file was locked when
+    /// the render leg landed), and the snapshot gate in DAWControl kept asking
+    /// the NARROW `!isStretchIdentity` — so a tuned clip's render state, a
+    /// failed render included, never reached the wire. Both now ask the model.
+    /// `isStretchIdentity` itself was deliberately NOT widened: five callers
+    /// read it as "is this clip time-stretched or transposed" (quantize,
+    /// slice-to-sampler, the overview's `hasStretch`, MIDI export totals),
+    /// which a tuning does not make true. `paramsIdentityAgreesWithNeedsRender`
+    /// still pins the model's answer against `StretchRenderCache.Params`'s own
+    /// identity — two derivations, so it is not tautological.
     ///
-    /// ⚠️ **ONE THING GENUINELY DOES NOT RENDER YET:** the render path passes
-    /// `contour: []`, so a set with `driftScale`/`vibratoScale` ≠ 1 (i.e.
-    /// `preserveVibrato: false`, the `.hardTune` preset) applies only its
-    /// constant per-note offset and names the rest in
-    /// `unresolvedShapingSegmentIDs`, which nothing reads. Hard Tune therefore
-    /// sounds like Tight today. `clip.autoCorrectPitch` says so in its
-    /// `warnings`.
+    /// ✅ **CLOSED 2026-09-24 (contour-to-render): drift/vibrato shaping now
+    /// renders.** A set with `driftScale`/`vibratoScale` ≠ 1 (Hard Tune) is
+    /// rendered against the detected whole-file contour
+    /// (`PitchContourCache.renderContour` in DAWEngine). Only when detection
+    /// is unavailable, or the set came from another detector generation, does
+    /// it fall back to constant per-note offsets — and then the engine posts
+    /// a `clip-pitch-contour-unavailable` notice rather than staying silent.
     ///
     /// ⚠️ NOTE (the m12-f MIRROR-DTO lesson, as `gainEnvelope` and
     /// `controllerLanes` both warn): the disk path is `ClipDocument`, not this
@@ -736,9 +739,10 @@ public struct Clip: Identifiable, Codable, Sendable, Equatable {
     public var isMIDI: Bool { notes != nil }
 
     /// True when the stretch is a structural identity — ratio exactly 1 and no
-    /// pitch shift — so the engine (ii-d) bypasses rendering and plays the
-    /// original file byte-for-byte. `formantPreserve` alone (no pitch shift) is
-    /// still identity.
+    /// pitch shift. `formantPreserve` alone (no pitch shift) is still identity.
+    /// This answers "is this clip time-stretched or transposed", NOT "does the
+    /// engine render it": a tuned clip is stretch-identity and still renders.
+    /// For the engine's bypass question ask `rendersThroughStretchCache`.
     public var isStretchIdentity: Bool {
         stretchRatio == 1 && pitchShiftSemitones == 0
     }
@@ -747,16 +751,33 @@ public struct Clip: Identifiable, Codable, Sendable, Equatable {
     /// curve (m23-ap) — a set of freshly detected but UNTOUCHED notes reads
     /// false, because it renders as nothing.
     ///
-    /// ⚠️ **DELIBERATELY NOT FOLDED INTO `isStretchIdentity` YET.** §6.4's rule
-    /// is that an empty edit set must still hit `OfflineStretcher.isIdentity`
-    /// and play the original file byte-for-byte; the corresponding rule for a
-    /// NON-empty set — that it must leave the identity bypass — belongs with
-    /// the render integration, which is gated on m23-q's unrun E2 listening
-    /// leg. Until then this is a readable fact about the model and nothing
-    /// changes what the engine does. The item that wires the curve in owns
-    /// changing `isStretchIdentity`, and should expect the byte gates that
-    /// pin today's behaviour to move with it.
+    /// §6.4's rule is that a set which renders as nothing must still hit
+    /// `OfflineStretcher.isIdentity` and play the original file byte-for-byte;
+    /// a set for which this is TRUE leaves the identity bypass. That rule is
+    /// wired: it lives in `rendersThroughStretchCache`, not in
+    /// `isStretchIdentity` (see there for why).
     public var hasPitchEdits: Bool { !(pitchEdits?.isIdentity ?? true) }
+
+    /// Does the engine play this clip from a RENDER in the stretch cache
+    /// rather than straight off its source file? True for a time-stretch, a
+    /// transpose, or a tuning that bends the curve (`hasPitchEdits`).
+    ///
+    /// ⭐ **THE ONE HOME OF "DOES THIS CLIP RENDER" (m23-ap-p2 p2-snapshot).**
+    /// `StretchRenderCache.needsRender` (what the engine resolves, schedules
+    /// as silence while pending, and waits for before a bounce) forwards
+    /// here, and so does `project.snapshot`'s gate for the transient
+    /// `stretchRendering` / `stretchError` fields. Before this existed the two
+    /// sides asked different questions — the engine the wide one, the
+    /// snapshot `!isStretchIdentity` — and a TUNED clip's pending or FAILED
+    /// render was invisible on the wire. A third caller asks this property;
+    /// it does not re-derive the disjunction.
+    ///
+    /// When this is false the clip takes the identity bypass and plays its
+    /// source byte-for-byte (the null-case contract every stretch and pitch
+    /// byte gate pins).
+    public var rendersThroughStretchCache: Bool {
+        !isStretchIdentity || hasPitchEdits
+    }
 
     /// Source-material window this clip consumes, in SECONDS, DERIVED from the
     /// timeline span and the stretch ratio (spec §1): the tempo-map integral

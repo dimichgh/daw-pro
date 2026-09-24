@@ -505,6 +505,56 @@ struct FXCommandTests {
             + "— its latency is a CONSTANT 32 by design, because its factor is automatable"))
     }
 
+    /// m39-ac-2 — THE 2026-09-20 RULING, ON THE WIRE: a clipper added with no
+    /// params starts at 1× (off) — it used to start at 4× — on a track AND on
+    /// the master, and `fx.describe` reports 1 as the default. The PROJECT-FILE
+    /// half (a clipper already saved keeps its 4×, decoded and rendered from a
+    /// verbatim pre-ruling document) lives in `ClipperDefaultOversamplingTests`.
+    @Test("m39-ac-2: a clipper added over the wire starts at 1×, track and master, and fx.describe says 1")
+    func clipperAddedOverTheWireStartsAtOne() async throws {
+        let (router, store) = makeRouter()
+        let trackID = await addTrack(router, name: "Drums", kind: "audio")
+
+        let added = await router.handle(ControlRequest(
+            id: "1", command: "fx.add",
+            params: ["trackId": .string(trackID.uuidString), "kind": .string("clipper")]))
+        #expect(added.ok)
+        let params = try #require(added.result?["effects"]?.arrayValue?.first?["params"])
+        #expect(params["oversampling"]?.doubleValue == 1, Comment(rawValue:
+            "a new clipper reported oversampling "
+            + "\(params["oversampling"]?.doubleValue ?? -1) — the ruling says it starts OFF (1)"))
+        #expect(params["resolvedOversampling"]?.doubleValue == 1)
+        // ⭐ INVARIANCE CONTROL: the ruling moved the FACTOR, not the design —
+        // the clipper's latency is still a constant 32 at every factor.
+        #expect(params["latencySamples"]?.doubleValue == 32)
+        // …and the 1 is IN THE MODEL, explicitly — not a nil that some later
+        // default could reinterpret (that nil is what an OLD clipper looks like).
+        let track = try #require(store.tracks.first { $0.id == trackID })
+        #expect(track.effects.first?.clipper?.oversampling == 1)
+
+        let master = await router.handle(ControlRequest(
+            id: "2", command: "fx.add",
+            params: ["trackId": .string("master"), "kind": .string("clipper")]))
+        #expect(master.ok)
+        let masterID = try #require(master.result?["effectId"]?.stringValue)
+        let masterParams = try #require(master.result?["effects"]?.arrayValue?
+            .first { $0["id"]?.stringValue == masterID }?["params"])
+        #expect(masterParams["oversampling"]?.doubleValue == 1)
+        #expect(store.masterEffects.last?.clipper?.oversampling == 1)
+
+        let described = await router.handle(ControlRequest(
+            id: "3", command: "fx.describe", params: ["kind": .string("clipper")]))
+        #expect(described.ok)
+        let specs = try #require(described.result?["kinds"]?.arrayValue?.first?["params"]?
+            .arrayValue)
+        let oversampling = try #require(specs.first { $0["name"]?.stringValue == "oversampling" })
+        #expect(oversampling["default"]?.doubleValue == 1)
+        // The note tells an agent BOTH halves: new ones start at 1, saved ones keep 4.
+        let note = try #require(oversampling["note"]?.stringValue)
+        #expect(note.contains("NEWLY ADDED CLIPPER"))
+        #expect(note.contains("ALREADY SAVED"))
+    }
+
     @Test("m38-a: fx.describe reports invertPolarity with its type and default")
     func fxDescribeReportsPolarity() async throws {
         let (router, _) = makeRouter()

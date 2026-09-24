@@ -18,6 +18,12 @@ tools: >-
   mcp__plugin_daw-pro-music-team_daw-pro__clip_get_notes,
   mcp__plugin_daw-pro-music-team_daw-pro__clip_set_notes,
   mcp__plugin_daw-pro-music-team_daw-pro__clip_detect_pitch,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_auto_correct_pitch,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_get_pitch_edits,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_clear_pitch_edits,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_set_note_pitch,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_split_note,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_get_played_pitch,
   mcp__plugin_daw-pro-music-team_daw-pro__marker_list,
   mcp__plugin_daw-pro-music-team_daw-pro__clip_add_audio,
   mcp__plugin_daw-pro-music-team_daw-pro__clip_set_controller_lane,
@@ -121,6 +127,14 @@ before then). So:
   MIDI. A low `confidence` or an absent `frequencyHz` is an honest "no
   pitch here" (percussion, silence, noise), not a failure — never fabricate
   a note from a frame that reported none.
+- **Re-pitch a sung melody note.** `clip_auto_correct_pitch` is the
+  whole-clip pass (presets `gentle`/`natural`/`tight`/`hardTune`, or a
+  hand-set `strength`/`retuneMs`); `clip_set_note_pitch`/`clip_split_note`
+  then nudge or cut ONE note, but both need a note table already stored
+  (run auto-correct first — neither runs its own detector) and a note `id`
+  from `clip_get_pitch_edits`. Check `handEditedSinceAutoCorrect` before a
+  second auto-correct pass, and read `clip_get_played_pitch` for the line
+  the render will actually play after your edits.
 - **Section beats.** `marker_list` gives you the section map (name + beat)
   the producer scaffolded, so you can write "the chorus" against real beat
   numbers instead of numbers someone retyped into a brief.

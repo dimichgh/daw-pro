@@ -607,7 +607,8 @@ Fail fast **before** the (slow) detection, the `quantizeAudioClip` discipline
    later boundary. **`transients` and `divisions` are source-domain and must NOT be rejected.**
 7. `targetTrackId`, when given, must name an existing track of kind `.instrument`. A non-instrument
    track is a teaching error naming the kind it found.
-8. Boundary count: after conditioning, `slices = boundaries.count + (includeHead ? 1 : 0)`.
+8. Boundary count: after conditioning, `slices = boundaries.count + (effectiveIncludeHead ? 1 : 0)`.
+   > ⚠ Corrected 2026-09-24 (m33-d): the original read `includeHead`, which dropped the first piece in `divisions`/`grid` mode ("Equal pieces 8" gave 7 pads). `effectiveIncludeHead = includeHead || mode != .transients` (`SliceToSampler.swift:120-122`).
    - `slices < 1` → `audioQuantizeNoTransients` (nothing changes).
    - `slices > maxSlices` → **REJECT**, naming the count and the three levers (lower
      `sensitivity`, raise `minSliceSeconds`, trim the clip window). ⭐ **Never truncate.** Keeping

@@ -118,7 +118,7 @@ function lastLogLine(): any {
 // Instrumentation coverage (both registration paths)
 // ---------------------------------------------------------------------------
 
-test("both registration paths are instrumented: 239 total, empty symmetric difference vs tools/list", async () => {
+test("both registration paths are instrumented: 245 total, empty symmetric difference vs tools/list", async () => {
   const instrumented = instrumentedToolNames();
   // m34-l: 208 -> 209 with `play_sustain`.
   // m34-h-1: 209 -> 216 with the seven-verb `looper_*` LIVE LOOPING family.
@@ -145,7 +145,22 @@ test("both registration paths are instrumented: 239 total, empty symmetric diffe
   // m23-q Phase 2 MCP mirror: 236 -> 239 with `clip_auto_correct_pitch`/
   // `clip_clear_pitch_edits`/`clip_get_pitch_edits`, all three through the
   // wrapper (the `clip_detect_pitch` precedent) — instrumented the same way.
-  assert.equal(instrumented.length, 239, `expected 239 instrumented registrations, got ${instrumented.length}`);
+  // Pitch-editor command-surface door MCP mirror (2026-09-24): 239 -> 242
+  // with `view_open_pitch_editor`/`clip_set_note_pitch`/`clip_split_note`,
+  // all three through the wrapper (the `view_select_clip`/`clip_auto_correct_pitch`
+  // precedents) — instrumented the same way, both registration paths running
+  // through the same patched `server.registerTool` underneath.
+  // m39-levels-2 wire MCP mirror (2026-09-24): 242 -> 244 with
+  // `instrument_spread_slice`/`instrument_set_spread_direction`, both through
+  // the wrapper (the `instrument_describe_sampler`/`instrument_set_sampler_zones`
+  // precedent) — instrumented the same way.
+  // m23-ap C-0c MCP mirror (2026-09-24): 244 -> 245 with
+  // `clip_get_played_pitch`, through the wrapper (the `clip_detect_pitch`
+  // precedent) — instrumented the same way, both registration paths running
+  // through the same patched `server.registerTool` underneath. The same
+  // close's `replaceExisting` addition to `clip_auto_correct_pitch` adds
+  // zero (a param on an already-instrumented tool).
+  assert.equal(instrumented.length, 245, `expected 245 instrumented registrations, got ${instrumented.length}`);
 
   const listed = await client.listTools();
   const listedNames = new Set(listed.tools.map((t) => t.name));

@@ -11,7 +11,15 @@ import os
 /// SOURCE sample rate and channel count, covering the ENTIRE source file (so
 /// split clips share one phase-coherent render and clip geometry never
 /// invalidates; spec §3). Renders are regenerable by definition: an OS cache
-/// purge or project move re-renders asynchronously and self-heals.
+/// purge or project move re-renders asynchronously and self-heals on the next
+/// launch, and a save / Save As that repoints a clip re-renders it in-session.
+/// ⚠️ NOT in-session: a committed CAF deleted under a RUNNING app is not
+/// re-rendered for that clip until its render key changes — the engine's kick
+/// dedupe (`AudioEngine.stretchDesired`) remembers that the key was asked
+/// for, not that its file still exists, so the next re-resolve schedules the
+/// clip as silence (measured 2026-09-24 with a move; `rebuildEngine`
+/// re-resolves every clip into a fresh graph and keeps that dedupe, so a
+/// rebuild takes the same path — read, not run).
 ///
 /// Job model (the M3 vi-a async-prepare shape): a miss spawns one
 /// `Task.detached` render per clip with per-clip latest-wins supersession and
@@ -19,18 +27,49 @@ import os
 /// a `.partial-…caf` sibling and atomically renames on success. Everything
 /// here is main-actor / detached-task scheduling-time work — the render
 /// thread is untouched by construction.
+///
+/// contour-to-render (2026-09-24): a render whose pitch edits shape against
+/// the DETECTED contour (Hard Tune, any drift/vibrato scale ≠ 1) fetches or
+/// detects it inside the same detached job through `PitchContourCache` — whose
+/// entries live in a `PitchContours/` folder inside `directory` — and keys on
+/// it. While that job runs the clip is `.rendering` and schedules as silence,
+/// exactly like every other render in flight; the first render of a file pays
+/// for one detection (~0.4–0.6 s per 33 s of audio, measured), later renders
+/// read the cached contour. If detection is unavailable the job commits the
+/// constant-offset render under the pre-contour key instead and says why
+/// (`contourShortfall(source:params:)`).
 @MainActor
 public final class StretchRenderCache {
-    /// The render-affecting clip parameters, as one hashable value (the
-    /// cache-key payload and the engine's latest-wins comparator).
+    /// The render-affecting clip parameters, as one hashable value — the
+    /// cache-key payload. ⛔ **NOT a render's identity, and not the engine's
+    /// latest-wins comparator any more** (2026-09-24): `Params ==` holds no
+    /// source file and compares Doubles with `==` (+0.0 == −0.0), while the
+    /// on-disk key starts with the source's identity and hashes bit patterns.
+    /// The engine compared `Params` and so refused to render a clip whose
+    /// SOURCE had changed under unchanged params — which every first save
+    /// and Save As does (it repoints the clip at its bundle copy) — leaving
+    /// the clip silent for the rest of the session with an idle status. The
+    /// engine now compares the render KEY itself (`AudioEngine.stretchDesired`,
+    /// via `keys(source:params:)`), so the two cannot disagree.
     ///
     /// ⚠️⚠️ **ADDING A FIELD HERE DOES NOT CHANGE THE ON-DISK KEY.** `Hashable`
     /// synthesis and `cacheKey(source:params:)` are two different derivations:
     /// the on-disk key is SHA256 over an EXPLICIT field list below, so a field
-    /// added here and not added there re-keys the in-memory latest-wins
-    /// comparator while serving the previous render's audio from disk — stale
-    /// audio that looks like a cache working perfectly. `pitchEditSetHash` is
-    /// in BOTH, and `pitchEditSetIsPartOfTheOnDiskKey` is the gate.
+    /// added here and not added there changes what compares equal here while
+    /// serving the previous render's audio from disk — stale audio that looks
+    /// like a cache working perfectly. `pitchEditSetHash` is in BOTH, and
+    /// `StretchEngineTests.editFreeClipKeyIsUnchanged` is the gate (its
+    /// controls: an edited set must not share the edit-free key, and a
+    /// one-cent edit must re-key).
+    ///
+    /// ⚠️ **THE DETECTED CONTOUR IS IN THE ON-DISK KEY AND DELIBERATELY NOT
+    /// HERE** (contour-to-render). Its key's inputs are the SOURCE FILE's
+    /// identity — never in `Params`; the source is passed beside it — and the
+    /// cache instance's `contourDetector`, a per-process constant. WHETHER a
+    /// render shapes against the contour is a function of `pitchEdits`,
+    /// already here through its digest. (This paragraph used to add that the
+    /// source "cannot change between two `Params` values of one clip". It
+    /// can — a save repoints it — and that is the defect described above.)
     public struct Params: Hashable, Sendable {
         public let ratio: Double
         public let semitones: Double
@@ -87,23 +126,71 @@ public final class StretchRenderCache {
             hasher.combine(formantPreserve)
             hasher.combine(pitchEditSetHash)
         }
+
+        /// Does a render of these params shape against the detected contour
+        /// under `detector`? THE question the key, the fallback and
+        /// `performRender` all ask — answered here once.
+        ///
+        /// False for every set that needs no contour (the preset ladder,
+        /// generator-only edits, plain offsets) — those key and render exactly
+        /// as they did before the contour reached the render. Also false for a
+        /// set from ANOTHER detector generation: it is never shaped against this
+        /// build's contour (§7.2), so its render is the constant-offset render
+        /// and keys like one.
+        func shapesAgainstContour(_ detector: PitchContourCache.Detector) -> Bool {
+            guard let set = pitchEdits else { return false }
+            return set.needsDetectedContour && set.analysisVersion == detector.analysisVersion
+        }
+    }
+
+    /// The two on-disk keys a render of (source, params) can live under.
+    ///
+    /// * `resolved` — where the render lives when it got what it asked for:
+    ///   for a set that shapes against the contour, the legacy fields plus
+    ///   `contour:<contour key>`; otherwise identical to `legacy`.
+    /// * `legacy` — the key this cache derived before the contour reached the
+    ///   render, byte for byte. For a contour-needing set it holds the
+    ///   CONSTANT-OFFSET render, which is exactly what the pre-contour code
+    ///   rendered for that set — so every such entry already on a user's disk
+    ///   is not orphaned: it is this set's FALLBACK, reused verbatim when
+    ///   detection is unavailable.
+    struct RenderKeys: Equatable, Sendable {
+        let resolved: String
+        let legacy: String
+    }
+
+    /// Where an entry for `(source, params)` is COMMITTED right now, if
+    /// anywhere: the resolved render, or — when this session's detection failed
+    /// for that key — the constant-offset fallback it fell back to.
+    ///
+    /// ⭐ **THE ONE PLACE THE FALLBACK MEMO IS CONSULTED.** The engine's
+    /// `resolveStretch` (with the keys it derived once for its kick dedupe),
+    /// `cachedURL` (the bounce's `stretchedFileProvider`) and
+    /// `renderIfNeeded`'s fast path all come through here, so the three can
+    /// never disagree about which file a clip plays.
+    func committedURL(for keys: RenderKeys) -> URL? {
+        let resolved = directory.appendingPathComponent(keys.resolved + ".caf")
+        if FileManager.default.fileExists(atPath: resolved.path) { return resolved }
+        if let fallback = contourFallbacks[keys.resolved]?.url,
+           FileManager.default.fileExists(atPath: fallback.path) {
+            return fallback
+        }
+        return nil
     }
 
     /// Does this clip need a render at all? The engine's reconcile-time
-    /// predicate, in ONE place.
+    /// predicate — a FORWARD to `Clip.rendersThroughStretchCache`, the one
+    /// home of that rule in DAWCore (m23-ap-p2 p2-snapshot).
     ///
-    /// ⚠️ **A DELIBERATE, TEMPORARY SECOND HOME FOR AN IDENTITY RULE.**
-    /// `Clip.isStretchIdentity` is the model's answer and it does NOT yet know
-    /// about pitch edits — its own doc comment says the render-integration
-    /// item owns folding `hasPitchEdits` in, and that edit lives in
-    /// `Model.swift`. Until it lands, an engine that asked only
-    /// `!clip.isStretchIdentity` would skip every pitch-edited clip that is
-    /// otherwise unstretched, i.e. the common case: correction with no
-    /// transpose and no time change. `paramsIdentityAgreesWithNeedsRender`
-    /// pins this against `Params.isIdentity` so the two cannot drift; when the
-    /// model folds it in, this collapses to `!clip.isStretchIdentity`.
+    /// It used to BE the rule (`!clip.isStretchIdentity || clip.hasPitchEdits`,
+    /// a temporary second home while `Model.swift` was locked), and the
+    /// snapshot gate in DAWControl meanwhile asked only `!isStretchIdentity`,
+    /// so a tuned clip's render state never reached the wire. Do not restate
+    /// the disjunction here again. `paramsIdentityAgreesWithNeedsRender` pins
+    /// this against `Params.isIdentity`, the cache's OWN derivation, so the
+    /// model and the cache cannot drift.
     nonisolated public static func needsRender(_ clip: Clip) -> Bool {
-        !clip.isStretchIdentity || clip.hasPitchEdits
+        clip.rendersThroughStretchCache
     }
 
     /// Bumped whenever the vendored signalsmith version or our preset/config
@@ -151,17 +238,94 @@ public final class StretchRenderCache {
     /// next job for that clip), absent = idle.
     private var statuses: [UUID: ClipStretchStatus] = [:]
 
-    public init(directory: URL? = nil) {
+    /// The detector whose contour renders shape against — `.product`
+    /// everywhere but tests, which inject one to count detections or force a
+    /// failure. Its fields are part of every contour-shaped render's key.
+    let contourDetector: PitchContourCache.Detector
+
+    /// THIS SESSION'S FALLBACKS: resolved render key → the constant-offset
+    /// render committed at its `legacy` key because the contour was
+    /// unavailable. In memory ON PURPOSE:
+    ///  * a failed detection must not be pinned on disk under the key a
+    ///    successful one would use — that would serve the degraded audio as
+    ///    fresh forever;
+    ///  * but the clip must not go silent either — the engine re-resolves
+    ///    through `cachedURL` after the job and must find SOMETHING to play;
+    ///  * so the fallback is remembered for the session and retried on the
+    ///    next launch (or the next edit, which is a new key).
+    ///
+    /// The reason travels WITH the file, keyed the same way, so "which file
+    /// plays" and "why it is the fallback" cannot come apart
+    /// (`contourShortfall`).
+    private var contourFallbacks: [String: (url: URL, reason: String)] = [:]
+
+    public convenience init(directory: URL? = nil) {
+        self.init(directory: directory, contourDetector: .product)
+    }
+
+    /// Test seam: inject the contour detector.
+    init(directory: URL?, contourDetector: PitchContourCache.Detector) {
         self.directory = directory
             ?? FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
                 .appendingPathComponent("DAWPro", isDirectory: true)
                 .appendingPathComponent("StretchRenders", isDirectory: true)
+        self.contourDetector = contourDetector
     }
 
     // MARK: - Status (pull-based, spec §5)
 
     public func status(forClip clipID: UUID) -> ClipStretchStatus {
         statuses[clipID] ?? .idle
+    }
+
+    /// Why a clip rendering `(source, params)` plays — or, once rendered, will
+    /// play — its CONSTANT-OFFSET fallback instead of the contour-shaped render
+    /// its edits ask for; `nil` when it does not. The engine turns this into a
+    /// visible notice (design §7.2: never a silent substitution); the curve
+    /// also names the affected segments in
+    /// `PitchCorrectionCurve.unresolvedShapingSegmentIDs`.
+    ///
+    /// ⭐ **ANSWERED FROM WHAT IS COMMITTED, NOT FROM WHETHER A JOB RAN.** A
+    /// fallback can be served from disk with no render at all — edits from
+    /// another detector generation sit under their (unchanged) legacy key
+    /// across launches — and a notice that only a completed job could raise
+    /// would go quiet exactly then. So:
+    ///  * edits from ANOTHER detector generation → never shaped (§7.2), so
+    ///    always short, whatever is on disk;
+    ///  * this session's detection failed for the render's key → that
+    ///    failure's reason, until the resolved render exists;
+    ///  * anything else → `nil` (including a later session, which retries).
+    public func contourShortfall(source: URL, params: Params) -> String? {
+        guard let set = params.pitchEdits, set.needsDetectedContour else { return nil }
+        if set.analysisVersion != contourDetector.analysisVersion {
+            return Self.shortfallReason(.analysisVersionMismatch(
+                editSet: set.analysisVersion, detector: contourDetector.analysisVersion))
+        }
+        guard !contourFallbacks.isEmpty,
+              let keys = try? Self.renderKeys(source: source, params: params,
+                                              detector: contourDetector),
+              !FileManager.default.fileExists(
+                atPath: directory.appendingPathComponent(keys.resolved + ".caf").path)
+        else { return nil }
+        return contourFallbacks[keys.resolved]?.reason
+    }
+
+    /// THE one wording of a contour shortfall — a clause that completes
+    /// "…the wobble inside each note is kept, because ___". Shared by the
+    /// render (which knows what the seam answered) and `contourShortfall`
+    /// (which re-derives the version rule without running anything), so the
+    /// two can never describe one fallback in two ways.
+    nonisolated static func shortfallReason(_ contour: PitchRenderContour?) -> String? {
+        switch contour {
+        case nil, .detected?:
+            return nil
+        case .analysisVersionMismatch(let editSet, let detector)?:
+            return "the tuning was made with a different version of the pitch analysis "
+                + "(v\(editSet); this build runs v\(detector)) — apply the tuning again "
+                + "to hear it flattened"
+        case .unavailable(let reason)?:
+            return "the singing's pitch could not be analysed (\(reason))"
+        }
     }
 
     /// Cancels and clears any in-flight job for a clip that left the model.
@@ -172,22 +336,47 @@ public final class StretchRenderCache {
 
     // MARK: - Key derivation (spec §3)
 
-    /// SHA256 over (standardized source path ‖ file size ‖ mtime ‖ ratio bit
-    /// pattern ‖ semitones bit pattern ‖ formant flag ‖ engine version);
-    /// first 16 hex chars = filename. Source identity = path + size + mtime —
-    /// cheap, standard waveform-cache practice; a moved project re-renders
-    /// once and self-heals. Throws when the source file is unreadable.
-    nonisolated static func cacheKey(source: URL, params: Params) throws -> String {
+    /// A source file's identity as every content-keyed entry here sees it:
+    /// standardized path ‖ size ‖ mtime bit pattern. Cheap, standard
+    /// waveform-cache practice; a moved project re-renders once and
+    /// self-heals — across launches AND within a session (a save or Save As
+    /// that repoints a clip at its bundle copy), the latter only because the
+    /// engine's kick dedupe compares the key derived from these fields rather
+    /// than `Params` (2026-09-24; before that, a repointed clip went silent
+    /// until the next launch). Throws when the source file is unreadable.
+    ///
+    /// ONE derivation (design §7.8): the render key and the detected-contour
+    /// key (`PitchContourCache.key`) both start from exactly these strings.
+    nonisolated static func sourceIdentityFields(source: URL) throws -> [String] {
         let path = source.standardizedFileURL.path
         let attributes = try FileManager.default.attributesOfItem(atPath: path)
         let size = (attributes[.size] as? NSNumber)?.uint64Value ?? 0
         let mtime = (attributes[.modificationDate] as? Date)?
             .timeIntervalSinceReferenceDate ?? 0
+        return [path, String(size), String(mtime.bitPattern)]
+    }
+
+    /// SHA256 over the fields, each followed by a 0 separator; first 16 hex
+    /// chars. The one hashing step every key here goes through.
+    nonisolated static func keyDigest(_ fields: [String]) -> String {
         var hasher = SHA256()
-        var fields = [
-            path,
-            String(size),
-            String(mtime.bitPattern),
+        for field in fields {
+            hasher.update(data: Data(field.utf8))
+            hasher.update(data: Data([0]))  // field separator
+        }
+        let hex = hasher.finalize().map { String(format: "%02x", $0) }.joined()
+        return String(hex.prefix(16))
+    }
+
+    /// SHA256 over (standardized source path ‖ file size ‖ mtime ‖ ratio bit
+    /// pattern ‖ semitones bit pattern ‖ formant flag ‖ engine version
+    /// [‖ `pitch:<edit digest>`] [‖ `contour:<contour key>`]); first 16 hex
+    /// chars = filename. See `RenderKeys` for which of the two keys a render
+    /// commits under. Throws when the source file is unreadable.
+    nonisolated static func renderKeys(source: URL, params: Params,
+                                       detector: PitchContourCache.Detector) throws -> RenderKeys {
+        var fields = try sourceIdentityFields(source: source)
+        fields += [
             String(params.ratio.bitPattern),
             String(params.semitones.bitPattern),
             params.formantPreserve ? "1" : "0",
@@ -201,22 +390,69 @@ public final class StretchRenderCache {
         if !params.pitchEditSetHash.isEmpty {
             fields.append("pitch:" + params.pitchEditSetHash)
         }
-        for field in fields {
-            hasher.update(data: Data(field.utf8))
-            hasher.update(data: Data([0]))  // field separator
+        let legacy = keyDigest(fields)
+        // contour-to-render — THE SAME RULE, ONE LEVEL DOWN. Appended only
+        // when the render actually shapes against the contour, so every set
+        // that does not (the preset ladder, generator-only edits, plain
+        // offsets) keeps its key byte for byte. A set that DOES now renders
+        // different audio than it did before the contour reached the render
+        // (flattened, not a constant offset), so it MUST re-key — keeping the
+        // old key would serve the old constant-offset render as if it were
+        // the fix. Embedding the contour's own key means anything that
+        // re-keys the contour (the file, the detector generation, its
+        // thresholds, the model) re-keys every render shaped against it.
+        guard params.shapesAgainstContour(detector) else {
+            return RenderKeys(resolved: legacy, legacy: legacy)
         }
-        let hex = hasher.finalize().map { String(format: "%02x", $0) }.joined()
-        return String(hex.prefix(16))
+        fields.append("contour:" + (try PitchContourCache.key(source: source, detector: detector)))
+        // …and the version of the arithmetic that turns (edits, contour) into
+        // a curve, which neither key above can see — see
+        // `PitchRenderContour.shapingVersion`.
+        fields.append("shaping:\(PitchRenderContour.shapingVersion)")
+        return RenderKeys(resolved: keyDigest(fields), legacy: legacy)
+    }
+
+    /// The key a render of (source, params) is looked up and committed under
+    /// when it gets what it asked for (`RenderKeys.resolved`).
+    nonisolated static func cacheKey(
+        source: URL, params: Params,
+        detector: PitchContourCache.Detector = .product
+    ) throws -> String {
+        try renderKeys(source: source, params: params, detector: detector).resolved
+    }
+
+    /// The keys a render of (source, params) lives under with THIS cache's
+    /// detector — the one derivation the engine's resolve path, `cachedURL`
+    /// and `renderIfNeeded` all use. The engine derives it ONCE per resolve
+    /// and uses `resolved` both for the committed lookup and as its kick
+    /// dedupe, so "which render does this clip need" and "has that render
+    /// been asked for" are answered from the same string. Throws when the
+    /// source file is unreadable (the stat in `sourceIdentityFields`).
+    func keys(source: URL, params: Params) throws -> RenderKeys {
+        try Self.renderKeys(source: source, params: params, detector: contourDetector)
     }
 
     /// The committed cache entry for (source, params), or nil when absent /
-    /// key underivable. Pure lookup — never starts a job (the engine's
-    /// resolve path uses this for the `.ready` branch; OfflineRenderer's
-    /// provider uses it after the mixdown wait).
+    /// key underivable. Pure lookup — never starts a job (OfflineRenderer's
+    /// provider uses it after the mixdown wait). Includes this session's
+    /// contour fallback — see `committedURL(for:)`.
     public func cachedURL(source: URL, params: Params) -> URL? {
-        guard let key = try? Self.cacheKey(source: source, params: params) else { return nil }
-        let url = directory.appendingPathComponent(key + ".caf")
-        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+        guard let keys = try? self.keys(source: source, params: params) else { return nil }
+        return committedURL(for: keys)
+    }
+
+    /// The display's door to THE seam: the contour the render uses for a clip
+    /// whose source is `source` and whose edits carry `analysisVersion`,
+    /// computed off the main actor. Same function, same cache directory, same
+    /// detector as `performRender` — see `PitchContourCache.renderContour`.
+    public func renderContour(source: URL, analysisVersion: Int) async -> PitchRenderContour {
+        let directory = self.directory
+        let detector = contourDetector
+        return await Task.detached(priority: .userInitiated) {
+            PitchContourCache.renderContour(
+                source: source, analysisVersion: analysisVersion,
+                renderCacheDirectory: directory, detector: detector)
+        }.value
     }
 
     // MARK: - renderIfNeeded (the one async entry point)
@@ -232,11 +468,13 @@ public final class StretchRenderCache {
         if params.isIdentity {
             return source
         }
-        let key = try Self.cacheKey(source: source, params: params)
-        let destination = directory.appendingPathComponent(key + ".caf")
-        if FileManager.default.fileExists(atPath: destination.path) {
-            return destination
+        let keys = try Self.renderKeys(source: source, params: params, detector: contourDetector)
+        if let committed = committedURL(for: keys) {
+            return committed
         }
+        let key = keys.resolved
+        let destination = directory.appendingPathComponent(key + ".caf")
+        let fallbackDestination = directory.appendingPathComponent(keys.legacy + ".caf")
         if let job = jobs[clipID], job.key == key {
             return try await job.task.value  // single-flight: coalesce onto it
         }
@@ -249,6 +487,8 @@ public final class StretchRenderCache {
         // Unique partial per job: two clips sharing one (source, params) key
         // may race — each writes its own partial; the rename commits once.
         let partial = directory.appendingPathComponent("\(key).partial-\(token.uuidString).caf")
+        let renderCacheDirectory = directory
+        let detector = contourDetector
         statuses[clipID] = .rendering
         let task = Task { @MainActor [weak self] () throws -> URL in
             do {
@@ -256,7 +496,8 @@ public final class StretchRenderCache {
                 // dies before any file I/O happens.
                 try await Task.sleep(for: .milliseconds(Self.debounceMilliseconds))
                 self?.renderCount += 1
-                // The blocking render runs detached — reads the FULL source,
+                // The blocking render runs detached — fetches-or-detects the
+                // contour when the edits need one, reads the FULL source,
                 // pumps the facade, writes the partial, atomically renames.
                 // Result-boxed so the detached task never throws into the
                 // structured tree before we re-check cancellation.
@@ -264,11 +505,30 @@ public final class StretchRenderCache {
                     Result {
                         try Self.performRender(
                             source: source, partial: partial, destination: destination,
-                            params: params, isCancelled: { cancelled.withLock { $0 } })
+                            fallbackDestination: fallbackDestination, params: params,
+                            renderCacheDirectory: renderCacheDirectory, detector: detector,
+                            isCancelled: { cancelled.withLock { $0 } })
                     }
                 }.value
                 try Task.checkCancellation()
-                try outcome.get()
+                let rendered = try outcome.get()
+                let committed: URL
+                switch rendered {
+                case .rendered(let url):
+                    committed = url
+                case .fellBack(let url, let reason):
+                    committed = url
+                    // Keyed by the RESOLVED key, not by the clip: the memo
+                    // says "this session could not resolve this render", which
+                    // is true for any clip asking for it. When resolved ==
+                    // legacy (another detector generation) the file already
+                    // sits under the resolved key and needs no memo — and
+                    // `contourShortfall` re-derives that reason from the
+                    // version rule alone, on every launch.
+                    if keys.resolved != keys.legacy {
+                        self?.contourFallbacks[keys.resolved] = (url, reason)
+                    }
+                }
                 // Bookkeeping only if this job still owns the clip's slot
                 // (a superseding job may have replaced it mid-render).
                 if let self, self.jobs[clipID]?.token == token {
@@ -276,7 +536,7 @@ public final class StretchRenderCache {
                     self.statuses[clipID] = nil
                     self.onRenderComplete?(clipID)
                 }
-                return destination
+                return committed
             } catch {
                 if let self, self.jobs[clipID]?.token == token {
                     self.jobs[clipID] = nil
@@ -294,17 +554,60 @@ public final class StretchRenderCache {
 
     // MARK: - The blocking render (detached-task body; never on the main actor)
 
+    /// What one render committed, and where.
+    enum RenderOutcome: Equatable, Sendable {
+        /// The render the params asked for, at the resolved key.
+        case rendered(URL)
+        /// The contour was unavailable, so the CONSTANT-OFFSET render — the
+        /// exact audio this cache produced for these edits before the contour
+        /// reached the render — was committed (or found already committed) at
+        /// the LEGACY key instead. `reason` is for the engine's notice.
+        case fellBack(URL, reason: String)
+    }
+
     /// Reads the whole source file, stretches it through the `OfflineStretcher`
     /// facade (deterministic fixed-seed output — cache entries are
     /// reproducible), writes a Float32 CAF partial and renames it into place.
     /// The partial is cleaned up on every exit path; a lost rename race
     /// against a same-key sibling job counts as success (identical bytes by
     /// determinism).
-    nonisolated private static func performRender(
-        source: URL, partial: URL, destination: URL, params: Params,
+    ///
+    /// **contour-to-render.** When the edits need the detected contour, it is
+    /// fetched-or-detected FIRST, through THE seam
+    /// (`PitchContourCache.renderContour`), here, inside this already-detached
+    /// task — never on the main actor, never on the render thread. Then:
+    ///  * `.detected` → the curve is built from it and the render commits at
+    ///    `destination` (the resolved key, which names the contour).
+    ///  * anything else → the render is EXACTLY the pre-contour render (the
+    ///    curve with no contour: constant per-note offsets, the shaping
+    ///    segments named in `unresolvedShapingSegmentIDs`) and commits at
+    ///    `fallbackDestination` (the legacy key) — reusing the entry already
+    ///    there if one exists, since it is byte-identical by construction.
+    ///    Never silence, and never the fallback under the resolved key, where
+    ///    it would be served as the fix.
+    nonisolated static func performRender(
+        source: URL, partial: URL, destination: URL, fallbackDestination: URL,
+        params: Params, renderCacheDirectory: URL, detector: PitchContourCache.Detector,
         isCancelled: @Sendable () -> Bool
-    ) throws {
+    ) throws -> RenderOutcome {
         defer { try? FileManager.default.removeItem(at: partial) }  // no-op after rename
+
+        // (1) The contour, when these edits shape against one. Detection is
+        //     the slow part, and it runs before the source is even read so a
+        //     fallback that is already on disk costs nothing further.
+        var contour: PitchRenderContour?
+        if let set = params.pitchEdits, set.needsDetectedContour {
+            if isCancelled() { throw OfflineStretcherError.cancelled }
+            contour = PitchContourCache.renderContour(
+                source: source, analysisVersion: set.analysisVersion,
+                renderCacheDirectory: renderCacheDirectory, detector: detector)
+            if isCancelled() { throw OfflineStretcherError.cancelled }
+        }
+        let fallbackReason = shortfallReason(contour)
+        let target = fallbackReason == nil ? destination : fallbackDestination
+        if let fallbackReason, FileManager.default.fileExists(atPath: target.path) {
+            return .fellBack(target, reason: fallbackReason)
+        }
 
         let reader = try AVAudioFile(forReading: source)
         let format = reader.processingFormat  // deinterleaved float32, source rate
@@ -341,11 +644,16 @@ public final class StretchRenderCache {
         // The curve SUBSUMES `params.semitones` (design §6.4/§7.8), so the
         // constant is NOT also passed on this branch — doing both would
         // transpose twice.
+        //
+        // contour-to-render: the contour goes in ONLY when it was detected.
+        // A fallback passes `nil`, which is the pre-contour curve bit for bit
+        // — the audio the legacy key has always held for these edits.
         let plan = StretchCurvePlan.make(
             editSet: params.pitchEdits,
             clipPitchShiftSemitones: params.semitones,
             sampleRate: format.sampleRate,
-            ratio: params.ratio)
+            ratio: params.ratio,
+            contour: fallbackReason == nil ? contour : nil)
         let stretched: [[Float]]
         if let plan {
             stretched = try OfflineStretcher.stretchTransposeCurve(
@@ -388,11 +696,15 @@ public final class StretchRenderCache {
         // A render cancelled after the last block must not commit.
         if isCancelled() { throw OfflineStretcherError.cancelled }
         do {
-            try FileManager.default.moveItem(at: partial, to: destination)
+            try FileManager.default.moveItem(at: partial, to: target)
         } catch {
             // Same-key sibling won the rename — identical bytes, so ours is
             // redundant, not failed.
-            guard FileManager.default.fileExists(atPath: destination.path) else { throw error }
+            guard FileManager.default.fileExists(atPath: target.path) else { throw error }
         }
+        if let fallbackReason {
+            return .fellBack(target, reason: fallbackReason)
+        }
+        return .rendered(target)
     }
 }

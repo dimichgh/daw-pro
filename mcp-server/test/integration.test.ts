@@ -554,7 +554,48 @@ test("tools/list returns exactly the audit-enforced tool count", { skip: SKIP_RE
   // not derived, by the same two name-capturing regexes: **42 direct + 197
   // wrapper = 239**, 0 duplicates in either set, 0 names in both sets, and
   // the same bogus-name negative control (`"zzz_not_a_tool"`) returning 0.
-  assert.equal(result.tools.length, 239);
+  //
+  // 239 -> 242 at the pitch-editor command-surface door (2026-09-24,
+  // `docs/design/2026-09-22-pitch-editor-ui.md` §9): the pane had no way for
+  // an agent to open it, read it, or edit a note — `view_open_pitch_editor`
+  // (the explicit latch, §3.6, refuses a MIDI clip), `clip_set_note_pitch`
+  // (absolute `pitchOffsetCents`, clamped +/-2400) and `clip_split_note`
+  // (mirrors the scissors tool's 60ms minimum-half refusal) close that gap,
+  // mirroring the wire's `view.openPitchEditor`/`clip.setNotePitch`/
+  // `clip.splitNote` (`Commands.swift` 234 -> 237) 1:1. All three route
+  // through the strict-schema wrapper (real, typo-worth-catching params —
+  // `clipId`/`segmentId`/`cents`/`atSourceSeconds` — the `clip_set_note_pitch`
+  // pair joining `clip_auto_correct_pitch`'s precedent, `view_open_pitch_editor`
+  // joining `view_select_clip`'s). Command<->tool bijection stays mechanical
+  // (`view.openPitchEditor` -> `view_open_pitch_editor`, etc.), no
+  // exception-table entry needed. RE-MEASURED, not derived, by the same two
+  // name-capturing regexes: **42 direct + 200 wrapper = 242**, 0 duplicates
+  // in either set, 0 names in both sets, and the same bogus-name negative
+  // control (`"zzz_not_a_tool"`) returning 0.
+  //
+  // 242 -> 244 at m39-levels-2 wire (2026-09-24): SIXTEEN LEVELS' model API
+  // (`Sources/DAWCore/SixteenLevels.swift`'s `ProjectStore` extension)
+  // shipped earlier with no wire door reaching it — `instrument_spread_slice`
+  // / `instrument_set_spread_direction` close that gap, mirroring the wire's
+  // `instrument.spreadSlice`/`instrument.setSpreadDirection`
+  // (`Commands.swift` 237 -> 239) 1:1. Both route through the strict-schema
+  // wrapper (the `instrument_describe_sampler`/`instrument_set_sampler_zones`
+  // precedent). Command<->tool bijection stays mechanical, no exception-table
+  // entry needed. RE-MEASURED, not derived, by the same two name-capturing
+  // regexes: **42 direct + 202 wrapper = 244**, 0 duplicates in either set, 0
+  // names in both sets, and the same bogus-name negative control
+  // (`"zzz_not_a_tool"`) returning 0.
+  //
+  // 244 -> 245 at m23-ap C-0c close (2026-09-24): `clip_get_played_pitch`
+  // (new tool, wrapper — real typo-worth-catching params: `clipId`,
+  // `fromSeconds`/`durationSeconds`/`maxPoints`), mirroring the wire's
+  // `clip.getPlayedPitch` (`Commands.swift` 239 -> 240) 1:1, no
+  // exception-table entry needed. The same close's C-F3 `replaceExisting`
+  // param on `clip_auto_correct_pitch` adds zero — a new optional field on
+  // an already-registered tool. RE-MEASURED: **42 direct + 203 wrapper =
+  // 245**, 0 duplicates in either set, 0 names in both sets, bogus-name
+  // negative control still returning 0.
+  assert.equal(result.tools.length, 245);
 });
 
 // ---------------------------------------------------------------------------

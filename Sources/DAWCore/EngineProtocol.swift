@@ -362,16 +362,38 @@ public enum ClipStretchStatus: Sendable, Equatable {
 
 /// One schedule-time degradation as the engine reports it (m15-e, audit F6):
 /// playback proceeded, but not exactly as the project describes (a fade/
-/// envelope bake failed, a stretched clip is still rendering, …). Posted from
-/// CONTROL-side schedule code only — the render thread never produces these.
-/// The store coalesces events into its `engineNotices` ring; this event type
-/// carries just the facts one occurrence knows.
+/// envelope bake failed, a stretched or tuned clip is still rendering, …).
+/// Posted from CONTROL-side code only — the render thread never produces
+/// these. The store coalesces events into its `engineNotices` ring; this
+/// event type carries just the facts one occurrence knows.
 public struct EngineNoticeEvent: Sendable, Equatable {
     /// Stable machine code (kebab-case) naming the degradation family — the
-    /// store's coalescing key. Current codes: `clip-envelope-skipped`,
-    /// `clip-fades-skipped`, `clip-stretch-pending`, `clip-unplayable`,
-    /// `engine-exception` (m16-a), `clip-file-missing` (m16-c — the
-    /// build-time open catch and the store's open/recover echo).
+    /// store's coalescing key.
+    ///
+    /// Current codes — CENSUSED 2026-09-24 (m23-ap-p2) from every
+    /// `EngineNoticeEvent(code:` construction in `Sources/`, not copied from
+    /// an earlier list (the list this replaced named 6 of the 10):
+    ///  * `clip-stretch-pending` — `PlaybackGraph`'s schedule pass: a clip
+    ///    whose stretch OR tuning render is still pending plays as silence.
+    ///    Posted only when a pass actually plays it (p2-notice), never at the
+    ///    edit that started the render.
+    ///  * `clip-fades-skipped`, `clip-envelope-skipped` — `PlaybackGraph`'s
+    ///    bake fallbacks, linear and loop-cycle (two sites each).
+    ///  * `clip-unplayable` (m16-a) — `PlaybackGraph`'s play-start wiring guard.
+    ///  * `clip-file-missing` (m16-c) — `PlaybackGraph`'s build-time open
+    ///    catch AND `ProjectStore`'s open/recover echo (one code, two sites).
+    ///  * `engine-exception` (m16-a) — `AudioEngine`'s ObjC exception barrier.
+    ///  * `instrument-unavailable` — `AudioEngine`: a hosted instrument that
+    ///    never produced a playable unit plays silence.
+    ///  * `clip-pitch-contour-unavailable` — `AudioEngine`: a tuning plays
+    ///    WITHOUT its drift/vibrato flattening (constant-offset fallback).
+    ///  * `output-device-unavailable` — `AudioEngine`: the pinned output
+    ///    device vanished, sound went to the system default.
+    ///  * `ai-generation-interrupted` — posted from DAWApp (not the engine)
+    ///    through the same `engineNoticeHandler` funnel, when the generation
+    ///    sidecar dies mid-job.
+    /// `debug.postEngineNotice` (debug tier, off the wire list) can post any
+    /// code through the same funnel for UI captures.
     public var code: String
     /// Beginner-readable description of what the listener actually got
     /// (design-language copy — no wire-speak, names the clip).
@@ -712,6 +734,19 @@ public protocol AudioEngineControlling: AnyObject {
     func detectPitch(inFileAt url: URL, fromSeconds: Double, durationSeconds: Double,
                      confidenceThreshold: Double,
                      silenceFloorDbfs: Double) async throws -> PitchDetectionResult
+
+    /// ⭐ THE contour the offline pitch render uses for a clip whose SOURCE
+    /// FILE is `url` (contour-to-render, 2026-09-24): the whole file from
+    /// source second 0 at the product's detection settings, cached beside the
+    /// renders — the exact input the render shapes Hard Tune / drift / vibrato
+    /// edits against. `analysisVersion` is the clip's
+    /// `PitchEditSet.analysisVersion` (`PitchEditSet.currentAnalysisVersion`
+    /// for a clip with no edits); a mismatch answers `.analysisVersionMismatch`
+    /// and detects nothing. Build curves from the result with
+    /// `PitchRenderContour.curve(editSet:clipPitchShiftSemitones:)` — the one
+    /// the render uses. Offline, detached; never the render thread. Unlike
+    /// `detectPitch`, cached: it is the render's own input, not a diagnostic.
+    func renderPitchContour(inFileAt url: URL, analysisVersion: Int) async -> PitchRenderContour
 
     /// The project's reference SLOT changed (m22-g P2) — the
     /// `masterEffectsChanged` twin for the monitor lane: live engines cache
@@ -1735,6 +1770,15 @@ extension AudioEngineControlling {
                             confidenceThreshold: Double,
                             silenceFloorDbfs: Double) async throws -> PitchDetectionResult {
         throw ProjectError.engineUnavailable
+    }
+
+    /// The render contour is optional capability (contour-to-render) — and,
+    /// like `detectPitch`, a fabricated contour would be a lie, so an engine
+    /// without it answers `.unavailable`: no frames, which every reader
+    /// (render and display alike) treats as "nothing to shape against".
+    public func renderPitchContour(inFileAt url: URL,
+                                   analysisVersion: Int) async -> PitchRenderContour {
+        .unavailable(reason: "this engine cannot analyse pitch")
     }
 
     /// The reference slot push is optional capability (m22-g P2, the

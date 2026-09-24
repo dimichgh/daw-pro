@@ -260,14 +260,20 @@ public struct PadState: Equatable, Sendable, Identifiable {
     public let startFrame: Int?
     /// Was this pad's audio produced by AI? Violet, always.
     public let isAITouched: Bool
-    /// In SIXTEEN LEVELS, how far above the source slice this pad plays, in
-    /// semitones (pad 1 = 0). nil in normal play.
+    /// When this pad plays a SIXTEEN LEVELS spread, how far from the source
+    /// slice it plays, in semitones — 0 on the pad that plays it as recorded
+    /// (pad 1 in an UP spread, 0…+15; pad 9 in a CENTRED one, -8…+7). nil on a
+    /// slice or an empty pad. Derived from the spread zone's root, never from
+    /// the toggle.
     ///
-    /// ⚠️ **PRESENT MEANS "THIS GRID IS A SPREAD", and the view must prefer it
-    /// over `sliceOrdinal`.** One wide zone answers all sixteen pitches in
-    /// LEVELS, so every pad would otherwise read the SAME slice number — a
-    /// grid of sixteen squares all labelled "slice 7", each of which plays
+    /// ⚠️ **PRESENT MEANS "THIS PAD PLAYS A SPREAD", and the view must prefer
+    /// it over `sliceOrdinal`** (which is then nil). One wide zone answers all
+    /// sixteen pitches of a spread, so every pad would otherwise read the SAME
+    /// slice number — sixteen squares all labelled "slice 7", each playing
     /// something different. The number would be true and the picture a lie.
+    /// Since m39-levels-3 it is set for ANY spread the pad falls on, recognised
+    /// by shape — not only the one the grid remembers making — so a reopened
+    /// or wire-made spread labels itself too.
     public let levelsSemitones: Int?
 
     public init(id: Int, pitch: Int?, noteName: String, keyLabel: String?,

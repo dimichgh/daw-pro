@@ -416,7 +416,10 @@ struct MusicalKeyboardStrip: View {
                     levelsStatus: padGrid.levelsStatus,
                     levelsUnavailableReason: padGrid.levelsUnavailableReason,
                     levelsError: padGrid.lastLevelsError,
-                    onToggleLevels: { padGrid.toggleLevels() })
+                    onToggleLevels: { padGrid.toggleLevels() },
+                    spreadDirection: padGrid.spreadDirection,
+                    spreadDirectionUnavailableReason: padGrid.spreadDirectionUnavailableReason,
+                    onSetSpreadDirection: { padGrid.setSpreadDirection($0) })
                 if let notice = padGrid.lastChop {
                     chopNotice(notice, model: padGrid)
                 }
@@ -496,7 +499,9 @@ struct MusicalKeyboardStrip: View {
                     .font(.system(size: 10))
                     .foregroundStyle(DAWTheme.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
-                ForEach(notice.warnings, id: \.self) { warning in
+                // ⚠️ THE HUMAN TEXT, never `notice.warnings` — that is the
+                // wire's sentence ("Pass includeHead: true…"). m33-d.
+                ForEach(notice.warningsForHumans, id: \.self) { warning in
                     Text(warning)
                         .font(.system(size: 10))
                         .foregroundStyle(DAWTheme.record)

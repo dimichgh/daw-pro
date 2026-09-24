@@ -91,11 +91,16 @@ import Foundation
 // | **0** | `driveDb` | −12 … 36 | **0** | dB | `.linear` | yes |
 // | **1** | `ceilingDb` | −24 … 0 | **−0.3** | dBFS | `.linear` | yes |
 // | **2** | `mode` | 0 … 1 | **0** (hard) | mode | `.linear` | **refused** |
-// | **3** | `oversampling` | 1 … 4 | **4** | x | `.linear` | **refused** |
+// | **3** | `oversampling` | 1 … 4 | **1** new · 4 absent | x | `.linear` | **refused** |
 // | **4** | `mix` | 0 … 1 | **1** | linear | `.linear` | yes |
 // | **5** | `outputDb` | −24 … 24 | **0** | dB | `.linear` | yes |
 //
 // **Totals contributed: 4 yes, 0 warned, 2 refused.**
+//
+// `oversampling` has two defaults (2026-09-24, the user's "clipper-os" pick): a
+// clipper added now starts at 1 (`ClipperParams.defaultOversampling`), while a
+// saved clipper with no stored settings decodes as 4
+// (`ClipperParams.legacyOversampling`), so existing projects keep their tone.
 //
 // Both refusals are rule 6.0.5 discrete params (the `PhaserEffect.stages`
 // precedent), and `oversampling` has a second, independent reason: changing it

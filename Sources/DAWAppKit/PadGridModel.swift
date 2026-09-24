@@ -89,6 +89,41 @@ public struct PadChopSettings: Equatable, Sendable {
             return "Cuts on the project's musical grid. Best on something already in time."
         }
     }
+
+    /// The lead-in toggle's label — ONE home, read by the card's checkbox, the
+    /// refusal vocabulary map and the lead-in notice, so a sentence that tells a
+    /// person to tick it names the box they can actually see.
+    public static let leadInLabel = "Keep the lead-in as pad 1"
+
+    /// Does the lead-in toggle reach the chop in the chosen mode?
+    ///
+    /// ⚠️ READ OFF THE DOMAIN'S ONE HOME (`SliceToSamplerSettings
+    /// .includeHeadIsEffective`), never a local `mode == .transients` — a
+    /// second derivation that agrees today is how the card and the planner come
+    /// to disagree tomorrow (DESIGN-LANGUAGE, "a setting that cannot reach the
+    /// sound stays live, goes dim, and says so").
+    public var leadInIsEffective: Bool { settings().includeHeadIsEffective }
+
+    /// The line under a DIMMED lead-in toggle, in the card's own words (the
+    /// mode chip, then the box's own label), or nil while the toggle is live.
+    /// ≤ 51 characters — the one-line budget DESIGN-LANGUAGE measured on the
+    /// narrower sampler card, kept here as a conservative bound (the chop card
+    /// is wider). A 53-character first draft failed `PadGridTests` on it.
+    public var leadInInertNote: String? {
+        guard !leadInIsEffective else { return nil }
+        return "\(Self.modeLabel(mode).uppercased()) always keeps the lead-in as pad 1."
+    }
+
+    /// The lead-in toggle's tooltip — the WHY, which costs no pixels.
+    public var leadInHelp: String {
+        if leadInIsEffective {
+            return "Pad 1 normally starts at the first hit, like an MPC. Turn this on if the "
+                + "chop is eating a downbeat."
+        }
+        return "Only “\(Self.modeLabel(.transients))” can leave the lead-in out — the quiet "
+            + "bit before the first hit. “\(Self.modeLabel(mode))” cuts up the whole clip, so "
+            + "pad 1 always starts at its very beginning."
+    }
 }
 
 /// What the last successful chop produced — kept so the grid can say "slice 7 of
@@ -109,17 +144,23 @@ public struct PadChopSummary: Equatable, Sendable {
     /// after the edit (`sourceTrackMuted`), so it is a measurement rather than a
     /// restatement of the request.
     public var sourceStillAudible: Bool
+    /// The store's warnings, VERBATIM — wire contract, written for an agent.
     public var warnings: [String]
+    /// ⭐ The same warnings as a PERSON reads them in the notice — index-aligned
+    /// with `warnings`. See `PadGridModel.chopWarningsForHumans`. Required, with
+    /// no fallback to `warnings`: a default would be the leak this field closes.
+    public var warningsForHumans: [String]
 
     public init(sliceCount: Int, trackName: String, createdTrack: Bool,
                 mutedTrackName: String?, sourceStillAudible: Bool,
-                warnings: [String]) {
+                warnings: [String], warningsForHumans: [String]) {
         self.sliceCount = sliceCount
         self.trackName = trackName
         self.createdTrack = createdTrack
         self.mutedTrackName = mutedTrackName
         self.sourceStillAudible = sourceStillAudible
         self.warnings = warnings
+        self.warningsForHumans = warningsForHumans
     }
 }
 
@@ -189,6 +230,39 @@ public enum PadTriggerMode: String, Equatable, Sendable, CaseIterable {
                 // back from the engine; filed, not faked.)
                 + "The pad light follows your hand, so it goes dark while the "
                 + "slice is still sounding."
+        }
+    }
+}
+
+/// The words for the two ways a Sixteen Levels spread can run (m39-levels-2) —
+/// the ONE home for them, as `PadTriggerMode` is for LET GO's.
+///
+/// ⭐ **"UP" AND "CENTRED" ARE THE USER'S OWN WORDS** — the card they answered
+/// offered *"a small up/centred toggle beside LEVELS."* A newcomer gets the rest
+/// from the tooltip and, once a spread is up, from the pads themselves, which
+/// then read "0", "+1"… or "-8"…"+7".
+extension SixteenLevels.Direction {
+    /// The chip. ⚠️ UK spelling ON SCREEN, US in code (`centered`) — the house
+    /// split, as the phaser's `centerHz` reads "Centre" on its card.
+    public var label: String {
+        switch self {
+        case .up: return "UP"
+        case .centered: return "CENTRED"
+        }
+    }
+
+    /// One or two sentences a person who is not a musician can act on.
+    /// ⚠️ "Semitone" is glossed once as a piano key — the grid's other text
+    /// already uses the word, and this is where it gets explained.
+    public var help: String {
+        switch self {
+        case .up:
+            return "Spread upward: pad 1 plays the slice exactly as recorded, and each pad "
+                + "after it is one semitone (one piano key) higher, up to +15."
+        case .centered:
+            return "Spread both ways: pad 9 plays the slice exactly as recorded. The pads "
+                + "before it play it lower, down to -8, and the pads after it play it "
+                + "higher, up to +7."
         }
     }
 }
@@ -340,9 +414,18 @@ public final class PadGridModel {
         ("maxSlices", "“Most pads to make”"),
         ("sensitivity", "“How many hits to catch”"),
         ("minSliceSeconds", "the shortest-piece setting"),
-        ("includeHead", "“Keep the lead-in as pad 1”"),
+        ("includeHead", "“\(PadChopSettings.leadInLabel)”"),
         ("baseNote", "“Pad 1 plays note”"),
     ]
+
+    /// `uiTerms`, applied. The ONE loop both translations share.
+    static func speakingUIVocabulary(_ text: String) -> String {
+        var out = text
+        for (api, ui) in uiTerms {
+            out = out.replacingOccurrences(of: api, with: ui)
+        }
+        return out
+    }
 
     public var lastRefusalForHumans: String? {
         guard let text = lastRefusal else { return nil }
@@ -351,10 +434,51 @@ public final class PadGridModel {
             out = out.replacingOccurrences(of: source.clipId.uuidString,
                                            with: "“\(source.clipName)”")
         }
-        for (api, ui) in Self.uiTerms {
-            out = out.replacingOccurrences(of: api, with: ui)
+        return Self.speakingUIVocabulary(out)
+    }
+
+    /// The chop's warnings in the words a PERSON reads in the pad grid's notice
+    /// (m33-d) — index-aligned with `result.warnings`.
+    ///
+    /// ⭐⭐ **SAME FACT, TWO AUDIENCES (Rule 6), AND THE SPLIT IS FORCED.**
+    /// ⛔ MEASURED 2026-09-24: the notice showed the store's sentence verbatim —
+    /// *"…like an MPC or Recycle. Pass includeHead: true to keep it as pad 1 —
+    /// worth doing if the detector missed the downbeat"* — to a person with no
+    /// control called includeHead, who was never told where to click. That
+    /// sentence is RIGHT for an agent (it names the parameter precisely), so it
+    /// stays byte-exact in `warnings` and on the wire; this is the translation.
+    ///
+    /// ⭐ **WHY WHOLE-SENTENCE EQUALITY, NOT THE `uiTerms` PHRASE MAP.** Swapping
+    /// the API token leaves "slice point", "onset", "Recycle" and "detector" in
+    /// front of a newcomer and yields "Pass “Keep the lead-in as pad 1”: true".
+    /// So the head warning is recognised WHOLE: the store builds it with
+    /// `SliceToSamplerPlan.headDiscardedWarning(headSeconds:)`, and this rebuilds
+    /// the same string from the result's OWN `headSeconds` — one builder, so a
+    /// rewording moves both sides at once. A mismatch falls through to the
+    /// vocabulary map, never to silence. ⛔ No wire field was added for this: a
+    /// presentation problem does not get to change the wire contract.
+    ///
+    /// ⚠️ The OTHER plan warning ("snapWindowMs was reduced to…") gets no copy
+    /// because this card cannot produce it: `PadChopSettings.settings()` sends
+    /// the default 3 ms snap against the default 50 ms minimum slice, and the
+    /// clamp only bites when the snap exceeds HALF the minimum. `PadGridTests`
+    /// pins that arithmetic, so a card that grows either control fails a test
+    /// and gets its own sentence then.
+    public static func chopWarningsForHumans(_ result: SliceToSamplerResult) -> [String] {
+        let wireHead = SliceToSamplerPlan.headDiscardedWarning(headSeconds: result.headSeconds)
+        return result.warnings.map { warning in
+            warning == wireHead
+                ? leadInNotice(headSeconds: result.headSeconds)
+                : speakingUIVocabulary(warning)
         }
-        return out
+    }
+
+    /// What a person reads when an "Every hit" chop left the start of the clip
+    /// off the pads: what happened, in their words, and every click to undo it.
+    public static func leadInNotice(headSeconds: Double) -> String {
+        "The first \(String(format: "%.2f", headSeconds)) s of the clip, before the first hit, "
+            + "isn't on any pad. If a beat you want is in there: press Undo, open CHOP A CLIP… "
+            + "again, switch to PRO, tick “\(PadChopSettings.leadInLabel)”, and chop."
     }
     /// What the last successful chop produced.
     public private(set) var lastChop: PadChopSummary?
@@ -445,23 +569,50 @@ public final class PadGridModel {
                                   baseNote: baseNote)
     }
 
-    /// Zones whose root sits BELOW pad 1 — unreachable on this grid.
+    /// SLICES whose root sits BELOW pad 1 — unreachable on this grid.
     ///
     /// ⭐ **REPORTED RATHER THAN HIDDEN.** A chop at `baseNote: 24` viewed on a
     /// grid based at 36 would draw sixteen empty pads over a fully loaded
     /// sampler, and every other reading in this model would agree with the
     /// picture. The header says "12 slices sit below pad 1" and offers the base
     /// note that would reach them.
+    ///
+    /// ⚠️ **SLICES ONLY — A SPREAD IS NOT COUNTED HERE (m39-levels-3).** A
+    /// spread usually sits directly below the chop, so after a relaunch (the
+    /// grid back at 36) it WOULD sit below pad 1 — and "show them" lands on the
+    /// lowest ROOT, which for a CENTRED spread is its ninth key: pad 1 would
+    /// open eight keys into the spread, half the grid spread and half chop. A
+    /// spread is reached through LEVELS instead (`toggleLevels` goes to it,
+    /// aligned), which also reaches a spread ABOVE the chop, where this
+    /// affordance never looks.
     public var unreachableBelowCount: Int {
-        zones.filter { $0.rootPitch < baseNote }.count
+        slices(in: zones).filter { $0.rootPitch < baseNote }.count
     }
 
-    /// The lowest root pitch in the keymap — what `unreachableBelowCount`'s fix
-    /// would set the base note to.
-    public var lowestRootPitch: Int? { zones.map(\.rootPitch).min() }
+    /// The lowest root pitch among the SLICES — what `unreachableBelowCount`'s
+    /// fix would set the base note to. Never a spread's (see above).
+    public var lowestRootPitch: Int? { slices(in: zones).map(\.rootPitch).min() }
 
-    /// Total loaded pads across every bank.
-    public var loadedCount: Int { zones.count }
+    /// Total loaded SLICES across every bank — the header's "8 slices loaded".
+    ///
+    /// ⛔ **NOT `zones.count` (m39-levels-3, measured).** A Sixteen Levels
+    /// spread is one extra zone, and counting it made the header say "9 slices
+    /// loaded" over an 8-slice chop for as long as LEVELS was up — and forever
+    /// after a relaunch.
+    public var loadedCount: Int { slices(in: zones).count }
+
+    /// The keymap's SLICES: every zone except a Sixteen Levels spread.
+    ///
+    /// A spread is anything `SixteenLevels.isSpread` accepts — THE one
+    /// predicate, the store's and the wire's too — plus the ONE zone this grid
+    /// itself moved onto (`sessionSpread`), even after something reshaped it
+    /// out of spread shape: the grid still draws that zone as a spread and
+    /// still removes it on EXIT, so numbering it as a slice as well would
+    /// shift the chop exactly as the bug did.
+    private func slices(in live: [SamplerZone]) -> [SamplerZone] {
+        let own = sessionSpread(in: live)?.id
+        return live.filter { !SixteenLevels.isSpread($0) && $0.id != own }
+    }
 
     /// The sixteen pads of the CURRENT bank, ready to draw.
     ///
@@ -476,7 +627,10 @@ public final class PadGridModel {
         let isAI = targetIsAIProvider()
         // Ordinals are assigned over the WHOLE keymap in pitch order, so bank 2
         // pad 1 reads "slice 17". Computed once per pass, not per pad.
-        let ordinals = Self.sliceOrdinals(zones: live)
+        // ⛔ SLICES ONLY (m39-levels-3): `sliceOrdinals` drops every spread by
+        // shape; the grid's own spread is dropped by identity too (`slices(in:)`).
+        let own = sessionSpread(in: live)?.id
+        let ordinals = Self.sliceOrdinals(zones: live.filter { $0.id != own })
         return PadGridGeometry.bankPadIndices.map { index in
             guard let pitch = PadGridGeometry.pitch(forPad: index,
                                                     baseNote: baseNote, bank: bank) else {
@@ -490,7 +644,20 @@ public final class PadGridModel {
             // replaced by the interval — sixteen squares reading "slice 7"
             // would each play something different while all claiming to be one
             // thing. See `PadState.levelsSemitones`.
-            let spread = levels.map { _ in SixteenLevels.semitones(forPad: index) } ?? nil
+            // ⛔ READ OFF THE LIVE ZONE'S ROOT (m39-levels-2), never off the
+            // toggle: UP and CENTRED differ ONLY in that root, so a label worked
+            // out from what the toggle last said would lie the moment a write
+            // bounced or an agent moved the root over the wire.
+            // ⛔⛔ AND OFF THE ZONE THAT ANSWERS THIS PAD, RECOGNISED BY SHAPE
+            // (m39-levels-3) — not only off the one spread this grid remembers
+            // making. That memory is session state: a relaunch loses it and a
+            // spread made over the wire never had it, and either way the spread
+            // used to draw as sixteen pads all reading "1". Every spread on the
+            // kit now labels itself, wherever the grid stands.
+            let spread = zone.flatMap { answering in
+                SixteenLevels.isSpread(answering) || answering.id == own
+                    ? SixteenLevels.semitones(atPitch: pitch, on: answering) : nil
+            }
             return PadState(
                 id: index,
                 pitch: pitch,
@@ -505,10 +672,18 @@ public final class PadGridModel {
         }
     }
 
-    /// zone id → 1-based ordinal in pitch order. `static` and pure so a test can
-    /// pin the numbering without building a model.
+    /// zone id → 1-based ordinal in pitch order, over the SLICES. `static` and
+    /// pure so a test can pin the numbering without building a model.
+    ///
+    /// ⛔⛔ **A SPREAD GETS NO NUMBER AND TAKES NONE (m39-levels-3, measured).**
+    /// A spread sits directly BELOW the chop, so numbering it made it "slice 1"
+    /// and pushed every real slice up one: the chop's first pad read "2". That
+    /// happened the moment a spread existed — in-session on the chop's bank,
+    /// and on every pad after a relaunch. Spreads are dropped here by THE one
+    /// predicate (`SixteenLevels.isSpread`), so every caller — the pads, the
+    /// header's source slice — numbers the same way.
     public static func sliceOrdinals(zones: [SamplerZone]) -> [UUID: Int] {
-        let sorted = zones.sorted { a, b in
+        let sorted = zones.filter { !SixteenLevels.isSpread($0) }.sorted { a, b in
             a.rootPitch == b.rootPitch ? a.id.uuidString < b.id.uuidString
                                        : a.rootPitch < b.rootPitch
         }
@@ -591,42 +766,281 @@ public final class PadGridModel {
 
     // MARK: - Sixteen Levels
 
-    /// A LIVE spread: which zone was added, which slice it came from, and where
-    /// the grid was standing before, so leaving puts it back.
+    /// A LIVE spread: which zone, which slice it came from, and where the grid
+    /// goes when you leave.
+    ///
+    /// ⭐⭐ **DERIVED ON EVERY READ, NEVER STORED (m39-levels-3).** It used to be
+    /// a stored property set by `enterLevels`, which made it the ONLY way the
+    /// grid could know a spread existed — and it is session state. A project
+    /// saved while LEVELS was up reopened with the spread still in the keymap
+    /// and nothing in the grid that recognised it, so the spread was numbered as
+    /// slice 1; a spread made over the wire (`instrument.spreadSlice`) or by the
+    /// store was never recognised at all. Now the spread IS the record — its
+    /// zone, read live through the one predicate — and this value is a view of
+    /// it. See `liveSpreadZone` for which spread is "live".
     public struct Levels: Equatable, Sendable {
-        /// The zone SIXTEEN LEVELS added. ⚠️ Removal is BY THIS ID and nothing
-        /// else — "remove the widest zone" or "remove the last one" would eat a
-        /// user's own hand-built zone the first time one existed.
+        /// The live spread's zone. ⚠️ Removal is BY THIS ID and nothing else —
+        /// "remove the widest zone" or "remove the last one" would eat a user's
+        /// own hand-built zone the first time one existed.
         public var spreadZoneID: UUID
-        /// 1-based slice number of the source, for the header.
-        public var sourceOrdinal: Int
+        /// 1-based slice number of the slice the spread plays, for the header —
+        /// or nil when no slice on the kit is its source any more (deleted, or
+        /// its window edited since). Found by what the two PLAY
+        /// (`SixteenLevels.sourceSlice`), so a hand-made spread and the same
+        /// spread after a relaunch name the same slice.
+        public var sourceOrdinal: Int?
         /// Pad 1's pitch while the spread is up.
         public var base: Int
-        /// Where the grid was, to restore on exit.
+        /// Where the grid goes on exit: where it stood when it moved onto this
+        /// spread, or — for a spread it never moved onto itself — the chop's
+        /// lowest slice, bank 1.
         public var homeBaseNote: Int
         public var homeBank: Int
     }
 
-    public private(set) var levels: Levels?
+    /// What THIS grid remembers about a spread it moved onto — by hand
+    /// (`enterLevels`) or by going to one it found (`toggleLevels`): which zone,
+    /// and where to go back to.
+    ///
+    /// ⚠️ **SESSION STATE, AND NOTHING DEPENDS ON IT SURVIVING.** A relaunch
+    /// loses it; a project opened over it, or a track switch, leaves it naming a
+    /// zone that is not in the keymap, and then it is simply not consulted
+    /// (`sessionSpread` finds nothing). It decides only two things: that its
+    /// zone stays the live spread wherever the grid is banked, and where EXIT
+    /// returns to.
+    private struct Session: Equatable {
+        var spreadZoneID: UUID
+        var base: Int
+        var homeBaseNote: Int
+        var homeBank: Int
+    }
+
+    private var session: Session?
+
+    /// The live spread, derived — see the type's note.
+    public var levels: Levels? {
+        let live = zones
+        guard let spread = liveSpreadZone(in: live) else { return nil }
+        let own = session?.spreadZoneID == spread.id ? session : nil
+        return Levels(spreadZoneID: spread.id,
+                      sourceOrdinal: Self.sourceOrdinal(of: spread, in: live),
+                      base: own?.base ?? spread.minPitch,
+                      homeBaseNote: own?.homeBaseNote
+                          ?? Self.homeBaseNote(in: live, leaving: spread),
+                      homeBank: own?.homeBank ?? 0)
+    }
+
     /// LEVELS was pressed and the grid is waiting for the pad to spread.
     public private(set) var levelsArming = false
     public private(set) var lastLevelsError: String?
 
     public var isLevels: Bool { levels != nil }
 
+    // MARK: Which way the spread runs (m39-levels-2)
+
+    /// The direction the NEXT spread will run — what the UP / CENTRED toggle
+    /// holds while no spread is up. UP by default, which is the behaviour that
+    /// shipped, so nobody who never touches the toggle sees anything change.
+    ///
+    /// ⚠️ **SESSION STATE, DELIBERATELY NOT PERSISTED** — the same standing as
+    /// the bank and the base note: a choice about how to PLAY, not a fact about
+    /// the project. The fact that does persist is each spread's own direction,
+    /// and that lives in its zone (see `SixteenLevels`' header), not here.
+    public private(set) var preferredSpreadDirection: SixteenLevels.Direction = .up
+
+    /// The LIVE spread, read FRESH from the keymap, or nil when LEVELS is not up.
+    ///
+    /// ⭐⭐ **LEVELS IS UP WHEN THE GRID IS PLAYING A SPREAD (m39-levels-3).**
+    /// Two ways to be live, in this order:
+    ///  1. **Identity first** — the zone THIS grid moved onto (`session`), for
+    ///     as long as the keymap holds it, wherever the grid is banked: the
+    ///     shipped behaviour for a hand-made spread, kept byte-for-byte. Held by
+    ///     id, not by shape, so a spread something else reshaped is still the
+    ///     one EXIT removes (and the one a flip refuses to touch).
+    ///  2. **Shape second** — a spread (`SixteenLevels.isSpread`, THE one
+    ///     predicate) that the grid is STANDING on: its sixteen keys ARE the
+    ///     current bank's sixteen pads, pad 1 on its first key. This is how a
+    ///     spread the grid never made — reopened after a relaunch, or made by
+    ///     `instrument.spreadSlice` — comes up as LEVELS, with its intervals on
+    ///     the pads and its slice in the header.
+    ///
+    /// ⚠️ **ALIGNED, NOT MERELY VISIBLE.** Every LEVELS sentence describes the
+    /// pads on screen ("pad 1 is the slice as recorded"), so a grid straddling
+    /// half a spread and half the chop is not in LEVELS — its spread pads still
+    /// read their intervals (`pads` labels by shape everywhere), and the header
+    /// offers LEVELS to go there aligned.
+    public var liveSpreadZone: SamplerZone? { liveSpreadZone(in: zones) }
+
+    private func liveSpreadZone(in live: [SamplerZone]) -> SamplerZone? {
+        if let own = sessionSpread(in: live) { return own }
+        guard let padOne = PadGridGeometry.pitch(forPad: 0, baseNote: baseNote, bank: bank),
+              // First match, as the engine resolves a key within one group:
+              // the zone that ANSWERS pad 1 must itself be the spread.
+              let zone = live.first(where: { $0.contains(pitch: padOne) }),
+              zone.minPitch == padOne, SixteenLevels.isSpread(zone) else { return nil }
+        return zone
+    }
+
+    /// The zone this grid moved onto, if the keymap still holds it.
+    private func sessionSpread(in live: [SamplerZone]) -> SamplerZone? {
+        guard let id = session?.spreadZoneID else { return nil }
+        return live.first { $0.id == id }
+    }
+
+    /// Spreads on this kit that are NOT live — lowest first. What LEVELS goes
+    /// to, and what the header mentions when the grid is off them.
+    ///
+    /// ⭐ **MORE THAN ONE CAN EXIST** — `instrument.spreadSlice` can make
+    /// several — and the grid still models ONE live spread. Every spread is
+    /// kept out of the slice numbering and the slice count and labels its own
+    /// pads; LEVELS goes to the lowest waiting one; EXIT removes only the live
+    /// one, and LEVELS then goes to the next. The pad grid itself never makes a
+    /// second: with a spread on the kit, LEVELS goes to it rather than arming.
+    public var waitingSpreads: [SamplerZone] {
+        let live = zones
+        let current = liveSpreadZone(in: live)?.id
+        return live.filter { SixteenLevels.isSpread($0) && $0.id != current }
+            .sorted { a, b in
+                a.minPitch == b.minPitch ? a.id.uuidString < b.id.uuidString
+                                         : a.minPitch < b.minPitch
+            }
+    }
+
+    /// The slice number of the slice `spread` plays, among the SLICES of
+    /// `live`, or nil when none does. The ONE derivation, hand-made or not.
+    private static func sourceOrdinal(of spread: SamplerZone,
+                                      in live: [SamplerZone]) -> Int? {
+        guard let source = SixteenLevels.sourceSlice(of: spread, in: live) else { return nil }
+        return sliceOrdinals(zones: live.filter { $0.id != spread.id })[source.id]
+    }
+
+    /// Where EXIT takes the grid from a spread it did not move onto itself:
+    /// the lowest SLICE — the chop's own pad 1 — or, with no slices left,
+    /// the grid's default home.
+    private static func homeBaseNote(in live: [SamplerZone], leaving spread: SamplerZone) -> Int {
+        live.filter { $0.id != spread.id && !SixteenLevels.isSpread($0) }
+            .map(\.rootPitch).min() ?? SliceToSamplerSettings.defaultBaseNote
+    }
+
+    /// What the toggle SHOWS. While a spread is up this is THAT SPREAD'S OWN
+    /// direction, read off its zone — so a flip the store refused, or a root an
+    /// agent moved over the wire, is reported as it is rather than as it was
+    /// clicked (`triggerMode`'s rule). Otherwise, the preference.
+    public var spreadDirection: SixteenLevels.Direction {
+        liveSpreadZone.flatMap(SixteenLevels.direction(of:)) ?? preferredSpreadDirection
+    }
+
+    /// The toggle was clicked.
+    ///
+    /// No spread up → it only sets which way the next one runs. A spread up →
+    /// it FLIPS that spread, through `SixteenLevels.keymap(_:respreading:to:)`:
+    /// ⛔⛔ **ONE FIELD OF ONE ZONE — LEVELS' OWN.** The chop is written back as
+    /// the same values in the same order; only the spread's `rootPitch` moves.
+    ///
+    /// A redundant click writes nothing (a sampler apply is wholesale and
+    /// re-validates every zone file — the `setTriggerMode` guard). A REFUSED
+    /// write leaves the preference alone too, so the toggle, which reads the
+    /// zone, and the next spread, which reads the preference, cannot disagree
+    /// about a click that did not take.
+    public func setSpreadDirection(_ value: SixteenLevels.Direction) {
+        guard let live = levels else {
+            preferredSpreadDirection = value
+            bump()
+            return
+        }
+        let current = zones
+        guard let spread = current.first(where: { $0.id == live.spreadZoneID }),
+              SixteenLevels.direction(of: spread) != value else {
+            // Already running that way — or the spread is gone, and there is
+            // nothing to flip. Either way, remember the choice for the next one.
+            preferredSpreadDirection = value
+            bump()
+            return
+        }
+        guard let respread = SixteenLevels.keymap(current, respreading: live.spreadZoneID,
+                                                  to: value) else {
+            // ⚠️ The spread is there but is no longer sixteen keys wide — the
+            // sampler card or an agent reshaped it. Flipping it now would mean
+            // editing more than its root, so REFUSE, and say so: silently
+            // lighting the other chip would be a toggle claiming a state the
+            // pads are not in. The preference stays put, as for any refusal.
+            lastLevelsError = "This spread was changed outside the pad grid, so it cannot be "
+                + "flipped. Press EXIT LEVELS, then make a new one."
+            bump()
+            return
+        }
+        if let refusal = setZonesAction(respread) {
+            lastLevelsError = refusal
+        } else {
+            lastLevelsError = nil
+            preferredSpreadDirection = value
+        }
+        bump()
+    }
+
+    /// Why the toggle is dead, or nil when it can be used. The LEVELS button's
+    /// own reason: a direction for a spread that cannot be made is not a
+    /// setting worth offering.
+    public var spreadDirectionUnavailableReason: String? {
+        isLevels ? nil : levelsUnavailableReason
+    }
+
     /// The header line for whichever of the three states the grid is in.
     public var levelsStatus: String? {
         if let levels {
-            return "Sixteen Levels · slice \(levels.sourceOrdinal) · pad 1 is the "
-                + "slice as recorded, each pad up is a semitone higher"
+            let from = Self.sourcePhrase(levels.sourceOrdinal)
+            switch spreadDirection {
+            case .up:
+                // ⚠️ BYTE-IDENTICAL to the line that shipped before the toggle
+                // existed: UP is the default, and the default does not change.
+                return "Sixteen Levels · \(from) · pad 1 is the "
+                    + "slice as recorded, each pad up is a semitone higher"
+            case .centered:
+                // ⭐ It names what is ON SCREEN — the pad marked 0, the minus
+                // pads, the plus pads — rather than pad numbers the grid does
+                // not print. "Pad 9" stays because it is the card's own phrase
+                // — the words the user read when they chose the toggle.
+                return "Sixteen Levels · \(from) · pad 9, marked 0, "
+                    + "is the slice as recorded — the minus pads play it lower, "
+                    + "the plus pads higher"
+            }
         }
         if levelsArming { return "Hit the pad holding the slice you want to play." }
-        return nil
+        // ⭐ A SPREAD ON THE KIT, OFF THESE PADS (m39-levels-3) — after a
+        // relaunch (the grid starts back on the chop), or made by an agent
+        // while you played. Said out loud, because the button that goes there
+        // reads plain "LEVELS", and a click that jumps somewhere instead of
+        // arming would otherwise be a surprise.
+        let waiting = waitingSpreads
+        switch waiting.count {
+        case 0:
+            return nil
+        case 1:
+            let live = zones
+            if let ordinal = Self.sourceOrdinal(of: waiting[0], in: live) {
+                return "Sixteen Levels · slice \(ordinal) is spread on sixteen other pads — "
+                    + "press LEVELS to go there"
+            }
+            return "Sixteen Levels · a spread is on sixteen other pads — press LEVELS to go there"
+        default:
+            return "Sixteen Levels · \(waiting.count) spreads are on other pads — press LEVELS "
+                + "to go to the first"
+        }
     }
 
-    /// Why LEVELS cannot be armed, or nil when it can.
+    /// "slice 3", or the honest sentence when no slice on the kit is the
+    /// spread's source any more — the header must never name a slice that is
+    /// not the one being played.
+    private static func sourcePhrase(_ ordinal: Int?) -> String {
+        ordinal.map { "slice \($0)" } ?? "from a slice no longer on the pads"
+    }
+
+    /// Why LEVELS cannot be pressed, or nil when it can.
     public var levelsUnavailableReason: String? {
         guard levels == nil else { return nil }
+        // ⭐ A spread already on the kit is always reachable: LEVELS goes to it
+        // (`toggleLevels`), which needs neither a slice nor a free window.
+        guard waitingSpreads.isEmpty else { return nil }
         guard !zones.isEmpty else {
             return "Chop something onto the pads first — Sixteen Levels spreads one "
                 + "slice across the grid."
@@ -641,13 +1055,24 @@ public final class PadGridModel {
         return nil
     }
 
-    /// LEVELS pressed. Off → arming, arming → off, on → back to the chop.
+    /// LEVELS pressed. On → back to the chop; arming → off; off with a spread
+    /// already on the kit → go to it; otherwise off → arming.
+    ///
+    /// ⭐ **GO TO A SPREAD THAT EXISTS RATHER THAN MAKE ANOTHER (m39-levels-3).**
+    /// After a relaunch the grid starts back on the chop with the saved spread
+    /// sixteen keys away; arming there would stack a SECOND spread on the kit,
+    /// and a third after the next relaunch. So LEVELS moves the grid onto the
+    /// waiting spread, aligned, and WRITES NOTHING — the zone is already there.
+    /// To spread a different slice: EXIT LEVELS (which removes this one), then
+    /// LEVELS again.
     public func toggleLevels() {
         if levels != nil {
             exitLevels()
         } else if levelsArming {
             levelsArming = false
             bump()
+        } else if let waiting = waitingSpreads.first {
+            goToSpread(waiting)
         } else if levelsUnavailableReason == nil {
             levelsArming = true
             lastLevelsError = nil
@@ -655,6 +1080,18 @@ public final class PadGridModel {
         } else {
             bump()
         }
+    }
+
+    /// Stands the grid on `spread` — pad 1 on its first key, bank 1 — and
+    /// remembers where it was, so EXIT comes back here. No zone is written.
+    private func goToSpread(_ spread: SamplerZone) {
+        session = Session(spreadZoneID: spread.id, base: spread.minPitch,
+                          homeBaseNote: baseNote, homeBank: bank)
+        levelsArming = false
+        lastLevelsError = nil
+        typing.setPadBaseNote(spread.minPitch)
+        typing.setPadBank(0)
+        bump()
     }
 
     /// Spreads the slice under `padIndex` across the grid.
@@ -676,12 +1113,26 @@ public final class PadGridModel {
             bump()
             return false
         }
+        // ⛔ NOT A SPREAD OF A SPREAD (m39-levels-3). A spread off the grid
+        // now labels its own pads wherever the grid stands, so one can be under
+        // the hand while arming (an agent made it mid-arm, or the grid
+        // straddles one). Spreading it again would copy a copy — reachable,
+        // and nothing a person asking for "this slice" meant.
+        guard !SixteenLevels.isSpread(source) else {
+            lastLevelsError = "That pad already plays a Sixteen Levels spread — pick a pad "
+                + "holding one slice."
+            bump()
+            return false
+        }
         guard let base = SixteenLevels.freeBase(zones: live) else {
             lastLevelsError = levelsUnavailableReason
             bump()
             return false
         }
-        let spread = SixteenLevels.zone(from: source, base: base)
+        // ⭐ THE PREFERENCE DECIDES ONLY THE ROOT (m39-levels-2) — the keys, the
+        // window and the "add one zone" write are identical in both directions.
+        let spread = SixteenLevels.zone(from: source, base: base,
+                                        direction: preferredSpreadDirection)
         // ⚠️ THE WRITE FIRST, THE VIEW SECOND. Moving the grid before the store
         // agreed would leave the pads pointing at sixteen empty notes with a
         // header announcing a spread — a surface describing an edit that did
@@ -691,11 +1142,12 @@ public final class PadGridModel {
             bump()
             return false
         }
-        levels = Levels(spreadZoneID: spread.id,
-                        sourceOrdinal: Self.sliceOrdinals(zones: live)[source.id] ?? 1,
-                        base: base,
-                        homeBaseNote: baseNote,
-                        homeBank: bank)
+        // ⭐ Only WHERE THE GRID WAS is remembered. Which slice the spread
+        // plays is derived on every read (`levels`), exactly as it is for a
+        // spread the grid never made — one derivation, so a hand-made spread
+        // and the same spread after a relaunch cannot name different slices.
+        session = Session(spreadZoneID: spread.id, base: base,
+                          homeBaseNote: baseNote, homeBank: bank)
         levelsArming = false
         lastLevelsError = nil
         typing.setPadBaseNote(base)
@@ -704,7 +1156,17 @@ public final class PadGridModel {
         return true
     }
 
-    /// Takes the spread away and puts the grid back on the chop.
+    /// Takes the LIVE spread away and puts the grid back on the chop.
+    ///
+    /// ⭐ **THE SAME FOR EVERY SPREAD, WHOEVER MADE IT (m39-levels-3).** A
+    /// spread reopened from disk or made over the wire is removed exactly as a
+    /// hand-made one: by its own id, and nothing else in the keymap changes.
+    /// The alternative — leave it, and only move the grid — would make EXIT
+    /// mean two things depending on history the user cannot see, and would
+    /// strand the spread on the kit with no way to take it off from here.
+    /// The known cost is a zone that is spread-SHAPED without being a spread
+    /// (see `SixteenLevels.isSpread`): standing on one and pressing EXIT
+    /// removes it, as one undo step.
     ///
     /// ⚠️ **THE GRID MOVES HOME EVEN IF THE REMOVAL IS REFUSED.** Leaving the
     /// user parked on a spread they asked to leave, because the store could not
@@ -717,7 +1179,7 @@ public final class PadGridModel {
         lastLevelsError = refusal
         typing.setPadBaseNote(live.homeBaseNote)
         typing.setPadBank(live.homeBank)
-        levels = nil
+        session = nil
         levelsArming = false
         bump()
     }
@@ -867,7 +1329,9 @@ public final class PadGridModel {
                 // ⚠️ THE STORE'S ANSWER, NOT THE REQUEST — see the field's doc.
                 mutedTrackName: result.mutedTrackId != nil ? source.trackName : nil,
                 sourceStillAudible: !result.sourceTrackMuted,
-                warnings: result.warnings)
+                warnings: result.warnings,
+                // What the notice SHOWS — see `chopWarningsForHumans`.
+                warningsForHumans: Self.chopWarningsForHumans(result))
             bump()
             return true
         } catch {

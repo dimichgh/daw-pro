@@ -1,5 +1,53 @@
 # Changelog
 
+## 2026-09-24b — Bugs you could hear, fixed
+
+**Five bugs a person using the app would hear or see: audio that jumped, a clip that went silent, a false alarm, a pad grid that miscounted, and a chop that lost a pad.**
+
+1. **Split or trim a time-stretched clip and the audio jumped.** The cut point was computed in timeline seconds and applied to the source file. At stretch ratio 2 the audio after a split skipped ahead 1.0 s; at 0.5 it repeated 0.25 s. The same maths served insert/delete bars and every overlap resolution (move, duplicate, paste, import). Fixed: rendering a clip whole vs split now differs by exactly 0.0 at the seam, with no lag. Projects already saved keep their stored offsets, so they sound exactly as they did.
+
+2. **A tuned or time-stretched clip went silent after the first save**, until the app was quit. Saving points the clip at the project's own copy of its audio file, and a check that could not see that change refused to re-render. Fixed.
+
+3. **A false alarm after tuning.** Tuning a clip posted "still being time-stretched — plays as silence" within milliseconds (11 ms measured), even with the transport stopped, and it stayed in the notice list. Now the notice is posted only when playback or recording starts while the tuned version is still being prepared, and for a clip that is tuned but not time-stretched it reads "The tuned version of '<clip name>' is still being prepared — the clip plays as silence until it's ready."
+
+4. **Sixteen Levels (the pad grid): three display bugs.** Reopening a project saved while LEVELS was on showed the pads reading "1" and the slices shifted by one; the header counted the spread as a slice ("9" for 8 slices); spreads made by an agent over the wire read the same way. Fixed with one rule that recognises a spread by its shape. On reopen the grid shows the chop, with the line "Sixteen Levels · a spread is on sixteen other pads — press LEVELS to go there".
+
+5. **"Equal pieces: 8" gave 7 pads** (and a grid of quarter notes gave 3 pads for 4): the first piece was being discarded as if it were silence before the first hit. Now N pieces make N pads. ⚠ Agents: each pad now sits one slice up from before; nothing was renamed. The toggle "Keep the lead-in as pad 1" dims and explains itself where it does not apply.
+
+**Also:** a newly added clipper now starts with oversampling 1 (OFF); a clipper saved in an older project keeps 4, because a shipped effect may not change the sound of a saved song. Sixteen Levels spreads can go UP from the slice or be CENTRED on it.
+
+## 2026-09-24 — Hard Tune for real, and a sung phrase becomes notes
+
+**Hard Tune now really flattens a sung note, a sung phrase is split into notes before anything is tuned, and the editor draws what the render will play.**
+
+**Hard Tune reaches the render.** Until today, the render got an empty pitch line, so Hard Tune only shifted each note by a constant. Now the detected pitch line reaches it. Hard Tune's within-note wander drops 62.8 → 18.2 cents (about 70% flatter) on a real vocal, while Tight changes it by about 1%. Gentle, Natural and Tight move note centres by 14.7, 25.9 and 31.2 cents on that take, delivered within about 0.5 cent. **Hard Tune is back in the Tune Vocal menu.** If the pitch line cannot be read for a clip, the render falls back to exactly the old (constant-offset) render, byte for byte, and posts the notice code `clip-pitch-contour-unavailable`.
+
+**A sung phrase becomes notes.** Before, every unbroken stretch of singing was ONE note, pinned to its middle pitch — so a slide into a held note moved the HELD note. On the test take, Hard Tune shifted 4 of 42 notes by more than 3 semitones and 11 by more than 2 (the largest 5.06). Now a phrase is split wherever the pitch settles on a new note. A slide that lasts longer than about 130 ms (8 frames at 62.5 frames per second) becomes its own part. What Hard Tune does with a slide was decided BY EAR: four versions of the same slide were rendered and the user picked "slide kept, note locked": the slide plays as sung and each held note locks to its pitch. Gentle, Natural and Tight also leave every slide exactly as sung. `segmentCount` in the tuning responses now counts NOTES, not phrases. Nothing already saved changes: a stored note table is never re-split, no new field is saved, and the analysis version did not move. ⭐ **Check that the real code matches what was listened to: the new splitter's renders of the listening excerpt are byte-identical to the hand-cut renders the user heard, for all four slide options.** Known and filed, not fixed: on one low note the pitch detector itself reads about 21–23 cents sharp, so that note lands about 20 cents flat after tuning (filed as p2-seg-F-detect).
+
+**The editor draws what you will hear.** The pitch editor now draws the line the RENDER will play, including a clip transpose: a moved note carries its wobble with it, and the place where it was sung is left behind as an empty outline (the "ghost"). Before, the wobble line stayed behind at the old spot while the note moved. When the render's pitch line is not available, the editor says so with an amber "estimate" caption instead of drawing a guess as fact.
+
+**"Replace your hand edits?"** Picking a Tune Vocal preset on a clip you have hand-edited since the last preset now asks first. Title: "Replace your hand edits?" Confirm button: "Replace my edits" (red and deliberately NOT the default button, so Return cannot erase your work). Switching from one preset to another with no hand edits in between stays silent (so comparing presets is still one click each). Projects saved before today get ONE extra confirm the first time (the safe direction). "Remove Tuning" does not ask: its label names the loss, and it is one Undo.
+
+**Wire and MCP:** commands 234 → 240; MCP tools 239 → 245. Six new: `view.openPitchEditor`, `clip.setNotePitch` (ABSOLUTE cents, clamped to +/−2400, and it reads back the stored value), `clip.splitNote`, `clip.getPlayedPitch`, `instrument.spreadSlice`, `instrument.setSpreadDirection`. `clip.autoCorrectPitch` gains `replaceExisting` (default true); with `false` it refuses when the clip has hand edits since the last preset. Every pitch-edits response now carries `handEditedSinceAutoCorrect`. The note verbs never run pitch detection over the wire: a clip with no stored note table is refused. The Claude plugin moves to 0.15.0: the pitch tools are in the mix-engineer and composer agents' allowlists, the played-pitch and open-pitch-editor tools in the demo-director's, the spread pair in the sound-designer's.
+
+**Groundwork with no sound change yet:** note timing edits (the model and the curve maths; the render does not read them yet), and a wobble (vibrato) estimator for the coming Wobble tool. The estimator measured a limit of the product's pitch detector: it reads only 26–32% of a +/−20 cent wobble, so wobbles shallower than about +/−25 cents are nearly invisible to it. Tests: 9287 in 802 suites, 0 failures; MCP 992/992; the command count is 240 by two independent derivations.
+
+## 2026-09-23 — Tune Vocal: pitch correction from the model to the menu
+
+**A person who never opens an editor can now tune a vocal: Tune Vocal in the audio clip's menu, with presets. Gentle, Natural, Tight shipped that day. Hard Tune ("the robot effect") was withheld because the render could not honour it yet (it would have played as a stronger Tight wearing the robot label); it came back on 2026-09-24.**
+
+A note editor pane: a piano ruler, one blob per note, and the per-frame pitch line with its holes left visible (a gap where the detector heard no pitch is drawn as a gap, not bridged).
+
+**Timing:** the correction lands where it was asked for: −0.47 frames, against an uncompensated control of +2854.6. Engine latency measured 54.5 ± 6.1 ms against a declared 49.6.
+
+**Pitch edits stick to clips.** Six clip operations silently DROPPED a clip's pitch edits: split, trim, trim-to-window, re-identify, flatten, and make-slice. All six now carry them. The times are NOT rebased, because they are counted from the start of the source FILE, not the clip (a planted rebase clamped a note to 0.0–0.4 s instead of 0.25–0.90 s).
+
+**What listening found that no test could:** a listener said every preset sounded the same, and was right. (1) The presets move each note's centre by about 18 cents, while that take's own within-note movement is 56 cents (standard deviation), three times larger and kept on purpose. (2) A "detune it, then repair it" demo built to make the effect bigger put 24% of the material on the WRONG semitone, because a 45-cent detune sits next to the 50-cent halfway point and snapping then picks the neighbour. (3) "Distance to the nearest semitone" scored that wrong-note render at 11.7 cents against the untouched take's 18.8, i.e. BETTER than what was sung. A wrong note sung perfectly in tune scores perfectly on that measure. (The fix is a detected key; it is not built. Recorded in the code at `PitchCorrectionScale.chromatic`.)
+
+**Wire and MCP:** commands 231 → 234; MCP tools 236 → 239. Three new: `clip.autoCorrectPitch`, `clip.clearPitchEdits`, `clip.getPitchEdits`.
+
+**Tests:** 8917 in 774 suites, 0 failures.
+
 ## 2026-09-20j — An EQ band that only moves when the music makes it move
 
 **A normal EQ turns a frequency down and leaves it down, whatever happens next.

@@ -4,18 +4,28 @@ import Testing
 @testable import DAWControl
 
 /// M35 — the agent-facing VIEW surface (`view.capture` / `view.selectClip` /
-/// `view.panelLayout` / `view.openEditor`): command taxonomy + routing through
-/// the `ViewUIControlling` seam. A fake seam records calls and returns scripted
-/// results — no AppKit, no window, no engine (the `PluginUICommandTests`
-/// fixture shape, verbatim).
+/// `view.panelLayout` / `view.openEditor`) plus the pitch-editor
+/// command-surface door's `view.openPitchEditor` (m23-ap Phase 2, item p2-c,
+/// `docs/design/2026-09-22-pitch-editor-ui.md` §9.1): command taxonomy +
+/// routing through the `ViewUIControlling` seam. A fake seam records calls and
+/// returns scripted results — no AppKit, no window, no engine (the
+/// `PluginUICommandTests` fixture shape, verbatim).
 ///
 /// ⭐ **THE HEADLESS REFUSALS ARE ASSERTED WITHOUT THE SEAM INSTALLED, AND THAT
-/// IS THE POINT OF THE SUITE.** The design's headless contract is that all four
+/// IS THE POINT OF THE SUITE.** The design's headless contract is that all five
 /// fail LOUDLY rather than returning a success that means nothing — a
 /// `plugin.listOpenUIs`-style `{available:false}` was deliberately NOT copied,
 /// because "list the windows" has a true empty answer and "show me the app"
 /// does not. A test that only exercised the happy path with a fake installed
 /// could not tell a loud throw from a quiet empty success.
+///
+/// ⚠️ **`view.openPitchEditor` IS THE ONE VERB HERE WHOSE CLIP LOOKUP AND MIDI
+/// REFUSAL ARE ROUTER-SIDE, NOT BEHIND THE FAKE SEAM** (`Commands.swift`'s own
+/// comment on the case). That means its MIDI-clip and unknown-clip refusals are
+/// provable with `viewUI` left `nil` — headless AND seam-absent at once — and
+/// its headless-only refusal needs a REAL audio clip in the store (the other
+/// four verbs never touch the store, so `f.midiClip`'s placeholder id is
+/// enough for them even headless).
 @MainActor
 @Suite("CommandRouter — view.* agent-facing VIEW surface (M35)")
 struct ViewSurfaceCommandTests {
@@ -27,11 +37,15 @@ struct ViewSurfaceCommandTests {
         var layoutCalls: [(workspace: String?, editorMaximized: Bool?)] = []
         var editorCalls: [ViewEditorTarget] = []
 
+        var openPitchEditorCalls: [UUID] = []
+
         var captureError: (any Error)?
         var selectResult: ViewSelectClipResult?
         var selectError: (any Error)?
         var editorResult: ViewEditorResult?
         var editorError: (any Error)?
+        var openPitchEditorResult: ViewOpenPitchEditorResult?
+        var openPitchEditorError: (any Error)?
         var workspace = "arrange"
         var editorMaximized = false
 
@@ -70,6 +84,14 @@ struct ViewSurfaceCommandTests {
                 editor: .polySynth, trackID: target.trackIDForTest,
                 effectID: target.effectIDForTest, title: "Poly Synth on Synth 1")
         }
+
+        func openPitchEditorForView(_ clipID: UUID) throws -> ViewOpenPitchEditorResult {
+            openPitchEditorCalls.append(clipID)
+            if let openPitchEditorError { throw openPitchEditorError }
+            return openPitchEditorResult ?? ViewOpenPitchEditorResult(
+                clipID: clipID, trackID: UUID(), opened: true,
+                reason: .pitchEditorOpened, workspace: "arrange")
+        }
     }
 
     private struct Fixtures {
@@ -95,23 +117,51 @@ struct ViewSurfaceCommandTests {
         await router.handle(ControlRequest(id: "1", command: command, params: params))
     }
 
+    /// A real AUDIO clip in the store, via the router — `PitchCorrectionCommandTests`'s
+    /// `addAudioClip` shape, needed only by `view.openPitchEditor` (the one verb
+    /// here whose clip lookup is router-side rather than behind the fake seam).
+    /// Callers must set `f.store.media = FakeMedia()` first — the other tests in
+    /// this file never add an audio clip and so never needed it.
+    private func addAudioClip(_ router: CommandRouter) async throws -> (trackID: UUID, clipID: UUID) {
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("daw-pro-view-pitch-\(UUID().uuidString).wav")
+        try Data([0x00]).write(to: fileURL)
+        let addTrack = await router.handle(ControlRequest(
+            id: "t", command: "track.add", params: ["kind": .string("audio")]))
+        let trackIDString = try #require(addTrack.result?["id"]?.stringValue)
+        let addClip = await router.handle(ControlRequest(
+            id: "c", command: "clip.addAudio",
+            params: ["trackId": .string(trackIDString), "path": .string(fileURL.path),
+                     "atBeat": .number(0)]))
+        let clipIDString = try #require(addClip.result?["id"]?.stringValue)
+        let trackID = try #require(UUID(uuidString: trackIDString))
+        let clipID = try #require(UUID(uuidString: clipIDString))
+        return (trackID, clipID)
+    }
+
     // MARK: - 1. parity
 
-    @Test("allCommands lists the four view.* commands, right after the plugin.* block")
+    @Test("allCommands lists the five view.* commands, right after the plugin.* block")
     func allCommandsListsViewCommands() throws {
-        for name in ["view.capture", "view.selectClip", "view.panelLayout", "view.openEditor"] {
+        for name in ["view.capture", "view.selectClip", "view.panelLayout", "view.openEditor",
+                     "view.openPitchEditor"] {
             #expect(CommandRouter.allCommands.contains(name))
         }
         // The PLACEMENT is load-bearing, not cosmetic: ~51 assertions across the
         // suite read end-relative windows of this array, so the block sits after
         // `plugin.listOpenUIs` rather than at the tail. Pinning it here means a
         // future "just append it" edit reddens THIS test — which names the
-        // reason — instead of fifty that do not.
+        // reason — instead of fifty that do not. `view.openPitchEditor` landed
+        // directly after `view.openEditor` (the pitch-editor command-surface
+        // door, m23-ap Phase 2 p2-c) — extending the same contiguous window by
+        // one rather than opening a second one.
         let all = CommandRouter.allCommands
         let anchor = try #require(all.firstIndex(of: "plugin.listOpenUIs"))
-        #expect(Array(all[(anchor + 1)...(anchor + 4)])
-            == ["view.capture", "view.selectClip", "view.panelLayout", "view.openEditor"])
+        #expect(Array(all[(anchor + 1)...(anchor + 5)])
+            == ["view.capture", "view.selectClip", "view.panelLayout", "view.openEditor",
+                "view.openPitchEditor"])
         #expect(all.last != "view.openEditor")
+        #expect(all.last != "view.openPitchEditor")
     }
 
     // MARK: - 2. the headless contract — all four fail LOUDLY
@@ -119,12 +169,18 @@ struct ViewSurfaceCommandTests {
     @Test("every view.* verb throws a readable, actionable error when the seam is absent")
     func headlessRefusals() async throws {
         let f = try makeFixtures()
+        f.store.media = FakeMedia()
+        let (_, audioClipID) = try await addAudioClip(f.router)
         // viewUI deliberately nil the whole time.
         let calls: [(String, [String: JSONValue])] = [
             ("view.capture", [:]),
             ("view.selectClip", ["clipId": .string(f.midiClip.uuidString)]),
             ("view.panelLayout", ["workspace": .string("mix")]),
             ("view.openEditor", ["trackId": .string(f.midiTrack.uuidString)]),
+            // AUDIO, not `f.midiClip` — this verb's MIDI refusal is router-side
+            // and would fire BEFORE the headless guard, masking exactly the
+            // refusal this test wants to prove.
+            ("view.openPitchEditor", ["clipId": .string(audioClipID.uuidString)]),
         ]
         for (command, params) in calls {
             let r = await send(f.router, command, params)
@@ -151,6 +207,10 @@ struct ViewSurfaceCommandTests {
             ("view.selectClip", ["clipId": .string(f.midiClip.uuidString), "bogus": .bool(true)]),
             ("view.panelLayout", ["bogus": .bool(true)]),
             ("view.openEditor", ["trackId": .string(f.midiTrack.uuidString), "bogus": .bool(true)]),
+            // `f.midiClip` here is fine even though this verb refuses MIDI
+            // clips: `rejectUnknownKeys` is the FIRST check in the case body,
+            // before the clip lookup ever runs.
+            ("view.openPitchEditor", ["clipId": .string(f.midiClip.uuidString), "bogus": .bool(true)]),
         ]
         for (command, params) in calls {
             let r = await send(f.router, command, params)
@@ -277,7 +337,7 @@ struct ViewSurfaceCommandTests {
         withExtendedLifetime(fake) {}
     }
 
-    @Test("view.selectClip's three reasons each encode as their raw value")
+    @Test("view.selectClip's three MIDI/workspace reasons each encode as their raw value")
     func selectClipReasonVocabulary() async throws {
         let cases: [(ViewSelectClipResult.Reason, String, Bool)] = [
             (.pianoRollOpened, "piano-roll-opened", true),
@@ -299,6 +359,53 @@ struct ViewSurfaceCommandTests {
             #expect(r.result?.objectValue?["editorOpen"]?.boolValue == editorOpen)
             withExtendedLifetime(fake) {}
         }
+    }
+
+    /// m23-ap Phase 2, item p2-c — design §9.2: `view.selectClip` starts lying
+    /// (about an audio clip having "no editor") unless it also carries the
+    /// FOURTH reason and the `pitchEditorOpen` field. This is the fourth case
+    /// `selectClipReasonVocabulary` deliberately does not fold in: its table
+    /// pins `editorOpen` per case, and `pitchEditorOpen` is a SEPARATE field
+    /// that is never true at the same time as `editorOpen` — folding it in
+    /// would need a second column nobody else reads, for one case.
+    @Test("view.selectClip's fourth reason, pitch-editor-open, carries pitchEditorOpen:true and editorOpen:false")
+    func selectClipPitchEditorOpenReason() async throws {
+        let f = try makeFixtures()
+        let fake = FakeViewUI()
+        let clipID = UUID()
+        fake.selectResult = ViewSelectClipResult(
+            clipID: clipID, trackID: f.audioTrack, clipKind: "audio",
+            editorOpen: false, pitchEditorOpen: true, reason: .pitchEditorOpen,
+            workspace: "arrange")
+        f.router.viewUI = fake
+
+        let r = await send(f.router, "view.selectClip", ["clipId": .string(clipID.uuidString)])
+        #expect(r.ok, "an audio clip with its pitch editor open is a SUCCESS")
+        let obj = try #require(r.result?.objectValue)
+        #expect(obj["reason"]?.stringValue == "pitch-editor-open")
+        #expect(obj["editorOpen"]?.boolValue == false)
+        #expect(obj["pitchEditorOpen"]?.boolValue == true)
+        withExtendedLifetime(fake) {}
+    }
+
+    @Test("view.selectClip's pitchEditorOpen defaults false when a fake omits it — the m23-ap-era call sites")
+    func selectClipPitchEditorOpenDefaultsFalse() async throws {
+        // `ViewSelectClipResult`'s `pitchEditorOpen` parameter carries a
+        // default (`= false`) specifically so call sites written before this
+        // item — inside this very file, e.g. `selectClipAudioReason` above —
+        // keep compiling unchanged. This test pins that default itself,
+        // independent of any one call site continuing to omit the argument.
+        let f = try makeFixtures()
+        let fake = FakeViewUI()
+        let clipID = UUID()
+        fake.selectResult = ViewSelectClipResult(
+            clipID: clipID, trackID: f.audioTrack, clipKind: "audio",
+            editorOpen: false, reason: .audioClipHasNoEditor, workspace: "arrange")
+        f.router.viewUI = fake
+        let r = await send(f.router, "view.selectClip", ["clipId": .string(clipID.uuidString)])
+        #expect(r.ok)
+        #expect(r.result?.objectValue?["pitchEditorOpen"]?.boolValue == false)
+        withExtendedLifetime(fake) {}
     }
 
     // MARK: - 6. view.panelLayout
@@ -464,6 +571,105 @@ struct ViewSurfaceCommandTests {
         #expect(r.ok)
         #expect(r.result?.objectValue?["pluginWindow"] == nil)
         withExtendedLifetime(fake) {}
+    }
+
+    // MARK: - 8. view.openPitchEditor (m23-ap Phase 2, item p2-c)
+
+    @Test("view.openPitchEditor forwards clipId to the seam and round-trips its result")
+    func openPitchEditorHappyPath() async throws {
+        let f = try makeFixtures()
+        f.store.media = FakeMedia()
+        let (_, clipID) = try await addAudioClip(f.router)
+        let fake = FakeViewUI()
+        let resultTrackID = UUID()
+        fake.openPitchEditorResult = ViewOpenPitchEditorResult(
+            clipID: clipID, trackID: resultTrackID, opened: true,
+            reason: .pitchEditorOpened, workspace: "arrange")
+        f.router.viewUI = fake
+
+        let r = await send(f.router, "view.openPitchEditor", ["clipId": .string(clipID.uuidString)])
+        #expect(r.ok)
+        #expect(fake.openPitchEditorCalls == [clipID])
+        let obj = try #require(r.result?.objectValue)
+        #expect(obj["clipId"]?.stringValue == clipID.uuidString)
+        #expect(obj["trackId"]?.stringValue == resultTrackID.uuidString)
+        #expect(obj["opened"]?.boolValue == true)
+        #expect(obj["reason"]?.stringValue == "pitch-editor-opened")
+        #expect(obj["workspace"]?.stringValue == "arrange")
+        withExtendedLifetime(fake) {}
+    }
+
+    /// ⭐ `opened:false` with `workspace-is-not-arrange` is still `r.ok` — the
+    /// pane is latched open, just not on screen. Only a clip-kind mismatch
+    /// throws (below); this is the ORTHOGONAL "which workspace" axis, the
+    /// `view.selectClip` shape.
+    @Test("view.openPitchEditor's workspace-is-not-arrange is a SUCCESS with opened:false, not an error")
+    func openPitchEditorWorkspaceIsNotArrange() async throws {
+        let f = try makeFixtures()
+        f.store.media = FakeMedia()
+        let (trackID, clipID) = try await addAudioClip(f.router)
+        let fake = FakeViewUI()
+        fake.openPitchEditorResult = ViewOpenPitchEditorResult(
+            clipID: clipID, trackID: trackID, opened: false,
+            reason: .workspaceIsNotArrange, workspace: "mix")
+        f.router.viewUI = fake
+
+        let r = await send(f.router, "view.openPitchEditor", ["clipId": .string(clipID.uuidString)])
+        #expect(r.ok, "latched-but-not-visible is success carrying an honest reason, not an error")
+        let obj = try #require(r.result?.objectValue)
+        #expect(obj["opened"]?.boolValue == false)
+        #expect(obj["reason"]?.stringValue == "workspace-is-not-arrange")
+        #expect(obj["workspace"]?.stringValue == "mix")
+        withExtendedLifetime(fake) {}
+    }
+
+    /// ⭐ THE CLIP LOOKUP AND MIDI REFUSAL ARE ROUTER-SIDE, PROVABLE WITH NO
+    /// SEAM INSTALLED AT ALL (`f.router.viewUI` stays nil the whole test) —
+    /// exactly the property `Commands.swift`'s own comment on this case
+    /// claims: "`DAWApp` has no test target, so a refusal written only in
+    /// `ViewUIWireSurface.swift` would be untestable." A PLANTED defect that
+    /// inverted or deleted this guard (letting a MIDI clip through) would
+    /// fail HERE, headless, not only in an app that has no tests.
+    @Test("view.openPitchEditor refuses a MIDI clip, headless, with no seam installed — the error names the clip")
+    func openPitchEditorMIDIRefused() async throws {
+        let f = try makeFixtures()
+        // viewUI deliberately nil — this must fail on the MIDI check, not on
+        // a missing seam, so it must never even reach that guard.
+        let r = await send(f.router, "view.openPitchEditor", ["clipId": .string(f.midiClip.uuidString)])
+        #expect(!r.ok)
+        let error = try #require(r.error)
+        #expect(error.contains(f.midiClip.uuidString), "the refusal must name the clip id: \(error)")
+        #expect(error.contains("MIDI clip"), "the refusal must say why: \(error)")
+        #expect(error.contains("SUNG OR PLAYED AUDIO") || error.contains("sung or played audio"),
+                "the refusal must explain what the pitch editor is FOR: \(error)")
+        #expect(error.contains("view.selectClip"), "the refusal must teach the fix: \(error)")
+        #expect(!error.contains("headless"),
+                "a MIDI clip must be refused on its own terms, not by falling through to the seam guard")
+    }
+
+    @Test("view.openPitchEditor: an unknown clip surfaces clipNotFound, headless, with no seam installed")
+    func openPitchEditorUnknownClipRejected() async throws {
+        let f = try makeFixtures()
+        let r = await send(f.router, "view.openPitchEditor", ["clipId": .string(UUID().uuidString)])
+        #expect(!r.ok)
+        #expect(r.error?.contains("no clip with id") == true)
+    }
+
+    @Test("view.openPitchEditor requires a well-formed clipId and rejects unknown params")
+    func openPitchEditorValidatesParams() async throws {
+        let f = try makeFixtures()
+        var r = await send(f.router, "view.openPitchEditor")
+        #expect(!r.ok)
+        #expect(r.error?.contains("clipId") == true)
+
+        r = await send(f.router, "view.openPitchEditor", ["clipId": .string("nope")])
+        #expect(!r.ok)
+        #expect(r.error?.contains("not a valid UUID") == true)
+
+        r = await send(f.router, "view.openPitchEditor",
+                       ["clipId": .string(f.midiClip.uuidString), "bogus": .bool(true)])
+        #expect(!r.ok)
+        #expect(r.error?.contains("bogus") == true)
     }
 }
 

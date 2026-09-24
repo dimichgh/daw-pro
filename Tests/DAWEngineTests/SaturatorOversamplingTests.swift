@@ -195,8 +195,8 @@ struct SaturatorOversamplingTests {
     func defaultIsOneAndCostsNoLatency() {
         let params = SaturatorParams()
         #expect(params.oversampling == 1,
-                Comment(rawValue: "a shipped kind may not change what it does at its default; "
-                    + "the clipper's 4 is for a kind that had no history"))
+                Comment(rawValue: "a shipped kind may not change what it does at its default "
+                    + "(and since the 2026-09-20 ruling a NEW clipper starts at 1 as well)"))
         #expect(SaturatorParams.latencySamples(oversampling: 1) == 0)
         let effect = SaturatorEffect(params: params)
         effect.prepare(sampleRate: Self.sampleRate, maxFramesPerQuantum: 512, channelCount: 2)

@@ -128,6 +128,10 @@ If the GPL-3.0/archived-repo risk is accepted (or mitigated via the arm's-length
 
 ### 3c. Ethical/legal note (orthogonal to license, still load-bearing)
 
+> ⚠️ **SUPERSEDED 2026-07-27 by the user's ruling:** the own-voice / "voice you have the rights to use"
+> restriction below was WITHDRAWN. Third-party voice models are supported, and the provenance of any voice is
+> the user's responsibility. (Annotated 2026-09-24 after a research pass re-imported this rule as current.)
+
 Voice-cloning tooling — regardless of which library — raises an obvious risk: users training on a voice they don't have rights to (a celebrity singer, a bandmate without consent, etc.). This isn't a licensing question, it's a product-policy one. Recommend the same posture ACE-Step's own commercial-use framing implies: **DAW Pro's UI should frame this feature explicitly as "convert to your own voice" / "voice you have rights to use,"** not as a generic "impersonate any singer" tool, and should not ship or link to any pre-trained third-party celebrity voice models (which circulate widely in the RVC community but carry obvious consent/right-of-publicity risk) — training data must be the user's own recordings, full stop.
 
 ---
@@ -173,7 +177,7 @@ Every component above (RVC/Applio training + MLX inference, or the DDSP-SVC/seed
 2. **Add a `docs/research/README.md` entry**: mark this report answered under "Standing questions," and add a new standing question: *"Time an actual Applio/RVC training run + `Retrieval-based-Voice-Conversion-MLX` inference pass on this exact Mac before committing VC architecture to code — no verified M-series-Max number exists yet for either."*
 3. **Update `docs/AI-INTEGRATIONS.md`**: add a new row/subsection, "Voice conversion (planned) — RVC (MIT) local sidecar, `127.0.0.1:8002`, mirrors the ACE-Step `SidecarManager` pattern; seed-vc/DDSP-SVC noted as spike-only alternatives (GPL-3.0/archived and lighter-MIT-fallback respectively, not shipped by default)."
 4. **Propose a new `ROADMAP.md` M6 sub-track "Voice conversion (M6 vi)"** with the six-item split in §4c above, gated first on the (vi-a) hands-on timing/quality spike — do not skip straight to install-script/client work given the total absence of verified Apple-Silicon-Max training-time data.
-5. **Product-policy note for `docs/VISION.md` or wherever usage guidelines live**: frame the feature as "convert to a voice you have the rights to use" and never ship/link pretrained third-party celebrity voice models — training data must come from the user's own recordings.
+5. ⚠️ *(SUPERSEDED 2026-07-27, see §3c)* **Product-policy note for `docs/VISION.md` or wherever usage guidelines live**: frame the feature as "convert to a voice you have the rights to use" and never ship/link pretrained third-party celebrity voice models — training data must come from the user's own recordings.
 6. **License hygiene**: keep RVC/Applio/MIT as the only *shipped-by-default* VC engine to preserve the same "fully MIT, no legal review needed" posture as ACE-Step. If seed-vc's zero-shot UX proves compelling enough in the spike to justify the GPL-3.0 exposure, that decision needs an explicit legal sign-off before it ships as anything other than an opt-in, user-installed, arm's-length subprocess — do not bundle its code in the DAW Pro installer without that review.
 
 ---

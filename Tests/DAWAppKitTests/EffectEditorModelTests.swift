@@ -182,13 +182,24 @@ struct EffectEditorModelTests {
     @Test("the reader's names are exactly the fx.describe schema names, per kind")
     func readerCoversSchema() {
         for kind in Self.builtInKinds {
-            let fresh = EffectDescriptor(kind: kind)
+            // ⚠️ `newlyAdded`, not a bare `EffectDescriptor(kind:)` (m39-ac-2): a
+            // brand-new insert is what `ProjectStore.addEffect` builds, and for
+            // `.clipper` that is NOT a bare descriptor — a bare clipper is what a
+            // pre-ruling project saved, and it reads the LEGACY 4× (below).
+            let fresh = EffectDescriptor.newlyAdded(kind: kind)
             for spec in EffectParamSpec.specs(for: kind) {
                 #expect(EffectEditorModel.paramValue(spec.name, in: fresh) == spec.defaultValue,
                         "\(kind).\(spec.name) must read its default off a fresh descriptor")
             }
             #expect(EffectEditorModel.paramValue("notAParam", in: fresh) == nil)
         }
+        // m39-ac-2: the ONE deliberate gap between "fresh" and "bare". A clipper
+        // carrying no params is an untouched PRE-RULING clipper, and the card must
+        // show the 4× it is rendering at, not the new default it never had.
+        let bareClipper = EffectDescriptor(kind: .clipper)
+        #expect(EffectEditorModel.paramValue("oversampling", in: bareClipper)
+                == ClipperParams.legacyOversampling)
+        #expect(ClipperParams.legacyOversampling != ClipperParams.defaultOversampling)
         // AU descriptors are off this surface entirely (v1).
         let au = EffectDescriptor(kind: .audioUnit)
         #expect(EffectEditorModel.paramValue("gainLinear", in: au) == nil)

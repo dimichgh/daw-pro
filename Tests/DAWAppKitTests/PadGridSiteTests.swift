@@ -150,6 +150,27 @@ struct PadGridSiteTests {
         #expect(strip.contains("model.chopToPadsOpen"))
     }
 
+    /// m33-d. `PadGridModel.chopWarningsForHumans` is unit-tested; this pins that
+    /// the strip DRAWS it. A strip still drawing `notice.warnings` would show
+    /// "Pass includeHead: true…" to a person with every model test green.
+    @Test("⛔ the chop notice DRAWS the human warnings; the lead-in toggle dims on the domain rule")
+    func chopNoticeDrawsTheHumanText() {
+        let strip = Self.code("DAWApp/Components/MusicalKeyboardStrip.swift")
+        #expect(strip.contains("ForEach(notice.warningsForHumans"))
+        // NON-VACUITY: the wire's sentences are drawn nowhere on the strip.
+        #expect(strip.contains("notice.warnings,") == false)
+        #expect(strip.contains("notice.warnings)") == false)
+
+        let card = Self.code("DAWApp/Instrument/ChopToPadsPanel.swift")
+        // Dimmed on the model's reading of the DOMAIN rule — not hidden, not disabled.
+        #expect(card.contains("dimmed: !model.chop.leadInIsEffective"))
+        #expect(card.contains("model.chop.leadInInertNote"))
+        #expect(card.contains(".disabled(!model.chop.leadInIsEffective") == false)
+        // The label has ONE home, so the notice names the box the card draws.
+        #expect(card.contains("label: PadChopSettings.leadInLabel"))
+        #expect(card.contains("\"Keep the lead-in as pad 1\"") == false)
+    }
+
     @Test("⛔ the CHOP goes through the store method the WIRE calls — no parallel path")
     func chopUsesTheWiresOwnFunnel() {
         let staging = Self.code("DAWApp/PadGridStaging.swift")
@@ -237,6 +258,47 @@ struct PadGridSiteTests {
         let staging = Self.code("DAWApp/PadGridStaging.swift")
         #expect(staging.contains("func openChopToPads(clipID: UUID)"))
         #expect(staging.contains("_ = clickClip(id: clipID, modifiers: .none)"))
+    }
+
+    /// m39-levels-2 — the UP / CENTRED toggle. The model is tested headless in
+    /// `PadGridTests`; what only a site test can see is that the chips are
+    /// MOUNTED beside LEVELS, that a click reaches the model, and that the
+    /// staging seam can drive and read it. A toggle declared and never placed,
+    /// or placed and wired to nothing, would pass every model test.
+    @Test("⛔ the UP/CENTRED toggle is mounted beside LEVELS, wired, and drivable from staging")
+    func spreadDirectionToggleIsWired() {
+        let view = Self.code("DAWApp/Components/PadGridView.swift")
+        // MOUNTED, beside the button it qualifies — not merely declared.
+        let row = try! #require(view.range(of: "HStack(spacing: 6) {"))
+        let rowBody = String(view[row.upperBound...].prefix(160))
+        #expect(rowBody.contains("spreadDirectionToggle"))
+        #expect(rowBody.contains("levelsButton"))
+        // One chip per direction, and a click calls the callback.
+        #expect(view.contains("ForEach(SixteenLevels.Direction.allCases"))
+        #expect(view.contains("Button { onSetSpreadDirection(value) }"))
+        // Dead exactly when LEVELS is, and it says why.
+        #expect(view.contains(".disabled(spreadDirectionUnavailableReason != nil)"))
+
+        // The strip hands the view the MODEL's reading and the MODEL's setter.
+        let strip = Self.code("DAWApp/Components/MusicalKeyboardStrip.swift")
+        #expect(strip.contains("spreadDirection: padGrid.spreadDirection,"))
+        #expect(strip.contains(
+            "spreadDirectionUnavailableReason: padGrid.spreadDirectionUnavailableReason"))
+        #expect(strip.contains("onSetSpreadDirection: { padGrid.setSpreadDirection($0) }"))
+
+        // Staging parses it, refuses an unknown word, and reports it back.
+        let staging = Self.code("DAWApp/PadGridStaging.swift")
+        #expect(staging.contains("params[\"spreadDirection\"]?.stringValue"))
+        #expect(staging.contains("SixteenLevels.Direction(rawValue: raw)"))
+        #expect(staging.contains("padGrid.setSpreadDirection(value)"))
+        #expect(staging.contains("\"spreadDirection\": .string(padGrid.spreadDirection.rawValue)"))
+        // ⚠️ ORDER: the direction is applied BEFORE `levels`/`levelsFromPad`,
+        // so one call can choose CENTRED and make the spread in that direction.
+        let direction = try! #require(staging.range(of: "params[\"spreadDirection\"]"))
+        let levels = try! #require(staging.range(of: "params[\"levels\"]"))
+        let fromPad = try! #require(staging.range(of: "params[\"levelsFromPad\"]"))
+        #expect(direction.lowerBound < levels.lowerBound)
+        #expect(direction.lowerBound < fromPad.lowerBound)
     }
 
     @Test("⛔ the panel's refusal is DERIVED, never a stored copy that can go stale")

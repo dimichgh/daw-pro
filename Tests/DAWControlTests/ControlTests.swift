@@ -1561,7 +1561,82 @@ struct CommandRouterTests {
         let removableRouteID = try store.addModulationRoute(
             on: .track(track.id), sourceID: routeSource.id, target: .pan,
             depth: 0.1).route.id.uuidString
+        // m39-levels-2 wire: instrument.spreadSlice/setSpreadDirection are
+        // DRIVEN, not excluded — the mod.* precedent above, not the
+        // instrument.describeSampler exclusion below: THAT verb is excluded
+        // because instTrackID's own sampler is never configured (this loop's
+        // track.setInstrument entry for instTrackID only sets a waveform).
+        // These two get their OWN dedicated sampler-equipped tracks instead
+        // of fighting over instTrackID. Each gets its own subject: spreadSlice
+        // gets a fresh one-key "chop" zone; setSpreadDirection gets a zone
+        // that is ALREADY spread, minted HERE via spreadSlice's own wire call
+        // — NOT by relying on allCommands iteration order reaching
+        // instrument.spreadSlice before instrument.setSpreadDirection in the
+        // loop below, which is incidental placement, not a contract.
+        func makeOneKeySamplerTrack() async throws -> (trackID: String, zoneID: String) {
+            let sample = BundledSamples.catalog[0]
+            let newTrackID = store.addTrack(kind: .instrument).id.uuidString
+            let setup = await router.handle(ControlRequest(
+                id: "levels-setup-\(newTrackID)", command: "track.setInstrument",
+                params: [
+                    "trackId": .string(newTrackID),
+                    "kind": .string("sampler"),
+                    "sampler": .object([
+                        "zones": .array([
+                            .object([
+                                "path": .string(sample.wireName),
+                                "rootPitch": .number(Double(sample.rootPitch)),
+                                // Explicit, not omitted — an omitted minPitch/
+                                // maxPitch defaults to the full 0...127 span,
+                                // which leaves no free sixteen-key window
+                                // anywhere. One key wide is the chopper's own
+                                // shape (SliceToSampler.swift), by hand here.
+                                "minPitch": .number(Double(sample.rootPitch)),
+                                "maxPitch": .number(Double(sample.rootPitch)),
+                            ]),
+                        ]),
+                    ]),
+                ]))
+            let newZoneID = try #require(setup.result?["sampler"]?["zones"]?
+                .arrayValue?.first?["id"]?.stringValue)
+            return (newTrackID, newZoneID)
+        }
+        let (spreadSliceTrackID, spreadSliceZoneID) = try await makeOneKeySamplerTrack()
+        let (setSpreadTrackID, setSpreadSourceZoneID) = try await makeOneKeySamplerTrack()
+        let preSpread = await router.handle(ControlRequest(
+            id: "levels-setup-prespread", command: "instrument.spreadSlice",
+            params: ["trackId": .string(setSpreadTrackID), "zoneId": .string(setSpreadSourceZoneID)]))
+        let preSpreadZoneID = try #require(preSpread.result?["id"]?.stringValue)
+        // clip.getPlayedPitch (m23-ap C-0c) is DRIVEN, not excluded — unlike
+        // clip.detectPitch/clip.autoCorrectPitch/clip.clearPitchEdits/
+        // clip.getPitchEdits/clip.setNotePitch/clip.splitNote below (all six
+        // excluded because minting their real-clip prerequisite needs a
+        // clip.addAudio WIRE call whose id this static paramsByCommand
+        // dictionary has no way to capture and reuse). This one is
+        // reachable a different way: `clip.addAudio` here, in SETUP, ahead
+        // of the loop — its returned clipId IS capturable, because this
+        // code runs before paramsByCommand is even built — then
+        // `store.setClipNotePitchOffset(..., seedIfAbsent:)` OFF THE WIRE,
+        // the C1 seeding rule's own in-process shortcut, mints a one-segment
+        // stored note table with no real pitch detector involved. That
+        // satisfies clip.getPlayedPitch's own two checks (a real AUDIO clip,
+        // a non-empty stored table) without needing FakePitchDetectionEngine
+        // machinery this suite's plain FakeEngine does not carry.
+        let playedPitchTrackID = store.addTrack(kind: .audio).id.uuidString
+        let playedPitchAdd = await router.handle(ControlRequest(
+            id: "played-pitch-setup", command: "clip.addAudio",
+            params: ["trackId": .string(playedPitchTrackID), "path": .string("/tmp/PlayedPitchFixture.wav")]))
+        let playedPitchClipID = try #require(playedPitchAdd.result?["id"]?.stringValue)
+        let playedPitchSegmentID = UUID()
+        try store.setClipNotePitchOffset(
+            clipId: try #require(UUID(uuidString: playedPitchClipID)),
+            segmentId: playedPitchSegmentID, offsetCents: 0,
+            seedIfAbsent: PitchEditSet(analysisVersion: PitchEditSet.currentAnalysisVersion, segments: [
+                NoteSegment(id: playedPitchSegmentID, startSeconds: 0, endSeconds: 1,
+                            detectedHz: 220, detectedConfidence: 1),
+            ]))
         let paramsByCommand: [String: [String: JSONValue]] = [
+            "clip.getPlayedPitch": ["clipId": .string(playedPitchClipID)],
             // m22-g P2: OFF is the idempotent never-refusing side of the A/B
             // monitor (design §5.6) — a legitimate headless route.
             "reference.setMonitor": ["on": .bool(false)],
@@ -1673,6 +1748,14 @@ struct CommandRouterTests {
             // nobody later reads an ordering bug into it.
             "instrument.loadDrumPreset": ["trackId": .string(instTrackID),
                                           "name": .string("909")],
+            // m39-levels-2 wire: see the dedicated-track setup above this
+            // dictionary — each verb gets its own subject, independent of
+            // where the other one falls in allCommands order.
+            "instrument.spreadSlice": ["trackId": .string(spreadSliceTrackID),
+                                       "zoneId": .string(spreadSliceZoneID)],
+            "instrument.setSpreadDirection": ["trackId": .string(setSpreadTrackID),
+                                              "spreadZoneId": .string(preSpreadZoneID),
+                                              "direction": .string("centered")],
             // m23-h: track.reorder sits at the END of allCommands, by which
             // point track.remove has already deleted the shared audio trackID —
             // so it moves the INSTRUMENT track, which survives the whole loop
@@ -1848,6 +1931,22 @@ struct CommandRouterTests {
                 // rejection including the ALL-OR-NOTHING unknown/duplicate
                 // id refusals, the counts-only response shape).
                 "clip.patchNotes",
+                // clip.setNotePitch / clip.splitNote (m23-ap Phase 2, item
+                // p2-c) need a REAL AUDIO clip id carrying a STORED pitch
+                // note table — deeper than clip.repeatNotes/clip.patchNotes
+                // directly above: those need a real MIDI clip+note id, these
+                // need a real audio clip that has ALREADY been through a
+                // full clip.autoCorrectPitch pass (there is no pitch
+                // detection on either of these two wire paths, by design —
+                // `ProjectStore+PitchNoteEdits.swift`'s own banner), which
+                // this params-free loop cannot supply. A bare call is the
+                // ordinary "missing or invalid required param 'segmentId'"
+                // refusal this loop cannot express. Proven by
+                // PitchCorrectionCommandTests (wire round-trip for both,
+                // clamp-and-read-back, the absolute-not-delta idempotency
+                // check, the split's minimum-half refusal and set-difference
+                // right-id, every clip-kind/no-table/unknown-id rejection).
+                "clip.setNotePitch", "clip.splitNote",
                 "clip.remove",
                 "clip.split", "clip.trim", "clip.move",
                 // clip.duplicate (m15-d) needs a clip id like the other per-clip
@@ -2370,24 +2469,31 @@ struct CommandRouterTests {
                 // function with no network, by SoundBankDownloadCommandTests.
                 "instrument.downloadSoundBank",
                 "instrument.cancelSoundBankDownload",
-                // M35 — the four `view.*` verbs. Excluded because THIS ROUTER IS
-                // HEADLESS BY CONSTRUCTION (no `viewUI` seam installed) and the
-                // design's contract is that all four then fail LOUDLY rather
-                // than returning a success that means nothing: a `view.capture`
-                // that answered `ok` here would be reporting a screenshot of an
-                // app that does not exist. So the refusal IS the verb working.
+                // M35 — the five `view.*` verbs (the fifth, `view.openPitchEditor`,
+                // landed at the m23-ap Phase 2 p2-c pitch-editor command-surface
+                // door). Excluded because THIS ROUTER IS HEADLESS BY CONSTRUCTION
+                // (no `viewUI` seam installed) and the design's contract is that
+                // all five then fail LOUDLY rather than returning a success that
+                // means nothing: a `view.capture` that answered `ok` here would
+                // be reporting a screenshot of an app that does not exist. So the
+                // refusal IS the verb working.
                 // ⛔ Do NOT "fix" this by installing a fake seam in this
                 // fixture: the loud-refusal contract is the thing most worth
                 // protecting, and a fake here would make it untestable in the
                 // one place it is asserted.
-                // ⚠️ Two of the four would fail for a SECOND, unrelated reason
-                // as well — `view.selectClip` needs a `clipId` and
-                // `view.openEditor` a `trackId`, which this params-free loop
-                // cannot supply — and that is recorded so a future reader does
-                // not "repair" the wrong half. All four are proven, headless
-                // refusal included, by ViewSurfaceCommandTests.
+                // ⚠️ Three of the five would fail for a SECOND, unrelated reason
+                // as well — `view.selectClip` and `view.openPitchEditor` need a
+                // `clipId` and `view.openEditor` a `trackId`, which this
+                // params-free loop cannot supply — and that is recorded so a
+                // future reader does not "repair" the wrong half.
+                // `view.openPitchEditor` has a THIRD reason on top of those two:
+                // its clip lookup and MIDI-clip refusal are ROUTER-SIDE
+                // (`Commands.swift`'s own comment on the case), so even a
+                // well-formed `clipId` this loop does not have would still need
+                // to name a real, existing, non-MIDI clip. All five are proven,
+                // headless refusal included, by ViewSurfaceCommandTests.
                 "view.capture", "view.selectClip",
-                "view.panelLayout", "view.openEditor"].contains(command) {
+                "view.panelLayout", "view.openEditor", "view.openPitchEditor"].contains(command) {
                 continue
             }
             let response = await router.handle(ControlRequest(

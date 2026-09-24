@@ -194,9 +194,18 @@ struct ClipperParamsTests {
         #expect(defaults.driveDb == 0)
         #expect(defaults.ceilingDb == -0.3)
         #expect(defaults.mode == 0)
-        #expect(defaults.oversampling == 4)
+        // ⛔ 1, NOT THE 4 THIS KIND SHIPPED WITH — the user's 2026-09-20 ruling
+        // that a NEW clipper starts with oversampling OFF. A literal as well as
+        // the constant, so moving the constant cannot quietly move this pin.
+        #expect(defaults.oversampling == 1)
+        #expect(defaults.oversampling == ClipperParams.defaultOversampling)
         #expect(defaults.mix == 1)
         #expect(defaults.outputDb == 0)
+        // …and the frozen number that absence means, which must NEVER follow it.
+        #expect(ClipperParams.legacyOversampling == 4)
+        #expect(ClipperParams.legacy.oversampling == 4)
+        #expect(ClipperParams.legacy == ClipperParams(oversampling: 4),
+                "the legacy params must differ from a new clipper in oversampling ONLY")
 
         let clamped = ClipperParams(driveDb: 999, ceilingDb: 12, mode: 7,
                                     oversampling: 3, mix: -4, outputDb: -999)
@@ -220,6 +229,12 @@ struct ClipperParamsTests {
         #expect(poisoned.driveDb == 0)
         #expect(poisoned.ceilingDb == -0.3)        // the DEFAULT, not the range's top
         #expect(poisoned.mode == 0)
+        // ⚠️ THE ONE FIELD THAT DOES NOT FALL BACK TO ITS DEFAULT — and it never
+        // did; until 2026-09-20 the two numbers merely coincided at 4. A NaN
+        // factor snaps through `oversamplingFactor(at:)`, the render thread's
+        // own rule, to the TOP factor ("more alias rejection than asked for").
+        // One rule for init and render beats matching the new default here, and
+        // JSON cannot carry a NaN, so this never decides what a project sounds like.
         #expect(poisoned.oversampling == 4)
         #expect(poisoned.mix == 1)                 // the DEFAULT, not the range's bottom
         #expect(poisoned.outputDb == 0)
@@ -286,6 +301,15 @@ struct ClipperParamsTests {
         #expect(decoded.mix == 1)
         #expect(decoded.outputDb == 0)
 
+        // ⛔ …EXCEPT `oversampling`, whose ABSENCE is not "the default" but
+        // "written by something describing a clipper that ran at 4×" — the
+        // 2026-09-20 ruling moved the default to 1 and must not move this.
+        let noFactor = Data(#"{"driveDb": 3}"#.utf8)
+        let legacy = try JSONDecoder().decode(ClipperParams.self, from: noFactor)
+        #expect(legacy.oversampling == ClipperParams.legacyOversampling)
+        #expect(legacy.oversampling == 4)
+        #expect(legacy.driveDb == 3)
+
         // An out-of-range object on disk re-clamps through the same init.
         let wild = Data(#"{"ceilingDb": 99, "mix": 42}"#.utf8)
         let tamed = try JSONDecoder().decode(ClipperParams.self, from: wild)
@@ -295,22 +319,41 @@ struct ClipperParamsTests {
 
     // MARK: - P9: the spec surface agrees with the struct
 
-    @Test("P9 — every spec's default equals the struct's default, and every range is the struct's")
+    /// ⚠️ **"FRESH" MEANS `EffectDescriptor.newlyAdded`, NOT `EffectDescriptor(kind:)`**
+    /// (2026-09-20 ruling). A bare no-params clipper descriptor is what a
+    /// pre-ruling build SAVED for a clipper nobody touched, so it deliberately
+    /// reads the LEGACY 4 — asserted below, next to the new insert's 1.
+    @Test("P9 — every spec's default equals a NEW clipper's value, and every range is the struct's")
     func specTableAgreesWithTheStruct() {
         let specs = EffectParamSpec.specs(for: .clipper)
         let defaults = ClipperParams()
-        let descriptor = EffectDescriptor(kind: .clipper)
+        let descriptor = EffectDescriptor.newlyAdded(kind: .clipper)
+        #expect(descriptor.clipper != nil,
+                "a NEW clipper must carry explicit params — absence means 'saved before the ruling'")
         #expect(specs.count == 6)
         for spec in specs {
             let live = descriptor.paramValue(spec.name)
             #expect(live != nil, "paramValue has no arm for \(spec.name)")
             #expect(live == spec.defaultValue, Comment(rawValue:
-                    "\(spec.name): spec default \(spec.defaultValue) but a fresh descriptor "
+                    "\(spec.name): spec default \(spec.defaultValue) but a new clipper "
                     + "reads \(String(describing: live))"))
             #expect(spec.range.contains(spec.defaultValue))
         }
         #expect(descriptor.paramValue("driveDb") == defaults.driveDb)
         #expect(descriptor.paramValue("nonsense") == nil)
+
+        // ⛔ THE OTHER HALF: a no-params descriptor is an OLD clipper and reads
+        // 4 for `oversampling` — and ONLY for `oversampling`; every other field's
+        // default never moved, so it must still match the spec.
+        let saved = EffectDescriptor(kind: .clipper)
+        #expect(saved.clipper == nil)
+        for spec in specs {
+            let expected = spec.name == "oversampling"
+                ? ClipperParams.legacyOversampling : spec.defaultValue
+            #expect(saved.paramValue(spec.name) == expected, Comment(rawValue:
+                    "an untouched pre-ruling clipper reads \(spec.name) = "
+                    + "\(String(describing: saved.paramValue(spec.name))), expected \(expected)"))
+        }
         // The ranges are the struct's, not a second copy.
         #expect(specs[0].range == ClipperParams.driveDbRange)
         #expect(specs[1].range == ClipperParams.ceilingDbRange)

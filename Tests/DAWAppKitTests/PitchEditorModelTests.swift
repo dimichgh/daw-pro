@@ -310,6 +310,12 @@ struct PitchEditorModelTests {
 
         let runs = PitchAutoCorrect.voicedRuns(in: frames, frameRateHz: Self.frameRate)
         #expect(runs.count == 2)
+        // p2-seg §5.2: neither run changes note inside, so the note splitter the
+        // blobs now come from returns each run whole, and both note-table
+        // builders write the pre-p2-seg table field by field.
+        let invariance = PrePitchNoteSplitReference.invarianceFailures(frames: frames,
+                                                                       frameRateHz: Self.frameRate)
+        #expect(invariance.isEmpty, "\(invariance.prefix(3))")
         #expect(model.blobs.count == runs.count)
         #expect(close(model.blobs[0].detectedHz, 220, 1e-6))
         #expect(close(model.blobs[0].centreMidi, 57, 1e-6))
@@ -381,8 +387,26 @@ struct PitchEditorModelTests {
         #expect(model.contourRuns.count == 2, "a hole must END a run, never be bridged")
         #expect(model.contourSegments.count == 2)
         #expect(model.blobs.count == 2)
-        // The polylines carry their blobs' ids, so a view needs no second table.
-        #expect(model.contourRuns.map(\.id) == model.blobs.map(\.id))
+        // ⚠️⚠️ **THE ID EQUALITY THAT USED TO BE ASSERTED HERE IS RETIRED, AND
+        // ITS RETIREMENT IS THE FINDING.** Until m23-ap C3 the contour was
+        // gathered PER BLOB, so `contourRuns[i].id == blobs[i].id` held by
+        // construction. A split makes two NOTES out of one measured RUN, and
+        // the contour follows the RUN — because breaking the measured line in
+        // two at a cut would draw a 16 ms hole where the singer never stopped,
+        // which is the bridged-hole lie (§5.5.1) with its sign reversed. So the
+        // two collections are no longer index-for-index, and the honest
+        // assertion is that each polyline lies inside exactly one voiced run.
+        let runs = PitchAutoCorrect.voicedRuns(in: withHole, frameRateHz: Self.frameRate)
+        // p2-seg §5.2: two steady runs, so the note splitter changes nothing here.
+        let invariance = PrePitchNoteSplitReference.invarianceFailures(frames: withHole,
+                                                                       frameRateHz: Self.frameRate)
+        #expect(invariance.isEmpty, "\(invariance.prefix(3))")
+        #expect(model.contourRuns.count == runs.count)
+        for (index, run) in runs.enumerated() {
+            let points = model.contourRuns[index].points
+            #expect(points.allSatisfy { $0.sourceSeconds >= run.startSeconds
+                                        && $0.sourceSeconds < run.endSeconds })
+        }
 
         // ⛔ THE PHYSICS: nothing was measured inside the hole, so nothing is drawn there.
         let allPoints = model.contourRuns.flatMap(\.points)
@@ -881,4 +905,406 @@ struct PitchEditorModelTests {
         #expect(flat.centsReadout == "-50 cents")
         #expect(flat.noteName == "A4")
     }
+
+    // MARK: - m23-ap Increment C — direct manipulation
+    //
+    // ⭐⭐ THE LOAD-BEARING TEST IN THIS SECTION IS `aDragTickNeverCommits`.
+    // Design §8.2 / §11 P7b: a commit per pointer tick re-keys
+    // `ClipKey.pitchEditSetHash` at pointer rate, the offline render is never
+    // ready, `StretchResolution.pending` SKIPS the clip, and the vocal goes
+    // SILENT for the whole drag. That defect is invisible to every other kind
+    // of gate — the pitch still ends up right, the undo still coalesces, the
+    // screen still looks correct. Only the CADENCE tells you, and only because
+    // the model owns the commit seam rather than a `DragGesture` closure.
+
+    /// One long A3 (220 Hz = midi 57 exactly), so every drag number below is
+    /// derivable by hand from `rowHeight` and nothing else.
+    /// A reference box so the sink survives the closure. (Returning the array
+    /// by value would hand back a SNAPSHOT — a sink that can never fill is a
+    /// test that can never fail, which is the whole failure class this file's
+    /// header is about.)
+    @MainActor final class Box {
+        var commits: [PitchEditorCommit] = []
+    }
+
+    private func oneNote(rowHeight: CGFloat = PitchEditorGeometry.defaultRowHeight)
+    -> (model: PitchEditorModel, sink: Box) {
+        var geometry = awkwardGeometry()
+        geometry.rowHeight = rowHeight
+        let model = PitchEditorModel(clipID: UUID(), geometry: geometry)
+        model.apply(detection(voiced(count: 60, from: 0.30, hz: 220)))
+        let sink = Box()
+        model.onCommit = { sink.commits.append($0) }
+        return (model, sink)
+    }
+
+    @Test("the editor seeds a note table from the detection and draws its blobs from it")
+    func seedTableBecomesTheBlobs() {
+        let (model, _) = oneNote()
+        #expect(model.blobs.count == 1)
+        #expect(model.seedTable.segments.count == 1)
+        #expect(model.storedTable == nil)
+        // The blob IS the segment — that identity is what makes a drag
+        // addressable without a second table.
+        #expect(model.blobs[0].id == model.seedTable.segments[0].id)
+        #expect(close(model.blobs[0].centreMidi, 57, 1e-9))
+        #expect(model.blobs[0].offsetCents == 0)
+        #expect(close(model.blobs[0].editedCentreMidi, 57, 1e-9))
+        #expect(model.blobs[0].frameCount == 60)
+        // ⛔ AND THE SEED IS NOT AN EMPTY SET. `PitchAutoCorrect.editSet` at
+        // strength 0 returns no segments at all; an editor needs the notes.
+        #expect(!model.seedTable.isEmpty)
+        #expect(model.seedTable.isIdentity)
+    }
+
+    @Test("a STORED table wins over the seed, and its offsets move the blob")
+    func storedTableWinsAndMovesTheBlob() {
+        let (model, _) = oneNote()
+        let seeded = model.seedTable.segments[0]
+        var edited = seeded
+        edited.pitchOffsetCents = 100
+        model.syncStoredNoteTable(PitchEditSet(segments: [edited]))
+
+        #expect(model.blobs.count == 1)
+        #expect(model.blobs[0].id == seeded.id)
+        #expect(model.blobs[0].offsetCents == 100)
+        #expect(model.blobs[0].isEdited)
+        // The DETECTED centre never moves — that is the measurement.
+        #expect(close(model.blobs[0].centreMidi, 57, 1e-9))
+        // The DRAWN centre does.
+        #expect(close(model.blobs[0].editedCentreMidi, 58, 1e-9))
+        #expect(model.blobs[0].noteName == "A3")
+        #expect(model.blobs[0].editedNoteName == "A#3")
+        // And the rectangle follows the EDIT, one row higher (y grows down).
+        let detectedY = model.geometry.y(forMidi: 57)
+        #expect(close(model.rect(for: model.blobs[0]).midY,
+                      detectedY - model.geometry.rowHeight, 1e-6))
+    }
+
+    @Test("a stored segment outside the clip's source window is not drawn")
+    func staleSegmentsOutsideTheWindowAreNotDrawn() {
+        let (model, _) = oneNote()
+        let inside = model.seedTable.segments[0]
+        // The awkward clip reads source seconds [0.25, 2.75). A note at 9 s is
+        // one a trim left behind: real data, not this clip's to draw.
+        let outside = NoteSegment(startSeconds: 9, endSeconds: 9.5,
+                                  detectedHz: 440, detectedConfidence: 0.9)
+        model.syncStoredNoteTable(PitchEditSet(segments: [inside, outside]))
+        #expect(model.blobs.count == 1)
+        #expect(model.blobs[0].id == inside.id)
+        // POSITIVE CONTROL: the same segment INSIDE the window is drawn, so the
+        // filter is the window talking and not a blanket drop of a second note.
+        let alsoInside = NoteSegment(startSeconds: 1.5, endSeconds: 1.8,
+                                     detectedHz: 440, detectedConfidence: 0.9)
+        model.syncStoredNoteTable(PitchEditSet(segments: [inside, alsoInside]))
+        #expect(model.blobs.count == 2)
+    }
+
+    // MARK: C1 — the drag
+
+    @Test("⭐ a drag TICK never commits — forty of them produce zero store writes")
+    func aDragTickNeverCommits() {
+        let (model, sink) = oneNote()
+        let blob = model.blobs[0]
+        #expect(model.beginPitchDrag(on: blob))
+
+        for tick in 1...40 {
+            model.updatePitchDrag(translationHeight: -CGFloat(tick), free: false)
+            // The DRAFT moves — the live value is visible the whole way down.
+            #expect(model.drag != nil)
+        }
+        // ⛔ THE ASSERTION THE WHOLE CADENCE RESTS ON.
+        #expect(sink.commits.isEmpty,
+                "a pointer tick committed to the store — the vocal would go silent for the drag")
+        #expect(model.commitCount == 0)
+
+        // …and the release commits exactly once, with the value the last tick
+        // resolved to. -40 pt at 14 pt/row = 2.857 semitones; snapped to the
+        // chromatic scale from midi 57 that is 60, i.e. +300 cents.
+        let commit = model.endPitchDrag()
+        #expect(sink.commits.count == 1)
+        #expect(model.commitCount == 1)
+        #expect(commit != nil)
+        guard case .notePitch(let segmentID, let cents)? = sink.commits.first?.kind else {
+            Issue.record("the commit was not a pitch edit")
+            return
+        }
+        #expect(segmentID == blob.id)
+        #expect(close(cents, 300, 1e-9))
+        // The seed rides along, so the first edit on an untuned clip has a
+        // table to land in.
+        #expect(sink.commits[0].seedIfAbsent.segments.count == 1)
+        #expect(sink.commits[0].seedIfAbsent.segments[0].id == blob.id)
+        #expect(model.drag == nil)
+    }
+
+    @Test("a drag that ends where it began commits NOTHING")
+    func aNoOpDragCommitsNothing() {
+        let (model, sink) = oneNote()
+        #expect(model.beginPitchDrag(on: model.blobs[0]))
+        model.updatePitchDrag(translationHeight: -30, free: false)
+        model.updatePitchDrag(translationHeight: 0, free: false)   // back to the start
+        #expect(model.endPitchDrag() == nil)
+        #expect(sink.commits.isEmpty)
+        #expect(model.commitCount == 0)
+        // POSITIVE CONTROL: the same gesture that does NOT return home commits.
+        #expect(model.beginPitchDrag(on: model.blobs[0]))
+        model.updatePitchDrag(translationHeight: -30, free: false)
+        #expect(model.endPitchDrag() != nil)
+        #expect(sink.commits.count == 1)
+    }
+
+    @Test("a cancelled drag commits nothing and leaves no phantom baseline")
+    func cancelDragCommitsNothing() {
+        let (model, sink) = oneNote()
+        #expect(model.beginPitchDrag(on: model.blobs[0]))
+        model.updatePitchDrag(translationHeight: -30, free: false)
+        model.cancelDrag()
+        #expect(model.drag == nil)
+        #expect(sink.commits.isEmpty)
+        // And `endPitchDrag` after a cancel is a no-op rather than a replay.
+        #expect(model.endPitchDrag() == nil)
+        #expect(sink.commits.isEmpty)
+    }
+
+    @Test("⌥ moves freely; without it the drag SNAPS to the scale")
+    func snapAndFreeDragDiffer() {
+        let (model, _) = oneNote()
+        // -18 pt at 14 pt/row = 1.2857 semitones above midi 57 → 58.2857.
+        #expect(model.beginPitchDrag(on: model.blobs[0]))
+        model.updatePitchDrag(translationHeight: -18, free: false)
+        #expect(close(model.drag!.offsetCents, 100, 1e-9))   // snapped to 58 = A#3
+        model.updatePitchDrag(translationHeight: -18, free: true)
+        #expect(close(model.drag!.offsetCents, 18.0 / 14.0 * 100, 1e-9))
+        #expect(model.drag!.isFree)
+        model.cancelDrag()
+    }
+
+    @Test("the snap follows the SCALE, not just the nearest semitone")
+    func snapFollowsTheScale() {
+        let (model, _) = oneNote()
+        model.snapScale = PitchCorrectionScale(tonicPitchClass: 0, mode: .major)  // C major
+        #expect(model.beginPitchDrag(on: model.blobs[0]))
+        // 58.2857 is A#3, which C major does not contain; the nearest allowed
+        // is B3 = 59, i.e. +200 cents rather than chromatic's +100.
+        model.updatePitchDrag(translationHeight: -18, free: false)
+        #expect(close(model.drag!.offsetCents, 200, 1e-9))
+        model.cancelDrag()
+    }
+
+    @Test("a second drag starts from where the first LEFT the note, not from the detected centre")
+    func aSecondDragStartsFromTheStoredOffset() {
+        let (model, sink) = oneNote()
+        var edited = model.seedTable.segments[0]
+        edited.pitchOffsetCents = 100          // already a semitone up
+        model.syncStoredNoteTable(PitchEditSet(segments: [edited]))
+
+        #expect(model.beginPitchDrag(on: model.blobs[0]))
+        #expect(close(model.drag!.baselineCents, 100, 1e-9))
+        // One more row up from 58 lands on 59 = +200, not on 58 = +100.
+        model.updatePitchDrag(translationHeight: -14, free: false)
+        #expect(close(model.drag!.offsetCents, 200, 1e-9))
+        _ = model.endPitchDrag()
+        guard case .notePitch(_, let cents)? = sink.commits.first?.kind else {
+            Issue.record("no commit")
+            return
+        }
+        #expect(close(cents, 200, 1e-9))
+    }
+
+    @Test("the drag readout respects the detector's resolution floor and never prints zero")
+    func dragReadoutHonoursTheFloor() {
+        let (model, _) = oneNote()
+        #expect(model.beginPitchDrag(on: model.blobs[0]))
+        // A free drag of 1 pt at 14 pt/row is ~7.1 cents — under the 12.90
+        // floor, so there is NOTHING honest to print.
+        model.updatePitchDrag(translationHeight: -1, free: true)
+        #expect(model.drag!.readout == nil)
+        // POSITIVE CONTROL: a snapped semitone clears the floor and prints.
+        model.updatePitchDrag(translationHeight: -18, free: false)
+        #expect(model.drag!.readout == "+100 cents")
+        #expect(model.drag!.targetNoteName == "A#3")
+        model.cancelDrag()
+    }
+
+    @Test("a taller row means a SMALLER pitch change for the same pointer distance")
+    func rowHeightChangesDragSensitivity() {
+        let (coarse, _) = oneNote(rowHeight: 14)
+        let (fine, _) = oneNote(rowHeight: 56)
+        for model in [coarse, fine] {
+            #expect(model.beginPitchDrag(on: model.blobs[0]))
+            model.updatePitchDrag(translationHeight: -28, free: true)
+        }
+        #expect(close(coarse.drag!.offsetCents, 200, 1e-9))   // 2 semitones
+        #expect(close(fine.drag!.offsetCents, 50, 1e-9))      // half a semitone
+        coarse.cancelDrag(); fine.cancelDrag()
+    }
+
+    @Test("⛔ a drag cannot push a note off the visible window — snapped OR free")
+    func aDragCannotLoseANoteOffTheWindow() {
+        let (model, sink) = oneNote()
+        let window = model.geometry.midiRange
+        #expect(model.beginPitchDrag(on: model.blobs[0]))
+
+        // 200 pt at a 14 pt row is over fourteen semitones — far past the top
+        // of a window that is the detected span plus four.
+        model.updatePitchDrag(translationHeight: -200, free: false)
+        var target = model.drag!.targetMidi
+        #expect(target <= window.upperBound,
+                "a snapped drag committed a note above the top of the content — it would vanish")
+        // …and the snap is still EXACT at the boundary: a clamp that put the
+        // note on a non-scale pitch would be a quieter version of the same lie.
+        #expect(close(target, model.snapScale.nearestAllowedMidi(to: target), 1e-9))
+
+        model.updatePitchDrag(translationHeight: 200, free: false)
+        target = model.drag!.targetMidi
+        #expect(target >= window.lowerBound)
+
+        model.updatePitchDrag(translationHeight: -200, free: true)
+        #expect(close(model.drag!.targetMidi, window.upperBound, 1e-9),
+                "a FREE drag must stop at the edge too — ⌥ turns off the snap, not the window")
+
+        // POSITIVE CONTROL: a drag well inside the window is untouched by any
+        // of this, so the clamp is the window talking and not a ceiling on
+        // every drag.
+        model.updatePitchDrag(translationHeight: -14, free: false)
+        #expect(close(model.drag!.offsetCents, 100, 1e-9))
+        _ = model.endPitchDrag()
+        #expect(sink.commits.count == 1)
+    }
+
+    @Test("the hit test finds a note where it is DRAWN, not where it was sung")
+    func hitTestFollowsTheEdit() {
+        let (model, _) = oneNote()
+        var edited = model.seedTable.segments[0]
+        edited.pitchOffsetCents = 300            // three semitones up
+        model.syncStoredNoteTable(PitchEditSet(segments: [edited]))
+        let rect = model.rect(for: model.blobs[0])
+
+        #expect(model.blob(at: CGPoint(x: rect.midX, y: rect.midY))?.id == model.blobs[0].id)
+        // ⛔ AND NOT at the detected centre it no longer occupies. Three
+        // semitones is 42 pt at a 14 pt row — far outside the slop.
+        let sungY = model.geometry.y(forMidi: 57)
+        #expect(model.blob(at: CGPoint(x: rect.midX, y: sungY)) == nil)
+    }
+
+    @Test("the scissors tool does not drag, and the pointer does not cut")
+    func toolsDoNotOverlap() {
+        let (model, sink) = oneNote()
+        model.tool = .scissors
+        #expect(model.beginPitchDrag(on: model.blobs[0]) == false)
+        #expect(model.drag == nil)
+
+        model.tool = .pointer
+        let rect = model.rect(for: model.blobs[0])
+        #expect(model.splitNote(at: CGPoint(x: rect.midX, y: rect.midY)) == nil)
+        #expect(sink.commits.isEmpty)
+        // POSITIVE CONTROL: with the right tool each one works.
+        model.tool = .scissors
+        #expect(model.splitNote(at: CGPoint(x: rect.midX, y: rect.midY)) != nil)
+        #expect(sink.commits.count == 1)
+    }
+
+    // MARK: C3 — the split
+
+    @Test("the scissors cuts where the pointer is, in SOURCE seconds")
+    func splitCutsAtThePointer() {
+        let (model, sink) = oneNote()
+        model.tool = .scissors
+        let blob = model.blobs[0]
+        let rect = model.rect(for: blob)
+        let cutX = rect.midX
+        _ = model.splitNote(at: CGPoint(x: cutX, y: rect.midY))
+
+        #expect(sink.commits.count == 1)
+        guard case .splitNote(let segmentID, let second)? = sink.commits.first?.kind else {
+            Issue.record("the commit was not a split")
+            return
+        }
+        #expect(segmentID == blob.id)
+        // ⭐ Hand-checked against the ONE coordinate home, not against itself:
+        // the cut must be the source second that x maps to.
+        #expect(close(second, model.geometry.sourceSecond(forX: cutX), 1e-9))
+        #expect(second > blob.startSeconds && second < blob.endSeconds)
+        #expect(model.refusal == nil)
+    }
+
+    @Test("a cut off a note, and a cut too near an edge, REFUSE in words and commit nothing")
+    func splitRefusalsAreSpokenNotSilent() {
+        let (model, sink) = oneNote()
+        model.tool = .scissors
+        let rect = model.rect(for: model.blobs[0])
+
+        // Off the note entirely.
+        #expect(model.splitNote(at: CGPoint(x: rect.midX, y: rect.midY + 200)) == nil)
+        #expect(sink.commits.isEmpty)
+        #expect(model.refusal == "Nothing to cut there. Click on one of the notes.")
+
+        // On the note but a sliver from its start.
+        let edgeX = model.geometry.x(forSourceSecond: model.blobs[0].startSeconds + 0.005)
+        #expect(model.splitNote(at: CGPoint(x: edgeX, y: rect.midY)) == nil)
+        #expect(sink.commits.isEmpty)
+        let refusal = model.refusal ?? ""
+        #expect(refusal.contains("too close to the edge"))
+        #expect(refusal.contains("60 milliseconds"))
+        // ⚠️ The two refusals are DIFFERENT SENTENCES. "Nothing there" and "too
+        // near the edge" are different facts and a surface that merged them
+        // would teach the user to zoom when they should aim.
+        #expect(refusal != "Nothing to cut there. Click on one of the notes.")
+
+        // POSITIVE CONTROL: the middle of the same note is accepted, and the
+        // refusal clears.
+        #expect(model.splitNote(at: CGPoint(x: rect.midX, y: rect.midY)) != nil)
+        #expect(model.refusal == nil)
+        #expect(sink.commits.count == 1)
+    }
+
+    @Test("the split commit carries the seed table, so the first cut on an untuned clip has somewhere to land")
+    func splitCarriesTheSeed() {
+        let (model, sink) = oneNote()
+        model.tool = .scissors
+        let rect = model.rect(for: model.blobs[0])
+        _ = model.splitNote(at: CGPoint(x: rect.midX, y: rect.midY))
+        #expect(sink.commits.count == 1)
+        #expect(sink.commits[0].seedIfAbsent.segments.count == 1)
+        #expect(sink.commits[0].seedIfAbsent.segments[0].id == model.blobs[0].id)
+    }
+
+    @Test("after a split the editor draws TWO notes and ONE contour run")
+    func splitDrawsTwoNotesOverOneMeasuredRun() {
+        let (model, _) = oneNote()
+        let parent = model.seedTable.segments[0]
+        let cut = (parent.startSeconds + parent.endSeconds) / 2
+        var left = parent
+        left.endSeconds = cut
+        let right = NoteSegment(startSeconds: cut, endSeconds: parent.endSeconds,
+                                detectedHz: parent.detectedHz,
+                                detectedConfidence: parent.detectedConfidence)
+        model.syncStoredNoteTable(PitchEditSet(segments: [left, right]))
+
+        #expect(model.blobs.count == 2)
+        // ⛔⛔ THE POINT OF THE WHOLE SEPARATION: the MEASUREMENT is still one
+        // unbroken run. A contour split at the cut would draw a hole where the
+        // singer never stopped — §5.5.1's lie with its sign reversed.
+        #expect(model.contourRuns.count == 1)
+        #expect(model.contourSegments.count == 1)
+        // The frames are divided between the two notes, none lost, none doubled.
+        #expect(model.blobs[0].frameCount + model.blobs[1].frameCount == 60)
+        #expect(model.blobs[0].frameCount > 0 && model.blobs[1].frameCount > 0)
+    }
+
+    @Test("the tool palette offers exactly the tools that work, and each says what it does")
+    func paletteOffersOnlyWorkingTools() {
+        // ⚠️ TWO, not the reference app's nine (design §7.2): seven slots that
+        // do nothing when pressed is one fake affordance multiplied by seven.
+        #expect(PitchEditorTool.allCases.count == 2)
+        #expect(PitchEditorTool.allCases.map(\.rawValue) == ["pointer", "scissors"])
+        for tool in PitchEditorTool.allCases {
+            #expect(!tool.label.isEmpty)
+            #expect(tool.help.count > 20, "a tool's help must be a sentence, not a word")
+            #expect(!tool.symbolName.isEmpty)
+        }
+        #expect(PitchEditorTool.pointer.help.contains("⌥"))
+    }
+
 }
