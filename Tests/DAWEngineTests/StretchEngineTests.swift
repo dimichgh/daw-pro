@@ -1,4 +1,5 @@
 import AVFAudio
+import CryptoKit
 import DAWCore
 import Foundation
 import Testing
@@ -379,5 +380,244 @@ struct StretchEngineTests {
             tracks: [audioTrack(clip)], tempoMap: TempoMap(constantBPM: 120), fromBeat: 0,
             durationSeconds: 1.0, masterVolume: 1)
         #expect(TestSignals.peak(rendered.channelData[0], in: 0..<48_000) == 0)
+    }
+
+    // MARK: - m23-q: pitch edits in the cache's identity
+
+    /// ⭐⭐ **THE INVARIANCE CONTROL, AND IT IS THE FIRST THING HERE ON
+    /// PURPOSE.** Adding a field to the key is how every stretched render on
+    /// every machine gets orphaned by a feature that changed none of their
+    /// audio. The gate is a GOLDEN REIMPLEMENTATION of the pre-m23-q formula,
+    /// written out below: an edit-free clip must still key to exactly that, and
+    /// an edited one must not.
+    @Test("an edit-free clip keys exactly as it did before pitch edits existed")
+    func editFreeClipKeyIsUnchanged() throws {
+        let dir = try makeTempDir("key-src")
+        let source = dir.appendingPathComponent("tone.wav")
+        try writeSine(to: source, frequency: 440, seconds: 0.25)
+
+        /// The field list as it stood before m23-q, verbatim.
+        func legacyKey(ratio: Double, semitones: Double, formant: Bool) throws -> String {
+            let path = source.standardizedFileURL.path
+            let attributes = try FileManager.default.attributesOfItem(atPath: path)
+            let size = (attributes[.size] as? NSNumber)?.uint64Value ?? 0
+            let mtime = (attributes[.modificationDate] as? Date)?
+                .timeIntervalSinceReferenceDate ?? 0
+            var hasher = SHA256()
+            for field in [
+                path, String(size), String(mtime.bitPattern),
+                String(ratio.bitPattern), String(semitones.bitPattern),
+                formant ? "1" : "0",
+                String(StretchRenderCache.stretchEngineVersion),
+            ] {
+                hasher.update(data: Data(field.utf8))
+                hasher.update(data: Data([0]))
+            }
+            return String(hasher.finalize().map { String(format: "%02x", $0) }
+                .joined().prefix(16))
+        }
+
+        let plain = Clip(name: "c", audioFileURL: source, stretchRatio: 1.5,
+                         pitchShiftSemitones: 2, formantPreserve: true)
+        let detectedOnly = Clip(name: "c", audioFileURL: source, stretchRatio: 1.5,
+                                pitchShiftSemitones: 2, formantPreserve: true,
+                                pitchEdits: Self.detectedOnlyEdits())
+        let edited = Clip(name: "c", audioFileURL: source, stretchRatio: 1.5,
+                          pitchShiftSemitones: 2, formantPreserve: true,
+                          pitchEdits: Self.editedEdits(cents: 25))
+
+        let legacy = try legacyKey(ratio: 1.5, semitones: 2, formant: true)
+        let plainKey = try StretchRenderCache.cacheKey(
+            source: source, params: .init(clip: plain))
+        let detectedKey = try StretchRenderCache.cacheKey(
+            source: source, params: .init(clip: detectedOnly))
+        let editedKey = try StretchRenderCache.cacheKey(
+            source: source, params: .init(clip: edited))
+
+        #expect(plainKey == legacy,
+                "the key moved for a clip with no pitch edits — every cached render is orphaned")
+        #expect(detectedKey == legacy,
+                "a DETECTED-but-unedited note table re-keyed the cache; it renders as nothing")
+        // ⭐ The control: the gate above must be able to fail.
+        #expect(editedKey != legacy, "an edited clip must NOT share the edit-free key")
+        // And two different edit sets must not collide.
+        let other = Clip(name: "c", audioFileURL: source, stretchRatio: 1.5,
+                         pitchShiftSemitones: 2, formantPreserve: true,
+                         pitchEdits: Self.editedEdits(cents: 26))
+        #expect(try StretchRenderCache.cacheKey(source: source, params: .init(clip: other))
+            != editedKey, "a one-cent edit did not re-key the render")
+    }
+
+    /// §6.4's "never bypass the identity path": an unstretched clip carrying a
+    /// detected-but-unedited note table still plays its SOURCE FILE, and one
+    /// carrying a real edit does not.
+    @Test("identity bypass survives a note table and ends at a real edit")
+    func identityBypassAndItsControl() async throws {
+        let dir = try makeTempDir("bypass-src")
+        let source = dir.appendingPathComponent("tone.wav")
+        try writeSine(to: source, frequency: 220, seconds: 0.5)
+        let cache = StretchRenderCache(directory: try makeTempDir("bypass-cache"))
+        let clipID = UUID()
+
+        let bypassed = try await cache.renderIfNeeded(
+            clipID: clipID, source: source,
+            params: .init(clip: Clip(name: "c", audioFileURL: source,
+                                     pitchEdits: Self.detectedOnlyEdits())))
+        #expect(bypassed == source, "a note table that bends nothing must not force a render")
+        #expect(cache.renderCount == 0)
+
+        let rendered = try await cache.renderIfNeeded(
+            clipID: clipID, source: source,
+            params: .init(clip: Clip(name: "c", audioFileURL: source,
+                                     pitchEdits: Self.editedEdits(cents: 50))))
+        #expect(rendered != source, "a real pitch edit on an unstretched clip must render")
+        #expect(rendered.pathExtension == "caf")
+        #expect(cache.renderCount == 1)
+    }
+
+    /// The byte gate under the branch: taking the curve path for edited clips
+    /// must leave the EDIT-FREE render exactly where it was. Not "similar" —
+    /// sample-for-sample, against the facade call the cache used to make
+    /// unconditionally.
+    @Test("an edit-free render is byte-identical to the constant facade call")
+    func editFreeRenderIsByteIdenticalToTheConstantCall() async throws {
+        let dir = try makeTempDir("bytes-src")
+        let source = dir.appendingPathComponent("tone.wav")
+        try writeSine(to: source, frequency: 330, seconds: 0.75)
+        let cache = StretchRenderCache(directory: try makeTempDir("bytes-cache"))
+        let url = try await cache.renderIfNeeded(
+            clipID: UUID(), source: source,
+            params: .init(ratio: 1.5, semitones: 2, formantPreserve: false))
+        let throughCache = try TestSignals.readFile(url)
+        let direct = try OfflineStretcher.stretch(
+            input: try TestSignals.readFile(source), sampleRate: 48_000,
+            ratio: 1.5, semitones: 2, formantPreserve: false)
+        #expect(throughCache.count == direct.count)
+        var differing = 0
+        for channel in 0..<min(throughCache.count, direct.count) {
+            #expect(throughCache[channel].count == direct[channel].count)
+            for (a, b) in zip(throughCache[channel], direct[channel]) where a != b {
+                differing += 1
+            }
+        }
+        #expect(differing == 0,
+                "\(differing) samples moved in an edit-free render — the curve branch leaked")
+    }
+
+    /// A render that exists is not a render that is HEARD: the playback graph
+    /// re-opens a clip's file only when its `ClipKey` changes. An edit that
+    /// re-keyed the cache but not the schedule would render correctly and play
+    /// the old file.
+    @Test("a pitch edit changes the clip's schedule identity, not just its cache key")
+    func pitchEditChangesScheduleIdentity() throws {
+        let fixtures = try TestSignals.fixtures()
+        func key(_ edits: PitchEditSet?) -> PlaybackGraph.ClipKey {
+            let clip = Clip(name: "c", startBeat: 0, lengthBeats: 4,
+                            audioFileURL: fixtures.cos1k48, pitchEdits: edits)
+            return PlaybackGraph.ClipKey(
+                id: clip.id, startBeat: clip.startBeat, lengthBeats: clip.lengthBeats,
+                url: clip.audioFileURL, startOffsetSeconds: clip.startOffsetSeconds,
+                fadeInBeats: clip.fadeInBeats, fadeOutBeats: clip.fadeOutBeats,
+                fadeInCurve: clip.fadeInCurve, fadeOutCurve: clip.fadeOutCurve,
+                stretchRatio: clip.stretchRatio,
+                pitchShiftSemitones: clip.pitchShiftSemitones,
+                formantPreserve: clip.formantPreserve, gainEnvelope: clip.gainEnvelope,
+                pitchEditSetHash: PitchEditSetDigest.hex(clip.pitchEdits))
+        }
+        #expect(key(nil).pitchEditSetHash == key(Self.detectedOnlyEdits()).pitchEditSetHash,
+                "a note table that renders as nothing must not force a re-schedule")
+        #expect(key(nil).pitchEditSetHash != key(Self.editedEdits(cents: 25)).pitchEditSetHash)
+        #expect(key(Self.editedEdits(cents: 25)).pitchEditSetHash
+            != key(Self.editedEdits(cents: 26)).pitchEditSetHash)
+    }
+
+    /// m23-ap Phase 2, design §6.4 — **THE INVARIANCE HALF OF THE PRESET
+    /// DOOR'S GATE, END TO END THROUGH THE REAL CACHE.**
+    ///
+    /// The menu's *Remove Tuning* calls `ProjectStore.clearClipPitchEdits`,
+    /// which writes `nil` and never `PitchEditSet.empty`
+    /// (`PitchCorrectionWriterTests.clearClipPitchEditsWritesNilAndIsIdempotent`
+    /// pins that half). This is the other half: a clip that HAS been tuned and
+    /// then cleared must render **sample-for-sample** as if it had never been
+    /// tuned — same cache key, same bytes — so undoing a tuning is genuinely
+    /// undoing it and not "close enough".
+    ///
+    /// ⭐ The positive control is the point: every assertion here is an
+    /// equality, and equalities pass beautifully against a render path that
+    /// ignores `pitchEdits` entirely. The tuned render must DIFFER, or the
+    /// identity claims below are claims about nothing.
+    @Test("a tuned-then-cleared clip renders byte-identically to one that was never tuned")
+    func clearedSetRendersAsNeverTuned() async throws {
+        let dir = try makeTempDir("cleared-src")
+        let source = dir.appendingPathComponent("tone.wav")
+        try writeSine(to: source, frequency: 330, seconds: 0.75)
+
+        // Stretched on purpose: an unstretched, edit-free clip takes the
+        // IDENTITY BYPASS and never renders at all, so a byte comparison there
+        // would be comparing the source file to itself and could not fail.
+        func clip(_ edits: PitchEditSet?) -> Clip {
+            Clip(name: "c", audioFileURL: source, stretchRatio: 1.5,
+                 pitchShiftSemitones: 2, formantPreserve: false, pitchEdits: edits)
+        }
+        let neverTuned = clip(nil)
+        let tuned = clip(Self.editedEdits(cents: 50))
+        // Cleared the way the store clears it: the tuned clip with the field put
+        // back to nil, not a separately-typed clip that happens to look like one.
+        var cleared = tuned
+        cleared.pitchEdits = nil
+
+        func render(_ c: Clip, _ label: String) async throws -> [[Float]] {
+            let cache = StretchRenderCache(directory: try makeTempDir("cleared-\(label)"))
+            let url = try await cache.renderIfNeeded(
+                clipID: UUID(), source: source, params: .init(clip: c))
+            #expect(cache.renderCount == 1,
+                    "\(label) did not actually render — a byte comparison against a bypass proves nothing")
+            return try TestSignals.readFile(url)
+        }
+
+        let never = try await render(neverTuned, "never")
+        let after = try await render(cleared, "cleared")
+        let withEdits = try await render(tuned, "tuned")
+
+        // ⭐ THE POSITIVE CONTROL, FIRST, so a render path that ignores pitch
+        // edits fails here rather than passing the two identities below.
+        var tunedDiffering = 0
+        for channel in 0..<min(never.count, withEdits.count) {
+            for (a, b) in zip(never[channel], withEdits[channel]) where a != b { tunedDiffering += 1 }
+        }
+        #expect(tunedDiffering > 0,
+                "POSITIVE CONTROL FAILED: a 50-cent tuning changed not one sample, so the byte identity asserted below is an identity between two renders that ignore pitch edits")
+
+        #expect(never.count == after.count)
+        var differing = 0
+        for channel in 0..<min(never.count, after.count) {
+            #expect(never[channel].count == after[channel].count)
+            for (a, b) in zip(never[channel], after[channel]) where a != b { differing += 1 }
+        }
+        #expect(differing == 0,
+                "\(differing) samples moved after a tuning was cleared — Remove Tuning does not return the audio to where it started")
+
+        // And the key, because bytes that match under a key that moved still
+        // cost a pointless re-render and a pointless re-schedule.
+        #expect(try StretchRenderCache.cacheKey(source: source, params: .init(clip: cleared))
+            == (try StretchRenderCache.cacheKey(source: source, params: .init(clip: neverTuned))),
+                "a cleared clip does not share the never-tuned cache key")
+        #expect(try StretchRenderCache.cacheKey(source: source, params: .init(clip: tuned))
+            != (try StretchRenderCache.cacheKey(source: source, params: .init(clip: neverTuned))),
+                "POSITIVE CONTROL FAILED: a tuned clip shares the never-tuned key, so the key equality above proves nothing")
+    }
+
+    static func detectedOnlyEdits() -> PitchEditSet {
+        PitchEditSet(segments: [
+            NoteSegment(startSeconds: 0.1, endSeconds: 0.4, detectedHz: 220,
+                        detectedConfidence: 0.9)
+        ])
+    }
+
+    static func editedEdits(cents: Double) -> PitchEditSet {
+        PitchEditSet(segments: [
+            NoteSegment(startSeconds: 0.1, endSeconds: 0.4, detectedHz: 220,
+                        detectedConfidence: 0.9, pitchOffsetCents: cents)
+        ])
     }
 }

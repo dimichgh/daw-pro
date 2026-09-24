@@ -298,7 +298,26 @@ public enum AudioQuantizePlan {
             fadeInBeats: fadeInBeats, fadeOutBeats: fadeOutBeats,
             fadeInCurve: fadeInCurve, fadeOutCurve: fadeOutCurve,
             stretchRatio: 1, pitchShiftSemitones: 0,
-            formantPreserve: clip.formantPreserve)
+            formantPreserve: clip.formantPreserve,
+            // Pitch edits (m23-q): carried VERBATIM onto every slice. The chop
+            // REPLACES the source clip, so an omission is data loss — a user
+            // tunes a vocal, quantizes it, and the tuning is gone with a success
+            // response.
+            //
+            // Verbatim is right rather than windowed-per-slice for two reasons.
+            // (1) `NoteSegment` times are source-file-absolute seconds and every
+            // slice reads the SAME file — only `sourceOffset` differs, and that
+            // is already recorded above; a slice evaluates the curve only over
+            // the source span it reads, so the extra segments are inert.
+            // (2) `applyCrossfades` runs after this and EXTENDS slices back into
+            // their neighbour's material, so any per-slice window computed here
+            // would already be stale by the time the slice plays.
+            //
+            // Note `pitchShiftSemitones: 0` above does NOT contradict this:
+            // `compute` refuses a non-identity stretch outright
+            // (`audioQuantizeStretchUnsupported`), so that 0 is a restatement of
+            // an enforced precondition, not a discarded edit.
+            pitchEdits: clip.pitchEdits)
         return Slice(clip: c, placedStart: placedStart, sourceOffset: sourceOffset,
                      sourceEnd: sourceEnd, naturalLenBeats: natural, baseLenBeats: baseLen)
     }

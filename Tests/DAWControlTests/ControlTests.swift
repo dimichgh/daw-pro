@@ -1923,6 +1923,22 @@ struct CommandRouterTests {
                 // DAWEngineTests ClipPitchAnalyzerTests (real SwiftF0
                 // inference).
                 "clip.detectPitch",
+                // clip.autoCorrectPitch (m23-q Phase 2) needs the SAME real
+                // clip id + real backing file as clip.detectPitch above (it
+                // calls detectClipPitch internally) — this loop's clip id is
+                // minted mid-loop and points at no real file. Proven by
+                // PitchCorrectionCommandTests (happy path, presets, scale,
+                // range validation, MIDI/comp-member/unknown-clip
+                // rejections, the hardTune warning) and DAWCore
+                // PitchCorrectionWriterTests.
+                "clip.autoCorrectPitch",
+                // clip.clearPitchEdits / clip.getPitchEdits (m23-q Phase 2)
+                // need a clip id like the other per-clip reads above — this
+                // loop's clip id is minted mid-loop, not known ahead of time.
+                // Both are no-ops/reads on a clip with no edits, so excluding
+                // them costs nothing but route coverage, which
+                // PitchCorrectionCommandTests supplies directly.
+                "clip.clearPitchEdits", "clip.getPitchEdits",
                 // clip.crossfade (m11-d) needs TWO adjacent audio clips with source
                 // material on each side of the seam — a fixture this shared, single-
                 // clip project doesn't have. Proven by ClipCrossfadeCommandTests

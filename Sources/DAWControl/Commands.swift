@@ -798,6 +798,17 @@ public final class CommandRouter {
         // deliberately (the m25-d rule). STRICTLY ADDITIVE, appended at the
         // end per the additive-at-end law.
         "vc.installEmbeddedVoice",
+        // m23-q Phase 2 (writer leg): the auto-correct policy in
+        // PitchCorrection.swift/PitchCorrectionPresets.swift had no store
+        // setter, no wire command, and no MCP tool — an agent could detect a
+        // clip's pitch (clip.detectPitch) but could not act on it. These
+        // three close that gap: run the policy and store the result, clear
+        // it, and read it back. NOTE: no quoted string in this comment,
+        // deliberately (the m25-d rule). STRICTLY ADDITIVE, appended at the
+        // end per the additive-at-end law.
+        "clip.autoCorrectPitch",
+        "clip.clearPitchEdits",
+        "clip.getPitchEdits",
     ]
 
     public init(
@@ -4871,6 +4882,158 @@ public final class CommandRouter {
                 confidenceThreshold: pitchConfidenceThreshold,
                 silenceFloorDbfs: pitchSilenceFloorDbfs)
             return .success(request.id, try JSONValue(encoding: pitchResult))
+
+        case "clip.autoCorrectPitch":
+            // m23-q Phase 2 (writer leg): detects the clip's pitch (its own
+            // call — see ProjectStore.autoCorrectClipPitch's doc for why the
+            // caller never ferries a contour over the wire) and runs
+            // PitchAutoCorrect's policy against it, storing the result on
+            // clip.pitchEdits.
+            //
+            // params: clipId (required). preset? — one of
+            // PitchCorrectionPreset's four raw values ("gentle" | "natural" |
+            // "tight" | "hardTune"), unknown value is a field-named error
+            // naming all four. tonicPitchClass?/mode? — the scale
+            // (0...11 = C...B, wraps; mode one of "chromatic" | "major" |
+            // "minor", unknown is a field-named error) — ALWAYS independent
+            // of preset (PitchCorrectionPreset's own doc: "a preset carries
+            // no scale"), defaults to chromatic when neither is given.
+            // strength?/retuneMs?/preserveVibrato? — when given, OVERRIDE
+            // whichever base (a named preset, or the plain defaults when no
+            // preset is given) they'd otherwise take from; when `preset` is
+            // also given this lets an agent ask for "Gentle, but instant" —
+            // the preset's own knob positions still apply to anything not
+            // explicitly overridden. strength is range-checked 0...1,
+            // retuneMs range-checked against PitchEditSet.retuneMsRange
+            // (30...500) — a LOUD field-named error rather than the model's
+            // own silent clamp, the confidenceThreshold precedent, because a
+            // caller outside those ranges almost certainly meant something
+            // else.
+            //
+            // ⚠️ hardTune / any preserveVibrato:false request asks the CURVE
+            // to flatten the sung contour onto the target, which needs the
+            // detected contour AT RENDER TIME. The render path
+            // (StretchRenderCache → StretchCurvePlan.make) does not thread a
+            // contour through today — `contour` defaults to `[]` there, so
+            // every such segment lands in
+            // PitchCorrectionCurve.unresolvedShapingSegmentIDs and renders as
+            // a CONSTANT per-note offset, i.e. audibly like `tight`, not the
+            // replaced-contour "robot effect" hardTune's own summary
+            // promises. This is a render-path gap, not a writer-leg bug —
+            // Sources/DAWEngine/Stretch/ is out of scope for this item (see
+            // this milestone's brief) and is UNFINISHED. The response's
+            // `warnings` carries this verbatim whenever the stored options
+            // ask for shaping, so an agent (or a human reading the reply)
+            // is told rather than finding out by ear.
+            //
+            // A clip with no voiced runs (silence, an instrumental clip, a
+            // contour the detector could not voice) stores nothing
+            // (clip.pitchEdits stays/becomes nil) rather than silently
+            // "succeeding" with an empty correction — the response's
+            // segmentCount:0 plus a warning pointing at clip.detectPitch's
+            // voicedFraction says so rather than leaving an agent to assume
+            // the clip is simply already in tune.
+            //
+            // MIDI clip → pitchDetectionRequiresAudioClip (checked BEFORE
+            // running detection, the quantizeAudioClip fail-fast
+            // convention); a comp-lane read-only member → invalidClipEdit
+            // (requireNotCompMember, the setClipStretch precedent);
+            // clipNotFound / missing backing file / engineUnavailable
+            // surface via the LocalizedError mapping (detectClipPitch's own
+            // rejections, inherited). Coalescing key: nil (structural — never
+            // coalesces, design §7.4).
+            //
+            // Response: {clipId, hasPitchEdits, analysisVersion, retuneMs,
+            // segmentCount, isIdentity, appliedOptions: {scale: {tonicPitchClass,
+            // mode, displayName}, strength, retuneMs, preserveVibrato},
+            // segments: [{id, startSeconds, endSeconds, detectedHz,
+            // detectedConfidence, pitchOffsetCents, driftScale, vibratoScale}],
+            // warnings}. Every segment field is ALWAYS present (unlike
+            // NoteSegment's own omit-when-default Codable encoder) so a
+            // caller reading this back can't mistake "default" for "absent."
+            try params.rejectUnknownKeys(
+                ["clipId", "preset", "tonicPitchClass", "mode",
+                 "strength", "retuneMs", "preserveVibrato"], verb: "clip.autoCorrectPitch")
+            let acClipID = try params.requireClipID()
+            var acScale = PitchCorrectionScale.chromatic
+            if let tonicRaw = try Self.optionalNumber(params["tonicPitchClass"], "'tonicPitchClass'") {
+                acScale.tonicPitchClass = Int(tonicRaw)
+            }
+            if let modeRaw = try Self.optionalString(params["mode"], "'mode'") {
+                guard let acMode = PitchCorrectionScaleMode(rawValue: modeRaw) else {
+                    throw ControlError(
+                        "'mode' must be one of chromatic, major, minor — got \"\(modeRaw)\"")
+                }
+                acScale.mode = acMode
+            }
+            var acOptions: PitchAutoCorrectOptions
+            if let presetRaw = try Self.optionalString(params["preset"], "'preset'") {
+                guard let acPreset = PitchCorrectionPreset(rawValue: presetRaw) else {
+                    throw ControlError(
+                        "'preset' must be one of gentle, natural, tight, hardTune — got \"\(presetRaw)\"")
+                }
+                acOptions = acPreset.options(scale: acScale)
+            } else {
+                acOptions = PitchAutoCorrectOptions(scale: acScale)
+            }
+            if let strengthRaw = try Self.optionalNumber(params["strength"], "'strength'") {
+                guard (0...1).contains(strengthRaw) else {
+                    throw ControlError("'strength' must be between 0 and 1")
+                }
+                acOptions.strength = strengthRaw
+            }
+            if let retuneRaw = try Self.optionalNumber(params["retuneMs"], "'retuneMs'") {
+                guard PitchEditSet.retuneMsRange.contains(retuneRaw) else {
+                    throw ControlError(
+                        "'retuneMs' must be between \(PitchEditSet.retuneMsRange.lowerBound) "
+                        + "and \(PitchEditSet.retuneMsRange.upperBound)")
+                }
+                acOptions.retuneMs = retuneRaw
+            }
+            if let preserveRaw = try Self.optionalBool(params["preserveVibrato"], "'preserveVibrato'") {
+                acOptions.preserveVibrato = preserveRaw
+            }
+            let acClip = try await store.autoCorrectClipPitch(clipId: acClipID, options: acOptions)
+            return .success(request.id, Self.pitchEditsResponse(
+                clipId: acClipID, edits: acClip.pitchEdits, appliedOptions: acOptions))
+
+        case "clip.clearPitchEdits":
+            // params: clipId (required). Removes clip.pitchEdits entirely —
+            // nil, not a stored empty set (the same nil-not-empty rule
+            // clip.autoCorrectPitch follows) — so a cleared clip renders and
+            // persists byte-identically to one that was never corrected.
+            // Idempotent: clearing an already-clear clip is a no-op, no undo
+            // entry recorded. Works (as a no-op) on a MIDI clip rather than
+            // rejecting it — there is nothing to teach an agent asking to
+            // clear a field that was already clear. A comp-lane read-only
+            // member → invalidClipEdit (requireNotCompMember);
+            // clipNotFound via the LocalizedError mapping. Coalescing key:
+            // nil (structural, design §7.4).
+            // Response: same shape as clip.autoCorrectPitch, minus
+            // appliedOptions (nothing was applied) — segmentCount is always
+            // 0 and hasPitchEdits always false on success.
+            try params.rejectUnknownKeys(["clipId"], verb: "clip.clearPitchEdits")
+            let cpeClipID = try params.requireClipID()
+            let cpeClip = try store.clearClipPitchEdits(clipId: cpeClipID)
+            return .success(request.id, Self.pitchEditsResponse(
+                clipId: cpeClipID, edits: cpeClip.pitchEdits, appliedOptions: nil))
+
+        case "clip.getPitchEdits":
+            // params: clipId (required). STRICTLY READ-ONLY (the
+            // clip.getNotes idiom) — no performEdit, no engine call, no undo
+            // entry, no dirty flag, no requireNotCompMember (reading a comp
+            // member's edits is harmless). Lets an agent see what a prior
+            // clip.autoCorrectPitch actually did, or confirm a clip carries
+            // no edits at all. clipNotFound via the LocalizedError mapping.
+            // Response: same shape as clip.autoCorrectPitch, minus
+            // appliedOptions (nothing was applied THIS call) — a clip that
+            // has never been corrected, or was cleared, reads back
+            // hasPitchEdits:false, segmentCount:0, segments:[].
+            try params.rejectUnknownKeys(["clipId"], verb: "clip.getPitchEdits")
+            let gpeClipID = try params.requireClipID()
+            let gpeEdits = try store.pitchEdits(forClipId: gpeClipID)
+            return .success(request.id, Self.pitchEditsResponse(
+                clipId: gpeClipID, edits: gpeEdits, appliedOptions: nil))
 
         case "arrange.insertBars":
             // params: atBar (required int >= 1, 1-BASED — bar 1 is the first bar,
@@ -13166,6 +13329,78 @@ public final class CommandRouter {
             glideMode: try Self.optionalSamplerGlideMode(obj["glideMode"])
                 ?? fallback.glideMode
         )
+    }
+
+    /// The shared response builder for `clip.autoCorrectPitch` /
+    /// `clip.clearPitchEdits` / `clip.getPitchEdits` (m23-q Phase 2). Reads
+    /// `edits` back rather than trusting a setter's return — "a setter's
+    /// return is not proof it took" — and states EVERY field explicitly
+    /// rather than going through `PitchEditSet`/`NoteSegment`'s own
+    /// omit-when-default `Codable` encoders, so a caller reading this back
+    /// cannot mistake "default value" for "field absent." `appliedOptions` is
+    /// `nil` for the getter and the clear (nothing was applied that call);
+    /// present, POST-CLAMP, for the auto-correct so a caller can see any
+    /// range clamp that took effect.
+    ///
+    /// `warnings` carries the hardTune/shaping render-path gap
+    /// (`clip.autoCorrectPitch`'s own doc) whenever the applied options asked
+    /// for contour shaping (`preserveVibrato == false`), and a
+    /// zero-voiced-run result — the silent-success trap this file is full of
+    /// warnings about — whenever a real auto-correct pass (not the getter,
+    /// not the clear) found nothing to segment.
+    private static func pitchEditsResponse(
+        clipId: UUID, edits: PitchEditSet?, appliedOptions: PitchAutoCorrectOptions?
+    ) -> JSONValue {
+        let segments = edits?.segments ?? []
+        var warnings: [String] = []
+        if let appliedOptions, !appliedOptions.preserveVibrato {
+            warnings.append(
+                "preserveVibrato:false asks the curve to flatten the sung contour onto the "
+                + "target, which needs the detected contour AT RENDER TIME. The render path "
+                + "does not thread a contour through yet, so this currently renders as a "
+                + "constant per-note offset — audibly like a 'tight' correction, not the "
+                + "replaced-contour hard-tune effect its options describe.")
+        }
+        if appliedOptions != nil, segments.isEmpty {
+            warnings.append(
+                "No voiced notes were found to correct — check clip.detectPitch's own "
+                + "voicedFraction before assuming this clip is already in tune; a silent, "
+                + "instrumental, or too-quiet clip legitimately has nothing to segment.")
+        }
+        var response: [String: JSONValue] = [
+            "clipId": .string(clipId.uuidString),
+            "hasPitchEdits": .bool(!(edits?.isIdentity ?? true)),
+            "analysisVersion": .number(Double(edits?.analysisVersion ?? PitchEditSet.currentAnalysisVersion)),
+            "retuneMs": .number(edits?.retuneMs ?? PitchEditSet.engineMinimumRetuneMs),
+            "segmentCount": .number(Double(segments.count)),
+            "isIdentity": .bool(edits?.isIdentity ?? true),
+            "segments": .array(segments.map { segment in
+                .object([
+                    "id": .string(segment.id.uuidString),
+                    "startSeconds": .number(segment.startSeconds),
+                    "endSeconds": .number(segment.endSeconds),
+                    "detectedHz": .number(segment.detectedHz),
+                    "detectedConfidence": .number(segment.detectedConfidence),
+                    "pitchOffsetCents": .number(segment.pitchOffsetCents),
+                    "driftScale": .number(segment.driftScale),
+                    "vibratoScale": .number(segment.vibratoScale),
+                ])
+            }),
+            "warnings": .array(warnings.map { .string($0) }),
+        ]
+        if let appliedOptions {
+            response["appliedOptions"] = .object([
+                "scale": .object([
+                    "tonicPitchClass": .number(Double(appliedOptions.scale.tonicPitchClass)),
+                    "mode": .string(appliedOptions.scale.mode.rawValue),
+                    "displayName": .string(appliedOptions.scale.displayName),
+                ]),
+                "strength": .number(appliedOptions.strength),
+                "retuneMs": .number(appliedOptions.retuneMs),
+                "preserveVibrato": .bool(appliedOptions.preserveVibrato),
+            ])
+        }
+        return .object(response)
     }
 
     /// One optional, RANGE-CHECKED number inside the `sampler` object. Refuses

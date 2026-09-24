@@ -28,12 +28,14 @@ struct TransportEndStopCommandTests {
         #expect(CommandRouter.allCommands
             .filter { $0 == "transport.setStopAtContentEnd" }.count == 1)
         // m25-z appended `audio.profileFile`, then m23-ap-3 appended
-        // `clip.detectPitch`, then m26-k appended `edit.pasteClips`, after
-        // this verb (same law), so it is no longer literally last — still
-        // contiguous, still unmoved.
-        #expect(CommandRouter.allCommands.dropLast(5).last == "transport.setStopAtContentEnd")
+        // `clip.detectPitch`, then m26-k appended `edit.pasteClips`, then
+        // m23-q Phase 2 appended `clip.autoCorrectPitch`/
+        // `clip.clearPitchEdits`/`clip.getPitchEdits`, after this verb (same
+        // law), so it is no longer literally last — still contiguous, still
+        // unmoved.
+        #expect(CommandRouter.allCommands.dropLast(8).last == "transport.setStopAtContentEnd")
         // The verb BEFORE it is untouched — HEAD's list stays an exact prefix.
-        #expect(CommandRouter.allCommands.dropLast(6).last == "vc.importVoiceModel")
+        #expect(CommandRouter.allCommands.dropLast(9).last == "vc.importVoiceModel")
     }
 
     @Test("the verb is in the copilot catalog exactly once (m21-b2)")

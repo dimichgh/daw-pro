@@ -226,6 +226,19 @@ struct TimelineLanesView: View {
     /// in BOTH densities. Routes to `openChopToPads(clipID:)`, which selects the
     /// clip before showing the card.
     var onChopToPads: (_ clip: Clip) -> Void = { _ in }
+    /// Applies a one-click tuning preset to a clip (m23-ap Phase 2, design §6.2
+    /// Door 1) — AUDIO clips only, and in BOTH densities. Routes to
+    /// `AppModel.tuneVocalFromContextMenu(clipID:preset:)`, which calls the SAME
+    /// `ProjectStore.autoCorrectClipPitch` the wire's `clip.autoCorrectPitch`
+    /// calls. The preset travels as the enum, never as a resolved options blob,
+    /// so the view can never invent a strength, a retune time or a scale.
+    var onTuneVocal: (_ clip: Clip, _ preset: PitchCorrectionPreset) -> Void = { _, _ in }
+    /// Removes a clip's pitch edits (`ProjectStore.clearClipPitchEdits`, via
+    /// `AppModel.clearClipTuningFromContextMenu(clipID:)`).
+    var onClearPitchEdits: (_ clip: Clip) -> Void = { _ in }
+    /// Opens the note editor pane on the named clip. See `ClipBlock`'s copy for
+    /// why this exists as its own seam rather than reusing the tune callbacks.
+    var onOpenPitchEditor: (_ clip: Clip) -> Void = { _ in }
     /// Opens the **Convert Voice…** panel (m24-m leg B, Pro clip menu; sp-c).
     /// UI-only — routes to `openVoiceConvert(clipIDs:)`, whose panel rides the
     /// SAME store seam as the wire's `vc.convertClips`. The COMMAND (title +
@@ -1292,6 +1305,9 @@ struct TimelineLanesView: View {
                     onOpenBreathPad: { onOpenBreathPad(clip) },
                     onExtractGroove: { onExtractGroove(clip) },
                     onChopToPads: { onChopToPads(clip) },
+                    onTuneVocal: { preset in onTuneVocal(clip, preset) },
+                    onClearPitchEdits: { onClearPitchEdits(clip) },
+                    onOpenPitchEditor: { onOpenPitchEditor(clip) },
                     voiceConvertCommand: VoiceConvertMenuPolicy.clipContextCommand(
                         clickedClipID: clip.id,
                         clickedClipIsAudio: !clip.isMIDI && clip.audioFileURL != nil,
@@ -3018,6 +3034,31 @@ private struct ClipBlock: View {
     /// Opens **Chop to Pads…** (m39-pads) — audio only, both densities.
     var onChopToPads: () -> Void = {}
 
+    // MARK: Tune Vocal (m23-ap Phase 2 — the preset door, design §6.2 Door 1)
+
+    /// Applies one of `PitchCorrectionPreset.offeredInUI`'s one-click tunings to
+    /// THIS clip — audio only, both densities. Routes to
+    /// `AppModel.tuneVocalFromContextMenu`, which calls the SAME
+    /// `ProjectStore.autoCorrectClipPitch` the wire's `clip.autoCorrectPitch`
+    /// calls, with the SAME `preset.options()` (chromatic scale) the wire
+    /// resolves when no key is named. One store method, one policy, one default
+    /// — design §6.2's "all three doors call ONE store method".
+    var onTuneVocal: (PitchCorrectionPreset) -> Void = { _ in }
+    /// Removes this clip's pitch edits entirely (`ProjectStore.clearClipPitchEdits`
+    /// via `AppModel.clearClipTuningFromContextMenu`). Offered ONLY when the clip
+    /// actually carries edits — a "Remove Tuning" over a never-tuned clip is a
+    /// control whose only possible outcome is nothing happening.
+    var onClearPitchEdits: () -> Void = {}
+    /// Opens the note editor pane on THIS clip (`AppModel.openPitchEditor`).
+    ///
+    /// ⭐ THE PANE EXISTED FOR A WHILE WITH NO HUMAN DOOR. p2-b built and
+    /// rendered the whole surface, `AppModel.openPitchEditor(clipID:)` was
+    /// waiting, and the only thing missing was this one `Button` — in a file
+    /// that agent had been told to stay out of. **A capability nobody can
+    /// reach is indistinguishable from one that was never built**, and it
+    /// would have read as "the editor is not done" in every later summary.
+    var onOpenPitchEditor: () -> Void = {}
+
     // MARK: Convert to voice (m10-p-5)
 
     /// What this block's *Convert Voice…* entry says and targets (m24-m leg B),
@@ -4015,6 +4056,62 @@ private struct ClipBlock: View {
         if !clip.isMIDI, clip.audioFileURL != nil {
             Divider()
             Button("Chop to Pads…") { onChopToPads() }
+            // ═══ TUNE VOCAL (m23-ap Phase 2, design §6.2 Door 1) ═══
+            //
+            // ⭐ **OUTSIDE THE `if pro` BLOCK, ON DELETE'S AND CHOP'S ARGUMENT.**
+            // Tuning a vocal is not expert chrome — it is the single most asked-for
+            // thing anyone does to a recorded voice, and "an operation reachable by
+            // only one route is an operation that goes missing" (m23-cf). Until this
+            // entry the preset actions existed as data, as a store op, as a wire verb
+            // and as an MCP tool, and as NOTHING A PERSON COULD CLICK.
+            //
+            // SHARES the audio-only gate above rather than repeating it: the
+            // predicate is character-for-character the same one ("hidden rather than
+            // offered-then-errored", the "Quantize…" / "Convert Voice…" rule), and a
+            // second copy would be a second place for it to drift. `autoCorrectClipPitch`
+            // rejects a MIDI clip with `pitchDetectionRequiresAudioClip` and a
+            // file-less clip through `detectClipPitch`'s own teaching refusal, so both
+            // halves of the gate are real refusals the user never has to meet.
+            //
+            // ⛔ **THREE PRESETS, NOT FOUR — `offeredInUI`, NEVER `allCases`.**
+            // `hardTune` is withheld from every on-screen door because the render path
+            // calls `StretchCurvePlan.make` with `contour: []`, so the one preset that
+            // flips `preserveVibrato` has nothing to resolve its shaping against and
+            // degrades to a constant per-note offset — measured at a median 62.1 cents
+            // against tight's 18.8, i.e. a STRONGER TIGHT wearing the label "the robot
+            // effect". The wire and MCP still accept it, with a warning in the reply;
+            // only the pixels withhold it, because only the pixels have no room to
+            // explain. `PitchCorrectionPreset.offeredInUI`'s own doc holds the full
+            // reason, and `uiDoorWithholdsHardTune` pins both the list and the reason.
+            // With three there is no hairline separating the ladder from Hard Tune —
+            // the thing it would have separated is not on the menu.
+            //
+            // The label is the preset's `displayName` and the tooltip its `summary`,
+            // both taken VERBATIM from `PitchCorrectionPresets.swift` (design §6.1:
+            // "use these strings verbatim") — already written for someone who has
+            // never used a tuner, and never re-worded here.
+            Menu("Tune Vocal") {
+                ForEach(PitchCorrectionPreset.offeredInUI) { preset in
+                    Button(preset.displayName) { onTuneVocal(preset) }
+                        .help(preset.summary)
+                }
+                // Only when there is tuning to remove. `clip.pitchEdits` is the
+                // clip's OWN field read straight off the block's model value, so
+                // the entry appears the moment the store writes and disappears the
+                // moment it clears — there is no second copy of this state to go
+                // stale. It is also the ONE thing on screen that says the tuning
+                // took at all, until the note view lands.
+                Divider()
+                // The way in to the note editor. Worded for someone who has
+                // never used one: "Note Editor" names the thing, the ellipsis
+                // is AppKit's promise that a surface opens rather than
+                // something happening to the clip immediately.
+                Button("Open Note Editor…") { onOpenPitchEditor() }
+                if clip.pitchEdits != nil {
+                    Divider()
+                    Button("Remove Tuning") { onClearPitchEdits() }
+                }
+            }
         }
         // The separator is CONDITIONAL because in SIMPLE density on a NON-TAKE
         // clip both blocks below are empty, so an unconditional one would be a

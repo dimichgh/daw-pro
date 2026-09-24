@@ -8664,6 +8664,163 @@ registerTool(
     )
 );
 
+const PITCH_CORRECTION_PRESETS = ["gentle", "natural", "tight", "hardTune"] as const;
+const PITCH_CORRECTION_MODES = ["chromatic", "major", "minor"] as const;
+
+registerTool(
+  "clip_auto_correct_pitch",
+  {
+    title: "Auto-correct a clip's pitch (tune a vocal or lead take)",
+    description:
+      "Run pitch correction on an AUDIO clip and STORE the result on the clip -- the writer " +
+      "half of clip_detect_pitch (read-only measurement) and PitchCorrection.swift's " +
+      "auto-correct policy, which had no way to act on a clip until this tool. It detects " +
+      "the clip's pitch ITSELF, over the clip's whole current source window (you do not " +
+      "need to call clip_detect_pitch first and pass frames back in -- the contour is not " +
+      "persisted by design, so shuttling ~60 KB/10s of frames over the wire just to hand " +
+      "them straight back would buy nothing). Use `preset` for the one-click cases: " +
+      "'gentle' nudges badly-out notes halfway to pitch and leaves slides/scoops/vibrato " +
+      "alone; 'natural' lands every note in tune while still sounding sung; 'tight' snaps " +
+      "notes into tune the instant they start, the modern pop-lead sound; 'hardTune' " +
+      "REPLACES the sung pitch outright, the robot/T-Pain effect -- it is NOT a stronger " +
+      "'tight', it is a structurally different algorithm (see the warning below). " +
+      "`tonicPitchClass`/`mode` pick the SCALE a note may be pulled onto and are ALWAYS " +
+      "independent of `preset` (a preset says how correction behaves, the scale says which " +
+      "notes are allowed -- so 'gentle, in G minor' is expressible). `strength`/`retuneMs`/" +
+      "`preserveVibrato`, when given, OVERRIDE whatever a named preset would otherwise use " +
+      "for that one knob, so 'gentle, but instant' is one call. Be honest about what this " +
+      "buys: the detector's own quantisation floor is about +/-13 cents before correction " +
+      "even runs, and the shipped pitch transposer is itself a few cents sharp -- this pulls " +
+      "a note's centre onto the scale to roughly the detector's own resolution, it does not " +
+      "tune to +/-5 cents. A clip with no voiced notes (silence, an instrumental, material " +
+      "too quiet to voice) stores nothing and comes back with segmentCount:0 plus a warning " +
+      "pointing at clip_detect_pitch's voicedFraction -- check that before assuming the clip " +
+      "is simply already in tune. " +
+      "WARNING -- hardTune / any preserveVibrato:false request is UNFINISHED end to end: it " +
+      "asks the render curve to flatten the sung contour onto the target, which needs the " +
+      "detected pitch contour AT RENDER TIME, and the render path does not thread one " +
+      "through yet. Today it renders as a CONSTANT per-note offset -- audibly like 'tight', " +
+      "not the replaced-contour robot effect the name promises. The response's `warnings` " +
+      "repeats this whenever it applies, so you are told rather than finding out by ear. " +
+      "Coalescing: never (this is a structural edit, like split or a whole preset apply -- " +
+      "each call is its own undo step). Returns {clipId, hasPitchEdits, analysisVersion, " +
+      "retuneMs, segmentCount, isIdentity, appliedOptions: {scale, strength, retuneMs, " +
+      "preserveVibrato}, segments: [{id, startSeconds, endSeconds (SOURCE-FILE-absolute " +
+      "seconds, the clip_detect_pitch domain), detectedHz, detectedConfidence, " +
+      "pitchOffsetCents, driftScale, vibratoScale}], warnings} -- every segment field is " +
+      "ALWAYS present, unlike the clip's own on-disk storage which omits defaults, so you " +
+      "can't mistake 'default value' for 'field absent' when reading this back.",
+    inputSchema: {
+      clipId: z.string().uuid().describe("Id of the AUDIO clip to correct, from project_snapshot."),
+      preset: z
+        .enum(PITCH_CORRECTION_PRESETS)
+        .optional()
+        .describe(
+          "One-click tuning: 'gentle' (strength 0.5, 200ms retune, keeps vibrato), " +
+            "'natural' (0.85, 110ms, keeps vibrato), 'tight' (1.0, 40ms, keeps vibrato), or " +
+            "'hardTune' (1.0, 30ms floor, REPLACES the contour -- see the tool description's " +
+            "warning about this one). Omit to build options from strength/retuneMs/" +
+            "preserveVibrato directly (defaults: chromatic, strength 1, retuneMs 30, " +
+            "preserveVibrato true)."
+        ),
+      tonicPitchClass: z
+        .number()
+        .int()
+        .optional()
+        .describe(
+          "0=C .. 11=B (wraps outside that range). Which pitches a note may be pulled onto, " +
+            "together with `mode`. Independent of `preset`. Omit for chromatic (tonic " +
+            "irrelevant)."
+        ),
+      mode: z
+        .enum(PITCH_CORRECTION_MODES)
+        .optional()
+        .describe(
+          "'chromatic' (every semitone, the default when omitted), 'major', or 'minor' -- " +
+            "the scale `tonicPitchClass` is built on."
+        ),
+      strength: z
+        .number()
+        .min(0)
+        .max(1)
+        .optional()
+        .describe(
+          "0..1: how far each note is pulled toward its scale target. 0 is EXACTLY identity " +
+            "(no segments stored, nothing to clear). Overrides a preset's own strength when " +
+            "both are given."
+        ),
+      retuneMs: z
+        .number()
+        .min(30)
+        .max(500)
+        .optional()
+        .describe(
+          "30..500ms: how long the correction takes to arrive at a note boundary. The 30ms " +
+            "floor is the renderer's own one-analysis-hop limit, not a taste setting. " +
+            "Overrides a preset's own retuneMs when both are given."
+        ),
+      preserveVibrato: z
+        .boolean()
+        .optional()
+        .describe(
+          "true (default) moves only the note's CENTRE and leaves vibrato/drift/scoop " +
+            "untouched -- a musical result. false flattens the contour onto the target too " +
+            "(the hardTune algorithm) -- see the tool description's render-path warning " +
+            "before using this. Overrides a preset's own value when both are given."
+        ),
+    },
+  },
+  async ({ clipId, preset, tonicPitchClass, mode, strength, retuneMs, preserveVibrato }) =>
+    toToolResult(() =>
+      bridge.send("clip.autoCorrectPitch", {
+        clipId,
+        preset,
+        tonicPitchClass,
+        mode,
+        strength,
+        retuneMs,
+        preserveVibrato,
+      })
+    )
+);
+
+registerTool(
+  "clip_clear_pitch_edits",
+  {
+    title: "Remove a clip's pitch correction entirely",
+    description:
+      "Removes everything clip_auto_correct_pitch stored on a clip -- the clip renders and " +
+      "persists byte-identically to one that was never corrected afterward. Idempotent: " +
+      "clearing an already-clear clip is a harmless no-op and records no undo step. Safe to " +
+      "call on a MIDI clip (also a no-op -- MIDI notes never carry this field). Returns the " +
+      "same shape as clip_get_pitch_edits (segmentCount:0, hasPitchEdits:false on success).",
+    inputSchema: {
+      clipId: z.string().uuid().describe("Id of the clip to clear, from project_snapshot."),
+    },
+  },
+  async ({ clipId }) => toToolResult(() => bridge.send("clip.clearPitchEdits", { clipId }))
+);
+
+registerTool(
+  "clip_get_pitch_edits",
+  {
+    title: "Read back a clip's stored pitch correction",
+    description:
+      "STRICTLY READ-ONLY -- see what a prior clip_auto_correct_pitch actually did, or " +
+      "confirm a clip carries no correction at all. Never runs the detector, never edits " +
+      "anything, no undo entry. A clip that was never corrected, or was cleared, reads back " +
+      "hasPitchEdits:false, segmentCount:0, segments:[]. Returns the same shape as " +
+      "clip_auto_correct_pitch minus `appliedOptions` (nothing was applied this call): " +
+      "{clipId, hasPitchEdits, analysisVersion, retuneMs, segmentCount, isIdentity, " +
+      "segments: [{id, startSeconds, endSeconds, detectedHz, detectedConfidence, " +
+      "pitchOffsetCents, driftScale, vibratoScale}], warnings}.",
+    inputSchema: {
+      clipId: z.string().uuid().describe("Id of the clip to read, from project_snapshot."),
+    },
+  },
+  async ({ clipId }) => toToolResult(() => bridge.send("clip.getPitchEdits", { clipId }))
+);
+
 registerTool(
   "clip_delete_time_range",
   {

@@ -22,7 +22,11 @@ alone over-counts — see the method below), so a real count needs a
 derivation you can state and defend, not a bare `grep -c`.
 
 It reflects the tool surface enumerated from
-`mcp-server/src/server.ts` (**236 tools**, re-derived 2026-09-20 at the
+`mcp-server/src/server.ts` (**239 tools**, re-derived 2026-09-22 at the
+m23-q Phase 2 writer-leg close — `clip_auto_correct_pitch`/
+`clip_clear_pitch_edits`/`clip_get_pitch_edits`, all three through the
+strict-schema wrapper (the `clip_detect_pitch` precedent); before that 236 at
+the
 m39-dm drum-machine close — four `instrument_*DrumKit/DrumParam/DrumPreset`
 tools; before that 232 at the
 m39-e MCP mirror close, which added the nine `mod_*` tools —
@@ -66,16 +70,20 @@ m35-g close (claimed 208 against a measured 220, a TWELVE-tool drift, for the
 same reason) — **treat this paragraph as due for staleness at every close that
 adds a tool, not just the ones that remembered to touch it.** It was corrected
 by re-running the decomposition below, whose arithmetic then matched a live
-`tools/list` over the generated plugin bundle EXACTLY — **236 (42 direct +
-194 wrapper, MEASURED 2026-09-20 with the anchored pattern)**; it was 232
-(41 + 191) before the drum machine, with a negative control (a name that is not a tool) correctly
+`tools/list` over the generated plugin bundle EXACTLY (**as SOURCE-measured
+— the generated plugin bundle itself, `claude-plugin/server/index.mjs`, is a
+RELEASE-STEP regen this item did NOT run; treat the bundle as stale until
+that regen happens, the `daw-pro-project` §2026-09-20s precedent**) —
+**239 (42 direct + 197 wrapper, MEASURED 2026-09-22 at the m23-q Phase 2
+close)**; it was 236 (42 + 194) before that, and 232 (41 + 191) before the
+drum machine, with a negative control (a name that is not a tool) correctly
 absent. The bijection test, `mcp-server/test/audit-tools.test.ts`, defines
-`tool count = commands + |exception table B| + |exception table C|` — **231**
+`tool count = commands + |exception table B| + |exception table C|` — **234**
 MIRRORED commands + 3 Table-B tools with no backing command at all
 (`generate_image`, `generate_lyrics`, `generate_song_suno` — they call a
 generation provider directly) + 2 Table-C tools that bridge to an EXISTING
 command, `track.setInstrument`, under a friendlier name/shape
-(`instrument_set_sampler_param`, `instrument_set_sampler_zones`) = **236**.
+(`instrument_set_sampler_param`, `instrument_set_sampler_zones`) = **239**.
 ✅ **CLOSED, m23-cw (2026-09-19): the "215 mirrored of 217 wire" gap this
 paragraph used to flag is gone — `au.listPresets`/`au.loadPreset` are now
 mirrored 1:1 as `au_list_presets`/`au_load_preset`, no exception-table entry
@@ -137,15 +145,17 @@ for all nine, the direct-vs-wrapper strictness split, the nested-strict-gap
 closure on `target` (the discriminated union) and `params` (the m30-c
 precedent), and every one of those verbatim carries.
 ⚠️ The authoritative pins are `mcp-server/test/integration.test.ts`'s
-`assert.equal(result.tools.length, 236)` and `mcp-server/test/mcp-log.test.ts`'s
-`assert.equal(instrumented.length, 236)` — **NOT** a `grep -c 'registerTool('`,
+`assert.equal(result.tools.length, 239)` and `mcp-server/test/mcp-log.test.ts`'s
+`assert.equal(instrumented.length, 239)` — **NOT** a `grep -c 'registerTool('`,
 which is a known liar on this file and previously anchored this paragraph at a
 stale 194) and
 `Sources/DAWControl/Commands.swift`
-(**231 commands** — the `CommandRouter.allCommands.count == 227` pin in
+(**234 commands** — the `CommandRouter.allCommands.count == 234` pin in
 `Tests/DAWControlTests/RenderCommandTests.swift`, and in eighteen sibling
 files — **twenty pin lines across nineteen files** (one file carries two),
-counted 2026-09-19 at the m39-f close; ⚠️ three of the twenty spell it
+counted 2026-09-19 at the m39-f close, re-measured 2026-09-22 at the m23-q
+writer-leg close (231 -> 234, `clip.autoCorrectPitch`/`clip.clearPitchEdits`/
+`clip.getPitchEdits`, appended at the tail); ⚠️ three of the twenty spell it
 `all.count == N` and seventeen `allCommands.count == N`, so grep the LITERAL
 number, not the idiom)
 in the DAW Pro repo — not memory, and not the app's own in-app Copilot

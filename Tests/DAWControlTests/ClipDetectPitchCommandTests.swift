@@ -361,11 +361,15 @@ struct ClipDetectPitchCommandTests {
         // longer the tail itself, but the additive-at-end law only requires
         // it stay UNMOVED relative to what came before it, which the
         // profileIndex < pitchIndex check above still proves.
-        #expect(all.dropLast(2).last == "edit.pasteClips", "additive-at-end law (now one past clip.detectPitch)")
-        // m24-n appended project.embeddedVoices then vc.installEmbeddedVoice
-        // at the END (same law).
-        #expect(all.dropLast().last == "project.embeddedVoices")
-        #expect(all.last == "vc.installEmbeddedVoice")
-        #expect(all.dropLast(3).last == "clip.detectPitch", "clip.detectPitch is unmoved, just no longer the tail")
+        #expect(all.dropLast(5).last == "edit.pasteClips", "additive-at-end law (now three past clip.detectPitch)")
+        // m24-n appended project.embeddedVoices then vc.installEmbeddedVoice;
+        // m23-q Phase 2 appended clip.autoCorrectPitch / clip.clearPitchEdits
+        // / clip.getPitchEdits AFTER those, at the new END (same law).
+        #expect(all.dropLast(4).last == "project.embeddedVoices")
+        #expect(all.dropLast(3).last == "vc.installEmbeddedVoice")
+        #expect(all.dropLast(2).last == "clip.autoCorrectPitch")
+        #expect(all.dropLast().last == "clip.clearPitchEdits")
+        #expect(all.last == "clip.getPitchEdits")
+        #expect(all.dropLast(6).last == "clip.detectPitch", "clip.detectPitch is unmoved, just no longer the tail")
     }
 }

@@ -617,6 +617,107 @@ public struct Clip: Identifiable, Codable, Sendable, Equatable {
     /// `ClipDocument`, not this Codable — the field is threaded through
     /// `ClipDocument` init/encode/decode AND `runtimeState`.
     public var controllerLanes: [MIDIControllerLane]
+    /// Note-level pitch correction (m23-ap phase 1, design §7.1): the detected
+    /// note table plus the edits standing on it, in SOURCE-FILE seconds. `nil`
+    /// == ABSENT == today's behaviour EXACTLY; omitted from Codable when nil (a
+    /// pre-m23-ap clip stays byte-identical). `Clip.init` normalises an EMPTY
+    /// set to nil, so "no notes" and "never detected" are one state rather than
+    /// two that round-trip into each other.
+    ///
+    /// Source seconds are what make this survive trim / split / move / tempo
+    /// change without conversion, and what make take lanes free at the model
+    /// layer: `TakeLane.clip` IS a `Clip`.
+    ///
+    /// ✅ **THIS RENDERS. (Was "NOTHING RENDERS THIS YET" until 2026-09-22 —
+    /// three separate agents flagged that line as false on the same day, which
+    /// is what stale prose costs.)** `StretchRenderCache.Params` carries
+    /// `pitchEditSetHash`, `performRender` takes the curve branch when there
+    /// are edits, and the curve is latency-compensated by
+    /// `curveLatencyCompensation` (2379 frames at 48 kHz). E2 has run: on a
+    /// real dry vocal the curve path lands on the constant path's pitch to
+    /// within a quarter of a cent.
+    ///
+    /// ⚠️ **BUT `isStretchIdentity` BELOW IS STILL UNCHANGED, AND THAT IS A
+    /// SECOND HOME, NOT A DESIGN.** The widened predicate lives in
+    /// `StretchRenderCache.needsRender` because this file was locked by a
+    /// concurrent agent when the render leg landed. `paramsIdentityAgreesWithNeedsRender`
+    /// pins the two together so they cannot drift silently. **When the fold
+    /// lands here, `needsRender` collapses to `!clip.isStretchIdentity`, that
+    /// agreement test becomes tautological and must be RETIRED (not left
+    /// passing), and `ClipStretchTests:25–38` + `PitchCorrectionTests:930`
+    /// need re-reading.**
+    ///
+    /// ⚠️ **ONE THING GENUINELY DOES NOT RENDER YET:** the render path passes
+    /// `contour: []`, so a set with `driftScale`/`vibratoScale` ≠ 1 (i.e.
+    /// `preserveVibrato: false`, the `.hardTune` preset) applies only its
+    /// constant per-note offset and names the rest in
+    /// `unresolvedShapingSegmentIDs`, which nothing reads. Hard Tune therefore
+    /// sounds like Tight today. `clip.autoCorrectPitch` says so in its
+    /// `warnings`.
+    ///
+    /// ⚠️ NOTE (the m12-f MIRROR-DTO lesson, as `gainEnvelope` and
+    /// `controllerLanes` both warn): the disk path is `ClipDocument`, not this
+    /// Codable — the field is threaded through `ClipDocument`
+    /// init/encode/decode AND **both** `ClipDocument`→`Clip` reconstructions
+    /// (`ProjectDocument.runtimeState` and `TakeGroupDocument.takeGroup`), or
+    /// every edit set silently vanishes on reopen.
+    ///
+    /// ⛔⛔ **THE CARRY SITES — READ THIS BEFORE ADDING A SETTER, AND BEFORE
+    /// ADDING ANY NEW PATH THAT REBUILDS A `Clip`.** Design §7.1 claims the edit
+    /// set "survives clip trim, split, move and tempo change" because it is in
+    /// source seconds. That is true of the COORDINATES and NOT automatic in the
+    /// CODE: several edit paths rebuild a `Clip` by enumerating its fields, and
+    /// a field omitted from such a list silently takes its default. Every one of
+    /// them below now threads this field, and
+    /// `Tests/DAWCoreTests/PitchEditCarryTests.swift` pins each one:
+    ///
+    ///  * `ProjectStore.splitClip` — **twice**, once per half
+    ///  * `ProjectStore.applyTrimWindow` — the journalled trim
+    ///  * `ProjectStore.clipTrimmedToWindow` — the un-journalled trim, reached
+    ///    by overlap resolution and the import paths
+    ///  * `ProjectStore.reidentified` — duplicate / paste, AND the split-off
+    ///    tails `arrange.insertBars` / `arrange.deleteBars` produce
+    ///  * `CompFlattener.flatten` (`Takes.swift`) — comp materialisation
+    ///  * `AudioQuantizePlan.makeSlice` (`AudioQuantize.swift`) — the chop
+    ///
+    /// ⚠️ **`ProjectStore.moveClips` IS NOT ON THIS LIST AND MUST NOT BE ADDED
+    /// TO IT.** An earlier census named it; that was WRONG. It never constructs
+    /// a `Clip` — the whole VALUE travels (`var landed = moving[i]`) and only
+    /// `startBeat` is written, so this field rides along for free. A regression
+    /// leg in the suite above guards that property, so a future refactor that
+    /// "tidies" the move into an explicit rebuild reddens instead of silently
+    /// becoming a seventh lossy site.
+    ///
+    /// Persistence is a SECOND pair of hand-maintained field lists and both are
+    /// threaded: `ProjectDocument.runtimeState` and
+    /// `TakeGroupDocument.takeGroup(bundleURL:warn:)`. §7.5 calls take lanes
+    /// "free" because `TakeLaneDocument.clip` is a `ClipDocument` — true of the
+    /// DTO, false of that reconstruction. That exact gap is how `gainEnvelope`
+    /// went missing from take lanes from m13-e until m16-b3.
+    ///
+    /// **The carry is VERBATIM at every site, and that is a decision, not
+    /// laziness.** Unlike `gainEnvelope` and `controllerLanes` — CLIP-RELATIVE
+    /// BEATS, which must be re-anchored by `windowedGainEnvelope` /
+    /// `windowedControllerLanes` — these segments are SOURCE-FILE-ABSOLUTE
+    /// SECONDS (`ClipPitchFrame.timeSeconds`: "geometry-free: trims/splits don't
+    /// move these numbers"). Re-anchoring them would silently de-tune every
+    /// clip to the right of a split while leaving a healthy-looking non-nil set
+    /// behind, and `startOffsetSeconds` already records the geometry change.
+    /// Neither is the set FILTERED to the surviving window: a segment outside
+    /// the window a clip plays is never evaluated and costs nothing, while a
+    /// trim or a split is reversible and discarded tuning is not.
+    ///
+    /// One deliberate NON-carry: `ProjectStore.convertClipsToVoice` builds its
+    /// clip from a `ClipConversionSource` descriptor (which has no such field),
+    /// lands it on a NEW track, and leaves the original clip untouched — so
+    /// nothing is lost, and the new audio is a different performance whose
+    /// `detectedHz` facts would not describe it. `ProjectStore.importClipFix`
+    /// is safe for a different reason worth stating: it keeps the ORIGINAL clip
+    /// whole as a take lane (`TakeLane(name: original.name, clip: original)`)
+    /// and rebuilds comp members through `CompFlattener.flatten`, so the
+    /// tuning reaches the comped result via the carry above rather than via a
+    /// field list of its own.
+    public var pitchEdits: PitchEditSet?
 
     /// Per-clip gain bounds: a generous studio range, matching the fader's
     /// mental model (a clip can be pulled 72 dB down toward silence or pushed
@@ -641,6 +742,21 @@ public struct Clip: Identifiable, Codable, Sendable, Equatable {
     public var isStretchIdentity: Bool {
         stretchRatio == 1 && pitchShiftSemitones == 0
     }
+
+    /// True when this clip carries pitch edits that would actually bend the
+    /// curve (m23-ap) — a set of freshly detected but UNTOUCHED notes reads
+    /// false, because it renders as nothing.
+    ///
+    /// ⚠️ **DELIBERATELY NOT FOLDED INTO `isStretchIdentity` YET.** §6.4's rule
+    /// is that an empty edit set must still hit `OfflineStretcher.isIdentity`
+    /// and play the original file byte-for-byte; the corresponding rule for a
+    /// NON-empty set — that it must leave the identity bypass — belongs with
+    /// the render integration, which is gated on m23-q's unrun E2 listening
+    /// leg. Until then this is a readable fact about the model and nothing
+    /// changes what the engine does. The item that wires the curve in owns
+    /// changing `isStretchIdentity`, and should expect the byte gates that
+    /// pin today's behaviour to move with it.
+    public var hasPitchEdits: Bool { !(pitchEdits?.isIdentity ?? true) }
 
     /// Source-material window this clip consumes, in SECONDS, DERIVED from the
     /// timeline span and the stretch ratio (spec §1): the tempo-map integral
@@ -677,7 +793,8 @@ public struct Clip: Identifiable, Codable, Sendable, Equatable {
         formantPreserve: Bool = false,
         gainEnvelope: [ClipGainPoint] = [],
         controllerLanes: [MIDIControllerLane] = [],
-        takeGroupID: UUID? = nil
+        takeGroupID: UUID? = nil,
+        pitchEdits: PitchEditSet? = nil
     ) {
         self.id = id
         self.name = name
@@ -706,6 +823,12 @@ public struct Clip: Identifiable, Codable, Sendable, Equatable {
         // above). A MIDI clip heals its lanes to canonical form (at most one lane
         // per type, sorted, points canonical). Empty stays empty.
         self.controllerLanes = notes == nil ? [] : Self.canonicalControllerLanes(controllerLanes)
+        // Pitch edits (m23-ap): an EMPTY set normalises to nil, so a caller that
+        // passes `PitchEditSet.empty` and a caller that passes nothing produce
+        // the SAME clip — otherwise an empty set would round-trip to nil through
+        // the omit-when-default encoder and break Equatable across a save. The
+        // set heals its own segments in `PitchEditSet.init`.
+        self.pitchEdits = (pitchEdits?.isEmpty ?? true) ? nil : pitchEdits
     }
 
     /// Linear playback gain at `beat` (measured from the clip start): the static
@@ -902,6 +1025,7 @@ public struct Clip: Identifiable, Codable, Sendable, Equatable {
         case id, name, startBeat, lengthBeats, audioFileURL, notes, isAIGenerated
         case startOffsetSeconds, gainDb, fadeInBeats, fadeOutBeats, fadeInCurve, fadeOutCurve
         case stretchRatio, pitchShiftSemitones, formantPreserve, gainEnvelope, controllerLanes, takeGroupID
+        case pitchEdits
     }
 
     /// Decoding routes through the clamping `init`; every edit field tolerates
@@ -930,7 +1054,8 @@ public struct Clip: Identifiable, Codable, Sendable, Equatable {
             formantPreserve: try c.decodeIfPresent(Bool.self, forKey: .formantPreserve) ?? false,
             gainEnvelope: try c.decodeIfPresent([ClipGainPoint].self, forKey: .gainEnvelope) ?? [],
             controllerLanes: try c.decodeIfPresent([MIDIControllerLane].self, forKey: .controllerLanes) ?? [],
-            takeGroupID: try c.decodeIfPresent(UUID.self, forKey: .takeGroupID)
+            takeGroupID: try c.decodeIfPresent(UUID.self, forKey: .takeGroupID),
+            pitchEdits: try c.decodeIfPresent(PitchEditSet.self, forKey: .pitchEdits)
         )
     }
 
@@ -965,6 +1090,12 @@ public struct Clip: Identifiable, Codable, Sendable, Equatable {
         // Members carry their group marker; ordinary clips (nil) omit it, so a
         // pre-take clip stays byte-identical.
         try c.encodeIfPresent(takeGroupID, forKey: .takeGroupID)
+        // Pitch edits (m23-ap): written ONLY when the clip carries a non-empty
+        // set, so a clip without one carries no new key (byte-identical to a
+        // pre-m23-ap save). `init` already normalised empty to nil, so this is
+        // `encodeIfPresent` and not a second emptiness test that could disagree
+        // with the first.
+        try c.encodeIfPresent(pitchEdits, forKey: .pitchEdits)
     }
 }
 

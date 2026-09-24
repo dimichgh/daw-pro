@@ -2176,7 +2176,7 @@ public final class AudioEngine: AudioEngineControlling {
         guard !stretchDesired.isEmpty else { return }
         var live: Set<UUID> = []
         for track in tracks where track.kind == .audio {
-            for clip in track.clips where !clip.isStretchIdentity {
+            for clip in track.clips where StretchRenderCache.needsRender(clip) {
                 live.insert(clip.id)
             }
         }
@@ -2477,7 +2477,7 @@ public final class AudioEngine: AudioEngineControlling {
         // the protocol. Coalesces with any live in-flight job (same cache);
         // a FAILED render bounces silent, exactly matching live playback.
         for track in tracks where track.kind == .audio {
-            for clip in track.clips where !clip.isStretchIdentity {
+            for clip in track.clips where StretchRenderCache.needsRender(clip) {
                 guard let source = clip.audioFileURL else { continue }
                 _ = try? await stretchCache.renderIfNeeded(
                     clipID: clip.id, source: source,

@@ -762,8 +762,13 @@ struct ContentView: View {
         // ⚠️ IF THOSE PANELS EVER STOP COMPRESSING, THIS PIN OVERFLOWS. That
         // coupling is why it is written down here and not only there.
         .frame(maxHeight: .infinity)
+        // m23-ap p2-b: the term is "a bottom EDITOR PANE is on screen", not "the
+        // ROLL is". ⚠️ `editorPaneFraction` below carries no clip term at all, so
+        // a maximized pitch editor would otherwise take the maximized fraction
+        // while this row stayed un-pinned — and the two frames would over-commit
+        // the window, which is an overflow no headless gate here can see.
         .frame(height: EditorMaximize.arrangeHeight(
-                   maximized: model.panelLayout.editorMaximized && selectedMIDIClip != nil,
+                   maximized: model.panelLayout.editorMaximized && openBottomPaneClip != nil,
                    arrangeSliver: Self.maximizedArrangeSliver))
         // Keep the fix panel's composer pointed at the live audio selection. The
         // panel is thin over the model, so the view (not the model) reads the
@@ -952,7 +957,76 @@ struct ContentView: View {
             )
             .id(clip.id)
             .frame(height: geo.size.height * editorPaneFraction(geoHeight: geo.size.height))
+        } else if let clip = model.openPitchEditorClip {
+            // m23-ap p2-b — THE SECOND BOTTOM PANE. `else if` is not an
+            // arbitration and must not be mistaken for one: the two accessors
+            // resolve the SAME `selectedClipID` and filter on opposite sides of
+            // `isMIDI`, so they cannot both be non-nil (design §3.6). The
+            // ordering is a formality that makes the branch total.
+            editorSplitter(geoHeight: geo.size.height)
+            PitchEditorView(
+                clip: clip,
+                tempoMap: store.transport.tempoMap,
+                // The SAME transport source the arrange consumes — no second
+                // ticker, exactly as the roll above.
+                positionBeats: store.transport.positionBeats,
+                // m12-d, the v1 one-meter-per-clip-view policy: the meter
+                // GOVERNING THE CLIP'S START, matching the roll's call site.
+                beatsPerBar: store.transport.meterMap.beatsPerBar(atBeat: clip.startBeat),
+                layout: model.panelLayout,
+                // The app's ONE peak cache, shared with the arrange and the take
+                // lanes: splits share a file, and a second cache would re-read
+                // every one of them.
+                waveforms: model.waveformStore,
+                // Detection is injected so the pane's model never holds the
+                // store (the `ClipFixModel` precedent, design §5.4).
+                detect: { id in try await store.detectClipPitch(clipId: id) },
+                // Door 2 (§6.2) — THROUGH THE SAME FUNNEL DOOR 1 CALLS, never
+                // through a second `store.autoCorrectClipPitch` of its own.
+                //
+                // ⛔ **THE FIRST DRAFT CALLED THE STORE DIRECTLY AND HANDLED ONLY
+                // `catch`, WHICH RE-CREATED THE EXACT DEFECT DOOR 1 GUARDS
+                // AGAINST.** `autoCorrectClipPitch` RETURNS NORMALLY with
+                // `pitchEdits == nil` when the detector found no voiced runs —
+                // an instrumental, a take under the silence floor — so pressing
+                // "Natural" in this header would have done nothing and said
+                // nothing, on exactly the clip whose own status line says "we
+                // could not hear any sung notes here". `tuneVocalFromContextMenu`
+                // already answers that with a sentence written for a person, and
+                // design §6.2 is explicit: **all doors call ONE store method**,
+                // with no second policy, no second default, no second scale.
+                onApplyPreset: { preset in
+                    model.tuneVocalFromContextMenu(clipID: clip.id, preset: preset)
+                },
+                onClearTuning: { model.clearClipTuningFromContextMenu(clipID: clip.id) },
+                // ⭐ CLOSING IS EXPLICIT BECAUSE OPENING IS (design §3.6). The
+                // roll gets closing for free from deselection; this pane was
+                // opened by a deliberate act and needs a deliberate way out.
+                // Deselecting closes it too — that is the latch's own rule —
+                // but the user must not have to deselect to put it away.
+                onClose: { model.closePitchEditor() },
+                // m23-al: the pane reports that the user just ACTED inside it.
+                // THIS is what ⌘+/⌘−/⌘0 route on, via `EditorSurfaceRouter`.
+                onEngage: { model.editorEngagement.engage(.pitchEditor) },
+                // The spy seam: the header reports the very strings it drew, so
+                // p2-c's `debug.pitchEditor` echo can publish the screen rather
+                // than a re-derivation of it.
+                chrome: model.pitchEditorChrome
+            )
+            .id(clip.id)
+            .frame(height: geo.size.height * editorPaneFraction(geoHeight: geo.size.height))
         }
+    }
+
+    /// The clip whose BOTTOM EDITOR PANE is on screen — either one (m23-ap p2-b).
+    ///
+    /// ⚠️ **A LAYOUT QUESTION, NOT A SURFACE DECISION.** Anything that decides
+    /// WHICH editor an action targets must go through `AppModel.activeEditorSurface`
+    /// (engagement) or `openEditorSurface` (mount); this exists only so the
+    /// maximize pin and the pane-height expression ask the same question, and it
+    /// is used at exactly the one site that needs it.
+    private var openBottomPaneClip: Clip? {
+        selectedMIDIClip ?? model.openPitchEditorClip
     }
 
     /// The fraction of the window the editor pane is laid out at (m25-b-1) — ONE
@@ -1126,6 +1200,23 @@ struct ContentView: View {
             // Chop to Pads… (m39-pads, audio only, BOTH densities): the second
             // route to the chopper, beside the pad face's own "CHOP A CLIP…".
             onChopToPads: { clip in model.openChopToPads(clipID: clip.id) },
+            // m23-ap Phase 2 — DOOR 1, the clip context menu's "Tune Vocal"
+            // (design §6.2, the PRIMARY door). ⚠️ `TimelineLanesView` defaults
+            // both closures to a NO-OP, the `onChopToPads` precedent — which is
+            // the right shape for previews and the wrong one to ship: unbound,
+            // the menu entry draws, highlights, dismisses and does nothing.
+            // `PitchTuneDoorSiteTests.contentViewBindsTheDoor` is red until
+            // these two lines exist, and they are deliberately THIN: the whole
+            // of the behaviour (one store call, the refusal bubble, AND the
+            // silent-zero-voiced-run case) lives in `PitchCorrectionStaging`,
+            // so all three doors keep calling one method with one policy.
+            onTuneVocal: { clip, preset in
+                model.tuneVocalFromContextMenu(clipID: clip.id, preset: preset)
+            },
+            onClearPitchEdits: { clip in
+                model.clearClipTuningFromContextMenu(clipID: clip.id)
+            },
+            onOpenPitchEditor: { clip in model.openPitchEditor(clipID: clip.id) },
             // Convert Voice… (m24-m leg B, Pro clip menu): opens the panel on
             // the ids the menu's own title named, which ride the SAME store
             // seam as the wire's vc.convertClips.

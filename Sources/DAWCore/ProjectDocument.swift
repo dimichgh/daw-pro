@@ -258,7 +258,12 @@ public struct ProjectDocument: Codable, Sendable, Equatable {
                     controllerLanes: cd.controllerLanes ?? [],
                     // Take-group marker (M5 iii-a): restores comp members as
                     // store-managed clips; nil for ordinary clips.
-                    takeGroupID: cd.takeGroupId
+                    takeGroupID: cd.takeGroupId,
+                    // Pitch edits (m23-ap): absent reads as no edits; the
+                    // segments re-heal (sorted, non-overlapping, values
+                    // re-clamped) through `PitchEditSet.init`, and an empty set
+                    // normalises back to nil in `Clip.init`.
+                    pitchEdits: cd.pitchEdits
                 )
             }
             let instrument = td.instrument.map { instDoc in
@@ -1452,6 +1457,23 @@ public struct ClipDocument: Codable, Sendable, Equatable {
     /// field must be threaded through `init(from clip:)`, encode, decode, AND
     /// `runtimeState`, or every controller lane silently vanishes on reopen.
     public var controllerLanes: [MIDIControllerLane]?
+    /// Note-level pitch correction (m23-ap, design §7.3) — additive optional,
+    /// same omit-when-empty rule as `gainEnvelope`/`controllerLanes`: stored
+    /// ONLY when the clip carries a non-empty edit set, so a pre-m23-ap project
+    /// stays byte-identical across a round trip. `nil`/absent reads as no edits
+    /// on load. A project WITH edits opened by an older build has the key
+    /// ignored and the clip plays uncorrected — lossy but non-destructive,
+    /// exactly how `gainEnvelope` and `controllerLanes` already behave.
+    ///
+    /// ⚠️⚠️ Same m12-f mirror-DTO lesson, and design §7.3 calls it the trap of
+    /// its section: this field must be threaded through `init(from clip:)`,
+    /// encode, decode, AND **BOTH** `ClipDocument`→`Clip` reconstructions —
+    /// `ProjectDocument.runtimeState` for timeline clips and
+    /// `TakeGroupDocument.takeGroup` for take lanes. §7.5 calls take lanes
+    /// "free"; they are free in the DTO and NOT free in the reconstruction,
+    /// which is precisely how `gainEnvelope` silently vanished from take lanes
+    /// for three milestones until m16-b3 found it.
+    public var pitchEdits: PitchEditSet?
     /// Take-group marker (M5 iii-a) — additive optional, same omit-when-nil rule.
     /// Set only on comp member clips; a pre-take clip has no key and stays
     /// byte-identical across a round trip.
@@ -1461,6 +1483,7 @@ public struct ClipDocument: Codable, Sendable, Equatable {
         case id, name, startBeat, lengthBeats, media, notes, isAIGenerated
         case startOffsetSeconds, gainDb, fadeInBeats, fadeOutBeats, fadeInCurve, fadeOutCurve
         case stretchRatio, pitchShiftSemitones, formantPreserve, gainEnvelope, controllerLanes, takeGroupId
+        case pitchEdits
     }
 
     init(from clip: Clip, media: String?) {
@@ -1484,6 +1507,9 @@ public struct ClipDocument: Codable, Sendable, Equatable {
         formantPreserve = clip.formantPreserve ? true : nil
         gainEnvelope = clip.gainEnvelope.isEmpty ? nil : clip.gainEnvelope
         controllerLanes = clip.controllerLanes.isEmpty ? nil : clip.controllerLanes
+        // Pitch edits (m23-ap): `Clip.init` already normalised an empty set to
+        // nil, so an unedited clip carries no key here either.
+        pitchEdits = clip.pitchEdits
         takeGroupId = clip.takeGroupID
     }
 
@@ -1507,6 +1533,7 @@ public struct ClipDocument: Codable, Sendable, Equatable {
         formantPreserve = try c.decodeIfPresent(Bool.self, forKey: .formantPreserve)
         gainEnvelope = try c.decodeIfPresent([ClipGainPoint].self, forKey: .gainEnvelope)
         controllerLanes = try c.decodeIfPresent([MIDIControllerLane].self, forKey: .controllerLanes)
+        pitchEdits = try c.decodeIfPresent(PitchEditSet.self, forKey: .pitchEdits)
         takeGroupId = try c.decodeIfPresent(UUID.self, forKey: .takeGroupId)
     }
 
@@ -1541,6 +1568,9 @@ public struct ClipDocument: Codable, Sendable, Equatable {
         // Controller lanes (m16-b): omitted when nil/absent (the clip had none),
         // so a pre-m16-b clip never grows a key.
         try c.encodeIfPresent(controllerLanes, forKey: .controllerLanes)
+        // Pitch edits (m23-ap): omitted when nil/absent (the clip had none), so a
+        // pre-m23-ap clip never grows a key.
+        try c.encodeIfPresent(pitchEdits, forKey: .pitchEdits)
         try c.encodeIfPresent(takeGroupId, forKey: .takeGroupId)
     }
 }
@@ -1603,7 +1633,14 @@ public struct TakeGroupDocument: Codable, Sendable, Equatable {
                 // inherited the same gap. The main `tracks` path (:196/:200)
                 // always threaded both; take lanes now match it.
                 gainEnvelope: cd.gainEnvelope ?? [],
-                controllerLanes: cd.controllerLanes ?? [])
+                controllerLanes: cd.controllerLanes ?? [],
+                // m23-ap: threaded HERE TOO. Design §7.5 calls take lanes
+                // "free" because `TakeLaneDocument.clip` is a `ClipDocument` —
+                // true of the DTO, FALSE of this reconstruction, which is a
+                // second hand-maintained field list. That is exactly how
+                // `gainEnvelope` went missing from take lanes from m13-e until
+                // m16-b3 found it.
+                pitchEdits: cd.pitchEdits)
             // TakeLane.init strips any stray takeGroupID (payloads never nest).
             return TakeLane(id: ld.id, name: ld.name, clip: clip)
         }

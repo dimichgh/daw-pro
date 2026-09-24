@@ -93,6 +93,23 @@ import Foundation
 public enum EditorSurface: String, Sendable, Equatable, CaseIterable {
     case arrange
     case pianoRoll
+    /// The read-only vocal pitch editor (m23-ap Phase 2) — the SECOND bottom
+    /// editor pane, a sibling of the roll rather than a mode of it.
+    ///
+    /// ⭐ **A THIRD CASE RATHER THAN A `pianoRoll` FLAG, FOR THE REASON §3.3 OF
+    /// `docs/design/2026-09-22-pitch-editor-ui.md` GIVES:** the two panes edit
+    /// incompatible models on incompatible axes (`[MIDINote]` at integer pitch
+    /// vs `[NoteSegment]` at continuous `Double` midi), and every MIDI-shaped
+    /// gate of the roll — ⌘A selects NOTES, Paste pastes NOTES, DELETE routes on
+    /// `pianoRollWouldConsumeKey` — would be inherited wrongly by a mode flag.
+    ///
+    /// ⚠️ **WHAT DID NOT MOVE WITH IT, AND MUST NOT (design §3.6).**
+    /// `pianoRollWouldConsumeKey`, `SelectAllMenuPolicy`,
+    /// `ClipboardMenuPolicy.pasteMenuItem` and `DeleteMenuPolicy` all ask NOTE
+    /// questions, and a pitch SEGMENT is not a note. They stay MIDI-only; ⌘A and
+    /// DELETE *inside* the pitch editor are interaction questions that belong to
+    /// the (still unwritten) §7, not to this enum.
+    case pitchEditor
 }
 
 /// A RESOLVED verdict about which surface is active, carrying the term that
@@ -118,10 +135,18 @@ public struct ActiveEditorSurface: Sendable, Equatable {
         case notArrangeWorkspace
         /// Arrange workspace, but no MIDI clip is open.
         case noRollOpen
-        /// Roll on screen; the last engagement was the arrange.
+        /// An editor pane is on screen; the last engagement was the arrange.
+        ///
+        /// ⚠️ **SHARED BY BOTH PANES ON PURPOSE (m23-ap p2-b).** "Which pane the
+        /// user is NOT working in" is one fact, and splitting it in two would
+        /// invent a distinction no consumer can act on — the `SelectAllSurface`
+        /// single-case argument. Which pane is open is answered by
+        /// `OpenEditorSurface.Reason`, which is exactly what that verdict is for.
         case engagedArrange
         /// Roll on screen; the last engagement was the roll.
         case engagedRoll
+        /// Pitch editor on screen; the last engagement was the pitch editor.
+        case engagedPitchEditor
     }
 
     public let surface: EditorSurface
@@ -185,6 +210,14 @@ public struct OpenEditorSurface: Sendable, Equatable {
         /// it is reached the instant the user clicks a clip in the arrange, one
         /// gesture BEFORE `resolve` would call the roll active.**
         case rollOpen
+        /// An AUDIO clip is open in the pitch editor (m23-ap p2-b).
+        ///
+        /// ⚠️ **`noRollOpen` ABOVE NOW MEANS "NEITHER PANE IS OPEN", AND ITS
+        /// NAME IS DELIBERATELY UNCHANGED** — the spelling is echoed by
+        /// `debug.editorSurface` and pinned in `EditorSurfaceRouterTests`, and
+        /// the standing wire rule is ADDITIVE ONLY, never rename a live string.
+        /// A reader who needs the distinction has this case to read.
+        case pitchEditorOpen
     }
 
     public let surface: EditorSurface
@@ -240,9 +273,24 @@ public enum EditorSurfaceRouter {
     /// (`DAWProApp.swift:52`), which DAWAppKit must not depend on. The parameter
     /// is named `workspaceIsArrange` so a caller cannot pass the wrong polarity
     /// by accident.
+    ///   - pitchEditorOpen: is an AUDIO clip open in the pitch editor
+    ///     (`openPitchEditorClip != nil` — m23-ap p2-b's one rule for "the pitch
+    ///     editor is on screen")?
+    ///
+    ///     ⭐ **THE TWO PANE TERMS CANNOT BOTH BE TRUE IN THE APP, AND THAT IS
+    ///     STRUCTURAL RATHER THAN ARBITRATED** (design §3.6): both accessors
+    ///     resolve the SAME `selectedClipID`, `openEditorClip` requires
+    ///     `isMIDI` and `openPitchEditorClip` requires `!isMIDI`. So no
+    ///     one-at-a-time rule has to be written, tested or kept in sync. ⚠️ This
+    ///     FUNCTION is still total over the impossible rows — a pure rule must
+    ///     answer every input — and the roll wins them, because it is the older
+    ///     surface and a tie-break nobody can reach should not be a new
+    ///     behaviour. `EditorSurfaceRouterTests` sweeps them anyway, so if the
+    ///     app ever does reach one, the answer is pinned rather than emergent.
     nonisolated public static func resolve(
         workspaceIsArrange: Bool,
         rollOpen: Bool,
+        pitchEditorOpen: Bool,
         lastEngaged: EditorSurface
     ) -> ActiveEditorSurface {
         // ⭐ THE FIRST TWO GUARDS ARE NOT REPEATED HERE — THEY ARE CONSUMED
@@ -257,13 +305,23 @@ public enum EditorSurfaceRouter {
         // `EditorSurfaceRouterTests.fullTruthTable` sweeps all eight rows and
         // asserts BOTH the surface and the reason, so a mapping slip here is a
         // red row, not a silent re-route.
-        let open = openSurface(workspaceIsArrange: workspaceIsArrange, rollOpen: rollOpen)
+        let open = openSurface(workspaceIsArrange: workspaceIsArrange, rollOpen: rollOpen,
+                               pitchEditorOpen: pitchEditorOpen)
         switch open.reason {
         case .notArrangeWorkspace: return ActiveEditorSurface(.arrange, .notArrangeWorkspace)
         case .noRollOpen: return ActiveEditorSurface(.arrange, .noRollOpen)
         case .rollOpen:
             return lastEngaged == .pianoRoll
                 ? ActiveEditorSurface(.pianoRoll, .engagedRoll)
+                : ActiveEditorSurface(.arrange, .engagedArrange)
+        case .pitchEditorOpen:
+            // ⚠️ THE LATCH IS COMPARED AGAINST THE PANE THAT IS ACTUALLY OPEN,
+            // never merely "is it non-arrange". A latch left on `.pianoRoll` by
+            // an earlier MIDI clip must not hand ⌘+ to a roll that is not on
+            // screen — the same failure the workspace term exists to prevent,
+            // one surface over.
+            return lastEngaged == .pitchEditor
+                ? ActiveEditorSurface(.pitchEditor, .engagedPitchEditor)
                 : ActiveEditorSurface(.arrange, .engagedArrange)
         }
     }
@@ -300,13 +358,20 @@ public enum EditorSurfaceRouter {
     ///     because the roll is not even on screen to show what happened.
     ///   - rollOpen: is a MIDI clip open in the piano roll (`openEditorClip !=
     ///     nil` — the tree's ONE rule for "the roll is on screen")?
+    ///   - pitchEditorOpen: is an AUDIO clip open in the pitch editor
+    ///     (`openPitchEditorClip != nil`)? Applied AFTER `rollOpen`: the two are
+    ///     mutually exclusive in the app (see `resolve`), so the order is a
+    ///     formality — but fixing it is what makes the truth table TOTAL rather
+    ///     than leaving one cell to whichever guard happened to be written first.
     nonisolated public static func openSurface(
         workspaceIsArrange: Bool,
-        rollOpen: Bool
+        rollOpen: Bool,
+        pitchEditorOpen: Bool
     ) -> OpenEditorSurface {
         guard workspaceIsArrange else { return OpenEditorSurface(.arrange, .notArrangeWorkspace) }
-        guard rollOpen else { return OpenEditorSurface(.arrange, .noRollOpen) }
-        return OpenEditorSurface(.pianoRoll, .rollOpen)
+        if rollOpen { return OpenEditorSurface(.pianoRoll, .rollOpen) }
+        if pitchEditorOpen { return OpenEditorSurface(.pitchEditor, .pitchEditorOpen) }
+        return OpenEditorSurface(.arrange, .noRollOpen)
     }
 }
 

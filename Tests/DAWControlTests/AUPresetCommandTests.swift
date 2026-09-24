@@ -162,7 +162,7 @@ struct AUPresetCommandTests {
     func commandsAreCanonical() {
         #expect(CommandRouter.allCommands.contains("au.listPresets"))
         #expect(CommandRouter.allCommands.contains("au.loadPreset"))
-        #expect(CommandRouter.allCommands.count == 231)
+        #expect(CommandRouter.allCommands.count == 234)   // -> 234 at m23-q (clip.autoCorrectPitch/clip.clearPitchEdits/clip.getPitchEdits, appended at the tail)
         // Placed next to their au.* siblings, NOT at the tail — the m23-ct
         // precedent (a tail append reddened 19 end-relative assertions across
         // 7 files). This pins the placement, not just the presence.

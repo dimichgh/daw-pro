@@ -568,6 +568,21 @@ final class AppModel {
                                                            to: arrangeSelection) {
                 pianoRollNoteSelection.dropForWidenedArrangeSelection()
             }
+            // m23-ap p2-b — ⭐ "SELECTING AWAY **CLOSES**", the chosen half of
+            // design §3.6's named pair. The accessor's `id == selectedClipID`
+            // term would only HIDE the pane; without this the latch survives, so
+            // open A → select B → select A again would make the pane spring back,
+            // which is a surprise a novice cannot explain.
+            //
+            // ⚠️ THE PREDICATE IS "CHANGED TO ANYTHING **ELSE**", LITERALLY —
+            // not "changed". `openPitchEditor` writes the selection FIRST and the
+            // latch second, and a bare `oldValue != arrangeSelection` here would
+            // clear the latch that call is about to set. Widening a selection
+            // while the focus clip stays put likewise leaves the pane alone.
+            if pitchEditorRequestedClipID != nil,
+               arrangeSelection.focusID != pitchEditorRequestedClipID {
+                pitchEditorRequestedClipID = nil
+            }
         }
     }
 
@@ -3175,6 +3190,78 @@ final class AppModel {
         return nil
     }
 
+    // MARK: - The pitch editor pane (m23-ap Phase 2, p2-b)
+
+    /// THE LATCH BEHIND THE SECOND BOTTOM PANE — set ONLY by an explicit open
+    /// (`openPitchEditor(clipID:)`), cleared by `closePitchEditor()` and by
+    /// selecting any other clip (see `arrangeSelection`'s `didSet`).
+    ///
+    /// ⭐⭐ **A LATCH AND NOT A DERIVATION, AND THE REASON IS A PRODUCT ONE**
+    /// (design §3.6). A MIDI clip *is* notes, so a note editor is always the
+    /// right editor for it and auto-opening is correct. An audio clip may be a
+    /// drum loop, a rendered stem, a field recording or a vocal — and SwiftF0 is
+    /// a **monophonic** detector. Auto-opening a vocal pitch editor on every
+    /// audio-clip selection would make a claim the app cannot support, on the
+    /// majority of audio clips in a real project. **So opening it is an explicit
+    /// act.**
+    private var pitchEditorRequestedClipID: UUID?
+
+    /// The clip the PITCH EDITOR is actually open on: the explicit request,
+    /// re-resolved against the live store and filtered to AUDIO.
+    ///
+    /// Four properties fall out of this shape, and each is the reason for a term
+    /// (design §3.6):
+    ///
+    ///  1. **The two panes are mutually exclusive BY CONSTRUCTION, not by
+    ///     arbitration.** Both resolve the SAME `selectedClipID`; the roll's
+    ///     accessor requires `isMIDI`, this requires `!isMIDI`. They cannot both
+    ///     be non-nil, so no one-at-a-time rule has to be written, tested or kept
+    ///     in sync.
+    ///  2. **Selecting another clip closes it**, because the `id ==
+    ///     selectedClipID` term fails — no `onChange` watcher needed.
+    ///  3. **A deleted clip closes it**, because the store lookup returns nil: a
+    ///     stale id after an undo resolves to nil here and the pane goes away.
+    ///  4. ⚠️ **THE ROLL'S CENSUS STAYS AT 14.** This accessor does not mention
+    ///     `openEditorClip`, and an implementer who finds themselves adding a
+    ///     mention should stop — that is the second-computation failure
+    ///     `EditorSurfaceOwnershipSiteTests` exists to catch.
+    var openPitchEditorClip: Clip? {
+        guard let id = pitchEditorRequestedClipID, id == selectedClipID else { return nil }
+        for track in store.tracks {
+            if let clip = track.clips.first(where: { $0.id == id }), !clip.isMIDI {
+                return clip
+            }
+        }
+        return nil
+    }
+
+    /// Open the pitch editor on an audio clip — the ONE explicit door
+    /// (`ClipBlock`'s "Open Note Editor…" context item today; `view.openPitchEditor`
+    /// when p2-c lands).
+    ///
+    /// ⚠️ **SELECTION FIRST, LATCH SECOND, AND THE ORDER IS LOAD-BEARING.**
+    /// `selectedClipID`'s setter runs `arrangeSelection`'s `didSet`, which clears
+    /// a latch pointing at any OTHER clip; writing the latch first would have that
+    /// pass throw it away again.
+    ///
+    /// No filtering here beyond the store lookup: a MIDI clip simply never
+    /// resolves through `openPitchEditorClip`, so the pane stays shut rather than
+    /// opening empty. The DOOR is the place that hides itself (the "Chop to
+    /// Pads" rule — hidden, never offered-then-errored).
+    func openPitchEditor(clipID: UUID) {
+        selectedClipID = clipID
+        pitchEditorRequestedClipID = clipID
+    }
+
+    /// Close the pitch editor, leaving the clip selected.
+    ///
+    /// ⭐ **AN EXPLICIT DOOR, BECAUSE OPENING IS EXPLICIT.** The roll gets
+    /// closing for free from deselection; this does not — a pane that opened on
+    /// a deliberate act has to be closeable by one (design §3.6).
+    func closePitchEditor() {
+        pitchEditorRequestedClipID = nil
+    }
+
     /// WHICH EDITING SURFACE THE USER IS WORKING IN (m23-al) — the ONE accessor,
     /// and the only thing `zoomIn`/`zoomOut`/`zoomReset` are allowed to read.
     ///
@@ -3192,6 +3279,7 @@ final class AppModel {
         EditorSurfaceRouter.resolve(
             workspaceIsArrange: workspaceMode == .arrange,
             rollOpen: openEditorClip != nil,
+            pitchEditorOpen: openPitchEditorClip != nil,
             lastEngaged: editorEngagement.lastEngaged)
     }
 
@@ -3218,7 +3306,8 @@ final class AppModel {
     var openEditorSurface: OpenEditorSurface {
         EditorSurfaceRouter.openSurface(
             workspaceIsArrange: workspaceMode == .arrange,
-            rollOpen: openEditorClip != nil)
+            rollOpen: openEditorClip != nil,
+            pitchEditorOpen: openPitchEditorClip != nil)
     }
 
     // MARK: Space-bar transport toggle (m17-d)
@@ -3493,6 +3582,14 @@ final class AppModel {
     /// Peak cache for audio-clip waveforms, shared across the window so a file is
     /// read off-main once and reused by every clip that windows it.
     let waveformStore = WaveformStore()
+
+    /// m23-ap p2-b — WHAT THE PITCH EDITOR'S HEADER ACTUALLY DREW. App-held so
+    /// it survives the pane's own rebuilds and so `p2-c`'s `debug.pitchEditor`
+    /// echo can publish the screen rather than a second derivation of it. See
+    /// `PitchEditorChromeLedger`; the `pianoRollBarOpsStyle` precedent, and
+    /// deliberately non-observable for the same reason (it is written during
+    /// `body`).
+    @ObservationIgnored let pitchEditorChrome = PitchEditorChromeLedger()
 
     /// Per-panel Simple/Pro density (M8 sp-a). App-side sticky PREFERENCE (never
     /// project data): the UserDefaults backing persists each panel's mode under
@@ -5570,7 +5667,7 @@ final class AppModel {
     }
 
     /// `debug.panelLayout {sidebarWidth?, editorFraction?, rowHeight?,
-    /// pianoRollPPB?, pianoRollRowHeight?, mixerInsertsCollapsed?, followPlayhead?, auditionEnabled?,
+    /// pianoRollPPB?, pitchEditorPPB?, pianoRollRowHeight?, mixerInsertsCollapsed?, followPlayhead?, auditionEnabled?,
     /// waveformNormalize?, waveformVerticalZoom?, editorMaximized?,
     /// pianoRollMinimap?, pianoRollCenterPitch?, reset?}` —
     /// stages the adjustable window layout (beta m10-d)
@@ -5602,6 +5699,10 @@ final class AppModel {
         if let f = params["editorFraction"]?.doubleValue { panelLayout.setEditorFraction(CGFloat(f)) }
         if let h = params["rowHeight"]?.doubleValue { panelLayout.setRowHeight(CGFloat(h)) }
         if let z = params["pianoRollPPB"]?.doubleValue { panelLayout.setPianoRollPPB(CGFloat(z)) }
+        // m23-ap p2-b — DEBUG TIER on purpose (design §5.8): `view.panelLayout`
+        // owns only what determines WHAT A CAPTURE CAN SEE and accepts exactly
+        // two keys, so this one is a rejected unknown key there, deliberately.
+        if let z = params["pitchEditorPPB"]?.doubleValue { panelLayout.setPitchEditorPPB(CGFloat(z)) }
         // m25-b-4: the roll's VERTICAL zoom — one more `PanelLayoutStore` slot, and
         // it rides here for the reason recorded above rather than as a new verb: a
         // pitch-row height changes no project byte and no sound, so it is view
@@ -5700,6 +5801,7 @@ final class AppModel {
             "editorFraction": .number(Double(panelLayout.editorFraction)),
             "rowHeight": .number(Double(panelLayout.rowHeight)),
             "pianoRollPPB": .number(Double(panelLayout.pianoRollPPB)),
+            "pitchEditorPPB": .number(Double(panelLayout.pitchEditorPPB)),
             "pianoRollRowHeight": .number(Double(panelLayout.pianoRollRowHeight)),
             "mixerInsertsCollapsed": .bool(panelLayout.mixerInsertsCollapsed),
             "followPlayhead": .bool(panelLayout.followPlayhead),
@@ -6140,18 +6242,21 @@ final class AppModel {
     func zoomIn() {
         switch activeEditorSurface.surface {
         case .pianoRoll: zoomPianoRollIn()
+        case .pitchEditor: zoomPitchEditorIn()
         case .arrange: zoomArrangeIn()
         }
     }
     func zoomOut() {
         switch activeEditorSurface.surface {
         case .pianoRoll: zoomPianoRollOut()
+        case .pitchEditor: zoomPitchEditorOut()
         case .arrange: zoomArrangeOut()
         }
     }
     func zoomReset() {
         switch activeEditorSurface.surface {
         case .pianoRoll: zoomPianoRollReset()
+        case .pitchEditor: zoomPitchEditorReset()
         case .arrange: zoomArrangeReset()
         }
     }
@@ -6165,6 +6270,23 @@ final class AppModel {
     func zoomPianoRollIn() { panelLayout.setPianoRollPPB(PianoRollZoom.zoomedIn(panelLayout.pianoRollPPB)) }
     func zoomPianoRollOut() { panelLayout.setPianoRollPPB(PianoRollZoom.zoomedOut(panelLayout.pianoRollPPB)) }
     func zoomPianoRollReset() { panelLayout.setPianoRollPPB(PianoRollZoom.defaultPixelsPerBeat) }
+
+    // MARK: Pitch-editor zoom (m23-ap p2-b)
+
+    /// The second bottom pane's horizontal zoom entry points — `zoomPianoRollIn`'s
+    /// shape, one surface over: every driver (the ⌘ router above and
+    /// `debug.panelLayout {pitchEditorPPB}`) mutates the ONE persisted
+    /// `panelLayout.pitchEditorPPB` slot, clamped by the store, and the pane's
+    /// `PitchEditorGeometry` re-reads it.
+    ///
+    /// The LADDER is `PianoRollZoom`'s, shared rather than copied: a second
+    /// ladder would let the two bottom panes disagree about what "one step in"
+    /// means. ⚠️ NOTHING HERE MAY CALL `editorEngagement.engage` — a router that
+    /// engaged the surface it just routed to would be self-confirming and would
+    /// latch forever (`EditorSurfaceOwnershipSiteTests.noZoomEntryPointEngages`).
+    func zoomPitchEditorIn() { panelLayout.setPitchEditorPPB(PianoRollZoom.zoomedIn(panelLayout.pitchEditorPPB)) }
+    func zoomPitchEditorOut() { panelLayout.setPitchEditorPPB(PianoRollZoom.zoomedOut(panelLayout.pitchEditorPPB)) }
+    func zoomPitchEditorReset() { panelLayout.setPitchEditorPPB(PianoRollZoom.defaultPixelsPerBeat) }
 
     // MARK: Piano-roll VERTICAL zoom — pitch-row height (m25-b-4)
 
@@ -6639,6 +6761,7 @@ final class AppModel {
             "workspaceMode": .string(workspaceMode.rawValue),
             "arrangePPB": .number(Double(arrangePPB)),
             "pianoRollPPB": .number(Double(panelLayout.pianoRollPPB)),
+            "pitchEditorPPB": .number(Double(panelLayout.pitchEditorPPB)),
             "pianoRollRowHeight": .number(Double(panelLayout.pianoRollRowHeight)),
             // THE INSTRUMENT, NOT AN INPUT (m23-al). Reported here beside the
             // verdict precisely so the DIVERGENCE between SwiftUI focus and the
@@ -7194,11 +7317,12 @@ final class AppModel {
                 // funnel calls (`clickClip`, the roll's R1–R8), so the seam cannot
                 // drift from the feature.
                 guard let raw = params["surface"]?.stringValue else {
-                    throw DebugError("act \"engage\" needs 'surface' — \"arrange\" or \"pianoRoll\"")
+                    throw DebugError("act \"engage\" needs 'surface' — \"arrange\", "
+                        + "\"pianoRoll\" or \"pitchEditor\"")
                 }
                 guard let surface = EditorSurface(rawValue: raw) else {
-                    throw DebugError("unknown surface \"\(raw)\" — expected \"arrange\" "
-                        + "or \"pianoRoll\"")
+                    throw DebugError("unknown surface \"\(raw)\" — expected \"arrange\", "
+                        + "\"pianoRoll\" or \"pitchEditor\"")
                 }
                 // THE POST-CONDITION IS ENFORCED, LOUDLY, following
                 // `act:"automationPoints"` (below): engaging the ROLL while no
@@ -7212,6 +7336,16 @@ final class AppModel {
                         + "roll — no MIDI clip is selected, so `openEditorClip` is nil and the "
                         + "router would resolve straight back to \"arrange\" (select a MIDI clip "
                         + "first)")
+                }
+                // m23-ap p2-b — THE SAME UNSATISFIABLE-POST-CONDITION RULE, one
+                // surface over. Engaging the pitch editor while no AUDIO clip is
+                // open in it is unsatisfiable for exactly the roll's reason:
+                // `resolve` would override it to `.arrange` on the very next read.
+                if surface == .pitchEditor, openPitchEditorClip == nil {
+                    throw DebugError("act \"engage\" surface \"pitchEditor\" needs an open pitch "
+                        + "editor — nothing has opened one, so `openPitchEditorClip` is nil and "
+                        + "the router would resolve straight back to \"arrange\" (open an audio "
+                        + "clip's note editor first)")
                 }
                 // DELIBERATELY DOES NOT FORCE `workspaceMode`, unlike "click" and
                 // "clickTrack": engagement is not a workspace-scoped gesture, and a

@@ -4,9 +4,10 @@ import Testing
 
 /// m23-al-1 — the ONE home for "which editing surface is the user working in?".
 ///
-/// WHY THE WHOLE 2×2×2 TABLE AND NOT A HANDFUL OF EXAMPLES. `resolve` has three
-/// boolean-shaped inputs and four outcomes, so the table is EIGHT rows and a
-/// suite that swept six of them would be leaving the untested pair to chance.
+/// WHY THE WHOLE 2×2×2×3 TABLE AND NOT A HANDFUL OF EXAMPLES. `resolve` has
+/// three boolean-shaped inputs and a three-case latch, so the table is
+/// TWENTY-FOUR rows (m23-ap p2-b grew it from eight) and a suite that swept
+/// twenty of them would be leaving the untested four to chance.
 /// Specifically the four `workspaceIsArrange == false` rows are the ones that pin
 /// the Mix-console term — the term the design names as "the easiest thing to
 /// drop", because `openEditorClip` looks like it already means "the roll is on
@@ -34,6 +35,7 @@ struct EditorSurfaceRouterTests {
     private struct Row {
         let workspaceIsArrange: Bool
         let rollOpen: Bool
+        let pitchEditorOpen: Bool
         let lastEngaged: EditorSurface
         let surface: EditorSurface
         let reason: ActiveEditorSurface.Reason
@@ -46,49 +48,105 @@ struct EditorSurfaceRouterTests {
     /// and `engagedRoll` for row 4, and only row 4 is a behaviour change. Both
     /// are pinned.
     private static let table: [Row] = [
-        // The Mix console: no PianoRollView is MOUNTED, whatever else is true.
-        Row(workspaceIsArrange: false, rollOpen: false, lastEngaged: .arrange,
-            surface: .arrange, reason: .notArrangeWorkspace),
-        Row(workspaceIsArrange: false, rollOpen: false, lastEngaged: .pianoRoll,
-            surface: .arrange, reason: .notArrangeWorkspace),
-        Row(workspaceIsArrange: false, rollOpen: true, lastEngaged: .arrange,
-            surface: .arrange, reason: .notArrangeWorkspace),
+        // ═══ THE MIX CONSOLE — no editor pane is MOUNTED, whatever else is true.
+        Row(workspaceIsArrange: false, rollOpen: false, pitchEditorOpen: false,
+            lastEngaged: .arrange, surface: .arrange, reason: .notArrangeWorkspace),
+        Row(workspaceIsArrange: false, rollOpen: false, pitchEditorOpen: false,
+            lastEngaged: .pianoRoll, surface: .arrange, reason: .notArrangeWorkspace),
+        Row(workspaceIsArrange: false, rollOpen: false, pitchEditorOpen: false,
+            lastEngaged: .pitchEditor, surface: .arrange, reason: .notArrangeWorkspace),
+        Row(workspaceIsArrange: false, rollOpen: false, pitchEditorOpen: true,
+            lastEngaged: .arrange, surface: .arrange, reason: .notArrangeWorkspace),
+        Row(workspaceIsArrange: false, rollOpen: false, pitchEditorOpen: true,
+            lastEngaged: .pianoRoll, surface: .arrange, reason: .notArrangeWorkspace),
+        // ⭐ THE PITCH-EDITOR TWIN OF THE ROW THE WHOLE MIX TERM EXISTS FOR: an
+        // audio clip is still latched open AND the latch still says the pitch
+        // editor — but the console is up and there is no pane to zoom.
+        Row(workspaceIsArrange: false, rollOpen: false, pitchEditorOpen: true,
+            lastEngaged: .pitchEditor, surface: .arrange, reason: .notArrangeWorkspace),
+        Row(workspaceIsArrange: false, rollOpen: true, pitchEditorOpen: false,
+            lastEngaged: .arrange, surface: .arrange, reason: .notArrangeWorkspace),
         // ⭐ THE ROW THE WHOLE MIX TERM EXISTS FOR: a MIDI clip is still selected
-        // (so `openEditorClip != nil`) and the latch still says the roll — but the
-        // console is up and there is no roll to zoom.
-        Row(workspaceIsArrange: false, rollOpen: true, lastEngaged: .pianoRoll,
-            surface: .arrange, reason: .notArrangeWorkspace),
+        // (so `openEditorClip != nil`) and the latch still says the roll.
+        Row(workspaceIsArrange: false, rollOpen: true, pitchEditorOpen: false,
+            lastEngaged: .pianoRoll, surface: .arrange, reason: .notArrangeWorkspace),
+        Row(workspaceIsArrange: false, rollOpen: true, pitchEditorOpen: false,
+            lastEngaged: .pitchEditor, surface: .arrange, reason: .notArrangeWorkspace),
+        Row(workspaceIsArrange: false, rollOpen: true, pitchEditorOpen: true,
+            lastEngaged: .arrange, surface: .arrange, reason: .notArrangeWorkspace),
+        Row(workspaceIsArrange: false, rollOpen: true, pitchEditorOpen: true,
+            lastEngaged: .pianoRoll, surface: .arrange, reason: .notArrangeWorkspace),
+        Row(workspaceIsArrange: false, rollOpen: true, pitchEditorOpen: true,
+            lastEngaged: .pitchEditor, surface: .arrange, reason: .notArrangeWorkspace),
 
-        // The arrange workspace with no clip open: the latch is not consulted.
-        Row(workspaceIsArrange: true, rollOpen: false, lastEngaged: .arrange,
-            surface: .arrange, reason: .noRollOpen),
-        // ⭐ A CLOSED ROLL CAN NEVER BE THE ACTIVE SURFACE, however the latch reads.
-        Row(workspaceIsArrange: true, rollOpen: false, lastEngaged: .pianoRoll,
-            surface: .arrange, reason: .noRollOpen),
+        // ═══ THE ARRANGE WORKSPACE WITH NOTHING OPEN: the latch is not consulted.
+        Row(workspaceIsArrange: true, rollOpen: false, pitchEditorOpen: false,
+            lastEngaged: .arrange, surface: .arrange, reason: .noRollOpen),
+        // ⭐ A CLOSED PANE CAN NEVER BE THE ACTIVE SURFACE, however the latch reads
+        // — and that is now TWO mutants this pair of rows kills, not one.
+        Row(workspaceIsArrange: true, rollOpen: false, pitchEditorOpen: false,
+            lastEngaged: .pianoRoll, surface: .arrange, reason: .noRollOpen),
+        Row(workspaceIsArrange: true, rollOpen: false, pitchEditorOpen: false,
+            lastEngaged: .pitchEditor, surface: .arrange, reason: .noRollOpen),
 
-        // Roll on screen — now, and only now, the latch decides.
-        Row(workspaceIsArrange: true, rollOpen: true, lastEngaged: .arrange,
-            surface: .arrange, reason: .engagedArrange),
-        Row(workspaceIsArrange: true, rollOpen: true, lastEngaged: .pianoRoll,
-            surface: .pianoRoll, reason: .engagedRoll),
+        // ═══ THE PITCH EDITOR ON SCREEN — now, and only now, the latch decides.
+        Row(workspaceIsArrange: true, rollOpen: false, pitchEditorOpen: true,
+            lastEngaged: .arrange, surface: .arrange, reason: .engagedArrange),
+        // ⚠️ A STALE `.pianoRoll` LATCH MUST NOT CLAIM THE PITCH EDITOR. `resolve`
+        // compares the latch against the pane that is ACTUALLY open, never
+        // merely against "is it non-arrange" — otherwise ⌘+ would zoom a roll
+        // that is not on screen, which is the failure the workspace term exists
+        // to prevent, one surface over.
+        Row(workspaceIsArrange: true, rollOpen: false, pitchEditorOpen: true,
+            lastEngaged: .pianoRoll, surface: .arrange, reason: .engagedArrange),
+        Row(workspaceIsArrange: true, rollOpen: false, pitchEditorOpen: true,
+            lastEngaged: .pitchEditor, surface: .pitchEditor, reason: .engagedPitchEditor),
+
+        // ═══ THE ROLL ON SCREEN.
+        Row(workspaceIsArrange: true, rollOpen: true, pitchEditorOpen: false,
+            lastEngaged: .arrange, surface: .arrange, reason: .engagedArrange),
+        Row(workspaceIsArrange: true, rollOpen: true, pitchEditorOpen: false,
+            lastEngaged: .pianoRoll, surface: .pianoRoll, reason: .engagedRoll),
+        // ⚠️ AND THE MIRROR: a `.pitchEditor` latch must not claim the ROLL.
+        Row(workspaceIsArrange: true, rollOpen: true, pitchEditorOpen: false,
+            lastEngaged: .pitchEditor, surface: .arrange, reason: .engagedArrange),
+
+        // ═══ BOTH PANES "OPEN" — UNREACHABLE IN THE APP, PINNED ANYWAY.
+        // `AppModel.openEditorClip` requires `isMIDI` and `openPitchEditorClip`
+        // requires `!isMIDI` of the SAME `selectedClipID`, so these three rows
+        // cannot occur (design §3.6, property 1). A pure rule must still answer
+        // them, and the ROLL wins: it is the older surface, and a tie-break
+        // nobody can reach must not be a new behaviour. ⭐ If the app ever DOES
+        // reach one, this is the pin that makes the answer a decision rather
+        // than whichever guard happened to be written first.
+        Row(workspaceIsArrange: true, rollOpen: true, pitchEditorOpen: true,
+            lastEngaged: .arrange, surface: .arrange, reason: .engagedArrange),
+        Row(workspaceIsArrange: true, rollOpen: true, pitchEditorOpen: true,
+            lastEngaged: .pianoRoll, surface: .pianoRoll, reason: .engagedRoll),
+        Row(workspaceIsArrange: true, rollOpen: true, pitchEditorOpen: true,
+            lastEngaged: .pitchEditor, surface: .arrange, reason: .engagedArrange),
     ]
 
-    @Test("resolve sweeps the full 2×2×2 table, asserting BOTH the surface and the reason")
+    @Test("resolve sweeps the full 2×2×2×3 table, asserting BOTH the surface and the reason")
     func fullTruthTable() {
         // Fixture check first: the table really is the whole product space, not
         // seven rows plus a duplicate. A sweep with a missing row passes exactly
         // as loudly as a complete one.
-        #expect(Self.table.count == 8)
-        let keys = Set(Self.table.map { "\($0.workspaceIsArrange)/\($0.rollOpen)/\($0.lastEngaged)" })
-        #expect(keys.count == 8, "the table must cover each input triple exactly once")
+        #expect(Self.table.count == 24)
+        let keys = Set(Self.table.map {
+            "\($0.workspaceIsArrange)/\($0.rollOpen)/\($0.pitchEditorOpen)/\($0.lastEngaged)"
+        })
+        #expect(keys.count == 24, "the table must cover each input tuple exactly once")
 
         for row in Self.table {
             let got = EditorSurfaceRouter.resolve(
                 workspaceIsArrange: row.workspaceIsArrange,
                 rollOpen: row.rollOpen,
+                pitchEditorOpen: row.pitchEditorOpen,
                 lastEngaged: row.lastEngaged)
             let label = "workspaceIsArrange=\(row.workspaceIsArrange) "
-                + "rollOpen=\(row.rollOpen) lastEngaged=\(row.lastEngaged)"
+                + "rollOpen=\(row.rollOpen) pitchEditorOpen=\(row.pitchEditorOpen) "
+                + "lastEngaged=\(row.lastEngaged)"
             // Field-by-field, NOT against a constructed expectation: the
             // `fileprivate init` on `ActiveEditorSurface` means a test cannot mint
             // one, and widening it to make `==` convenient would destroy the very
@@ -98,23 +156,37 @@ struct EditorSurfaceRouterTests {
         }
     }
 
-    @Test("the piano roll is the active surface in EXACTLY ONE of the eight rows")
-    func exactlyOneRollRow() {
+    @Test("each editor pane is the active surface in EXACTLY the rows it should be")
+    func eachPaneWinsExactlyItsOwnRows() {
         // The anti-vacuity twin of the sweep above: a resolver hardwired to
-        // `.arrange` passes every `.arrange` row, and a resolver that returned
-        // `.pianoRoll` whenever the roll is open would pass row 8 too. Counting
-        // the rows pins both mutants at once.
-        var rollRows = 0
+        // `.arrange` passes every `.arrange` row, and a resolver that returned a
+        // pane whenever that pane was open would pass its winning row too.
+        // Counting the rows pins both mutants at once, now on both panes.
+        //
+        // ⭐ THE ROLL'S COUNT IS **2**, NOT 1, AND THE SECOND ONE IS NOT A BUG:
+        // it is the unreachable both-open row that the table above decides in
+        // the roll's favour. Writing 1 here would be the "I expected the old
+        // number" fix that hides a real decision.
+        var rollRows: [String] = []
+        var pitchRows: [String] = []
         for workspace in [true, false] {
             for open in [true, false] {
-                for engaged in EditorSurface.allCases {
-                    let got = EditorSurfaceRouter.resolve(
-                        workspaceIsArrange: workspace, rollOpen: open, lastEngaged: engaged)
-                    if got.surface == .pianoRoll { rollRows += 1 }
+                for pitch in [true, false] {
+                    for engaged in EditorSurface.allCases {
+                        let got = EditorSurfaceRouter.resolve(
+                            workspaceIsArrange: workspace, rollOpen: open,
+                            pitchEditorOpen: pitch, lastEngaged: engaged)
+                        let key = "\(workspace)/\(open)/\(pitch)/\(engaged)"
+                        if got.surface == .pianoRoll { rollRows.append(key) }
+                        if got.surface == .pitchEditor { pitchRows.append(key) }
+                    }
                 }
             }
         }
-        #expect(rollRows == 1)
+        #expect(rollRows == ["true/true/true/pianoRoll", "true/true/false/pianoRoll"],
+                "the roll wins exactly its own rows; got \(rollRows)")
+        #expect(pitchRows == ["true/false/true/pitchEditor"],
+                "the pitch editor wins exactly its own row; got \(pitchRows)")
     }
 
     @Test("every Reason case is reachable — no term is dead")
@@ -122,10 +194,12 @@ struct EditorSurfaceRouterTests {
         var seen: Set<ActiveEditorSurface.Reason> = []
         for workspace in [true, false] {
             for open in [true, false] {
-                for engaged in EditorSurface.allCases {
-                    seen.insert(EditorSurfaceRouter.resolve(
-                        workspaceIsArrange: workspace, rollOpen: open,
-                        lastEngaged: engaged).reason)
+                for pitch in [true, false] {
+                    for engaged in EditorSurface.allCases {
+                        seen.insert(EditorSurfaceRouter.resolve(
+                            workspaceIsArrange: workspace, rollOpen: open,
+                            pitchEditorOpen: pitch, lastEngaged: engaged).reason)
+                    }
                 }
             }
         }
@@ -139,13 +213,17 @@ struct EditorSurfaceRouterTests {
     func reasonAndSurfaceAgree() {
         for workspace in [true, false] {
             for open in [true, false] {
-                for engaged in EditorSurface.allCases {
-                    let got = EditorSurfaceRouter.resolve(
-                        workspaceIsArrange: workspace, rollOpen: open, lastEngaged: engaged)
-                    switch got.reason {
-                    case .engagedRoll: #expect(got.surface == .pianoRoll)
-                    case .notArrangeWorkspace, .noRollOpen, .engagedArrange:
-                        #expect(got.surface == .arrange)
+                for pitch in [true, false] {
+                    for engaged in EditorSurface.allCases {
+                        let got = EditorSurfaceRouter.resolve(
+                            workspaceIsArrange: workspace, rollOpen: open,
+                            pitchEditorOpen: pitch, lastEngaged: engaged)
+                        switch got.reason {
+                        case .engagedRoll: #expect(got.surface == .pianoRoll)
+                        case .engagedPitchEditor: #expect(got.surface == .pitchEditor)
+                        case .notArrangeWorkspace, .noRollOpen, .engagedArrange:
+                            #expect(got.surface == .arrange)
+                        }
                     }
                 }
             }
@@ -158,7 +236,8 @@ struct EditorSurfaceRouterTests {
             for row in Self.table {
                 let got = EditorSurfaceRouter.resolve(
                     workspaceIsArrange: row.workspaceIsArrange,
-                    rollOpen: row.rollOpen, lastEngaged: row.lastEngaged)
+                    rollOpen: row.rollOpen, pitchEditorOpen: row.pitchEditorOpen,
+                    lastEngaged: row.lastEngaged)
                 #expect(got.surface == row.surface)
                 #expect(got.reason == row.reason)
             }
@@ -172,28 +251,38 @@ struct EditorSurfaceRouterTests {
     /// `resolve` answers "which surface is the user WORKING IN"; this answers
     /// "which surface is OPEN IN FRONT OF THEM", and the two deliberately
     /// disagree in exactly the state the user reported as a bug.
-    @Test("openSurface sweeps its full 2×2 table, asserting BOTH the surface and the reason")
+    @Test("openSurface sweeps its full 2×2×2 table, asserting BOTH the surface and the reason")
     func openSurfaceTruthTable() {
-        let rows: [(workspaceIsArrange: Bool, rollOpen: Bool,
+        let rows: [(workspaceIsArrange: Bool, rollOpen: Bool, pitchEditorOpen: Bool,
                     surface: EditorSurface, reason: OpenEditorSurface.Reason)] = [
             // The MIX CONSOLE first — the term `EditorSurfaceRouter` calls the
             // easiest thing to drop, and the one a bare `openEditorClip != nil`
-            // silently loses.
-            (false, false, .arrange, .notArrangeWorkspace),
-            (false, true, .arrange, .notArrangeWorkspace),
+            // silently loses. It outranks BOTH pane terms.
+            (false, false, false, .arrange, .notArrangeWorkspace),
+            (false, false, true, .arrange, .notArrangeWorkspace),
+            (false, true, false, .arrange, .notArrangeWorkspace),
+            (false, true, true, .arrange, .notArrangeWorkspace),
             // Arrange workspace, nothing open.
-            (true, false, .arrange, .noRollOpen),
+            (true, false, false, .arrange, .noRollOpen),
+            // ⭐ m23-ap p2-b: the pitch editor is open and the roll is not.
+            (true, false, true, .pitchEditor, .pitchEditorOpen),
             // ⭐ THE m34-d ROW: open is open, with no engagement asked for.
-            (true, true, .pianoRoll, .rollOpen),
+            (true, true, false, .pianoRoll, .rollOpen),
+            // ⚠️ UNREACHABLE IN THE APP (the two accessors filter opposite sides
+            // of `isMIDI` on one `selectedClipID`) — and pinned so the tie-break
+            // is a decision rather than an accident of guard order.
+            (true, true, true, .pianoRoll, .rollOpen),
         ]
-        #expect(rows.count == 4)
-        let keys = Set(rows.map { "\($0.workspaceIsArrange)/\($0.rollOpen)" })
-        #expect(keys.count == 4, "the table must cover each input pair exactly once")
+        #expect(rows.count == 8)
+        let keys = Set(rows.map { "\($0.workspaceIsArrange)/\($0.rollOpen)/\($0.pitchEditorOpen)" })
+        #expect(keys.count == 8, "the table must cover each input triple exactly once")
 
         for row in rows {
             let got = EditorSurfaceRouter.openSurface(
-                workspaceIsArrange: row.workspaceIsArrange, rollOpen: row.rollOpen)
-            let label = "workspaceIsArrange=\(row.workspaceIsArrange) rollOpen=\(row.rollOpen)"
+                workspaceIsArrange: row.workspaceIsArrange, rollOpen: row.rollOpen,
+                pitchEditorOpen: row.pitchEditorOpen)
+            let label = "workspaceIsArrange=\(row.workspaceIsArrange) "
+                + "rollOpen=\(row.rollOpen) pitchEditorOpen=\(row.pitchEditorOpen)"
             // Field-by-field, for `fullTruthTable`'s reason: `OpenEditorSurface`'s
             // init is `fileprivate` and widening it to make `==` convenient would
             // destroy the mechanism keeping a divergent verdict unrepresentable.
@@ -212,22 +301,39 @@ struct EditorSurfaceRouterTests {
         var divergences: [String] = []
         for workspace in [true, false] {
             for open in [true, false] {
-                for engaged in EditorSurface.allCases {
-                    let active = EditorSurfaceRouter.resolve(
-                        workspaceIsArrange: workspace, rollOpen: open, lastEngaged: engaged)
-                    let mounted = EditorSurfaceRouter.openSurface(
-                        workspaceIsArrange: workspace, rollOpen: open)
-                    if active.surface != mounted.surface {
-                        divergences.append("\(workspace)/\(open)/\(engaged)")
+                for pitch in [true, false] {
+                    for engaged in EditorSurface.allCases {
+                        let active = EditorSurfaceRouter.resolve(
+                            workspaceIsArrange: workspace, rollOpen: open,
+                            pitchEditorOpen: pitch, lastEngaged: engaged)
+                        let mounted = EditorSurfaceRouter.openSurface(
+                            workspaceIsArrange: workspace, rollOpen: open,
+                            pitchEditorOpen: pitch)
+                        if active.surface != mounted.surface {
+                            divergences.append("\(workspace)/\(open)/\(pitch)/\(engaged)")
+                        }
                     }
                 }
             }
         }
         // ⚠️ ANTI-VACUITY: a `openSurface` hardwired to `.arrange` would produce
         // ZERO divergences and pass a "they never disagree" test. Requiring the
-        // exact row makes that mutant red.
-        #expect(divergences == ["true/true/arrange"],
-                "expected divergence in exactly the first-press state; got \(divergences)")
+        // exact set makes that mutant red.
+        //
+        // ⭐ SIX ROWS SINCE m23-ap p2-b, AND EVERY ONE IS THE SAME PHENOMENON —
+        // "a pane is open and the user has not acted in it yet" — not a second
+        // divergence nobody ruled on. Four are the roll's (its first press, ×
+        // both values of the unreachable `pitchEditorOpen` term, × the two
+        // latches that are not `.pianoRoll`); two are the pitch editor's, and
+        // they are the roll's row read one surface over.
+        #expect(divergences == [
+            "true/true/true/arrange",
+            "true/true/true/pitchEditor",
+            "true/true/false/arrange",
+            "true/true/false/pitchEditor",
+            "true/false/true/arrange",
+            "true/false/true/pianoRoll",
+        ], "expected divergence in exactly the first-press states; got \(divergences)")
     }
 
     @Test("every openSurface Reason is reachable — no term is dead")
@@ -235,8 +341,11 @@ struct EditorSurfaceRouterTests {
         var seen: Set<OpenEditorSurface.Reason> = []
         for workspace in [true, false] {
             for open in [true, false] {
-                seen.insert(EditorSurfaceRouter.openSurface(
-                    workspaceIsArrange: workspace, rollOpen: open).reason)
+                for pitch in [true, false] {
+                    seen.insert(EditorSurfaceRouter.openSurface(
+                        workspaceIsArrange: workspace, rollOpen: open,
+                        pitchEditorOpen: pitch).reason)
+                }
             }
         }
         #expect(seen == Set(OpenEditorSurface.Reason.allCases))
@@ -246,11 +355,15 @@ struct EditorSurfaceRouterTests {
     func openReasonAndSurfaceAgree() {
         for workspace in [true, false] {
             for open in [true, false] {
-                let got = EditorSurfaceRouter.openSurface(
-                    workspaceIsArrange: workspace, rollOpen: open)
-                switch got.reason {
-                case .rollOpen: #expect(got.surface == .pianoRoll)
-                case .notArrangeWorkspace, .noRollOpen: #expect(got.surface == .arrange)
+                for pitch in [true, false] {
+                    let got = EditorSurfaceRouter.openSurface(
+                        workspaceIsArrange: workspace, rollOpen: open,
+                        pitchEditorOpen: pitch)
+                    switch got.reason {
+                    case .rollOpen: #expect(got.surface == .pianoRoll)
+                    case .pitchEditorOpen: #expect(got.surface == .pitchEditor)
+                    case .notArrangeWorkspace, .noRollOpen: #expect(got.surface == .arrange)
+                    }
                 }
             }
         }
@@ -265,19 +378,26 @@ struct EditorSurfaceRouterTests {
     func theSharedTermsCannotDrift() {
         for workspace in [true, false] {
             for open in [true, false] {
-                let mounted = EditorSurfaceRouter.openSurface(
-                    workspaceIsArrange: workspace, rollOpen: open)
-                for engaged in EditorSurface.allCases {
-                    let active = EditorSurfaceRouter.resolve(
-                        workspaceIsArrange: workspace, rollOpen: open, lastEngaged: engaged)
-                    switch mounted.reason {
-                    case .notArrangeWorkspace:
-                        #expect(active.reason == .notArrangeWorkspace)
-                    case .noRollOpen:
-                        #expect(active.reason == .noRollOpen)
-                    case .rollOpen:
-                        // Only here may the latch speak at all.
-                        #expect(active.reason == .engagedArrange || active.reason == .engagedRoll)
+                for pitch in [true, false] {
+                    let mounted = EditorSurfaceRouter.openSurface(
+                        workspaceIsArrange: workspace, rollOpen: open, pitchEditorOpen: pitch)
+                    for engaged in EditorSurface.allCases {
+                        let active = EditorSurfaceRouter.resolve(
+                            workspaceIsArrange: workspace, rollOpen: open,
+                            pitchEditorOpen: pitch, lastEngaged: engaged)
+                        switch mounted.reason {
+                        case .notArrangeWorkspace:
+                            #expect(active.reason == .notArrangeWorkspace)
+                        case .noRollOpen:
+                            #expect(active.reason == .noRollOpen)
+                        case .rollOpen:
+                            // Only here may the latch speak at all.
+                            #expect(active.reason == .engagedArrange
+                                    || active.reason == .engagedRoll)
+                        case .pitchEditorOpen:
+                            #expect(active.reason == .engagedArrange
+                                    || active.reason == .engagedPitchEditor)
+                        }
                     }
                 }
             }
@@ -296,7 +416,8 @@ struct EditorSurfaceRouterTests {
         // case silently is a wire break, so the spellings are contract.
         #expect(EditorSurface.arrange.rawValue == "arrange")
         #expect(EditorSurface.pianoRoll.rawValue == "pianoRoll")
-        #expect(EditorSurface.allCases.count == 2)
+        #expect(EditorSurface.pitchEditor.rawValue == "pitchEditor")
+        #expect(EditorSurface.allCases.count == 3)
     }
 
     @Test("every Reason rawValue is the exact string the seams echo")
@@ -305,7 +426,8 @@ struct EditorSurfaceRouterTests {
         #expect(ActiveEditorSurface.Reason.noRollOpen.rawValue == "noRollOpen")
         #expect(ActiveEditorSurface.Reason.engagedArrange.rawValue == "engagedArrange")
         #expect(ActiveEditorSurface.Reason.engagedRoll.rawValue == "engagedRoll")
-        #expect(ActiveEditorSurface.Reason.allCases.count == 4)
+        #expect(ActiveEditorSurface.Reason.engagedPitchEditor.rawValue == "engagedPitchEditor")
+        #expect(ActiveEditorSurface.Reason.allCases.count == 5)
     }
 
     /// ⚠️ **NOT ON THE WIRE TODAY, AND PINNED ANYWAY (m34-d).** Nothing echoes
@@ -319,7 +441,8 @@ struct EditorSurfaceRouterTests {
         #expect(OpenEditorSurface.Reason.notArrangeWorkspace.rawValue == "notArrangeWorkspace")
         #expect(OpenEditorSurface.Reason.noRollOpen.rawValue == "noRollOpen")
         #expect(OpenEditorSurface.Reason.rollOpen.rawValue == "rollOpen")
-        #expect(OpenEditorSurface.Reason.allCases.count == 3)
+        #expect(OpenEditorSurface.Reason.pitchEditorOpen.rawValue == "pitchEditorOpen")
+        #expect(OpenEditorSurface.Reason.allCases.count == 4)
         // The shared pair really is shared, spelling for spelling.
         #expect(OpenEditorSurface.Reason.notArrangeWorkspace.rawValue
                 == ActiveEditorSurface.Reason.notArrangeWorkspace.rawValue)
@@ -381,6 +504,81 @@ struct EditorSurfaceRouterTests {
         #expect(latch.lastEngaged == .pianoRoll)
     }
 
+    // MARK: - The pitch editor's own terms (m23-ap p2-b)
+
+    /// ⭐⭐ **THE LATCH IS COMPARED AGAINST THE PANE THAT IS ACTUALLY OPEN, NOT
+    /// AGAINST "IS IT NON-ARRANGE".** With three cases the tempting shape is
+    /// `lastEngaged != .arrange ? lastEngaged : .arrange`, which is *shorter*,
+    /// *total*, and **wrong**: it hands ⌘+ to a piano roll that is not on screen
+    /// the moment the user opens a pitch editor after editing a MIDI clip. That
+    /// is the same class as the workspace term's failure (zooming a roll behind
+    /// the Mix console), which this file's banner calls "the easiest thing to
+    /// drop", so it gets its own named leg rather than relying on two rows of a
+    /// 24-row sweep to notice.
+    @Test("a latch pointing at the OTHER pane never claims the one that is open")
+    func aStaleLatchNeverClaimsTheOpenPane() {
+        let rollLatchOnPitchPane = EditorSurfaceRouter.resolve(
+            workspaceIsArrange: true, rollOpen: false, pitchEditorOpen: true,
+            lastEngaged: .pianoRoll)
+        #expect(rollLatchOnPitchPane.surface == .arrange,
+                "a `.pianoRoll` latch must not make the PITCH EDITOR active — the roll is not on screen to zoom")
+        #expect(rollLatchOnPitchPane.reason == .engagedArrange)
+
+        let pitchLatchOnRoll = EditorSurfaceRouter.resolve(
+            workspaceIsArrange: true, rollOpen: true, pitchEditorOpen: false,
+            lastEngaged: .pitchEditor)
+        #expect(pitchLatchOnRoll.surface == .arrange,
+                "a `.pitchEditor` latch must not make the ROLL active")
+        #expect(pitchLatchOnRoll.reason == .engagedArrange)
+    }
+
+    /// ⚠️ **THE `noRollOpen` SPELLING NOW MEANS "NEITHER PANE IS OPEN", AND IT
+    /// WAS DELIBERATELY NOT RENAMED.** It is echoed by `debug.editorSurface` and
+    /// the standing wire rule is additive-only — never rename a live string. A
+    /// reader who needs the distinction reads `OpenEditorSurface.Reason`, which
+    /// carries a case per pane. This leg pins the meaning so a later "tidy-up"
+    /// rename is a red test rather than a silent wire break.
+    @Test("`noRollOpen` is reached only when NEITHER pane is open")
+    func noRollOpenMeansNeitherPane() {
+        for pitch in [true, false] {
+            for engaged in EditorSurface.allCases {
+                let got = EditorSurfaceRouter.resolve(
+                    workspaceIsArrange: true, rollOpen: false, pitchEditorOpen: pitch,
+                    lastEngaged: engaged)
+                if pitch {
+                    #expect(got.reason != .noRollOpen,
+                            "a pitch editor IS open — `noRollOpen` would tell a red gate 'nothing is on screen' about a pane the user is looking at")
+                } else {
+                    #expect(got.reason == .noRollOpen)
+                }
+            }
+        }
+        #expect(EditorSurfaceRouter.openSurface(
+            workspaceIsArrange: true, rollOpen: false, pitchEditorOpen: false).reason
+                == .noRollOpen)
+    }
+
+    /// ⛔ **⌘A IS REFUSED BY NAME IN THE PITCH EDITOR, NOT ROUTED AND NOT FOLDED
+    /// INTO `noRollOpen`.** ⌘A means "select all NOTES" in this app and nowhere
+    /// else; a pitch SEGMENT is not a note, Increment A is read-only and holds
+    /// no selection at all, and design §3.6 assigns the gesture to the unwritten
+    /// interaction model. A fall-through to `noRollOpen` would hand a red gate
+    /// the wrong fixture to chase.
+    @Test("Select All refuses the pitch editor under its OWN reason")
+    func selectAllRefusesThePitchEditorByName() {
+        let open = EditorSurfaceRouter.openSurface(
+            workspaceIsArrange: true, rollOpen: false, pitchEditorOpen: true)
+        let item = SelectAllMenuPolicy.editMenuItem(
+            openSurface: open, isModalPresented: false, rollNoteCount: 12)
+        #expect(!item.isEnabled)
+        #expect(item.refusedBy == .pitchEditorOpen)
+        // ⚠️ ANTI-VACUITY: the note count is deliberately NON-ZERO above, so a
+        // policy that had fallen through to the `emptyRoll` guard instead would
+        // still be red here rather than accidentally green.
+        #expect(item.refusedBy != .emptyRoll)
+        #expect(item.refusedBy != .noRollOpen)
+    }
+
     @MainActor
     @Test("the latch feeds resolve, and a closed roll overrides it rather than clearing it")
     func latchSurvivesARollThatCloses() {
@@ -392,14 +590,16 @@ struct EditorSurfaceRouterTests {
         latch.engage(.pianoRoll)
 
         let closed = EditorSurfaceRouter.resolve(
-            workspaceIsArrange: true, rollOpen: false, lastEngaged: latch.lastEngaged)
+            workspaceIsArrange: true, rollOpen: false, pitchEditorOpen: false,
+            lastEngaged: latch.lastEngaged)
         #expect(closed.surface == .arrange)
         #expect(closed.reason == .noRollOpen)
         #expect(latch.lastEngaged == .pianoRoll, "resolving must not mutate the latch")
         #expect(latch.transitionSeq == 1)
 
         let reopened = EditorSurfaceRouter.resolve(
-            workspaceIsArrange: true, rollOpen: true, lastEngaged: latch.lastEngaged)
+            workspaceIsArrange: true, rollOpen: true, pitchEditorOpen: false,
+            lastEngaged: latch.lastEngaged)
         #expect(reopened.surface == .pianoRoll)
         #expect(reopened.reason == .engagedRoll)
     }

@@ -540,7 +540,21 @@ test("tools/list returns exactly the audit-enforced tool count", { skip: SKIP_RE
   // same two name-capturing regexes: **42 direct + 194 wrapper = 236**, 0
   // duplicates in either set, 0 names in both sets, and the same bogus-name
   // negative control (`"zzz_not_a_tool"`) returning 0.
-  assert.equal(result.tools.length, 236);
+  //
+  // 236 -> 239 at m23-q Phase 2's writer leg (2026-09-22): the pitch-
+  // correction model/policy had a detector (`clip_detect_pitch`) but no way
+  // to ACT on a clip — `clip_auto_correct_pitch` / `clip_clear_pitch_edits` /
+  // `clip_get_pitch_edits` close that gap, mirroring the wire's
+  // `clip.autoCorrectPitch`/`clip.clearPitchEdits`/`clip.getPitchEdits`
+  // (`Commands.swift` 231 -> 234) 1:1. All three route through the
+  // strict-schema wrapper (the `clip_detect_pitch` precedent — real,
+  // typo-worth-catching params even on the read-only getter/clear, which take
+  // just `clipId` but keep the shape uniform across the trio). Command<->tool
+  // bijection stays mechanical, no exception-table entry needed. RE-MEASURED,
+  // not derived, by the same two name-capturing regexes: **42 direct + 197
+  // wrapper = 239**, 0 duplicates in either set, 0 names in both sets, and
+  // the same bogus-name negative control (`"zzz_not_a_tool"`) returning 0.
+  assert.equal(result.tools.length, 239);
 });
 
 // ---------------------------------------------------------------------------

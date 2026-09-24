@@ -68,8 +68,11 @@ struct EmbeddedVoiceCommandTests {
     func commandsAreCanonical() {
         #expect(CommandRouter.allCommands.contains("project.embeddedVoices"))
         #expect(CommandRouter.allCommands.contains("vc.installEmbeddedVoice"))
-        #expect(CommandRouter.allCommands.dropLast().last == "project.embeddedVoices")
-        #expect(CommandRouter.allCommands.last == "vc.installEmbeddedVoice")
+        // m23-q Phase 2 appended clip.autoCorrectPitch/clip.clearPitchEdits/
+        // clip.getPitchEdits AFTER these two, at the new END (same law) — they
+        // are no longer literally last, still an exact, unmoved pair.
+        #expect(CommandRouter.allCommands.dropLast(4).last == "project.embeddedVoices")
+        #expect(CommandRouter.allCommands.dropLast(3).last == "vc.installEmbeddedVoice")
         // ADDITIVE ONLY: every neighbour they were placed beside is untouched.
         for name in ["project.snapshot", "project.open", "project.save",
                      "vc.importVoiceModel", "vc.convertClips", "vc.listVoices"] {

@@ -53,11 +53,25 @@ final class PlaybackGraph {
         /// A plain `gainDb` edit stays out of the key (it rides `player.volume`);
         /// a time-varying envelope cannot, so it lives here.
         let gainEnvelope: [ClipGainPoint]
+        /// m23-q: the pitch-edit set's digest, `""` when it bends nothing.
+        ///
+        /// ⚠️ **THE EDIT SET CHANGES WHICH FILE THIS NODE OPENS, SO IT IS
+        /// SCHEDULE IDENTITY** — exactly like the three stretch fields above.
+        /// Without it, editing a note re-keys the render CACHE (a new CAF is
+        /// rendered and committed) while the graph, seeing an unchanged key,
+        /// keeps the clip node it already has and goes on playing the OLD
+        /// file: a correction the user made, rendered correctly, and never
+        /// heard. The DIGEST rather than the set itself because `ClipKey` is
+        /// `Equatable` and compared for every clip on every reconcile.
+        let pitchEditSetHash: String
     }
 
     /// Resolution of one NON-IDENTITY stretched clip at reconcile time.
-    /// Identity clips (`Clip.isStretchIdentity`) never reach the resolver —
-    /// the bypass contract: their schedule is byte-identical to pre-ii-d.
+    /// Identity clips (`StretchRenderCache.needsRender` false) never reach the
+    /// resolver — the bypass contract: their schedule is byte-identical to
+    /// pre-ii-d. m23-q widened the predicate from `Clip.isStretchIdentity` to
+    /// include pitch edits; see `needsRender` for why that is not simply a
+    /// model change.
     enum StretchResolution {
         /// The rendered CAF exists — open THIS file instead of the source.
         /// The CAF is timeline-domain audio, so all downstream beat→frame
@@ -851,7 +865,8 @@ final class PlaybackGraph {
                         stretchRatio: $0.stretchRatio,
                         pitchShiftSemitones: $0.pitchShiftSemitones,
                         formantPreserve: $0.formantPreserve,
-                        gainEnvelope: $0.gainEnvelope)
+                        gainEnvelope: $0.gainEnvelope,
+                        pitchEditSetHash: PitchEditSetDigest.hex($0.pitchEdits))
             }
         }
 
@@ -930,7 +945,7 @@ final class PlaybackGraph {
                 // render-completion restart lands the CAF. Identity clips
                 // never invoke the resolver (the bypass contract).
                 var fileURL = url
-                if !domainClip.isStretchIdentity {
+                if StretchRenderCache.needsRender(domainClip) {
                     switch stretchResolver?(domainClip) {
                     case .ready(let rendered):
                         stretchPendingNoticed.remove(key.id)

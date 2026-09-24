@@ -1361,10 +1361,54 @@ struct MainActorOccupancySiteTests {
     /// and the census have never been re-derived together against the current
     /// suite size** — which is a better explanation of the last three bumps
     /// than any of them being individually careless.
-    /// **⛔ STILL OWED, now three deep: one valid campaign on a quiescent
+    /// **⛔ STILL OWED, now FOUR deep: one valid campaign on a quiescent
     /// machine, folded into m35-f — and with it, a re-derivation of the 248 s
     /// validity limit against the suite's current size.** Do not read the
     /// suite being green as evidence of headroom.
+    ///
+    /// ══ 391 = 390 + 1 — m23-q Phase 2, 2026-09-22 ═══════════════════════════
+    /// ⚠️⚠️ **THIS BUMP HAS NO CAMPAIGN BEHIND IT EITHER, AND IS THE FIRST ONE
+    /// THE USER WAS ASKED ABOUT AND EXPLICITLY RULED ON** ("Bump to 391, record
+    /// why"). That makes it authorised, NOT discharged — the debt above is now
+    /// four deep, not three, and this paragraph is the record, not the excuse.
+    ///
+    /// **WHY THE CAMPAIGN WAS NOT RUN — MEASURED, NOT ASSERTED.** At 23:04 the
+    /// machine carried `load averages: 7.61 17.27 21.96` with TradingView's
+    /// helpers at 89.4 % + 42.3 % + 31.6 % CPU and WindowServer at 41.1 % —
+    /// the user's own applications, which I will not close. The validity leg
+    /// needs a median wall ≤ 248 s; the four full runs observed during this
+    /// item were **303.0 / 314.9 / 353.7 / 358.8 s**, every one contaminated.
+    /// A campaign started here spends ~25 minutes of machine time to reject
+    /// itself (exit 2). ⭐ **THE CONFOUND NAMED AT 387 HAS GOT WORSE, NOT
+    /// BETTER: the suite is now 8900 tests / 771 suites against the 7699 the
+    /// 248 s limit was derived from (+15.6 %).** A limit that has never been
+    /// re-derived against a suite that grew by a sixth is a likelier
+    /// explanation of four "careless" bumps than four careless agents.
+    ///
+    /// **THE CENSUS, BY TWO INDEPENDENT INSTRUMENTS THAT AGREED.** The parent
+    /// and the p2-a agent each replicated this file's own rule (trimmed-line
+    /// `hasPrefix("@Suite")`, `@MainActor` on a preceding attribute line or
+    /// within 6 lines before the type decl) in Python over `Tests/**/*.swift`.
+    /// Both returned **390**, matching this gate's own printed `[measured]`
+    /// line — and the parent's replica was positive-controlled by requiring it
+    /// to reproduce 390 before its HEAD-delta was read at all. HEAD 386 → 390,
+    /// delta **+4**, every one from m23-q Phase 2:
+    ///
+    ///   * `PitchEditCarryTests`         — drives `ProjectStore` split/trim/flatten
+    ///   * `PitchCorrectionWriterTests`  — drives `ProjectStore` writer ops
+    ///   * `PitchCorrectionCommandTests` — drives `CommandRouter` + `ProjectStore`
+    ///   * `PitchEditorModelTests`       — drives `PitchEditorModel`
+    ///
+    /// ⭐ **NO LEGITIMATE REDUCTION EXISTS HERE, AND THAT WAS CHECKED RATHER
+    /// THAN ASSUMED.** The first three touch `ProjectStore`/`CommandRouter`,
+    /// `@MainActor` by necessity. The fourth looked de-isolatable from the
+    /// outside — `PitchEditorModel`'s geometry is deliberately `nonisolated`
+    /// — so the parent went and read the declaration: `PitchEditorModel.swift:800`
+    /// is `@MainActor @Observable public final class`. The hypothesis was
+    /// refuted by the source, not by argument. **Both named evasions stay
+    /// declined**: splitting the pure-geometry tests into a nonisolated sibling
+    /// still leaves +1, and a nonisolated-suite-with-awaits silences the
+    /// instrument instead of reducing the occupancy.
     @Test("Leg C — THE REVIEW CADENCE: @MainActor-isolated suite count stays inside the cadence")
     func mainActorSuiteCountStaysInsideCadence() {
         let counts = Self.structuralCounts()
@@ -1373,9 +1417,9 @@ struct MainActorOccupancySiteTests {
               + "prepare/prepareEffect-like sites \(counts.prepareLikeSites) (PRINTED ONLY — design §4.3 "
               + "rejects this as a ratchet channel; it is a proxy for the channel measured NOT to drift), "
               + "files \(counts.files)")
-        #expect(counts.mainActorSuites <= 387, """
-            @MainActor-isolated suite count is \(counts.mainActorSuites), over the 387 cadence limit \
-            (measured 386 at m39-dm). This is a REVIEW CADENCE, not a physical threshold — ds/dN is \
+        #expect(counts.mainActorSuites <= 391, """
+            @MainActor-isolated suite count is \(counts.mainActorSuites), over the 391 cadence limit \
+            (measured 390 at m23-q Phase 2). This is a REVIEW CADENCE, not a physical threshold — ds/dN is \
             unmeasured. Bumping this number requires pasting a fresh \
             scripts/gates/m23aw-prepare-headroom.mjs campaign result into the comment above this bound \
             first; raising it without running the gate is the same act as raising the horizon.

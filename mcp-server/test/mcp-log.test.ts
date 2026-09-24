@@ -118,7 +118,7 @@ function lastLogLine(): any {
 // Instrumentation coverage (both registration paths)
 // ---------------------------------------------------------------------------
 
-test("both registration paths are instrumented: 236 total, empty symmetric difference vs tools/list", async () => {
+test("both registration paths are instrumented: 239 total, empty symmetric difference vs tools/list", async () => {
   const instrumented = instrumentedToolNames();
   // m34-l: 208 -> 209 with `play_sustain`.
   // m34-h-1: 209 -> 216 with the seven-verb `looper_*` LIVE LOOPING family.
@@ -142,7 +142,10 @@ test("both registration paths are instrumented: 236 total, empty symmetric diffe
   // `server.registerTool` underneath. `track_set_instrument`'s new
   // `drumSynth` kind and `drumKit` param add zero, being additions to an
   // already-instrumented tool.
-  assert.equal(instrumented.length, 236, `expected 236 instrumented registrations, got ${instrumented.length}`);
+  // m23-q Phase 2 MCP mirror: 236 -> 239 with `clip_auto_correct_pitch`/
+  // `clip_clear_pitch_edits`/`clip_get_pitch_edits`, all three through the
+  // wrapper (the `clip_detect_pitch` precedent) — instrumented the same way.
+  assert.equal(instrumented.length, 239, `expected 239 instrumented registrations, got ${instrumented.length}`);
 
   const listed = await client.listTools();
   const listedNames = new Set(listed.tools.map((t) => t.name));

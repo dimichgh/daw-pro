@@ -21,24 +21,89 @@ import os
 /// thread is untouched by construction.
 @MainActor
 public final class StretchRenderCache {
-    /// The three schedule-affecting stretch parameters, as one hashable value
-    /// (the cache-key payload and the engine's latest-wins comparator).
+    /// The render-affecting clip parameters, as one hashable value (the
+    /// cache-key payload and the engine's latest-wins comparator).
+    ///
+    /// ⚠️⚠️ **ADDING A FIELD HERE DOES NOT CHANGE THE ON-DISK KEY.** `Hashable`
+    /// synthesis and `cacheKey(source:params:)` are two different derivations:
+    /// the on-disk key is SHA256 over an EXPLICIT field list below, so a field
+    /// added here and not added there re-keys the in-memory latest-wins
+    /// comparator while serving the previous render's audio from disk — stale
+    /// audio that looks like a cache working perfectly. `pitchEditSetHash` is
+    /// in BOTH, and `pitchEditSetIsPartOfTheOnDiskKey` is the gate.
     public struct Params: Hashable, Sendable {
         public let ratio: Double
         public let semitones: Double
         public let formantPreserve: Bool
 
-        public init(ratio: Double, semitones: Double, formantPreserve: Bool) {
+        /// The clip's pitch edits, or nil when they bend nothing. The RENDER
+        /// needs the set itself (it drives the transpose curve); the KEY needs
+        /// only the digest, which is why both are here and why the digest is
+        /// derived in `init` rather than passed in — a caller cannot hand over
+        /// a digest that disagrees with the edits.
+        public let pitchEdits: PitchEditSet?
+
+        /// `PitchEditSetDigest.hex(pitchEdits)` — `""` when there are none.
+        /// Deterministic across launches; see the digest's own warning about
+        /// why `hashValue` would be a bug here.
+        public let pitchEditSetHash: String
+
+        /// True when this render is a structural identity: the clip plays its
+        /// SOURCE FILE byte-for-byte and no render exists at all. An empty (or
+        /// detected-but-unedited) edit set therefore still takes the identity
+        /// bypass — design §6.4's "never bypass the identity path" rule,
+        /// expressed where the bypass is actually decided.
+        public var isIdentity: Bool {
+            pitchEditSetHash.isEmpty
+                && OfflineStretcher.isIdentity(ratio: ratio, semitones: semitones)
+        }
+
+        public init(ratio: Double, semitones: Double, formantPreserve: Bool,
+                    pitchEdits: PitchEditSet? = nil) {
             self.ratio = ratio
             self.semitones = semitones
             self.formantPreserve = formantPreserve
+            self.pitchEditSetHash = PitchEditSetDigest.hex(pitchEdits)
+            // Normalise a bends-nothing set to nil so `Params` Equatable and
+            // the digest agree: two clips that render identically must compare
+            // equal, or the latest-wins comparator re-kicks renders forever.
+            self.pitchEdits = self.pitchEditSetHash.isEmpty ? nil : pitchEdits
         }
 
         public init(clip: Clip) {
             self.init(ratio: clip.stretchRatio,
                       semitones: clip.pitchShiftSemitones,
-                      formantPreserve: clip.formantPreserve)
+                      formantPreserve: clip.formantPreserve,
+                      pitchEdits: clip.pitchEdits)
         }
+
+        /// Hand-written because `PitchEditSet` is Equatable but not Hashable.
+        /// Hashing the DIGEST rather than the set keeps "equal values hash
+        /// equally" (equal sets ⇒ equal digest) and costs nothing: the digest
+        /// is already computed.
+        public func hash(into hasher: inout Hasher) {
+            hasher.combine(ratio)
+            hasher.combine(semitones)
+            hasher.combine(formantPreserve)
+            hasher.combine(pitchEditSetHash)
+        }
+    }
+
+    /// Does this clip need a render at all? The engine's reconcile-time
+    /// predicate, in ONE place.
+    ///
+    /// ⚠️ **A DELIBERATE, TEMPORARY SECOND HOME FOR AN IDENTITY RULE.**
+    /// `Clip.isStretchIdentity` is the model's answer and it does NOT yet know
+    /// about pitch edits — its own doc comment says the render-integration
+    /// item owns folding `hasPitchEdits` in, and that edit lives in
+    /// `Model.swift`. Until it lands, an engine that asked only
+    /// `!clip.isStretchIdentity` would skip every pitch-edited clip that is
+    /// otherwise unstretched, i.e. the common case: correction with no
+    /// transpose and no time change. `paramsIdentityAgreesWithNeedsRender`
+    /// pins this against `Params.isIdentity` so the two cannot drift; when the
+    /// model folds it in, this collapses to `!clip.isStretchIdentity`.
+    nonisolated public static func needsRender(_ clip: Clip) -> Bool {
+        !clip.isStretchIdentity || clip.hasPitchEdits
     }
 
     /// Bumped whenever the vendored signalsmith version or our preset/config
@@ -119,7 +184,7 @@ public final class StretchRenderCache {
         let mtime = (attributes[.modificationDate] as? Date)?
             .timeIntervalSinceReferenceDate ?? 0
         var hasher = SHA256()
-        for field in [
+        var fields = [
             path,
             String(size),
             String(mtime.bitPattern),
@@ -127,7 +192,16 @@ public final class StretchRenderCache {
             String(params.semitones.bitPattern),
             params.formantPreserve ? "1" : "0",
             String(stretchEngineVersion),
-        ] {
+        ]
+        // APPENDED ONLY WHEN THERE ARE EDITS, so every key derived before
+        // m23-q is still the same 16 hex chars and no existing cache entry is
+        // orphaned by a feature that did not change its audio. A field that
+        // was always appended — even as an empty string — would silently
+        // re-render every stretched clip in every project on this machine.
+        if !params.pitchEditSetHash.isEmpty {
+            fields.append("pitch:" + params.pitchEditSetHash)
+        }
+        for field in fields {
             hasher.update(data: Data(field.utf8))
             hasher.update(data: Data([0]))  // field separator
         }
@@ -155,7 +229,7 @@ public final class StretchRenderCache {
     /// Throws `CancellationError`/`.cancelled` when superseded, or the render
     /// error (also recorded in `status(forClip:)` as `.failed`).
     public func renderIfNeeded(clipID: UUID, source: URL, params: Params) async throws -> URL {
-        if OfflineStretcher.isIdentity(ratio: params.ratio, semitones: params.semitones) {
+        if params.isIdentity {
             return source
         }
         let key = try Self.cacheKey(source: source, params: params)
@@ -257,10 +331,36 @@ public final class StretchRenderCache {
             }
         }
 
-        let stretched = try OfflineStretcher.stretch(
-            input: planar, sampleRate: format.sampleRate, ratio: params.ratio,
-            semitones: params.semitones, formantPreserve: params.formantPreserve,
-            isCancelled: isCancelled)
+        // m23-q Phase 1: a clip carrying pitch edits renders through the
+        // TIME-VARYING transpose path, latency-compensated. Everything else
+        // takes the constant call it always took, unchanged — an edit-free
+        // render is byte-identical to the one this cache produced before pitch
+        // correction existed, which `editFreeRenderIsByteIdenticalToTheConstantCall`
+        // pins rather than assumes.
+        //
+        // The curve SUBSUMES `params.semitones` (design §6.4/§7.8), so the
+        // constant is NOT also passed on this branch — doing both would
+        // transpose twice.
+        let plan = StretchCurvePlan.make(
+            editSet: params.pitchEdits,
+            clipPitchShiftSemitones: params.semitones,
+            sampleRate: format.sampleRate,
+            ratio: params.ratio)
+        let stretched: [[Float]]
+        if let plan {
+            stretched = try OfflineStretcher.stretchTransposeCurve(
+                input: planar, sampleRate: format.sampleRate, ratio: params.ratio,
+                semitonesAtOutputFrame: { plan.semitones(atOutputFrame: $0) },
+                formantPreserve: params.formantPreserve,
+                compensation: OfflineStretcher.curveLatencyCompensation(
+                    sampleRate: format.sampleRate),
+                isCancelled: isCancelled)
+        } else {
+            stretched = try OfflineStretcher.stretch(
+                input: planar, sampleRate: format.sampleRate, ratio: params.ratio,
+                semitones: params.semitones, formantPreserve: params.formantPreserve,
+                isCancelled: isCancelled)
+        }
 
         let outFrames = stretched[0].count
         guard let outBuffer = AVAudioPCMBuffer(

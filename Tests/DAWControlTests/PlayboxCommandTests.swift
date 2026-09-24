@@ -87,8 +87,12 @@ struct PlayboxCommandTests {
         let skeleton = try? #require(CommandRouter.allCommands.firstIndex(of: "macro.songSkeleton"))
         #expect(index == (skeleton.map { $0 + 1 } ?? -1))
         #expect(index != CommandRouter.allCommands.count - 1, "must NOT be at the tail")
-        #expect(CommandRouter.allCommands.last == "vc.installEmbeddedVoice",
-                "…and the tail is exactly what it was before this item")
+        // m23-q Phase 2 appended clip.autoCorrectPitch/clip.clearPitchEdits/
+        // clip.getPitchEdits AFTER vc.installEmbeddedVoice, at the new END —
+        // it is no longer literally last, still exactly where it was.
+        #expect(CommandRouter.allCommands.dropLast(3).last == "vc.installEmbeddedVoice",
+                "…and the old tail is exactly where it was before this item")
+        #expect(CommandRouter.allCommands.last == "clip.getPitchEdits")
     }
 
     @Test("it rejects unknown parameter keys with a teaching error")

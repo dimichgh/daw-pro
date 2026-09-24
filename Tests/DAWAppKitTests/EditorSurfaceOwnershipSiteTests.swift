@@ -118,6 +118,12 @@ struct EditorSurfaceOwnershipSiteTests {
         "setArrangeZoom",
         "zoomArrangeIn", "zoomArrangeOut", "zoomArrangeReset",
         "zoomPianoRollIn", "zoomPianoRollOut", "zoomPianoRollReset",
+        // ⭐ m23-ap p2-b — THE SECOND BOTTOM PANE'S THREE. A new editor surface
+        // brings new zoom entry points, and this list is HAND-MAINTAINED: the
+        // law "no router engages its own target" does not extend itself, so a
+        // surface added without a line here is a self-confirming latch nothing
+        // is watching for.
+        "zoomPitchEditorIn", "zoomPitchEditorOut", "zoomPitchEditorReset",
     ]
 
     // MARK: - F1: the router may never read SwiftUI focus again

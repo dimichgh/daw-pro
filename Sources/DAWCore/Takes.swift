@@ -234,7 +234,29 @@ public enum CompFlattener {
                 controllerLanes: Clip.windowedControllerLanes(
                     source.controllerLanes,
                     delta: memberStart - laneStart,
-                    newLength: memberLength)
+                    newLength: memberLength),
+                // Pitch edits (m23-q): the lane's set carried VERBATIM — the ONE
+                // field here that is deliberately NOT windowed alongside the two
+                // above. Those are clip-relative beats; `NoteSegment` times are
+                // source-file-absolute seconds, which `memberOffset` already
+                // accounts for.
+                //
+                // ⚠️ DESIGN §7.5 CALLS THIS "A FILTER, NOT A TRANSFORM". The
+                // "not a transform" half is what matters and is honoured. The
+                // FILTER half is deliberately NOT implemented, and this is the
+                // measured reason: `applyCrossfades` runs AFTER this
+                // initialiser and WIDENS members — the left grows `lengthBeats`,
+                // the right moves `startBeat` back and REDUCES
+                // `startOffsetSeconds`. Any window filter computed here is
+                // computed against pre-crossfade geometry, so it would drop
+                // segments the member then goes on to PLAY through its fade:
+                // one side of a comp join tuned, the other not, summed together.
+                // An unfiltered carry has no such failure mode — a segment
+                // outside the window a member plays is simply never evaluated.
+                //
+                // Lossless either way at the model layer: the lane keeps its own
+                // clip with the full set, and flatten is re-runnable from it.
+                pitchEdits: source.pitchEdits
             )
             member.takeGroupID = group.id
 

@@ -186,6 +186,17 @@ public enum SelectAllMenuPolicy {
             return SelectAllMenuItem(refusedBy: .noRollOpen)
         case .rollOpen:
             break
+        case .pitchEditorOpen:
+            // ⛔ m23-ap p2-b — REFUSED BY NAME, NOT ROUTED. ⌘A means "select all
+            // NOTES" in this app and nowhere else; a pitch SEGMENT is not a
+            // note, and the pitch editor's Increment A is read-only and has no
+            // selection at all. Design §3.6 assigns ⌘A-inside-the-pitch-editor
+            // to the (unwritten) interaction model, §7 — so until the user's
+            // TUNE X video settles it, the honest answer is a greyed item with
+            // its own reason, never a silent fall-through to `noRollOpen` that
+            // would tell a red gate "no clip is open" about a pane that is
+            // plainly on screen.
+            return SelectAllMenuItem(refusedBy: .pitchEditorOpen)
         }
         guard !isModalPresented else { return SelectAllMenuItem(refusedBy: .modal) }
         guard rollNoteCount > 0 else { return SelectAllMenuItem(refusedBy: .emptyRoll) }
@@ -239,6 +250,15 @@ public enum SelectAllRefusal: String, Sendable, Equatable, CaseIterable {
     case modal
     /// The roll is active but its clip holds no notes — nothing to select.
     case emptyRoll = "empty-roll"
+    /// The **pitch editor** is the open pane (m23-ap p2-b). ⌘A has no meaning
+    /// there yet: Increment A is read-only and holds no selection, and design
+    /// §3.6 assigns the gesture to the unwritten interaction model (§7).
+    ///
+    /// ⚠️ **NOT `noRollOpen`.** A pane IS open; saying "no clip is open" about a
+    /// surface the user is looking at is the conflation
+    /// `ActiveEditorSurface.Reason`'s "three different bugs" argument exists to
+    /// prevent, and it would make a red gate chase the wrong fixture.
+    case pitchEditorOpen = "pitch-editor-open"
 }
 
 /// The resolved Edit ▸ Select All item.

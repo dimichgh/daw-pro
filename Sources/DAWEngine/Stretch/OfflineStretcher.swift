@@ -184,7 +184,7 @@ public enum OfflineStretcher {
         return outBase.map { Array(UnsafeBufferPointer(start: $0, count: outputFrames)) }
     }
 
-    // MARK: - m23-q Phase 0 (E1): time-varying transpose — EXPERIMENT ONLY
+    // MARK: - m23-q: time-varying transpose (E1 measured it, Phase 1 ships it)
 
     /// **MEASURED, not chosen** (m23-q E1(a), 2026-08-17, 48 kHz, this exact
     /// vendored build): a transpose value handed to
@@ -216,9 +216,84 @@ public enum OfflineStretcher {
     ///   * transition width — the pitch ramps over ≈712 frames (14.8 ms)
     ///     10 %→90 % as seen by a 21 ms tracker, not instantly.
     ///
-    /// Nothing in this file compensates for it: E1 measures the raw path, and
-    /// deciding what to do about 50 ms is Phase 1's business.
+    /// E1 measured the RAW path and compensated for nothing; `m23-q` Phase 1
+    /// (this item) compensates, through `CurveLatencyCompensation` below —
+    /// which is the ONLY consumer of this constant, so the number and the code
+    /// cannot drift apart without `curveLookupFrame` changing with them.
     static let measuredCurveLatencyFrames = 2379
+
+    /// The sample rate `measuredCurveLatencyFrames` was measured at. Quoted
+    /// separately because the constant is a FRAME count, and frames are not a
+    /// rate-independent unit.
+    static let measuredCurveLatencySampleRate: Double = 48_000
+
+    /// How the curve is aligned against the DELIVERED output. Two cases, and
+    /// the distinction is a measurement one rather than a preference:
+    ///
+    ///  * `.none` — index the curve naively against the output write cursor.
+    ///    **This is the phase-0 EXPERIMENT path**, and it must stay reachable:
+    ///    E1(a) measures `measuredCurveLatencyFrames` with it, and a
+    ///    compensated render would measure its own correction.
+    ///  * `.frames(n)` — the SHIPPING path: read the curve `n` delivered
+    ///    frames ahead, so a value asked for at output frame F is handed to the
+    ///    stretcher early enough to arrive AT F.
+    enum CurveLatencyCompensation: Equatable, Sendable {
+        case none
+        case frames(Int)
+    }
+
+    /// The compensation for a render at `sampleRate`.
+    ///
+    /// ⚠️ **MEASURED AT 48 kHz, SCALED TO OTHER RATES — and the scaling is a
+    /// STRUCTURAL argument plus one corroborating measurement, not a
+    /// coincidence.** Every window in this stretcher is defined in
+    /// MILLISECONDS: `presetDefault` hands `configure` `sampleRate*0.12`
+    /// (block) and `sampleRate*0.03` (hop), so the latency a 48 kHz render
+    /// shows in FRAMES must scale with the rate to stay the same duration.
+    /// `PitchCurveRenderTests.compensationHoldsAt44k` renders the same step at
+    /// 44 100 Hz and checks the landing, so the extrapolation is gated rather
+    /// than assumed.
+    static func curveLatencyCompensation(sampleRate: Double) -> CurveLatencyCompensation {
+        guard sampleRate.isFinite, sampleRate > 0 else {
+            return .frames(measuredCurveLatencyFrames)
+        }
+        let scaled = (Double(measuredCurveLatencyFrames) * sampleRate
+            / measuredCurveLatencySampleRate).rounded()
+        return .frames(Int(scaled))
+    }
+
+    /// **THE ONE PLACE THE COMPENSATION ARITHMETIC LIVES**, so a test can spy
+    /// on exactly what the render loop does rather than on a copy of it.
+    ///
+    /// The chunk that begins at delivered frame `outputFrame` governs the
+    /// delivered window `[outputFrame + n, outputFrame + n + interval)`, whose
+    /// CENTRE is `outputFrame + n + interval/2`. Reading the curve at the
+    /// window's centre rather than at its start is what makes the residual
+    /// error symmetric instead of 0…+1 hop LATE on top of the latency just
+    /// removed. DERIVED, not measured, and marked as such: a hop-aligned
+    /// request at 72 000 is first served by the chunk at 70 560 under
+    /// start-sampling (landing 72 939, 939 LATE) and by the chunk at 69 120
+    /// under centre-sampling (landing 71 499, 501 early).
+    ///
+    /// What IS measured is the result. Sweeping a request across one whole hop
+    /// with a HARD step, the compensated landing is unbiased — residuals
+    /// −500 / +581 / +221 / −139 frames, mean +41 (+0.85 ms) — against +50 ms
+    /// LATE uncompensated. The ±half-hop spread is IRREDUCIBLE at a 30 ms hop
+    /// and is the same limit that puts the floor under `PitchEditSet.retuneMs`.
+    /// Driven by a real 30 ms `PitchEditSet` ramp the same sweep sits ~8-10 ms
+    /// early on average; that bias is the RAMP meeting the hop grid, not this
+    /// arithmetic, and `PitchCurveRenderTests`' landing budget records both
+    /// sweeps and the discriminator between them.
+    static func curveLookupFrame(outputFrame: Int,
+                                 compensation: CurveLatencyCompensation,
+                                 intervalSamples: Int) -> Int {
+        switch compensation {
+        case .none:
+            return outputFrame
+        case .frames(let latency):
+            return outputFrame + latency + intervalSamples / 2
+        }
+    }
 
     /// The step value of a transpose curve at an output frame. Sample-and-hold:
     /// the value in effect at `frame` is the last breakpoint at or before it,
@@ -239,8 +314,13 @@ public enum OfflineStretcher {
         return value
     }
 
-    /// **m23-q Phase 0 experiment surface — not a shipping path.** Renders with
-    /// a *time-varying* transpose: `css_set_transpose_semitones` is called
+    /// **m23-q: the time-varying transpose path.** Phase 0 built it as an
+    /// experiment surface; Phase 1 (this item) ships it — `StretchRenderCache`
+    /// renders a clip's `pitchEdits` through the closure core below, with
+    /// `compensation: .frames(…)`. The phase-0 legs still drive THIS entry
+    /// point with `.none`, which is why the compensation is a parameter rather
+    /// than a constant folded into the loop. Renders with a *time-varying*
+    /// transpose: `css_set_transpose_semitones` is called
     /// between `css_process` calls, and the chunk is exactly the stretcher's
     /// own hop (`css_interval_samples`, measured not derived) so the curve
     /// resolves per analysis block. The 4096-frame chunk of `stretch(...)`
@@ -253,11 +333,14 @@ public enum OfflineStretcher {
     /// (`OfflineStretcherCurveTests`) are the guard against the two copies
     /// drifting — a constant curve must be bit-identical to the constant call.
     ///
-    /// **No latency compensation.** The curve is indexed naively against the
-    /// output write cursor. Upstream centres a parameter change at the
-    /// *processing time*, which leads the delivered output; measuring that
-    /// offset is E1(a) and compensating for it is Phase 1. Anything that
-    /// pre-shifts the curve here would make E1(a) measure its own correction.
+    /// **Latency compensation is the caller's explicit choice**, and it
+    /// DEFAULTS TO `.none` so the phase-0 measurement legs keep measuring the
+    /// raw path: the curve is indexed naively against the output write cursor,
+    /// upstream centres a parameter change at the *processing time* which
+    /// leads the delivered output, and anything that pre-shifted the curve by
+    /// default would make E1(a) measure its own correction. The SHIPPING path
+    /// (`StretchRenderCache.performRender`) passes
+    /// `curveLatencyCompensation(sampleRate:)`.
     ///
     /// `curve` is `(outputFrame, semitones)` breakpoints in DELIVERED output
     /// frames, sorted ascending, non-empty. Returns exactly
@@ -269,6 +352,46 @@ public enum OfflineStretcher {
         ratio: Double,
         curve: [(outputFrame: Int, semitones: Double)],
         formantPreserve: Bool,
+        compensation: CurveLatencyCompensation = .none,
+        isCancelled: () -> Bool = { false }
+    ) throws -> [[Float]] {
+        guard !curve.isEmpty else {
+            throw OfflineStretcherError.invalidInput("empty curve")
+        }
+        guard curve.allSatisfy({ $0.semitones.isFinite }) else {
+            throw OfflineStretcherError.invalidInput("non-finite semitones in curve")
+        }
+        guard zip(curve, curve.dropFirst()).allSatisfy({ $0.outputFrame <= $1.outputFrame })
+        else {
+            throw OfflineStretcherError.invalidInput("curve not sorted by outputFrame")
+        }
+        return try stretchTransposeCurve(
+            input: input, sampleRate: sampleRate, ratio: ratio,
+            semitonesAtOutputFrame: { transposeCurveValue(curve, at: $0) },
+            formantPreserve: formantPreserve, compensation: compensation,
+            isCancelled: isCancelled)
+    }
+
+    /// The core of the curve path: the transpose at a delivered output frame
+    /// comes from a CLOSURE rather than a breakpoint array, so a caller with a
+    /// continuous curve (`PitchCorrectionCurve`, via `StretchCurvePlan`) does
+    /// not have to materialise one breakpoint per hop for a five-minute vocal
+    /// and then quantise twice — once onto its own grid and again onto the
+    /// stretcher's hop. The array entry point above is implemented on top of
+    /// this one, so both paths run the SAME loop and the E1(d) equivalence
+    /// legs cover both.
+    ///
+    /// `semitonesAtOutputFrame` is called once per hop with a frame index that
+    /// may be past the end of the render (that is what the lookahead IS) and
+    /// must be total: it is sampled, never interpolated, and a non-finite
+    /// return would reach `css_set_transpose_semitones`.
+    static func stretchTransposeCurve(
+        input: [[Float]],
+        sampleRate: Double,
+        ratio: Double,
+        semitonesAtOutputFrame: (Int) -> Double,
+        formantPreserve: Bool,
+        compensation: CurveLatencyCompensation = .none,
         isCancelled: () -> Bool = { false }
     ) throws -> [[Float]] {
         let channels = input.count
@@ -288,16 +411,6 @@ public enum OfflineStretcher {
         guard ratio.isFinite, ratio > 0 else {
             throw OfflineStretcherError.invalidInput("bad ratio \(ratio)")
         }
-        guard !curve.isEmpty else {
-            throw OfflineStretcherError.invalidInput("empty curve")
-        }
-        guard curve.allSatisfy({ $0.semitones.isFinite }) else {
-            throw OfflineStretcherError.invalidInput("non-finite semitones in curve")
-        }
-        guard zip(curve, curve.dropFirst()).allSatisfy({ $0.outputFrame <= $1.outputFrame })
-        else {
-            throw OfflineStretcherError.invalidInput("curve not sorted by outputFrame")
-        }
         let outputFrames = Int((Double(frames) * ratio).rounded())
         guard outputFrames >= 1 else {
             throw OfflineStretcherError.invalidInput("output would be empty")
@@ -307,18 +420,39 @@ public enum OfflineStretcher {
             throw OfflineStretcherError.allocationFailed
         }
         defer { css_destroy(handle) }
-        // The pre-roll runs at the curve's initial value.
-        css_set_transpose_semitones(
-            handle, Float(transposeCurveValue(curve, at: 0)), tonalityLimitHz)
-        css_set_formant_preserve(handle, formantPreserve)
 
         // MEASURED, never derived: the hop is whatever the stretcher says it
-        // is. Guarded because a zero would spin the loop forever.
+        // is. Guarded because a zero would spin the loop forever. Read BEFORE
+        // the pre-roll's transpose because the compensated lookup needs it.
         let interval = Int(css_interval_samples(handle))
         guard interval >= 1 else {
             throw OfflineStretcherError.invalidInput(
                 "stretcher reported non-positive interval \(interval)")
         }
+
+        // The pre-roll runs at whatever the FIRST chunk will ask for, not at
+        // the curve's value at frame 0.
+        //
+        // ⚠️ **THE FIRST `n` DELIVERED FRAMES CANNOT BE COMPENSATED, AND THIS
+        // IS THE LEAST-WRONG ANSWER RATHER THAN A FIX.** Compensating output
+        // frame F means handing its value over at processing position F − n;
+        // for F < n that position is before the render starts and there is
+        // nowhere to put it. `outputSeek` takes ONE transpose value for the
+        // whole pre-roll, so the choice is between the curve's value at 0
+        // (leaves a discontinuity at delivered frame n, and phase-0 §5.4
+        // measured a −5.11 dB level dip across an instantaneous 2-semitone
+        // map change) and the first chunk's value (continuous, and wrong only
+        // over the first ~50 ms). Continuity wins. A curve that moves inside
+        // the first 49.6 ms of a file therefore moves at frame 0 instead; a
+        // pitch-correction curve is flat there, because a note boundary at
+        // source second 0 has no earlier note to ramp from.
+        css_set_transpose_semitones(
+            handle,
+            Float(semitonesAtOutputFrame(curveLookupFrame(
+                outputFrame: 0, compensation: compensation,
+                intervalSamples: interval))),
+            tonalityLimitHz)
+        css_set_formant_preserve(handle, formantPreserve)
 
         let inputLatency = Int(css_input_latency(handle))
         let outputLatency = Int(css_output_latency(handle))
@@ -376,7 +510,11 @@ public enum OfflineStretcher {
                     .rounded())
             let inBlock = inTarget - inDone
             css_set_transpose_semitones(
-                handle, Float(transposeCurveValue(curve, at: outDone)), tonalityLimitHz)
+                handle,
+                Float(semitonesAtOutputFrame(curveLookupFrame(
+                    outputFrame: outDone, compensation: compensation,
+                    intervalSamples: interval))),
+                tonalityLimitHz)
             withInPointers(offset: seekLength + inDone) { inPtrs in
                 withOutPointers(offset: outDone) { outPtrs in
                     css_process(

@@ -5432,7 +5432,26 @@ public final class ProjectStore {
             fadeInCurve: clip.fadeInCurve, fadeOutCurve: .linear,
             stretchRatio: clip.stretchRatio, pitchShiftSemitones: clip.pitchShiftSemitones,
             formantPreserve: clip.formantPreserve, gainEnvelope: firstEnv,
-            controllerLanes: firstLanes)
+            controllerLanes: firstLanes,
+            // Pitch edits (m23-q): copied VERBATIM to BOTH halves — deliberately
+            // NOT windowed like the two lines above it.
+            //
+            // ⚠️⚠️ THE NEIGHBOURING CODE IS THE TRAP. `firstEnv`/`firstLanes`
+            // exist because gain points and controller points are CLIP-RELATIVE
+            // BEATS and must be re-anchored at a split. `NoteSegment` times are
+            // SOURCE-FILE-ABSOLUTE SECONDS (`ClipPitchFrame.timeSeconds`:
+            // "geometry-free: trims/splits don't move these numbers"), and
+            // `startOffsetSeconds` below already carries the whole geometry
+            // change. Re-anchoring these would shift every segment on the right
+            // half by `splitSeconds` and silently de-tune the take — while
+            // leaving a healthy-looking non-nil set behind.
+            //
+            // Both halves keep the WHOLE set, including a note that straddles
+            // the cut and notes that fall outside their own window: the curve is
+            // only ever evaluated over the source window a half actually plays,
+            // so an out-of-window segment costs nothing, and a split is
+            // reversible by re-joining while discarded tuning is not.
+            pitchEdits: clip.pitchEdits)
         let second = Clip(
             id: UUID(), name: clip.name,
             startBeat: clip.startBeat + firstLength, lengthBeats: secondLength,
@@ -5443,7 +5462,11 @@ public final class ProjectStore {
             fadeInCurve: .linear, fadeOutCurve: clip.fadeOutCurve,
             stretchRatio: clip.stretchRatio, pitchShiftSemitones: clip.pitchShiftSemitones,
             formantPreserve: clip.formantPreserve, gainEnvelope: secondEnv,
-            controllerLanes: secondLanes)
+            controllerLanes: secondLanes,
+            // Same verbatim carry as the first half — see the note above. This
+            // is the half where a re-anchoring mistake would actually change the
+            // sound, because its `startOffsetSeconds` moved.
+            pitchEdits: clip.pitchEdits)
 
         performEdit("Split Clip '\(clip.name)'") {
             tracks[t].clips[c] = first
@@ -5538,7 +5561,14 @@ public final class ProjectStore {
             // formant carry through unchanged — only the visible window moves.
             stretchRatio: clip.stretchRatio, pitchShiftSemitones: clip.pitchShiftSemitones,
             formantPreserve: clip.formantPreserve, gainEnvelope: newEnv,
-            controllerLanes: newLanes)
+            controllerLanes: newLanes,
+            // Pitch edits (m23-q): VERBATIM, and deliberately NOT re-windowed
+            // like `newEnv`/`newLanes` above — those are clip-relative beats,
+            // these are source-file-absolute seconds, which `newOffset` already
+            // accounts for. Segments outside the new window are KEPT: a trim is
+            // a non-destructive window change the user can drag back open, so
+            // dropping them would turn a reversible gesture into lost tuning.
+            pitchEdits: clip.pitchEdits)
 
         performEdit(label, key: key) {
             tracks[t].clips[c] = rebuilt
@@ -6467,7 +6497,19 @@ public final class ProjectStore {
             // so a duplicated / split-off piece carries the same lanes with
             // nothing to re-mint (design-m16b §11 duplicate row).
             controllerLanes: clip.controllerLanes,
-            takeGroupID: nil)
+            takeGroupID: nil,
+            // Pitch edits (m23-q): copied. A FRESH IDENTITY IS NOT A FRESH
+            // PERFORMANCE — the copy reads the same source file at the same
+            // source offset, so the same notes are there and the same tuning
+            // applies. Contrast `takeGroupID` above, which is dropped precisely
+            // because it names a relationship the copy does not have; this field
+            // names the CONTENT, like `gainEnvelope` and `controllerLanes`.
+            //
+            // This site is load-bearing beyond duplicate/paste: `insertBars` and
+            // `deleteBars` re-mint their SPLIT-OFF TAILS through here, and those
+            // REPLACE the original clip — so an omission is real data loss, not
+            // just an untuned copy.
+            pitchEdits: clip.pitchEdits)
     }
 
     /// Duplicates a clip (m15-d) — a VALUE-COPY of everything (`reidentified`)
@@ -6592,7 +6634,15 @@ public final class ProjectStore {
             fadeInCurve: clip.fadeInCurve, fadeOutCurve: clip.fadeOutCurve,
             stretchRatio: clip.stretchRatio, pitchShiftSemitones: clip.pitchShiftSemitones,
             formantPreserve: clip.formantPreserve, gainEnvelope: newEnv,
-            controllerLanes: newLanes)
+            controllerLanes: newLanes,
+            // Pitch edits (m23-q): VERBATIM — source-file-absolute seconds, so
+            // `newOffset` is the only thing a window change may touch (the same
+            // reasoning as `trimClip`'s own rebuild; these two must agree or a
+            // journalled and an un-journalled trim would disagree about the
+            // user's tuning). Reached by the overlap-resolution choke point, so
+            // an omission here loses tuning on a STATIONARY clip the user never
+            // touched — the worst shape this bug can take.
+            pitchEdits: clip.pitchEdits)
     }
 
     /// Resolves how one STATIONARY same-track clip must change so it no longer

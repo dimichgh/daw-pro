@@ -46,9 +46,11 @@ struct SelectAllMenuPolicyTests {
     /// rather than test ceremony: `OpenEditorSurface.init` is `fileprivate` to the
     /// router, so every row below is fed a verdict the SHIPPED router computed. A
     /// suite that could hand-build one could pin a rule the app never applies.
-    private func open(workspaceIsArrange: Bool = true, rollOpen: Bool = true) -> OpenEditorSurface {
+    private func open(workspaceIsArrange: Bool = true, rollOpen: Bool = true,
+                      pitchEditorOpen: Bool = false) -> OpenEditorSurface {
         EditorSurfaceRouter.openSurface(
-            workspaceIsArrange: workspaceIsArrange, rollOpen: rollOpen)
+            workspaceIsArrange: workspaceIsArrange, rollOpen: rollOpen,
+            pitchEditorOpen: pitchEditorOpen)
     }
 
     // MARK: - The policy
@@ -173,19 +175,27 @@ struct SelectAllMenuPolicyTests {
         var seen = Set<SelectAllRefusal>()
         for workspaceIsArrange in [false, true] {
             for rollOpen in [false, true] {
-                for modal in [false, true] {
-                    for count in [0, 3] {
-                        let item = SelectAllMenuPolicy.editMenuItem(
-                            openSurface: open(workspaceIsArrange: workspaceIsArrange,
-                                              rollOpen: rollOpen),
-                            isModalPresented: modal, rollNoteCount: count)
-                        if let r = item.refusedBy { seen.insert(r) }
+                for pitchEditorOpen in [false, true] {
+                    for modal in [false, true] {
+                        for count in [0, 3] {
+                            let item = SelectAllMenuPolicy.editMenuItem(
+                                openSurface: open(workspaceIsArrange: workspaceIsArrange,
+                                                  rollOpen: rollOpen,
+                                                  pitchEditorOpen: pitchEditorOpen),
+                                isModalPresented: modal, rollNoteCount: count)
+                            if let r = item.refusedBy { seen.insert(r) }
+                        }
                     }
                 }
             }
         }
         #expect(seen == Set(SelectAllRefusal.allCases))
-        #expect(SelectAllRefusal.allCases.count == 4)
+        // ⭐ 4 → 5 AT m23-ap p2-b. The fifth is `pitchEditorOpen`: ⌘A means
+        // "select all NOTES" and a pitch SEGMENT is not a note, so the pitch
+        // editor refuses under its OWN name rather than falling through to
+        // `noRollOpen` — which would tell a red gate "no clip is open" about a
+        // pane that is plainly on screen.
+        #expect(SelectAllRefusal.allCases.count == 5)
     }
 
     /// ⭐⭐ **m34-d — THIS TEST'S ASSERTIONS ARE INVERTED FROM WHAT THEY WERE, AND
@@ -209,7 +219,8 @@ struct SelectAllMenuPolicyTests {
         // state (asserted here, so the two verdicts' DISAGREEMENT is the pin
         // rather than an accident) — and ⌘A no longer asks it.
         let engagementSaysArrange = EditorSurfaceRouter.resolve(
-            workspaceIsArrange: true, rollOpen: true, lastEngaged: .arrange)
+            workspaceIsArrange: true, rollOpen: true, pitchEditorOpen: false,
+            lastEngaged: .arrange)
         #expect(engagementSaysArrange.surface == .arrange)
         #expect(engagementSaysArrange.reason == .engagedArrange)
 
@@ -244,7 +255,7 @@ struct SelectAllMenuPolicyTests {
                 for latch in EditorSurface.allCases {
                     let engaged = EditorSurfaceRouter.resolve(
                         workspaceIsArrange: workspaceIsArrange,
-                        rollOpen: rollOpen, lastEngaged: latch)
+                        rollOpen: rollOpen, pitchEditorOpen: false, lastEngaged: latch)
                     // The two verdicts genuinely DISAGREE in the m34-d state —
                     // asserted so this sweep cannot pass by them being the same.
                     if workspaceIsArrange && rollOpen && latch == .arrange {

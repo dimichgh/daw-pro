@@ -111,13 +111,18 @@ struct AudioProfileFileCommandTests {
         // its controller-lane siblings 116 elements from the end, the
         // clip.getNotes / instrument.describeSampler precedent, so every
         // end-relative assertion here is untouched by it.)
-        #expect(CommandRouter.allCommands.dropLast(2).last == "edit.pasteClips")
-        // m24-n appended project.embeddedVoices then vc.installEmbeddedVoice
-        // at the END (same law).
-        #expect(CommandRouter.allCommands.dropLast().last == "project.embeddedVoices")
-        #expect(CommandRouter.allCommands.last == "vc.installEmbeddedVoice")
-        #expect(CommandRouter.allCommands.dropLast(4).last == "audio.profileFile")
-        #expect(CommandRouter.allCommands.dropLast(5).last == "transport.setStopAtContentEnd")
+        #expect(CommandRouter.allCommands.dropLast(5).last == "edit.pasteClips")
+        // m24-n appended project.embeddedVoices then vc.installEmbeddedVoice;
+        // m23-q Phase 2 then appended clip.autoCorrectPitch/
+        // clip.clearPitchEdits/clip.getPitchEdits AFTER those, at the new END
+        // (same law).
+        #expect(CommandRouter.allCommands.dropLast(4).last == "project.embeddedVoices")
+        #expect(CommandRouter.allCommands.dropLast(3).last == "vc.installEmbeddedVoice")
+        #expect(CommandRouter.allCommands.dropLast(2).last == "clip.autoCorrectPitch")
+        #expect(CommandRouter.allCommands.dropLast().last == "clip.clearPitchEdits")
+        #expect(CommandRouter.allCommands.last == "clip.getPitchEdits")
+        #expect(CommandRouter.allCommands.dropLast(7).last == "audio.profileFile")
+        #expect(CommandRouter.allCommands.dropLast(8).last == "transport.setStopAtContentEnd")
     }
 
     // MARK: - Happy path: params forwarded, response shape verbatim

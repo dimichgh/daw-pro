@@ -101,7 +101,16 @@ const CLIP_TRANSCRIBE_COMMANDS: ReadonlySet<string> = new Set(["clip.transcribe"
  * VOICE_CONVERT_TIMEOUT_MS's 330s (RVC's ~37x-real-time model; SwiftF0
  * measured at roughly 40x FASTER than real time, the opposite shape). */
 const CLIP_DETECT_PITCH_TIMEOUT_MS = 60000;
-const CLIP_DETECT_PITCH_COMMANDS: ReadonlySet<string> = new Set(["clip.detectPitch"]);
+// m23-q Phase 2: clip.autoCorrectPitch runs the SAME SwiftF0 detection call
+// internally (ProjectStore.autoCorrectClipPitch calls detectClipPitch itself
+// -- see that function's doc for why the contour is never ferried over the
+// wire by the caller), so it pays the identical cost and shares this tier
+// rather than the flat REQUEST_TIMEOUT_MS default. clip.clearPitchEdits/
+// clip.getPitchEdits touch no engine and stay on the default tier.
+const CLIP_DETECT_PITCH_COMMANDS: ReadonlySet<string> = new Set([
+  "clip.detectPitch",
+  "clip.autoCorrectPitch",
+]);
 
 interface ControlResponse {
   id: string;
