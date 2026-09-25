@@ -58,7 +58,7 @@ struct SelectAllMenuPolicyTests {
     @Test("the roll is OPEN and holds notes — LIVE, targeting the roll")
     func liveInTheRoll() {
         let item = SelectAllMenuPolicy.editMenuItem(
-            openSurface: open(), isModalPresented: false, rollNoteCount: 3)
+            openSurface: open(), isModalPresented: false, rollNoteCount: 3, pitchEditorNoteCount: 0)
         #expect(item.surface == .pianoRollNotes)
         #expect(item.isEnabled)
         #expect(item.refusedBy == nil)
@@ -77,7 +77,8 @@ struct SelectAllMenuPolicyTests {
     @Test("no clip is open — DECLINES, and no arrange-wide select-all was invented")
     func declinesInTheArrange() {
         let item = SelectAllMenuPolicy.editMenuItem(
-            openSurface: open(rollOpen: false), isModalPresented: false, rollNoteCount: 3)
+            openSurface: open(rollOpen: false), isModalPresented: false, rollNoteCount: 3,
+            pitchEditorNoteCount: 0)
         #expect(item.surface == nil)
         #expect(!item.isEnabled)
         #expect(item.refusedBy == .noRollOpen)
@@ -98,7 +99,7 @@ struct SelectAllMenuPolicyTests {
     func refusesInTheMixConsole() {
         let item = SelectAllMenuPolicy.editMenuItem(
             openSurface: open(workspaceIsArrange: false, rollOpen: true),
-            isModalPresented: false, rollNoteCount: 3)
+            isModalPresented: false, rollNoteCount: 3, pitchEditorNoteCount: 0)
         #expect(item.surface == nil)
         #expect(item.refusedBy == .notArrangeWorkspace)
     }
@@ -106,7 +107,7 @@ struct SelectAllMenuPolicyTests {
     @Test("a modal is up — refuses, matching both sibling policies")
     func refusesBehindAModal() {
         let item = SelectAllMenuPolicy.editMenuItem(
-            openSurface: open(), isModalPresented: true, rollNoteCount: 3)
+            openSurface: open(), isModalPresented: true, rollNoteCount: 3, pitchEditorNoteCount: 0)
         #expect(item.refusedBy == .modal)
         #expect(!item.isEnabled)
     }
@@ -114,7 +115,7 @@ struct SelectAllMenuPolicyTests {
     @Test("the roll's clip is empty — refuses rather than offering a provable no-op")
     func refusesOnAnEmptyRoll() {
         let item = SelectAllMenuPolicy.editMenuItem(
-            openSurface: open(), isModalPresented: false, rollNoteCount: 0)
+            openSurface: open(), isModalPresented: false, rollNoteCount: 0, pitchEditorNoteCount: 0)
         #expect(item.refusedBy == .emptyRoll)
         #expect(!item.isEnabled)
     }
@@ -127,15 +128,16 @@ struct SelectAllMenuPolicyTests {
         // Mixer + no roll + modal + empty: the WORKSPACE term must answer first.
         #expect(SelectAllMenuPolicy.editMenuItem(
             openSurface: open(workspaceIsArrange: false, rollOpen: false),
-            isModalPresented: true, rollNoteCount: 0)
+            isModalPresented: true, rollNoteCount: 0, pitchEditorNoteCount: 0)
             .refusedBy == .notArrangeWorkspace)
         // Arrange + no roll + modal + empty: ROLL-OPEN before modal.
         #expect(SelectAllMenuPolicy.editMenuItem(
-            openSurface: open(rollOpen: false), isModalPresented: true, rollNoteCount: 0)
+            openSurface: open(rollOpen: false), isModalPresented: true, rollNoteCount: 0,
+            pitchEditorNoteCount: 0)
             .refusedBy == .noRollOpen)
         // Roll open + modal + empty: MODAL before emptiness.
         #expect(SelectAllMenuPolicy.editMenuItem(
-            openSurface: open(), isModalPresented: true, rollNoteCount: 0)
+            openSurface: open(), isModalPresented: true, rollNoteCount: 0, pitchEditorNoteCount: 0)
             .refusedBy == .modal)
     }
 
@@ -151,7 +153,8 @@ struct SelectAllMenuPolicyTests {
                         let item = SelectAllMenuPolicy.editMenuItem(
                             openSurface: open(workspaceIsArrange: workspaceIsArrange,
                                               rollOpen: rollOpen),
-                            isModalPresented: modal, rollNoteCount: count)
+                            isModalPresented: modal, rollNoteCount: count,
+                            pitchEditorNoteCount: count)
                         // INV: enabled iff a surface, and the two are never both set.
                         #expect(item.isEnabled == (item.surface != nil))
                         #expect((item.surface == nil) == (item.refusedBy != nil))
@@ -164,6 +167,39 @@ struct SelectAllMenuPolicyTests {
             }
         }
         // arrange × rollOpen × !modal × {1, 7} = 2
+        #expect(live == 2)
+    }
+
+    /// m23-ap I4 — the NOTE EDITOR's arm, swept the way the roll's is above.
+    @Test("I4: the note editor's arm is live exactly when the pane is open in the arrange, no modal, and it draws notes")
+    func noteEditorArmSweep() {
+        var live = 0
+        for workspaceIsArrange in [false, true] {
+            for pitchEditorOpen in [false, true] {
+                for modal in [false, true] {
+                    for count in [0, 1, 7] {
+                        let item = SelectAllMenuPolicy.editMenuItem(
+                            openSurface: open(workspaceIsArrange: workspaceIsArrange,
+                                              rollOpen: false,
+                                              pitchEditorOpen: pitchEditorOpen),
+                            isModalPresented: modal, rollNoteCount: 0,
+                            pitchEditorNoteCount: count)
+                        #expect(item.isEnabled == (item.surface != nil))
+                        #expect((item.surface == nil) == (item.refusedBy != nil))
+                        if item.isEnabled {
+                            live += 1
+                            #expect(item.surface == .pitchEditorNotes)
+                            #expect(workspaceIsArrange && pitchEditorOpen && !modal && count > 0)
+                        }
+                        // Guard order on the pane's arm: modal before emptiness.
+                        if workspaceIsArrange && pitchEditorOpen && modal {
+                            #expect(item.refusedBy == .modal)
+                        }
+                    }
+                }
+            }
+        }
+        // arrange × pane open × !modal × {1, 7} = 2
         #expect(live == 2)
     }
 
@@ -182,7 +218,8 @@ struct SelectAllMenuPolicyTests {
                                 openSurface: open(workspaceIsArrange: workspaceIsArrange,
                                                   rollOpen: rollOpen,
                                                   pitchEditorOpen: pitchEditorOpen),
-                                isModalPresented: modal, rollNoteCount: count)
+                                isModalPresented: modal, rollNoteCount: count,
+                                pitchEditorNoteCount: count)
                             if let r = item.refusedBy { seen.insert(r) }
                         }
                     }
@@ -190,12 +227,15 @@ struct SelectAllMenuPolicyTests {
             }
         }
         #expect(seen == Set(SelectAllRefusal.allCases))
-        // ⭐ 4 → 5 AT m23-ap p2-b. The fifth is `pitchEditorOpen`: ⌘A means
-        // "select all NOTES" and a pitch SEGMENT is not a note, so the pitch
-        // editor refuses under its OWN name rather than falling through to
-        // `noRollOpen` — which would tell a red gate "no clip is open" about a
-        // pane that is plainly on screen.
+        // ⭐ 4 → 5 AT m23-ap p2-b, whose fifth was `pitchEditorOpen` (⌘A had no
+        // meaning in a read-only pane). ⭐ STILL 5 AT m23-ap I4, AND NOT THE SAME
+        // FIVE: the pane's arm went LIVE, `pitchEditorOpen` was retired, and
+        // `emptyPitchEditor` took its place — the pane refuses only when it
+        // draws nothing, under its OWN name rather than the roll's `emptyRoll`
+        // or `noRollOpen` (which would tell a red gate "no clip is open" about a
+        // pane that is plainly on screen).
         #expect(SelectAllRefusal.allCases.count == 5)
+        #expect(!SelectAllRefusal.allCases.map(\.rawValue).contains("pitch-editor-open"))
     }
 
     /// ⭐⭐ **m34-d — THIS TEST'S ASSERTIONS ARE INVERTED FROM WHAT THEY WERE, AND
@@ -225,7 +265,7 @@ struct SelectAllMenuPolicyTests {
         #expect(engagementSaysArrange.reason == .engagedArrange)
 
         let firstPress = SelectAllMenuPolicy.editMenuItem(
-            openSurface: open(), isModalPresented: false, rollNoteCount: 4)
+            openSurface: open(), isModalPresented: false, rollNoteCount: 4, pitchEditorNoteCount: 0)
         #expect(firstPress.surface == .pianoRollNotes)
         #expect(firstPress.isEnabled)
         #expect(firstPress.refusedBy == nil)
@@ -233,7 +273,7 @@ struct SelectAllMenuPolicyTests {
         // The MIX CONSOLE still refuses — the workspace term survived the widening.
         #expect(SelectAllMenuPolicy.editMenuItem(
             openSurface: open(workspaceIsArrange: false, rollOpen: true),
-            isModalPresented: false, rollNoteCount: 4)
+            isModalPresented: false, rollNoteCount: 4, pitchEditorNoteCount: 0)
             .refusedBy == .notArrangeWorkspace)
     }
 
@@ -249,7 +289,8 @@ struct SelectAllMenuPolicyTests {
             for rollOpen in [false, true] {
                 let verdict = open(workspaceIsArrange: workspaceIsArrange, rollOpen: rollOpen)
                 let item = SelectAllMenuPolicy.editMenuItem(
-                    openSurface: verdict, isModalPresented: false, rollNoteCount: 4)
+                    openSurface: verdict, isModalPresented: false, rollNoteCount: 4,
+                    pitchEditorNoteCount: 0)
                 // The latch moves; `openSurface` takes no such parameter, so the
                 // only way this could fail is somebody adding one back.
                 for latch in EditorSurface.allCases {
@@ -262,7 +303,8 @@ struct SelectAllMenuPolicyTests {
                         #expect(engaged.surface != verdict.surface)
                     }
                     let again = SelectAllMenuPolicy.editMenuItem(
-                        openSurface: verdict, isModalPresented: false, rollNoteCount: 4)
+                        openSurface: verdict, isModalPresented: false, rollNoteCount: 4,
+                        pitchEditorNoteCount: 0)
                     #expect(again.surface == item.surface)
                     #expect(again.refusedBy == item.refusedBy)
                 }
@@ -440,13 +482,15 @@ struct SelectAllMenuPolicyTests {
     func presentationRendersThePolicy() {
         let live = ClipboardResponderRouting.presentation(
             for: SelectAllMenuPolicy.editMenuItem(
-                openSurface: open(), isModalPresented: false, rollNoteCount: 2))
+                openSurface: open(), isModalPresented: false, rollNoteCount: 2,
+                pitchEditorNoteCount: 0))
         #expect(live.isEnabled)
         #expect(live.title == "Select All")
 
         let declined = ClipboardResponderRouting.presentation(
             for: SelectAllMenuPolicy.editMenuItem(
-                openSurface: open(rollOpen: false), isModalPresented: false, rollNoteCount: 2))
+                openSurface: open(rollOpen: false), isModalPresented: false, rollNoteCount: 2,
+                pitchEditorNoteCount: 0))
         #expect(!declined.isEnabled)
         // ⚠️ THE BARE macOS WORDS IN BOTH STATES — the user's 2026-08-12 ruling on
         // this menu group. A qualified "Select All Notes" here would re-open it.

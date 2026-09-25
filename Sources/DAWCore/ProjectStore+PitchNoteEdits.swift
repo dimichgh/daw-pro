@@ -7,7 +7,9 @@ import Foundation
 // §8.3 (the undo keys), §9.1 (the verbs these ops are the one home for).
 //
 // `ProjectStore+PitchCorrection.swift` writes a WHOLE auto-correct pass.
-// This file writes ONE NOTE. Own extension file, the `+PitchDetection` /
+// This file writes ONE NOTE — or, since I7a/U-D/I4, a GROUP of named notes in
+// one undo step (`setClipNotesCleared`, `setClipNoteGain`,
+// `setClipNotePitchOffsets`). Own extension file, the `+PitchDetection` /
 // `+PitchCorrection` precedent: per-frame f0 is its own file, per-clip passes
 // are their own file, per-note edits are this one.
 //
@@ -67,21 +69,24 @@ extension ProjectStore {
                                        offsetCents: Double,
                                        seedIfAbsent: PitchEditSet? = nil) throws -> Clip {
         let (t, c) = try locateEditableNoteClip(clipId)
-        var table = try noteTable(trackIndex: t, clipIndex: c, seedIfAbsent: seedIfAbsent)
-        let index = try segmentIndex(of: segmentId, in: table, clipId: clipId)
 
-        // ⛔⛔ **CLAMPED HERE, BECAUSE A DIRECT FIELD ASSIGNMENT BYPASSES THE
-        // HEALING `init` — AND THE FIRST DRAFT OF THIS FUNCTION DID NOT, WHICH
+        // ⛔⛔ **CLAMPED, BECAUSE A DIRECT FIELD ASSIGNMENT BYPASSES THE HEALING
+        // `init` — AND THE FIRST DRAFT OF THIS FUNCTION DID NOT, WHICH
         // `setNotePitchClamps` CAUGHT.** `NoteSegment.init` clamps
         // `pitchOffsetCents` to ±2400 cents; `segments[i].pitchOffsetCents = x`
         // does not go near it, so 99999 went in and read back as 99999. That is
         // the same shape `ProjectStore+PitchCorrection.swift` records for
         // `pitchEdits` itself ("a direct field assignment, which this is,
         // bypasses it") — one struct down.
-        table.segments[index].pitchOffsetCents = PitchCorrectionMath
-            .finite(offsetCents, default: 0)
-            .clamped(to: NoteSegment.pitchOffsetCentsRange)
-        let stored = table
+        //
+        // ⭐ m23-ap I1 UI hooks, item 0: the clamp now lives in ONE home,
+        // `PitchEditSet.applyingNotePitchOffsets` — the transform the pitch
+        // editor's drag preview hands the engine — so the note a one-note drag
+        // PLAYS is the note this commit STORES. Same clamp, and the same
+        // unknown-note refusal in the same words as `segmentIndex`'s.
+        let stored = try noteTable(trackIndex: t, clipIndex: c, seedIfAbsent: seedIfAbsent)
+            .applyingNotePitchOffsets(
+                [NotePitchOffset(segmentId: segmentId, offsetCents: offsetCents)], clipId: clipId)
 
         performEdit("Tune Note",
                     key: PitchCorrectionUndoKey.segment(clipID: clipId, segmentID: segmentId)) {
@@ -164,6 +169,230 @@ extension ProjectStore {
         return tracks[t].clips[c]
     }
 
+    /// Clear (silence) or restore a GROUP of notes in place. This is I7a's
+    /// store leg (design `docs/design/2026-09-24-pitch-editor-interaction-batch.md`
+    /// §10, ruled in §17), and the one home every door calls: the wire verb
+    /// `clip.setNoteCleared` today, and later the editor's Clear/Restore menu
+    /// (I7b) and ⌫ (I4, `delete-clears = yes`).
+    ///
+    /// It sets `NoteSegment.isCleared` to `cleared` on every named note and
+    /// changes NOTHING ELSE. No note moves and no pitch or level is written, so
+    /// `cleared: false` brings a note back at its own level. The offline
+    /// render silences a cleared note between its ramps
+    /// (`PitchEditSet.gain(atSourceSecond:)`).
+    ///
+    /// ⭐ **ONE journal entry for N notes** ("Clear Notes" / "Restore Notes"),
+    /// under `PitchCorrectionUndoKey.structuralKey`. A deliberate on/off never
+    /// coalesces (UI design §8.3), and a multi-select edit is one entry over
+    /// all N (the undo-key doc's `clip.moveMany` precedent). One
+    /// `tracksDidChange`.
+    ///
+    /// ⚠️ **ALL OR NOTHING.** Every id is resolved BEFORE anything is written,
+    /// so an unknown id among several leaves the table untouched, never
+    /// half-cleared. A repeated id is harmless (the same value written twice)
+    /// and is folded. An empty list is refused in words: a call that names no
+    /// note would otherwise succeed silently and change nothing.
+    ///
+    /// The refusals are the per-note setters' own, shared rather than
+    /// restated: an unknown clip, a MIDI clip or a take-group comp member
+    /// (`locateEditableNoteClip`); no stored table and no seed (`noteTable`); an
+    /// unknown note id (`segmentIndex`, which names how many notes the clip
+    /// does carry). A no-op (every named note already in that state) journals
+    /// nothing, the `setClipNotePitchOffset` idiom.
+    @discardableResult
+    public func setClipNotesCleared(clipId: UUID,
+                                    segmentIds: [UUID],
+                                    cleared: Bool,
+                                    seedIfAbsent: PitchEditSet? = nil) throws -> Clip {
+        let (t, c) = try locateEditableNoteClip(clipId)
+        guard !segmentIds.isEmpty else {
+            throw ProjectError.invalidClipEdit(
+                "Name at least one note to \(cleared ? "clear" : "restore"). Read the clip's "
+                    + "note ids with `clip.getPitchEdits` first.")
+        }
+        var table = try noteTable(trackIndex: t, clipIndex: c, seedIfAbsent: seedIfAbsent)
+        var indices: [Int] = []
+        var seen = Set<UUID>()
+        for segmentId in segmentIds where seen.insert(segmentId).inserted {
+            indices.append(try segmentIndex(of: segmentId, in: table, clipId: clipId))
+        }
+        for index in indices {
+            table.segments[index].isCleared = cleared
+        }
+        let stored = table
+
+        performEdit(cleared ? "Clear Notes" : "Restore Notes",
+                    key: PitchCorrectionUndoKey.structuralKey) {
+            tracks[t].clips[c].pitchEdits = stored
+            // The flag rides the render key through the digest's level block
+            // (`PitchEditSetDigest`, slot 5), the `autoCorrectClipPitch`
+            // precedent for a key-affecting edit.
+            engine?.tracksDidChange(tracks)
+        }
+        return tracks[t].clips[c]
+    }
+
+    /// Set a GROUP of notes' LEVEL, in dB. U-D's store leg (design
+    /// `docs/design/2026-09-24-unpitched-notes-presets-midi-targets.md` §1.8,
+    /// as amended by `docs/design/2026-09-24-pitch-editor-interaction-batch.md`
+    /// §17.3), `setClipNotesCleared`'s MIRROR for the other half of the same
+    /// mask: that flag silences, this sets what a note plays AT when it is
+    /// not silenced. Sits beside it for that reason, and shares its shape —
+    /// same refusals, all-or-nothing, a no-op journals nothing, one undo step
+    /// for N notes.
+    ///
+    /// `gainDb` is the note's FINAL level, 0 = as sung, NOT a delta — the
+    /// `setClipNotePitchOffset` rule verbatim, for the same reason (a dropped
+    /// call and a call of 0 must read back differently). Every named note
+    /// gets exactly this ONE value; a per-note fan-out is a caller loop, same
+    /// as `setClipNotesCleared`'s single `cleared` flag.
+    ///
+    /// ⛔ **CLAMPED HERE, EXPLICITLY, BECAUSE A DIRECT FIELD ASSIGNMENT
+    /// BYPASSES THE HEALING `init`** — `setClipNotePitchOffset`'s own rule
+    /// (this file's banner), restated because `amplitudeDb` shares
+    /// `Clip.gainDbRange` (−72…24) with a whole clip's own gain rather than
+    /// minting a second range (`PitchCorrection.swift:437`).
+    ///
+    /// ⭐ **ONE journal entry for N notes** ("Set Note Level"), under
+    /// `PitchCorrectionUndoKey.structuralKey` — a deliberate level pick never
+    /// coalesces, the `setClipNotesCleared` on/off rule extended to a value:
+    /// there is no continuous-drag caller for this verb yet, so there is
+    /// nothing to coalesce toward (unlike `setClipNotePitchOffset`'s
+    /// `.segment` key).
+    ///
+    /// ⚠️ **ALL OR NOTHING**, the `setClipNotesCleared` rule verbatim: every
+    /// id is resolved BEFORE anything is written, a repeated id is folded,
+    /// and an empty list is refused in words.
+    ///
+    /// The refusals are the per-note setters' own, shared rather than
+    /// restated. A no-op (every named note already at exactly this dB)
+    /// journals nothing, the `setClipNotePitchOffset` idiom.
+    ///
+    /// Setting every named note back to 0 dB does not clear anything — level
+    /// and cleared are independent fields (`NoteSegment.hasLevelEdits`'s own
+    /// banner) — it only means "as sung."
+    @discardableResult
+    public func setClipNoteGain(clipId: UUID,
+                                segmentIds: [UUID],
+                                gainDb: Double,
+                                seedIfAbsent: PitchEditSet? = nil) throws -> Clip {
+        let (t, c) = try locateEditableNoteClip(clipId)
+        guard !segmentIds.isEmpty else {
+            throw ProjectError.invalidClipEdit(
+                "Name at least one note to set the level of. Read the clip's "
+                    + "note ids with `clip.getPitchEdits` first.")
+        }
+        var table = try noteTable(trackIndex: t, clipIndex: c, seedIfAbsent: seedIfAbsent)
+        var indices: [Int] = []
+        var seen = Set<UUID>()
+        for segmentId in segmentIds where seen.insert(segmentId).inserted {
+            indices.append(try segmentIndex(of: segmentId, in: table, clipId: clipId))
+        }
+        let clamped = PitchCorrectionMath.finite(gainDb, default: 0).clamped(to: Clip.gainDbRange)
+        for index in indices {
+            table.segments[index].amplitudeDb = clamped
+        }
+        let stored = table
+
+        performEdit("Set Note Level", key: PitchCorrectionUndoKey.structuralKey) {
+            tracks[t].clips[c].pitchEdits = stored
+            // amplitudeDb rides the render key through the digest's level
+            // block (`PitchEditSetDigest`, slot 5) — the `setClipNotesCleared`
+            // precedent for a key-affecting edit; the field itself is hashed
+            // inline rather than moved, so this write re-keys the same slot.
+            engine?.tracksDidChange(tracks)
+        }
+        return tracks[t].clips[c]
+    }
+
+    /// Set a GROUP of notes' pitch offsets in ONE undo step — the pitch
+    /// editor's GROUP DRAG (m23-ap I4, design
+    /// `docs/design/2026-09-24-pitch-editor-interaction-batch.md` §7): every
+    /// selected note moved by the same landed delta, each landing at its OWN
+    /// absolute offset. `setClipNotePitchOffset`'s group twin, and the MIRROR of
+    /// `setClipNotesCleared` / `setClipNoteGain` beside it — same refusals,
+    /// all-or-nothing, a no-op journals nothing, one undo step for N notes.
+    ///
+    /// Each offset is ABSOLUTE, never a delta — `setClipNotePitchOffset`'s rule
+    /// verbatim, for its reason (a dropped call and a call of zero must read
+    /// back differently). Unlike `setClipNoteGain`'s single value, every note
+    /// carries its own number: a group drag keeps the INTERVALS between notes,
+    /// so the notes land on different offsets.
+    ///
+    /// ⛔ **CLAMPED PER NOTE, EXPLICITLY** to `NoteSegment.pitchOffsetCentsRange`
+    /// — a direct field assignment bypasses the healing `init` (this file's
+    /// `setClipNotePitchOffset` note). The clamp, the fold of a repeated id and
+    /// the refusals are `PitchEditSet.applyingNotePitchOffsets`'s: THE ONE HOME
+    /// of the draft rule (`NotePitchDraft.swift`), which the pitch editor's drag
+    /// preview also calls, so what a drag plays is what its release stores.
+    ///
+    /// ⭐ **ONE `performEdit("Tune Notes")` UNDER THE CALLER'S `undoKey`.** The
+    /// editor passes `PitchCorrectionUndoKey.group(clipID:selectionToken:)`
+    /// (UI design §8.4): a second drag of the SAME selection inside the 800 ms
+    /// window coalesces, a different selection starts a new step. A caller with
+    /// no selection to name (a batch verb on the wire) passes
+    /// `PitchCorrectionUndoKey.structuralKey`. NO DEFAULT, deliberately: which
+    /// of the two a caller means is a decision, and a defaulted key is the
+    /// silent omission of it.
+    ///
+    /// ⚠️ **ALL OR NOTHING.** Every id is resolved BEFORE anything is written,
+    /// so one unknown id among several leaves the table untouched. A repeated
+    /// id with the SAME offset is folded (the `setClipNotesCleared` rule); a
+    /// repeated id with two DIFFERENT offsets is REFUSED in words — "last one
+    /// wins" would be a silent choice between two things the caller asked for.
+    /// An empty list is refused in words.
+    ///
+    /// The refusals are the per-note setters' own, shared rather than
+    /// restated: an unknown clip, a MIDI clip or a take-group comp member
+    /// (`locateEditableNoteClip`); no stored table and no seed (`noteTable`);
+    /// an unknown note id (`segmentIndex`, which names the count). A no-op
+    /// (every named note already at exactly its offset) journals nothing:
+    /// `performEdit` records only a changed state.
+    ///
+    /// The wire verb is `clip.setNotePitches {clipId, notes: [{segmentId,
+    /// cents}]}` (`Sources/DAWControl/Commands.swift`) and its MCP tool
+    /// `clip_set_note_pitches`, both shipped by the MCP lane after I4; `cents`
+    /// is each note's absolute offset, this function's `offsetCents`. A caller
+    /// with no selection to name passes `PitchCorrectionUndoKey.structuralKey`
+    /// (see the undo-key paragraph above), which is what the verb does.
+    @discardableResult
+    public func setClipNotePitchOffsets(clipId: UUID,
+                                        offsets: [NotePitchOffset],
+                                        seedIfAbsent: PitchEditSet? = nil,
+                                        undoKey: String?) throws -> Clip {
+        let (t, c) = try locateEditableNoteClip(clipId)
+        // ⚠️ THE EMPTY LIST IS REFUSED HERE, BEFORE `noteTable`, ON PURPOSE.
+        // `applyingNotePitchOffsets` refuses it too, with the same words, but
+        // only AFTER a table exists: without this guard a bare clip handed `[]`
+        // would be told "no notes to edit yet" instead of "name at least one
+        // note". The preview (`previewClipNotePitchDraft`) keeps the same order.
+        guard !offsets.isEmpty else {
+            throw ProjectError.invalidClipEdit(
+                "Name at least one note to tune. Read the clip's note ids with "
+                    + "`clip.getPitchEdits` first.")
+        }
+        // ⭐ THE ONE HOME OF THE DRAFT RULE (m23-ap I1 UI hooks, item 0). The
+        // clamp (first, so "the same offset twice" is judged on what would be
+        // WRITTEN), the fold of a repeated id, the refusal of one id with two
+        // pitches and the unknown-id refusal are all
+        // `PitchEditSet.applyingNotePitchOffsets`'s — the transform the drag
+        // preview hands the engine. One rule, so a drag cannot play one pitch
+        // and its release store another. `ClipNoteSpanAuditionTests`' agreement
+        // test still pins the two against each other, so a future inline copy
+        // here goes red.
+        let stored = try noteTable(trackIndex: t, clipIndex: c, seedIfAbsent: seedIfAbsent)
+            .applyingNotePitchOffsets(offsets, clipId: clipId)
+
+        performEdit("Tune Notes", key: undoKey) {
+            tracks[t].clips[c].pitchEdits = stored
+            // pitchEdits rides the render cache key (`ClipKey.pitchEditSetHash`)
+            // — ONE `tracksDidChange` for the whole group, the
+            // `setClipNotePitchOffset` precedent for a key-affecting edit.
+            engine?.tracksDidChange(tracks)
+        }
+        return tracks[t].clips[c]
+    }
+
     // MARK: - Shared resolution
 
     /// Locate + the two gates every per-note write shares.
@@ -240,6 +469,24 @@ extension ProjectStore {
             }
         }
         return nil
+    }
+}
+
+// MARK: - One note's pitch, as a group edit names it
+
+/// ONE note's ABSOLUTE pitch offset, as `ProjectStore.setClipNotePitchOffsets`
+/// takes it (m23-ap I4). A named pair rather than a tuple or a dictionary: a
+/// dictionary would make a repeated id unrepresentable and so hide the one
+/// ambiguity the store refuses in words, and a tuple cannot carry a doc.
+public struct NotePitchOffset: Sendable, Equatable, Hashable {
+    /// The note, by `NoteSegment.id`.
+    public var segmentId: UUID
+    /// Where the note lands, in cents from its detected centre — ABSOLUTE.
+    public var offsetCents: Double
+
+    public init(segmentId: UUID, offsetCents: Double) {
+        self.segmentId = segmentId
+        self.offsetCents = offsetCents
     }
 }
 

@@ -114,12 +114,24 @@ public enum PitchCorrectionPreset: String, Codable, Sendable, CaseIterable, Iden
     /// TIMES.** Until 2026-09-24 the render built every curve with
     /// `contour: []`, so Hard Tune's flattening resolved to nothing and it
     /// rendered as a *stronger Tight* wearing the label "the robot effect" —
-    /// on the real dry vocal its within-note wander came back 62.8 → 63.8
-    /// cents, indistinguishable from Tight's 62.8 → 63.8. The render now
+    /// on the real dry vocal the constant-offset render left each held note's
+    /// within-note wander where it was, the same as Tight. The render now
     /// shapes against the detected whole-file contour (`PitchRenderContour`),
-    /// and through that product path the same vocal comes back 62.8 → 18.2
-    /// cents (median 70 % cut per note) while Tight still moves it 1 %. The
-    /// label is now true, so the button is offered.
+    /// and the phrase is split into notes first (`PitchNoteSplitter`, p2-seg).
+    /// Through that product path, over the vocal's 19 measurable held notes,
+    /// Hard Tune cuts the wander 37.6 → 15.2 cents (median 49 % per note,
+    /// `PitchWanderMeter`; 18.8 → 8.1 cents, 68 %, by an independent YIN) and
+    /// keeps every one of them on its own note. Tight reads 37.6 → 38.3 (−1 %),
+    /// and so does the constant-offset fallback. The env-gated
+    /// `ContourRenderListeningTests` is the measurement (p2-seg-F-metric,
+    /// 2026-09-24). The label is now true, so the button is offered.
+    ///
+    /// ⚠️ RETRACTED: the figure first written here, "62.8 → 18.2 cents (median
+    /// 70 % cut per note)", was scored per stored segment BEFORE note
+    /// splitting. That render flattened 4 of the 19 held notes onto the WRONG
+    /// note (97–460 cents off), so part of its "70 %" was flattening onto
+    /// wrong notes. This doc is the ONE home of the figure; other comments
+    /// point here and do not restate it.
     ///
     /// ⚠️ **WHAT IS STILL TRUE AND A UI SHOULD SAY:** if the pitch detector
     /// cannot run (a build missing the model), Hard Tune renders its fallback

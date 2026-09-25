@@ -142,6 +142,37 @@ struct ReferenceLaneTransparencyTests {
         #expect(OfflineRenderer().referenceLaneEnabled == false)
     }
 
+    // MARK: - I1: the before/after invariance instrument (env-gated)
+
+    /// I1 (hear the note, design 2026-09-24-pitch-editor-interaction-batch §4)
+    /// INVARIANCE INSTRUMENT, not a gate on its own. With `I1_RENDER_DUMP` set
+    /// to a file path, it renders the representative session through the
+    /// production offline loop, with no audition anywhere, and writes every
+    /// float's BIT PATTERN (little-endian, channel-major) to that path. Run it
+    /// on the tree before a render-path change and again after, then compare
+    /// the two files with `md5`/`cmp`: equal bytes are the evidence that the
+    /// change left an ordinary bounce alone. The graph's own lane-off ≡ lane-on
+    /// gates cannot say that, because both sides of them run the NEW code.
+    @Test("I1 invariance instrument: dump the representative render's bit patterns (env-gated)",
+          .enabled(if: ProcessInfo.processInfo.environment["I1_RENDER_DUMP"] != nil))
+    func i1DumpRepresentativeRender() throws {
+        let path = try #require(ProcessInfo.processInfo.environment["I1_RENDER_DUMP"])
+        let rendered = try render(lane: false, tracks: try representativeSession())
+        var data = Data()
+        for channel in rendered.channelData {
+            for sample in channel {
+                withUnsafeBytes(of: sample.bitPattern.littleEndian) { data.append(contentsOf: $0) }
+            }
+        }
+        try data.write(to: URL(fileURLWithPath: path))
+        let frames = rendered.channelData.first?.count ?? 0
+        let rms = TestSignals.rms(rendered.channelData[0], in: 0..<frames)
+        print("[I1 dump] \(rendered.channelData.count) ch × \(frames) frames, \(data.count) bytes, "
+              + "ch0 RMS \(rms) → \(path)")
+        // Never two agreeing silences: the dump must carry real audio.
+        #expect(rms > 0.05)
+    }
+
     // MARK: - Lane topology pins (the m13-d R1 idiom)
 
     private func makeManualEngine(lane: Bool) throws -> (AVAudioEngine, PlaybackGraph) {
@@ -233,6 +264,169 @@ struct ReferenceLaneTransparencyTests {
     /// Minimal real audio file for the schedule-refusal pin above.
     private func dummyFile() throws -> AVAudioFile {
         try AVAudioFile(forReading: TestSignals.fixtures().cos1k48)
+    }
+
+    // MARK: - I1: the clip-note audition voice (hear the note while editing it)
+    //
+    // The live engine builds `clipAuditionPlayer → clipAuditionMixer →
+    // mainMixerNode` into every graph, beside this suite's reference lane and
+    // under the same rules (fresh stock nodes, attached before the first
+    // render, live-only). These gates live HERE, in an existing `@MainActor`
+    // suite, so the MainActorOccupancy Leg C count does not move.
+
+    @Test("I1 clip-audition lane: an IDLE voice is BYTE-transparent — voice-on vs voice-off render of the representative session")
+    func clipAuditionLaneIsBitTransparent() throws {
+        let tracks = try representativeSession()
+        let off = try render(lane: false, tracks: tracks)
+
+        func renderWith(referenceLane: Bool, clipLane: Bool) throws -> RenderedAudio {
+            let renderer = OfflineRenderer()
+            renderer.referenceLaneEnabled = referenceLane
+            renderer.clipAuditionLaneEnabled = clipLane
+            return try renderer.render(
+                tracks: tracks, tempoMap: TempoMap(constantBPM: 120),
+                fromBeat: 0, durationSeconds: 1.5, masterVolume: 0.85,
+                masterEffects: [])
+        }
+        let voiceOn = try renderWith(referenceLane: false, clipLane: true)
+        // The live engine's exact shape: BOTH lanes present, both idle.
+        let liveShape = try renderWith(referenceLane: true, clipLane: true)
+
+        let verdict = bitIdentical(off, voiceOn)
+        let liveVerdict = bitIdentical(off, liveShape)
+        let frames = off.channelData[0].count
+        let offRMS = TestSignals.rms(off.channelData[0], in: 0..<frames)
+        print("[measured] I1 idle-voice transparency over \(frames) frames × \(off.channelData.count) ch: "
+              + "voice-on byte-identical \(verdict.identical) (first diff: \(verdict.firstDiff)); "
+              + "both lanes byte-identical \(liveVerdict.identical) (first diff: \(liveVerdict.firstDiff)); "
+              + "voice-off ch0 RMS \(offRMS)")
+        #expect(offRMS > 0.05, "two agreeing silences prove nothing")
+        #expect(verdict.identical, "an idle clip-note voice changed the mix: \(verdict.firstDiff)")
+        #expect(liveVerdict.identical,
+                "the live graph's two idle lanes changed the mix: \(liveVerdict.firstDiff)")
+    }
+
+    @Test("I1 clip-audition lane: player → mixer → mainMixerNode, built with the graph, idempotent, zero announces; OFF by default on graph and renderer")
+    func clipAuditionLaneTopologyAndDefaults() throws {
+        #expect(PlaybackGraph(engine: AVAudioEngine()).clipAuditionLaneEnabled == false)
+        #expect(OfflineRenderer().clipAuditionLaneEnabled == false)
+
+        let (engine, graph) = try makeManualEngine(lane: false)
+        graph.clipAuditionLaneEnabled = true
+        var announces = 0
+        graph.willMutateRoutingTopology = { announces += 1 }
+        graph.reconcile(tracks: [])
+        let player = try #require(graph.clipAuditionPlayer)
+        let mixer = try #require(graph.clipAuditionMixer)
+        #expect(engine.inputConnectionPoint(for: mixer, inputBus: 0)?.node === player)
+        let outputs = engine.outputConnectionPoints(for: mixer, outputBus: 0)
+        #expect(outputs.count == 1)
+        #expect(outputs.first?.node === engine.mainMixerNode,
+                "the voice must pass the master fader and the master chain")
+        #expect(mixer.outputVolume == 1)
+        #expect(graph.clipAuditionScheduled == false)
+        #expect(!graph.needsEngineRebuild)
+        #expect(announces == 0)
+
+        // One creation site: identities survive further sandwich calls and
+        // reconciles, still zero announces, zero rebuild debt.
+        graph.ensureMasterSandwich()
+        graph.reconcile(tracks: [Track(name: "A", kind: .audio)])
+        #expect(graph.clipAuditionPlayer === player)
+        #expect(graph.clipAuditionMixer === mixer)
+        #expect(announces == 0)
+        #expect(!graph.needsEngineRebuild)
+        graph.stopClipAudition()   // ledger-gated: free when idle
+        #expect(graph.clipAuditionScheduled == false)
+
+        // Voice off: no nodes, and a play is refused rather than crashing.
+        let (_, bare) = try makeManualEngine(lane: false)
+        bare.reconcile(tracks: [])
+        #expect(bare.clipAuditionPlayer == nil)
+        #expect(bare.clipAuditionMixer == nil)
+        let buffer = try #require(AVAudioPCMBuffer(pcmFormat: bare.clipAuditionFormat,
+                                                   frameCapacity: 16))
+        buffer.frameLength = 16
+        #expect(bare.playClipAudition(buffer) == false)
+    }
+
+    @Test("I1 clip-audition lane: a scheduled buffer is HEARD through the master in a manual render — onset, level, end, stop — written to a WAV and read back")
+    func clipAuditionLanePlaysThroughTheMaster() throws {
+        // Manual rendering: the engine renders into buffers, never a device.
+        let engine = AVAudioEngine()
+        let graph = PlaybackGraph(engine: engine, graphRate: 48_000)
+        graph.clipAuditionLaneEnabled = true
+        let format = try #require(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2))
+        try engine.enableManualRenderingMode(.offline, format: format, maximumFrameCount: 4_096)
+        _ = engine.mainMixerNode
+        graph.reconcile(tracks: [])
+        try engine.start()
+        defer { engine.stop() }
+
+        // 0.25 s of a 0.5-amplitude 1 kHz COSINE, so the very first sample is
+        // 0.5 and the onset is visible at frame 0.
+        let frames = 12_000
+        let buffer = try #require(AVAudioPCMBuffer(pcmFormat: graph.clipAuditionFormat,
+                                                   frameCapacity: AVAudioFrameCount(frames)))
+        let data = try #require(buffer.floatChannelData)
+        for frame in 0..<frames {
+            let value = Float(0.5 * cos(2 * Double.pi * 1_000 * Double(frame) / 48_000))
+            data[0][frame] = value
+            data[1][frame] = value
+        }
+        buffer.frameLength = AVAudioFrameCount(frames)
+        let input = Array(UnsafeBufferPointer(start: data[0], count: frames))
+
+        func pull(_ count: Int) throws -> [[Float]] {
+            var out: [[Float]] = [[], []]
+            let block = try #require(AVAudioPCMBuffer(pcmFormat: engine.manualRenderingFormat,
+                                                      frameCapacity: 4_096))
+            while out[0].count < count {
+                let n = min(4_096, count - out[0].count)
+                let status = try engine.renderOffline(AVAudioFrameCount(n), to: block)
+                try #require(status == .success, "renderOffline status \(status.rawValue)")
+                let blockData = try #require(block.floatChannelData)
+                for channel in 0..<2 {
+                    out[channel].append(contentsOf: UnsafeBufferPointer(
+                        start: blockData[channel], count: Int(block.frameLength)))
+                }
+            }
+            return out
+        }
+
+        #expect(graph.playClipAudition(buffer))
+        #expect(graph.clipAuditionScheduled)
+        let played = try pull(24_000)
+        graph.stopClipAudition()
+        #expect(graph.clipAuditionScheduled == false)
+        let afterStop = try pull(4_096)
+
+        // Written to a WAV and read back: the assertions below run on the file.
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("daw-pro-i1-lane-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let wav = dir.appendingPathComponent("voice-through-master.wav")
+        try I1Signals.write(played, sampleRate: 48_000, to: wav)
+        let readBack = try I1Signals.read(wav).planar
+        try #require(readBack.count == 2 && readBack[0].count == 24_000)
+
+        let onset = readBack[0].firstIndex { abs($0) > 1e-4 } ?? -1
+        var maxError: Float = 0
+        for frame in 0..<frames {
+            maxError = max(maxError, abs(readBack[0][frame] - input[frame]),
+                           abs(readBack[1][frame] - input[frame]))
+        }
+        let tailPeak = readBack.flatMap { $0[frames..<24_000] }.map(abs).max() ?? 0
+        let stopPeak = afterStop.flatMap { $0 }.map(abs).max() ?? 0
+        let playedRMS = TestSignals.rms(readBack[0], in: 0..<frames)
+        print("[measured] I1 voice through the master (manual render, \(wav.path)): onset frame "
+              + "\(onset), max |out − in| \(maxError) over \(frames) frames × 2 ch, RMS \(playedRMS) "
+              + "(0.5 cosine ⇒ 0.3536), peak after the buffer ends \(tailPeak), after stop \(stopPeak)")
+        #expect(onset == 0, "the voice started at frame \(onset), not at the first rendered frame")
+        #expect(maxError <= 1e-6, "the voice reached the output altered by \(maxError)")
+        #expect(abs(playedRMS - 0.353_553) < 1e-3)
+        #expect(tailPeak < 1e-7, "the voice kept sounding after its buffer ended")
+        #expect(stopPeak < 1e-7)
     }
 
     // MARK: - T8: level-match honesty (the roadmap gate — real Loudness math)

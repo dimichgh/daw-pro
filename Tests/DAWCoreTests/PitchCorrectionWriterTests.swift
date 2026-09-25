@@ -508,6 +508,9 @@ struct PitchCorrectionWriterTests {
         parent.vibratoScale = 0.5
         parent.formantOffsetSemitones = 3
         parent.amplitudeDb = -2.5
+        // I7a: a cleared note split in two is two cleared halves. The right
+        // half is carried through the Codable round trip (`reidentified`).
+        parent.isCleared = true
         seed = PitchEditSet(segments: [parent])
         let parentID = parent.id
         let cut = (parent.startSeconds + parent.endSeconds) / 2
@@ -536,6 +539,7 @@ struct PitchCorrectionWriterTests {
             #expect(half.vibratoScale == 0.5)
             #expect(half.formantOffsetSemitones == 3)
             #expect(half.amplitudeDb == -2.5)
+            #expect(half.isCleared, "a split dropped the clear on one half")
             #expect(half.detectedHz == parent.detectedHz)
             #expect(half.detectedConfidence == parent.detectedConfidence)
         }
@@ -821,5 +825,574 @@ struct PitchCorrectionWriterTests {
         #expect(stored.autoCorrectStamp == nil)
         #expect(stored.hasHandEditsSinceAutoCorrect == true,
                 "notes moved by hand on a never-tuned clip read as a preset's output, so the first preset would erase them silently")
+    }
+
+    // MARK: - I7a: clear a note in place (`setClipNotesCleared`)
+
+    /// Four notes, the third at −6 dB so a Restore has a level of its own to
+    /// come back to. Built by hand: the store never inspects detection here.
+    private func fourNoteTable() -> PitchEditSet {
+        var segments: [NoteSegment] = []
+        for index in 0..<4 {
+            let start: Double = Double(index) * 0.5
+            let hz: Double = 220 + Double(index) * 20
+            let level: Double = index == 2 ? -6 : 0
+            segments.append(NoteSegment(startSeconds: start, endSeconds: start + 0.4,
+                                        detectedHz: hz, detectedConfidence: 0.9,
+                                        amplitudeDb: level))
+        }
+        return PitchEditSet(segments: segments)
+    }
+
+    @Test("I7a: clearing three notes is ONE undo step, moves nothing else, and undo brings all three back")
+    func clearingNNotesIsOneUndoStep() throws {
+        let (store, engine, clip, url) = try audioStore()
+        defer { try? FileManager.default.removeItem(at: url); _ = engine }
+        let seed = fourNoteTable()
+        // Store the table first with an unrelated edit, so "before" is a real
+        // stored state and not nil.
+        _ = try store.setClipNotePitchOffset(clipId: clip.id, segmentId: seed.segments[3].id,
+                                             offsetCents: 12, seedIfAbsent: seed)
+        let before = try storedSet(store)
+        let depth = store.undoHistory().undo.count
+        let named = seed.segments[0...2].map(\.id)
+
+        _ = try store.setClipNotesCleared(clipId: clip.id, segmentIds: named, cleared: true)
+
+        #expect(store.undoHistory().undo.count == depth + 1, "three notes must be ONE undo step")
+        #expect(store.undoHistory().undo.first == "Clear Notes")
+        // READ IT BACK OUT OF THE STORE.
+        let after = try storedSet(store)
+        #expect(after.segments.filter(\.isCleared).map(\.id) == named)
+        // ⭐ THE INVARIANCE CONTROL: apart from the flag, every field of every
+        // note is exactly what it was. Nothing moved, no level was written.
+        #expect(after.segments.count == before.segments.count)
+        for (now, was) in zip(after.segments, before.segments) {
+            var flagRestored = now
+            flagRestored.isCleared = was.isCleared
+            #expect(flagRestored == was, "clearing changed more than the flag on \(now.id)")
+        }
+        // A deliberate on/off never coalesces: a second clear is a second step.
+        _ = try store.setClipNotesCleared(clipId: clip.id, segmentIds: [seed.segments[3].id],
+                                          cleared: true)
+        #expect(store.undoHistory().undo.count == depth + 2)
+
+        #expect(try store.undo() == "Clear Notes")
+        #expect(try store.undo() == "Clear Notes")
+        #expect(try storedSet(store) == before, "undo did not bring the notes back")
+        #expect(try storedSet(store).segments.allSatisfy { !$0.isCleared })
+    }
+
+    @Test("I7a: Restore brings a note back at its OWN level, never 0 dB, as 'Restore Notes'")
+    func restoreKeepsTheNotesOwnLevel() throws {
+        let (store, engine, clip, url) = try audioStore()
+        defer { try? FileManager.default.removeItem(at: url); _ = engine }
+        let seed = fourNoteTable()
+        let levelled = seed.segments[2].id
+        _ = try store.setClipNotesCleared(clipId: clip.id, segmentIds: [levelled], cleared: true,
+                                          seedIfAbsent: seed)
+        let cleared = try #require(try storedSet(store).segments.first { $0.id == levelled })
+        #expect(cleared.isCleared)
+        #expect(cleared.amplitudeDb == -6, "clearing must not touch the level")
+
+        _ = try store.setClipNotesCleared(clipId: clip.id, segmentIds: [levelled], cleared: false)
+        #expect(store.undoHistory().undo.first == "Restore Notes")
+        let restored = try #require(try storedSet(store).segments.first { $0.id == levelled })
+        #expect(!restored.isCleared)
+        #expect(restored.amplitudeDb == -6, "Restore must return the note's OWN level")
+    }
+
+    @Test("I7a: a clear ALONE takes an untouched clip out of the identity bypass, so it renders")
+    func aClearAloneMakesTheClipRender() throws {
+        let (store, engine, clip, url) = try audioStore()
+        defer { try? FileManager.default.removeItem(at: url); _ = engine }
+        let seed = seedTable(melodicResult())
+        #expect(seed.isIdentity, "fixture: a detected table that bends nothing")
+        #expect(!Clip(name: "c", audioFileURL: url, pitchEdits: seed).rendersThroughStretchCache)
+
+        _ = try store.setClipNotesCleared(clipId: clip.id, segmentIds: [seed.segments[0].id],
+                                          cleared: true, seedIfAbsent: seed)
+        let stored = store.tracks[0].clips[0]
+        #expect(stored.hasPitchEdits, "a cleared note is an edit: Clip.hasPitchEdits must say so")
+        #expect(stored.rendersThroughStretchCache,
+                "a clip with a cleared note must leave the bypass, or the note plays from the source")
+        #expect(try #require(stored.pitchEdits).isPitchIdentity,
+                "a clear bends no pitch: the render must be able to skip the stretcher")
+    }
+
+    @Test("I7a: a no-op journals nothing, and a repeated id is folded")
+    func aNoOpClearJournalsNothing() throws {
+        let (store, engine, clip, url) = try audioStore()
+        defer { try? FileManager.default.removeItem(at: url); _ = engine }
+        let seed = fourNoteTable()
+        let target = seed.segments[1].id
+        _ = try store.setClipNotesCleared(clipId: clip.id, segmentIds: [target, target],
+                                          cleared: true, seedIfAbsent: seed)
+        #expect(try storedSet(store).segments.filter(\.isCleared).map(\.id) == [target])
+        let depth = store.undoHistory().undo.count
+        _ = try store.setClipNotesCleared(clipId: clip.id, segmentIds: [target], cleared: true)
+        #expect(store.undoHistory().undo.count == depth,
+                "clearing a note that is already cleared must journal nothing")
+    }
+
+    @Test("I7a: ALL OR NOTHING — one unknown id among several changes nothing, and names the count")
+    func anUnknownIdAmongSeveralChangesNothing() throws {
+        let (store, engine, clip, url) = try audioStore()
+        defer { try? FileManager.default.removeItem(at: url); _ = engine }
+        let seed = fourNoteTable()
+        _ = try store.setClipNotesCleared(clipId: clip.id, segmentIds: [seed.segments[3].id],
+                                          cleared: true, seedIfAbsent: seed)
+        let before = try storedSet(store)
+        let depth = store.undoHistory().undo.count
+        var message = ""
+        do {
+            _ = try store.setClipNotesCleared(clipId: clip.id,
+                                              segmentIds: [seed.segments[0].id, UUID()],
+                                              cleared: true)
+            Issue.record("an unknown note id was accepted")
+        } catch let error as ProjectError {
+            message = error.localizedDescription
+        }
+        #expect(message.contains("4 note(s)"), "the refusal must name how many notes the clip DOES carry")
+        #expect(try storedSet(store) == before, "a refused clear half-cleared the table")
+        #expect(store.undoHistory().undo.count == depth)
+    }
+
+    @Test("I7a: the per-note setters' refusals — no table, no ids, unknown clip, MIDI clip, comp member")
+    func clearSharesThePerNoteRefusals() throws {
+        let (store, engine, clip, url) = try audioStore()
+        defer { try? FileManager.default.removeItem(at: url); _ = engine }
+        func refusal(_ body: () throws -> Void) -> String {
+            do { try body(); return "ACCEPTED" } catch { return error.localizedDescription }
+        }
+        // No stored table and no seed: the same teaching text as setNotePitch.
+        let noTable = refusal {
+            _ = try store.setClipNotesCleared(clipId: clip.id, segmentIds: [UUID()], cleared: true)
+        }
+        #expect(noTable.contains("no notes to edit yet"), "\(noTable)")
+        // No ids at all: refused in words, and the seed is NOT stored.
+        let noIDs = refusal {
+            _ = try store.setClipNotesCleared(clipId: clip.id, segmentIds: [], cleared: true,
+                                              seedIfAbsent: fourNoteTable())
+        }
+        #expect(noIDs.contains("at least one note"), "\(noIDs)")
+        #expect(try store.pitchEdits(forClipId: clip.id) == nil)
+        // An unknown clip.
+        #expect(refusal {
+            _ = try store.setClipNotesCleared(clipId: UUID(), segmentIds: [UUID()], cleared: true)
+        } != "ACCEPTED")
+        // A MIDI clip.
+        let midi = Clip(name: "Notes", startBeat: 0, lengthBeats: 4, notes: [])
+        let midiStore = ProjectStore(tracks: [Track(name: "Keys", kind: .instrument, clips: [midi])])
+        #expect(refusal {
+            _ = try midiStore.setClipNotesCleared(clipId: midi.id, segmentIds: [UUID()],
+                                                  cleared: true, seedIfAbsent: fourNoteTable())
+        }.contains("MIDI"))
+        // A take-group comp member.
+        var member = Clip(name: "Take 2", startBeat: 0, lengthBeats: 8,
+                          audioFileURL: URL(fileURLWithPath: "/tmp/i7a-comp-member.wav"))
+        member.takeGroupID = UUID()
+        let memberStore = ProjectStore(tracks: [Track(name: "Vox", kind: .audio, clips: [member])])
+        let table = fourNoteTable()
+        #expect(refusal {
+            _ = try memberStore.setClipNotesCleared(clipId: member.id,
+                                                    segmentIds: [table.segments[0].id],
+                                                    cleared: true, seedIfAbsent: table)
+        } != "ACCEPTED")
+        #expect(memberStore.tracks[0].clips[0].pitchEdits == nil)
+    }
+
+    // MARK: - U-D: set a group of notes' level (`setClipNoteGain`)
+
+    @Test("U-D: setting a group's level round-trips, and clamps at both ends against Clip.gainDbRange")
+    func settingGainRoundTripsAndClampsAtBothEnds() throws {
+        let (store, engine, clip, url) = try audioStore()
+        defer { try? FileManager.default.removeItem(at: url); _ = engine }
+        let seed = fourNoteTable()
+        let named = seed.segments[0...1].map(\.id)
+
+        _ = try store.setClipNoteGain(clipId: clip.id, segmentIds: named, gainDb: -6,
+                                      seedIfAbsent: seed)
+        let after = try storedSet(store)
+        for id in named {
+            #expect(after.segments.first { $0.id == id }?.amplitudeDb == -6)
+        }
+        // The untouched notes (index 2 carries fourNoteTable's own −6 seed,
+        // index 3 is 0) are exactly what they were.
+        #expect(after.segments[2].amplitudeDb == -6)
+        #expect(after.segments[3].amplitudeDb == 0)
+
+        // ⛔ CLAMPED IN THE STORE, not merely asserted in range: a direct
+        // field assignment (this function's own ⛔) bypasses NoteSegment.init's
+        // healing clamp entirely, so this is the test that would catch a
+        // first draft that forgot the explicit `.clamped(to:)` call.
+        _ = try store.setClipNoteGain(clipId: clip.id, segmentIds: named, gainDb: 999)
+        let high = try storedSet(store)
+        for id in named {
+            #expect(high.segments.first { $0.id == id }?.amplitudeDb == Clip.gainDbRange.upperBound)
+        }
+        _ = try store.setClipNoteGain(clipId: clip.id, segmentIds: named, gainDb: -999)
+        let low = try storedSet(store)
+        for id in named {
+            #expect(low.segments.first { $0.id == id }?.amplitudeDb == Clip.gainDbRange.lowerBound)
+        }
+    }
+
+    @Test("U-D: N notes in one call is ONE undo step, a repeated id is folded, a no-op journals nothing, and undo restores the group")
+    func settingGainOnNNotesIsOneUndoStepAndNoOpJournalsNothing() throws {
+        let (store, engine, clip, url) = try audioStore()
+        defer { try? FileManager.default.removeItem(at: url); _ = engine }
+        let seed = fourNoteTable()
+        // Store the table first with an unrelated edit, so "before" (and what
+        // undo restores TO) is a real stored state and not nil — the
+        // `clearingNNotesIsOneUndoStep` precedent.
+        _ = try store.setClipNotePitchOffset(clipId: clip.id, segmentId: seed.segments[3].id,
+                                             offsetCents: 12, seedIfAbsent: seed)
+        let depth = store.undoHistory().undo.count
+        let named = [seed.segments[0].id, seed.segments[1].id]
+
+        // A repeated id folds to the same set of writes, still ONE step.
+        _ = try store.setClipNoteGain(clipId: clip.id, segmentIds: [named[0], named[1], named[0]],
+                                      gainDb: -9)
+        #expect(store.undoHistory().undo.count == depth + 1, "N notes, one repeated, must be ONE undo step")
+        #expect(store.undoHistory().undo.first == "Set Note Level")
+        for id in named {
+            #expect(try storedSet(store).segments.first { $0.id == id }?.amplitudeDb == -9)
+        }
+
+        // A no-op — writing the SAME value again — journals nothing.
+        _ = try store.setClipNoteGain(clipId: clip.id, segmentIds: named, gainDb: -9)
+        #expect(store.undoHistory().undo.count == depth + 1,
+                "setting notes to the level they already carry must journal nothing")
+
+        #expect(try store.undo() == "Set Note Level")
+        for (index, id) in named.enumerated() {
+            let expected = seed.segments[index].amplitudeDb  // both 0 dB in fourNoteTable
+            #expect(try storedSet(store).segments.first { $0.id == id }?.amplitudeDb == expected,
+                    "undo did not restore the group's pre-edit level")
+        }
+    }
+
+    @Test("U-D: a level alone takes an untouched clip out of the identity bypass, so it renders, without touching pitch")
+    func aLevelAloneMakesTheClipRenderAndIsAnEdit() throws {
+        let (store, engine, clip, url) = try audioStore()
+        defer { try? FileManager.default.removeItem(at: url); _ = engine }
+        let seed = seedTable(melodicResult())
+        #expect(seed.isIdentity, "fixture: a detected table that bends nothing")
+        #expect(!Clip(name: "c", audioFileURL: url, pitchEdits: seed).rendersThroughStretchCache)
+
+        _ = try store.setClipNoteGain(clipId: clip.id, segmentIds: [seed.segments[0].id],
+                                      gainDb: -6, seedIfAbsent: seed)
+        let stored = store.tracks[0].clips[0]
+        #expect(stored.hasPitchEdits, "a leveled note is an edit: Clip.hasPitchEdits must say so")
+        #expect(stored.rendersThroughStretchCache,
+                "a clip with a leveled note must leave the bypass, or the note plays unleveled")
+        #expect(try #require(stored.pitchEdits).isPitchIdentity,
+                "a level bends no pitch: the render must be able to skip the stretcher")
+        #expect(try #require(stored.pitchEdits).isIdentity == false,
+                "the SET-level isIdentity (segments.allSatisfy(.isIdentity)) must see the level too")
+    }
+
+    @Test("U-D: ALL OR NOTHING, and the per-note setters' shared refusals — no table, no ids, unknown clip, MIDI clip, comp member")
+    func gainSharesThePerNoteRefusalsAndAllOrNothing() throws {
+        let (store, engine, clip, url) = try audioStore()
+        defer { try? FileManager.default.removeItem(at: url); _ = engine }
+        func refusal(_ body: () throws -> Void) -> String {
+            do { try body(); return "ACCEPTED" } catch { return error.localizedDescription }
+        }
+        // No stored table and no seed: the same teaching text as setNotePitch.
+        let noTable = refusal {
+            _ = try store.setClipNoteGain(clipId: clip.id, segmentIds: [UUID()], gainDb: -6)
+        }
+        #expect(noTable.contains("no notes to edit yet"), "\(noTable)")
+        // No ids at all: refused in words, and the seed is NOT stored.
+        let noIDs = refusal {
+            _ = try store.setClipNoteGain(clipId: clip.id, segmentIds: [], gainDb: -6,
+                                          seedIfAbsent: fourNoteTable())
+        }
+        #expect(noIDs.contains("at least one note"), "\(noIDs)")
+        #expect(try store.pitchEdits(forClipId: clip.id) == nil)
+        // An unknown clip.
+        #expect(refusal {
+            _ = try store.setClipNoteGain(clipId: UUID(), segmentIds: [UUID()], gainDb: -6)
+        } != "ACCEPTED")
+        // A MIDI clip.
+        let midi = Clip(name: "Notes", startBeat: 0, lengthBeats: 4, notes: [])
+        let midiStore = ProjectStore(tracks: [Track(name: "Keys", kind: .instrument, clips: [midi])])
+        #expect(refusal {
+            _ = try midiStore.setClipNoteGain(clipId: midi.id, segmentIds: [UUID()],
+                                              gainDb: -6, seedIfAbsent: fourNoteTable())
+        }.contains("MIDI"))
+        // A take-group comp member.
+        var member = Clip(name: "Take 2", startBeat: 0, lengthBeats: 8,
+                          audioFileURL: URL(fileURLWithPath: "/tmp/u-d-comp-member.wav"))
+        member.takeGroupID = UUID()
+        let memberStore = ProjectStore(tracks: [Track(name: "Vox", kind: .audio, clips: [member])])
+        let table = fourNoteTable()
+        #expect(refusal {
+            _ = try memberStore.setClipNoteGain(clipId: member.id,
+                                                segmentIds: [table.segments[0].id],
+                                                gainDb: -6, seedIfAbsent: table)
+        } != "ACCEPTED")
+        #expect(memberStore.tracks[0].clips[0].pitchEdits == nil)
+
+        // ALL OR NOTHING: an unknown id among real ones changes nothing, and
+        // the refusal names how many notes the clip DOES carry. `clip`'s
+        // table is still nil at this point (neither refusal above wrote to
+        // it), so this seeds it fresh.
+        let seed = fourNoteTable()
+        _ = try store.setClipNoteGain(clipId: clip.id, segmentIds: [seed.segments[3].id],
+                                      gainDb: -2, seedIfAbsent: seed)
+        let before = try storedSet(store)
+        let depth = store.undoHistory().undo.count
+        var message = ""
+        do {
+            _ = try store.setClipNoteGain(clipId: clip.id,
+                                          segmentIds: [seed.segments[0].id, UUID()],
+                                          gainDb: -2)
+            Issue.record("an unknown note id was accepted")
+        } catch let error as ProjectError {
+            message = error.localizedDescription
+        }
+        #expect(message.contains("4 note(s)"), "the refusal must name how many notes the clip DOES carry")
+        #expect(try storedSet(store) == before, "a refused level-set half-wrote the table")
+        #expect(store.undoHistory().undo.count == depth)
+    }
+
+    // MARK: - I4: a group pitch drag (`setClipNotePitchOffsets`)
+
+    private func offsets(_ pairs: [(UUID, Double)]) -> [NotePitchOffset] {
+        pairs.map { NotePitchOffset(segmentId: $0.0, offsetCents: $0.1) }
+    }
+
+    @Test("I4: N notes in one call is ONE 'Tune Notes' step, each lands at its OWN offset, nothing else moves, and undo restores all N")
+    func groupPitchIsOneUndoStepAndUndoRestoresAllN() throws {
+        let (store, engine, clip, url) = try audioStore()
+        defer { try? FileManager.default.removeItem(at: url); _ = engine }
+        let seed = fourNoteTable()
+        // Store the table first with an unrelated edit, so "before" is a real
+        // stored state (the `clearingNNotesIsOneUndoStep` precedent).
+        _ = try store.setClipNotePitchOffset(clipId: clip.id, segmentId: seed.segments[3].id,
+                                             offsetCents: 12, seedIfAbsent: seed)
+        let before = try storedSet(store)
+        let depth = store.undoHistory().undo.count
+        let ids = seed.segments.map(\.id)
+        let key = PitchCorrectionUndoKey.group(clipID: clip.id, selectionToken: UUID())
+
+        // A group drag of +200 cents over notes 0-2: each lands at its own
+        // absolute value (all start at 0 here, so 200 each).
+        _ = try store.setClipNotePitchOffsets(
+            clipId: clip.id, offsets: offsets([(ids[0], 200), (ids[1], 200), (ids[2], 200)]),
+            undoKey: key)
+        #expect(store.undoHistory().undo.count == depth + 1, "three notes must be ONE undo step")
+        #expect(store.undoHistory().undo.first == "Tune Notes")
+        // READ IT BACK OUT OF THE STORE.
+        let after = try storedSet(store)
+        #expect(after.segments.prefix(3).map(\.pitchOffsetCents) == [200, 200, 200])
+        // ⭐ THE INVARIANCE CONTROL: apart from the offset, every field of every
+        // note is exactly what it was, and the fourth note did not move at all.
+        #expect(after.segments.count == before.segments.count)
+        for (now, was) in zip(after.segments, before.segments) {
+            var restored = now
+            restored.pitchOffsetCents = was.pitchOffsetCents
+            #expect(restored == was, "a group pitch write changed more than the offset on \(now.id)")
+        }
+        #expect(after.segments[3].pitchOffsetCents == 12)
+
+        #expect(try store.undo() == "Tune Notes")
+        #expect(try storedSet(store) == before, "undo did not bring all three notes back")
+    }
+
+    @Test("I4: the group key coalesces a second drag of the SAME selection, and not a different selection (UI design §8.4)")
+    func groupKeyCoalescesTheSameSelectionOnly() throws {
+        let (store, engine, clip, url) = try audioStore()
+        defer { try? FileManager.default.removeItem(at: url); _ = engine }
+        let seed = fourNoteTable()
+        let ids = seed.segments.map(\.id)
+        _ = try store.setClipNotePitchOffset(clipId: clip.id, segmentId: ids[3],
+                                             offsetCents: 12, seedIfAbsent: seed)
+        let untouched = try storedSet(store)
+        let depth = store.undoHistory().undo.count
+        let sameSelection = PitchCorrectionUndoKey.group(clipID: clip.id, selectionToken: UUID())
+
+        // Two drags of the SAME selection inside the journal's window.
+        _ = try store.setClipNotePitchOffsets(
+            clipId: clip.id, offsets: offsets([(ids[0], 100), (ids[1], 100)]), undoKey: sameSelection)
+        _ = try store.setClipNotePitchOffsets(
+            clipId: clip.id, offsets: offsets([(ids[0], 300), (ids[1], 300)]), undoKey: sameSelection)
+        #expect(store.undoHistory().undo.count == depth + 1,
+                "a second drag of the SAME selection must coalesce into one step (§8.4)")
+        let afterSameSelection = try storedSet(store)
+
+        // A DIFFERENT selection (a new token) starts a new step.
+        let otherSelection = PitchCorrectionUndoKey.group(clipID: clip.id, selectionToken: UUID())
+        _ = try store.setClipNotePitchOffsets(
+            clipId: clip.id, offsets: offsets([(ids[1], 500), (ids[2], 200)]), undoKey: otherSelection)
+        #expect(store.undoHistory().undo.count == depth + 2,
+                "a drag of a DIFFERENT selection must start a new undo step")
+        // ⚠️ AND NOT THE SEGMENT KEY OF A MEMBER: a one-note drag of note 1 right
+        // after is its own step too, never folded into the group's.
+        _ = try store.setClipNotePitchOffset(clipId: clip.id, segmentId: ids[1], offsetCents: 600)
+        #expect(store.undoHistory().undo.count == depth + 3)
+
+        // Undo walks back one DECISION per step: the one-note drag, the other
+        // selection, then BOTH drags of the first selection at once.
+        #expect(try store.undo() == "Tune Note")
+        #expect(try store.undo() == "Tune Notes")
+        #expect(try storedSet(store) == afterSameSelection)
+        #expect(try store.undo() == "Tune Notes")
+        #expect(try storedSet(store) == untouched,
+                "one undo must take back BOTH coalesced drags of the same selection")
+        // The key strings themselves: distinct per token, and never a segment key.
+        #expect(sameSelection != otherSelection)
+        #expect(sameSelection.hasPrefix("pitch.group:"))
+        #expect(sameSelection != PitchCorrectionUndoKey.segment(clipID: clip.id, segmentID: ids[0]))
+    }
+
+    @Test("I4: a no-op journals nothing; a repeated id is folded when it agrees and REFUSED when it does not")
+    func groupPitchNoOpAndRepeatedIds() throws {
+        let (store, engine, clip, url) = try audioStore()
+        defer { try? FileManager.default.removeItem(at: url); _ = engine }
+        let seed = fourNoteTable()
+        let ids = seed.segments.map(\.id)
+        let key = PitchCorrectionUndoKey.group(clipID: clip.id, selectionToken: UUID())
+        // A repeated id with the SAME value folds: one step, one write.
+        _ = try store.setClipNotePitchOffsets(
+            clipId: clip.id, offsets: offsets([(ids[0], 100), (ids[1], -50), (ids[0], 100)]),
+            seedIfAbsent: seed, undoKey: key)
+        #expect(try storedSet(store).segments[0].pitchOffsetCents == 100)
+        #expect(try storedSet(store).segments[1].pitchOffsetCents == -50)
+        let depth = store.undoHistory().undo.count
+
+        // ⭐ A NO-OP JOURNALS NOTHING — under a FRESH key, so coalescing cannot
+        // be what hides the entry: the notes already sit at these offsets.
+        let fresh = PitchCorrectionUndoKey.group(clipID: clip.id, selectionToken: UUID())
+        _ = try store.setClipNotePitchOffsets(
+            clipId: clip.id, offsets: offsets([(ids[0], 100), (ids[1], -50)]), undoKey: fresh)
+        #expect(store.undoHistory().undo.count == depth,
+                "writing the offsets the notes already carry must journal nothing")
+        // POSITIVE CONTROL: the same call with ONE value changed does journal.
+        _ = try store.setClipNotePitchOffsets(
+            clipId: clip.id, offsets: offsets([(ids[0], 100), (ids[1], -40)]), undoKey: fresh)
+        #expect(store.undoHistory().undo.count == depth + 1)
+
+        // A repeated id with two DIFFERENT values is refused in words, and
+        // nothing is written.
+        let beforeConflict = try storedSet(store)
+        var message = ""
+        do {
+            _ = try store.setClipNotePitchOffsets(
+                clipId: clip.id, offsets: offsets([(ids[2], 100), (ids[2], 200)]),
+                undoKey: PitchCorrectionUndoKey.structuralKey)
+            Issue.record("a note named twice with two pitches was accepted")
+        } catch let error as ProjectError {
+            message = error.localizedDescription
+        }
+        #expect(message.contains("named twice"), "\(message)")
+        #expect(try storedSet(store) == beforeConflict)
+    }
+
+    @Test("I4: every offset is CLAMPED to the pitch range, per note, at both ends")
+    func groupPitchClampsEachNote() throws {
+        let (store, engine, clip, url) = try audioStore()
+        defer { try? FileManager.default.removeItem(at: url); _ = engine }
+        let seed = fourNoteTable()
+        let ids = seed.segments.map(\.id)
+        let range = NoteSegment.pitchOffsetCentsRange
+        _ = try store.setClipNotePitchOffsets(
+            clipId: clip.id,
+            offsets: offsets([(ids[0], 99_999), (ids[1], -99_999), (ids[2], .nan), (ids[3], 250)]),
+            seedIfAbsent: seed, undoKey: PitchCorrectionUndoKey.structuralKey)
+        let stored = try storedSet(store).segments
+        #expect(stored[0].pitchOffsetCents == range.upperBound)
+        #expect(stored[1].pitchOffsetCents == range.lowerBound)
+        #expect(stored[2].pitchOffsetCents == 0, "a non-finite offset must land as 0, never NaN")
+        // CONTROL: an in-range value is written verbatim.
+        #expect(stored[3].pitchOffsetCents == 250)
+    }
+
+    @Test("I4: ALL OR NOTHING, and the per-note setters' shared refusals — no ids, unknown note, unknown clip, MIDI clip, no table and no seed, comp member")
+    func groupPitchSharesThePerNoteRefusals() throws {
+        let (store, engine, clip, url) = try audioStore()
+        defer { try? FileManager.default.removeItem(at: url); _ = engine }
+        func refusal(_ body: () throws -> Void) -> String {
+            do { try body(); return "ACCEPTED" } catch { return error.localizedDescription }
+        }
+        let key = PitchCorrectionUndoKey.structuralKey
+        // No stored table and no seed: the same teaching text as setNotePitch.
+        let noTable = refusal {
+            _ = try store.setClipNotePitchOffsets(clipId: clip.id, offsets: offsets([(UUID(), 100)]),
+                                                  undoKey: key)
+        }
+        #expect(noTable.contains("no notes to edit yet"), "\(noTable)")
+        // No notes named: refused in words, and the seed is NOT stored.
+        let noIDs = refusal {
+            _ = try store.setClipNotePitchOffsets(clipId: clip.id, offsets: [],
+                                                  seedIfAbsent: fourNoteTable(), undoKey: key)
+        }
+        #expect(noIDs.contains("at least one note"), "\(noIDs)")
+        #expect(try store.pitchEdits(forClipId: clip.id) == nil)
+        // An unknown clip.
+        #expect(refusal {
+            _ = try store.setClipNotePitchOffsets(clipId: UUID(), offsets: offsets([(UUID(), 1)]),
+                                                  undoKey: key)
+        } != "ACCEPTED")
+        // A MIDI clip.
+        let midi = Clip(name: "Notes", startBeat: 0, lengthBeats: 4, notes: [])
+        let midiStore = ProjectStore(tracks: [Track(name: "Keys", kind: .instrument, clips: [midi])])
+        #expect(refusal {
+            _ = try midiStore.setClipNotePitchOffsets(clipId: midi.id, offsets: offsets([(UUID(), 1)]),
+                                                      seedIfAbsent: fourNoteTable(), undoKey: key)
+        }.contains("MIDI"))
+        // A take-group comp member.
+        var member = Clip(name: "Take 2", startBeat: 0, lengthBeats: 8,
+                          audioFileURL: URL(fileURLWithPath: "/tmp/i4-comp-member.wav"))
+        member.takeGroupID = UUID()
+        let memberStore = ProjectStore(tracks: [Track(name: "Vox", kind: .audio, clips: [member])])
+        let table = fourNoteTable()
+        #expect(refusal {
+            _ = try memberStore.setClipNotePitchOffsets(
+                clipId: member.id, offsets: offsets([(table.segments[0].id, 100)]),
+                seedIfAbsent: table, undoKey: key)
+        } != "ACCEPTED")
+        #expect(memberStore.tracks[0].clips[0].pitchEdits == nil)
+
+        // ALL OR NOTHING: an unknown id AFTER real ones changes nothing (the
+        // real ones are not half-written), and the refusal names the count.
+        let seed = fourNoteTable()
+        _ = try store.setClipNotePitchOffsets(clipId: clip.id,
+                                              offsets: offsets([(seed.segments[3].id, 30)]),
+                                              seedIfAbsent: seed, undoKey: key)
+        let before = try storedSet(store)
+        let depth = store.undoHistory().undo.count
+        var message = ""
+        do {
+            _ = try store.setClipNotePitchOffsets(
+                clipId: clip.id,
+                offsets: offsets([(seed.segments[0].id, 100), (seed.segments[1].id, 100), (UUID(), 100)]),
+                undoKey: key)
+            Issue.record("an unknown note id was accepted")
+        } catch let error as ProjectError {
+            message = error.localizedDescription
+        }
+        #expect(message.contains("4 note(s)"), "the refusal must name how many notes the clip DOES carry")
+        #expect(try storedSet(store) == before, "a refused group write half-wrote the table")
+        #expect(store.undoHistory().undo.count == depth)
+    }
+
+    @Test("I4: the FIRST group edit on an untuned clip seeds the table verbatim, so the editor's ids survive")
+    func groupPitchSeedsVerbatim() throws {
+        let (store, engine, clip, url) = try audioStore()
+        defer { try? FileManager.default.removeItem(at: url); _ = engine }
+        let seed = seedTable(melodicResult())
+        #expect(try store.pitchEdits(forClipId: clip.id) == nil)
+        _ = try store.setClipNotePitchOffsets(
+            clipId: clip.id, offsets: offsets([(seed.segments[0].id, 100), (seed.segments[1].id, 100)]),
+            seedIfAbsent: seed,
+            undoKey: PitchCorrectionUndoKey.group(clipID: clip.id, selectionToken: UUID()))
+        let stored = try storedSet(store)
+        // The ids the editor drew and selected are the ids that were saved.
+        #expect(stored.segments.map(\.id) == seed.segments.map(\.id))
+        #expect(stored.segments.map(\.pitchOffsetCents) == [100, 100])
     }
 }

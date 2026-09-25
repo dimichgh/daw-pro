@@ -66,17 +66,40 @@ public enum OfflineStretcher {
         formantPreserve: Bool,
         isCancelled: () -> Bool = { false }
     ) throws -> [[Float]] {
-        let channels = input.count
-        guard channels >= 1 else {
-            throw OfflineStretcherError.invalidInput("no channels")
-        }
-        let frames = input[0].count
-        guard frames >= 1 else {
-            throw OfflineStretcherError.invalidInput("empty input")
-        }
-        guard input.allSatisfy({ $0.count == frames }) else {
-            throw OfflineStretcherError.invalidInput("channels differ in length")
-        }
+        try constantLoop(.whole(input), sampleRate: sampleRate, ratio: ratio,
+                         semitones: semitones, formantPreserve: formantPreserve,
+                         isCancelled: isCancelled).planar
+    }
+
+    /// **I1-F1: THE SECOND ENTRY into the constant loop below**: one WINDOW
+    /// of the whole-file render `stretch(input:…)` makes of the same source,
+    /// in the whole-file render's output frames. Not a copy of the loop; the
+    /// loop, and the schedule it runs on, are the same code (`constantLoop`,
+    /// `StretchSchedule`). See `StretchWindow` for what a window can and cannot
+    /// reproduce.
+    static func stretch(
+        window: StretchWindow,
+        sampleRate: Double,
+        ratio: Double,
+        semitones: Double,
+        formantPreserve: Bool,
+        isCancelled: () -> Bool = { false }
+    ) throws -> StretchWindowOutput {
+        try constantLoop(.window(window), sampleRate: sampleRate, ratio: ratio,
+                         semitones: semitones, formantPreserve: formantPreserve,
+                         isCancelled: isCancelled)
+    }
+
+    /// THE constant-transpose loop, for both entries.
+    private static func constantLoop(
+        _ source: StretchSource,
+        sampleRate: Double,
+        ratio: Double,
+        semitones: Double,
+        formantPreserve: Bool,
+        isCancelled: () -> Bool
+    ) throws -> StretchWindowOutput {
+        let (channels, frames) = try source.validatedShape()
         guard sampleRate.isFinite, sampleRate > 0 else {
             throw OfflineStretcherError.invalidInput("bad sample rate \(sampleRate)")
         }
@@ -90,6 +113,7 @@ public enum OfflineStretcher {
         guard outputFrames >= 1 else {
             throw OfflineStretcherError.invalidInput("output would be empty")
         }
+        StretchLoopTrace.current?.record(.constant, source.entry)
 
         guard let handle = css_create(Int32(channels), Float(sampleRate), rngSeed) else {
             throw OfflineStretcherError.allocationFailed
@@ -100,70 +124,39 @@ public enum OfflineStretcher {
 
         // Upstream `outputSeekLength(1/ratio)`, truncation and all. The
         // outputSeek consumes this many head frames and leaves the delivered
-        // output aligned to input frame 0.
-        let inputLatency = Int(css_input_latency(handle))
-        let outputLatency = Int(css_output_latency(handle))
-        let playbackRate = 1.0 / ratio
-        let seekLength = Int(Double(inputLatency) + playbackRate * Double(outputLatency))
+        // output aligned to input frame 0 (of the window, for a window).
+        let schedule = StretchSchedule(
+            sourceFrames: frames, ratio: ratio,
+            inputLatency: Int(css_input_latency(handle)),
+            outputLatency: Int(css_output_latency(handle)),
+            blockFrames: blockFrames)
+        let span = schedule.span(for: source)
 
         // Working copies: input padded with silence to at least seekLength
         // (sub-latency-sized sources are legal, just smeared), output sized
         // exactly. Manual allocation gives the C shim stable base pointers.
-        let totalIn = max(frames, seekLength)
-        var inChans: [UnsafeMutableBufferPointer<Float>] = []
-        var outChans: [UnsafeMutableBufferPointer<Float>] = []
-        defer {
-            for b in inChans { b.deallocate() }
-            for b in outChans { b.deallocate() }
-        }
-        for channel in input {
-            let inBuf = UnsafeMutableBufferPointer<Float>.allocate(capacity: totalIn)
-            inBuf.initialize(repeating: 0)
-            channel.withUnsafeBufferPointer { src in
-                inBuf.baseAddress!.update(from: src.baseAddress!, count: frames)
-            }
-            inChans.append(inBuf)
-            let outBuf = UnsafeMutableBufferPointer<Float>.allocate(capacity: outputFrames)
-            outBuf.initialize(repeating: 0)
-            outChans.append(outBuf)
-        }
-        let inBase = inChans.map { UnsafePointer($0.baseAddress!) }
-        let outBase = outChans.map { $0.baseAddress! }
+        let io = try StretchBuffers(source: source, channels: channels, schedule: schedule,
+                                    span: span)
+        defer { io.deallocate() }
 
-        func withInPointers<R>(
-            offset: Int, _ body: (UnsafePointer<UnsafePointer<Float>>) -> R
-        ) -> R {
-            let shifted = inBase.map { $0 + offset }
-            return shifted.withUnsafeBufferPointer { body($0.baseAddress!) }
+        // 1. Align (consumes input[start..<start + seekLength], produces the
+        //    pre-roll internally).
+        io.withInPointers(atSourceFrame: span.inputStart) {
+            css_output_seek(handle, $0, Int32(schedule.seekLength))
         }
-        func withOutPointers<R>(
-            offset: Int, _ body: (UnsafePointer<UnsafeMutablePointer<Float>>) -> R
-        ) -> R {
-            let shifted = outBase.map { $0 + offset }
-            return shifted.withUnsafeBufferPointer { body($0.baseAddress!) }
-        }
-
-        // 1. Align (consumes input[0..<seekLength], produces the pre-roll
-        //    internally).
-        withInPointers(offset: 0) { css_output_seek(handle, $0, Int32(seekLength)) }
 
         // 2. Chunked middle: the remaining input maps onto the output before
         //    the flush tail; cumulative targets keep the average per-call
         //    out/in ratio exact (upstream: block splits "work just the same").
-        let processIn = totalIn - seekLength
-        let seekOut = Int(Double(seekLength) / playbackRate) // upstream truncation
-        let processOut = max(0, outputFrames - seekOut)
-        var outDone = 0
-        var inDone = 0
-        while outDone < processOut {
+        var outDone = span.startOutputFrame
+        var inDone = span.inputStart
+        while outDone < span.loopEndOutputFrame {
             if isCancelled() { throw OfflineStretcherError.cancelled }
-            let outBlock = min(blockFrames, processOut - outDone)
-            let inTarget = Int(
-                (Double(outDone + outBlock) * Double(processIn) / Double(processOut))
-                    .rounded())
+            let outBlock = min(blockFrames, schedule.processOut - outDone)
+            let inTarget = schedule.inputTarget(afterOutputFrame: outDone + outBlock)
             let inBlock = inTarget - inDone
-            withInPointers(offset: seekLength + inDone) { inPtrs in
-                withOutPointers(offset: outDone) { outPtrs in
+            io.withInPointers(atSourceFrame: schedule.seekLength + inDone) { inPtrs in
+                io.withOutPointers(atOutputFrame: outDone) { outPtrs in
                     css_process(
                         handle, inPtrs, Int32(inBlock), outPtrs, Int32(outBlock))
                 }
@@ -174,14 +167,16 @@ public enum OfflineStretcher {
 
         // 3. Drain the synthesis tail (click-free ending, no more input).
         if isCancelled() { throw OfflineStretcherError.cancelled }
-        let flushFrames = outputFrames - outDone
-        if flushFrames > 0 {
-            withOutPointers(offset: outDone) {
-                css_flush(handle, $0, Int32(flushFrames), playbackRate)
+        if span.flushes {
+            let flushFrames = outputFrames - outDone
+            if flushFrames > 0 {
+                io.withOutPointers(atOutputFrame: outDone) {
+                    css_flush(handle, $0, Int32(flushFrames), schedule.playbackRate)
+                }
             }
         }
 
-        return outBase.map { Array(UnsafeBufferPointer(start: $0, count: outputFrames)) }
+        return io.output(span)
     }
 
     // MARK: - m23-q: time-varying transpose (E1 measured it, Phase 1 ships it)
@@ -260,6 +255,35 @@ public enum OfflineStretcher {
         let scaled = (Double(measuredCurveLatencyFrames) * sampleRate
             / measuredCurveLatencySampleRate).rounded()
         return .frames(Int(scaled))
+    }
+
+    /// **The curve loop's schedule for a source of this shape** (I1-F1, R2/R4
+    /// of the incremental-note-render design): the block grid and every input
+    /// target the whole-file curve render runs on, built by the SAME
+    /// `StretchSchedule` initialiser the loop calls, from a stretcher configured
+    /// exactly as the loop configures one (hop and latencies READ from it,
+    /// never derived). Creates and destroys one stretcher: call it off the main
+    /// actor if called often.
+    static func curveSchedule(sourceFrames: Int, channels: Int, sampleRate: Double,
+                              ratio: Double) throws -> StretchSchedule {
+        guard channels >= 1, sourceFrames >= 1, sampleRate.isFinite, sampleRate > 0,
+              ratio.isFinite, ratio > 0 else {
+            throw OfflineStretcherError.invalidInput(
+                "bad shape: \(channels) ch, \(sourceFrames) frames, \(sampleRate) Hz, ratio \(ratio)")
+        }
+        guard let handle = css_create(Int32(channels), Float(sampleRate), rngSeed) else {
+            throw OfflineStretcherError.allocationFailed
+        }
+        defer { css_destroy(handle) }
+        let interval = Int(css_interval_samples(handle))
+        guard interval >= 1 else {
+            throw OfflineStretcherError.invalidInput(
+                "stretcher reported non-positive interval \(interval)")
+        }
+        return StretchSchedule(sourceFrames: sourceFrames, ratio: ratio,
+                               inputLatency: Int(css_input_latency(handle)),
+                               outputLatency: Int(css_output_latency(handle)),
+                               blockFrames: interval)
     }
 
     /// **THE ONE PLACE THE COMPENSATION ARITHMETIC LIVES**, so a test can spy
@@ -394,17 +418,44 @@ public enum OfflineStretcher {
         compensation: CurveLatencyCompensation = .none,
         isCancelled: () -> Bool = { false }
     ) throws -> [[Float]] {
-        let channels = input.count
-        guard channels >= 1 else {
-            throw OfflineStretcherError.invalidInput("no channels")
-        }
-        let frames = input[0].count
-        guard frames >= 1 else {
-            throw OfflineStretcherError.invalidInput("empty input")
-        }
-        guard input.allSatisfy({ $0.count == frames }) else {
-            throw OfflineStretcherError.invalidInput("channels differ in length")
-        }
+        try curveLoop(.whole(input), sampleRate: sampleRate, ratio: ratio,
+                      semitonesAtOutputFrame: semitonesAtOutputFrame,
+                      formantPreserve: formantPreserve, compensation: compensation,
+                      isCancelled: isCancelled).planar
+    }
+
+    /// **I1-F1: THE SECOND ENTRY into the curve loop below**: one WINDOW of
+    /// the whole-file render the closure entry above makes of the same source.
+    /// `semitonesAtOutputFrame` is asked for WHOLE-FILE output frames, exactly
+    /// as the whole-file render asks it (the window's frames ARE whole-file
+    /// frames), so a caller hands both entries the same closure. Not a copy of
+    /// the loop: see `StretchWindow`.
+    static func stretchTransposeCurve(
+        window: StretchWindow,
+        sampleRate: Double,
+        ratio: Double,
+        semitonesAtOutputFrame: (Int) -> Double,
+        formantPreserve: Bool,
+        compensation: CurveLatencyCompensation = .none,
+        isCancelled: () -> Bool = { false }
+    ) throws -> StretchWindowOutput {
+        try curveLoop(.window(window), sampleRate: sampleRate, ratio: ratio,
+                      semitonesAtOutputFrame: semitonesAtOutputFrame,
+                      formantPreserve: formantPreserve, compensation: compensation,
+                      isCancelled: isCancelled)
+    }
+
+    /// THE time-varying-transpose loop, for both entries.
+    private static func curveLoop(
+        _ source: StretchSource,
+        sampleRate: Double,
+        ratio: Double,
+        semitonesAtOutputFrame: (Int) -> Double,
+        formantPreserve: Bool,
+        compensation: CurveLatencyCompensation,
+        isCancelled: () -> Bool
+    ) throws -> StretchWindowOutput {
+        let (channels, frames) = try source.validatedShape()
         guard sampleRate.isFinite, sampleRate > 0 else {
             throw OfflineStretcherError.invalidInput("bad sample rate \(sampleRate)")
         }
@@ -415,6 +466,7 @@ public enum OfflineStretcher {
         guard outputFrames >= 1 else {
             throw OfflineStretcherError.invalidInput("output would be empty")
         }
+        StretchLoopTrace.current?.record(.curve, source.entry)
 
         guard let handle = css_create(Int32(channels), Float(sampleRate), rngSeed) else {
             throw OfflineStretcherError.allocationFailed
@@ -429,6 +481,19 @@ public enum OfflineStretcher {
             throw OfflineStretcherError.invalidInput(
                 "stretcher reported non-positive interval \(interval)")
         }
+        // The schedule is read BEFORE the pre-roll's transpose too (I1-F1): a
+        // window's pre-roll runs at its OWN first chunk's value, and where that
+        // chunk starts depends on the schedule. The three accessors are
+        // `const` reads of the configured STFT (`signalsmith-stretch.h`
+        // `inputLatency()`/`outputLatency()`), so reading them before the two
+        // setters below changes no state; `wholeFileGoldenCapture` diffs the
+        // whole-file bytes across this reordering.
+        let schedule = StretchSchedule(
+            sourceFrames: frames, ratio: ratio,
+            inputLatency: Int(css_input_latency(handle)),
+            outputLatency: Int(css_output_latency(handle)),
+            blockFrames: interval)
+        let span = schedule.span(for: source)
 
         // The pre-roll runs at whatever the FIRST chunk will ask for, not at
         // the curve's value at frame 0.
@@ -445,69 +510,33 @@ public enum OfflineStretcher {
         // over the first ~50 ms). Continuity wins. A curve that moves inside
         // the first 49.6 ms of a file therefore moves at frame 0 instead; a
         // pitch-correction curve is flat there, because a note boundary at
-        // source second 0 has no earlier note to ramp from.
+        // source second 0 has no earlier note to ramp from. (A WINDOW's first
+        // chunk is its own; the span render's pre-roll keeps the frames it
+        // delivers well past this, see `StretchRenderCache.spanPreRollSeconds`.)
         css_set_transpose_semitones(
             handle,
             Float(semitonesAtOutputFrame(curveLookupFrame(
-                outputFrame: 0, compensation: compensation,
+                outputFrame: span.startOutputFrame, compensation: compensation,
                 intervalSamples: interval))),
             tonalityLimitHz)
         css_set_formant_preserve(handle, formantPreserve)
 
-        let inputLatency = Int(css_input_latency(handle))
-        let outputLatency = Int(css_output_latency(handle))
-        let playbackRate = 1.0 / ratio
-        let seekLength = Int(Double(inputLatency) + playbackRate * Double(outputLatency))
+        let io = try StretchBuffers(source: source, channels: channels, schedule: schedule,
+                                    span: span)
+        defer { io.deallocate() }
 
-        let totalIn = max(frames, seekLength)
-        var inChans: [UnsafeMutableBufferPointer<Float>] = []
-        var outChans: [UnsafeMutableBufferPointer<Float>] = []
-        defer {
-            for b in inChans { b.deallocate() }
-            for b in outChans { b.deallocate() }
+        io.withInPointers(atSourceFrame: span.inputStart) {
+            css_output_seek(handle, $0, Int32(schedule.seekLength))
         }
-        for channel in input {
-            let inBuf = UnsafeMutableBufferPointer<Float>.allocate(capacity: totalIn)
-            inBuf.initialize(repeating: 0)
-            channel.withUnsafeBufferPointer { src in
-                inBuf.baseAddress!.update(from: src.baseAddress!, count: frames)
-            }
-            inChans.append(inBuf)
-            let outBuf = UnsafeMutableBufferPointer<Float>.allocate(capacity: outputFrames)
-            outBuf.initialize(repeating: 0)
-            outChans.append(outBuf)
-        }
-        let inBase = inChans.map { UnsafePointer($0.baseAddress!) }
-        let outBase = outChans.map { $0.baseAddress! }
-
-        func withInPointers<R>(
-            offset: Int, _ body: (UnsafePointer<UnsafePointer<Float>>) -> R
-        ) -> R {
-            let shifted = inBase.map { $0 + offset }
-            return shifted.withUnsafeBufferPointer { body($0.baseAddress!) }
-        }
-        func withOutPointers<R>(
-            offset: Int, _ body: (UnsafePointer<UnsafeMutablePointer<Float>>) -> R
-        ) -> R {
-            let shifted = outBase.map { $0 + offset }
-            return shifted.withUnsafeBufferPointer { body($0.baseAddress!) }
-        }
-
-        withInPointers(offset: 0) { css_output_seek(handle, $0, Int32(seekLength)) }
 
         // Chunked middle — identical bookkeeping to `stretch(...)` except that
         // the chunk is `interval`, and the transpose is re-set before each one.
-        let processIn = totalIn - seekLength
-        let seekOut = Int(Double(seekLength) / playbackRate)
-        let processOut = max(0, outputFrames - seekOut)
-        var outDone = 0
-        var inDone = 0
-        while outDone < processOut {
+        var outDone = span.startOutputFrame
+        var inDone = span.inputStart
+        while outDone < span.loopEndOutputFrame {
             if isCancelled() { throw OfflineStretcherError.cancelled }
-            let outBlock = min(interval, processOut - outDone)
-            let inTarget = Int(
-                (Double(outDone + outBlock) * Double(processIn) / Double(processOut))
-                    .rounded())
+            let outBlock = min(interval, schedule.processOut - outDone)
+            let inTarget = schedule.inputTarget(afterOutputFrame: outDone + outBlock)
             let inBlock = inTarget - inDone
             css_set_transpose_semitones(
                 handle,
@@ -515,8 +544,8 @@ public enum OfflineStretcher {
                     outputFrame: outDone, compensation: compensation,
                     intervalSamples: interval))),
                 tonalityLimitHz)
-            withInPointers(offset: seekLength + inDone) { inPtrs in
-                withOutPointers(offset: outDone) { outPtrs in
+            io.withInPointers(atSourceFrame: schedule.seekLength + inDone) { inPtrs in
+                io.withOutPointers(atOutputFrame: outDone) { outPtrs in
                     css_process(
                         handle, inPtrs, Int32(inBlock), outPtrs, Int32(outBlock))
                 }
@@ -526,14 +555,16 @@ public enum OfflineStretcher {
         }
 
         if isCancelled() { throw OfflineStretcherError.cancelled }
-        let flushFrames = outputFrames - outDone
-        if flushFrames > 0 {
-            withOutPointers(offset: outDone) {
-                css_flush(handle, $0, Int32(flushFrames), playbackRate)
+        if span.flushes {
+            let flushFrames = outputFrames - outDone
+            if flushFrames > 0 {
+                io.withOutPointers(atOutputFrame: outDone) {
+                    css_flush(handle, $0, Int32(flushFrames), schedule.playbackRate)
+                }
             }
         }
 
-        return outBase.map { Array(UnsafeBufferPointer(start: $0, count: outputFrames)) }
+        return io.output(span)
     }
 
     /// AVAudioPCMBuffer convenience over the planar core. Requires

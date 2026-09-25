@@ -350,6 +350,12 @@ public final class ProjectStore {
             engine?.engineNoticeHandler = { [weak self] event in
                 self?.recordEngineNotice(event)
             }
+            // I1: the render cache's commit signal. A note audition waiting for
+            // its clip's render plays the moment that render lands, never at
+            // the app's 10 Hz status poll. Always pushed on the main actor.
+            engine?.setClipRenderCompleteHandler { [weak self] clipID in
+                self?.clipRenderDidComplete(clipID: clipID)
+            }
             // The m28-knob controller feed (see ProjectStore+MIDIControl). NOT
             // an unconditional install: subscribing CREATES the CoreMIDI client
             // and connects to every online source, so it happens only when a
@@ -819,6 +825,10 @@ public final class ProjectStore {
 
     public func play() {
         guard !transport.isPlaying else { return }
+        // I1: a transport start stops a sounding note audition and drops one
+        // waiting for its render. The transport plays the edit in context; a
+        // second voice on top would double the vocal.
+        clipNoteAudition.transportDidStart(engine: engine)
         transport.isPlaying = true
         if let engine {
             try? engine.prepare()
@@ -840,6 +850,17 @@ public final class ProjectStore {
     }
 
     public func stop() {
+        // m23-ap I1 UI hooks (the RT review's H5): Stop silences a sounding
+        // note audition, and it does so BEFORE the guard below on purpose. A
+        // note audition only ever sounds with the transport STOPPED (every door
+        // refuses while it rolls, and `play()` stops one), so behind the guard
+        // this line could never reach the one case it exists for. That case is
+        // `transport.stop` on the wire and any Stop control: the transport
+        // bar's own button is a play/pause toggle, whose play half already
+        // stops the audition (`play()` → `transportDidStart`). A slowed clip
+        // plays up to 6 SOURCE seconds, stretched — hence a stop door at all.
+        // Idempotent: with nothing sounding the engine has nothing to fade.
+        stopClipNoteAudition()
         guard transport.isPlaying || transport.isRecording else { return }
         // m34-h-1: a QUEUED deck layer is waiting for a boundary the stopped
         // transport will never reach, and nothing ticks while stopped — so it
@@ -1222,6 +1243,8 @@ public final class ProjectStore {
         // and every open note clamps to the end of the take.
         livePlay.stopAll(engine: engine)
         audition.stopAll(engine: engine)
+        // I1: a take starts with no note audition sounding or waiting.
+        clipNoteAudition.transportDidStart(engine: engine)
         transport.isRecording = true
         transport.isPlaying = true
         // ⚠️⚠️ m25-d — RECORDING MUST NEVER STOP AT CONTENT END. Recording past
@@ -2097,6 +2120,12 @@ public final class ProjectStore {
     /// `audition`, NOT a mode of it: see `LivePlayController` for why.
     @ObservationIgnored public let livePlay = LivePlayController()
 
+    /// THE clip-note audition policy home (I1): hearing a vocal note from the
+    /// render playback plays. The note editor's press and release doors and
+    /// the wire's audition verb all run through it. See `ClipNoteAudition.swift`
+    /// and `ProjectStore+NoteAudition.swift`.
+    @ObservationIgnored public let clipNoteAudition = ClipNoteAuditionController()
+
     /// THE CC→target mapping home (m28-knob) — one table, one engine
     /// subscription, the `audition` idiom. Engine-free; handed the engine per
     /// call. See `ProjectStore+MIDIControl.swift`.
@@ -2278,6 +2307,8 @@ public final class ProjectStore {
     /// `AudioEngine.previewController` answers by STARTING THE AUDIO HARDWARE, on
     /// the app-resign-active path, to send a controller to silence.
     public func stopAllAudition() {
+        // I1: a note audition sounding or waiting for its render stops too.
+        clipNoteAudition.stop(engine: engine)
         // A pad gesture left open across a project boundary would park a
         // controller on a strip nobody is looking at any more (breath pad P6).
         padPreview.stop(engine: engine)
@@ -2427,6 +2458,13 @@ public final class ProjectStore {
         // wipes `auditionVoices` wholesale: run it first and the live-play
         // release below diffs against an empty ledger, ingests zero note-offs,
         // and every open note clamps to the end of the take.
+        // I1 (RT review H2): the clip-note audition too. `audition.stopAll`
+        // below silences its VOICE (through the engine) but never cleared the
+        // controller, so a release still waiting for its render played up to
+        // 8 s later. This drops that wait, a drag step waiting behind a span
+        // render, and cancels a span render in flight. It touches neither the
+        // live-play nor the audition ledger, so the m23-ct order holds.
+        clipNoteAudition.stop(engine: engine)
         livePlay.stopAll(engine: engine)
         audition.stopAll(engine: engine)
         return engine?.allNotesOff() ?? 0
@@ -8244,6 +8282,13 @@ public final class ProjectStore {
         // wipes `auditionVoices` wholesale: run it first and the live-play
         // release below diffs against an empty ledger, ingests zero note-offs,
         // and every open note clamps to the end of the take.
+        // I1 (RT review H2): the clip-note audition too. `audition.stopAll`
+        // below silences its VOICE (through the engine) but never cleared the
+        // controller, so a release still waiting for its render played up to
+        // 8 s later. This drops that wait, a drag step waiting behind a span
+        // render, and cancels a span render in flight. It touches neither the
+        // live-play nor the audition ledger, so the m23-ct order holds.
+        clipNoteAudition.stop(engine: engine)
         livePlay.stopAll(engine: engine)
         audition.stopAll(engine: engine)
         // m13-a (A1): a project boundary retires the engine's whole graph —
@@ -8332,6 +8377,13 @@ public final class ProjectStore {
         // wipes `auditionVoices` wholesale: run it first and the live-play
         // release below diffs against an empty ledger, ingests zero note-offs,
         // and every open note clamps to the end of the take.
+        // I1 (RT review H2): the clip-note audition too. `audition.stopAll`
+        // below silences its VOICE (through the engine) but never cleared the
+        // controller, so a release still waiting for its render played up to
+        // 8 s later. This drops that wait, a drag step waiting behind a span
+        // render, and cancels a span render in flight. It touches neither the
+        // live-play nor the audition ledger, so the m23-ct order holds.
+        clipNoteAudition.stop(engine: engine)
         livePlay.stopAll(engine: engine)
         audition.stopAll(engine: engine)
         // m13-a (A1): a project boundary retires the engine's whole graph —

@@ -1,5 +1,70 @@
 # Changelog
 
+## 2026-09-25 — Hear the note you're editing
+
+**Press a note in the pitch editor and you hear it. Drag it and it plays at each step. Let go and it plays once more, about 50 ms later, even on a 5-minute recording. While an edit is being prepared, the vocal keeps playing the version before it instead of going silent.**
+
+1. **Hear the note you're editing.**
+   - **How it works:** press a note to hear it. While you drag it up or down it plays at each step, and once more when you let go. Only the edited notes are rendered, with a little of the sound around them, through the same engine as playback, so what you hear is what will play.
+   - **How fast (measured):** about 50 ms from letting go to sound, on both a 33-second and a 5-minute recording. Waiting for the whole recording to re-render used to take 1.7 s and 12.9 s. The first press on a clip takes about 0.4 s while its pitch is read.
+   - **A silent failure fixed:** on recordings longer than about 3 minutes, the note you edited was never played, and nothing said so.
+   - **Controls and messages:**
+     - The **HEAR** switch in the editor turns hearing off.
+     - Stop, Esc, picking another clip or closing the editor silences the note.
+     - "Preparing your note…" shows while a note is being prepared, and "Couldn't play that note in time. Click it to hear it." when it can't be.
+   - **Cleaner sound:** quick drags no longer click when one note's sound replaces the last, and the note stops at once when the audio output stops.
+
+2. **The vocal keeps playing while an edit is prepared.**
+   - **Before:** after a pitch edit, a tuned clip went silent until the whole recording was re-rendered: about 1.8 s on a 33-second recording, 13 s on a 5-minute one.
+   - **Now:** it keeps playing the version it played a moment ago, and switches to the new one when that is ready.
+   - **When it still goes silent:**
+     - there is no earlier version;
+     - the edit changes the timing (a new stretch ratio);
+     - the clip now points at a different file (for example after a save);
+     - the new version fails to render.
+   - A new notice, `clip-render-previous`, says when a clip is playing its previous version.
+
+3. **Select notes, and move several at once.**
+   - **Selecting:** click a note; ⇧- or ⌘-click to add or remove one; drag a rectangle; ⌘A for all. The line under the editor counts them ("3 notes selected"). A selected note has a bright white ring, easy to see on tuned (green) notes too.
+   - **Moving together:** drag one selected note and the others move by the same step. One undo puts them all back.
+   - **Esc:** it clears the selection first, then leaves the bigger editor. In the MIDI note editor too: Escape now reaches the editor you're looking at.
+   - **Zoom:** zooming keeps the playhead where it was on screen.
+   - **Fixed:** clicking a note drawn between two pitches snapped it to the nearest one and recorded an edit. Now a click only selects it.
+
+4. **Clear notes, and a volume per note.**
+   - **Clearing:** select notes and press ⌫, choose Edit ▸ Clear Selected Notes, or right-click ▸ Clear. The notes go silent in place, and nothing around them moves.
+     - One Undo brings them all back, and right-click ▸ Restore brings back a single note.
+     - In an exported file a cleared note is exact silence, with short 10 ms fades at its edges. Nothing else in the recording changes.
+     - A cleared note is drawn as a hollow dashed box.
+   - **Volume per note:** the AI agents can set a note's volume. The quietest level is −72 dB, which is never full silence. The editor shows it as "Level -6.0 dB". A control for it in the editor comes later.
+   - **The label:** a clip where you only cleared notes or changed their volume says "NOTES EDITED" instead of "TUNING APPLIED".
+   - **Remove Tuning** now says when it would also bring back cleared notes.
+
+5. **Delete and Cut no longer remove the vocal clip while the note editor is open.**
+   - **Before:** ⌫ or Edit ▸ Cut with the note editor open removed the whole vocal clip. Undo brought it back.
+   - **With notes selected:** ⌫ clears them (4).
+   - **With none selected:** Delete and Cut leave the clip alone and say "Delete and Cut won't remove the clip while the note editor is open. Close the note editor first." Copy still works.
+
+6. **The cut line, and a bigger editor.**
+   - **The cut line:** in Split mode a thin line follows the mouse, labelled with the two lengths the cut makes ("Cut · 400 ms | 400 ms").
+   - **A bigger editor:** a button fills the window with the note editor, and Esc brings it back.
+   - **Fills the window:** the notes fill the whole window. Extra rows appear above and below your notes at the row size you chose, and you can drag a note into them. A note moved there stays in view when the editor goes back to its usual size.
+
+7. **For AI agents (plugin 0.17.0).** Four new control commands, each with an MCP tool:
+   - `clip.auditionNote` / `clip_audition_note` plays notes of a vocal clip as they will sound.
+     - At most about 6 seconds are heard per call.
+     - `audible: true` means the request was accepted, not that it was heard.
+   - `clip.setNotePitches` / `clip_set_note_pitches` retunes several notes at once, as one undo step.
+   - `clip.setNoteCleared` / `clip_set_note_cleared` silences or restores notes.
+   - `clip.setNoteGain` / `clip_set_note_gain` sets a note's volume.
+   - Also: `clip.getPitchEdits` now reports `hasTuningEdits`, and `project_snapshot` lists the new `clip-render-previous` notice.
+
+8. **Playbox gives the number of chords you ask for.**
+   - **Before:** asking Playbox for a 2-chord progression sometimes gave 4 chords: 28 of 1000 answers in a major key and 129 of 1000 in a minor key. A chord swap could make both chords the same, and the backup answer ignored the length.
+   - **Now:** every length from 2 to 16 gets exactly that many chords. Every answer that was already right is unchanged; the 314 wrong answers of 34,000 checked now play the progression without the swap.
+
+**A correction to the 2026-09-24 entry.** It said Hard Tune makes the wobble inside a held note "about 70% flatter". Measured note by note after note splitting, Hard Tune removes about half to two-thirds of it (a median 49 % by one pitch meter, 68 % by an independent one), and every measured note stays on its own note. The old figure came from before note splitting and counted notes pulled onto the wrong pitch. That entry is corrected below, and so is the design note that repeated the number.
+
 ## 2026-09-24b — Bugs you could hear, fixed
 
 **Five bugs a person using the app would hear or see: audio that jumped, a clip that went silent, a false alarm, a pad grid that miscounted, and a chop that lost a pad.**
@@ -20,7 +85,7 @@
 
 **Hard Tune now really flattens a sung note, a sung phrase is split into notes before anything is tuned, and the editor draws what the render will play.**
 
-**Hard Tune reaches the render.** Until today, the render got an empty pitch line, so Hard Tune only shifted each note by a constant. Now the detected pitch line reaches it. Hard Tune's within-note wander drops 62.8 → 18.2 cents (about 70% flatter) on a real vocal, while Tight changes it by about 1%. Gentle, Natural and Tight move note centres by 14.7, 25.9 and 31.2 cents on that take, delivered within about 0.5 cent. **Hard Tune is back in the Tune Vocal menu.** If the pitch line cannot be read for a clip, the render falls back to exactly the old (constant-offset) render, byte for byte, and posts the notice code `clip-pitch-contour-unavailable`.
+**Hard Tune reaches the render.** Until today, the render got an empty pitch line, so Hard Tune only shifted each note by a constant. Now the detected pitch line reaches it. On a real vocal, Hard Tune now removes about half to two-thirds of the wobble inside each held note (a median 49 % by one pitch meter, 68 % by an independent one), and every measured note stays on its own note, while Tight leaves the wobble as sung. Gentle, Natural and Tight move each held note's centre by what they ask for, to within about a cent (median). *(Corrected: this entry first said "62.8 → 18.2 cents, about 70% flatter" and quoted three centre figures. Those were measured before note splitting, and the 70 % counted some notes flattened onto the wrong note.)* **Hard Tune is back in the Tune Vocal menu.** If the pitch line cannot be read for a clip, the render falls back to exactly the old (constant-offset) render, byte for byte, and posts the notice code `clip-pitch-contour-unavailable`.
 
 **A sung phrase becomes notes.** Before, every unbroken stretch of singing was ONE note, pinned to its middle pitch — so a slide into a held note moved the HELD note. On the test take, Hard Tune shifted 4 of 42 notes by more than 3 semitones and 11 by more than 2 (the largest 5.06). Now a phrase is split wherever the pitch settles on a new note. A slide that lasts longer than about 130 ms (8 frames at 62.5 frames per second) becomes its own part. What Hard Tune does with a slide was decided BY EAR: four versions of the same slide were rendered and the user picked "slide kept, note locked": the slide plays as sung and each held note locks to its pitch. Gentle, Natural and Tight also leave every slide exactly as sung. `segmentCount` in the tuning responses now counts NOTES, not phrases. Nothing already saved changes: a stored note table is never re-split, no new field is saved, and the analysis version did not move. ⭐ **Check that the real code matches what was listened to: the new splitter's renders of the listening excerpt are byte-identical to the hand-cut renders the user heard, for all four slide options.** Known and filed, not fixed: on one low note the pitch detector itself reads about 21–23 cents sharp, so that note lands about 20 cents flat after tuning (filed as p2-seg-F-detect).
 

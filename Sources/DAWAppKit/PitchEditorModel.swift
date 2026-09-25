@@ -188,6 +188,101 @@ public enum PitchEditorRange {
         }
         return low...high
     }
+
+    // MARK: I6c — the window grows to fill the pane (interaction batch §9)
+
+    /// The window to LAY OUT in a pane `availableHeight` points tall at
+    /// `rowHeight` points per semitone: `fitted` (the notes' own window) grown
+    /// by WHOLE rows while one more whole row still fits, the new rows split
+    /// above and below so the notes stay centred (m23-ap I6c).
+    ///
+    /// ⭐ **THE ROW HEIGHT IS THE USER'S, SO THE ROW COUNT MOVES AND THE ROW
+    /// HEIGHT DOES NOT** (the I6c brief's approach A). PITCH −/+ keeps meaning
+    /// "shorter/taller rows"; a pane with room to spare shows MORE rows, never
+    /// fatter ones. Stretching the rows to fit instead (approach B) would make
+    /// PITCH −/+ do nothing while the editor is maximized.
+    ///
+    /// ⚠️ **FLOOR, NOT CEIL, AND THE REMAINDER UNDER ONE ROW IS DELIBERATE.** A
+    /// row is added only while a WHOLE row fits, so the window THIS returns is
+    /// never taller than its pane and ends less than one row above the pane's
+    /// floor. (The strand rule can still widen the LAID-OUT window past the
+    /// pane; `PitchEditorModel.layOutPitchWindow` says when.) Ceil
+    /// would overshoot the pane by up to a row. That means a scroll of a
+    /// fraction of a row, and the gap strip (drawn on the CONTENT's floor,
+    /// `PitchEditorSurface.drawGaps`) sitting under the viewport's edge. It
+    /// would also give the DOCKED default pane an 18th row it has no room for:
+    /// MEASURED 2026-09-25 at 1400×1000, that pane is 245.6 pt tall for a
+    /// 17-row, 238 pt window. Floor leaves that pane exactly as it was.
+    ///
+    /// ⚠️ Bounded by `fullMidiRange`, NOT by `maximumVisibleSemitones`. That cap
+    /// guards the OPENING window against detection nonsense drawn at one pixel
+    /// per note. The fill never makes a row shorter; it only spends room the
+    /// user gave it, at the row height they chose.
+    ///
+    /// The ODD row goes ABOVE: a PICK, because nothing prefers either side,
+    /// and the extra row is room to drag a note UP into.
+    ///
+    /// Total: an unmeasured pane (`availableHeight` ≤ 0 or not finite), a
+    /// non-positive row height, or a window already at least as tall as the pane
+    /// returns `fitted` unchanged. That keeps every caller with no pane (every
+    /// headless test, the model before its first layout) exactly where it was.
+    public nonisolated static func filled(_ fitted: ClosedRange<Double>,
+                                          rowHeight: CGFloat,
+                                          availableHeight: CGFloat) -> ClosedRange<Double> {
+        guard rowHeight.isFinite, rowHeight > 0,
+              availableHeight.isFinite, availableHeight > 0 else { return fitted }
+        let fittedRows = fitted.upperBound - fitted.lowerBound + 1
+        let allRows = fullMidiRange.upperBound - fullMidiRange.lowerBound + 1
+        // A hair of slack, so a pane EXACTLY n rows tall (give or take layout
+        // rounding) holds n rows and not n − 1.
+        let fits = (Double(availableHeight / rowHeight) + 1e-6).rounded(.down)
+        let rows = min(allRows, fits)
+        guard rows > fittedRows else { return fitted }
+        let extra = rows - fittedRows
+        let below = (extra / 2).rounded(.down)
+        var low = fitted.lowerBound - below
+        var high = fitted.upperBound + (extra - below)
+        // Into 0…127 by SLIDING, keeping the span (`midiRange(forNoteCentres:)`'s
+        // rule): the span is at most 128 rows, so a slide always fits.
+        if low < fullMidiRange.lowerBound {
+            high += fullMidiRange.lowerBound - low
+            low = fullMidiRange.lowerBound
+        }
+        if high > fullMidiRange.upperBound {
+            low -= high - fullMidiRange.upperBound
+            high = fullMidiRange.upperBound
+        }
+        return max(fullMidiRange.lowerBound, low)...high
+    }
+
+    /// Rows kept free on either side of a note the strand rule holds. The note's
+    /// NAME is drawn in the gutter ABOVE it (`PitchEditorSurface.drawBlobLabels`),
+    /// so a note held on the window's very top row would keep its blob and lose
+    /// its label off the content. MEASURED on staging 2026-09-25: a restore left
+    /// the dragged note on the top row with no "B4" drawn. One row is room for
+    /// the 8 pt label at every row height the zoom reaches (10 pt and up).
+    public nonisolated static let heldNoteHeadroomRows: Double = 1
+
+    /// `window`, widened by whole rows just enough to hold every pitch in
+    /// `drawnMidis` with `heldNoteHeadroomRows` to spare, and never narrowed
+    /// (m23-ap I6c).
+    ///
+    /// ⛔ **THE STRAND RULE.** A note dragged into a row the fill added must not
+    /// vanish when the pane shrinks (restore, PITCH +, a shorter splitter): that
+    /// is the drag clamp's own "A NOTE DRAGGED OFF THE WINDOW IS DATA LOSS" rule,
+    /// applied when the WINDOW moves rather than the note. The caller decides
+    /// which notes are held (`PitchEditorModel.fitOutlierIDs` says why not all
+    /// of them). Clamped to `fullMidiRange`; non-finite pitches are ignored.
+    public nonisolated static func holding(_ window: ClosedRange<Double>,
+                                           drawnMidis: [Double]) -> ClosedRange<Double> {
+        let usable = drawnMidis.filter(\.isFinite)
+        guard let lowest = usable.min(), let highest = usable.max() else { return window }
+        let low = min(window.lowerBound,
+                      max(fullMidiRange.lowerBound, lowest.rounded(.down) - heldNoteHeadroomRows))
+        let high = max(window.upperBound,
+                       min(fullMidiRange.upperBound, highest.rounded(.up) + heldNoteHeadroomRows))
+        return low...high
+    }
 }
 
 // MARK: - One key of the pitch ruler
@@ -263,11 +358,45 @@ public struct NoteBlob: Sendable, Equatable, Identifiable {
     /// per-note edit, not only a pitch move (m23-ap C-0). A Hard-Tuned note
     /// that already sat in tune carries offset 0 and flattened scales; before
     /// this it drew as untouched while its line visibly changed.
+    ///
+    /// ⚠️ **A CLEARED NOTE IS "EDITED" TOO** (`NoteSegment.hasLevelEdits` is part
+    /// of `isEdited`), so a surface that asks `isEdited` first would draw a
+    /// cleared note in the TUNED accent. Ask `isCleared` first — the cleared
+    /// look (hollow, dashed, labelled) replaces the tuned one, it does not sit
+    /// on top of it.
     public let hasEdits: Bool
+
+    /// m23-ap I7b — the note is CLEARED (`NoteSegment.isCleared`, I7a): the
+    /// render silences it between two 10 ms ramps, IN PLACE. It stays drawn and
+    /// selectable, and Restore brings it back at its own level.
+    public let isCleared: Bool
+
+    /// m23-ap I7b — the note's LEVEL, dB (`NoteSegment.amplitudeDb`, U-D's
+    /// `clip.setNoteGain`): 0 is as sung, −72 the quietest level (never
+    /// silence — that is `isCleared`). Read from the segment, never derived.
+    public let amplitudeDb: Double
+
+    /// ⭐ THE TUNED COLOUR'S QUESTION (m23-ap I1 UI hooks, item 7): does this
+    /// note's PITCH half depart from identity — `!NoteSegment.isPitchIdentity`
+    /// of the segment it was drawn from. The SAME per-note predicate the header
+    /// badge aggregates (`Clip.hasTuningEdits` = `!PitchEditSet.isPitchIdentity`),
+    /// so the note and the badge cannot disagree: ONE home, read, not restated.
+    ///
+    /// ⛔ NOT `isEdited`, which also counts LEVEL edits (a clear, a level) and a
+    /// vibrato RATE with no depth (which renders as nothing). Found by I7b-2: a
+    /// note that was only turned down drew in the tuned green while the header
+    /// said NOTES EDITED, and a rate-only note drew green over a sound nobody
+    /// changed. A level keeps its own plate and a clear its own look; neither
+    /// is "tuned". A Hard-Tuned note that already sat in tune (offset 0,
+    /// flattened drift and vibrato) IS pitch-edited: green, with no ghost
+    /// (`isMoved` is the ghost's question, and it is false there).
+    public let isPitchEdited: Bool
 
     public init(id: UUID = UUID(), startSeconds: Double, endSeconds: Double,
                 detectedHz: Double, medianConfidence: Double, frameCount: Int,
-                offsetCents: Double = 0, hasEdits: Bool? = nil) {
+                offsetCents: Double = 0, hasEdits: Bool? = nil,
+                isCleared: Bool = false, amplitudeDb: Double = 0,
+                isPitchEdited: Bool? = nil) {
         self.id = id
         self.startSeconds = startSeconds
         self.endSeconds = endSeconds
@@ -276,7 +405,12 @@ public struct NoteBlob: Sendable, Equatable, Identifiable {
         self.medianConfidence = medianConfidence
         self.frameCount = frameCount
         self.offsetCents = offsetCents
-        self.hasEdits = hasEdits ?? (offsetCents != 0)
+        self.hasEdits = hasEdits ?? (offsetCents != 0 || isCleared || amplitudeDb != 0)
+        self.isCleared = isCleared
+        self.amplitudeDb = amplitudeDb
+        // A blob built without a segment knows only its offset — the one pitch
+        // field it carries. `init(segment:)` hands the segment's own answer.
+        self.isPitchEdited = isPitchEdited ?? (offsetCents != 0)
     }
 
     /// One stored note, as the surface draws it (m23-ap C1/C3). `id` is the
@@ -290,7 +424,32 @@ public struct NoteBlob: Sendable, Equatable, Identifiable {
                   medianConfidence: segment.detectedConfidence,
                   frameCount: frameCount,
                   offsetCents: segment.pitchOffsetCents,
-                  hasEdits: segment.isEdited)
+                  hasEdits: segment.isEdited,
+                  isCleared: segment.isCleared,
+                  amplitudeDb: segment.amplitudeDb,
+                  isPitchEdited: !segment.isPitchIdentity)
+    }
+
+    /// m23-ap I7b — the note's LEVEL as a readout, "Level -6.0 dB", or `nil`
+    /// when there is nothing to say: a note at its sung level (0 dB), or a
+    /// CLEARED note (it plays silence, and its "cleared" label says so; the
+    /// level it keeps for Restore is in the echo, `levelDb`).
+    ///
+    /// ⭐ **A LEVEL IS NEVER INVISIBLE** (design §17.3): any non-zero level
+    /// reads, even one that rounds to "0.0 dB" — nothing on screen may pretend
+    /// an edited level is the sung one. Formatted by the house's ONE dB
+    /// readout (`ClipEdit.gainDbString`: one decimal, explicit `+`), so a note's
+    /// level and a clip's gain read in the same style.
+    public var levelReadout: String? {
+        guard !isCleared, amplitudeDb != 0 else { return nil }
+        return "Level " + ClipEdit.gainDbString(amplitudeDb)
+    }
+
+    /// What the selection menu needs to know about this note
+    /// (`PitchEditorNoteMenu`). Every drawn note is a NOTE until U-A gives the
+    /// editor unpitched sounds.
+    public var menuTarget: PitchEditorNoteMenu.Target {
+        PitchEditorNoteMenu.Target(kind: .note, isCleared: isCleared)
     }
 
     /// The detected centre plus the edit, WITHOUT the clip's transpose — the
@@ -299,8 +458,9 @@ public struct NoteBlob: Sendable, Equatable, Identifiable {
     /// are equal only on an untransposed clip.
     public var editedCentreMidi: Double { centreMidi + offsetCents / 100 }
 
-    /// True when this note carries ANY edit (`NoteSegment.isEdited`) — the
-    /// accent's question: an edited object must not look like an untouched one.
+    /// True when this note carries ANY edit (`NoteSegment.isEdited`): "has
+    /// anyone touched this note". ⚠️ NOT the tuned colour's question since
+    /// m23-ap I1 UI hooks item 7 — that is `isPitchEdited`, the pitch half only.
     public var isEdited: Bool { hasEdits || offsetCents != 0 }
 
     /// True when the note was MOVED off where it was sung — the ghost's
@@ -1011,6 +1171,15 @@ public struct PitchEditorDragDraft: Sendable, Equatable {
     /// The clip's transpose when the drag began (m23-ap C-0) — what turns the
     /// stored offset above into the pitch the note is DRAWN and heard at.
     public let clipPitchShiftSemitones: Double
+    /// m23-ap I4 — the OTHER selected notes riding this drag, in table order.
+    /// EMPTY for a one-note drag, which is then byte-identical to before I4:
+    /// it snaps, clamps and commits (`.notePitch`) exactly as it always did.
+    /// Non-empty, every member takes the pressed note's LANDED delta, so the
+    /// intervals between the notes are kept (`PitchEditorModel.updatePitchDrag`).
+    public internal(set) var members: [PitchEditorDragMember] = []
+
+    /// Every note this drag moves — the pressed one first, then `members`.
+    public var movingSegmentIDs: [UUID] { [segmentID] + members.map(\.segmentID) }
 
     /// Where the blob is drawn RIGHT NOW — DRAWN pitch, transpose included.
     public var targetMidi: Double {
@@ -1026,8 +1195,11 @@ public struct PitchEditorDragDraft: Sendable, Equatable {
     /// reads while dragging.
     public var gestureCents: Double { offsetCents - baselineCents }
 
-    /// True when releasing here would change nothing.
-    public var isNoOp: Bool { offsetCents == baselineCents }
+    /// True when releasing here would change nothing — for a group, when NO
+    /// note moved (they all take one delta, so that is "the delta is zero").
+    public var isNoOp: Bool {
+        offsetCents == baselineCents && members.allSatisfy { $0.offsetCents == $0.baselineCents }
+    }
 
     /// The note the drag is landing on, e.g. "A3".
     public var targetNoteName: String {
@@ -1041,19 +1213,80 @@ public struct PitchEditorDragDraft: Sendable, Equatable {
     public var readout: String? { PitchEditorReadout.centsReadout(offsetCents) }
 }
 
+/// One OTHER selected note riding a GROUP pitch drag (m23-ap I4). The pressed
+/// note is the drag's own `PitchEditorDragDraft`; this is everyone else.
+public struct PitchEditorDragMember: Sendable, Equatable {
+    /// The note — a `NoteSegment.id`.
+    public let segmentID: UUID
+    public let startSeconds: Double
+    public let endSeconds: Double
+    /// Where the singer actually was. Never moves.
+    public let detectedMidi: Double
+    /// The offset the note carried when the drag began.
+    public let baselineCents: Double
+    /// The live offset, in cents — the baseline plus the group's landed delta.
+    /// STORED space: the number the commit writes.
+    public internal(set) var offsetCents: Double
+
+    public init(segmentID: UUID, startSeconds: Double, endSeconds: Double,
+                detectedMidi: Double, baselineCents: Double, offsetCents: Double) {
+        self.segmentID = segmentID
+        self.startSeconds = startSeconds
+        self.endSeconds = endSeconds
+        self.detectedMidi = detectedMidi
+        self.baselineCents = baselineCents
+        self.offsetCents = offsetCents
+    }
+
+    /// Where the note is DRAWN right now, on the clip's transposed axis.
+    public func targetMidi(clipPitchShiftSemitones: Double) -> Double {
+        PitchEditorGeometry.drawnMidi(centreMidi: detectedMidi, offsetCents: offsetCents,
+                                      clipPitchShiftSemitones: clipPitchShiftSemitones)
+    }
+
+    /// Where its ghost is drawn: the SUNG centre on the transposed axis.
+    public func ghostMidi(clipPitchShiftSemitones: Double) -> Double {
+        detectedMidi + clipPitchShiftSemitones
+    }
+}
+
+/// A rubber band in flight on the pitch editor's surface (m23-ap I4) — the
+/// roll's `.marquee(origin:base:additive:)` state, held by the MODEL so the
+/// band's arithmetic is headless and testable.
+public struct PitchEditorBand: Sendable, Equatable {
+    /// Where the band began: the press point, frozen at promotion.
+    public let origin: CGPoint
+    /// The selection when the band armed — FROZEN, so shrinking the band gives
+    /// notes back (`PianoRollMarquee.selection`'s rule).
+    public let base: Set<UUID>
+    /// ⇧ or ⌘ at the press: union onto `base` rather than replace it.
+    public let additive: Bool
+    /// The band as last drawn, normalized (`PianoRollMarquee.band(from:to:)`).
+    public internal(set) var rect: CGRect
+    /// The notes it touches right now (`PianoRollMarquee.hits` over
+    /// `PitchEditorModel.hitRects()`, the click's own rects).
+    public internal(set) var hits: Set<UUID>
+}
+
 // MARK: - Increment C — what a gesture submits
 
 /// ONE store write, emitted on gesture END and never per tick (§8.2 / §11 P7b).
 ///
 /// ⛔⛔ **WHY THE CADENCE IS STRUCTURAL AND NOT A MATTER OF TASTE.**
 /// `Clip.pitchEdits` rides `ClipKey.pitchEditSetHash`. A commit per pointer
-/// tick would re-key the clip's offline render at pointer rate, the render
-/// would never be ready, and `StretchResolution.pending` **skips the clip**
-/// (`PlaybackGraph.swift:78-83`, consumed at `:953`) — so the vocal would go
-/// SILENT for the whole drag. `AutomationLaneEditor` commits per tick and is
-/// right to: there is no offline render behind an automation lane. That
-/// precedent does not transfer, and the design doc records getting this
-/// backwards on its first pass.
+/// tick would re-key the clip's offline render at pointer rate, and the render
+/// would never be ready. What the transport plays meanwhile — ⚠️ CHANGED BY
+/// p2-ren Stage A (2026-09-25): a clip whose render is pending after an edit
+/// that keeps its time base (a note's pitch, level, clear or timing) plays its
+/// PREVIOUS version (`StretchResolution.bridge`), so the vocal would sound
+/// STALE for the whole drag — the edit never heard in context — while a render
+/// is started and thrown away per tick. Silence (`StretchResolution.pending`,
+/// the clip skipped) is now only for a change that moves the time base (a
+/// stretch) or a render that failed; before Stage A it was silence either way,
+/// which is what design §11 P7b records. `AutomationLaneEditor` commits per
+/// tick and is right to: there is no offline render behind an automation
+/// lane. That precedent does not transfer, and the design doc records getting
+/// this backwards on its first pass.
 public struct PitchEditorCommit: Sendable, Equatable {
     public enum Kind: Sendable, Equatable {
         /// C1 — an ABSOLUTE offset in cents for one note. Absolute, not a
@@ -1061,6 +1294,22 @@ public struct PitchEditorCommit: Sendable, Equatable {
         case notePitch(segmentID: UUID, offsetCents: Double)
         /// C3 — cut one note in two at a source-file second.
         case splitNote(segmentID: UUID, atSourceSecond: Double)
+        /// m23-ap I4 — a GROUP pitch drag: one ABSOLUTE offset per moved note
+        /// (the pressed note and every other selected note, in table order),
+        /// written in ONE store edit (`ProjectStore.setClipNotePitchOffsets`).
+        /// `selectionToken` is the selection's identity at the drag — the
+        /// group undo key's token (`PitchCorrectionUndoKey.group`), so a second
+        /// drag of the SAME selection coalesces (UI design §8.4). A ONE-note
+        /// drag never uses this case: it stays `.notePitch`, byte-identical.
+        case notePitches(offsets: [NotePitchOffset], selectionToken: UUID)
+        /// m23-ap I7b — CLEAR (`cleared: true`, silence in place) or RESTORE
+        /// (`false`) these notes, in ONE store edit
+        /// (`ProjectStore.setClipNotesCleared`: one "Clear Notes" / "Restore
+        /// Notes" journal entry for all of them). The ids are the notes the
+        /// action CHANGES, in table order — the count the menu's title named.
+        /// Emitted only by `PitchEditorModel.performNoteAction`, the one action
+        /// behind ⌫, Edit ▸ Delete and the right-click menu.
+        case notesCleared(segmentIDs: [UUID], cleared: Bool)
     }
 
     public var kind: Kind
@@ -1149,7 +1398,32 @@ public final class PitchEditorModel {
 
     /// Every conversion, as one value. Mutate it to zoom, scroll or re-range;
     /// the derived outputs below follow without re-detecting.
+    ///
+    /// ⚠️ m23-ap I6c: `midiRange` is LAID OUT by this model (`fittedMidiRange`
+    /// grown to fill `availableHeight`). Change the row height through
+    /// `setRowHeight(_:)` and report the pane through `setAvailableHeight(_:)`.
+    /// A direct write to `geometry.rowHeight` still draws correctly, but the
+    /// window is not re-filled until the next layout.
     public var geometry: PitchEditorGeometry
+
+    /// m23-ap I6c: THE NOTES' OWN WINDOW, what `autoFitMidiRange` chose (or
+    /// the geometry's opening window before any fit). `geometry.midiRange` is
+    /// this grown to fill the pane (`PitchEditorRange.filled`); the pitch window
+    /// the editor OPENS at is still exactly this.
+    public private(set) var fittedMidiRange: ClosedRange<Double>
+
+    /// m23-ap I6c: the notes the last fit LEFT OFF the window on purpose. The
+    /// 36-semitone cap re-centres on the median so that one octave-error
+    /// detection cannot drag the window off the singing (`PitchEditorRange`).
+    /// Every OTHER drawn note is held on the content whenever the window is
+    /// laid out (`PitchEditorRange.holding`). A blanket "hold every note" would
+    /// undo that cap the moment the pane was first measured.
+    public private(set) var fitOutlierIDs: Set<UUID> = []
+
+    /// m23-ap I6c: the pitch viewport's height as MEASURED by the view (the
+    /// vertical scroller's visible height), or 0 before the first layout. It
+    /// is 0 in every headless caller, and then nothing is filled.
+    public private(set) var availableHeight: CGFloat = 0
 
     /// What has happened to the load. `state` is what the screen says.
     public private(set) var phase: PitchEditorPhase = .notStarted
@@ -1192,6 +1466,21 @@ public final class PitchEditorModel {
     public private(set) var playedLine: PitchPlayedLine =
         PitchPlayedLine.make(contour: nil, fallback: nil, editSet: nil,
                              clipPitchShiftSemitones: 0, sourceWindow: 0..<0)
+
+    /// ⭐ m23-ap I7b → I7b-2 — **THE LINE AS DRAWN IS THE LINE AS MADE.** The
+    /// line means "what the render will play", and a cleared note plays
+    /// silence (`PitchEditSet.gain(atSourceSecond:)` is 0 between its ramps).
+    /// `PitchPlayedLine.make` — the ONE producer, which the wire verb
+    /// `clip.getPlayedPitch` returns too — already leaves a hole over every
+    /// cleared note, so this reads `playedLine` and filters nothing of its
+    /// own. Every surface reader (the committed segments, the echo's
+    /// `perNote`) reads this name; the drag's draft line is built by the same
+    /// `make` from a table carrying the same clears.
+    ///
+    /// ⛔ I7b first filtered here, on the finished line, while `make` ignored
+    /// the flag — two producers that disagreed, so the editor hid a stretch the
+    /// wire still reported as pitch. Do not bring a second filter back.
+    public var visiblePlayedLine: PitchPlayedLine { playedLine }
 
     /// The same line with the live DRAG applied, or `nil` when nothing is being
     /// dragged. **A VALUE COPY, NEVER A COMMIT** (design §4.4, F5): the note
@@ -1244,6 +1533,36 @@ public final class PitchEditorModel {
     /// A tool that refused and a tool that did nothing must not look the same.
     public private(set) var refusal: String?
 
+    // MARK: I4 — the selection (interaction batch §7)
+
+    /// The selected notes, by `NoteSegment.id` (m23-ap I4). The user's words:
+    /// "when I select segment, it should stay selected and I should also be able
+    /// to do mutiselect with mouse clicking or drawing rectangle, select all,
+    /// basically the same functionality we have in note editor".
+    ///
+    /// ⭐ **THE RULES ARE THE ROLL'S; THE SET IS THIS MODEL'S** (design §7, the
+    /// house ruling F12). The click table is `PianoRollGridPress` (through I0's
+    /// router), the band arithmetic is `PianoRollMarquee.selection`, the chord is
+    /// `ArrangeClickIntent` — none re-spelled here. Only ids of DRAWN notes are
+    /// ever held: every table sync prunes to them (`reconcileSelection`), the
+    /// roll's `survivors` rule.
+    ///
+    /// ⚠️ **SELECTING IS NOT EDITING.** Nothing here reaches `emit`: a
+    /// selection change is never journalled and never re-keys a render.
+    public private(set) var selection: Set<UUID> = []
+
+    /// The selection's IDENTITY — re-minted on every CHANGE of `selection`, and
+    /// never otherwise (`setSelection` compares first). It is the group undo
+    /// key's token (`PitchCorrectionUndoKey.group`, UI design §8.4): a second
+    /// drag of the SAME selection coalesces into the first, a drag of a
+    /// DIFFERENT one does not. A re-mint on a no-change write would make "the
+    /// same selection" unobservable, so the comparison is the rule.
+    public private(set) var selectionToken = UUID()
+
+    /// The rubber band in flight, or `nil` — promoted out of an empty-surface
+    /// press that travelled past the slop (I0's `.band` kind).
+    public private(set) var band: PitchEditorBand?
+
     /// ⭐ **THE COMMIT SEAM, AND THE SPY GATE'S HOME.** Set once by the view;
     /// the model is the ONLY thing that calls it. Every commit this surface
     /// makes goes through here and is counted, so a test can assert that forty
@@ -1262,6 +1581,32 @@ public final class PitchEditorModel {
     /// The last commit emitted, verbatim. Read by the suite so a gate asserts
     /// the CONTENTS of a write rather than that a call returned.
     public private(set) var lastCommit: PitchEditorCommit?
+
+    /// ⭐ **THE AUDITION SEAM — `onCommit`'s twin, and ITS spy gate's home**
+    /// (m23-ap I1 UI hooks). Set once by the view; the model is the ONLY thing
+    /// that calls it, and it calls it on exactly four events:
+    ///
+    ///  * a PRESS on a note — the first tick of a `.noteDrag` press, so a click
+    ///    is heard at mouse-down, the roll's first-tick sound (design §4);
+    ///  * a DRAG STEP — each change of the draft's OFFSET, never a pointer tick:
+    ///    a snapped drag moving inside one scale step asks for nothing;
+    ///  * ESCAPE — a stop, then the ladder's own rung (`handleEscapeKey`);
+    ///  * the pane going away or the switch turning off — a stop
+    ///    (`stopAudition`).
+    ///
+    /// The RELEASE audition is not here: it follows the commit, and only the
+    /// app knows the commit landed (`PitchEditorAuditionRouter.commitLanded`).
+    /// Nothing here reads the audition switch either — the router passes it to
+    /// the store's doors at the call site, so a gate over this seam counts
+    /// gestures and the router's own gate counts the switch.
+    ///
+    /// `@ObservationIgnored` for `onCommit`'s reason: plumbing, not state.
+    @ObservationIgnored public var onAudition: ((PitchEditorAuditionRequest) -> Void)?
+
+    /// What the drag in flight last ASKED TO HEAR, note by note, or nil before
+    /// its first step — then what is sounding is the press: every moving note
+    /// at its baseline. Reset by `beginPitchDrag`. See `requestDragAudition`.
+    @ObservationIgnored private var dragAuditionHeard: [UUID: Double]?
 
     /// Bumped by every `load` and every `reset`. A result whose token is stale
     /// is DROPPED: a detection that finished after the pane moved on must never
@@ -1290,6 +1635,7 @@ public final class PitchEditorModel {
     public init(clipID: UUID, geometry: PitchEditorGeometry) {
         self.clipID = clipID
         self.geometry = geometry
+        self.fittedMidiRange = geometry.midiRange
     }
 
     // MARK: Derived state
@@ -1336,8 +1682,9 @@ public final class PitchEditorModel {
     /// and end of a drag — never per pointer tick.
     public func playedLineSegments(excluding span: ClosedRange<Double>? = nil) -> [[CGPoint]] {
         var out: [[CGPoint]] = []
-        out.reserveCapacity(playedLine.runs.count)
-        for run in playedLine.runs {
+        out.reserveCapacity(visiblePlayedLine.runs.count)
+        // I7b-2 — a cleared note's stretch is already a hole, made by `make`.
+        for run in visiblePlayedLine.runs {
             guard let span else {
                 out.append(geometry.points(forPlayed: run))
                 continue
@@ -1368,24 +1715,77 @@ public final class PitchEditorModel {
         return (draft.startSeconds - half)...(draft.endSeconds + half)
     }
 
+    /// m23-ap I4 — EVERY moving note's span, widened like `draftSpan`, merged
+    /// where they overlap and sorted: what a GROUP drag's line owns while the
+    /// pointer is down. For a one-note drag this is `[draftSpan]` exactly, so
+    /// nothing a one-note drag draws changed. Empty with no drag.
+    public var draftSpans: [ClosedRange<Double>] {
+        guard let draft = drag, let first = draftSpan else { return [] }
+        guard !draft.members.isEmpty else { return [first] }
+        let half = max(0, noteTable.retuneMs / 1000 / 2)
+        let spans = ([first] + draft.members.map {
+            ($0.startSeconds - half)...($0.endSeconds + half)
+        }).sorted { $0.lowerBound < $1.lowerBound }
+        var merged: [ClosedRange<Double>] = []
+        for span in spans {
+            if let last = merged.last, span.lowerBound <= last.upperBound {
+                merged[merged.count - 1] = last.lowerBound...max(last.upperBound, span.upperBound)
+            } else {
+                merged.append(span)
+            }
+        }
+        return merged
+    }
+
+    /// The PLAYED line with EVERY span in `spans` left out (m23-ap I4) — the
+    /// group drag's twin of `playedLineSegments(excluding:)`, which it calls
+    /// VERBATIM for zero or one span so a one-note drag draws exactly what it
+    /// did. With several spans a run is split at each one: every point inside
+    /// any span is the draft's to draw.
+    public func playedLineSegments(excludingAll spans: [ClosedRange<Double>]) -> [[CGPoint]] {
+        guard spans.count > 1 else { return playedLineSegments(excluding: spans.first) }
+        var out: [[CGPoint]] = []
+        // I7b-2 — a cleared note's stretch is already a hole, made by `make`.
+        for run in visiblePlayedLine.runs {
+            var piece: [PitchPlayedLine.Point] = []
+            for point in run {
+                if spans.contains(where: { $0.contains(point.editedSeconds) }) {
+                    if !piece.isEmpty { out.append(geometry.points(forPlayed: piece)) }
+                    piece = []
+                } else {
+                    piece.append(point)
+                }
+            }
+            if !piece.isEmpty { out.append(geometry.points(forPlayed: piece)) }
+        }
+        return out
+    }
+
     /// The DRAFT line inside `draftSpan`, as screen polylines — the part of
     /// the line that moves with the pointer. Each piece is extended by ONE
     /// point on each side from the same run (never across a hole), which is
     /// exactly the point the committed line's cut stops at, so the two draw as
     /// one unbroken line. Empty with no drag.
     public var draftLineSegments: [[CGPoint]] {
-        guard let line = draftPlayedLine, let span = draftSpan else { return [] }
+        guard let line = draftPlayedLine else { return [] }
+        // I4 — one pass per moving span (a one-note drag has exactly one, the
+        // `draftSpan` this always used, so its output is unchanged).
+        // I7b-2 — a cleared note's stretch is a hole in the DRAFT line too: it
+        // is built by the same `make` from a table carrying the same clears, so
+        // a slice of one run can never reach across it.
         var out: [[CGPoint]] = []
-        for run in line.runs {
-            guard let first = run.first, let last = run.last,
-                  last.editedSeconds >= span.lowerBound,
-                  first.editedSeconds <= span.upperBound else { continue }
-            guard let lo = run.firstIndex(where: { $0.editedSeconds >= span.lowerBound }),
-                  let hi = run.lastIndex(where: { $0.editedSeconds <= span.upperBound }),
-                  lo <= hi else { continue }
-            let from = max(0, lo - 1)
-            let to = min(run.count - 1, hi + 1)
-            out.append(geometry.points(forPlayed: Array(run[from...to])))
+        for span in draftSpans {
+            for run in line.runs {
+                guard let first = run.first, let last = run.last,
+                      last.editedSeconds >= span.lowerBound,
+                      first.editedSeconds <= span.upperBound else { continue }
+                guard let lo = run.firstIndex(where: { $0.editedSeconds >= span.lowerBound }),
+                      let hi = run.lastIndex(where: { $0.editedSeconds <= span.upperBound }),
+                      lo <= hi else { continue }
+                let from = max(0, lo - 1)
+                let to = min(run.count - 1, hi + 1)
+                out.append(geometry.points(forPlayed: Array(run[from...to])))
+            }
         }
         return out
     }
@@ -1426,7 +1826,12 @@ public final class PitchEditorModel {
     /// numbers a person sees.
     public var playedLineNoteSummaries: [PitchPlayedLine.NoteSummary] {
         let drawn = Set(blobs.map(\.id))
-        return playedLine.noteSummaries(for: noteTable.segments.filter { drawn.contains($0.id) })
+        // I7b — a cleared note reports no points (`pointCount` 0,
+        // min/median/max null): the surface strokes nothing there, and the
+        // echo must not claim a line a person cannot see. Since I7b-2 that is
+        // `make`'s own hole, the wire's answer too.
+        return visiblePlayedLine.noteSummaries(
+            for: noteTable.segments.filter { drawn.contains($0.id) })
     }
 
     // MARK: C-0 — building the line
@@ -1486,6 +1891,13 @@ public final class PitchEditorModel {
         var segments = noteTable.segments
         if let index = segments.firstIndex(where: { $0.id == draft.segmentID }) {
             segments[index].pitchOffsetCents = draft.offsetCents
+        }
+        // I4 — every OTHER note of a group drag moves in the draft too, so the
+        // line rides with all of them (a no-op loop for a one-note drag).
+        for member in draft.members {
+            if let index = segments.firstIndex(where: { $0.id == member.segmentID }) {
+                segments[index].pitchOffsetCents = member.offsetCents
+            }
         }
         let table = PitchEditSet(analysisVersion: noteTable.analysisVersion,
                                  segments: segments, retuneMs: noteTable.retuneMs)
@@ -1579,10 +1991,14 @@ public final class PitchEditorModel {
         // Held here, NOT written to the store: opening a viewer must not dirty
         // a project. The first edit carries it to the store as `seedIfAbsent`,
         // which is what makes the ids the user dragged the ids that get saved.
+        let previous = noteTable
         seedTable = PitchNoteTable.detected(from: result)
         // C-0: kept whole — the estimate's sung line until the seam answers.
         fallbackDetection = result
         rebuildBlobs()
+        // I4: a fresh detection mints fresh ids — whatever was selected is
+        // pruned to what this table still draws.
+        reconcileSelection(previous: previous)
         // The gaps are rebuilt here too, from whichever frames the line uses.
         rebuildPlayedLine()
         phase = .detected
@@ -1600,11 +2016,19 @@ public final class PitchEditorModel {
     /// than by trusting that the call returned — and it is why a commit that
     /// silently wrote nothing shows up as a blob springing back.
     public func syncStoredNoteTable(_ table: PitchEditSet?) {
+        let previous = noteTable
         storedTable = table
         rebuildBlobs()
         // C-0: the line is what the render plays, and the render plays the
         // STORED table — so a read-back rebuilds it.
         rebuildPlayedLine()
+        // I4: the selection follows the table — pruned to what is still drawn,
+        // and a split's right half joins a selected parent.
+        reconcileSelection(previous: previous)
+        // I6c: a note the table moved off the laid-out window (a redo after the
+        // pane shrank, a wire edit) widens it. Never a shrink, so a commit
+        // read back never moves the grid.
+        holdStrandedNotes()
     }
 
     /// The table blobs are drawn from: the store's when there is one, the
@@ -1677,6 +2101,9 @@ public final class PitchEditorModel {
         drag = nil
         draftPlayedLine = nil
         refusal = nil
+        // I4: nothing is drawn, so nothing can be selected or banded.
+        band = nil
+        setSelection([])
         rebuildPlayedLine()
     }
 
@@ -1695,8 +2122,86 @@ public final class PitchEditorModel {
         // sung. Fitting on the detected centres would scroll a corrected note
         // off its own screen — and on a clip transposed an octave, every note.
         let geometry = geometry
-        self.geometry.midiRange = PitchEditorRange.midiRange(
+        let fitted = PitchEditorRange.midiRange(
             forNoteCentres: blobs.map { geometry.drawnMidi(for: $0) })
+        fittedMidiRange = fitted
+        // I6c: what the fit chose NOT to show (only the 36-semitone cap ever
+        // leaves a note out) stays out. See `fitOutlierIDs`.
+        fitOutlierIDs = Set(blobs.filter { !fitted.contains(geometry.drawnMidi(for: $0)) }.map(\.id))
+        layOutPitchWindow()
+    }
+
+    /// m23-ap I6c: the pitch viewport's measured height. The view reports it
+    /// whenever it changes (maximize, restore, the splitter, a window
+    /// resize), and the window is re-filled for it.
+    public func setAvailableHeight(_ height: CGFloat) {
+        let height = height.isFinite ? max(0, height) : 0
+        guard height != availableHeight else { return }
+        availableHeight = height
+        layOutPitchWindow()
+    }
+
+    /// m23-ap I6c: the pitch zoom (PITCH −/+, ⌘ row zoom, `debug.panelLayout`
+    /// all write the ONE slot, and the view hands its change here). The row
+    /// height is the user's. Only the NUMBER of rows the pane can hold changes,
+    /// so the window is re-filled BEFORE the view re-pins its scroll offset:
+    /// the re-pin clamps against the new content height, which reads the window.
+    public func setRowHeight(_ rowHeight: CGFloat) {
+        guard rowHeight != geometry.rowHeight else { return }
+        geometry.rowHeight = rowHeight
+        layOutPitchWindow()
+    }
+
+    /// ⭐ **THE ONE PLACE `geometry.midiRange` IS LAID OUT** (m23-ap I6c): the
+    /// notes' window, filled to the pane at the current row height
+    /// (`PitchEditorRange.filled`), then widened to hold every drawn note the
+    /// fit did not leave out on purpose (`PitchEditorRange.holding`, the strand
+    /// rule). Every reader of the window (the rows, the ruler, the drag and
+    /// group clamps, the hit rects and so the band, the cut line, the ghosts,
+    /// the labels, the playhead's height) reads the result and follows it.
+    ///
+    /// Only a held note OUTSIDE the notes' own window is passed on. Every other
+    /// note is inside `fittedMidiRange`, which the fill never shrinks below, so
+    /// giving it the strand rule's headroom would only re-open the fit the
+    /// editor already chose (and change the window it OPENS at).
+    ///
+    /// ⚠️ **THE PANE-HEIGHT BOUND IS `filled`'s, NOT THIS WINDOW'S.** A held note
+    /// on the filled window's edge row (a drag reaches it) gets its headroom row
+    /// at the next layout, so the grid can end up one row taller than the pane,
+    /// and after PITCH + (fewer rows fit) several. The strand rule outranks the
+    /// fill: a note off the window is the drag clamp's DATA LOSS case.
+    ///
+    /// Compare-first: the splitter reports a new height every frame, and the
+    /// window only moves when a whole row appears or goes.
+    private func layOutPitchWindow() {
+        let geometry = geometry
+        let fitted = fittedMidiRange
+        let held = blobs.filter { !fitOutlierIDs.contains($0.id) }
+            .map { geometry.drawnMidi(for: $0) }
+            .filter { !fitted.contains($0) }
+        let window = PitchEditorRange.holding(
+            PitchEditorRange.filled(fittedMidiRange, rowHeight: geometry.rowHeight,
+                                    availableHeight: availableHeight),
+            drawnMidis: held)
+        if window != geometry.midiRange { self.geometry.midiRange = window }
+    }
+
+    /// m23-ap I6c: after the stored table changes (a commit read back, an undo,
+    /// a redo, a wire edit), a held note that now sits OUTSIDE the laid-out
+    /// window widens it. This only ever WIDENS: a commit must never make the
+    /// grid jump under the note the user just let go of, and re-running the
+    /// whole layout here would shrink the window whenever a note that had
+    /// widened it moved back inside. The next pane or zoom change lays it out
+    /// afresh.
+    private func holdStrandedNotes() {
+        let geometry = geometry
+        let window = geometry.midiRange
+        let stranded = blobs.filter {
+            !fitOutlierIDs.contains($0.id) && !window.contains(geometry.drawnMidi(for: $0))
+        }
+        guard !stranded.isEmpty else { return }
+        self.geometry.midiRange = PitchEditorRange.holding(
+            window, drawnMidis: stranded.map { geometry.drawnMidi(for: $0) })
     }
 
     // MARK: Increment C — hit testing, dragging, splitting
@@ -1716,14 +2221,27 @@ public final class PitchEditorModel {
     /// "first in the array" would then mean "the earlier one", which is not
     /// what the user aimed at.
     public func blob(at point: CGPoint) -> NoteBlob? {
-        var best: (blob: NoteBlob, distance: CGFloat)?
-        for blob in blobs {
-            let rect = geometry.rect(for: blob).insetBy(dx: -Self.hitSlop, dy: -Self.hitSlop)
-            guard rect.contains(point) else { continue }
-            let distance = abs(point.y - rect.midY)
-            if best == nil || distance < best!.distance { best = (blob, distance) }
+        // I4: the rects are `hitRects()` — the ONE producer the band reads too.
+        var best: (index: Int, distance: CGFloat)?
+        for (index, entry) in hitRects().enumerated() {
+            guard entry.rect.contains(point) else { continue }
+            let distance = abs(point.y - entry.rect.midY)
+            if best == nil || distance < best!.distance { best = (index, distance) }
         }
-        return best?.blob
+        return best.map { blobs[$0.index] }
+    }
+
+    /// ⭐ **THE ONE HIT-RECT PRODUCER** (m23-ap I4): every drawn note's rect,
+    /// inflated by `hitSlop`, in `blobs` order — exactly the rects `blob(at:)`
+    /// (and so `pressHit(at:)`, the click) tests, and the rects the band hands
+    /// `PianoRollMarquee.hits`. The roll's marquee law (`PianoRollMarquee.swift`'s
+    /// banner, "THE REAL TRAP IS WHICH RECT"): a band and a click that read two
+    /// different rect sets disagree somewhere, and the user sees a note a click
+    /// selects that a sweep over it does not.
+    public func hitRects() -> [(id: UUID, rect: CGRect)] {
+        blobs.map { blob in
+            (blob.id, geometry.rect(for: blob).insetBy(dx: -Self.hitSlop, dy: -Self.hitSlop))
+        }
     }
 
     /// Start dragging a note's pitch (C1). Returns false when there is no note
@@ -1740,6 +2258,7 @@ public final class PitchEditorModel {
                                     offsetCents: blob.offsetCents,
                                     isFree: false,
                                     clipPitchShiftSemitones: geometry.clipPitchShiftSemitones)
+        dragAuditionHeard = nil
         // C-0: the draft line exists from the first moment of the gesture, so
         // the note's own stretch of line leaves the surface and rides with the
         // blob before the pointer has moved a pixel.
@@ -1765,6 +2284,13 @@ public final class PitchEditorModel {
             centreMidi: draft.detectedMidi, offsetCents: draft.baselineCents,
             clipPitchShiftSemitones: draft.clipPitchShiftSemitones)
         let raw = origin + semitones
+        // ⭐ m23-ap I4 — A GROUP DRAG takes its own branch, and the one-note
+        // path below is left EXACTLY as it was: a drag with no other selected
+        // note never enters it, so it snaps, clamps and commits byte-identically.
+        if !draft.members.isEmpty {
+            updateGroupPitchDrag(&draft, origin: origin, raw: raw, free: free)
+            return
+        }
         // ⛔ **A NOTE DRAGGED OFF THE WINDOW IS DATA LOSS TO THE PERSON HOLDING
         // THE MOUSE.** The visible range is the detected span padded by four
         // semitones, so a big drag would commit a note above the top of the
@@ -1796,7 +2322,13 @@ public final class PitchEditorModel {
         // C-0: the live line follows the draft — rebuilt only when the VALUE
         // moved (a snapped drag crosses a row a few times per gesture; most
         // ticks change nothing), and never committed.
-        if moved { rebuildDraftLine() }
+        // I1 UI hooks: and the drag is HEARD on exactly that event — once per
+        // change of the offset, never per pointer tick (a SNAPPED change inside
+        // the detector floor asks nothing: `requestDragAudition`).
+        if moved {
+            rebuildDraftLine()
+            requestDragAudition(draft)
+        }
     }
 
     /// The gesture ended. Emits AT MOST ONE commit — none at all when the note
@@ -1811,7 +2343,20 @@ public final class PitchEditorModel {
         // line springing back with its blob.
         draftPlayedLine = nil
         guard !draft.isNoOp else { return nil }
-        return emit(.notePitch(segmentID: draft.segmentID, offsetCents: draft.offsetCents))
+        guard !draft.members.isEmpty else {
+            return emit(.notePitch(segmentID: draft.segmentID, offsetCents: draft.offsetCents))
+        }
+        // m23-ap I4 — a GROUP drag: ONE commit carrying every moved note's
+        // absolute offset, in table order, and the selection's token for the
+        // group undo key. Never N `.notePitch` commits: that would be N undo
+        // steps for one gesture (UI design §8.4).
+        let offsets = [NotePitchOffset(segmentId: draft.segmentID, offsetCents: draft.offsetCents)]
+            + draft.members.map { NotePitchOffset(segmentId: $0.segmentID, offsetCents: $0.offsetCents) }
+        let order = Dictionary(uniqueKeysWithValues: blobs.enumerated().map { ($1.id, $0) })
+        let ordered = offsets.sorted {
+            (order[$0.segmentId] ?? Int.max) < (order[$1.segmentId] ?? Int.max)
+        }
+        return emit(.notePitches(offsets: ordered, selectionToken: selectionToken))
     }
 
     /// The gesture was abandoned — the window deactivated, the pane closed, a
@@ -1822,37 +2367,734 @@ public final class PitchEditorModel {
     public func cancelDrag() {
         drag = nil
         draftPlayedLine = nil
+        // I4 — a band that cannot finish gives the selection BACK: it is put
+        // away with the frozen base it armed with, never left half-applied.
+        cancelBand()
+        // I0 — and the PRESS that owned the drag. A press left in flight would
+        // make the next gesture's first tick look like a later tick of this one
+        // whenever it happened to start at the same point.
+        press.cancel()
+    }
+
+    // MARK: I0 — the press router (interaction batch §3 item 5)
+
+    /// The press in flight — `PitchEditorPressTracker`, which asks
+    /// `PitchEditorGestureRouter` ONCE per gesture and remembers the answer.
+    ///
+    /// `@ObservationIgnored`: it moves on every pointer tick and nothing DRAWS
+    /// it — the draft the overlay draws is `drag`, which stays observable. The
+    /// debug tier sees it through the view's report to
+    /// `PitchEditorInteractionBridge`.
+    @ObservationIgnored public private(set) var press = PitchEditorPressTracker()
+
+    /// What the last release did, verbatim — the seam I4 (selection) and I5 (⌘
+    /// on empty places the playhead) act on; reported to the debug echo.
+    @ObservationIgnored public private(set) var lastRelease: PitchEditorReleaseAction?
+
+    /// What is under a press, for the router — the ONE hit producer the press
+    /// path uses: `blob(at:)` (its slop and its nearest-by-vertical rule) on a
+    /// surface that is drawing notes, `.inert` on one that is not.
+    public func pressHit(at point: CGPoint) -> PitchEditorPressHit {
+        guard state.drawsNotes else { return .inert }
+        return blob(at: point).map { .note($0.id) } ?? .empty
+    }
+
+    /// One pointer tick of the gesture that began at `start` (content space).
+    /// Decides nothing itself: the tracker routes on the gesture's first tick,
+    /// with the tool engaged NOW and the note under `start` NOW, and never asks
+    /// again. ⛔ **COMMITS NOTHING** — it is the router's half of a tick; the
+    /// view's `dragChanged` owns the draft.
+    ///
+    /// ⚠️ **A NEW PRESS DROPS A DRAFT LEFT IN FLIGHT.** Before I0 a pitch drag
+    /// began at mouse-down, so every new gesture replaced whatever draft a lost
+    /// `onEnded` had stranded. Now it begins only on promotion, so without this a
+    /// stranded draft would take the NEXT gesture's ticks — a knife stroke or a
+    /// click elsewhere would move the old note's draft. A first tick means a new
+    /// gesture (`PitchEditorPressTracker.tick`), so any draft still here is the
+    /// stranded one. Nothing is committed either way.
+    ///
+    /// ⭐ m23-ap I4 — A `.band` PRESS IS DRIVEN HERE, WHOLE. Once it travels past
+    /// the slop the band arms (base = the selection at that moment, additive =
+    /// ⇧/⌘ AT THE PRESS — decided once, I0's rule) and every later tick
+    /// re-decides the whole selection from that frozen base. Selecting is not
+    /// editing, so this still commits nothing. A band a lost `onEnded` stranded
+    /// is put away on the next gesture's first tick, like a stranded draft.
+    @discardableResult
+    public func trackPress(start: CGPoint, location: CGPoint,
+                           modifiers: ArrangeClickModifiers) -> PitchEditorPressTick {
+        let tick = press.tick(start: start, location: location, tool: tool, modifiers: modifiers,
+                              hit: { pressHit(at: $0) })
+        if tick.isFirst, drag != nil {
+            drag = nil
+            draftPlayedLine = nil
+        }
+        if tick.isFirst, band != nil { cancelBand() }
+        if case .band = tick.kind, tick.isPromoted, let current = press.current {
+            advanceBand(origin: current.origin, to: location,
+                        modifiersAtPress: current.modifiersAtPress, didPromote: tick.didPromote)
+        }
+        // ⭐ m23-ap I1 UI hooks — A PRESS ON A NOTE IS HEARD, ONCE, AT ITS FIRST
+        // TICK: the note as it sounds NOW (design §4, the roll's first-tick
+        // sound). Decided by the router's kind, so a press on empty surface, a
+        // knife press or an inert surface asks for nothing, and a later tick of
+        // the same press never asks again. If the press becomes a drag, its
+        // steps take over (latest wins, in the engine).
+        if tick.isFirst, case .noteDrag(let id) = tick.kind {
+            requestAudition(.press(segmentIDs: [id], seedIfAbsent: seedForCommit))
+        }
+        return tick
+    }
+
+    /// The gesture that began at `start` ended at `location`: what the release
+    /// does, decided by the press it ends (never by the tool engaged at
+    /// mouse-up). Recorded as `lastRelease`. Commits nothing itself.
+    ///
+    /// ⭐ m23-ap I4 — AND IT APPLIES THE RELEASE'S SELECTION HALF, so the answer
+    /// I0 computed is ACTED ON and never decided twice: a click resolves
+    /// through `PianoRollGridPress`'s table (plain on a note selects only it,
+    /// ⇧/⌘ toggles it, plain on empty deselects, ⇧ on empty does nothing), and
+    /// a travelled band lands its final selection at the release point. ⌘ on
+    /// empty (`.positionPlayhead`) is I5's seam and does nothing yet. The two
+    /// commit-producing answers (`.endNoteDrag`, `.cut`) stay the view's to
+    /// dispatch — it owns the one path that can write.
+    ///
+    /// ⛔ **A CLICK ON A NOTE NEVER RETUNES IT.** Nothing here touches `drag`,
+    /// so a note drawn off the scale that is clicked in place is selected and
+    /// left exactly where it was (`PitchEditorModelTests` pins it on an
+    /// off-grid note, with the zero-length drag that used to retune it as the
+    /// positive control).
+    @discardableResult
+    public func releasePress(start: CGPoint, location: CGPoint,
+                             modifiers: ArrangeClickModifiers) -> PitchEditorReleaseAction {
+        let action = press.release(start: start, at: location, modifiers: modifiers)
+        lastRelease = action
+        switch action {
+        case .click(let answer):
+            applyClick(answer)
+        case .endBand:
+            finishBand(at: location)
+        case .endNoteDrag, .cut, .nothing:
+            break
+        }
+        return action
+    }
+
+    // MARK: I4 — the selection's writers (interaction batch §7)
+
+    /// THE ONE WRITER of `selection`. Compares first, so `selectionToken`
+    /// re-mints on a real change and never on a write of the same set.
+    private func setSelection(_ next: Set<UUID>) {
+        guard next != selection else { return }
+        selection = next
+        selectionToken = UUID()
+    }
+
+    /// Whether this note is selected.
+    public func isSelected(_ id: UUID) -> Bool { selection.contains(id) }
+
+    /// What the pane's status line says about the selection — `nil` when
+    /// nothing is selected (the line says nothing rather than "0 notes
+    /// selected"), "1 note selected", "3 notes selected". Resolved HERE so the
+    /// wording is tested headless; the view draws it verbatim.
+    public var selectionSummary: String? {
+        switch selection.count {
+        case 0: return nil
+        case 1: return "1 note selected"
+        case let count: return "\(count) notes selected"
+        }
+    }
+
+    /// Select exactly this note — a plain click on it. A note this surface
+    /// does not draw is ignored: the selection only ever holds drawn notes.
+    public func selectOnly(_ id: UUID) {
+        guard isDrawn(id) else { return }
+        setSelection([id])
+    }
+
+    /// Add this note to the selection, or take it out — a ⇧ or ⌘ click on it.
+    public func toggle(_ id: UUID) {
+        guard isDrawn(id) else { return }
+        var next = selection
+        if next.contains(id) { next.remove(id) } else { next.insert(id) }
+        setSelection(next)
+    }
+
+    /// Select nothing — a plain click on empty surface, Escape's
+    /// `.clearSelection` rung, the debug tier's `clearSelection` act.
+    public func clearSelection() { setSelection([]) }
+
+    /// Select EVERY DRAWN note — ⌘A / Edit ▸ Select All (routed by
+    /// `SelectAllMenuPolicy` to `.pitchEditorNotes`, handed over
+    /// `PitchEditorInteractionBridge.selectAllNonce`) and the debug tier's
+    /// `selectAll` act. REPLACES, never unions — the roll's `selectAllNotes`.
+    public func selectAll() { setSelection(Set(blobs.map(\.id))) }
+
+    private func isDrawn(_ id: UUID) -> Bool { blobs.contains { $0.id == id } }
+
+    /// The click table's answer, acted on (see `releasePress`).
+    private func applyClick(_ answer: PianoRollGridRelease) {
+        switch answer {
+        case .selectOnly(let id): selectOnly(id)
+        case .toggle(let id): toggle(id)
+        case .deselect: clearSelection()
+        case .positionPlayhead:
+            // ═══ I5 SEAM ═══ ⌘ on empty surface places the playhead there. Not
+            // built yet, so it does nothing — and in particular it does NOT
+            // deselect: the click table sent it here and not to `.deselect`.
+            break
+        case .doNothing:
+            break
+        }
+    }
+
+    /// THE SELECTION FOLLOWS THE NOTE TABLE, the roll's `survivors` rule
+    /// (`PianoRollModel.reseed`), plus one rule the roll has no need for.
+    ///
+    /// 1. **Pruned to what is drawn.** A note the new table no longer has, or
+    ///    no longer draws, cannot stay selected — a selection naming a note
+    ///    nobody can see is a delete (I7b) aimed at nothing the user chose.
+    /// 2. **A split's right half joins a selected parent.** The store keeps the
+    ///    parent's id on the LEFT half and mints the right one
+    ///    (`ProjectStore.splitClipNoteSegment`), so without this a selected note
+    ///    cut in two would come back half selected. Recognised from the two
+    ///    tables rather than from a remembered commit, so a split that arrives
+    ///    any way at all (the wire, a redo) behaves the same: a NEW note that
+    ///    starts exactly where a selected note now ends, and ends exactly where
+    ///    that note used to end, is its right half.
+    ///
+    /// ⭐ The FIRST commit on a clip with no stored table hands the seed back
+    /// verbatim (`ProjectStore.noteTable(seedIfAbsent:)`), so the ids survive it
+    /// and nothing is pruned.
+    private func reconcileSelection(previous: PitchEditSet) {
+        guard !selection.isEmpty else { return }
+        let drawn = Set(blobs.map(\.id))
+        var next = selection.intersection(drawn)
+        let before = Dictionary(previous.segments.map { ($0.id, $0) },
+                                uniquingKeysWith: { first, _ in first })
+        let now = noteTable.segments
+        for parent in now where next.contains(parent.id) {
+            guard let old = before[parent.id], parent.endSeconds < old.endSeconds else { continue }
+            if let right = now.first(where: {
+                before[$0.id] == nil && $0.startSeconds == parent.endSeconds
+                    && $0.endSeconds == old.endSeconds
+            }), drawn.contains(right.id) {
+                next.insert(right.id)
+            }
+        }
+        setSelection(next)
+    }
+
+    /// A tick of a promoted `.band` press: arm the band on the promoting tick,
+    /// then re-decide the selection from its frozen base.
+    private func advanceBand(origin: CGPoint, to location: CGPoint,
+                             modifiersAtPress: ArrangeClickModifiers, didPromote: Bool) {
+        if band == nil {
+            guard didPromote else { return }
+            band = PitchEditorBand(
+                origin: origin, base: selection,
+                additive: ArrangeClickIntent.intent(for: modifiersAtPress) == .toggle,
+                rect: .zero, hits: [])
+        }
+        updateBand(to: location)
+    }
+
+    /// Re-decide the WHOLE selection for the band's current corner — from the
+    /// frozen base, so growing the band adds notes and shrinking it gives them
+    /// back. The hits are `PianoRollMarquee.hits` over `hitRects()`, the SAME
+    /// rects the click tests; the rule is `PianoRollMarquee.selection`.
+    private func updateBand(to location: CGPoint) {
+        guard var live = band else { return }
+        live.rect = PianoRollMarquee.band(from: live.origin, to: location)
+        live.hits = PianoRollMarquee.hits(band: live.rect, rects: hitRects())
+        band = live
+        setSelection(PianoRollMarquee.selection(base: live.base, hits: live.hits,
+                                                additive: live.additive))
+    }
+
+    /// The band's release: its final selection lands, and the band goes.
+    private func finishBand(at location: CGPoint) {
+        guard band != nil else { return }
+        updateBand(to: location)
+        band = nil
+    }
+
+    /// Put a live band away WITHOUT applying it: the selection goes back to
+    /// the base it armed with.
+    private func cancelBand() {
+        guard let live = band else { return }
+        band = nil
+        setSelection(live.base)
+    }
+
+    // MARK: I4 — the group pitch drag (interaction batch §7)
+
+    /// The Move tool's press on a note travelled past the slop (I0's
+    /// promotion): drag the SELECTION's pitch (m23-ap I4). An UNSELECTED note
+    /// is selected first — alone, or added to the selection when the press
+    /// carried ⇧ or ⌘ (the house additive chord, `ArrangeClickIntent`). The
+    /// pressed note is the drag's anchor — `beginPitchDrag(on:)`, UNCHANGED —
+    /// and every OTHER selected, drawn note rides along as a member.
+    ///
+    /// ⭐ **A LONE SELECTED NOTE IS THE ONE-NOTE DRAG, BYTE FOR BYTE.** With no
+    /// other note selected there are no members, `updatePitchDrag` never enters
+    /// its group branch, and the release commits `.notePitch` under the
+    /// `.segment` undo key exactly as before I4.
+    @discardableResult
+    public func beginSelectionPitchDrag(on blob: NoteBlob) -> Bool {
+        guard tool == .pointer, isDrawn(blob.id) else { return false }
+        if !selection.contains(blob.id) {
+            let additive = press.current.map {
+                ArrangeClickIntent.intent(for: $0.modifiersAtPress) == .toggle
+            } ?? false
+            setSelection(additive ? selection.union([blob.id]) : [blob.id])
+        }
+        guard beginPitchDrag(on: blob), var draft = drag else { return false }
+        let others = blobs.filter { $0.id != blob.id && selection.contains($0.id) }
+        guard !others.isEmpty else { return true }
+        draft.members = others.map {
+            PitchEditorDragMember(segmentID: $0.id, startSeconds: $0.startSeconds,
+                                  endSeconds: $0.endSeconds, detectedMidi: $0.centreMidi,
+                                  baselineCents: $0.offsetCents, offsetCents: $0.offsetCents)
+        }
+        drag = draft
+        rebuildDraftLine()
+        return true
+    }
+
+    /// `updatePitchDrag`'s GROUP branch (m23-ap I4).
+    ///
+    /// ⭐ **ONE DELTA, SO THE INTERVALS ARE KEPT.** The pressed note resolves its
+    /// landing as the one-note drag does — snapped to the scale, or free with
+    /// ⌥ — and every other selected note takes the SAME landed delta. A member
+    /// is never snapped on its own: that would bend the intervals the user
+    /// sang between the notes.
+    ///
+    /// ⛔ **THE CLAMP IS THE TIGHTEST MEMBER'S** (`groupDeltaBounds`): the delta
+    /// is limited so that NO moving note leaves the visible window — the
+    /// data-loss rule of the one-note branch, applied to every note at once —
+    /// or the stored offset range. Clamping each note on its own instead would
+    /// flatten the group against the edge and change its shape.
+    ///
+    /// Snapping inside those bounds: the pressed note lands on the nearest
+    /// scale pitch; if that is outside the bounds it steps to the nearest scale
+    /// pitch inside them, and if there is none the group stays where it is.
+    private func updateGroupPitchDrag(_ draft: inout PitchEditorDragDraft,
+                                      origin: Double, raw: Double, free: Bool) {
+        let shift = draft.clipPitchShiftSemitones
+        let origins = [origin] + draft.members.map {
+            PitchEditorGeometry.drawnMidi(centreMidi: $0.detectedMidi, offsetCents: $0.baselineCents,
+                                          clipPitchShiftSemitones: shift)
+        }
+        let baselines = [draft.baselineCents] + draft.members.map(\.baselineCents)
+        let bounds = Self.groupDeltaBounds(origins: origins, baselines: baselines,
+                                           window: geometry.midiRange)
+        let rawDelta = raw - origin
+        let delta: Double
+        let landed: Double
+        if free {
+            delta = min(max(rawDelta, bounds.lowerBound), bounds.upperBound)
+            landed = origin + delta
+        } else {
+            (delta, landed) = snappedGroupLanding(origin: origin, rawDelta: rawDelta, bounds: bounds)
+        }
+        draft.isFree = free
+        // A zero delta writes the baselines back EXACTLY, so a group released
+        // where it began is a no-op and commits nothing — never a write of a
+        // float's rounding error.
+        draft.offsetCents = delta == 0 ? draft.baselineCents : PitchEditorGeometry.storedOffsetCents(
+            drawnMidi: landed, centreMidi: draft.detectedMidi,
+            clipPitchShiftSemitones: shift).clamped(to: NoteSegment.pitchOffsetCentsRange)
+        for index in draft.members.indices {
+            let member = draft.members[index]
+            draft.members[index].offsetCents = (member.baselineCents + delta * 100)
+                .clamped(to: NoteSegment.pitchOffsetCentsRange)
+        }
+        let moved = draft.offsetCents != drag?.offsetCents || draft.members != drag?.members
+        drag = draft
+        // I1 UI hooks: one drag step per change of the GROUP's offsets, the
+        // one-note branch's rule (and its floor) — the whole selection is heard
+        // moving.
+        if moved {
+            rebuildDraftLine()
+            requestDragAudition(draft)
+        }
+    }
+
+    /// The delta, in DRAWN semitones, every moving note can take — the
+    /// intersection over the notes of "stay inside the window" and "stay inside
+    /// `NoteSegment.pitchOffsetCentsRange`". A note ALREADY outside either is
+    /// never pushed further out but may come back in, so the result always
+    /// contains 0 and a group can always stay where it is.
+    nonisolated static func groupDeltaBounds(origins: [Double], baselines: [Double],
+                                             window: ClosedRange<Double>) -> ClosedRange<Double> {
+        let cents = NoteSegment.pitchOffsetCentsRange
+        var lower = -Double.infinity
+        var upper = Double.infinity
+        for (origin, baseline) in zip(origins, baselines) {
+            lower = max(lower, min(0, window.lowerBound - origin),
+                        min(0, (cents.lowerBound - baseline) / 100))
+            upper = min(upper, max(0, window.upperBound - origin),
+                        max(0, (cents.upperBound - baseline) / 100))
+        }
+        return lower...upper
+    }
+
+    /// The pressed note's snapped landing inside `bounds` (see
+    /// `updateGroupPitchDrag`), as (delta, landed pitch).
+    private func snappedGroupLanding(origin: Double, rawDelta: Double,
+                                     bounds: ClosedRange<Double>) -> (Double, Double) {
+        let target = origin + min(max(rawDelta, bounds.lowerBound), bounds.upperBound)
+        var landed = snapScale.nearestAllowedMidi(to: target)
+        if landed - origin > bounds.upperBound {
+            landed = allowedMidi(from: origin + bounds.upperBound, step: -1) ?? origin
+        } else if landed - origin < bounds.lowerBound {
+            landed = allowedMidi(from: origin + bounds.lowerBound, step: 1) ?? origin
+        }
+        let delta = landed - origin
+        // No scale pitch inside the bounds at all: the group stays put.
+        guard delta <= bounds.upperBound + 1e-9, delta >= bounds.lowerBound - 1e-9 else {
+            return (0, origin)
+        }
+        return (min(max(delta, bounds.lowerBound), bounds.upperBound), landed)
+    }
+
+    /// The nearest whole-semitone pitch the scale allows, walking from `midi`
+    /// in `step`'s direction (the first candidate is `midi` rounded that way).
+    private func allowedMidi(from midi: Double, step: Double) -> Double? {
+        let allowed = Set(snapScale.allowedPitchClasses)
+        var candidate = step < 0 ? midi.rounded(.down) : midi.rounded(.up)
+        for _ in 0...12 {
+            if allowed.contains(((Int(candidate) % 12) + 12) % 12) { return candidate }
+            candidate += step
+        }
+        return nil
+    }
+
+    // MARK: I3 — the cut line (interaction batch §6)
+
+    /// Whether the Split tool is LIVE: engaged, AND the surface is drawing notes
+    /// it could cut. These are the knife's own two preconditions — `splitNote`'s
+    /// tool guard and the view's `state.drawsNotes` guard in `dragEnded` — stated
+    /// once, so the hover line can never offer a cut the click would silently
+    /// ignore (a load still running, a take with no notes).
+    public var isCutToolLive: Bool { tool == .scissors && state.drawsNotes }
+
+    /// The pointer the surface shows while hovered: the crosshair while the
+    /// Split tool is live (the "precise place" family, `CursorKind.crosshair`;
+    /// design §6), nothing special otherwise. There is deliberately no
+    /// `CursorAffordance` case for it: that catalog lists surfaces that advertise
+    /// a cursor AT REST, and this one is tool-gated, like the roll's ⌘ bar.
+    public var surfaceCursor: CursorKind? { isCutToolLive ? .crosshair : nil }
+
+    /// ⭐⭐ **THE ONE VERDICT** (I3, design §6 D3): what the Split tool would do
+    /// at `point`. The hover line (`cutLine(at:)`) carries it and the knife
+    /// (`splitNote(at:)`) switches over it, so the two cannot disagree —
+    /// `PitchEditorModelTests` sweeps 200 points to hold them to that.
+    ///
+    /// The cut lands where the pointer is, converted through the ONE coordinate
+    /// home. The floor is `ProjectStore.splitClipNoteSegment`'s rule, restated
+    /// here only so the user sees it BEFORE the store refuses — from
+    /// `PitchAutoCorrect.minimumNoteSeconds`, never from a second constant.
+    ///
+    /// Tool-agnostic on purpose: which tool is engaged is the READERS' guard
+    /// (`isCutToolLive`, `splitNote`'s own), not part of what the geometry says.
+    public func cutVerdict(at point: CGPoint) -> PitchEditorCutVerdict {
+        resolveCut(at: point).verdict
+    }
+
+    /// What the cut line draws at a hover point, or `nil` when nothing is drawn
+    /// (the Split tool is not live, or the pointer is off the surface). Its
+    /// verdict IS `cutVerdict(at:)` — this adds only where to draw it.
+    public func cutLine(at point: CGPoint?) -> PitchEditorCutLine? {
+        guard isCutToolLive, let point else { return nil }
+        let resolved = resolveCut(at: point)
+        return PitchEditorCutLine(x: point.x,
+                                  sourceSecond: geometry.sourceSecond(forX: point.x),
+                                  verdict: resolved.verdict,
+                                  noteRect: resolved.blob.map { rect(for: $0) })
+    }
+
+    /// The verdict AND the note it found, from ONE hit test, so the line's
+    /// glowing segment is drawn on exactly the note the verdict is about.
+    private func resolveCut(at point: CGPoint) -> (verdict: PitchEditorCutVerdict, blob: NoteBlob?) {
+        guard let blob = blob(at: point) else { return (.noNote, nil) }
+        let cut = geometry.sourceSecond(forX: point.x)
+        let floor = PitchAutoCorrect.minimumNoteSeconds
+        let left = cut - blob.startSeconds
+        let right = blob.endSeconds - cut
+        guard left >= floor, right >= floor else {
+            return (.tooCloseToEdge(segmentID: blob.id, atSourceSecond: cut,
+                                    minimumMs: floor * 1000), blob)
+        }
+        return (.cut(segmentID: blob.id, atSourceSecond: cut,
+                     leftMs: left * 1000, rightMs: right * 1000), blob)
     }
 
     /// Cut the note under a point in two (C3). Returns the commit it emitted,
     /// or `nil` — and sets `refusal` to teaching prose whenever it returned
     /// `nil` for a reason the user can act on.
     ///
-    /// The cut lands where the pointer is, converted through the ONE coordinate
-    /// home. Refusal is `ProjectStore.splitClipNoteSegment`'s rule, restated
-    /// here only so the user hears it BEFORE the store does — the numbers come
-    /// from `PitchAutoCorrect.minimumNoteSeconds`, not from a second constant.
+    /// ⭐ **A `switch` OVER `cutVerdict(at:)` AND NOTHING ELSE** (I3): the knife
+    /// cuts exactly where the hover line said "cut", at the same second, and
+    /// refuses exactly where it did not. The click itself is unchanged by I3 —
+    /// the same two sentences, word for word (`splitRefusalsAreSpokenNotSilent`
+    /// pins them): the hover's amber is a PREDICTION on the line, and nothing is
+    /// refused until the click.
     @discardableResult
     public func splitNote(at point: CGPoint) -> PitchEditorCommit? {
         guard tool == .scissors else { return nil }
         refusal = nil
-        guard let blob = blob(at: point) else {
+        switch cutVerdict(at: point) {
+        case .noNote:
             refusal = "Nothing to cut there. Click on one of the notes."
             return nil
-        }
-        let cut = geometry.sourceSecond(forX: point.x)
-        let floor = PitchAutoCorrect.minimumNoteSeconds
-        guard cut - blob.startSeconds >= floor, blob.endSeconds - cut >= floor else {
+        case .tooCloseToEdge(_, _, let minimumMs):
             refusal = "That is too close to the edge of the note. Each half has to be at "
-                + "least \(Int((floor * 1000).rounded())) milliseconds long — zoom in and "
+                + "least \(Int(minimumMs.rounded())) milliseconds long — zoom in and "
                 + "click nearer the middle."
             return nil
+        case .cut(let segmentID, let atSourceSecond, _, _):
+            return emit(.splitNote(segmentID: segmentID, atSourceSecond: atSourceSecond))
         }
-        return emit(.splitNote(segmentID: blob.id, atSourceSecond: cut))
+    }
+
+    // MARK: I6a — ESCAPE on this pane
+
+    /// ESCAPE was pressed while this pane held key focus (m23-ap I6a). Returns
+    /// whether the key was consumed; `false` lets it keep propagating to the
+    /// arrange workspace's backstop mount, exactly as the roll's does.
+    ///
+    /// `appDecision` is the app's ONE Escape decision
+    /// (`AppModel.handleEditorEscape`: leave the maximized mode, refused while a
+    /// modal or a rename field owns the key). The pane never re-decides it.
+    ///
+    /// ⭐⭐ **THE SEAM I4 FILLS — THE ONLY PLACE ITS LADDER GOES.** I4 (design §7,
+    /// "Esc") builds `EditorEscapeLadder.resolve(gestureLive:hasSelection:
+    /// maximized:blocked:)` for BOTH editors: `.cancelGesture` and
+    /// `.clearSelection` are answered HERE, from this model's own `drag` and
+    /// selection, and consume the key without asking the app; `.exitMaximize`
+    /// falls through to `appDecision`; `.pass` returns false. Until I4 lands
+    /// there is no selection to clear and no cancel rung, so every press goes
+    /// straight to the app — which means a press during a live pitch drag still
+    /// only leaves the maximized mode (`PitchEditorModelTests` pins that today's
+    /// behaviour, and I4 is expected to change that test on purpose).
+    ///
+    /// ⭐ **FILLED AT I4.** `appDecision` is now handed THIS pane's two facts —
+    /// is a gesture live (`escapeGestureLive`), is anything selected — and
+    /// returns the ladder's rung (`EditorEscapeLadder`, resolved ONCE by the
+    /// app, which alone knows the mode and whether a modal or a rename field
+    /// owns the key). The pane applies the two rungs that are its own —
+    /// `.cancelGesture` (`cancelGestureForEscape`) and `.clearSelection` — and
+    /// the app has already applied `.exitMaximize`. So a press during a live
+    /// pitch drag now CANCELS the drag (the old leg of
+    /// `escapeAsksTheAppDecisionOnce`, rewritten on purpose), and a press with
+    /// notes selected clears them before the mode is left.
+    ///
+    /// ⭐ **m23-ap I1 UI hooks (the RT review's H5): EVERY ESCAPE THAT REACHES
+    /// THE PANE STOPS A SOUNDING NOTE AUDITION FIRST — AND THEN DOES EXACTLY
+    /// WHAT THE LADDER SAYS.** Not a rung: the ladder is untouched, so the
+    /// first press still cancels the drag or clears the selection as it always
+    /// did, and stops the sound with it. Both routes land here (the key
+    /// monitor's hand-off and this pane's own mount), one per press, so one
+    /// Escape is one stop. The note the audition plays was pressed or dragged,
+    /// which selected it, so the monitor route has something to take down and
+    /// hands the key over.
+    public func handleEscapeKey(
+        appDecision: (_ gestureLive: Bool, _ hasSelection: Bool) -> EditorEscapeRung
+    ) -> Bool {
+        requestAudition(.stop)
+        let rung = appDecision(escapeGestureLive, !selection.isEmpty)
+        switch rung {
+        case .cancelGesture: cancelGestureForEscape()
+        case .clearSelection: clearSelection()
+        case .exitMaximize, .pass: break
+        }
+        return rung.consumesKey
+    }
+
+    /// Whether this pane holds a gesture Escape would cancel: a pitch drag or a
+    /// band in flight. A press still inside the slop is not one — nothing on
+    /// screen has changed yet.
+    public var escapeGestureLive: Bool { drag != nil || band != nil }
+
+    /// Escape's `.cancelGesture` rung on this pane: the drag is dropped with
+    /// NOTHING committed, a band gives the selection back, and the press is
+    /// ABANDONED rather than forgotten — the pointer is still down, and its
+    /// remaining ticks and its release must resolve to nothing
+    /// (`PitchEditorPressTracker.abandon`), not start a fresh gesture.
+    public func cancelGestureForEscape() {
+        drag = nil
+        draftPlayedLine = nil
+        cancelBand()
+        press.abandon()
+    }
+
+    // MARK: I1 UI hooks — hearing the note (design 2026-09-24 §4, I1-F1)
+
+    /// Stop a sounding note audition: the pane is going away (closed, or
+    /// rebuilt on another clip — the view's `.onDisappear`) or the audition
+    /// switch was turned off. ONE request per call, and nothing else changes:
+    /// a draft, a selection and a press are `cancelDrag`'s business, and a
+    /// stop is not a cancel.
+    public func stopAudition() {
+        requestAudition(.stop)
+    }
+
+    /// THE ONE PLACE AN AUDITION REQUEST LEAVES THIS MODEL (`emit`'s twin).
+    private func requestAudition(_ request: PitchEditorAuditionRequest) {
+        onAudition?(request)
+    }
+
+    /// One drag step: every moving note's ABSOLUTE offset — the pressed note
+    /// first, then the members, in the draft's order (the numbers the release
+    /// would commit) — snapped unless ⌥ freed it, with the editor's seed for a
+    /// clip that has never been edited.
+    ///
+    /// ⭐ **A SNAPPED STEP NOBODY CAN HEAR ASKS NOTHING.** A sung note is almost
+    /// never exactly on the grid, so the first tick past the slop snaps it onto
+    /// its OWN scale step: −6 c and −1 c on the staging look's synthetic take
+    /// (2026-09-25, measured: 4 requests for a 3-row drag, 2 for a 1-row group
+    /// drag). Asking for that re-rendered the note and, when its buffer was
+    /// ready, restarted it (the engine's replace-on-ready) with no pitch
+    /// anyone could tell apart. So a snapped step whose every note lands
+    /// within `PitchEditorReadout.centsResolutionFloor` of what was last asked
+    /// for asks nothing — the same floor below which this editor refuses to
+    /// PRINT a number. A note sung 45 c off still snaps audibly and is heard;
+    /// every row crossed is 100 c and is heard. ⌥ FREE steps are never
+    /// thinned: their changes come from the hand, and fine adjustment is their
+    /// point. The draft itself (its line, its commit) is untouched.
+    private func requestDragAudition(_ draft: PitchEditorDragDraft) {
+        let offsets = [NotePitchOffset(segmentId: draft.segmentID, offsetCents: draft.offsetCents)]
+            + draft.members.map { NotePitchOffset(segmentId: $0.segmentID, offsetCents: $0.offsetCents) }
+        let heard = dragAuditionHeard ?? Dictionary(
+            [(draft.segmentID, draft.baselineCents)] + draft.members.map { ($0.segmentID, $0.baselineCents) },
+            uniquingKeysWith: { first, _ in first })
+        if !draft.isFree, offsets.allSatisfy({ offset in
+            heard[offset.segmentId].map {
+                abs(offset.offsetCents - $0) < PitchEditorReadout.centsResolutionFloor
+            } ?? false
+        }) {
+            return
+        }
+        dragAuditionHeard = Dictionary(offsets.map { ($0.segmentId, $0.offsetCents) },
+                                       uniquingKeysWith: { first, _ in first })
+        requestAudition(.dragStep(offsets: offsets, snapped: !draft.isFree,
+                                  seedIfAbsent: seedForCommit))
     }
 
     /// Clear a refusal the user has read (they moved on, or acted again).
     public func clearRefusal() { refusal = nil }
+
+    /// The DELETE key was pressed while this pane is open, and the app refused
+    /// to let it delete the clip the pane shows (m23-ap p2-del) — say so, on
+    /// the refusal line this surface already owns.
+    ///
+    /// ⭐ **THE WORDS ARE THE POLICY'S** (`DeleteMenuPolicy.pitchEditorOpenHint`),
+    /// never composed here: the routing decision and the sentence that explains
+    /// it live in one file, so they cannot come apart. Since m23-ap p2-del-2 the
+    /// sentence names Cut too. ⌘X itself never reaches this method: a greyed
+    /// Edit ▸ Cut runs no action, and the key-down monitor leaves ⌘ chords to
+    /// the menu, so only ⌫ ever raises the line.
+    ///
+    /// ⚠️ **NOT A COMMIT AND NOT A SELECTION CHANGE.** It touches nothing but
+    /// `refusal`, and it inherits that slot's lifetime unchanged — the next
+    /// drag, cut attempt, tool switch or reload clears it, exactly as it clears
+    /// "Nothing to cut there.". The app reaches it through a nonce the view
+    /// watches (`PitchEditorView.deleteKeyHintNonce`), because this model is
+    /// `@State private` inside the pane.
+    public func refuseDeleteKey() { refusal = DeleteMenuPolicy.pitchEditorOpenHint }
+
+    // MARK: I7b — clear and restore the selected notes (interaction batch §10)
+
+    /// The SELECTED notes this surface draws, in table order — what ⌫, Edit ▸
+    /// Delete and the right-click menu act on.
+    public var selectedBlobs: [NoteBlob] { blobs.filter { selection.contains($0.id) } }
+
+    /// ⭐⭐ **THE ONE ACTION BEHIND ⌫, EDIT ▸ DELETE AND THE RIGHT-CLICK MENU**
+    /// (m23-ap I7b; the user's `delete-clears = yes`). ⌫ and Edit ▸ Delete reach
+    /// it through the bridge's `deleteNonce` (`DeleteSurface.pitchEditorNotes`),
+    /// the menu's items and the debug tier's staged `noteMenu` step through the
+    /// view's `runNoteMenu` — never a second spelling, so what the menu said,
+    /// what the key does and what the store receives cannot come apart.
+    ///
+    /// **`.clear`** emits ONE `.notesCleared(cleared: true)` carrying the
+    /// selected notes that are NOT already cleared, in table order — the count
+    /// the menu's "Clear 3 Notes" named — so one gesture is one undo step
+    /// ("Clear Notes"). When every selected note is already cleared it commits
+    /// NOTHING and says so on the refusal line, pointing at Restore
+    /// (`PitchEditorNoteMenu.alreadyClearedLine`). **`.restore`** emits one
+    /// `cleared: false` carrying the selected notes that ARE cleared, and does
+    /// nothing when none is (the menu never offers it then).
+    ///
+    /// ⚠️ **NOTHING SELECTED IS A RACE, NOT A STATE THE APP ROUTES HERE.** With
+    /// no selection the app's policy never names this surface (⌫ keeps p2-del's
+    /// `.pitchEditorOpen` refusal and its line). If a stale bridge bit ever
+    /// hands a ⌫ to an empty selection anyway, the pane shows that same p2-del
+    /// line rather than swallowing the key in silence — the roll's rule that
+    /// the pane's LIVE selection wins over the bridge's report.
+    ///
+    /// Clears the refusal first, like every other action on this surface. The
+    /// selection is kept: the notes stay drawn (hollow) and stay selected, so a
+    /// Restore or an undo is one step away.
+    @discardableResult
+    public func performNoteAction(_ action: PitchEditorNoteMenu.Action) -> PitchEditorCommit? {
+        refusal = nil
+        let targets = selectedBlobs
+        guard !targets.isEmpty else {
+            if action == .clear { refusal = DeleteMenuPolicy.pitchEditorOpenHint }
+            return nil
+        }
+        switch action {
+        case .clear:
+            let changing = targets.filter { !$0.isCleared }.map(\.id)
+            guard !changing.isEmpty else {
+                refusal = PitchEditorNoteMenu.alreadyClearedLine(targets.map(\.menuTarget))
+                return nil
+            }
+            return emit(.notesCleared(segmentIDs: changing, cleared: true))
+        case .restore:
+            let changing = targets.filter(\.isCleared).map(\.id)
+            guard !changing.isEmpty else { return nil }
+            return emit(.notesCleared(segmentIDs: changing, cleared: false))
+        }
+    }
+
+    /// The right-click's SELECTION half, applied before the menu opens (the
+    /// brief's house rule for this pane: "a right-click on an UNSELECTED note
+    /// selects it first"). An unselected note under `point` becomes the whole
+    /// selection; a selected note, or empty surface, leaves the selection
+    /// alone — so a right-click inside a selection acts on all of it.
+    ///
+    /// ⚠️ **`docs/DESIGN-LANGUAGE.md` SAYS A RIGHT-CLICKED OBJECT OUTSIDE THE
+    /// SELECTION IS ACTED ON "ALONE" WITH THE SELECTION "UNTOUCHED"**
+    /// (`DeleteMenuPolicy.clipContextCommand`'s arrange rule). The TARGET is
+    /// the same here — that note alone; what differs is that this pane shows
+    /// the target by selecting it, as the I7b brief rules. Recorded as a
+    /// disagreement, not resolved silently.
+    public func selectForContextMenu(at point: CGPoint) {
+        guard let hit = blob(at: point), !selection.contains(hit.id) else { return }
+        selectOnly(hit.id)
+    }
+
+    /// The selection menu a right-click at `point` would show — titles and
+    /// enabled states from `PitchEditorNoteMenu`, for the notes that click
+    /// would act on: the unselected note under `point` ALONE (the one
+    /// `selectForContextMenu` is about to select), else the selection. `nil`
+    /// (the pointer is off the surface) reads the selection.
+    ///
+    /// ⭐ WHY IT TAKES THE POINT: SwiftUI builds a `.contextMenu`'s items when
+    /// the view's body runs, BEFORE the right-click lands, so a menu built from
+    /// the selection alone would name the OLD selection's notes over a note the
+    /// click is about to select. Resolved from the hover point instead, the
+    /// title names the notes the action will act on.
+    public func noteMenu(at point: CGPoint?) -> [PitchEditorNoteMenu.Item] {
+        PitchEditorNoteMenu.items(for: contextMenuTargets(at: point).map(\.menuTarget))
+    }
+
+    private func contextMenuTargets(at point: CGPoint?) -> [NoteBlob] {
+        if let point, let hit = blob(at: point), !selection.contains(hit.id) { return [hit] }
+        return selectedBlobs
+    }
 
     /// ⭐ **THE ONE PLACE A COMMIT LEAVES THIS MODEL.** Counted and recorded
     /// here so a gate asserts the CADENCE — N ticks, zero writes; one release,

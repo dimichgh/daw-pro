@@ -758,6 +758,38 @@ public struct Clip: Identifiable, Codable, Sendable, Equatable {
     /// `isStretchIdentity` (see there for why).
     public var hasPitchEdits: Bool { !(pitchEdits?.isIdentity ?? true) }
 
+    /// True when this clip's tuning MOVES something: a note's pitch, its
+    /// drift or vibrato shape, a generated vibrato, its formant or its timing
+    /// (m23-ap I7b-2). It is `hasPitchEdits` WITHOUT THE LEVEL HALF — a clip
+    /// whose only edits clear notes or change their level reads false here
+    /// and true there.
+    ///
+    /// ⭐ **A DOOR, NOT A NEW RULE.** It is `PitchEditSet.isPitchIdentity`,
+    /// negated — the set predicate the render already bypasses on
+    /// (`StretchCurvePlan.make` builds no curve when it holds) — lifted onto
+    /// `Clip` with the `nil` answered once, exactly as `hasPitchEdits` lifts
+    /// `isIdentity`. So the words "TUNING APPLIED" (the note editor's header,
+    /// `PitchEditorClipBadge`) claim a retune exactly when the render has a
+    /// pitch curve to play; a clip that was only cleared or levelled says
+    /// "NOTES EDITED" instead.
+    ///
+    /// ⚠️ **NEVER A SUBSTITUTE FOR `hasPitchEdits`.** That one is a wire
+    /// contract (every pitch-edit verb's `hasPitchEdits`), offers Remove
+    /// Tuning, and decides whether the clip renders at all
+    /// (`rendersThroughStretchCache`) — a cleared note must still render,
+    /// through the level mask. This one answers only "was a pitch moved".
+    ///
+    /// ✅ DONE (mcp-lane, m23-ap I7b-2 wire leg, 2026-09-25): ON THE WIRE —
+    /// `hasTuningEdits` rides beside `hasPitchEdits` in
+    /// `CommandRouter.pitchEditsResponse` (every pitch-edit verb returns it;
+    /// `clip.getPitchEdits` is the read), additive, `hasPitchEdits` itself
+    /// unchanged. The MCP tool `clip_get_pitch_edits`'s description says
+    /// `hasPitchEdits && !hasTuningEdits` means the clip's only edits clear
+    /// notes or change their level ("NOTES EDITED" in the app). Wire test:
+    /// `hasTuningEditsThreeStates`
+    /// (`Tests/DAWControlTests/PitchCorrectionCommandTests.swift`).
+    public var hasTuningEdits: Bool { !(pitchEdits?.isPitchIdentity ?? true) }
+
     /// Does the engine play this clip from a RENDER in the stretch cache
     /// rather than straight off its source file? True for a time-stretch, a
     /// transpose, or a tuning that bends the curve (`hasPitchEdits`).

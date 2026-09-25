@@ -1,6 +1,7 @@
 import AVFAudio
 import DAWCore
 import Foundation
+import os
 
 /// **THE DETECTED-CONTOUR CACHE, AND THE ONE SEAM THAT YIELDS "THE CONTOUR THE
 /// RENDER USES FOR THIS CLIP".** (contour-to-render, 2026-09-24)
@@ -187,6 +188,134 @@ enum PitchContourCache {
         return decode(data, key: key, detector: detector)
     }
 
+    /// What one read of an entry found. I1-F2 (RT re-review NH-G): a miss is
+    /// TWO cases, and only one of them may delete anything.
+    enum Load {
+        /// The entry decoded: the contour.
+        case hit(PitchDetectionResult)
+        /// There was nothing to read.
+        case absent
+        /// This caller READ bytes and they did not decode.
+        case undecodable
+    }
+
+    /// Reads `url` ONCE and says which of the three it found.
+    static func load(_ url: URL, key: String, detector: Detector) -> Load {
+        guard let data = try? Data(contentsOf: url) else { return .absent }
+        guard let decoded = decode(data, key: key, detector: detector) else { return .undecodable }
+        return .hit(decoded)
+    }
+
+    // MARK: - Single flight (I1-F2, RT re-review NH-A)
+
+    /// ONE detection per contour entry in flight, in this process. A cold
+    /// detection runs over the whole take and cannot be interrupted part-way
+    /// (`Detector.run` polls nothing), so before this, K requests that arrived
+    /// while the entry was cold ran K whole-take detections at once: K span
+    /// renders superseded by a drag or an agent's press loop, plus the
+    /// whole-file render and the display. Now the first caller for an entry
+    /// LEADS: it detects and ALWAYS commits, because every other caller for
+    /// that entry needs the same contour, and the detector is deterministic
+    /// (see the banner). Every later caller FOLLOWS: it waits for the
+    /// leader's answer, and gives up as soon as its OWN `isCancelled` says so
+    /// (polled every `followerPollSeconds`), so a superseded follower frees
+    /// its thread within one poll instead of after a whole-take detection.
+    ///
+    /// Keyed by the entry's path, which names the render cache directory and
+    /// the contour key, so two caches (two test directories) never share.
+    /// The lock and the conditions are taken only by the detached tasks that
+    /// call the seam, never by the render thread.
+    final class Flight: @unchecked Sendable {
+        private let condition = NSCondition()
+        private var result: PitchRenderContour?
+        private var waiters = 0
+
+        /// Hands the leader's answer to every follower, now and later.
+        func finish(_ value: PitchRenderContour) {
+            condition.lock()
+            result = value
+            condition.broadcast()
+            condition.unlock()
+        }
+
+        /// The leader's answer, or nil once `isCancelled` is true. The
+        /// caller's closure is never called while the condition is held.
+        func wait(isCancelled: () -> Bool) -> PitchRenderContour? {
+            condition.lock()
+            waiters += 1
+            condition.unlock()
+            defer {
+                condition.lock()
+                waiters -= 1
+                condition.unlock()
+            }
+            while true {
+                if isCancelled() { return nil }
+                condition.lock()
+                if result == nil {
+                    _ = condition.wait(until: Date(timeIntervalSinceNow: PitchContourCache.followerPollSeconds))
+                }
+                let answer = result
+                condition.unlock()
+                if let answer { return answer }
+            }
+        }
+
+        /// Followers waiting right now. Tests read it to prove the requests
+        /// were concurrent (`waiterCountForTesting`).
+        var waiterCount: Int {
+            condition.lock()
+            defer { condition.unlock() }
+            return waiters
+        }
+    }
+
+    /// How often a waiting follower asks whether it has been cancelled.
+    static let followerPollSeconds = 0.010
+
+    /// The flights in progress, by entry path.
+    private static let flights = OSAllocatedUnfairLock<[String: Flight]>(initialState: [:])
+
+    enum Role: Sendable {
+        case leader(Flight)
+        case follower(Flight)
+    }
+
+    /// Joins the flight for `path`: its leader when none is in progress, a
+    /// follower otherwise.
+    static func join(_ path: String) -> Role {
+        flights.withLock { table in
+            if let flight = table[path] { return .follower(flight) }
+            let flight = Flight()
+            table[path] = flight
+            return .leader(flight)
+        }
+    }
+
+    /// The leader's last act: its answer to the followers, then the flight
+    /// leaves the table (a caller arriving between the two follows a finished
+    /// flight and gets the answer at once).
+    static func land(_ path: String, _ flight: Flight, with answer: PitchRenderContour) {
+        flight.finish(answer)
+        flights.withLock { table in
+            if table[path] === flight { table[path] = nil }
+        }
+    }
+
+    /// TEST INSTRUMENTATION (I1-F2, NH-A): followers waiting on the flight for
+    /// `entry`, or 0 when no flight is in progress. Production never reads it.
+    static func waiterCountForTesting(entry: URL) -> Int {
+        flights.withLock { $0[entry.path] }?.waiterCount ?? 0
+    }
+
+    /// TEST SEAM (I1-F2, NH-G), never bound in production: runs in the LEADER
+    /// right after its read of the entry missed, before it decides whether to
+    /// delete anything. A test commits another writer's entry from here (a
+    /// second app sharing the cache directory: the live app and a staging app
+    /// both use `~/Library/Caches/DAWPro`), the one interleaving the
+    /// single flight cannot rule out.
+    @TaskLocal static var afterLeaderMissForTesting: (@Sendable () -> Void)?
+
     // MARK: - ⭐ THE SEAM
 
     /// ⭐⭐ **THE CONTOUR THE RENDER USES FOR A CLIP. There is no other.**
@@ -214,13 +343,25 @@ enum PitchContourCache {
     ///    generation. NOTHING is detected or read — the edits are never shaped
     ///    against a contour they were not made against (§7.2).
     ///  * `.unavailable(reason)`: the file could not be read or detection
-    ///    failed. Nothing is cached, so the next call retries.
+    ///    failed. Nothing is cached, so the next call retries. I1-F2: also the
+    ///    answer to a caller whose own `isCancelled` fired while it waited for
+    ///    another caller's detection. Only a caller that passes `isCancelled`
+    ///    can see that, and it must check its flag after the call and throw,
+    ///    as `StretchRenderCache.resolveRenderContour` does, so that answer is
+    ///    never shaped against and never reported as a fallback.
     ///  * TOTAL: never throws, never returns a contour with a reason attached,
     ///    never fabricates frames. Blocking — call it from a detached task only;
     ///    never from the main actor, never from the render thread.
+    ///
+    /// **I1-F2: SINGLE FLIGHT (RT re-review NH-A).** However many span renders,
+    /// whole-file renders and display reads ask for a cold entry at once, ONE
+    /// detection runs (`Flight`). Any caller may lead it, a DRAFT span render
+    /// included: see `StretchRenderCache.resolveRenderContour` for why a draft
+    /// may start a detection rather than only wait for one.
     static func renderContour(source: URL, analysisVersion: Int,
                               renderCacheDirectory: URL,
-                              detector: Detector) -> PitchRenderContour {
+                              detector: Detector,
+                              isCancelled: () -> Bool = { false }) -> PitchRenderContour {
         guard analysisVersion == detector.analysisVersion else {
             return .analysisVersionMismatch(editSet: analysisVersion,
                                             detector: detector.analysisVersion)
@@ -233,14 +374,45 @@ enum PitchContourCache {
         }
         let directory = Self.directory(inRenderCacheDirectory: renderCacheDirectory)
         let entry = directory.appendingPathComponent(key + ".json")
-        if let cached = read(entry, key: key, detector: detector) {
+        // The hot path: one read, shared with nobody, deleting nothing.
+        if case .hit(let cached) = load(entry, key: key, detector: detector) {
             return .detected(cached)
         }
-        // A miss. An entry that EXISTS but did not decode (truncated, an older
-        // layout under a colliding name) is removed, or the first-writer-wins
-        // commit below would be blocked by it forever and every render would
-        // re-detect.
-        if FileManager.default.fileExists(atPath: entry.path) {
+        switch join(entry.path) {
+        case .follower(let flight):
+            return flight.wait(isCancelled: isCancelled)
+                ?? .unavailable(reason: "the request was cancelled while the pitch analysis ran")
+        case .leader(let flight):
+            let answer = lead(entry: entry, directory: directory, key: key,
+                              source: source, detector: detector)
+            land(entry.path, flight, with: answer)
+            return answer
+        }
+    }
+
+    /// The leader's work: read again, detect, commit, and answer with the
+    /// committed bytes. Runs for at most one caller per entry at a time.
+    private static func lead(entry: URL, directory: URL, key: String, source: URL,
+                             detector: Detector) -> PitchRenderContour {
+        // Read AGAIN under the lead: a previous leader may have committed
+        // between this caller's first read and its turn.
+        let loaded = load(entry, key: key, detector: detector)
+        if case .hit(let cached) = loaded {
+            return .detected(cached)
+        }
+        afterLeaderMissForTesting?()
+        // ⛔ I1-F2 (RT re-review NH-G): remove ONLY bytes this caller READ and
+        // could not decode (truncated, an older layout under a colliding
+        // name), or the first-writer-wins commit below would be blocked by
+        // them forever and every render would re-detect. It used to remove
+        // whatever EXISTED at this point, and a valid entry another writer
+        // committed after this caller's read missed is not what this caller
+        // read: deleting it cost a detection, and would have broken "everyone
+        // reads the winner's bytes" for a detector that was not deterministic.
+        // In this process the single flight already keeps other writers out
+        // of this window; another process sharing the cache directory does not
+        // (`afterLeaderMissForTesting`).
+        if case .undecodable = loaded {
             try? FileManager.default.removeItem(at: entry)
         }
 

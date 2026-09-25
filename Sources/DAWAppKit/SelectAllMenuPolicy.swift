@@ -47,7 +47,10 @@ import Foundation
 ///     is not working in. They keep `resolve`.
 ///   • ⌫ **is destructive AND both surfaces claim it.** It keeps a third term
 ///     again (`pianoRollWouldConsumeKey`), and m34-d deliberately did NOT change
-///     it — see the sibling section below.
+///     it — see the sibling section below. (m23-ap p2-del later let openness
+///     REFUSE ⌫ — the note editor open greys Delete and swallows the key — and
+///     still not ROUTE it; the argument is the one above: a refusal steals from
+///     nothing and destroys nothing. p2-del-2 refuses Cut / ⌘X the same way.)
 ///
 /// ⚠️ **AND THE FIX IS NOT IN `resolve`.** `EditorSurfaceRouter`'s banner offers
 /// "drop the `lastEngaged` term" as the one-line overrule, and taking that line
@@ -80,6 +83,14 @@ import Foundation
 /// must not. Unifying them would either make ⌫ destroy notes in a roll the user
 /// has not touched, or put select-all back behind a selection that does not exist
 /// yet. Three items, three questions, three terms.
+///
+/// ⭐ m23-ap p2-del READS THE OPEN VERDICT FOR ⌫ — AND ONLY TO REFUSE IT. With the
+/// note editor (pitch editor) open, `DeleteMenuPolicy` answers `.pitchEditorOpen`
+/// so ⌫ cannot delete the vocal clip on screen, and (p2-del-2)
+/// `ClipboardMenuPolicy` answers the same for Cut, so ⌘X cannot cut it. That
+/// does not unify the two terms: nothing is destroyed or selected on openness,
+/// and which surface a delete or cut acts on is still decided by
+/// `pianoRollWouldConsumeKey`.
 ///
 /// ═══ WHERE THE TEXT-FIELD OBJECTION WENT ═══
 ///
@@ -127,7 +138,9 @@ public enum SelectAllMenuPolicy {
     ///
     /// ═══ THE GUARD STACK, IN ORDER ═══
     ///
-    ///   1. THE ROLL MUST BE **OPEN** (m34-d — was "must be the ACTIVE surface").
+    ///   1. THE ROLL MUST BE **OPEN** (m34-d — was "must be the ACTIVE surface")
+    ///      — or, since m23-ap I4, THE NOTE EDITOR (its own arm, the same two
+    ///      guards below, its own empty refusal).
     ///      The Mix console and "no clip open" still refuse, each under its own
     ///      name. `OpenEditorSurface` already folds the workspace and roll-open
     ///      terms in (`EditorSurfaceRouter.openSurface`), so re-deriving either
@@ -174,10 +187,21 @@ public enum SelectAllMenuPolicy {
     ///     AND one body pass behind (measured — see
     ///     `awaitPianoRollMarqueeApplied`), so reading it would trade a
     ///     theoretical staleness for a measured one.
+    ///   - pitchEditorNoteCount: how many notes the open NOTE EDITOR (the pitch
+    ///     editor pane) draws — `PitchEditorInteractionBridge.drawnNoteCount`,
+    ///     reported by the pane on CHANGE only (m23-ap I4). ⚠️ **NOT STORE
+    ///     TRUTH, AND IT CANNOT BE:** a clip with no stored note table draws the
+    ///     notes DETECTION found, which live only in the pane's `@State` model.
+    ///     The count is observable and moves only when the drawn set does
+    ///     (detection, a store sync, a split) — never per pointer tick — so it
+    ///     carries neither of the two costs the roll's note above rejects. NO
+    ///     DEFAULT, `DeleteMenuPolicy`'s reason: a defaulted term is a silent
+    ///     omission at every call site that forgets it.
     public static func editMenuItem(
         openSurface: OpenEditorSurface,
         isModalPresented: Bool,
-        rollNoteCount: Int
+        rollNoteCount: Int,
+        pitchEditorNoteCount: Int
     ) -> SelectAllMenuItem {
         switch openSurface.reason {
         case .notArrangeWorkspace:
@@ -185,35 +209,43 @@ public enum SelectAllMenuPolicy {
         case .noRollOpen:
             return SelectAllMenuItem(refusedBy: .noRollOpen)
         case .rollOpen:
-            break
+            guard !isModalPresented else { return SelectAllMenuItem(refusedBy: .modal) }
+            guard rollNoteCount > 0 else { return SelectAllMenuItem(refusedBy: .emptyRoll) }
+            return SelectAllMenuItem(surface: .pianoRollNotes)
         case .pitchEditorOpen:
-            // ⛔ m23-ap p2-b — REFUSED BY NAME, NOT ROUTED. ⌘A means "select all
-            // NOTES" in this app and nowhere else; a pitch SEGMENT is not a
-            // note, and the pitch editor's Increment A is read-only and has no
-            // selection at all. Design §3.6 assigns ⌘A-inside-the-pitch-editor
-            // to the (unwritten) interaction model, §7 — so until the user's
-            // TUNE X video settles it, the honest answer is a greyed item with
-            // its own reason, never a silent fall-through to `noRollOpen` that
-            // would tell a red gate "no clip is open" about a pane that is
-            // plainly on screen.
-            return SelectAllMenuItem(refusedBy: .pitchEditorOpen)
+            // ⭐ m23-ap I4 — LIVE ON THE OPENNESS VERDICT (the m34-d ruling,
+            // "make it work whenever the editor is open"), REWRITTEN ON PURPOSE.
+            // This arm used to REFUSE by name (p2-b: the pane was read-only and
+            // held no selection, and design §3.6 left ⌘A to the interaction
+            // model). §7 is that model: the pane now holds a note selection, and
+            // the user asked for "select all, basically the same functionality
+            // we have in note editor". The same two guards the roll's arm takes,
+            // in the same order; its own EMPTY refusal, never the roll's
+            // `emptyRoll` — a red gate must read which pane was empty.
+            guard !isModalPresented else { return SelectAllMenuItem(refusedBy: .modal) }
+            guard pitchEditorNoteCount > 0 else {
+                return SelectAllMenuItem(refusedBy: .emptyPitchEditor)
+            }
+            return SelectAllMenuItem(surface: .pitchEditorNotes)
         }
-        guard !isModalPresented else { return SelectAllMenuItem(refusedBy: .modal) }
-        guard rollNoteCount > 0 else { return SelectAllMenuItem(refusedBy: .emptyRoll) }
-        return SelectAllMenuItem(surface: .pianoRollNotes)
     }
 }
 
 /// Which surface a Select All acts on.
 ///
-/// ⚠️ **ONE CASE, AND THAT IS THE POINT RATHER THAN AN UNFINISHED ENUM.** A sum
-/// type with a single case forces the arrange to arrive as a `nil` surface — an
-/// explicit refusal a caller must handle — instead of as a default that some
-/// later edit could quietly point at clips. `DeleteSurface`'s note ("a fourth
-/// deletable surface must be routed, not silently defaulted to the arrange")
-/// states the same rule from the other end.
+/// ⚠️ **NO ARRANGE CASE, AND THAT IS THE POINT RATHER THAN AN UNFINISHED ENUM.**
+/// A sum type with no arrange case forces the arrange to arrive as a `nil`
+/// surface — an explicit refusal a caller must handle — instead of as a default
+/// that some later edit could quietly point at clips. `DeleteSurface`'s note ("a
+/// fourth deletable surface must be routed, not silently defaulted to the
+/// arrange") states the same rule from the other end. Both cases are NOTE
+/// surfaces, which is all ⌘A has ever meant in this app.
 public enum SelectAllSurface: String, Sendable, CaseIterable, Equatable {
     case pianoRollNotes = "piano-roll-notes"
+    /// The open NOTE EDITOR's drawn notes (m23-ap I4) — the pane resolves it
+    /// through `PitchEditorInteractionBridge.requestSelectAll()`, because its
+    /// model is `@State private`.
+    case pitchEditorNotes = "pitch-editor-notes"
 }
 
 /// WHY Edit ▸ Select All is inert, named for the guard that refused.
@@ -250,15 +282,17 @@ public enum SelectAllRefusal: String, Sendable, Equatable, CaseIterable {
     case modal
     /// The roll is active but its clip holds no notes — nothing to select.
     case emptyRoll = "empty-roll"
-    /// The **pitch editor** is the open pane (m23-ap p2-b). ⌘A has no meaning
-    /// there yet: Increment A is read-only and holds no selection, and design
-    /// §3.6 assigns the gesture to the unwritten interaction model (§7).
+    /// The **note editor** (the pitch editor pane) is open but draws NO notes —
+    /// nothing to select (m23-ap I4).
     ///
-    /// ⚠️ **NOT `noRollOpen`.** A pane IS open; saying "no clip is open" about a
-    /// surface the user is looking at is the conflation
-    /// `ActiveEditorSurface.Reason`'s "three different bugs" argument exists to
-    /// prevent, and it would make a red gate chase the wrong fixture.
-    case pitchEditorOpen = "pitch-editor-open"
+    /// ⭐ **IT REPLACES `pitchEditorOpen` ("pitch-editor-open"), RETIRED AT I4 ON
+    /// PURPOSE.** That refusal (m23-ap p2-b) said "⌘A has no meaning here yet"
+    /// while the pane was read-only; §7 gave it one, so the arm went live and the
+    /// only thing left to refuse is an empty pane. ⚠️ **NOT `emptyRoll` AND NOT
+    /// `noRollOpen`:** a pane IS open, and it is not the roll — a red gate must
+    /// read which surface was empty, the `ActiveEditorSurface.Reason` "three
+    /// different bugs" argument.
+    case emptyPitchEditor = "empty-pitch-editor"
 }
 
 /// The resolved Edit ▸ Select All item.

@@ -123,6 +123,25 @@ public enum PianoRollMarquee {
         }
         return out
     }
+
+    /// What a band's outcome makes the selection: REPLACE it with what the band
+    /// touched, or UNION the hits onto the selection FROZEN when the band armed
+    /// (⇧ or ⌘ — `ArrangeClickIntent.toggle`, the house additive chord).
+    ///
+    /// ⭐ **HOISTED, NOT INVENTED (m23-ap I4).** This one line lived in
+    /// `PianoRollModel.applyMarquee` as `additive ? base.union(hits) : hits`.
+    /// The pitch editor's band needs exactly the same rule, and a second
+    /// spelling of it is free to drift — so the rule moved HERE, beside the
+    /// band's geometry, and BOTH editors' models call it. The roll's behaviour
+    /// is unchanged character for character: its suites pass across the hoist
+    /// unedited, which is the acceptance criterion.
+    ///
+    /// The base is a PARAMETER, never live state, because a band re-decides the
+    /// WHOLE selection on every pointer update: growing it adds notes and
+    /// shrinking it gives them back, which only a frozen base allows.
+    public static func selection(base: Set<UUID>, hits: Set<UUID>, additive: Bool) -> Set<UUID> {
+        additive ? base.union(hits) : hits
+    }
 }
 
 /// A staged marquee gesture step for the note grid (debug tier only; nil in

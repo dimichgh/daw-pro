@@ -1519,6 +1519,10 @@ total. `node scripts/gates/doc-count-drift.mjs` is the pin; a `grep -c` on
 
 ## 17. Addendum 2026-09-24: automatic note splitting has no owner (item p2-seg)
 
+> **STATUS 2026-09-24: SHIPPED in `109b483`** (S1, R1, L, S2, S2-close). Everything below is the
+> filing record; the design, results and follow-ups (p2-seg-F-detect, F-tail, F-metric) live in
+> `docs/design/2026-09-24-pitch-note-splitting.md` (§15 L, §16 S2-close).
+
 **Found by measurement on the user's own take**, not by review. The busy-line check
 (2026-09-24, audio-dsp-engineer; the vibrato doc §18.5 has the full record) found the detector
 honest on this take and found the Hard Tune risk in SEGMENTATION instead.

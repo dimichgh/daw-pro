@@ -44,6 +44,19 @@ import Foundation
 /// half-speed render instead of 2.0. `PitchCurveRenderTests` renders exactly
 /// that case at ratio 2 and measures where the pitch actually moves.
 struct StretchCurvePlan: Sendable {
+    /// **Does the render read the time warp W?** `false`: step 3 above is
+    /// still `f / ratio`, and no render builds a W.
+    ///
+    /// ⚠️ **C2-3 FLIPS THIS IN THE SAME DIFF THAT MAKES STEP 3 READ W.** The
+    /// bridge's time base (`RenderTimeBase`) reads it (p2-ren Stage A). While it
+    /// is false, a timing-only edit re-keys the render but renders the same
+    /// audio, so a pending clip may play its previous file, which is exact.
+    /// Once W is read, a different W is a different time base, and the clip is
+    /// silent while its render is pending, as every clip was before the bridge.
+    /// Leave it false after C2-3 and the bridge would play the OLD timing for
+    /// a moment and call it the previous version: right speed, wrong place.
+    static let readsTimeWarp = false
+
     /// The SOURCE file's sample rate — the rate the render runs at.
     let sampleRate: Double
     /// `Clip.stretchRatio`: output duration multiplier.
@@ -54,10 +67,142 @@ struct StretchCurvePlan: Sendable {
     /// also pass `semitones:` to the stretcher.
     let curve: PitchCorrectionCurve
 
-    /// Step 4 above, and the ONLY expression of it.
+    /// Step 4 above, for a render that holds a plan. It forwards to the static
+    /// form below, which is the ONLY expression of the mapping.
     func sourceSecond(forOutputFrame frame: Int) -> Double {
+        Self.sourceSecond(forOutputFrame: frame, ratio: ratio, sampleRate: sampleRate)
+    }
+
+    /// Step 4 above, and the ONLY expression of it. It is static because a
+    /// render that builds NO plan still needs it: I7a's level mask runs on a
+    /// level-only render (no curve, no stretcher) and on a stretched clip
+    /// whose edits bend no pitch. C2-3 makes this W-aware, once, for both.
+    static func sourceSecond(forOutputFrame frame: Int, ratio: Double,
+                             sampleRate: Double) -> Double {
         guard ratio > 0, sampleRate > 0 else { return 0 }
         return Double(frame) / (ratio * sampleRate)
+    }
+
+    /// The INVERSE of step 4 (I1): the first delivered output frame whose
+    /// source second is at or after `sourceSecond`, for a render that holds a
+    /// plan. It forwards to the static form below.
+    func outputFrame(forSourceSecond sourceSecond: Double) -> Int {
+        Self.outputFrame(forSourceSecond: sourceSecond, ratio: ratio, sampleRate: sampleRate)
+    }
+
+    /// The INVERSE of step 4, source second → delivered output frame, for any
+    /// render, including one with no plan (a pure stretch, or a source file at
+    /// ratio 1). I1's audition maps a note's span onto the frames of the file
+    /// playback plays through here, and nowhere else.
+    ///
+    /// ⭐ **NOT A SECOND EXPRESSION OF THE MAPPING.** It is a search over
+    /// `sourceSecond(forOutputFrame:ratio:sampleRate:)`: a doubling probe finds
+    /// a frame at or past the target, then `firstOutputFrame(atOrAfter…)`
+    /// bisects. The forward formula stays the ONLY formula, so C2-3's W makes
+    /// BOTH directions W-aware by changing it once (a search needs only that
+    /// the forward mapping stays monotone).
+    ///
+    /// Exact on every frame: `outputFrame(forSourceSecond: sourceSecond(
+    /// forOutputFrame: f)) == f` (pinned at ratios 1, 1.5 and 0.5). 0 for a
+    /// non-positive or NaN second and for an unusable ratio or rate;
+    /// `outputFrameSearchLimit` for a second beyond it.
+    static func outputFrame(forSourceSecond sourceSecond: Double, ratio: Double,
+                            sampleRate: Double) -> Int {
+        guard ratio > 0, sampleRate > 0, !sourceSecond.isNaN, sourceSecond > 0 else { return 0 }
+        var high = 1
+        while Self.sourceSecond(forOutputFrame: high, ratio: ratio, sampleRate: sampleRate)
+            < sourceSecond {
+            guard high <= outputFrameSearchLimit / 2 else { return outputFrameSearchLimit }
+            high *= 2
+        }
+        return firstOutputFrame(atOrAfterSourceSecond: sourceSecond, frames: high,
+                                ratio: ratio, sampleRate: sampleRate)
+    }
+
+    /// The largest frame `outputFrame(forSourceSecond:…)` answers: about 12 h
+    /// at 48 kHz, past any file; it only bounds the probe on a bad input.
+    static let outputFrameSearchLimit = Int(Int32.max)
+
+    /// The first delivered output frame whose source second is at or after
+    /// `sourceSecond`, or `frames` when there is none. It is a binary search
+    /// over the forward mapping above (monotone in the frame), so the
+    /// mapping keeps one expression and never grows an inverse.
+    static func firstOutputFrame(atOrAfterSourceSecond sourceSecond: Double, frames: Int,
+                                 ratio: Double, sampleRate: Double) -> Int {
+        var low = 0
+        var high = max(0, frames)
+        while low < high {
+            let mid = low + (high - low) / 2
+            if Self.sourceSecond(forOutputFrame: mid, ratio: ratio, sampleRate: sampleRate)
+                < sourceSecond {
+                low = mid + 1
+            } else {
+                high = mid
+            }
+        }
+        return low
+    }
+
+    /// **I7a/U-C: THE LEVEL MASK PASS.** It multiplies each delivered output
+    /// frame by `PitchEditSet.gain(atSourceSecond:)`, the ONE mask home, at
+    /// the source second that frame plays, found through the one mapping
+    /// above. Offline only: this runs inside `performRender`'s detached job,
+    /// never on the render thread.
+    ///
+    /// ⭐ **ONLY FRAMES INSIDE A LEVEL-EDITED NOTE ARE VISITED, AND A FRAME
+    /// WHOSE MASK IS 1 IS NOT WRITTEN.** Outside those notes the mask is the
+    /// literal 1.0 (`PitchNoteLevelTests` pins that bit for bit, including an
+    /// untouched note that abuts a cleared one). So every other sample keeps
+    /// its bytes by construction, not because `x × 1.0 == x` happens to hold.
+    ///
+    /// Denormal guard: a product below `Float.leastNormalMagnitude` is
+    /// flushed to +0. That can only happen where the mask is below 1, and it
+    /// keeps a faded or levelled tail from carrying denormals into the mixer.
+    /// A cleared plateau multiplies by exactly 0, so its samples are ±0, and
+    /// the flush makes them +0. They are numeric zeros either way (design
+    /// §17.5: the gate is `sample == 0`, not a byte compare).
+    ///
+    /// No-op when the set has no level edit (`PitchEditSet.hasLevelEdits`, the
+    /// one predicate), so a set nobody cleared or levelled renders byte for
+    /// byte as it did before the mask existed.
+    ///
+    /// I1-F1: `outputFrameOffset` is the whole-file output frame of
+    /// `channels[…][0]`, for a WINDOW of the render (`StretchWindow`). Every
+    /// frame is still mapped as a WHOLE-FILE frame, so a window's mask is the
+    /// whole-file mask's samples, not a mask of its own. 0 (the whole-file
+    /// render) is the arithmetic this pass always did.
+    static func applyLevelMask(_ editSet: PitchEditSet, to channels: inout [[Float]],
+                               sampleRate: Double, ratio: Double,
+                               outputFrameOffset: Int = 0,
+                               isCancelled: () -> Bool = { false }) throws {
+        guard editSet.hasLevelEdits, let count = channels.first?.count, count > 0 else {
+            return
+        }
+        // Whole-file output frames `outputFrameOffset ..< frames` are present.
+        let frames = outputFrameOffset + count
+        for note in editSet.segments where note.hasLevelEdits {
+            if isCancelled() { throw OfflineStretcherError.cancelled }
+            var frame = max(outputFrameOffset,
+                            firstOutputFrame(atOrAfterSourceSecond: note.startSeconds,
+                                             frames: frames, ratio: ratio,
+                                             sampleRate: sampleRate))
+            while frame < frames {
+                let second = sourceSecond(forOutputFrame: frame, ratio: ratio,
+                                          sampleRate: sampleRate)
+                guard second < note.endSeconds else { break }
+                let gain = editSet.gain(atSourceSecond: second)
+                if gain != 1 {
+                    let factor = Float(gain)
+                    let index = frame - outputFrameOffset
+                    for channel in channels.indices {
+                        var sample = channels[channel][index] * factor
+                        if abs(sample) < Float.leastNormalMagnitude { sample = 0 }
+                        channels[channel][index] = sample
+                    }
+                }
+                frame += 1
+            }
+        }
     }
 
     /// **THE RENDER'S `D`: the source file's duration that `PitchTimeWarp` is
@@ -87,8 +232,14 @@ struct StretchCurvePlan: Sendable {
         curve.semitones(atSourceSecond: sourceSecond(forOutputFrame: frame))
     }
 
-    /// The plan for a render, or `nil` when the clip's edits bend nothing and
+    /// The plan for a render, or `nil` when the clip's edits bend no PITCH and
     /// the render must take the existing constant path BYTE-FOR-BYTE.
+    ///
+    /// I7a/U-C: the guard is `PitchEditSet.isPitchIdentity`, not `isIdentity`.
+    /// A set whose only edits are levels (a cleared note, a per-note level)
+    /// takes NO curve. Its level is applied afterwards by `applyLevelMask`,
+    /// and on a clip that is neither stretched nor transposed the stretcher
+    /// never runs at all (`performRender`'s level-only path).
     ///
     /// `contour` is what `PitchContourCache.renderContour` — THE seam — returned
     /// for this clip's source, and the curve is built through
@@ -108,7 +259,7 @@ struct StretchCurvePlan: Sendable {
                      sampleRate: Double,
                      ratio: Double,
                      contour: PitchRenderContour? = nil) -> StretchCurvePlan? {
-        guard let editSet, !editSet.isIdentity else { return nil }
+        guard let editSet, !editSet.isPitchIdentity else { return nil }
         let curve = contour?.curve(editSet: editSet,
                                    clipPitchShiftSemitones: clipPitchShiftSemitones)
             ?? PitchCorrectionCurve.make(editSet: editSet,
@@ -152,6 +303,10 @@ enum PitchEditSetDigest {
     /// **STILL 1 AFTER m23-ap C2-1 ADDED THE TIME-WARP BLOCK, FOR THE SAME
     /// REASON.** The block is emitted only when a set has time edits, so every
     /// untimed set keeps its bytes. See the block-order note in `hex`.
+    ///
+    /// **STILL 1 AFTER I7a ADDED THE LEVEL BLOCK (slot 5), AGAIN FOR THE SAME
+    /// REASON.** It is emitted only when a note is cleared or levelled, so a
+    /// set with neither keeps its bytes.
     static let layoutVersion: UInt64 = 1
 
     /// Introduces the generator suffix block. An arbitrary, distinctive
@@ -163,6 +318,11 @@ enum PitchEditSetDigest {
     /// Distinct from every other block's marker, so which blocks a stream
     /// carries is explicit in the stream, not implied by its length.
     static let timeWarpSuffixMarker: UInt64 = 0x5431_4D45_5752_5001
+
+    /// Introduces the LEVEL block (I7a/U-C, interaction-batch design §17,
+    /// slot 5): "L1EVELS" plus a 01, in the style of the two markers above,
+    /// and distinct from both.
+    static let levelSuffixMarker: UInt64 = 0x4C31_4556_454C_5301
 
     /// Hex digest, or `""` when the set bends nothing.
     ///
@@ -217,7 +377,10 @@ enum PitchEditSetDigest {
         //   2. anchor      (C5a-1)        — RESERVED SLOT, not yet written
         //   3. time warp   (C2-1)         — below
         //   4. shape       (C5b-1)        — RESERVED SLOT, not yet written
-        // (vibrato-handle design §7.5; timing design §5.4.) Each block is
+        //   5. level       (I7a/U-C)      — below
+        //   6. origin      (U-A)          — RESERVED SLOT, not yet written
+        // (vibrato-handle design §7.5; timing design §5.4; interaction-batch
+        // design §17; unpitched-notes design §1.4.) Each block is
         // emitted only when some segment uses its feature, so a block
         // inserted into its slot later changes no digest except those of the
         // sets that use it. The order is by slot, never by which item landed
@@ -259,6 +422,30 @@ enum PitchEditSetDigest {
         }
         // (4) RESERVED — the drawn-shape block (C5b-1) goes HERE, after the
         // time-warp block. Nothing is emitted for it today.
+        //
+        // (5) I7a/U-C — THE LEVEL BLOCK (interaction-batch design §17).
+        // `amplitudeDb` is already hashed INLINE above, and it stays there:
+        // moving it would re-key every set. This block carries the one level
+        // field that is not inline, each segment's CLEARED byte. It also closes
+        // the stale-key hazard, the time-warp block's F7 precedent. A set that
+        // carried a non-zero `amplitudeDb` before U-C was rendered with it
+        // IGNORED, under a key that already hashed it. On the day the render
+        // reads it, that same key would serve the unlevelled audio. Gated on
+        // `PitchEditSet.hasLevelEdits`, the one predicate, so it re-keys
+        // exactly the cleared or levelled sets, including those written before
+        // U-C. `PitchEditSet.levelMaskVersion` re-keys them again whenever the
+        // mask's arithmetic changes.
+        if set.hasLevelEdits {
+            putBits(levelSuffixMarker)
+            putInt(PitchEditSet.levelMaskVersion)
+            putInt(set.segments.count)
+            for segment in set.segments {
+                bytes.append(segment.isCleared ? 1 : 0)
+            }
+        }
+        // (6) RESERVED — the unpitched origin block (U-A) goes HERE, after the
+        // level block. Gated on `segments.contains { $0.origin != .detected }`
+        // (unpitched-notes design §1.4). Nothing is emitted for it today.
         var hasher = SHA256()
         hasher.update(data: Data(bytes))
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()

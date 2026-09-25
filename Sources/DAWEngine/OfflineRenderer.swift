@@ -114,6 +114,13 @@ public final class OfflineRenderer {
     /// precedent).
     var referenceLaneEnabled = false
 
+    /// I1 GATE SEAM ONLY (`ReferenceLaneTransparencyTests`), the
+    /// `referenceLaneEnabled` precedent verbatim: DEFAULT FALSE, so a
+    /// production bounce never carries the clip-note audition voice. The
+    /// transparency gate flips it to render voice-on through the REAL render
+    /// loop and pin that an IDLE voice leaves the mix byte-identical.
+    var clipAuditionLaneEnabled = false
+
     /// Render-load telemetry sink (M9 perf-b), handed to the graph before
     /// reconcile so offline pulls stamp the same counters live rendering
     /// does. `AudioEngine.renderOffline` assigns its OWN context here — that
@@ -289,6 +296,9 @@ public final class OfflineRenderer {
         // m22-g P2: T7 gate seam only — false in every production path, so
         // offline graphs stay lane-free by construction (design D3).
         graph.referenceLaneEnabled = referenceLaneEnabled
+        // I1: gate seam only, false in every production path (voice-free
+        // offline graphs by construction).
+        graph.clipAuditionLaneEnabled = clipAuditionLaneEnabled
         // Master volume automation (m15-c): lanes + the manual gain land
         // before the parameter passes, so the pre-start pass pins the master
         // fader (lane active) or leaves the static write below untouched.

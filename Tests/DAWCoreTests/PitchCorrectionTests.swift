@@ -956,7 +956,7 @@ struct PitchEditSetInvariantTests {
     /// purpose: the other answer — treat carried fields as identity — is
     /// silent, and it breaks on the day phase 4 starts rendering them, in a
     /// place nobody would look. Chosen now rather than discovered then.
-    @Test("each of the seven edit fields ALONE breaks identity, carried ones included")
+    @Test("each edit field ALONE breaks identity, carried ones included (the row count is pinned in the body)")
     func everyEditFieldBreaksIdentity() {
         func setWith(_ mutate: (inout NoteSegment) -> Void) -> PitchEditSet {
             var segment = NoteSegment(startSeconds: 0, endSeconds: 1, detectedHz: 440,
@@ -977,6 +977,10 @@ struct PitchEditSetInvariantTests {
             ("timeStartDeltaSeconds (phase 3)", { $0.timeStartDeltaSeconds = 0.01 }),
             ("timeEndDeltaSeconds (phase 3)", { $0.timeEndDeltaSeconds = -0.01 }),
             ("amplitudeDb (phase 4)", { $0.amplitudeDb = 2.5 }),
+            // I7a: silence is a flag, not a level. A set whose only edit is a
+            // cleared note must leave the identity bypass, or the cleared note
+            // plays from the untouched source.
+            ("isCleared (I7a)", { $0.isCleared = true }),
         ]
         for (name, mutate) in cases {
             let set = setWith(mutate)
@@ -985,9 +989,10 @@ struct PitchEditSetInvariantTests {
             #expect(Clip(name: "c", pitchEdits: set).hasPitchEdits,
                     "\(name) must make the clip report edits")
         }
-        // Was 7 before m23-ap C5a added `vibratoDepthCents`. The count is the
-        // point: a field added without a row here would slip through.
-        #expect(cases.count == 8)
+        // Was 7 before m23-ap C5a added `vibratoDepthCents`, and 8 before I7a
+        // added `isCleared`. The count is the point: a field added without a
+        // row here would slip through.
+        #expect(cases.count == 9)
 
         // ⭐⭐ **AND THE TWO THAT DELIBERATELY DO NOT**, asserted in the same
         // place so the list above cannot read as exhaustive when it is not.
@@ -1275,6 +1280,81 @@ struct PitchCorrectionPersistenceTests {
             .lanes.first).clip.pitchEdits == nil)
     }
 
+    // MARK: - I7a: the clear flag on disk
+
+    /// Omit-when-false, byte-gated: no note that is not cleared writes the key,
+    /// on the set, the wire (`Clip`) or the disk (`ClipDocument`) path, so every
+    /// existing save stays byte-identical. A cleared note writes exactly
+    /// `"cleared":true`.
+    @Test("I7a byte gate: 'cleared' appears only for a cleared note, as exactly \"cleared\":true")
+    func clearedKeyIsWrittenOnlyWhenTrue() throws {
+        let plain = editedSet()
+        let clip = audioClip(pitchEdits: plain)
+        for payload in [try JSONEncoder().encode(plain), try JSONEncoder().encode(clip),
+                        try JSONEncoder().encode(ClipDocument(from: clip, media: "media/vox.wav"))] {
+            #expect(!String(decoding: payload, as: UTF8.self).contains("cleared"))
+        }
+        // POSITIVE CONTROL: the same matcher sees the key once a note is cleared,
+        // exactly once, and as `true`.
+        var cleared = plain
+        cleared.segments[1].isCleared = true
+        let sorted = JSONEncoder()
+        sorted.outputFormatting = [.sortedKeys]
+        let json = String(decoding: try sorted.encode(cleared), as: UTF8.self)
+        #expect(json.contains("\"cleared\":true"))
+        #expect(json.components(separatedBy: "\"cleared\"").count == 2,
+                "only the one cleared note may carry the key")
+        // A payload written before the flag existed reads as not cleared.
+        let legacy = #"{"id":"\#(UUID().uuidString)","startSeconds":0,"endSeconds":1,"detectedHz":220,"detectedConfidence":0.9}"#
+        #expect(try JSONDecoder().decode(NoteSegment.self, from: Data(legacy.utf8)).isCleared == false)
+    }
+
+    /// ⚠️ A byte gate over a save is blind to a Codable DECODE default (UI
+    /// design §12.2), so the value is also compared FIELD FOR FIELD after a
+    /// reopen, through `ClipDocument` and both `ClipDocument`→`Clip`
+    /// reconstructions: `ProjectDocument.runtimeState` and
+    /// `TakeGroupDocument.takeGroup`.
+    @Test("I7a: a cleared note survives save and reopen field for field, through ClipDocument and BOTH reconstructions")
+    func clearedNoteSurvivesTheDiskPath() throws {
+        var set = editedSet()
+        set.segments[1].isCleared = true   // the note that also carries +2.5 dB
+        let clip = audioClip(pitchEdits: set)
+        let writer = JSONEncoder()
+        writer.outputFormatting = [.prettyPrinted, .sortedKeys]   // ProjectBundle's own
+
+        let document = ProjectDocument(name: "P", transport: TransportState(),
+                                       tracks: [Track(name: "Vox", kind: .audio, clips: [clip])],
+                                       masterVolume: 1, mediaRefs: [clip.id: "media/vox.wav"])
+        let reopened = try JSONDecoder().decode(ProjectDocument.self, from: writer.encode(document))
+        let viaDocument = try #require(reopened.tracks.first?.clips.first?.pitchEdits)
+        let viaRuntime = try #require(reopened
+            .runtimeState(bundleURL: URL(fileURLWithPath: "/tmp/does-not-exist-bundle"))
+            .tracks.first?.clips.first?.pitchEdits)
+
+        let group = TakeGroup(name: "Comp", lanes: [TakeLane(name: "Take 1", clip: clip)])
+        let groupBack = try JSONDecoder().decode(
+            TakeGroupDocument.self,
+            from: writer.encode(TakeGroupDocument(from: group,
+                                                  mediaRefs: [clip.id: "media/take1.wav"])))
+        let viaTakeGroup = try #require(groupBack
+            .takeGroup(bundleURL: URL(fileURLWithPath: "/tmp/nope")) { _ in }
+            .lanes.first?.clip.pitchEdits)
+
+        for (path, restored) in [("ClipDocument", viaDocument), ("runtimeState", viaRuntime),
+                                 ("takeGroup", viaTakeGroup)] {
+            try #require(restored.segments.count == set.segments.count)
+            for (back, original) in zip(restored.segments, set.segments) {
+                #expect(back.id == original.id)
+                let diff = PrePitchNoteSplitReference.differingFields(back, original)
+                #expect(diff.differing.isEmpty, "\(path): \(diff.differing)")
+                #expect(diff.compared >= 15, "\(path): only \(diff.compared) fields compared")
+            }
+            #expect(restored.segments[1].isCleared, "\(path) lost the clear")
+            #expect(restored.segments[1].amplitudeDb == 2.5, "\(path) lost the level beside the clear")
+            #expect(!restored.segments[0].isCleared, "\(path) invented a clear")
+        }
+    }
+
     /// A decoded set is HEALED, not trusted — a hand-authored or damaged
     /// payload cannot smuggle a NaN, an out-of-range scale, or overlapping
     /// notes past the disk boundary.
@@ -1393,6 +1473,8 @@ struct PitchCorrectionPersistenceTests {
             ("timeStartDeltaSeconds", { $0.segments[0].timeStartDeltaSeconds = 0.01 }),
             ("timeEndDeltaSeconds", { $0.segments[0].timeEndDeltaSeconds = -0.01 }),
             ("amplitudeDb", { $0.segments[0].amplitudeDb = -1 }),
+            // I7a: a clear is a hand edit a preset would silently undo.
+            ("isCleared", { $0.segments[0].isCleared = true }),
             ("startSeconds", { $0.segments[0].startSeconds += 0.01 }),
             ("endSeconds", { $0.segments[0].endSeconds -= 0.01 }),
             ("retuneMs", { $0.retuneMs = 250 }),

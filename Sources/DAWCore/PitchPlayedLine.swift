@@ -108,6 +108,15 @@ public struct PitchPlayedLine: Sendable, Equatable {
     /// run; drawing per note would break the line at the cut, a 16 ms hole
     /// where the singer never stopped. And never one path across an unvoiced
     /// frame: that would invent pitch where none was measured.
+    ///
+    /// ⭐ **A CLEARED NOTE IS A HOLE TOO** (m23-ap I7b-2). It plays silence
+    /// (`PitchEditSet.gain(atSourceSecond:)` is 0 between its ramps), so the
+    /// line the render plays has no pitch there: the run is SPLIT where the
+    /// cleared stretch begins and resumes after it — the representation an
+    /// unvoiced gap already has (a run boundary), never a bridge across it.
+    /// A point belongs to the cleared note whose `[startSeconds, endSeconds)`
+    /// holds its frame CENTRE, `noteSummaries`' own attribution, so a cleared
+    /// note keeps no point and a neighbour loses none.
     public let runs: [[Point]]
 
     /// THE curve a render of this clip's edits plays. Equal — as an object —
@@ -219,6 +228,20 @@ public struct PitchPlayedLine: Sendable, Equatable {
     /// whenever the stub is under `PitchAutoCorrect.minimumNoteSeconds` — and
     /// that note's BLOB still draws (the editor's overlap rule), so its line
     /// must too.
+    ///
+    /// ⭐ **CLEARED NOTES LEAVE HOLES HERE, AND ONLY HERE** (m23-ap I7b-2).
+    /// This is the ONE producer of the line — the editor draws it and
+    /// `clip.getPlayedPitch` returns it — so a cleared note's stretch is cut
+    /// out HERE, never by a reader afterwards: two producers that disagreed
+    /// were the defect (the editor hid the stretch, the wire still reported
+    /// pitch over a note that plays silence). ⚠️ **CUT AFTER THE RUN RULE,
+    /// NEVER FED INTO IT.** Marking cleared frames unvoiced before
+    /// `voicedRuns` would re-segment the singer's runs, and `voicedRuns` drops
+    /// any run under `PitchAutoCorrect.minimumNoteSeconds` — a neighbour's
+    /// short stub beside a cleared note would lose its line while it still
+    /// plays. The cut changes only the cleared stretch; every other point is
+    /// the one this builds with no note cleared, value for value. The `curve`
+    /// is untouched: a clear is a LEVEL edit, and the curve is pitch.
     public static func make(contour: PitchRenderContour?,
                             fallback: PitchDetectionResult?,
                             editSet: PitchEditSet?,
@@ -249,9 +272,13 @@ public struct PitchPlayedLine: Sendable, Equatable {
             valueOffset = rate.isFinite && rate > 0 ? 0.5 / rate : 0
         }
 
+        // I7b-2 — what the render silences, as holes. `PitchEditSet.canonical`
+        // keeps segments ascending and non-overlapping, so these are too.
+        let silenced = set.segments.filter(\.isCleared).map { $0.startSeconds..<$0.endSeconds }
         let runs = sung.map {
             sungRuns(frames: $0.frames, frameRateHz: $0.frameRateHz,
-                     valueOffsetSeconds: valueOffset, sourceWindow: sourceWindow, curve: curve)
+                     valueOffsetSeconds: valueOffset, sourceWindow: sourceWindow, curve: curve,
+                     silenced: silenced)
         } ?? []
 
         let windowStart = sourceWindow.lowerBound
@@ -272,9 +299,16 @@ public struct PitchPlayedLine: Sendable, Equatable {
     /// does not break there) — and this only gathers each run's own voiced frames
     /// (half-open `[start, end)`, the interval `voicedRuns` built from frame
     /// starts), then keeps the ones inside the widened window.
+    ///
+    /// `silenced` — the CLEARED notes' spans, ascending and non-overlapping —
+    /// cut a run wherever a frame CENTRE falls inside one (I7b-2): the points
+    /// before the cut close one array, the points after it open the next.
+    /// One cursor walks them, because every frame visited below is visited in
+    /// time order, so no note-count factor enters the cost.
     private static func sungRuns(frames: [ClipPitchFrame], frameRateHz: Double,
                                  valueOffsetSeconds: Double, sourceWindow: Range<Double>,
-                                 curve: PitchCorrectionCurve) -> [[Point]] {
+                                 curve: PitchCorrectionCurve,
+                                 silenced: [Range<Double>]) -> [[Point]] {
         let voicedRuns = PitchAutoCorrect.voicedRuns(in: frames, frameRateHz: frameRateHz)
         guard !voicedRuns.isEmpty, frameRateHz.isFinite, frameRateHz > 0 else { return [] }
         let period = 1 / frameRateHz
@@ -289,6 +323,7 @@ public struct PitchPlayedLine: Sendable, Equatable {
         var out: [[Point]] = []
         out.reserveCapacity(voicedRuns.count)
         var index = 0
+        var hole = 0   // the first `silenced` span not yet behind the walk
         for run in voicedRuns {
             // A run wholly outside the widened window contributes nothing, so
             // it costs no curve evaluations (the frame cursor still advances
@@ -305,6 +340,14 @@ public struct PitchPlayedLine: Sendable, Equatable {
                 guard let hz = frame.frequencyHz,
                       frame.timeSeconds > keepAfter, frame.timeSeconds < keepBefore else { continue }
                 let centre = frame.timeSeconds + valueOffsetSeconds
+                // I7b-2 — a cleared note is a HOLE: close the piece before it,
+                // keep no point inside it, open a new piece after it.
+                while hole < silenced.count, silenced[hole].upperBound <= centre { hole += 1 }
+                if hole < silenced.count, silenced[hole].contains(centre) {
+                    if !points.isEmpty { out.append(points) }
+                    points = []
+                    continue
+                }
                 let sungMidi = PitchCorrectionMath.midi(fromHz: hz)
                 points.append(Point(
                     sourceSeconds: centre,

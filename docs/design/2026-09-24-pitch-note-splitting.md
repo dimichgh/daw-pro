@@ -1633,3 +1633,129 @@ re-checked the page-facing numbers below with its own instruments before publish
   - Natural with the split → `07-natural-after.wav`
 
   Same parts and same arithmetic give the same bytes. Any difference names a run and a hop.
+
+## §16 Orchestrator rulings at S2-close (2026-09-24, written BEFORE any S2-close number exists)
+
+S2 landed and was committed in `109b483`. The pick is (a-T), "slide kept, note locked", chosen by the user by
+ear (handoff answer `slide-shape=kept`). §5.1 as pre-registered stays **FAIL on the record** (§15.2). The
+rule below is a **re-registration** with a stated reason. It governs S2-close and every later change to the
+splitter.
+
+### §16.1 §5.1's octave rule, re-registered
+
+1. **Frames:** the independent exact YIN's COUNTED frames (§11.2's mask), each folded to within ±600 c of the
+   part's sung median from the PRODUCT's frames. This is PH1 (`DUR/L/out/l-physics.log` §PH1).
+2. **Pass:** a held part passes when more than half of its counted frames sit within ±30 c of an allowed
+   note, using §5.1's allowed-target rule unchanged.
+3. **Unmeasurable:** a part with fewer than 3 counted frames never passes.
+   - It FAILS when the uncorrected render has 3 or more counted frames on the same part: the render has lost
+     a pitch the take had. That is the signature of T2's −1200 vocoder miss (0 counted frames). ⚠ Corrected
+     after S2-close measured it: the +800 vocoder miss has exactly 3 counted frames, so this floor does not
+     fire on it; rules 2 and 4 catch it.
+   - Otherwise it is reported by name as unmeasurable.
+   - Every part that passed PH1 on L's renders had at least 5 counted frames, so this floor changes no
+     verdict there.
+4. **Octave guard, unfolded (PH1's missing leg).** For each part, take the median over its counted frames
+   of (render YIN − uncorrected-render YIN), in cents. It must lie within ±150 c of the offset the edit set
+   asked for (the part's `pitchOffsetCents`; 0 for an identity part).
+   - Both renders pass through the same tracker at the same frames, so a tracker octave ambiguity present
+     in both cancels. 0:09.2 reads A1 on every render, the uncorrected one included (§15.2).
+   - A real octave move by the product lands about ±1200 c away and fails.
+   - A tracker that resolves the two renders into DIFFERENT octaves also fails. That is a false alarm,
+     which fails safe.
+   - Why an octave move can only come from the detector: on a chromatic scale, a held part's Hard Tune move
+     is at most 50 c from the product's own median (`PitchCorrection.swift:232-239`, PH1's header). So the
+     only route to an octave error is the product detector misreading the octave.
+5. **The rule must earn its place first.** This check is pre-registered and runs BEFORE any verdict. Re-run
+   T2's plants through rules 1–4, in (a-T)'s D3 tail [16.816, 16.992) s: synthetic and vocoder, at +0, +800,
+   −1200 and +1200 c.
+   - +0 must PASS.
+   - Every other plant must FAIL the part.
+   - If any plant passes, the rule is rejected, and S2-close reports that instead of a verdict.
+6. **Controls, unchanged:**
+   - (c) must still FAIL;
+   - the uncorrected render must reproduce the sung pitches (T1);
+   - run 28 stays a recorded cost, reported and not gated (§14).
+7. **0:22.6#0 is a KNOWN-MARGINAL pass under rule 2:** 7 of 13 counted frames on L's (a-T). The cause is the
+   product detector reading it about 20 c sharp (p2-seg-F-detect).
+   - Report its on/counted figure on every render.
+   - A drop to half or below is a FAIL, not noise.
+   - If p2-seg-F-detect is fixed, this part should move clearly into the pass band. If it does not, the
+     fix did not reach it.
+
+### §16.2 What S2-close runs
+
+- **The pitch verdict needs no new render.** Pass 3 proved the real splitter's (d), (a-T), (a-N) and
+  Natural-after renders are byte-identical to L's WAVs. So S2-close re-scores L's WAVs with §16.1:
+  - the rule's own acceptance check (rule 5) first;
+  - then (a-T), (d) and (a-N) as recorded shapes, and (c) as the control.
+  - Route: audio-dsp-engineer, python only, in `DUR/`.
+- **Still owed: a LOOK at the five named notes in the pitch editor**, on a staging app built from `109b483`
+  or later, on port 17695 only.
+  - Record what the editor DRAWS for each note's parts: a held bar, and a slide drawn as sung.
+  - Compare it against §11.5's part list.
+- **Also owed:** `ContourRenderListeningTests` and `WobbleOnsetListeningTests` reach the splitter and were
+  not run under S2. Both are env-gated, and neither compares against stored bytes. Run both once and record
+  whether their output changed. The MEASURED/UNMEASURED line in their reports must say which.
+
+### §16.3 S2's four hand-offs, ruled
+
+- **The ±80 c edge over-split, and (a-N)'s dependency on it: moot for the shipped shape.**
+  - Under (a-T), an over-split edge is a `.transition` and plays as sung. It cannot lock to a wrong
+    semitone.
+  - The "6 of 29 edges would lock to another semitone for 144–272 ms" cost is real only under (a-N), which
+    is not shipped. The `slideShape` doc comment already names it (`PitchCorrection.swift:1765`).
+  - Keep the tiered ±80 c leg in `PitchWobbleDetectorTests` exactly as S2 wrote it: strict at ±40 c and
+    below, a named exception at ±80 c.
+- **Whether (c) writes one segment per run: NO change.**
+  - (c) is the control shape for tests and the listening set only; production never selects it.
+  - Pass 3's (c) difference from `01-today.wav` is fully explained: 17 of 1110 hops differ, one per interior
+    boundary, and 0 differ outside the split windows. It is not a defect.
+- **`M23QDetuneRepairTests` needs a per-note error metric: FILED as p2-seg-F-metric, not scheduled.**
+  - The test still passes. Its repaired error moved 11.7 → 17.0 c, and S2 measured that as an artefact of
+    the metric:
+    - unsplit runs improved 11.1 → 10.2 c;
+    - held notes inside split runs improved 13.6 → 11.2 c;
+    - the whole rise sits in split runs' per-RUN medians, which land between the notes of a multi-note run.
+  - The test's detune is a constant per run, the exact inverse of the old per-run correction. A per-note
+    metric (detune and score per PART) is the fix.
+  - Changing a gate's metric is its own item, with a planted defect proven to fail the new metric.
+
+### §16.4 S2-close physics: RESULT (2026-09-24, audio-dsp-engineer; record `DUR/S2close/README.txt`)
+
+- **Rule 5 HOLDS [MEASURED].** Both +0 plants pass; all six other plants fail the part. Three octave plants
+  (tone −1200, tone +1200, vocoder +1200) pass the folded rule 2 and are caught ONLY by rule 4, the unfolded
+  guard. The fold alone would have certified all three.
+- **§5.1 under §16.1, the SHIPPED shape (a-T): PASS on all 10 held parts of the five named notes [MEASURED].**
+  (d) and (a-N) pass. The control (c) FAILS, as it must, and T1 passes: 0.00 c on all 10 parts.
+- **Margins to watch:**
+  - 0:22.6#0 is 7 of 13 counted on (a-T): the known-marginal pass (p2-seg-F-detect).
+  - 0:16.4#2 has the smallest rule-4 margin, +62.9 c against ±150. The uncorrected render counts only the
+    low half of that note's ±85 c wobble (§11.4).
+  - Run 28 reads −160.2 c against the uncorrected render, a recorded cost, not gated. L's "G#2+17" came
+    from taking the median before folding.
+- **The two unrun harnesses [MEASURED]:**
+  - `WobbleOnsetListeningTests` passes, and its outputs are unchanged.
+  - ⛔ **`ContourRenderListeningTests` is RED at `109b483`** ("hardCut 0.4876 ≥ 0.5"). It is env-gated, so the
+    default suite never ran it. Its Hard Tune renders are bit-identical to L's passing (a-T) WAVs.
+  - What moved is the meter's population: per stored segment, 23 notes → 20. Before the split, 11 of the
+    measured "notes" were whole multi-note runs, whose "wander" included the melody's own intervals.
+  - Hard Tune's absolute after-wander IMPROVED (18.2 → 15.7 c). The relative cut fell from 70 % to 48.8 %
+    (39.5 → 15.7 c).
+  - [INFERRED, not measured per note] Part of the old 70 % may have been the wrong-note defect itself:
+    pinning a phrase to one note reads as flattening it.
+  - → **p2-seg-F-metric** now covers BOTH per-segment metrics (this one and `M23QDetuneRepairTests`). The fix is
+    a held-part-only meter plus a plant. It is sequenced AFTER P-L, which uses the same `PitchWanderMeter`.
+- ⛔ **A published claim is affected.** "Hard Tune's within-note wander drops 62.8 → 18.2 c (70 %)" was
+  measured BEFORE the split, yet the committed code states it as current: CHANGELOG 2026-09-24, the
+  `clip_auto_correct_pitch` MCP description (`server.ts` ~8905, so the 0.15.0 plugin bundle), ARCHITECTURE.md,
+  DESIGN-LANGUAGE.md and 6 code comments. Correct them ONCE, with the per-part figure F-metric produces. Do
+  not swap in 48.8 %: that number comes from the same flawed meter.
+  **CORRECTED 2026-09-24 (orchestrator), from p2-seg-F-metric's per-part figure, which I verified by re-run:**
+  Hard Tune 37.6 → 15.2 c, a median 49 % cut per held note (68 % by YIN), and 0 of 19 held notes off their own
+  note. The CHANGELOG, ARCHITECTURE, DESIGN-LANGUAGE and all 6 comments now point to ONE home,
+  `PitchCorrectionPreset.offeredInUI`'s doc, which carries the figures and the retraction. `server.ts` (the MCP
+  description, and so the plugin bundle) is still pending the next MCP lane.
+- **S2-close is DONE except S4** (the ARCHITECTURE.md entry, §6 S4). The LOOK passed: 59 notes, and all five
+  named notes draw exactly §11.5's parts.
+

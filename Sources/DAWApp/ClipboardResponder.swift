@@ -189,11 +189,12 @@ extension AppModel {
     /// policy function.
     ///
     /// ⚠️ THE SWITCH IS NOT CEREMONY. Copy and Cut share a body
-    /// (`ClipboardMenuPolicy.copyMenuItem(verb:…)`, so Cut's enablement can never
-    /// drift from Copy's); PASTE DOES NOT — it is routed on the CLIPBOARD'S KIND
-    /// rather than on a selection, because you can paste with nothing selected at
-    /// all. Handing `.paste` to the copy body would compile and answer a
-    /// different question.
+    /// (`ClipboardMenuPolicy.copyMenuItem(verb:…)`, so Cut's enablement cannot
+    /// drift from Copy's except in the one named place: the note editor open
+    /// refuses Cut and not Copy, m23-ap p2-del-2); PASTE DOES NOT — it is
+    /// routed on the CLIPBOARD'S KIND rather than on a selection, because you
+    /// can paste with nothing selected at all. Handing `.paste` to the copy
+    /// body would compile and answer a different question.
     func clipboardMenuItem(for verb: ClipboardVerb) -> ClipboardMenuItem {
         switch verb {
         case .copy: return copyMenuItem

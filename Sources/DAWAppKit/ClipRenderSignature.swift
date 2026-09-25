@@ -46,10 +46,12 @@ import DAWCore
 ///   equal, and so does `Hashable`. The digest does not, so a lone ±0 flip
 ///   re-keys the render (and silences the clip while it re-renders). Comparing
 ///   bytes also compares a field added to `NoteSegment` tomorrow with no list
-///   here to update. That is sound because a note is plain data, a UUID
-///   followed by Doubles, so its bytes are exactly its fields. A future field
-///   that added padding or a reference could only make EQUAL notes compare
-///   unequal (one spare poll), never the reverse;
+///   here to update. That is sound because a note is plain data: a UUID,
+///   Doubles, and (since I7a) ONE trailing Bool, `isCleared`. Its first `size`
+///   bytes are exactly its fields and only its tail is padding, which the
+///   comparison skips. A future field that added INTERIOR padding or a
+///   reference could only make EQUAL notes compare unequal (one spare poll),
+///   never the reverse, and `noteBytesAreExactlyItsFields` would say so first;
 /// * **everything else through the type's own synthesized `==`**, on a copy with
 ///   the notes emptied and the stamp cleared, so a set-level field added
 ///   tomorrow is compared the day it lands.
@@ -131,6 +133,14 @@ public struct ClipRenderSignature: Equatable, Sendable {
 
         /// True when both tables hold the same bytes. Shared storage (the common
         /// case: nothing touched the set) answers without reading a note.
+        ///
+        /// ⚠️ **Each note is compared over its `size` bytes, never its
+        /// `stride`.** Since I7a added `isCleared` (a Bool, declared last), a
+        /// note is 129 bytes stored at a 136-byte stride, and the 7 tail bytes
+        /// are padding that nothing initialises. Comparing them would let two
+        /// EQUAL tables read unequal depending on what the allocator left
+        /// there. `noteBytesAreExactlyItsFields` pins that all padding is at the
+        /// tail, so a note's first `size` bytes are exactly its fields.
         static func bitIdentical(_ lhs: [NoteSegment], _ rhs: [NoteSegment]) -> Bool {
             guard lhs.count == rhs.count else { return false }
             return lhs.withUnsafeBytes { left in
@@ -138,7 +148,14 @@ public struct ClipRenderSignature: Equatable, Sendable {
                     guard let l = left.baseAddress, let r = right.baseAddress else {
                         return left.count == right.count
                     }
-                    return l == r || memcmp(l, r, left.count) == 0
+                    if l == r { return true }
+                    let size = MemoryLayout<NoteSegment>.size
+                    let stride = MemoryLayout<NoteSegment>.stride
+                    for index in 0..<lhs.count
+                    where memcmp(l + index * stride, r + index * stride, size) != 0 {
+                        return false
+                    }
+                    return true
                 }
             }
         }

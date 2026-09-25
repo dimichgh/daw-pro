@@ -789,7 +789,8 @@ public final class PianoRollModel {
     /// update compound the last, and an additive band could never give anything
     /// back (the `TimelineLanesView.updateMarquee` rule, one surface over).
     public func applyMarquee(hits: Set<UUID>, base: Set<UUID>, additive: Bool) {
-        selection = additive ? base.union(hits) : hits
+        // m23-ap I4: the rule's ONE home, shared with the pitch editor's band.
+        selection = PianoRollMarquee.selection(base: base, hits: hits, additive: additive)
     }
 
     /// Resizes a note's right edge to a snapped end beat. Length can't fall

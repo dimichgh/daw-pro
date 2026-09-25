@@ -109,6 +109,13 @@ public enum EditorSurface: String, Sendable, Equatable, CaseIterable {
     /// questions, and a pitch SEGMENT is not a note. They stay MIDI-only; ⌘A and
     /// DELETE *inside* the pitch editor are interaction questions that belong to
     /// the (still unwritten) §7, not to this enum.
+    ///
+    /// ⭐ ONE EXCEPTION, AND IT IS A REFUSAL (m23-ap p2-del): `DeleteMenuPolicy`
+    /// now reads the OPEN verdict's `.pitchEditorOpen` to refuse DELETE by name
+    /// while this pane is open, so ⌫ can never delete the clip it shows, and
+    /// (p2-del-2) `ClipboardMenuPolicy.copyMenuItem` refuses CUT on the same
+    /// verdict, so ⌘X cannot either. Neither routes anything to this surface;
+    /// what DELETE *does* in here is still §7's.
     case pitchEditor
 }
 
@@ -187,6 +194,12 @@ public struct ActiveEditorSurface: Sendable, Equatable {
 /// SELECTION**"), which cannot express a select-all at all — that key exists to
 /// be pressed when nothing is selected. Three items, three questions, three
 /// terms; this is the third term.
+///
+/// ⭐ m23-ap p2-del: Delete now reads this verdict too — but only its
+/// `.pitchEditorOpen` reason, and only to REFUSE (the note editor open means ⌫
+/// must not delete the clip it shows). Cut reads it the same way since
+/// p2-del-2. Both still ROUTE on `pianoRollWouldConsumeKey`; a refusal destroys
+/// nothing, which is the same argument that made ⌘A safe to widen.
 public struct OpenEditorSurface: Sendable, Equatable {
 
     /// WHICH TERM DECIDED, in the order `openSurface` applies them.
@@ -344,7 +357,9 @@ public enum EditorSurfaceRouter {
     /// does NOT qualify — both surfaces zoom, so "open" would have it zoom the
     /// one the user is not working in. ⌫ does not qualify either: it is
     /// destructive AND both surfaces claim it, which is why `DeleteMenuPolicy`
-    /// routes on a third term again (`pianoRollWouldConsumeKey`).
+    /// routes on a third term again (`pianoRollWouldConsumeKey`). (Since m23-ap
+    /// p2-del it reads THIS verdict's `.pitchEditorOpen` — to refuse ⌫ while the
+    /// note editor is open, never to route it; p2-del-2 refuses ⌘X the same way.)
     ///
     /// - Parameters:
     ///   - workspaceIsArrange: is the ARRANGE workspace live (as opposed to the

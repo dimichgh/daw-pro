@@ -298,8 +298,9 @@ public final class PanelLayoutStore {
     public private(set) var waveformVerticalZoom: CGFloat
     /// Whether the bottom note editor is MAXIMIZED (m25-b-1) — suspending the
     /// `editorFraction` clamp for as long as the mode is on. Read by the pane's
-    /// height expression, by the arrange row's pinned height, and by the roll's
-    /// header toggle; written by that toggle and by Escape. `editorFraction` is
+    /// height expression, by the arrange row's pinned height, and by the header
+    /// toggles of BOTH bottom editors (the roll's, and the note editor pane's
+    /// since m23-ap I6a); written by those toggles and by Escape. `editorFraction` is
     /// untouched throughout, which is what makes the restore land on the user's
     /// own height (see `editorMaximizedKey`).
     public private(set) var editorMaximized: Bool
@@ -525,9 +526,10 @@ public final class PanelLayoutStore {
     ///
     /// ⚠️ **DELIBERATELY DOES NOT TOUCH `editorFraction`.** That is the whole
     /// restore mechanism: the user's dragged height stays where it is and comes
-    /// back untouched when the mode ends. Two callers converge here — the roll's
-    /// header toggle and the Escape route — and both SET rather than toggle, so a
-    /// double-delivered Escape cannot re-maximize.
+    /// back untouched when the mode ends. Three callers converge here — the
+    /// roll's header toggle, the note editor pane's (m23-ap I6a), and the Escape
+    /// route — and all SET rather than toggle, so a double-delivered Escape
+    /// cannot re-maximize.
     public func setEditorMaximized(_ maximized: Bool) {
         editorMaximized = maximized
         backing.storeValue(maximized ? 1 : 0, forKey: Self.editorMaximizedKey)

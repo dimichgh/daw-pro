@@ -119,6 +119,42 @@ struct PlayboxProgressionTests {
             request: PlayboxRequest(bars: 999), seed: 3).degrees.count == 16)
     }
 
+    /// ⛔⛔ **EVERY SEED, EVERY LENGTH, BOTH MODES — NOT ONE SEED.** The wire and
+    /// the strip seed this path from the clock, so a seed that misbehaves is one
+    /// a user eventually gets. Before 2026-09-25, 28 of these 1000 seeds answered
+    /// a two-bar MAJOR request with FOUR chords, and 129 did in MINOR: the swap's
+    /// guard saw the whole sequence while only the first two chords lit (Doo-Wop
+    /// `[1, 6, …]` → `[6, 6]`), `validate` refused that, and the fallback was the
+    /// bare `[1, 5, 6, 4]`. `PlayboxCommandTests` met it only at random, through
+    /// the clock. Failures are tallied, not `#expect`ed per row, to stay fast.
+    @Test("⛔ EVERY seed, mode and length answers with exactly the chords asked for")
+    func localHonoursEveryLengthForEverySeed() {
+        let lengths = Array(PlayboxProgression.barsRange) + [0, 9_999]
+        var checked = 0
+        var failures: [String: Int] = [:]
+        var first: String?
+        for seed in UInt64(0)..<1_000 {
+            for mode in KeyMode.allCases {
+                for bars in lengths {
+                    let degrees = PlayboxProgression.localVariation(
+                        request: PlayboxRequest(keyMode: mode, bars: bars), seed: seed).degrees
+                    checked += 1
+                    let valid = degrees.count == PlayboxProgression.clampBars(bars)
+                        && Set(degrees).count >= 2
+                        && degrees.allSatisfy { PlayboxProgression.degreeRange.contains($0) }
+                    if !valid {
+                        failures["\(mode.rawValue)/\(bars)", default: 0] += 1
+                        if first == nil { first = "seed \(seed) \(mode.rawValue) bars \(bars) → \(degrees)" }
+                    }
+                }
+            }
+        }
+        #expect(checked == 34_000, "positive control: 1000 seeds × 2 modes × 17 lengths, got \(checked)")
+        let tally = failures.sorted { $0.key < $1.key }.map { "\($0.key): \($0.value)" }
+        #expect(failures.isEmpty,
+                "\(failures.values.reduce(0, +)) of \(checked) broke a rule — \(tally.joined(separator: ", ")); first: \(first ?? "none")")
+    }
+
     /// ⚠️ A minor project asked for lights must not be handed a major
     /// progression — `setProgression` would then switch the user's scale.
     @Test("⚠️ a MINOR request draws on the minor library")

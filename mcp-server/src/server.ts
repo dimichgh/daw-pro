@@ -6040,11 +6040,16 @@ registerTool(
       "about to work on. Returns {clipId, trackId, clipKind (\"midi\" or " +
       "\"audio\"), editorOpen, pitchEditorOpen, reason, workspace}. `reason` " +
       "tells you honestly what happened and is worth branching on: " +
-      "\"piano-roll-opened\" (a MIDI clip in the Arrange workspace — the note " +
-      "editor is on screen, editorOpen:true), \"pitch-editor-open\" (an AUDIO " +
+      "\"piano-roll-opened\" (a MIDI clip in the Arrange workspace — the piano " +
+      "roll is on screen, editorOpen:true), \"pitch-editor-open\" (an AUDIO " +
       "clip that view_open_pitch_editor already opened the PITCH editor on, and " +
-      "it is still open, pitchEditorOpen:true), \"audio-clip-has-no-editor\" " +
-      "(the clip IS selected, but audio has no NOTE editor and no pitch editor " +
+      "it is still open, pitchEditorOpen:true; the app's own UI calls THIS " +
+      "pane the \"note editor\" — its own Delete/Cut hint reads \"while the " +
+      "note editor is open\" — so if you're matching a screenshot's wording, " +
+      "\"note editor\" means the pitch editor, never the piano roll), " +
+      "\"audio-clip-has-no-editor\" " +
+      "(the clip IS selected, but audio has no piano roll — that pane is " +
+      "MIDI-only — and no pitch editor " +
       "is open on it either — this is a success, not an error; open the pitch " +
       "editor with view_open_pitch_editor, or use clip_analyze_audio / " +
       "clip_transcribe), or \"workspace-is-not-arrange\" (a MIDI clip, " +
@@ -6106,8 +6111,10 @@ registerTool(
     description:
       "Set what the DAW window is SHOWING, so a screenshot frames what you " +
       "actually want to look at: `workspace` picks the Arrange timeline or the " +
-      "Mix console, and `editorMaximized` makes the bottom editor (the piano " +
-      "roll) fill the window instead of sharing it with the timeline. Call it " +
+      "Mix console, and `editorMaximized` makes the bottom editor pane -- " +
+      "whichever one is open, the piano roll on a MIDI clip or the pitch " +
+      "editor on an audio clip -- fill the window instead of sharing it with " +
+      "the timeline. Call it " +
       "with NO arguments to READ the current layout without changing anything. " +
       "Returns {workspace, editorMaximized, editorFraction} — `editorFraction` " +
       "is read-only and is the user's own editor height, which maximizing never " +
@@ -7999,10 +8006,13 @@ registerTool(
       "is transparent-ish in the 0.75..1.5 ratio sweet spot; further out it still " +
       "works but smears transients. Every argument is OPTIONAL — an omitted field " +
       "keeps the clip's current value. AUDIO CLIPS ONLY (a MIDI clip is rejected). " +
-      "Rendering is ASYNCHRONOUS: after a large change the clip may be briefly " +
-      "SILENT while the engine renders — poll project_snapshot's per-clip " +
-      "`stretchRendering` flag (and `stretchError` if the render failed). Returns the " +
-      "updated clip.",
+      "Rendering is ASYNCHRONOUS. `ratio` always changes the clip's time base, so while " +
+      "a ratio change renders the clip plays SILENCE meanwhile (notice `clip-stretch-" +
+      "pending`); a `semitones`-only change (ratio untouched) keeps the time base, so " +
+      "meanwhile the clip plays its PREVIOUS version instead (notice `clip-render-" +
+      "previous`), or silence if there is no previous version to fall back on. Poll " +
+      "project_snapshot's per-clip `stretchRendering` flag (and `stretchError` if the " +
+      "render failed). Returns the updated clip.",
     inputSchema: {
       trackId: z.string().min(1).describe("Id of the track that owns the clip, from project_snapshot."),
       clipId: z.string().uuid().describe("Id of the AUDIO clip to stretch, from project_snapshot."),
@@ -8053,9 +8063,11 @@ registerTool(
       "(ratio doubles); halving it doubles the speed. The resulting ratio is clamped " +
       "to 0.25..4 (if the clamp bites, the final length is re-derived to keep the " +
       "source window intact). Fades re-clamp to the new length. AUDIO CLIPS ONLY. " +
-      "Like clip_set_stretch, rendering is asynchronous — the clip may be briefly " +
-      "silent after a big change (poll project_snapshot's per-clip `stretchRendering`). " +
-      "Returns the updated clip.",
+      "Like clip_set_stretch, rendering is asynchronous, and this ALWAYS scales the " +
+      "stretch ratio, which always changes the clip's time base — so the clip plays " +
+      "SILENCE while it renders, never a previous version (notice `clip-stretch-" +
+      "pending`, never `clip-render-previous`). Poll project_snapshot's per-clip " +
+      "`stretchRendering` (and `stretchError` if it failed). Returns the updated clip.",
     inputSchema: {
       trackId: z.string().min(1).describe("Id of the track that owns the clip, from project_snapshot."),
       clipId: z.string().uuid().describe("Id of the AUDIO clip to stretch, from project_snapshot."),
@@ -8902,17 +8914,22 @@ registerTool(
       "hardTune / any preserveVibrato:false request asks the render curve to flatten the " +
       "sung contour onto the target, which needs the detected pitch contour AT RENDER TIME " +
       "-- and, as of the contour-to-render work (2026-09-24), the render path threads one " +
-      "through: measured on a real vocal, Hard Tune's within-note wander drops 62.8 -> 18.2 " +
-      "cents (a 70% median cut), not the near-zero change a constant-offset fallback would " +
-      "give. ⚠️ The one remaining honest caveat: if the pitch detector could not run AT " +
-      "RENDER TIME, THAT render falls back to a constant per-note offset -- audibly like " +
+      "through: measured on a real vocal, Hard Tune cuts the wobble inside each held note by " +
+      "a median 49% (68% by an independent pitch meter) and keeps every measured note on its " +
+      "own note, while Tight leaves the wobble as sung -- not the near-zero change a " +
+      "constant-offset fallback would give. ⚠️ The one remaining honest caveat: if the pitch " +
+      "detector could not run AT RENDER TIME, THAT render falls back to a constant per-note " +
+      "offset -- audibly like " +
       "'tight' -- and the app posts a clip-pitch-contour-unavailable notice when it happens. " +
       "This call cannot know that in advance (it only segments and stores; it never " +
       "renders), so its own `warnings` field does not speculate about it. " +
-      "The TUNED audio is rendered in the background after this returns: until it lands " +
-      "the clip plays as SILENCE, and project_snapshot marks the clip `stretchRendering: " +
-      "true` (or carries `stretchError` if the render failed) -- poll that before " +
-      "transport_play when you need to hear the result. " +
+      "The TUNED audio is rendered in the background after this returns: a pitch edit " +
+      "keeps the clip's time base, so meanwhile the clip plays its PREVIOUS version " +
+      "(source, or its last render) rather than going silent (notice `clip-render-" +
+      "previous`) -- it falls back to SILENCE only if there is no previous version, or " +
+      "the render fails. project_snapshot marks the clip `stretchRendering: true` while " +
+      "the render is in flight (or carries `stretchError` if it failed) -- poll that " +
+      "before transport_play when you need to hear the result. " +
       "Coalescing: never (this is a structural edit, like split or a whole preset apply -- " +
       "each call is its own undo step). Returns {clipId, hasPitchEdits, analysisVersion, " +
       "retuneMs, segmentCount, isIdentity, appliedOptions: {scale, strength, retuneMs, " +
@@ -8921,8 +8938,12 @@ registerTool(
       "detectedHz, detectedConfidence, pitchOffsetCents, driftScale, vibratoScale, " +
       "vibratoRateHz/vibratoDepthCents/vibratoOnsetSeconds (a synthesised-vibrato generator " +
       "with no wire writer yet -- always 0 today), formantOffsetSemitones/" +
-      "timeStartDeltaSeconds/timeEndDeltaSeconds/amplitudeDb (carried for a later phase, " +
-      "unread by any renderer today, always 0)}], warnings} -- " +
+      "timeStartDeltaSeconds/timeEndDeltaSeconds (carried for a later phase, unread by any " +
+      "renderer today, always 0), amplitudeDb (the note's LEVEL in dB, 0 = as sung -- " +
+      "RENDERED since the contour-to-render work, written by clip_set_note_gain; -72 is " +
+      "the quietest level, never silence -- use clip_set_note_cleared for that), cleared " +
+      "(silenced in place when true, written by clip_set_note_cleared, independent of the " +
+      "level above)}], warnings} -- " +
       "every segment field is ALWAYS present, unlike the clip's own on-disk storage which " +
       "omits defaults, so you can't mistake 'default value' for 'field absent' when reading " +
       "this back. By default this REPLACES whatever was on the clip already (unchanged " +
@@ -9042,18 +9063,31 @@ registerTool(
     title: "Read back a clip's stored pitch correction",
     description:
       "STRICTLY READ-ONLY -- see what a prior clip_auto_correct_pitch / clip_set_note_pitch " +
-      "/ clip_split_note actually did, or confirm a clip carries no correction at all. Never " +
+      "/ clip_split_note / clip_set_note_cleared / clip_set_note_gain actually did, or " +
+      "confirm a clip carries no correction at all. Never " +
       "runs the detector, never edits anything, no undo entry. A clip that was never " +
       "corrected, or was cleared, reads back hasPitchEdits:false, segmentCount:0, " +
       "segments:[]. Returns the same shape as clip_auto_correct_pitch minus " +
       "`appliedOptions` (nothing was applied this call): {clipId, hasPitchEdits, " +
-      "analysisVersion, retuneMs, segmentCount, isIdentity, handEditedSinceAutoCorrect, " +
-      "segments: [{id, startSeconds, " +
+      "hasTuningEdits, analysisVersion, retuneMs, segmentCount, isIdentity, " +
+      "handEditedSinceAutoCorrect, segments: [{id, startSeconds, " +
       "endSeconds, detectedHz, detectedConfidence, pitchOffsetCents, driftScale, " +
       "vibratoScale, vibratoRateHz, vibratoDepthCents, vibratoOnsetSeconds, " +
-      "formantOffsetSemitones, timeStartDeltaSeconds, timeEndDeltaSeconds, amplitudeDb}], " +
-      "warnings}. Use this to find a note's `id`/`startSeconds`/`endSeconds` before calling " +
-      "clip_set_note_pitch or clip_split_note on it. `handEditedSinceAutoCorrect: true` " +
+      "formantOffsetSemitones, timeStartDeltaSeconds, timeEndDeltaSeconds, amplitudeDb, " +
+      "cleared}], " +
+      "warnings}. TWO FLAGS, not one: `hasPitchEdits` is true whenever ANYTHING was written " +
+      "(a pitch move, a clear, or a level change) and gates whether the clip renders through " +
+      "the tuning path at all. `hasTuningEdits` is true only when a PITCH actually moved -- " +
+      "so `hasPitchEdits && !hasTuningEdits` means every edit on this clip was a clear or a " +
+      "level change, nothing was retuned (the app's header then reads \"NOTES EDITED\" " +
+      "rather than \"TUNING APPLIED\"). `amplitudeDb` is the note's LEVEL (0 = as sung, " +
+      "written by " +
+      "clip_set_note_gain) and `cleared` is whether it is silenced IN PLACE (written by " +
+      "clip_set_note_cleared) -- the two are independent: a cleared note keeps its own " +
+      "`amplitudeDb` underneath, and comes back at that level when restored. Use this to " +
+      "find a note's `id`/`startSeconds`/`endSeconds` before calling " +
+      "clip_set_note_pitch, clip_split_note, clip_set_note_cleared or clip_set_note_gain " +
+      "on it. `handEditedSinceAutoCorrect: true` " +
       "means clip_auto_correct_pitch {replaceExisting:false} would refuse right now -- " +
       "false means the table is either untouched, empty, or exactly a preset's own last " +
       "output (switching presets never sets this).",
@@ -9085,8 +9119,11 @@ registerTool(
       "segmentId all refuse with a teaching error. Coalescing: two calls on the SAME note " +
       "within 800ms fold into one undo step (like a continuous drag); a different note " +
       "always starts a new one. Like clip_auto_correct_pitch, the retuned audio renders in " +
-      "the background (the clip is silent until it lands) -- poll project_snapshot's " +
-      "per-clip `stretchRendering` before playing it. Returns the same full-table shape as " +
+      "the background -- meanwhile the clip plays its PREVIOUS version (a note-pitch edit " +
+      "keeps the clip's time base; notice `clip-render-previous`), or SILENCE if there is no " +
+      "previous version or the render fails (`clip-stretch-pending`) -- poll " +
+      "project_snapshot's per-clip `stretchRendering` before playing it. Returns the same " +
+      "full-table shape as " +
       "clip_get_pitch_edits " +
       "(every OTHER note included, unchanged) plus `segmentId` (echoing what you sent) and " +
       "the stored, post-clamp `pitchOffsetCents`.",
@@ -9175,6 +9212,9 @@ registerTool(
       "absolute seconds (the clip_detect_pitch/clip_set_note_pitch domain). `playedMidi` " +
       "already includes the clip's whole-clip pitch shift; `editedSeconds` equals " +
       "`sourceSeconds` today (reserved for a future per-note timing feature). " +
+      "A CLEARED note (clip_set_note_cleared) has NO played pitch, because it plays silence: " +
+      "its span is a HOLE in `runs`, exactly like an unvoiced gap in the singing -- never a " +
+      "run of its own, and never a point with some fabricated value. " +
       "SIZE: a 5-minute vocal is roughly 18,900 frames, so the DEFAULT whole-clip call on a " +
       "real take DOES decimate -- `decimated`/`pointCount`/`totalPointCount` say exactly what " +
       "happened, always, never silently. Narrow with `fromSeconds`/`durationSeconds` for full " +
@@ -9222,6 +9262,255 @@ registerTool(
   async ({ clipId, fromSeconds, durationSeconds, maxPoints }) =>
     toToolResult(() =>
       bridge.send("clip.getPlayedPitch", { clipId, fromSeconds, durationSeconds, maxPoints })
+    )
+);
+
+registerTool(
+  "clip_set_note_cleared",
+  {
+    title: "Silence or restore one or more sung notes in place",
+    description:
+      "Silences notes IN PLACE, moving nothing else -- I7a's writer for the pitch editor's " +
+      "Clear/Restore action (interaction-batch design section 10, ruled in section 17). " +
+      "`cleared: true` mutes every named note between two 10ms ramps inside its own span " +
+      "(numerically exact zeros, no click); `cleared: false` brings them back at their OWN " +
+      "level -- never 0 dB, never a floor -- because clearing and level are independent " +
+      "fields (see clip_set_note_gain, which sets the level a restored note comes back at). " +
+      "Takes N note ids and ONE flag applied to all of them, in ONE undo step ('Clear Notes' " +
+      "/ 'Restore Notes'), never coalesced -- a deliberate on/off, the clip_remove_many/" +
+      "clip_move_many group-verb precedent: clearing 3 notes is a single entry, never 3. A " +
+      "repeated id is folded; an unknown id among several REFUSES THE WHOLE CALL -- ALL OR " +
+      "NOTHING, so a typo cannot half-clear a phrase. " +
+      "REQUIRES A STORED NOTE TABLE ALREADY ON THE CLIP, the clip_set_note_pitch rule " +
+      "verbatim -- there is NO pitch detection on this wire path: run clip_auto_correct_pitch " +
+      "first, then read note ids back with clip_get_pitch_edits. A MIDI clip is refused (its " +
+      "notes have no clear/level mask -- mute the MIDI note itself instead). " +
+      "Returns clip_get_pitch_edits' own shape (every note, each with its `cleared` flag) " +
+      "plus `segmentIds` (the notes this call named, deduplicated, in request order) and " +
+      "`cleared`, read back from the STORED notes rather than echoed from the request.",
+    inputSchema: {
+      clipId: z.string().uuid().describe("Id of the AUDIO clip the notes belong to."),
+      segmentIds: z
+        .array(z.string().uuid())
+        .describe(
+          "Ids of the notes to clear or restore (from clip_get_pitch_edits / " +
+            "clip_auto_correct_pitch's `segments`). At least one is required; a repeated id " +
+            "is harmless (folded). ALL OR NOTHING: an unknown id among several refuses the " +
+            "whole call and changes nothing."
+        ),
+      cleared: z
+        .boolean()
+        .describe(
+          "true silences the named notes in place; false restores them at their own level. " +
+            "No default -- a caller always says which way is meant."
+        ),
+    },
+  },
+  async ({ clipId, segmentIds, cleared }) =>
+    toToolResult(() => bridge.send("clip.setNoteCleared", { clipId, segmentIds, cleared }))
+);
+
+registerTool(
+  "clip_set_note_gain",
+  {
+    title: "Set one or more sung notes' level, in dB (per-note volume)",
+    description:
+      "Sets each named note's LEVEL in dB, in place -- U-D's writer for the pitch editor's " +
+      "per-note gain (the door Melodyne's Amplitude tool covers). `gainDb` is the note's " +
+      "FINAL level from where it was sung, 0 = as sung, NOT a delta: send -6 twice in a row " +
+      "and the note still reads back -6, not -12. Clamped to -72..24 dB (the same range a " +
+      "whole clip's own gain uses) -- read the response back rather than trusting the number " +
+      "you sent, in case it was clamped. -72 dB IS THE QUIETEST LEVEL, NOT SILENCE (about " +
+      "2.5e-4 of full scale) -- to actually silence a note use clip_set_note_cleared " +
+      "instead, which keeps this note's own level intact underneath for when it is restored. " +
+      "Takes N note ids and ONE value applied to all of them, in ONE undo step " +
+      "('Set Note Level'), never coalesced -- the clip_set_note_cleared group-verb " +
+      "precedent. A repeated id is folded; an unknown id among several REFUSES THE WHOLE " +
+      "CALL -- ALL OR NOTHING, so a typo cannot half-set a phrase's level. " +
+      "REQUIRES A STORED NOTE TABLE ALREADY ON THE CLIP, the clip_set_note_pitch rule " +
+      "verbatim -- there is NO pitch detection on this wire path: run clip_auto_correct_pitch " +
+      "first, then read note ids back with clip_get_pitch_edits. A MIDI clip is refused. " +
+      "A level alone (even on an otherwise untouched, freshly-detected table) takes the clip " +
+      "out of the render's identity bypass, so it renders through the stretch cache -- the " +
+      "same rule clip_set_note_cleared's clear flag follows; setting every named note back " +
+      "to 0 dB does not clear anything (level and cleared are independent), it only means " +
+      "'as sung'. " +
+      "Returns clip_get_pitch_edits' own shape (every note, each with its `amplitudeDb`) " +
+      "plus `segmentIds` (the notes this call named, deduplicated, in request order) and " +
+      "`gainDb`, read back from the STORED notes rather than echoed from the request, so a " +
+      "clamp is visible.",
+    inputSchema: {
+      clipId: z.string().uuid().describe("Id of the AUDIO clip the notes belong to."),
+      segmentIds: z
+        .array(z.string().uuid())
+        .describe(
+          "Ids of the notes to set the level of (from clip_get_pitch_edits / " +
+            "clip_auto_correct_pitch's `segments`). At least one is required; a repeated id " +
+            "is harmless (folded). ALL OR NOTHING: an unknown id among several refuses the " +
+            "whole call and changes nothing."
+        ),
+      gainDb: z
+        .number()
+        .describe(
+          "The note's FINAL level in dB, 0 = as sung. Absolute, not a delta. Clamped to " +
+            "-72..24 dB; -72 is the quietest level, never silence -- use clip_set_note_cleared " +
+            "to actually silence a note."
+        ),
+    },
+  },
+  async ({ clipId, segmentIds, gainDb }) =>
+    toToolResult(() => bridge.send("clip.setNoteGain", { clipId, segmentIds, gainDb }))
+);
+
+registerTool(
+  "clip_set_note_pitches",
+  {
+    title: "Move several sung notes' pitch at once (per-note tuning, one undo step)",
+    description:
+      "Moves several detected notes' pitch in ONE call and ONE undo step -- the BATCH " +
+      "sibling of clip_set_note_pitch, for retuning a whole phrase without one round trip " +
+      "per note. Each note gets its OWN absolute cents -- the intervals between notes are " +
+      "whatever you send, nothing is kept or forced (unlike clip_set_note_gain/" +
+      "clip_set_note_cleared, which apply ONE shared value to every named note). `cents` " +
+      "means exactly what it means on clip_set_note_pitch: each note's FINAL offset from " +
+      "where it was sung, not a delta -- send the same list twice and every note ends up in " +
+      "the same place both times, never accumulated. Clamped to +/-2400 cents (2 octaves) " +
+      "PER NOTE -- read the response back rather than trusting the numbers you sent, in case " +
+      "one was clamped. " +
+      "ALL OR NOTHING: every segmentId is resolved before anything is written, so ONE " +
+      "unknown id among several refuses the WHOLE call and changes nothing (the " +
+      "clip_remove_many/clip_move_many group-verb precedent). Naming the same note twice " +
+      "with the SAME cents is harmless (folded, clamp-first -- e.g. 9999 and 2400 both land " +
+      "on 2400 and are NOT a conflict); naming it twice with two DIFFERENT stored cents " +
+      "refuses -- that is an unresolvable contradiction inside one call, not a 'last one " +
+      "wins' silent pick. " +
+      "NEVER COALESCES: unlike a live drag in the pitch editor (which folds repeats of the " +
+      "SAME selection inside 800ms into one undo step), each clip_set_note_pitches call is " +
+      "its OWN undo step even if you send the identical list twice in a row -- a one-shot " +
+      "wire call has no open selection gesture for a second call to continue. " +
+      "REQUIRES A STORED NOTE TABLE ALREADY ON THE CLIP, the clip_set_note_pitch rule " +
+      "verbatim -- there is NO pitch detection on this wire path: run clip_auto_correct_pitch " +
+      "first, then read note ids back with clip_get_pitch_edits. A MIDI clip is refused. " +
+      "An empty notes list is refused too, naming clip_get_pitch_edits as the way to read " +
+      "note ids first. " +
+      "Returns clip_get_pitch_edits' own shape (every note, the full table) plus `notes`: an " +
+      "array of {segmentId, pitchOffsetCents}, one per note THIS call named (deduplicated, " +
+      "in request order), each `pitchOffsetCents` read back from the STORED, post-clamp " +
+      "value -- never the `cents` number you sent.",
+    inputSchema: {
+      clipId: z.string().uuid().describe("Id of the AUDIO clip the notes belong to."),
+      notes: z
+        .array(
+          z.object({
+            segmentId: z
+              .string()
+              .uuid()
+              .describe("Id of the note (from clip_get_pitch_edits / clip_auto_correct_pitch's `segments`)."),
+            cents: z
+              .number()
+              .describe(
+                "This note's FINAL pitch offset from where it was sung, in cents (100 " +
+                  "cents = 1 semitone). Absolute, not a delta. Clamped to +/-2400 (2 octaves)."
+              ),
+          })
+            // `.strict()` (m30-c): a typo'd field inside one `notes` element
+            // would otherwise be silently stripped instead of rejected.
+            .strict()
+        )
+        .describe(
+          "The notes to move, each with its OWN absolute cents. At least one is required " +
+            "(an empty list is refused by the app, naming clip_get_pitch_edits as the way to " +
+            "read note ids first). A repeated segmentId whose cents CLAMP to the same value " +
+            "is folded; two DIFFERENT stored values for the same id refuse the whole call. " +
+            "ALL OR NOTHING: an unknown segmentId among several refuses the whole call and " +
+            "changes nothing."
+        ),
+    },
+  },
+  async ({ clipId, notes }) =>
+    toToolResult(() => bridge.send("clip.setNotePitches", { clipId, notes }))
+);
+
+registerTool(
+  "clip_audition_note",
+  {
+    title: "Hear one or more sung notes now, as they currently sound",
+    description:
+      "Plays one or more detected notes from a vocal clip RIGHT NOW, as they sound with every " +
+      "pitch edit already applied, with a little audio on each side for context. The sound comes " +
+      "out of the USER's speakers -- YOU, the agent, hear nothing; use this when the user wants to " +
+      "check how a note or a retuned phrase sounds, not to verify anything yourself. Not an edit: " +
+      "nothing is written to the clip, and it costs no undo step. " +
+      "ONE OR MORE NOTES, ONE SPAN: name a single note to hear it alone, or several to hear the " +
+      "whole passage they span (the earliest note's start to the latest note's end, plus context) " +
+      "in ONE playback -- not one call per note. " +
+      "AT MOST ABOUT 6 SECONDS ARE HEARD per call: a longer span keeps its start (just before " +
+      "the earliest named note) and is cut at its end, and on a time-stretched clip those 6 " +
+      "heard seconds cover less of the recording. The reply's startSeconds/endSeconds are " +
+      "RECORDING (source-file) seconds and say exactly what plays. " +
+      "PLAYS NOTHING WHILE THE TRANSPORT RUNS OR RECORDS: stop it first (transport_stop), or the " +
+      "reply says so instead of sounding anything. This is a deliberate refusal, not a bug -- a " +
+      "second voice on top of the transport's own playback would double the vocal. " +
+      "IGNORES the user's in-app 'audition while editing' preference on purpose: that preference " +
+      "means 'do not sound notes while I am dragging one', not 'this tool may never make sound'. " +
+      "`audible:false` is a REAL ANSWER, not an error -- read `reason` and act on it rather than " +
+      "retrying blindly (these are every tag this tool can actually answer with, read from the " +
+      "engine's own reason enum, not a guess): " +
+      "`transport-running` (stop the transport, then ask again); `still-rendering` (the clip's " +
+      "render is still catching up with a recent edit -- wait a moment and ask again); " +
+      "`track-muted` (the track is muted, or excluded by another track's active solo); " +
+      "`engine-stopped` (the audio engine is not running); `no-audio` (nothing to play -- the clip " +
+      "has no audio, or it left the mix mid-rebuild); `unsupported` (this build's engine has no " +
+      "clip-note audition at all). " +
+      "WHAT `audible:true` DOES AND DOES NOT MEAN: it means ACCEPTED -- the engine has taken the " +
+      "request and will start playing within milliseconds, unless the audio underneath cannot " +
+      "actually be read. It answers before that read happens, so it is not a guarantee the sound " +
+      "was produced -- and this `audible` means something DIFFERENT from note_audition/" +
+      "note_play's `audible`: theirs says a note-on reached a live renderer; this one says the " +
+      "request was accepted before any audio was even read, an earlier and weaker claim. Never " +
+      "claim the user heard it, only that playback was accepted. " +
+      "A FAILURE AFTER ACCEPTANCE never appears in this tool's own reply -- call project_snapshot " +
+      "and look at its `engineNotices` array for an entry whose `code` is \"clip-audition-failed\"; " +
+      "read that entry's `count` BEFORE you call this tool and compare AFTER, because the ring " +
+      "COALESCES by code -- a repeat only raises the existing entry's `count`, it never adds a new " +
+      "one, so the entry's mere presence proves nothing about THIS call by itself. " +
+      "A SUPERSEDED AUDITION (a newer clip_audition_note call, or a stop, replaced this one before " +
+      "it finished loading) reports NOTHING at all -- no notice, no error, silence; do not read " +
+      "the absence of any signal as success either. " +
+      "`outcome` carries the engine's own raw answer alongside `audible`/`reason` for diagnostics; " +
+      "treat `audible`+`reason` as the ones to act on. " +
+      "`source` says what is actually sounding -- \"render\" or \"span-render\" (the clip's tuned, " +
+      "stretched or transposed audio, so pitch edits are heard) or \"source\" (the clip's audio " +
+      "as recorded, for a clip nothing has changed the sound of yet). " +
+      "A SOUNDING AUDITION CAN BE STOPPED with transport_panic. " +
+      "ALL-OR-NOTHING: every id in `segmentIds` is resolved before anything plays, so ONE unknown " +
+      "id among several refuses the whole call and plays nothing, naming how many notes the clip " +
+      "DOES carry. REQUIRES A STORED NOTE TABLE ALREADY ON THE CLIP, the clip_set_note_pitch rule " +
+      "verbatim -- run clip_auto_correct_pitch first, then read note ids back with " +
+      "clip_get_pitch_edits. A MIDI clip is refused; MIDI notes play through note_audition " +
+      "instead. An empty segmentIds list is refused too, naming clip_get_pitch_edits as the way " +
+      "to read note ids first.",
+    inputSchema: {
+      clipId: z.string().uuid().describe("Id of the AUDIO clip the notes belong to."),
+      segmentIds: z
+        .array(z.string().uuid())
+        .describe(
+          "Ids of the notes to hear together (from clip_get_pitch_edits / " +
+            "clip_auto_correct_pitch's `segments`). One name plays that note alone; several play " +
+            "the whole span they cover, once, together. A repeated id is folded."
+        ),
+      contextSeconds: z
+        .number()
+        .optional()
+        .describe(
+          "Seconds of audio played on EACH side of the named notes, for context (default 0.06 s). " +
+            "0-2 s; the app refuses anything outside that range rather than clamping it."
+        ),
+    },
+  },
+  async ({ clipId, segmentIds, contextSeconds }) =>
+    toToolResult(() =>
+      bridge.send("clip.auditionNote", { clipId, segmentIds, contextSeconds })
     )
 );
 
@@ -13735,12 +14024,17 @@ server.registerTool(
       "May also include `engineNotices` (m15-e): a top-level array of schedule-time " +
       "DEGRADATION reports — cases where playback proceeded on time but not exactly as " +
       "the project describes (e.g. a fade or gain envelope that couldn't be prepared in " +
-      "time so the clip played without it, or a stretched or TUNED clip whose render " +
-      "wasn't ready yet, so it played as silence — reported when playback actually starts " +
+      "time so the clip played without it, or a clip whose render wasn't ready yet, so it " +
+      "played its PREVIOUS version or SILENCE, depending on whether the edit kept its " +
+      "time base — reported when playback actually starts " +
       "over it, never at the edit itself). Each entry is `{code, message, beat, count, " +
       "lastAt}`: `code` is a stable machine key naming the degradation family (the current " +
-      "ones are `clip-stretch-pending` — a time-stretched, transposed or tuned clip still " +
-      "rendering, one code for all three — plus `clip-fades-skipped`, " +
+      "ones are `clip-stretch-pending` — a pending clip playing SILENCE meanwhile, because " +
+      "its edit changed the stretch ratio, its render failed, or it has no previous " +
+      "version to fall back on — and `clip-render-previous` — a pending clip playing its " +
+      "PREVIOUS version meanwhile instead, because its edit (a transpose, or a note's " +
+      "pitch, level, clear or timing edit) kept the stretch ratio and a previous version " +
+      "exists; never both for the same clip at once — plus `clip-fades-skipped`, " +
       "`clip-envelope-skipped`, `clip-unplayable`, `clip-file-missing`, " +
       "`clip-pitch-contour-unavailable`, `instrument-unavailable`, " +
       "`output-device-unavailable`, `engine-exception` and `ai-generation-interrupted`) " +
@@ -13758,8 +14052,11 @@ server.registerTool(
       "a time-stretch or transpose (clip_set_stretch / clip_stretch_to_length) OR a tuning " +
       "(clip_auto_correct_pitch / clip_set_note_pitch / clip_split_note) — may carry two " +
       "transient, never-saved fields: `stretchRendering: true` while that render is in " +
-      "flight (the clip plays as SILENCE until it lands) and `stretchError`, a readable " +
-      "reason, when it FAILED (the clip stays silent until the edit changes). Both are " +
+      "flight -- meanwhile the clip plays its PREVIOUS version if the edit kept its " +
+      "stretch ratio (notice `clip-render-previous`), or SILENCE if it did not, or there " +
+      "is no previous version to fall back on (notice `clip-stretch-pending`) -- and " +
+      "`stretchError`, a readable reason, when it FAILED (the clip stays silent, never " +
+      "bridged to a previous version, until the edit changes). Both are " +
       "ABSENT when there is nothing to report and never appear on an untouched clip; poll " +
       "until `stretchRendering` clears before transport_play when you need to hear the edit. " +
       "MIDI clips (from " +

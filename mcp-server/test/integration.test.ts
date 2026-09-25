@@ -595,7 +595,50 @@ test("tools/list returns exactly the audit-enforced tool count", { skip: SKIP_RE
   // an already-registered tool. RE-MEASURED: **42 direct + 203 wrapper =
   // 245**, 0 duplicates in either set, 0 names in both sets, bogus-name
   // negative control still returning 0.
-  assert.equal(result.tools.length, 245);
+  //
+  // 245 -> 246 at I7a (2026-09-24): `clip_set_note_cleared` (new tool,
+  // wrapper — real typo-worth-catching params: `clipId`, `segmentIds`,
+  // `cleared`), mirroring the wire's `clip.setNoteCleared`
+  // (`Commands.swift` 240 -> 241) 1:1, no exception-table entry needed.
+  // RE-MEASURED: **42 direct + 204 wrapper = 246**, 0 duplicates in either
+  // set, 0 names in both sets, bogus-name negative control still returning 0.
+  //
+  // 246 -> 247 at U-D (2026-09-24): `clip_set_note_gain` (new tool, wrapper —
+  // real typo-worth-catching params: `clipId`, `segmentIds`, `gainDb`),
+  // mirroring the wire's `clip.setNoteGain` (`Commands.swift` 241 -> 242)
+  // 1:1, no exception-table entry needed. RE-MEASURED: **42 direct + 205
+  // wrapper = 247**, 0 duplicates in either set, 0 names in both sets,
+  // bogus-name negative control still returning 0.
+  //
+  // 247 -> 248 at the I4 wire leg (2026-09-24, mcp-integration-engineer part
+  // 1 of 2): `clip_set_note_pitches` (new tool, wrapper — real
+  // typo-worth-catching params: `clipId`, `notes`), mirroring the wire's
+  // `clip.setNotePitches` (`Commands.swift` 242 -> 243) 1:1, no
+  // exception-table entry needed. It is the BATCH twin of
+  // `clip_set_note_pitch`: each note carries its OWN cents, unlike
+  // `clip_set_note_gain`/`clip_set_note_cleared`'s one value shared by every
+  // named note. RE-MEASURED, not derived, by the same two name-capturing
+  // regexes (`^server\.registerTool($` / `^registerTool($`): **42 direct +
+  // 206 wrapper = 248**, 0 duplicates in either set, 0 names in both sets,
+  // bogus-name negative control still returning 0. NOT a plugin release:
+  // `claude-plugin/server/index.mjs` stays at 247 (42 + 205) this close —
+  // part 2 (after the DAWEngine/DAWCore audition leg lands) adds
+  // `clip_audition_note`, then ONE regen and the version bump.
+  //
+  // 248 -> 249 at the I1 wire leg (2026-09-25, mcp-integration-engineer part
+  // 2 of 2): `clip_audition_note` (new tool, WRAPPED — the note_audition
+  // precedent: its closest sibling, "sounds now, not an edit", is itself
+  // registered through the wrapped/strict path, and the brief separately
+  // requires a strict schema regardless), mirroring the wire's
+  // `clip.auditionNote` (`Commands.swift` 243 -> 244) 1:1, no
+  // exception-table entry needed. RE-MEASURED, not derived, by the full
+  // name-capturing/dedup/intersection regex (never just the anchored line
+  // count): **42 direct + 207 wrapper = 249**, 0 duplicates in either set,
+  // 0 names in both sets, `clip_audition_note` present in the wrapper set
+  // (positive control), a bogus name absent from both (negative control).
+  // ONE release, 0.17.0, lands in this same close: see plugin.json and the
+  // built-bundle smoke test below.
+  assert.equal(result.tools.length, 249);
 });
 
 // ---------------------------------------------------------------------------

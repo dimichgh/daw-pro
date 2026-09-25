@@ -93,6 +93,16 @@ public final class PianoRollNoteSelectionBridge {
     /// its own name to avoid, only with the user's notes at stake.
     public private(set) var deleteNonce = 0
 
+    /// ASKED OF THE ROLL by the app's key monitor (m34-k): run your Escape path
+    /// — the roll's own mount body, the I4 ladder with the roll's LIVE facts —
+    /// without a SwiftUI key delivery. `PitchEditorInteractionBridge.escapeNonce`
+    /// is the pane's twin. It carries no rung: the roll re-asks the app's one
+    /// ladder with its own gesture and selection, so the monitor's prediction
+    /// can never apply a rung the roll disagrees with.
+    ///
+    /// A THIRD NONCE, for `deleteNonce`'s reason: one number, one meaning.
+    public private(set) var escapeNonce = 0
+
     public init() {}
 
     /// The roll's report. Idempotent — the view calls it with `initial: true`.
@@ -112,6 +122,11 @@ public final class PianoRollNoteSelectionBridge {
     /// the view's guard is what makes a stale menu impossible to act on rather
     /// than merely unlikely.
     public func requestDelete() { deleteNonce += 1 }
+
+    /// THE KEY MONITOR HANDED THE ROLL AN ESCAPE (m34-k). Inert with no roll
+    /// mounted — the view watches without `initial:`, so a roll that appears
+    /// later never replays it.
+    public func requestEscape() { escapeNonce &+= 1 }
 
     /// Stage a note selection into whatever roll is on screen.
     public func stage(selectAll: Bool) {

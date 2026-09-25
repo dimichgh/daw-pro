@@ -311,6 +311,11 @@ struct ClipRenderSignatureTests {
             changed[keyPath: path] = value
             variants.append((field, changed))
         }
+        // I7a: the one field that is not a Double. `n` carries a level, so the
+        // digest already emits its level block, and that block carries this flag.
+        var cleared = n
+        cleared.isCleared = true
+        variants.append(("isCleared", cleared))
         // Keeps this test's name true: a field added to `NoteSegment` is
         // compared by construction (the signature compares a note's bytes),
         // but this list has to grow by one line to PROVE it.
@@ -328,18 +333,50 @@ struct ClipRenderSignatureTests {
         }
     }
 
-    @Test("exact: a note is a UUID followed by Doubles, so comparing its bytes compares its fields")
+    @Test("exact: a note's first size bytes are exactly its fields (a UUID, Doubles, one trailing Bool)")
     func noteBytesAreExactlyItsFields() {
         // The premise of `ClipRenderSignature.Tuning.bitIdentical`, stated in
-        // the type's doc. A field that is not a Double (a Bool, an enum, a
-        // String) could add padding or a reference, so equal notes might read
-        // unequal. That costs only a spare poll, but the doc would be wrong.
+        // the type's doc. Until I7a a note was a UUID followed by Doubles, with
+        // size == stride. I7a added ONE Bool, `isCleared`, declared LAST, so
+        // the struct now has padding, and this pin moved from "no padding" to
+        // "padding only at the TAIL": the comparison reads `size` bytes per
+        // note, which are exactly the fields. A field that put padding INSIDE
+        // the note, or a reference, would break that, and this test says so.
         let note = tunedSet().segments[0]
         let fields = Mirror(reflecting: note).children.count
         #expect(MemoryLayout<NoteSegment>.size
-                    == MemoryLayout<UUID>.size + (fields - 1) * MemoryLayout<Double>.size,
-                "NoteSegment is no longer a UUID followed by Doubles — revisit the byte comparison")
-        #expect(MemoryLayout<NoteSegment>.size == MemoryLayout<NoteSegment>.stride)
+                    == MemoryLayout<UUID>.size + (fields - 2) * MemoryLayout<Double>.size
+                        + MemoryLayout<Bool>.size,
+                "NoteSegment is no longer a UUID, Doubles and one trailing Bool — revisit the byte comparison")
+        #expect(MemoryLayout<NoteSegment>.offset(of: \NoteSegment.isCleared)
+                    == MemoryLayout<NoteSegment>.size - MemoryLayout<Bool>.size,
+                "isCleared is no longer the last byte, so padding may sit INSIDE a note")
+        #expect(MemoryLayout<NoteSegment>.stride > MemoryLayout<NoteSegment>.size,
+                "precondition for the padding test below: there IS tail padding to be wrong about")
+    }
+
+    @Test("exact: tail padding cannot make two equal note tables compare unequal")
+    func tailPaddingIsNeverCompared() {
+        // Deterministic, not luck: one table is built in memory PRE-FILLED
+        // with 0xAB, so its tail padding holds bytes an ordinary allocation
+        // would not. Comparing `stride` bytes (the pre-I7a comparison) reads
+        // them and calls equal notes different. Comparing `size` bytes does not.
+        let notes = tunedSet().segments
+        let padded = [NoteSegment](unsafeUninitializedCapacity: notes.count) { buffer, count in
+            guard let base = buffer.baseAddress else { count = 0; return }
+            memset(base, 0xAB, MemoryLayout<NoteSegment>.stride * notes.count)
+            for (index, note) in notes.enumerated() {
+                (base + index).initialize(to: note)
+            }
+            count = notes.count
+        }
+        #expect(padded == notes)
+        #expect(ClipRenderSignature.Tuning.bitIdentical(padded, notes),
+                "two tables of equal notes compared unequal: the comparison read padding")
+        // The negative control: a real one-note difference is still seen.
+        var changed = notes
+        changed[1].isCleared = true
+        #expect(!ClipRenderSignature.Tuning.bitIdentical(padded, changed))
     }
 
     @Test("exact: changing the retune speed or the analysis version changes the signature")

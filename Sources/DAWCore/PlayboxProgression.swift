@@ -231,9 +231,14 @@ public enum PlayboxProgression {
     ///      the seven the row can play.
     ///   4. Loop or truncate to the requested length.
     ///
-    /// ⚠️ Step 3 is skipped when it would collapse the sequence to one degree —
-    /// `validate` would reject that, and a fallback that can fail is not a
-    /// fallback.
+    /// ⚠️ **ALWAYS exactly `clampBars(request.bars)` chords, all on the row, at
+    /// least two of them different** — a fallback that can fail is not a
+    /// fallback. Step 3's guard sees the WHOLE sequence, but only the first
+    /// `bars` chords light, and at two bars a swap beside its own relative
+    /// collapses them (Doo-Wop `[1, 6, …]` → `[6, 6]`). A cut `validate` refuses
+    /// falls back to the same rotation without the swap, then to I–V–vi–IV, each
+    /// cut to length — never the bare four-chord constant, which once answered
+    /// a two-bar request with four.
     public static func localVariation(request: PlayboxRequest, seed: UInt64) -> PlayboxPlan {
         var rng = SplitMix64(seed: seed)
         let candidates = ChordProgressionLibrary.all.filter { $0.mode == request.keyMode }
@@ -257,6 +262,8 @@ public enum PlayboxProgression {
             let rotation = Int(rng.next(upperBound: UInt64(degrees.count)))
             degrees = Array(degrees[rotation...] + degrees[..<rotation])
         }
+        // Kept for the fallback below: the swap can collapse a short cut.
+        let rotated = degrees
 
         // The relative substitution, at one seeded index.
         let relatives: [Int: Int] = [1: 6, 6: 1, 4: 2, 2: 4, 5: 3, 3: 5]
@@ -270,17 +277,24 @@ public enum PlayboxProgression {
         }
 
         let bars = clampBars(request.bars)
-        var out: [Int] = []
-        while out.count < bars { out.append(degrees[out.count % degrees.count]) }
 
         // `validate` is applied to the LOCAL path too, deliberately: one gate for
         // "is this a usable progression", not one for the model and a different,
         // more trusting one for ourselves.
-        let final = validate(degrees: out) ?? [1, 5, 6, 4]
+        let final = validate(degrees: fit(degrees, to: bars))
+            ?? validate(degrees: fit(rotated, to: bars))
+            ?? fit([1, 5, 6, 4], to: bars)
         return PlayboxPlan(
             degrees: final,
             name: "\(sourceName) variation",
             provenance: PlayboxProvenance(kind: .local, detail: sourceName))
+    }
+
+    /// Step 4: loop or truncate `sequence` to exactly `bars` chords.
+    private static func fit(_ sequence: [Int], to bars: Int) -> [Int] {
+        var out: [Int] = []
+        while out.count < bars { out.append(sequence[out.count % sequence.count]) }
+        return out
     }
 
     // MARK: - The prompt

@@ -149,16 +149,22 @@ extension AppModel {
         }
     }
 
-    /// The pitch editor committed ONE note edit (m23-ap Increment C).
+    /// The pitch editor committed ONE note edit (m23-ap Increment C) — or, since
+    /// I4, one GROUP pitch drag (`.notePitches`, one store call for N notes) —
+    /// or, since I7b, one Clear / Restore of N notes (`.notesCleared`, one
+    /// store call, one "Clear Notes" / "Restore Notes" undo step).
     ///
     /// ⭐ **ONE CALL PER GESTURE, NOT PER POINTER TICK** (design §8.2 / §11
     /// P7b). The cadence is enforced in `PitchEditorModel`, which is the only
     /// thing that calls this, and `PitchEditorModelTests.aDragTickNeverCommits`
     /// is what proves it — a source-shape gate over a `DragGesture` closure
     /// could not. Per-tick writes would re-key `ClipKey.pitchEditSetHash` at
-    /// pointer rate, the offline render would never be ready, and
-    /// `StretchResolution.pending` SKIPS the clip: the vocal would go silent for
-    /// the whole drag.
+    /// pointer rate and the offline render would never be ready. Since p2-ren
+    /// Stage A a clip whose render is pending after a note edit plays its
+    /// PREVIOUS version (`StretchResolution.bridge`), so the vocal would sound
+    /// stale for the whole drag, the edit never heard in context; silence
+    /// (`StretchResolution.pending`) is left for a stretch change or a failed
+    /// render.
     ///
     /// ⛔⛔ **THE WRITE IS READ BACK, AND THAT IS NOT BELT-AND-BRACES.** "The
     /// call returned" is this tree's characteristic failure shape — an operation
@@ -186,6 +192,30 @@ extension AppModel {
                     presentArrangeSplitRefusal(PitchNoteEditDidNotTake(), clipID: clipID)
                     return
                 }
+            case .notePitches(let offsets, let selectionToken):
+                // m23-ap I4 — a GROUP pitch drag: ONE store call, ONE undo step
+                // ("Tune Notes") under the SELECTION's key (UI design §8.4): the
+                // same selection dragged again inside the coalescing window is
+                // one step, a different selection is a new one.
+                let clip = try store.setClipNotePitchOffsets(
+                    clipId: clipID, offsets: offsets, seedIfAbsent: commit.seedIfAbsent,
+                    undoKey: PitchCorrectionUndoKey.group(clipID: clipID,
+                                                          selectionToken: selectionToken))
+                // Read back EVERY named note against its CLAMPED expectation —
+                // the one-note arm's rule, per note. One note that did not land
+                // is a group drag that did not take, and it says so.
+                var stored: [UUID: Double] = [:]
+                for segment in clip.pitchEdits?.segments ?? [] {
+                    stored[segment.id] = segment.pitchOffsetCents
+                }
+                let tookAll = offsets.allSatisfy {
+                    stored[$0.segmentId]
+                        == $0.offsetCents.clamped(to: NoteSegment.pitchOffsetCentsRange)
+                }
+                guard tookAll else {
+                    presentArrangeSplitRefusal(PitchNoteEditDidNotTake(), clipID: clipID)
+                    return
+                }
             case .splitNote(let segmentID, let atSourceSecond):
                 let clip = try store.splitClipNoteSegment(
                     clipId: clipID, segmentId: segmentID,
@@ -199,10 +229,58 @@ extension AppModel {
                     presentArrangeSplitRefusal(PitchNoteEditDidNotTake(), clipID: clipID)
                     return
                 }
+            case .notesCleared(let segmentIDs, let cleared):
+                // m23-ap I7b — CLEAR (silence in place) or RESTORE: ONE store
+                // call, ONE journal entry ("Clear Notes" / "Restore Notes") for
+                // every note the model named — the notes ⌫, Edit ▸ Delete or the
+                // right-click menu changes. The store's own refusals (a comp
+                // member, a MIDI clip, an unknown note) throw and are SHOWN below.
+                let clip = try store.setClipNotesCleared(
+                    clipId: clipID, segmentIds: segmentIDs, cleared: cleared,
+                    seedIfAbsent: commit.seedIfAbsent)
+                // Read back EVERY named note for the flag it was asked to carry
+                // — the group drag's rule. One note that did not change is a
+                // clear that did not take, and it says so.
+                var stored: [UUID: Bool] = [:]
+                for segment in clip.pitchEdits?.segments ?? [] {
+                    stored[segment.id] = segment.isCleared
+                }
+                guard segmentIDs.allSatisfy({ stored[$0] == cleared }) else {
+                    presentArrangeSplitRefusal(PitchNoteEditDidNotTake(), clipID: clipID)
+                    return
+                }
             }
+            // ⭐ m23-ap I1 UI hooks — THE RELEASE IS HEARD, AFTER THE ONE COMMIT
+            // LANDED. Reached only when the write was read back: every arm above
+            // returns on a refusal or a write that did not take, so a commit that
+            // changed nothing never plays a note that did not change. The router
+            // decides what plays (a pitch or group drag its notes, a clear or
+            // restore its notes with 0.3 s of context, a split nothing) and the
+            // switch is the door's `enabled:`.
+            pitchEditorAudition.commitLanded(commit, clipID: clipID,
+                                             enabled: panelLayout.auditionEnabled)
         } catch {
             presentArrangeSplitRefusal(error, clipID: clipID)
         }
+    }
+
+    /// m23-ap I1 UI hooks — one audition request from the pitch editor pane's
+    /// model (a press, a drag step, a stop), for the clip it shows. The switch
+    /// (`panelLayout.auditionEnabled`) rides along as the store door's
+    /// `enabled:` — the UI doors check it at the call site; the wire ignores it
+    /// (design 2026-09-24 §4).
+    ///
+    /// TODO(mcp-integration-engineer, after m23-ap I1 UI hooks): the DRAG door
+    /// (`ProjectStore.previewClipNotePitchDraft`) has no wire twin yet — verb
+    /// `clip.previewNotePitches {clipId, notes: [{segmentId, cents}], snapped?,
+    /// contextSeconds?}` in `Sources/DAWControl/Commands.swift` and MCP tool
+    /// `clip_preview_note_pitches` (the full proposal sits on that store
+    /// method). The press door is `clip.auditionNote` / `clip_audition_note`
+    /// already; stopping is `transport.stop`, which now stops a note audition
+    /// even with the transport stopped. The HEAR switch is app chrome (the
+    /// `auditionEnabled` precedent: `debug.panelLayout`, never the wire).
+    func routePitchEditorAudition(_ request: PitchEditorAuditionRequest, clipID: UUID) {
+        pitchEditorAudition.route(request, clipID: clipID, enabled: panelLayout.auditionEnabled)
     }
 
     /// A clip's context-menu **Tune Vocal ▸ Remove Tuning** fired. Synchronous —

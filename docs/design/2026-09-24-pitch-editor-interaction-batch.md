@@ -170,6 +170,14 @@ audio voice, and a commit silences the clip until its render lands (F15).
 - **Press** on a note: it plays AS IT SOUNDS NOW (the render if ready, else the source). This is the roll's
   first-tick sound.
 - **Drag:** silent; the readout says "Let go to hear it" (timing doc §5.6).
+  **SUPERSEDED 2026-09-25 (I1-F1 + I1 UI hooks):** the drag is HEARD — each change of the draft's offset asks
+  `ProjectStore.previewClipNotePitchDraft`, which span-renders the draft with the exact pitch and level the
+  commit would store (latest wins; a free ⌥ drag keeps one render in flight plus the newest). The "Let go to
+  hear it" readout was never built, so there was nothing to remove. One refinement, MEASURED in staging: a
+  sung note is almost never on the grid, so a snapped drag's first tick snaps it onto its OWN row (−6 c, −1 c
+  on the look's take) and asking for that restarted the note for nothing — a SNAPPED step that lands within
+  `PitchEditorReadout.centsResolutionFloor` (12.9 c) of what was last asked for asks nothing. A note far off
+  the grid still snaps audibly and is heard; ⌥ free steps are never thinned (`requestDragAudition`).
 - **Release:** after the one commit, wait for that clip's `onRenderComplete` (F15; not the 10 Hz poll),
   then play the edited notes.
 - **Which commits trigger it:** every commit that changes the sound (C1, I4, I7 with 0.3 s of context;
@@ -271,6 +279,10 @@ floor stays `PitchAutoCorrect.minimumNoteSeconds`; there is no second constant.
   (Rule 3).
 - **A label at the line's top** (SF Mono 9): "Cut · 240 ms | 310 ms", or "Too close to the edge", or nothing
   for `.noNote` (the dim hairline alone then says "move onto a note").
+  **AMENDED 2026-09-24 (I3 lane, from source; the orchestrator's ruling):** the label sits JUST ABOVE THE NOTE,
+  not at the content top. The pane scrolls vertically with no readable offset and its content is usually taller
+  than the viewport, so a top-anchored label is often scrolled out of view. The label text is unchanged. A note
+  at the top edge must not clip its label.
 - **Cursor:** `CursorKind.crosshair`, the existing "precise place" family (`CursorModel.swift:27-29`).
 
 **The click is unchanged:** `.tooCloseToEdge` still puts today's amber sentence in the palette
@@ -323,6 +335,13 @@ of all three verdicts.
   `.segment`, byte-identical to today.
 
 **Keys, each through an app policy, never a raw handler (UI design P6):**
+- ⭐ **LANDED EARLY AS p2-del (2026-09-24, orchestrator's interim ruling; `DeleteMenuPolicy.swift`):** while the pane is
+  OPEN, ⌫ / ⌦ / Edit ▸ Delete are REFUSED BY NAME (`DeleteMenuRefusal.pitchEditorOpen`, the ⌘A spelling), the key is
+  SWALLOWED (`consumesKeystroke`), and the pane's refusal line reads `DeleteMenuPolicy.pitchEditorOpenHint`. The guard
+  sits after the roll and automation arms, before the arrange's. The routing sweep grew 144 → 288 states. **I4 therefore
+  EXTENDS it: the `pitchEditorNotes` arm lands IN FRONT of the `if pitchEditorOpen` guard (open AND notes selected →
+  route to the notes); the refusal keeps every other open-pane case.** ⌘X / Edit ▸ Cut get the same treatment in
+  p2-del-2. The clip's right-click Delete/Cut stay the deliberate escape hatch.
 - **⌫ is wired BEFORE any selection is drawn.** `DeleteMenuPolicy` gains `pitchEditorNotes`, live when the
   pane is open AND the bridge reports a note selection (the `pianoRollWouldConsumeKey` shape,
   `DAWProApp.swift:1435`; never engagement or focus). The clip is never deleted while notes are selected.
@@ -543,6 +562,9 @@ Command Line Tools.
    notes in the note editor? *Recommended: yes.* It is undoable, and it does the same as right-click ▸
    Clear. Whatever the answer, I4 already stops ⌫ from deleting the whole vocal clip while notes are
    selected; until the answer arrives, ⌫ only shows a hint line.
+   **ANSWERED 2026-09-25 00:41Z (db `handoff/pitch-2026-09-24b`, `delete-clears = yes`):** I4 builds ⌫ as
+   "clear the selected notes" (one undo step, the same as right-click ▸ Clear). With no note selected, ⌫ keeps
+   p2-del's refusal and hint. p2-del has landed uncommitted and is in `dist/DAWPro-next.app`.
 
 **Decided here, not asked** (each is the house rule or a measurement gate):
 - Pinch zooms time only.

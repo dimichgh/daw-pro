@@ -184,10 +184,20 @@ extension ProjectStore {
     /// (reading a comp member's edits is harmless; only writing to one is
     /// gated).
     public func pitchEdits(forClipId clipId: UUID) throws -> PitchEditSet? {
+        try pitchEditClip(forClipId: clipId).pitchEdits
+    }
+
+    /// The clip `pitchEdits(forClipId:)` reads from: the same lookup and the
+    /// same refusal, one function. It exists so that a reader that reports
+    /// "does this clip bend the curve" can ask the clip's own
+    /// `Clip.hasPitchEdits`, the ONE home of that rule, instead of restating
+    /// it over the set (I7a: `clip.getPitchEdits`' response had a second
+    /// spelling of it). The same read-only rule as its twin applies.
+    public func pitchEditClip(forClipId clipId: UUID) throws -> Clip {
         guard let (t, c) = locateClipIndexForPitchCorrection(clipId) else {
             throw ProjectError.clipNotFound(clipId)
         }
-        return tracks[t].clips[c].pitchEdits
+        return tracks[t].clips[c]
     }
 
     /// The ONE place `replaceExisting: false`'s refusal text is built — both

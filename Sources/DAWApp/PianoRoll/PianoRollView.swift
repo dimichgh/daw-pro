@@ -169,14 +169,20 @@ struct PianoRollView: View {
     /// that entry disabled until an Edit ▸ Paste had already run.
     var clipboardNotes: [MIDINote]
     var onClose: () -> Void
-    /// ESCAPE reaching the roll (m25-b-1) — asks the APP whether the keystroke
-    /// leaves the MAXIMIZED editor mode, and reports whether it was consumed.
-    /// A closure, not a `layout` read, for the reason the DELETE route is one:
-    /// the decision needs app-level facts this view has no business knowing (is a
-    /// modal up, is a rename field live), and both of Escape's mounts must reach
-    /// the SAME decision. Defaulted so previews stay one-liner-simple; a preview
-    /// that never maximizes never needs it.
-    var onEscape: () -> Bool
+    /// ESCAPE reaching the roll (m25-b-1) — asks the APP's one Escape decision
+    /// and applies the answer. A closure, not a `layout` read, for the reason
+    /// the DELETE route is one: the decision needs app-level facts this view has
+    /// no business knowing (is a modal up, is a rename field live, is the mode
+    /// on), and every Escape mount must reach the SAME decision. Defaulted to
+    /// `.pass` so previews stay one-liner-simple.
+    ///
+    /// ⭐ m23-ap I4 — THE LADDER (`EditorEscapeLadder`). The roll hands its two
+    /// facts (is a gesture live, is anything selected) and gets back ONE rung.
+    /// It applies its own two (`.cancelGesture`, `.clearSelection`); the app has
+    /// already applied `.exitMaximize`. ⚠️ **A NAMED BEHAVIOUR CHANGE (design
+    /// §13):** before I4 this key went straight to exit-maximize and left a note
+    /// selection alone; with notes selected it now clears them first.
+    var onEscape: (_ gestureLive: Bool, _ hasSelection: Bool) -> EditorEscapeRung
     /// Sounds EXACTLY these pitches on the clip's track right now — SET
     /// semantics, so an empty array is "stop" (m23-d). Called on every gesture
     /// tick; the controller below diffs, so this view neither throttles nor
@@ -492,7 +498,8 @@ struct PianoRollView: View {
          onPasteNotes: @escaping ([MIDINote], Set<UUID>) -> String? = { _, _ in nil },
          clipboardNotes: [MIDINote] = [],
          onClose: @escaping () -> Void,
-         onEscape: @escaping () -> Bool = { false },
+         onEscape: @escaping (_ gestureLive: Bool, _ hasSelection: Bool) -> EditorEscapeRung
+             = { _, _ in .pass },
          onAudition: @escaping (_ pitches: [Int], _ velocity: Int) -> Void = { _, _ in },
          onFocusChange: @escaping (Bool) -> Void = { _ in },
          onEngage: @escaping () -> Void = {},
@@ -787,13 +794,28 @@ struct PianoRollView: View {
         // mount also calls; a mode that fills the window must not have exactly one
         // way out, and the header toggle is the other.
         //
-        // ⚠️ `.ignored` UNLESS THE DECISION CONSUMED IT — outside the maximized
-        // mode this view claims nothing new, so Escape propagates exactly as it
-        // did before. ⚠️ `.escape` needs no `\u{1B}` companion: unlike ⌫ (0x08 vs
-        // 0x7F, the m23-fk trap two lines up), `KeyEquivalent.escape` IS 0x1B, so
-        // the spelling and the key agree.
+        // ⚠️ `.ignored` UNLESS THE DECISION CONSUMED IT — with no gesture, no
+        // selection and no maximized mode this view claims nothing new, so Escape
+        // propagates exactly as it did before. ⚠️ `.escape` needs no `\u{1B}`
+        // companion: unlike ⌫ (0x08 vs 0x7F, the m23-fk trap two lines up),
+        // `KeyEquivalent.escape` IS 0x1B, so the spelling and the key agree.
+        //
+        // ⭐ m23-ap I4 — ONE RUNG PER PRESS, nearest thing first
+        // (`EditorEscapeLadder`): a live gesture is cancelled, else the
+        // selection is cleared, else the mode is left. ⚠️ The middle rung is new
+        // on this shipped surface (design §13) — see `onEscape`.
+        //
+        // ⚠️ m34-k: THIS MOUNT IS NOW THE SECONDARY ROUTE. It rides SwiftUI
+        // focus, and I7b measured it never delivered with the roll maximized and
+        // notes selected (7 of 7 presses landed on the workspace backstop). The
+        // app's key monitor now hands Escape to `handleEscape` below through
+        // `noteSelection.escapeNonce`, and swallows the key it hands over, so
+        // this mount only ever sees an Escape the monitor passed on — and asks
+        // the same ladder, so it cannot double-fire. The first statement is its
+        // own delivery counter, so a probe can tell the two routes apart.
         .onKeyPress(.escape) {
-            onEscape() ? .handled : .ignored
+            KeyPressProbe.pianoRollEscape += 1   // m34-k probe, first statement
+            return handleEscape()
         }
         .onAppear { isFocused = true }
         // m21-c: report key focus so the app routes ⌘+/⌘−/⌘0 to THIS editor's
@@ -889,6 +911,16 @@ struct PianoRollView: View {
             guard !model.selection.isEmpty else { return }
             model.deleteSelection()
             commit()
+        }
+        // m34-k: ESCAPE, handed over by the app's key monitor — the route that
+        // works when this view does not hold SwiftUI focus, which I7b measured
+        // to be every time (7 of 7) with the roll maximized and notes selected.
+        // The SAME body the mount above runs (`handleEscape`), so the roll asks
+        // the app's ladder with its LIVE gesture and selection; the monitor only
+        // predicted that something here would be taken down. No `onEngage()`:
+        // Escape takes things down, it states nothing about where the user works.
+        .onChange(of: noteSelection.escapeNonce) { _, _ in
+            _ = handleEscape()
         }
         // m23-ek-3: EDIT ▸ CUT / COPY / PASTE reaching the roll, and the roll's
         // own context-menu entries. Same reason as `deleteNonce` above — the menu
@@ -1406,6 +1438,78 @@ struct PianoRollView: View {
         if stripStale {
             controllerModel.reseed(lanes: clip.controllerLanes, clipLengthBeats: clip.lengthBeats)
         }
+    }
+
+    /// Whether the roll holds a gesture Escape would CANCEL (m23-ap I4): one
+    /// that is changing notes or the selection right now — a move, a resize, a
+    /// group scale, a rubber band. A press still resolving as a click has
+    /// changed nothing yet, and a playhead scrub edits nothing (its seeks are
+    /// the transport's, not the clip's), so neither is one: Escape passes over
+    /// them to the next rung, exactly as it did before I4.
+    private var escapeGestureLive: Bool {
+        switch activeDrag {
+        case .move, .resize, .groupScale, .marquee: return true
+        case .click, .playheadDrag, .none, .cancelled: return false
+        }
+    }
+
+    /// THE ROLL'S ONE ESCAPE BODY (m34-k extracted it; I4 wrote it). Two routes
+    /// reach it: the `.onKeyPress(.escape)` mount (SwiftUI focus) and the app's
+    /// key monitor through `noteSelection.escapeNonce` (no focus needed). Both
+    /// hand the app's ONE ladder this roll's live facts and apply the rung that
+    /// is the roll's own; the app has already applied `.exitMaximize` itself.
+    private func handleEscape() -> KeyPress.Result {
+        let rung = onEscape(escapeGestureLive, !model.selection.isEmpty)
+        switch rung {
+        case .cancelGesture: cancelGestureForEscape()
+        case .clearSelection: model.clearSelection()
+        case .exitMaximize, .pass: break
+        }
+        return rung.consumesKey ? .handled : .ignored
+    }
+
+    /// Escape's `.cancelGesture` rung on the roll (m23-ap I4): the gesture is
+    /// ABANDONED with nothing committed, and the pointer still down.
+    ///
+    /// ⭐ IT PARKS THE GESTURE IN `.cancelled`, the m18-i state that already
+    /// means "swallow the rest of this drag": no apply, no commit, no restart
+    /// (`onChanged` only begins from `.none`), and the release closes it through
+    /// `endGesture`'s `.cancelled` arm — which is also where the repeat clock is
+    /// stopped. ⚠️ NO FOURTH `setEdgeRepeat(running: false)` HERE, on purpose
+    /// (`PianoRollEdgeDragSiteTests` pins three teardowns): `.cancelled` scrolls
+    /// no content, so a held clock's tick returns before doing anything
+    /// (`repeatHeldEdgeScroll` gates on `activeDragScrollsContent`), and the
+    /// next pointer tick stops it (`applyGesture` re-arms on the same gate).
+    ///
+    /// What each gesture gives back:
+    ///  • a BAND — the selection it armed with (its frozen `base`), and its
+    ///    visual, which must never outlive the gesture behind it;
+    ///  • a MOVE / RESIZE / GROUP SCALE — the draft, re-read from the clip the
+    ///    store holds (nothing was committed, so that is the pre-gesture state),
+    ///    keeping the selection (`reseed` keeps survivors, and every id survives).
+    private func cancelGestureForEscape() {
+        let outgoing = activeDrag
+        activeDrag = .cancelled
+        didMove = false
+        switch outgoing {
+        case .marquee(_, let base, _):
+            // The frozen base, applied as a band that hits nothing: the rule's
+            // own "shrink the band to nothing" answer, never a second spelling.
+            model.applyMarquee(hits: [], base: base, additive: true)
+            marqueeStageOrigin = nil
+            marqueeBand = nil
+            reportMarquee(hits: [])
+        case .move, .resize, .groupScale:
+            let notes = clip.notes ?? []
+            if model.needsReseed(notes: notes, clipLengthBeats: clip.lengthBeats) {
+                model.reseed(notes: notes, clipLengthBeats: clip.lengthBeats)
+            }
+        case .click, .playheadDrag, .none, .cancelled:
+            break
+        }
+        // A move sounds the pitches it drags (m23-d); an abandoned move must not
+        // leave them sounding until the release.
+        onAudition([], 0)
     }
 
     /// m23-al R6 — the NOTE-EDIT commit funnel.

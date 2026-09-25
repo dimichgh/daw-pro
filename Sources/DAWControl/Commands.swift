@@ -472,6 +472,48 @@ public final class CommandRouter {
         // stay true by construction. NOTE: no quoted string in this comment,
         // deliberately (the m25-d rule).
         "clip.getPlayedPitch",
+        // I7a (interaction-batch design section 10, ruled in section 17): the
+        // per-note CLEAR writer, the wire door for
+        // ProjectStore.setClipNotesCleared. Placed HERE, immediately after
+        // clip.getPlayedPitch, in the same per-note pitch-editor door cluster
+        // beside clip.sliceToSampler, rather than at the literal tail: the
+        // adjacency pin in PitchCorrectionCommandTests (anchor + 1 to + 3)
+        // stays true, and so does every dropLast(N) window and tail suffix
+        // pin elsewhere. NOTE: no quoted string in this comment,
+        // deliberately (the m25-d rule).
+        "clip.setNoteCleared",
+        // U-D (unpitched-notes-presets-midi-targets design §1.8, as amended by
+        // interaction-batch design §17.3): the per-note LEVEL writer, I7a's
+        // clip.setNoteCleared MIRRORED for the other half of the same mask —
+        // that verb silences, this sets what a note plays AT when it is not
+        // silenced. Placed HERE, immediately after clip.setNoteCleared, in the
+        // same per-note pitch-editor door cluster beside clip.sliceToSampler,
+        // rather than at the literal tail: every dropLast(N)/suffix window and
+        // tail pin elsewhere stays true by construction. NOTE: no quoted
+        // string in this comment, deliberately (the m25-d rule).
+        "clip.setNoteGain",
+        // m23-ap I4 wire leg (mcp-integration-engineer, part 1 of 2): the
+        // BATCH twin of clip.setNotePitch — ProjectStore.setClipNotePitchOffsets
+        // (Sources/DAWCore/ProjectStore+PitchNoteEdits.swift), I4's group-drag
+        // store op, left as a TODO for this lane. Placed HERE, immediately
+        // after clip.setNoteGain, in the same per-note pitch-editor door
+        // cluster beside clip.sliceToSampler, rather than at the literal
+        // tail: every dropLast(N)/suffix window and tail pin elsewhere stays
+        // true by construction (the m25-d rule this whole cluster follows).
+        // NOTE: no quoted string in this comment, deliberately (the m25-d
+        // rule).
+        "clip.setNotePitches",
+        // m23-ap I1 wire leg (mcp-integration-engineer, part 2 of 2): HEAR
+        // one or more sung notes now, pitch edits included — over
+        // ProjectStore.auditionClipNotes (Sources/DAWCore/ProjectStore+
+        // NoteAudition.swift), I1/I1-F1's store op. Placed HERE,
+        // IMMEDIATELY after clip.setNotePitches (a deliberate departure
+        // from the tail-of-cluster rule the rest of this door follows —
+        // this verb is NOT a per-note WRITER like its neighbours, so no
+        // dropLast(N)/suffix-window pin anywhere depends on it landing at
+        // the tail), still beside clip.sliceToSampler. NOTE: no quoted
+        // string in this comment, deliberately (the m25-d rule).
+        "clip.auditionNote",
         "arrange.insertBars",
         "arrange.deleteBars",
         "take.group",
@@ -5047,11 +5089,11 @@ public final class CommandRouter {
             // contour AT RENDER TIME — and, as of this date, the render
             // path (StretchRenderCache -> StretchCurvePlan.make ->
             // PitchContourCache.renderContour) THREADS ONE THROUGH: on the
-            // measured dry vocal, Hard Tune's within-note wander goes
-            // 62.8 -> 18.2 cents (a 70% median cut), not the "audibly like
-            // tight" (1% cut) constant-offset fallback this response used
-            // to warn about (`PitchCorrectionPresets.swift`'s own doc has
-            // both numbers). This response therefore carries NO warning for
+            // measured dry vocal, Hard Tune really flattens each held
+            // note's wander, not the "audibly like tight" constant-offset
+            // fallback this response used to warn about
+            // (`PitchCorrectionPresets.swift`'s own doc has both numbers).
+            // This response therefore carries NO warning for
             // that case any more — the one remaining honest caveat (the
             // detector could not run AT RENDER TIME, so THIS PARTICULAR
             // render fell back to the per-note offset) is a fact this
@@ -5148,7 +5190,7 @@ public final class CommandRouter {
             let acClip = try await store.autoCorrectClipPitch(
                 clipId: acClipID, options: acOptions, replaceExisting: acReplaceExisting)
             return .success(request.id, Self.pitchEditsResponse(
-                clipId: acClipID, edits: acClip.pitchEdits, appliedOptions: acOptions))
+                clip: acClip, appliedOptions: acOptions))
 
         case "clip.clearPitchEdits":
             // params: clipId (required). Removes clip.pitchEdits entirely —
@@ -5169,7 +5211,7 @@ public final class CommandRouter {
             let cpeClipID = try params.requireClipID()
             let cpeClip = try store.clearClipPitchEdits(clipId: cpeClipID)
             return .success(request.id, Self.pitchEditsResponse(
-                clipId: cpeClipID, edits: cpeClip.pitchEdits, appliedOptions: nil))
+                clip: cpeClip, appliedOptions: nil))
 
         case "clip.getPitchEdits":
             // params: clipId (required). STRICTLY READ-ONLY (the
@@ -5184,9 +5226,9 @@ public final class CommandRouter {
             // hasPitchEdits:false, segmentCount:0, segments:[].
             try params.rejectUnknownKeys(["clipId"], verb: "clip.getPitchEdits")
             let gpeClipID = try params.requireClipID()
-            let gpeEdits = try store.pitchEdits(forClipId: gpeClipID)
+            let gpeClip = try store.pitchEditClip(forClipId: gpeClipID)
             return .success(request.id, Self.pitchEditsResponse(
-                clipId: gpeClipID, edits: gpeEdits, appliedOptions: nil))
+                clip: gpeClip, appliedOptions: nil))
 
         case "clip.setNotePitch":
             // m23-ap Phase 2, Increment C (item p2-c wire leg): C1's store
@@ -5238,7 +5280,7 @@ public final class CommandRouter {
             let snpStoredCents = snpClip.pitchEdits?.segments
                 .first(where: { $0.id == snpSegmentID })?.pitchOffsetCents ?? snpCents
             return .success(request.id, Self.pitchEditsResponse(
-                clipId: snpClipID, edits: snpClip.pitchEdits, appliedOptions: nil,
+                clip: snpClip, appliedOptions: nil,
                 extra: ["segmentId": .string(snpSegmentID.uuidString),
                         "pitchOffsetCents": .number(snpStoredCents)]))
 
@@ -5288,9 +5330,405 @@ public final class CommandRouter {
             let snAfterIDs = Set((snClip.pitchEdits?.segments ?? []).map(\.id))
             let snRightID = snAfterIDs.subtracting(snBeforeIDs).first
             return .success(request.id, Self.pitchEditsResponse(
-                clipId: snClipID, edits: snClip.pitchEdits, appliedOptions: nil,
+                clip: snClip, appliedOptions: nil,
                 extra: ["leftSegmentId": .string(snSegmentID.uuidString),
                         "rightSegmentId": snRightID.map { JSONValue.string($0.uuidString) } ?? .null]))
+
+        case "clip.setNoteCleared":
+            // I7a (interaction-batch design section 10, ruled in section 17):
+            // the store op `ProjectStore.setClipNotesCleared`. It silences the
+            // named notes IN PLACE: each renders as exact zeros between two
+            // 10 ms ramps inside the note, and nothing else moves.
+            // `cleared:false` brings them back at their own level. Additive: a
+            // new verb, and the only other wire change is the per-segment
+            // `cleared` key `clip.getPitchEdits` now echoes.
+            //
+            // params: clipId (required UUID); segmentIds (required array of
+            // note ids from clip.getPitchEdits; a repeated id is folded, and
+            // an empty array is refused by the store in words); cleared
+            // (required Bool, with no default, so a caller always says which
+            // way it means).
+            //
+            // ⛔ NO PITCH DETECTION ON THE WIRE PATH, the clip.setNotePitch rule
+            // verbatim: `seedIfAbsent` is never supplied, so a clip with no
+            // stored table refuses rather than seeding one.
+            //
+            // Errors are inherited from the store, never re-decided here:
+            // clipNotFound, a MIDI clip, a comp-lane member, no stored table,
+            // an unknown id (naming how many notes the clip DOES carry). ALL
+            // OR NOTHING: an unknown id among several changes nothing.
+            // Coalescing key: `PitchCorrectionUndoKey.structuralKey` (nil), so
+            // it is ONE undo step for all N notes, never coalesced.
+            //
+            // Response: `clip.getPitchEdits`' own shape (every note, each with
+            // its `cleared` flag) plus `segmentIds` (the notes this call named,
+            // deduplicated, in request order) and `cleared`, read back from
+            // the STORED notes rather than echoed from the request.
+            try params.rejectUnknownKeys(
+                ["clipId", "segmentIds", "cleared"], verb: "clip.setNoteCleared")
+            let sncClipID = try params.requireClipID()
+            guard let sncRawIDs = params["segmentIds"]?.arrayValue else {
+                throw ControlError(
+                    "'segmentIds' must be an array of note id strings, the `id` of each "
+                    + "note in clip.getPitchEdits' `segments`")
+            }
+            var sncSegmentIDs: [UUID] = []
+            for (index, element) in sncRawIDs.enumerated() {
+                guard let raw = element.stringValue, let id = UUID(uuidString: raw) else {
+                    throw ControlError("segmentIds[\(index)] is not a valid UUID")
+                }
+                sncSegmentIDs.append(id)
+            }
+            let sncCleared = try params.require("cleared", \.boolValue)
+            let sncClip = try store.setClipNotesCleared(
+                clipId: sncClipID, segmentIds: sncSegmentIDs, cleared: sncCleared)
+            // ⭐ A setter's return is not proof it took: read each named note's
+            // STORED flag back. `.null` would mean the stored notes disagree,
+            // which only a store defect could produce, and the response then
+            // says so rather than repeating the request.
+            var sncSeen = Set<UUID>()
+            let sncNamed = sncSegmentIDs.filter { sncSeen.insert($0).inserted }
+            let sncStoredFlags = sncNamed.compactMap { id in
+                sncClip.pitchEdits?.segments.first(where: { $0.id == id })?.isCleared
+            }
+            let sncStoredCleared: JSONValue =
+                sncStoredFlags.count == sncNamed.count && Set(sncStoredFlags).count == 1
+                    ? .bool(sncStoredFlags[0]) : .null
+            return .success(request.id, Self.pitchEditsResponse(
+                clip: sncClip, appliedOptions: nil,
+                extra: ["segmentIds": .array(sncNamed.map { .string($0.uuidString) }),
+                        "cleared": sncStoredCleared]))
+
+        case "clip.setNoteGain":
+            // U-D (unpitched-notes-presets-midi-targets design §1.8, as
+            // amended by interaction-batch design §17.3): the per-note LEVEL
+            // writer, clip.setNoteCleared MIRRORED for the other half of the
+            // same mask — that verb silences, this sets what a note plays AT
+            // when it is not silenced. The store op is
+            // `ProjectStore.setClipNoteGain`. It sets `NoteSegment.amplitudeDb`
+            // IN PLACE on every named note and changes NOTHING ELSE: no note
+            // moves and clearing is untouched, so a level written on a
+            // cleared note takes effect only once the note is restored
+            // (`PitchEditSet.gain(atSourceSecond:)`'s own rule).
+            //
+            // params: clipId (required UUID); segmentIds (required array of
+            // note ids from clip.getPitchEdits; a repeated id is folded, and
+            // an empty array is refused by the store in words); gainDb
+            // (required Double, the note's FINAL level — 0 = as sung, never a
+            // delta, the clip.setNotePitch `cents` rule verbatim). Clamped to
+            // `Clip.gainDbRange` (−72…24 dB) — −72 is the quietest level, not
+            // silence; use clip.setNoteCleared for that.
+            //
+            // ⛔ NO PITCH DETECTION ON THE WIRE PATH, the clip.setNotePitch
+            // rule verbatim: `seedIfAbsent` is never supplied, so a clip with
+            // no stored table refuses rather than seeding one.
+            //
+            // Errors are inherited from the store, never re-decided here:
+            // clipNotFound, a MIDI clip, a comp-lane member, no stored table,
+            // an unknown id (naming how many notes the clip DOES carry). ALL
+            // OR NOTHING: an unknown id among several changes nothing.
+            // Coalescing key: `PitchCorrectionUndoKey.structuralKey` (nil), so
+            // it is ONE undo step for all N notes, never coalesced — a
+            // deliberate level pick, the clip.setNoteCleared on/off rule
+            // extended to a value.
+            //
+            // Response: `clip.getPitchEdits`' own shape (every note, each
+            // with its `amplitudeDb`) plus `segmentIds` (the notes this call
+            // named, deduplicated, in request order) and `gainDb`, read back
+            // from the STORED notes rather than echoed from the request, so a
+            // clamp is visible.
+            try params.rejectUnknownKeys(
+                ["clipId", "segmentIds", "gainDb"], verb: "clip.setNoteGain")
+            let sngClipID = try params.requireClipID()
+            guard let sngRawIDs = params["segmentIds"]?.arrayValue else {
+                throw ControlError(
+                    "'segmentIds' must be an array of note id strings, the `id` of each "
+                    + "note in clip.getPitchEdits' `segments`")
+            }
+            var sngSegmentIDs: [UUID] = []
+            for (index, element) in sngRawIDs.enumerated() {
+                guard let raw = element.stringValue, let id = UUID(uuidString: raw) else {
+                    throw ControlError("segmentIds[\(index)] is not a valid UUID")
+                }
+                sngSegmentIDs.append(id)
+            }
+            let sngGainDb = try params.require("gainDb", \.doubleValue)
+            let sngClip = try store.setClipNoteGain(
+                clipId: sngClipID, segmentIds: sngSegmentIDs, gainDb: sngGainDb)
+            // ⭐ A setter's return is not proof it took: read each named note's
+            // STORED level back. `.null` would mean the stored notes
+            // disagree, which only a store defect could produce, since every
+            // named note is written the same clamped value.
+            var sngSeen = Set<UUID>()
+            let sngNamed = sngSegmentIDs.filter { sngSeen.insert($0).inserted }
+            let sngStoredLevels = sngNamed.compactMap { id in
+                sngClip.pitchEdits?.segments.first(where: { $0.id == id })?.amplitudeDb
+            }
+            let sngStoredGain: JSONValue =
+                sngStoredLevels.count == sngNamed.count && Set(sngStoredLevels).count == 1
+                    ? .number(sngStoredLevels[0]) : .null
+            return .success(request.id, Self.pitchEditsResponse(
+                clip: sngClip, appliedOptions: nil,
+                extra: ["segmentIds": .array(sngNamed.map { .string($0.uuidString) }),
+                        "gainDb": sngStoredGain]))
+
+        case "clip.setNotePitches":
+            // m23-ap I4 wire leg (mcp-integration-engineer, part 1 of 2): the
+            // BATCH twin of `clip.setNotePitch` — `ProjectStore.setClipNotePitchOffsets`
+            // (`Sources/DAWCore/ProjectStore+PitchNoteEdits.swift`), I4's
+            // group-drag store op, moves N notes in ONE undo step, each to
+            // its OWN absolute offset (the group drag keeps the INTERVALS
+            // between notes, unlike `clip.setNoteGain`'s single value shared
+            // by every named note). The `clip.moveMany` precedent: an
+            // ADDITIVE batch verb beside its single-item sibling.
+            //
+            // params: clipId (required UUID); notes (required array of
+            // {segmentId: UUID string, cents: Double}). `cents` means
+            // exactly what it means on `clip.setNotePitch` — ABSOLUTE, never
+            // a delta: a dropped call and a call of zero must read back
+            // differently, so the wire always sends (and the response always
+            // echoes) each note's FINAL cents value. An empty `notes` array
+            // is NOT rejected here — it is handed to the store, which
+            // refuses it in words ("Name at least one note to tune…"), the
+            // same inherit-the-store's-own-teaching-text rule every refusal
+            // below follows.
+            //
+            // ⛔ NO PITCH DETECTION ON THE WIRE PATH, the clip.setNotePitch
+            // rule verbatim: `seedIfAbsent` is never supplied, so a clip
+            // with no stored note table refuses rather than seeding one.
+            //
+            // ALL OR NOTHING (the store's own rule, not re-decided here):
+            // every segmentId is resolved BEFORE anything is written, so an
+            // unknown id among several leaves the table untouched, naming
+            // how many notes the clip DOES carry. A repeated id with the
+            // SAME cents folds; a repeated id with two DIFFERENT cents is
+            // refused in words — "last one wins" would be a silent choice
+            // between two things the caller asked for.
+            //
+            // Undo key: `PitchCorrectionUndoKey.structuralKey` (nil) — NEVER
+            // coalesces, so two wire calls back to back are always two undo
+            // steps, even naming the identical selection with identical
+            // values. `.group(clipID:selectionToken:)` is the IN-PROCESS
+            // pitch editor's own key for a live drag gesture: `selectionToken`
+            // is stable only for the life of ONE in-process selection and is
+            // re-minted whenever that selection changes (UI design §8.4) — a
+            // one-shot wire call has no such open gesture for a SECOND call
+            // to continue, and the store's own doc names exactly this caller
+            // ("a caller with no selection to name (a batch verb on the
+            // wire) passes `PitchCorrectionUndoKey.structuralKey`"). This
+            // also matches `clip.setNoteCleared`/`clip.setNoteGain`, this
+            // verb's nearest wire siblings, which use `structuralKey` for
+            // the same reason (a deliberate on/off, never coalesced).
+            //
+            // Errors, all inherited from the store and never re-decided
+            // here: clipNotFound / MIDI clip -> `pitchDetectionRequiresAudioClip`
+            // / comp-lane member -> `invalidClipEdit` / no stored table / an
+            // unknown segmentId (naming the count) / a repeated id with two
+            // different cents / an empty `notes` list — every one via the
+            // LocalizedError mapping.
+            //
+            // Response: `clip.getPitchEdits`'s own shape (the full stored
+            // table, so a caller can see every OTHER note unchanged) plus
+            // `notes`: [{segmentId, pitchOffsetCents}], the notes THIS call
+            // named — deduplicated, in request order (the
+            // `clip.setNoteCleared`/`clip.setNoteGain` `segmentIds` echo
+            // idiom, extended to carry a value per note instead of one value
+            // shared by all of them) — each `pitchOffsetCents` read back
+            // from the STORED, post-clamp segment, never the `cents` number
+            // sent (mirrors `clip.setNotePitch`'s own echo key, not the
+            // request's — `cents` is what you ask for, `pitchOffsetCents` is
+            // what every OTHER response on this door already calls what is
+            // stored).
+            try params.rejectUnknownKeys(["clipId", "notes"], verb: "clip.setNotePitches")
+            let snpsClipID = try params.requireClipID()
+            guard let snpsRawNotes = params["notes"]?.arrayValue else {
+                throw ControlError(
+                    "'notes' must be an array of {segmentId, cents} — segmentId is the `id` "
+                    + "of each note in clip.getPitchEdits' `segments`, cents is that note's "
+                    + "absolute offset, as in clip.setNotePitch")
+            }
+            var snpsOffsets: [NotePitchOffset] = []
+            var snpsRequestOrder: [UUID] = []
+            for (index, entry) in snpsRawNotes.enumerated() {
+                guard let object = entry.objectValue else {
+                    throw ControlError("notes[\(index)] must be {segmentId: string, cents: number}")
+                }
+                guard let rawID = object["segmentId"]?.stringValue, let segmentID = UUID(uuidString: rawID) else {
+                    throw ControlError("notes[\(index)].segmentId is not a valid UUID")
+                }
+                guard let cents = object["cents"]?.doubleValue else {
+                    throw ControlError("notes[\(index)].cents must be a number")
+                }
+                snpsOffsets.append(NotePitchOffset(segmentId: segmentID, offsetCents: cents))
+                snpsRequestOrder.append(segmentID)
+            }
+            let snpsClip = try store.setClipNotePitchOffsets(
+                clipId: snpsClipID, offsets: snpsOffsets,
+                undoKey: PitchCorrectionUndoKey.structuralKey)
+            // ⭐ A setter's return is not proof it took — read each named
+            // note's STORED, post-clamp cents back, in request order,
+            // deduplicated (the clip.setNoteCleared/setNoteGain `segmentIds`
+            // echo idiom).
+            var snpsSeen = Set<UUID>()
+            let snpsNamedOrder = snpsRequestOrder.filter { snpsSeen.insert($0).inserted }
+            let snpsNotesEcho: [JSONValue] = snpsNamedOrder.map { id in
+                let stored = snpsClip.pitchEdits?.segments.first(where: { $0.id == id })?.pitchOffsetCents
+                return .object(["segmentId": .string(id.uuidString),
+                                 "pitchOffsetCents": stored.map { JSONValue.number($0) } ?? .null])
+            }
+            return .success(request.id, Self.pitchEditsResponse(
+                clip: snpsClip, appliedOptions: nil,
+                extra: ["notes": .array(snpsNotesEcho)]))
+
+        case "clip.auditionNote":
+            // m23-ap I1 wire leg (mcp-integration-engineer, part 2 of 2):
+            // HEAR ONE OR MORE SUNG NOTES, right now, as they currently
+            // sound (pitch edits included) — the wire's and an agent's
+            // door onto `ProjectStore.auditionClipNotes`, the ONE home
+            // (`Sources/DAWCore/ProjectStore+NoteAudition.swift`) the
+            // pitch editor's own press door also calls, so a person and
+            // an agent hear the SAME thing. Design `docs/design/
+            // 2026-09-24-pitch-editor-interaction-batch.md` §4, §12 (D1):
+            // "The engine gets a static audition lane; the wire gets
+            // clip.auditionNote and MCP clip_audition_note."
+            //
+            // params: clipId (required UUID); segmentIds (required array
+            // of note id strings, the `id` of each note in
+            // clip.getPitchEdits' `segments` — 1 or more; one verb serves
+            // one note or a group; a repeated id is folded, same as every
+            // other segmentIds-taking verb on this door); contextSeconds
+            // (optional Double, SOURCE-FILE seconds of audio played on
+            // EACH side of the notes — defaults to the store's own
+            // `ClipNoteAuditionPolicy.contextSeconds`, 0.060 s, when
+            // omitted; range-checked by the store
+            // (`ClipNoteAuditionPolicy.contextSecondsRange`, 0...2), never
+            // re-checked here — a wrong TYPE is still caught here, since
+            // that is not the store's job).
+            //
+            // NOT AN EDIT: nothing is written to the clip, no undo entry,
+            // no performEdit. THIS DOOR NEVER RESOLVES A SPAN ITSELF —
+            // every second in the response is `auditionClipNotes`'s own
+            // answer, read back, never recomputed here (a setter's return
+            // is not proof it took, and here there is nothing TO take
+            // beyond what the store says played).
+            //
+            // ⚠️ THE WIRE IGNORES THE APP'S AUDITION SWITCH (design §4;
+            // confirmed by reading the store, not just by the design
+            // doc's word: `auditionClipNotes` calls
+            // `clipNoteAudition.press(..., enabled: true, ...)`
+            // UNCONDITIONALLY — there is no `enabled` parameter on this
+            // verb at all, on purpose. One consequence, also confirmed by
+            // reading `ClipNoteAuditionController.press`: `Reason.
+            // auditionOff` can NEVER be this verb's answer, because
+            // `enabled` is never anything but `true` on this path).
+            //
+            // A REFUSAL WITHOUT A THROW IS A SUCCESS, never a wire error:
+            // `audible: false` plus `reason` — the transport playing or
+            // recording is the main case (`reason: "transport-running"`).
+            // (RT review H6: a direct engine call while the transport
+            // rolls would answer `.noRenderer`, but `press`'s own
+            // `transportRunning` guard refuses FIRST, before the engine
+            // is ever touched, so the wire never sees that outcome on
+            // this path — confirmed by a test with a call-counting spy;
+            // no new `Reason` case added, as instructed.) Reading
+            // `press`'s own branches (Sources/DAWCore/
+            // ClipNoteAudition.swift) end to end, this verb's REACHABLE
+            // `reason` tags are exactly: transport-running, track-muted,
+            // engine-stopped, no-audio, unsupported, still-rendering.
+            // `waiting-for-render`, `unchanged` and `preview-queued`
+            // belong only to `commitDidChange`/`dragDidStep` (the
+            // in-process editor's release/drag doors, never `press`), and
+            // `audition-off` is unreachable for the reason just given —
+            // none of those five can be this verb's answer.
+            //
+            // A CALLER MISTAKE THROWS, verbatim, all inherited from the
+            // store and never re-decided here: an unknown clip ->
+            // clipNotFound; a MIDI clip, or a clip with no audio file ->
+            // invalidAudition; no stored note table (clip.autoCorrectPitch
+            // is the fix, taught in the message) -> invalidAudition; an
+            // empty segmentIds list -> invalidAudition; an unknown note id
+            // (naming the clip's ACTUAL note count) -> invalidAudition,
+            // ALL-OR-NOTHING — every id is resolved BEFORE anything
+            // reaches the engine, so an unknown id among several real ones
+            // plays nothing; contextSeconds outside
+            // ClipNoteAuditionPolicy.contextSecondsRange -> invalidAudition.
+            //
+            // Response: clipId, segmentIds (the notes THIS call named,
+            // deduplicated, in request order — the clip.setNoteGain/
+            // clip.setNotePitches segmentIds echo idiom), startSeconds/
+            // endSeconds (the SOURCE-second span the store resolved),
+            // source ("render"/"source"/"span-render" —
+            // `ClipNoteAuditionResult.Source`'s rawValue, verbatim,
+            // whichever it is: I1-F1 added the third case after this
+            // door's own brief was first drafted, so this handler reads
+            // the enum, never a hardcoded pair), audible (Bool, true only
+            // when outcome == "sounded"), outcome (the engine's answer —
+            // `AuditionOutcome`'s rawValue — or null when refused before
+            // it reached the engine), reason (the stable kebab-case tag,
+            // `ClipNoteAuditionResult.Reason`'s rawValue, or null when
+            // audible).
+            //
+            // ⚠️ H1 (RT re-review NH-C): `audible: true` MEANS "accepted
+            // for playback, and will sound unless its audio cannot be
+            // read" — NOT "the user heard it", and NOT what `audible`
+            // means on note.audition/note.play (a note-on that reached a
+            // live renderer — a stronger, later claim than THIS verb's,
+            // which answers before the read even runs). The engine
+            // answers synchronously, before the read/render runs; a read
+            // or render that fails AFTERWARDS never reaches this
+            // synchronous response at all (`ClipNoteAuditionResult` has
+            // no failed state) — it writes one stderr line and posts a
+            // `clip-audition-failed` engine notice
+            // (`ClipSpanAuditionDelivery.failed(reason:)`) onto
+            // `ProjectStore.engineNotices`, read back over
+            // `project.snapshot`'s `engineNotices` array (an entry whose
+            // `code == "clip-audition-failed"`). That ring COALESCES by
+            // code (`ProjectStore.swift`'s `recordEngineNotice`): a
+            // repeat only bumps the existing entry's `count`, never adds
+            // a new one — so an agent confirming a failure must read that
+            // entry's `count` before calling and compare after, never
+            // trust its mere presence. A SUPERSEDED audition (a newer
+            // request, or a stop, replaced this one before it finished
+            // loading) posts nothing at all — silence, not a signal.
+            // This is why the MCP tool text says all of the same things.
+            try params.rejectUnknownKeys(
+                ["clipId", "segmentIds", "contextSeconds"], verb: "clip.auditionNote")
+            let canClipID = try params.requireClipID()
+            guard let canRawIDs = params["segmentIds"]?.arrayValue else {
+                throw ControlError(
+                    "'segmentIds' must be an array of note id strings, the `id` of each "
+                    + "note in clip.getPitchEdits' `segments`")
+            }
+            var canSegmentIDs: [UUID] = []
+            for (index, element) in canRawIDs.enumerated() {
+                guard let raw = element.stringValue, let id = UUID(uuidString: raw) else {
+                    throw ControlError("segmentIds[\(index)] is not a valid UUID")
+                }
+                canSegmentIDs.append(id)
+            }
+            let canContextSeconds: Double
+            if let canContextSecondsRaw = params["contextSeconds"] {
+                guard let value = canContextSecondsRaw.doubleValue else {
+                    throw ControlError("'contextSeconds' must be a number")
+                }
+                canContextSeconds = value
+            } else {
+                canContextSeconds = ClipNoteAuditionPolicy.contextSeconds
+            }
+            let canResult = try store.auditionClipNotes(
+                clipId: canClipID, segmentIds: canSegmentIDs, contextSeconds: canContextSeconds)
+            var canSeen = Set<UUID>()
+            let canNamed = canSegmentIDs.filter { canSeen.insert($0).inserted }
+            return .success(request.id, .object([
+                "clipId": .string(canClipID.uuidString),
+                "segmentIds": .array(canNamed.map { .string($0.uuidString) }),
+                "startSeconds": .number(canResult.startSeconds),
+                "endSeconds": .number(canResult.endSeconds),
+                "source": .string(canResult.source.rawValue),
+                "audible": .bool(canResult.isAudible),
+                "outcome": canResult.outcome.map { JSONValue.string($0.rawValue) } ?? .null,
+                "reason": canResult.reason.map { JSONValue.string($0.rawValue) } ?? .null,
+            ]))
 
         case "clip.getPlayedPitch":
             // m23-ap C-0c: the pitch line THIS CLIP'S RENDER WILL ACTUALLY
@@ -13777,15 +14215,21 @@ public final class CommandRouter {
     ///
     /// `extra` (m23-ap Phase 2, item p2-c) merges additional TOP-LEVEL keys
     /// into the response — `clip.setNotePitch`'s `segmentId`/`pitchOffsetCents`
-    /// echo and `clip.splitNote`'s `leftSegmentId`/`rightSegmentId` — so both
-    /// per-note writers can return the full table (every OTHER note,
+    /// echo, `clip.splitNote`'s `leftSegmentId`/`rightSegmentId`, and (I7a)
+    /// `clip.setNoteCleared`'s `segmentIds`/`cleared` — so every per-note
+    /// writer can return the full table (every OTHER note,
     /// unchanged) AND point at the note(s) they just touched, without a
     /// second response shape. Empty for the three original callers, so their
     /// wire contract is byte-for-byte unchanged.
     private static func pitchEditsResponse(
-        clipId: UUID, edits: PitchEditSet?, appliedOptions: PitchAutoCorrectOptions?,
+        clip: Clip, appliedOptions: PitchAutoCorrectOptions?,
         extra: [String: JSONValue] = [:]
     ) -> JSONValue {
+        // I7a: the CLIP, not a (clipId, set) pair, so `edits` IS the clip's own
+        // set by construction and `hasPitchEdits` below can ask the clip's one
+        // home. Every caller already passed exactly `clip.pitchEdits`.
+        let clipId = clip.id
+        let edits = clip.pitchEdits
         let segments = edits?.segments ?? []
         var warnings: [String] = []
         // ✅ RETIRED 2026-09-24 (contour-to-render): `preserveVibrato:false`/
@@ -13793,8 +14237,8 @@ public final class CommandRouter {
         // constant per-note offset, because the render built every curve
         // with `contour: []`. It no longer does — the render now shapes
         // against the detected whole-file contour
-        // (`PitchCorrectionPresets.swift`'s own doc: 62.8 -> 18.2 cents
-        // median wander cut, measured, vs Tight's 1%) — so a warning
+        // (`PitchCorrectionPresets.swift`'s own doc holds the measured
+        // per-note wander cut, vs Tight's) — so a warning
         // claiming otherwise would now be FALSE, not merely stale. The one
         // remaining honest caveat — the detector could not run at RENDER
         // TIME, so this specific render fell back to the per-note offset —
@@ -13812,7 +14256,20 @@ public final class CommandRouter {
         }
         var response: [String: JSONValue] = [
             "clipId": .string(clipId.uuidString),
-            "hasPitchEdits": .bool(!(edits?.isIdentity ?? true)),
+            // I7a: `Clip.hasPitchEdits`, the ONE home (`Model.swift`). This line
+            // used to restate its rule over the set.
+            "hasPitchEdits": .bool(clip.hasPitchEdits),
+            // m23-ap I7b-2 wire leg (mcp-integration-engineer): `Clip.
+            // hasTuningEdits`, the ONE home (`Model.swift`) — `hasPitchEdits`
+            // WITHOUT THE LEVEL HALF (a note's pitch actually moved, never a
+            // clear or a level change alone). Beside `hasPitchEdits`, never
+            // replacing it: that one is the wire contract every pitch-edit
+            // verb already returns, and decides whether the clip renders
+            // through the tuning path at all. `hasPitchEdits &&
+            // !hasTuningEdits` means every edit here was a clear or a level
+            // change — the app's header badge then says "NOTES EDITED"
+            // rather than "TUNING APPLIED" (`PitchEditorClipBadge`).
+            "hasTuningEdits": .bool(clip.hasTuningEdits),
             "analysisVersion": .number(Double(edits?.analysisVersion ?? PitchEditSet.currentAnalysisVersion)),
             "retuneMs": .number(edits?.retuneMs ?? PitchEditSet.engineMinimumRetuneMs),
             "segmentCount": .number(Double(segments.count)),
@@ -13851,9 +14308,12 @@ public final class CommandRouter {
                     "vibratoDepthCents": .number(segment.vibratoDepthCents),
                     "vibratoOnsetSeconds": .number(segment.vibratoOnsetSeconds),
                     "formantOffsetSemitones": .number(segment.formantOffsetSemitones),
-                    // ⚠️ Carried, UNREAD by any renderer today (Phase 3
-                    // timing / Phase 4 gain — `NoteSegment`'s own doc).
-                    // Included anyway: `clip.autoCorrectPitch`'s own rule is
+                    // ⚠️ The two timing deltas are carried and UNREAD by the
+                    // render until C2-3 (`NoteSegment`'s own doc).
+                    // `amplitudeDb` is the note's LEVEL, read by the offline
+                    // render since I7a/U-C (`PitchEditSet.gain(atSourceSecond:)`),
+                    // though nothing writes it yet (U-D will). All three are
+                    // included anyway: `clip.autoCorrectPitch`'s own rule is
                     // EVERY field, always, and a wire view that curates which
                     // unread fields are worth showing is a second opinion
                     // about what "complete" means. All three are 0 on every
@@ -13861,6 +14321,9 @@ public final class CommandRouter {
                     "timeStartDeltaSeconds": .number(segment.timeStartDeltaSeconds),
                     "timeEndDeltaSeconds": .number(segment.timeEndDeltaSeconds),
                     "amplitudeDb": .number(segment.amplitudeDb),
+                    // I7a: the clear flag, ALWAYS present like every key above,
+                    // so a note that is not cleared never reads as "absent".
+                    "cleared": .bool(segment.isCleared),
                 ])
             }),
             "warnings": .array(warnings.map { .string($0) }),
@@ -14256,10 +14719,12 @@ public final class CommandRouter {
             trackObject["effects"] = effectsJSON(track.effects, trackID: track.id)
             // Transient per-clip stretch render state (M5 ii-d): engine-
             // sourced at snapshot-build time, never persisted.
-            // `stretchRendering: true` while the render job runs (the clip is
-            // scheduled as silence until it lands); `stretchError` carries a
-            // readable reason on failure. Both omit-when-default; clips that
-            // never render are never queried.
+            // `stretchRendering: true` while the render job runs -- p2-ren Stage A:
+            // meanwhile the clip plays its previous version when the edit kept its
+            // time base (notice `clip-render-previous`), or silence when it did not
+            // (notice `clip-stretch-pending`). `stretchError` carries a readable
+            // reason on failure -- never bridged, always silent. Both omit-when-
+            // default; clips that never render are never queried.
             // m23-ap-p2 p2-snapshot: "renders" is `Clip.rendersThroughStretchCache`
             // — the SAME predicate the engine renders on — so a TUNED clip
             // (pitch edits, no stretch) reports here too. This gate used to ask

@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import DAWAppKit
 
 /// m23-cf (second pass) — the SOURCE-SHAPE half of DELETE-key ownership.
 ///
@@ -412,12 +413,16 @@ struct DeleteKeySiteTests {
             + "owners and was measured non-deterministic. The routing must not depend on it."
         #expect(!routing.contains("pianoRollEditorFocused"), "\(focus)")
         #expect(!routing.contains("isFocused"), "\(focus)")
-        // All three branches must be dispatched. A `default:` that swallowed a
+        // Every branch must be dispatched. A `default:` that swallowed a
         // surface would silently send it to the arrange — the exact reason
-        // `DeleteSurface` is a sum type.
+        // `DeleteSurface` is a sum type. ⚠️ m23-ap I7b added the fourth: the
+        // note editor's selected notes, handed to the pane's bridge as a CASE of
+        // the surface switch (it was a refusal's side effect at I4).
         for branch in ["pianoRollNoteSelection.requestDelete()",
                        "automationPointSelection.requestDelete()",
-                       "handleArrangeDeleteKey()"] {
+                       "handleArrangeDeleteKey()",
+                       "case .pitchEditorNotes:",
+                       "pitchEditorInteraction.requestDelete()"] {
             #expect(routing.contains(branch),
                     "`handleDeleteKey` no longer routes to `\(branch)`")
         }
@@ -512,5 +517,225 @@ struct DeleteKeySiteTests {
                      "arrangeSelection.isEmpty", "deleteArrangeSelection()"] {
             #expect(fn.contains(term), "`handleArrangeDeleteKey` lost its `\(term)` guard/funnel")
         }
+    }
+
+    // MARK: - m23-ap p2-del — the note editor's refusal, wired end to end
+
+    private static let pitchPanePath = "DAWApp/PitchEditor/PitchEditorView.swift"
+
+    /// `DeleteKeyRoutingTests` proves the RULE (the pane open refuses ⌫ by name
+    /// and swallows it). This proves the APP feeds that rule and obeys it —
+    /// which no pure test can see, because `DAWApp` has no test target. Each leg
+    /// names the one failure it exists to catch.
+    @Test("the note editor's ⌫ refusal is wired end to end — the openness verdict in, the pane's hint out")
+    func noteEditorRefusalIsWired() {
+        let app = Self.code(Self.appPath)
+
+        // 1. THE ONE HOME READS THE OPENNESS VERDICT — the one ⌘A's
+        // `.pitchEditorOpen` arm reads — and nothing that can flip under it.
+        guard let home = Self.closureBody(after: "var pitchEditorPaneOpen: Bool", in: app) else {
+            let missing = "could not find `var pitchEditorPaneOpen: Bool` in \(Self.appPath) — if "
+                + "it was renamed, RENAME IT HERE TOO; a missing home must never read as a pass"
+            Issue.record("\(missing)")
+            return
+        }
+        let verdict = "`pitchEditorPaneOpen` must be the OPENNESS verdict "
+            + "(`openEditorSurface.reason == .pitchEditorOpen`, the m34-d ruling ⌘A reads) — a raw "
+            + "`openPitchEditorClip != nil` drops the workspace term the router folds in"
+        #expect(home.contains("openEditorSurface.reason == .pitchEditorOpen"), "\(verdict)")
+        for banned in ["activeEditorSurface", "lastEngaged", "pianoRollEditorFocused", "isFocused",
+                       "openPitchEditorClip"] {
+            #expect(!home.contains(banned),
+                    "`pitchEditorPaneOpen` reads `\(banned)` — the predicate is PANE OPEN, never engagement or focus (design P6)")
+        }
+
+        // 2. BOTH DOORS FEED IT — the key route AND Edit ▸ Delete. The policy
+        // parameter has no default, so omitting it cannot compile; this catches
+        // the other omission, a literal `false` passed "for now".
+        for property in ["var deleteKeyRouting: DeleteMenuItem", "var deleteMenuItem: DeleteMenuItem"] {
+            guard let body = Self.closureBody(after: property, in: app) else {
+                Issue.record("could not find `\(property)` in \(Self.appPath)")
+                continue
+            }
+            #expect(body.contains("pitchEditorOpen: pitchEditorPaneOpen"),
+                    "`\(property)` does not pass the note-editor term from its one home — that door would still delete the vocal clip")
+        }
+
+        // 3. THE FUNNEL SWALLOWS ON THE POLICY'S WORD AND ASKS THE PANE TO SAY WHY.
+        guard let funnel = Self.body(of: "handleDeleteKey", in: app) else {
+            Issue.record("could not find `func handleDeleteKey(` in \(Self.appPath)")
+            return
+        }
+        let swallow = "`handleDeleteKey` must return `routing.consumesKeystroke` for a refusal — "
+            + "returning `false` hands the ⌫ back, the three `.onKeyPress` mounts re-run the funnel "
+            + "and AppKit beeps"
+        #expect(funnel.contains("return routing.consumesKeystroke"), "\(swallow)")
+        let ask = "`handleDeleteKey` must bump `pitchEditorDeleteKeyNonce` on the `.pitchEditorOpen` "
+            + "refusal — without it the key is swallowed in SILENCE, and a refusal that looks like "
+            + "nothing happened is the failure the hint exists to prevent"
+        #expect(funnel.contains("if routing.refusedBy == .pitchEditorOpen { pitchEditorDeleteKeyNonce &+= 1 }"),
+                "\(ask)")
+
+        // 4. THE MOUNT HANDS THE NONCE TO THE PANE.
+        let content = Self.normalized(Self.code(Self.contentPath))
+        #expect(content.contains("deleteKeyHintNonce: model.pitchEditorDeleteKeyNonce"),
+                "`ContentView` does not pass the hint nonce to `PitchEditorView` — the pane would never hear it")
+
+        // 5. THE PANE ANSWERS WITH THE MODEL'S NAMED WRITER. (That it claims no
+        // ⌫ of its own is already pinned: `claimantCountIsPinned` walks
+        // every file under `Sources/DAWApp`.)
+        let pane = Self.code(Self.pitchPanePath)
+        guard let answer = Self.closureBody(after: ".onChange(of: deleteKeyHintNonce)", in: pane) else {
+            Issue.record("`PitchEditorView` does not watch `deleteKeyHintNonce` — the hint can never be drawn")
+            return
+        }
+        #expect(answer.contains("model.refuseDeleteKey()"))
+
+        // 6. THE HINT'S WAY OUT IS THE PANE'S OWN CLOSE CONTROL, BY THE WORDS
+        // THAT CONTROL CARRIES. Rename the pane or its close help and this
+        // reddens, instead of the hint quietly telling a novice to close a thing
+        // the app no longer calls by that name.
+        #expect(pane.contains(".help(\"Close the note editor\")"),
+                "the pane's close control no longer reads \"Close the note editor\" — re-word `DeleteMenuPolicy.pitchEditorOpenHint` to match")
+        #expect(DeleteMenuPolicy.pitchEditorOpenHint.contains("Close the note editor"))
+    }
+
+    // MARK: - m23-ap p2-del-2 — the same refusal on the CUT door
+
+    /// `ClipboardMenuPolicyTests` proves the RULE (the pane open refuses Cut by
+    /// name and leaves Copy alone). This proves the APP feeds that rule from
+    /// the SAME home, re-resolves it at click time, and leaves the right-click
+    /// escape hatch alone. That last point is the ruling's: "the right-click
+    /// Cut stays working".
+    @Test("the note editor's Cut refusal is wired — Edit ▸ Cut and ⌘X read the same openness verdict, the right-click Cut does not")
+    func noteEditorCutRefusalIsWired() {
+        let app = Self.code(Self.appPath)
+
+        // 1. THE CUT DOOR FEEDS THE ONE HOME. `clipboardItem` resolves Edit ▸
+        // Cut, and `ClipboardResponder.validateMenuItem` reads it for the native
+        // item whose key equivalent is ⌘X. The parameter has no default, so
+        // omitting it cannot compile; this catches a literal `false` passed
+        // "for now".
+        guard let item = Self.body(of: "clipboardItem", in: app) else {
+            let missing = "could not find `func clipboardItem(` in \(Self.appPath) — if it was "
+                + "renamed, RENAME IT HERE TOO; a missing door must never read as a pass"
+            Issue.record("\(missing)")
+            return
+        }
+        #expect(item.contains("pitchEditorOpen: pitchEditorPaneOpen"),
+                "`clipboardItem` does not pass the note-editor term from its one home — ⌘X would still cut the vocal clip")
+
+        // 2. THE CLICK RE-RESOLVES THROUGH THAT ITEM, so a menu drawn before the
+        // pane opened still cannot cut under it.
+        guard let perform = Self.body(of: "performMenuCut", in: app) else {
+            Issue.record("could not find `func performMenuCut(` in \(Self.appPath)")
+            return
+        }
+        #expect(perform.contains("switch cutMenuItem.surface"),
+                "`performMenuCut` no longer re-resolves `cutMenuItem` at click time — a stale item could cut under the pane")
+
+        // 3. THE ESCAPE HATCH STAYS OPEN. The clip's right-click Cut and Delete,
+        // and the two actions they share with the menu, read no openness term.
+        // A guard in any of these would lock the user out of removing the clip
+        // on purpose while the note editor is open.
+        for door in ["clipboardClipFromContextMenu", "deleteClipFromContextMenu",
+                     "cutArrangeSelection", "deleteArrangeSelection"] {
+            guard let body = Self.body(of: door, in: app) else {
+                Issue.record("could not find `func \(door)(` in \(Self.appPath)")
+                continue
+            }
+            for term in ["pitchEditorPaneOpen", "openEditorSurface", "openPitchEditorClip",
+                         "cutMenuItem", "deleteMenuItem"] {
+                #expect(!body.contains(term),
+                        "`\(door)` reads `\(term)` — the right-click door is the ESCAPE HATCH and must stay live with the note editor open")
+            }
+        }
+
+        // 4. THE ONE SENTENCE NAMES BOTH DOORS. ⌘X raises no hint of its own (a
+        // greyed item runs no action, and the key-down monitor leaves ⌘ chords
+        // to the menu), so the line ⌫ shows is the only place the app says why
+        // ⌘X did nothing.
+        #expect(DeleteMenuPolicy.pitchEditorOpenHint.contains("Cut"),
+                "the note editor's hint no longer mentions Cut — nothing in the app would say why ⌘X does nothing")
+    }
+
+    // MARK: - m23-ap I4 — notes selected in the open note editor
+
+    /// `DeleteKeyRoutingTests` proves the RULE (with notes selected in the open
+    /// pane, ⌫ and Edit ▸ Delete are a LIVE Clear of the notes — the clip never
+    /// the target — and the arm sits IN FRONT of p2-del's guard). This proves the
+    /// APP feeds that rule from one home and hands BOTH doors to the pane, which
+    /// no pure test can see. Each leg names the one failure it catches.
+    ///
+    /// ⚠️ RENAMED AND REWRITTEN at m23-ap I7b from "I4 — notes selected in the
+    /// open note editor: ⌫ is theirs — one home, both doors, the funnel asks the
+    /// pane" (`noteEditorSelectionRefusalIsWired`): the I4 funnel asked the pane
+    /// from inside the REFUSAL arm (`if routing.refusedBy == .pitchEditorNotes`),
+    /// and Edit ▸ Delete was greyed. Now it is a surface, dispatched by BOTH
+    /// funnels, and the pane answers with the clear
+    /// (`PitchEditorInteractionSiteTests` pins that half).
+    @Test("I7b — notes selected in the open note editor: ⌫ and Edit ▸ Delete CLEAR them — one home, both doors, both funnels ask the pane")
+    func noteEditorSelectionClearIsWired() {
+        let app = Self.code(Self.appPath)
+
+        // 1. THE ONE HOME: the pane is OPEN (p2-del's openness verdict,
+        // verbatim) AND its bridge reports a selection — the
+        // `pianoRollWouldConsumeKey` shape, never engagement or focus.
+        guard let home = Self.closureBody(after: "var pitchEditorWouldConsumeKey: Bool", in: app) else {
+            let missing = "could not find `var pitchEditorWouldConsumeKey: Bool` in \(Self.appPath) — if "
+                + "it was renamed, RENAME IT HERE TOO; a missing home must never read as a pass"
+            Issue.record("\(missing)")
+            return
+        }
+        #expect(home.contains("pitchEditorPaneOpen && pitchEditorInteraction.hasNoteSelection"),
+                "the ⌫ home must be PANE OPEN and the pane's own selection report, nothing else")
+        for banned in ["activeEditorSurface", "lastEngaged", "pianoRollEditorFocused", "isFocused"] {
+            #expect(!home.contains(banned),
+                    "`pitchEditorWouldConsumeKey` reads `\(banned)` — the predicate is never engagement or focus (design P6)")
+        }
+
+        // 2. BOTH DOORS FEED IT — the key route AND Edit ▸ Delete. A literal
+        // `false` passed "for now" compiles; this catches it.
+        for property in ["var deleteKeyRouting: DeleteMenuItem", "var deleteMenuItem: DeleteMenuItem"] {
+            guard let body = Self.closureBody(after: property, in: app) else {
+                Issue.record("could not find `\(property)` in \(Self.appPath)")
+                continue
+            }
+            #expect(body.contains("pitchEditorHasNoteSelection: pitchEditorWouldConsumeKey"),
+                    "`\(property)` does not pass the notes term from its one home — ⌫ with notes selected would fall through to p2-del's close-the-editor line")
+        }
+
+        // 3. BOTH FUNNELS DISPATCH THE SURFACE TO THE PANE'S BRIDGE — the key's
+        // and the Edit menu's. Each is a `case` of its surface switch, so the
+        // compiler forces it; what this catches is a case that does something
+        // ELSE (a refusal line, the arrange's delete, nothing).
+        for funnelName in ["handleDeleteKey", "performMenuDelete"] {
+            guard let funnel = Self.body(of: funnelName, in: app) else {
+                Issue.record("could not find `func \(funnelName)(` in \(Self.appPath)")
+                continue
+            }
+            guard let arm = funnel.range(of: "case .pitchEditorNotes:") else {
+                Issue.record("`\(funnelName)` has no `case .pitchEditorNotes:` — the notes' Clear is not dispatched by that door")
+                continue
+            }
+            let armBody = String(funnel[arm.upperBound...].prefix(220))
+            #expect(armBody.contains("pitchEditorInteraction.requestDelete()"),
+                    "`\(funnelName)`'s notes arm does not hand the ⌫ to the pane — the Clear would never run")
+            // It is a SURFACE now: nothing may still treat it as I4's refusal.
+            #expect(!funnel.contains("refusedBy == .pitchEditorNotes"),
+                    "`\(funnelName)` still reads the retired `.pitchEditorNotes` REFUSAL")
+        }
+        // The key funnel still swallows a refusal on the policy's word (p2-del's
+        // open-pane refusal is the one left that consumes).
+        if let funnel = Self.body(of: "handleDeleteKey", in: app) {
+            #expect(funnel.contains("return routing.consumesKeystroke"))
+        }
+
+        // 4. THE WORDS. I4's refusal sentence is retired with its refusal: the
+        // pane no longer answers ⌫ with a line, it clears. The one line left on
+        // this path is the all-already-cleared one, and it points at Restore.
+        let policy = Self.code("DAWAppKit/DeleteMenuPolicy.swift")
+        #expect(!policy.contains("pitchEditorNotesHint"),
+                "`DeleteMenuPolicy.pitchEditorNotesHint` outlived the refusal it explained")
     }
 }

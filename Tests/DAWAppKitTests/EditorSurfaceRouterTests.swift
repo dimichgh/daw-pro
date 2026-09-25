@@ -558,25 +558,43 @@ struct EditorSurfaceRouterTests {
                 == .noRollOpen)
     }
 
-    /// ⛔ **⌘A IS REFUSED BY NAME IN THE PITCH EDITOR, NOT ROUTED AND NOT FOLDED
-    /// INTO `noRollOpen`.** ⌘A means "select all NOTES" in this app and nowhere
-    /// else; a pitch SEGMENT is not a note, Increment A is read-only and holds
-    /// no selection at all, and design §3.6 assigns the gesture to the unwritten
-    /// interaction model. A fall-through to `noRollOpen` would hand a red gate
-    /// the wrong fixture to chase.
-    @Test("Select All refuses the pitch editor under its OWN reason")
-    func selectAllRefusesThePitchEditorByName() {
+    /// ⭐ **REWRITTEN ON PURPOSE AT m23-ap I4** — it was "Select All refuses the
+    /// pitch editor under its OWN reason" (`selectAllRefusesThePitchEditorByName`),
+    /// pinning p2-b's `SelectAllRefusal.pitchEditorOpen`: the pane was read-only,
+    /// held no selection, and design §3.6 left ⌘A to the interaction model. I4
+    /// IS that model (§7): the pane holds a note selection, so the arm went LIVE
+    /// on the openness verdict (the m34-d ruling) and the refusal it pinned was
+    /// retired. MEASURED RED before this rewrite: the old assertions read a live
+    /// `.pitchEditorNotes` item where they expected `"pitch-editor-open"`.
+    ///
+    /// What survives of the old pin is its point: the pane is never folded into
+    /// `noRollOpen` or the ROLL's `emptyRoll` — an empty pane refuses under its
+    /// OWN name.
+    @Test("Select All targets the open note editor's notes, and an EMPTY one refuses under its OWN reason")
+    func selectAllTargetsTheOpenNoteEditor() {
         let open = EditorSurfaceRouter.openSurface(
             workspaceIsArrange: true, rollOpen: false, pitchEditorOpen: true)
-        let item = SelectAllMenuPolicy.editMenuItem(
-            openSurface: open, isModalPresented: false, rollNoteCount: 12)
-        #expect(!item.isEnabled)
-        #expect(item.refusedBy == .pitchEditorOpen)
-        // ⚠️ ANTI-VACUITY: the note count is deliberately NON-ZERO above, so a
-        // policy that had fallen through to the `emptyRoll` guard instead would
-        // still be red here rather than accidentally green.
-        #expect(item.refusedBy != .emptyRoll)
-        #expect(item.refusedBy != .noRollOpen)
+        let live = SelectAllMenuPolicy.editMenuItem(
+            openSurface: open, isModalPresented: false, rollNoteCount: 0,
+            pitchEditorNoteCount: 12)
+        #expect(live.isEnabled)
+        #expect(live.surface == .pitchEditorNotes)
+        #expect(live.title == "Select All")
+        // ⚠️ ANTI-VACUITY: the ROLL's count is ZERO above and the item is still
+        // live, so it is the PANE's count doing the work; and below the pane's
+        // count is zero with the roll's NON-zero, so a policy that read the
+        // wrong count would be red in one leg or the other.
+        let empty = SelectAllMenuPolicy.editMenuItem(
+            openSurface: open, isModalPresented: false, rollNoteCount: 12,
+            pitchEditorNoteCount: 0)
+        #expect(!empty.isEnabled)
+        #expect(empty.refusedBy == .emptyPitchEditor)
+        #expect(empty.refusedBy != .emptyRoll)
+        #expect(empty.refusedBy != .noRollOpen)
+        // A modal still refuses first, as it does for the roll.
+        #expect(SelectAllMenuPolicy.editMenuItem(
+            openSurface: open, isModalPresented: true, rollNoteCount: 0,
+            pitchEditorNoteCount: 12).refusedBy == .modal)
     }
 
     @MainActor

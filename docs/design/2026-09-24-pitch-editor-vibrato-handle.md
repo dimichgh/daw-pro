@@ -2032,7 +2032,10 @@ C5a-L ✅ (on the handoff page) · C5a-L2 (independent; can run now)
 `PitchCorrectionPresets.swift:88-91`), which is the preset that renders with the scales below 1
 ([READ] `Model.swift:651`). Gentle, Natural and Tight keep it (`preserveVibrato: true`,
 `:79-87`), which matches the measured "Tight removes 1 % of the real vocal's wobble, Hard Tune
-70 %". Under Hard Tune the render shifts every note's audio by minus its DETECTED deviation.
+70 %" (⚠ **RETRACTED 2026-09-25:** measured note by note after note splitting, Hard Tune removes a
+median 49 % by one pitch meter and 68 % by an independent one, every note kept on its own note; the
+70 % came from before splitting and counted notes pulled onto the wrong pitch. The figures' one home is
+`PitchCorrectionPresets.swift`'s doc). Under Hard Tune the render shifts every note's audio by minus its DETECTED deviation.
 Two consequences follow from 18.1 [INFERRED from the render rule, not yet heard]:
 - **Where the detector UNDER-reads** (low pitch, 18.1.6), flattening leaves part of the sung
   movement. That is benign: less correction than asked. [MEASURED] 22.8 c RMS was left after

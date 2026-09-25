@@ -118,7 +118,7 @@ function lastLogLine(): any {
 // Instrumentation coverage (both registration paths)
 // ---------------------------------------------------------------------------
 
-test("both registration paths are instrumented: 245 total, empty symmetric difference vs tools/list", async () => {
+test("both registration paths are instrumented: 249 total, empty symmetric difference vs tools/list", async () => {
   const instrumented = instrumentedToolNames();
   // m34-l: 208 -> 209 with `play_sustain`.
   // m34-h-1: 209 -> 216 with the seven-verb `looper_*` LIVE LOOPING family.
@@ -160,7 +160,21 @@ test("both registration paths are instrumented: 245 total, empty symmetric diffe
   // through the same patched `server.registerTool` underneath. The same
   // close's `replaceExisting` addition to `clip_auto_correct_pitch` adds
   // zero (a param on an already-instrumented tool).
-  assert.equal(instrumented.length, 245, `expected 245 instrumented registrations, got ${instrumented.length}`);
+  // I7a MCP mirror (2026-09-24): 245 -> 246 with `clip_set_note_cleared`,
+  // through the wrapper (the `clip_get_played_pitch` precedent) —
+  // instrumented the same way.
+  // U-D MCP mirror (2026-09-24): 246 -> 247 with `clip_set_note_gain`,
+  // through the wrapper (the `clip_set_note_cleared` precedent) —
+  // instrumented the same way.
+  // I4 wire leg MCP mirror (2026-09-24, mcp-integration-engineer part 1 of
+  // 2): 247 -> 248 with `clip_set_note_pitches`, through the wrapper (the
+  // `clip_set_note_gain` precedent) — instrumented the same way, both
+  // registration paths running through the same patched
+  // `server.registerTool` underneath.
+  // I1 wire leg MCP mirror (2026-09-25, mcp-integration-engineer part 2 of
+  // 2): 248 -> 249 with `clip_audition_note`, through the wrapper (the
+  // note_audition precedent) — instrumented the same way.
+  assert.equal(instrumented.length, 249, `expected 249 instrumented registrations, got ${instrumented.length}`);
 
   const listed = await client.listTools();
   const listedNames = new Set(listed.tools.map((t) => t.name));

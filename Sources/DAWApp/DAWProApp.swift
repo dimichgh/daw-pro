@@ -1132,10 +1132,24 @@ final class AppModel {
         // that WAS made should stand. Nor does m25-m's click-empty-to-deselect —
         // see `explicitActiveTrackID`'s own doc for the caret argument.
         explicitActiveTrackID = nil
-        // Move keyboard focus onto the arrange so DELETE reaches it. Bumped on
-        // EVERY click, including a plain re-click of an already-selected clip:
-        // opening the piano roll steals focus back (its `.onAppear`), so a
-        // one-shot flag would leave the arrange permanently unfocused for MIDI.
+        // Re-assert SwiftUI key focus on the arrange workspace. Bumped on EVERY
+        // click, including a plain re-click of an already-selected clip.
+        //
+        // ⚠️ CORRECTED AT m34-k (m23-ap I7b-2). This said "so DELETE reaches it"
+        // and "opening the piano roll steals focus back (its `.onAppear`)". Both
+        // were stale, and the second was never a measurement:
+        //   • ⌫ has not depended on this focus since m23-cf-3, the arrows since
+        //     m34-j, and Escape since m34-k — all three ride the key monitor
+        //     (`handleKeyDownEvent`).
+        //   • The roll's `.onAppear` claim is a coin flip, not a steal: m23-al
+        //     measured `pianoRollEditorFocused` alternating 6 true / 6 false
+        //     across clip switches and true only on the opening click of one clip;
+        //     I7b measured it false on 7 of 7 Escape presses with the roll open,
+        //     maximized and three notes selected.
+        // What the bump still buys: the arrange scope's `.onKeyPress` mounts,
+        // kept as additive wiring (the Escape backstop, the two arrow mounts),
+        // become reachable again after m34-j's dead state — a dismissed text
+        // field drops this focus until a clip is clicked, and this is that click.
         arrangeKeyFocusNonce &+= 1
         // m23-al: and the SEPARATE, higher-level question — the user just acted
         // in the ARRANGE, so the arrange is the surface ⌘+/⌘−/⌘0 aim at. These two
@@ -1436,6 +1450,46 @@ final class AppModel {
         openEditorClip != nil && pianoRollNoteSelection.hasSelection
     }
 
+    /// m23-ap p2-del — THE ONE HOME for "is the NOTE EDITOR open?" as the routes
+    /// that REMOVE a clip ask it. Read by `deleteMenuItem`, `deleteKeyRouting`
+    /// and (p2-del-2) `clipboardItem`, for Cut, and by nothing else. This is the
+    /// `pianoRollWouldConsumeKey` extraction's rule: one property, one reader
+    /// per door, no second spelling to drift.
+    ///
+    /// ⭐ **THE OPENNESS VERDICT, VERBATIM — the one ⌘A's `.pitchEditorOpen` arm
+    /// reads (m34-d).** Not `openPitchEditorClip != nil` spelled raw (that drops
+    /// the WORKSPACE term the router folds in), not `activeEditorSurface`
+    /// (engagement: a pane the user has not clicked into yet can lose its clip
+    /// to ⌫ just as easily), and never a focus flag (measured non-deterministic,
+    /// `EditorSurfaceRouter` C1–C3).
+    ///
+    /// ⚠️ **IT REFUSES; IT ROUTES NOTHING.** `DeleteMenuPolicy` answers
+    /// `.pitchEditorOpen` from it — the menu greys, the key is swallowed with a
+    /// hint — and no delete is ever sent INTO the pane. `ClipboardMenuPolicy`
+    /// answers the same for CUT only: Edit ▸ Cut greys, so ⌘X runs no action
+    /// and no Cut code runs to raise a hint (the ⌫ hint names Cut instead).
+    /// Copy is not governed. Choosing a surface is still `pianoRollWouldConsumeKey`'s
+    /// job and the lanes'. Design I4 (§7) adds the pane's own note-selection
+    /// term beside this one, not instead.
+    var pitchEditorPaneOpen: Bool {
+        openEditorSurface.reason == .pitchEditorOpen
+    }
+
+    /// m23-ap I4 — THE ONE HOME for "would the open NOTE EDITOR claim ⌫?": the
+    /// pane is open (the openness verdict above, verbatim) AND its interaction
+    /// bridge reports a note selection. `pianoRollWouldConsumeKey`'s shape —
+    /// on screen AND holding a selection — and, like it, NEVER engagement or
+    /// focus (design P6). Read by `deleteMenuItem` and `deleteKeyRouting`, the
+    /// two doors that feed `DeleteMenuPolicy.pitchEditorHasNoteSelection`.
+    ///
+    /// Belt and braces, knowingly: the bridge's `hasNoteSelection` is written
+    /// by the pane itself and cleared by `clearSurface(from:)` when it goes,
+    /// and the policy's arm ALSO reads `pitchEditorOpen`, so a stale bit cannot
+    /// swallow a ⌫ meant for the clips once the pane is shut.
+    var pitchEditorWouldConsumeKey: Bool {
+        pitchEditorPaneOpen && pitchEditorInteraction.hasNoteSelection
+    }
+
     /// The Edit ▸ Delete item — title, target surface, enabled state.
     ///
     /// ⚠️ THE POLICY LIVES IN `DAWAppKit.DeleteMenuPolicy`, NOT HERE, and its doc
@@ -1461,6 +1515,13 @@ final class AppModel {
             // (`liveSelectionIndex` is an `Int?`), so the count of claiming lanes
             // IS the count of points a delete would remove.
             automationPointCount: automationPointSelection.lanesWithSelection.count,
+            // m23-ap p2-del: the note editor open greys this item — Edit ▸
+            // Delete is a door to the same vocal clip ⌫ would have deleted.
+            pitchEditorOpen: pitchEditorPaneOpen,
+            // m23-ap I4 → I7b: notes selected in the open pane — a LIVE
+            // "Clear Selected Notes", the same action as ⌫ and the pane's
+            // right-click Clear.
+            pitchEditorHasNoteSelection: pitchEditorWouldConsumeKey,
             arrangeClipCount: arrangeSelection.count)
     }
 
@@ -1493,6 +1554,13 @@ final class AppModel {
             return true
         case .automationPoints:
             automationPointSelection.requestDelete()
+            return true
+        case .pitchEditorNotes:
+            // m23-ap I7b — the note editor's selected notes: the SAME bridge
+            // request ⌫ makes, landing in the pane's one Clear action
+            // (`PitchEditorModel.performNoteAction(.clear)`), so Edit ▸ Delete,
+            // ⌫ and the right-click Clear journal identically.
+            pitchEditorInteraction.requestDelete()
             return true
         case .arrangeClips:
             return deleteArrangeSelection()
@@ -1557,8 +1625,11 @@ final class AppModel {
     /// re-evaluates the title and the enabled flag whenever any of them moves.
     var copyMenuItem: ClipboardMenuItem { clipboardItem(.copy) }
 
-    /// Edit ▸ Cut. Resolves through the SAME body as Copy — Cut is "Copy, plus
-    /// the delete that already ships", so its enablement can never drift.
+    /// Edit ▸ Cut (and ⌘X, its key equivalent). Resolves through the SAME body
+    /// as Copy — Cut is "Copy, plus the delete that already ships", so its
+    /// enablement cannot drift from Copy's except in the ONE named place where
+    /// that delete is refused: the note editor open (m23-ap p2-del-2,
+    /// `ClipboardMenuPolicy.copyMenuItem`'s step 5).
     var cutMenuItem: ClipboardMenuItem { clipboardItem(.cut) }
 
     private func clipboardItem(_ verb: ClipboardVerb) -> ClipboardMenuItem {
@@ -1570,6 +1641,10 @@ final class AppModel {
             // `handleArrangeNudgeKey`'s fifth guard and `deleteMenuItem` read.
             pianoRollHasNoteSelection: pianoRollWouldConsumeKey,
             automationPointCount: automationPointSelection.lanesWithSelection.count,
+            // m23-ap p2-del-2: the note editor open greys Edit ▸ Cut, and so
+            // ⌘X does nothing. It is a door to the same vocal clip ⌫ would have
+            // deleted. Handed to BOTH verbs; the policy reads it for `.cut` only.
+            pitchEditorOpen: pitchEditorPaneOpen,
             arrangeClipCount: arrangeSelection.count)
     }
 
@@ -1653,6 +1728,11 @@ final class AppModel {
     /// named one keystroke; `SelectAllMenuPolicy`'s banner carries why openness is
     /// safe for a key with no other meaning and unsafe for a key both surfaces
     /// claim. Three items, three questions, three terms — still.
+    /// ⭐ m23-ap p2-del qualifies that for ⌫ WITHOUT reversing it: openness may
+    /// now REFUSE ⌫ (the note editor open → `pitchEditorPaneOpen` → greyed item,
+    /// swallowed key, hint line) because a refusal destroys nothing — the same
+    /// argument that made ⌘A safe to widen. It still never ROUTES ⌫ anywhere.
+    /// p2-del-2 carries the same refusal to Edit ▸ Cut / ⌘X, and to nothing else.
     ///
     /// EVERY INPUT IS `@Observable` (`workspaceMode`, `selectedClipID`,
     /// `store.tracks`, `isModalPresented`), so the item cannot go stale.
@@ -1665,15 +1745,20 @@ final class AppModel {
             // ⚠️ STORE TRUTH, NOT THE ROLL'S DRAFT — the policy's parameter doc
             // names the one state where they differ and why it is unreachable
             // outside a live gesture. The roll's `draft` is `@State private`.
-            rollNoteCount: openEditorClip?.notes?.count ?? 0)
+            rollNoteCount: openEditorClip?.notes?.count ?? 0,
+            // m23-ap I4 — the note editor's DRAWN notes, as its pane reports
+            // them (observable, moved on change only). Not store truth, and the
+            // policy's parameter doc says why it cannot be.
+            pitchEditorNoteCount: pitchEditorInteraction.drawnNoteCount)
     }
 
     /// Edit ▸ Select All fired.
     ///
     /// RE-RESOLVED AT CLICK TIME, `performMenuDelete`'s rule and for its reason.
     ///
-    /// ⚠️ RETURNS `false` — DECLINING — EVERYWHERE EXCEPT THE ROLL, and that is
-    /// the feature working rather than failing. MEASURED 2026-08-13: a
+    /// ⚠️ RETURNS `false` — DECLINING — EVERYWHERE EXCEPT THE ROLL (and, since
+    /// m23-ap I4, the open note editor), and that is the feature working rather
+    /// than failing. MEASURED 2026-08-13: a
     /// `validateMenuItem` returning false greys the row AND the ⌘A key equivalent
     /// runs no action (0 invocations, against a positive control that ran 1), and
     /// an UNCLAIMED `selectAll:` behaved identically before this feature existed —
@@ -1688,6 +1773,12 @@ final class AppModel {
             // `PianoRollNoteSelectionBridge.selectAllNonce` for why a user
             // keystroke must not ride a debug seam.
             pianoRollNoteSelection.requestSelectAll()
+            return true
+        case .pitchEditorNotes:
+            // m23-ap I4 — the NOTE EDITOR resolves it on its own drawn notes:
+            // its model is `@State private` too, so the request rides the
+            // pane's bridge, never its debug staging nonce (the roll's rule).
+            pitchEditorInteraction.requestSelectAll()
             return true
         case nil:
             return false
@@ -2409,6 +2500,50 @@ final class AppModel {
             || showExportSheet
             || showUndoHistory
             || showSettings
+            // m34-k — THE OBLIGATION ABOVE, HONOURED LATE. The "Replace your hand
+            // edits?" card (`PresetReplaceConfirmCard`, m23-ap C-F3) is a scrimmed
+            // centred modal and was never listed, so every reader of this flag —
+            // ⌫, the arrows, Escape, the Edit menu — treated the app as modal-free
+            // while it was up. Found by m34-k: the card owns Escape through a KEY
+            // EQUIVALENT (its Cancel), which runs AFTER both the key monitor and
+            // the `.onKeyPress` mounts. MEASURED on the pre-m34-k build (m23-ap
+            // I7b-2 A/B): with the note editor maximized, Escape under the card
+            // left the mode behind it and the card stayed up — the backstop,
+            // unblocked, took `.exitMaximize` and consumed the key.
+            || pitchPresetReplaceGate.pending != nil
+            // m23-ap I1 UI hooks, item 8 (found by I7b-2) — THE CRASH-RECOVERY
+            // OFFER, the OUTERMOST scrimmed modal (`RecoveryOfferView`), was
+            // never listed either: Escape with it up went to the editor behind it
+            // (m34-k's house rule: a dismissal key belongs to whatever is on top),
+            // and ⌫ could reach a clip behind the sheet that asks about unsaved
+            // work. ⭐ WHAT ESCAPE DOES TO THE SHEET ITSELF: NOTHING, ON PURPOSE.
+            // Its two buttons, Discard and Restore, carry no key equivalent and
+            // the sheet mounts no Escape handler, so with this term the key is
+            // passed by the monitor, refused by the ladder (`blocked`) and
+            // claimed by no one. Escape must never mean "discard the recovered
+            // work"; the choice stays an explicit click.
+            // `EscapeKeyMonitorSiteTests` pins both halves.
+            || recoveryOffer != nil
+    }
+
+    /// Whether something ABOVE the editors owns Escape right now — the ladder's
+    /// `blocked` term, and its ONE home for BOTH of Escape's routes: the
+    /// SwiftUI mounts (through `handleEditorEscape`) and the key monitor
+    /// (through `EscapeKeyMonitorRouting.route`, m34-k).
+    ///
+    ///  • a blocking modal (`isModalPresented`, the preset card included);
+    ///  • a live text field (`isArrangeTextEditingFocused`) — Escape reverts it;
+    ///  • ⭐ THE EXPLAIN MODE (m34-k). Its exit is a hidden
+    ///    `.keyboardShortcut(.cancelAction)` button (`ContentView
+    ///    .explainEscHandler`), and that key equivalent runs LAST — the key
+    ///    monitor AND the `.onKeyPress` mounts both see Escape first (MEASURED,
+    ///    m23-ap I7b-2 A/B). Before m34-k this term did not name explain, so with
+    ///    the editor maximized the workspace backstop took `.exitMaximize` and
+    ///    consumed the key: the user was left IN explain mode with the editor
+    ///    un-maximized behind it (measured on the pre-m34-k build). Not a modal
+    ///    (it blocks no ⌫ and no arrow), so it is named here and only here.
+    var escapeIsOwnedElsewhere: Bool {
+        isModalPresented || isArrangeTextEditingFocused || explain.isActive
     }
 
     func handleArrangeDeleteKey() -> Bool {
@@ -2433,42 +2568,103 @@ final class AppModel {
     /// which are two different bugs with the same visible symptom.
     ///
     /// ⚠️⚠️ **IT COUNTS MOUNT HITS, NOT KEY PRESSES, AND ITS NAME SAYS SO.** Escape
-    /// has TWO mounts; when the decision REFUSES, the roll's mount reports
-    /// `.ignored` and the press bubbles to the workspace mount, which asks again —
-    /// so ONE refused press moves this by TWO. (A press that is CONSUMED stops at
-    /// the first mount and moves it by one.) Named `…MountHits` rather than
+    /// has THREE mounts since m23-ap I6a, and one press meets at most TWO of them:
+    /// the focused bottom pane's (the roll's, or the note editor pane's — only one
+    /// pane is ever open) and the workspace backstop. When the decision REFUSES,
+    /// the pane's mount reports `.ignored` and the press bubbles to the workspace
+    /// mount, which asks again — so ONE refused press moves this by TWO. (A press
+    /// that is CONSUMED stops at the first mount and moves it by one.) The note
+    /// editor pane also counts its OWN mount's deliveries
+    /// (`PitchEditorChromeLedger.escapeMountHits`, echoed by `debug.pitchEditor`),
+    /// which is what tells its mount apart from the backstop. Named `…MountHits` rather than
     /// `…FunnelSeq` for the m25-d law this repo already paid for: a readout whose
     /// name promises something other than what it counts is worse than no readout,
     /// because the reader has no reason to doubt it. Non-observable on purpose:
     /// nothing renders from it.
     @ObservationIgnored private(set) var editorEscapeMountHits = 0
 
-    /// ESCAPE's ONE decision, shared by BOTH of its mounts — the roll's own
-    /// `.onKeyPress(.escape)` and the arrange workspace's key scope. Returns
-    /// whether the keystroke was consumed; `false` leaves both mounts reporting
+    /// ESCAPE's ONE decision, shared by ALL THREE of its mounts — the roll's own
+    /// `.onKeyPress(.escape)`, the note editor pane's (m23-ap I6a, through its
+    /// model's I4 seam `PitchEditorModel.handleEscapeKey`), and the arrange
+    /// workspace's key scope. Answers the rung the press takes (since I4); a
+    /// rung that does not consume the key (`.pass`) leaves every mount reporting
     /// `.ignored`, so Escape keeps propagating exactly as it did before this item.
     ///
-    /// ⭐ TWO MOUNTS, ONE DECISION — the m23-cf lesson, applied before it could be
-    /// paid for again. Three focus-gated views claiming DELETE were measured to be
-    /// a coin flip in this tree, and the fix was to stop letting focus decide what
-    /// a key MEANS: every claimant asks the same question. Here the roll's mount
-    /// covers the ordinary case (the roll holds focus; it asserts it on appear) and
-    /// the workspace mount is the backstop for focus sitting elsewhere in the
-    /// arrange — a track row, the ruler, a lane. Both land here.
+    /// ⭐ THREE MOUNTS, ONE DECISION — the m23-cf lesson, applied before it could
+    /// be paid for again. Three focus-gated views claiming DELETE were measured to
+    /// be a coin flip in this tree, and the fix was to stop letting focus decide
+    /// what a key MEANS: every claimant asks the same question. Here the bottom
+    /// pane's mount covers the ordinary case (the roll or the note editor holds
+    /// focus; each asserts it on appear) and the workspace mount is the backstop
+    /// for focus sitting elsewhere in the arrange — a track row, the ruler, a
+    /// lane. All land here.
     ///
     /// ⭐ SET, NEVER TOGGLE. If both mounts somehow ran for one press, the second
     /// would be a no-op rather than a re-maximize. A toggle here would make the
     /// feature's correctness depend on SwiftUI's propagation being exactly-once.
     ///
-    /// The refusals live in `EditorMaximize.escapeExits` (headless, tested):
-    /// a modal owns Escape, and so does a live rename field.
-    func handleEditorEscape() -> Bool {
+    /// ⭐⭐ I4 — THE LADDER (`EditorEscapeLadder`, headless, tested). An editor's
+    /// mount hands the two facts only the focused editor has — is a gesture
+    /// live, is anything selected — and this adds the two only the app has: is
+    /// the mode on, and does a modal or a live rename field own the key
+    /// (`blocked`, checked first). The ladder picks ONE rung, nearest thing
+    /// first. The app applies the rung that is its own (`.exitMaximize`, SET
+    /// false) and hands the rung back; the editor applies `.cancelGesture` /
+    /// `.clearSelection` to its own `@State` model and answers `.handled`
+    /// exactly when `rung.consumesKey`.
+    ///
+    /// ⚠️ **THE ROLL'S ESCAPE CHANGED HERE, ON PURPOSE (design §13).** It used to
+    /// go straight to exit-maximize and leave a note selection alone; with notes
+    /// selected it now clears them first, and the NEXT press leaves the mode.
+    func handleEditorEscape(gestureLive: Bool, hasSelection: Bool) -> EditorEscapeRung {
         editorEscapeMountHits &+= 1
-        guard EditorMaximize.escapeExits(maximized: panelLayout.editorMaximized,
-                                         modalPresented: isModalPresented,
-                                         textEditing: isArrangeTextEditingFocused)
-        else { return false }
-        panelLayout.setEditorMaximized(false)
+        let rung = EditorEscapeLadder.resolve(
+            gestureLive: gestureLive, hasSelection: hasSelection,
+            maximized: panelLayout.editorMaximized,
+            blocked: escapeIsOwnedElsewhere)
+        if rung == .exitMaximize {
+            panelLayout.setEditorMaximized(false)
+        }
+        return rung
+    }
+
+    /// The arrange workspace's BACKSTOP mount (focus is in a track row, the
+    /// ruler, a lane — not in an editor). It has no editor facts to hand over,
+    /// so it asks the SAME ladder with none: the only rung it can reach is the
+    /// mode's, which is `EditorMaximize.escapeExits`'s truth table exactly (that
+    /// function now forwards to the ladder). A selection in an editor that does
+    /// not hold focus is therefore left alone — Escape takes down the thing in
+    /// front of the user, and an unfocused editor is not in front.
+    func handleEditorEscape() -> Bool {
+        handleEditorEscape(gestureLive: false, hasSelection: false).consumesKey
+    }
+
+    /// THE KEY MONITOR'S ESCAPE (m34-k): hand the key to the OPEN editor pane's
+    /// own Escape path, or pass it on. Returns whether it was handed over — the
+    /// monitor swallows exactly then.
+    ///
+    /// `EscapeKeyMonitorRouting.route` decides, from the open-pane verdict (the
+    /// ⌘A ruling's `openEditorSurface`, never engagement, never focus), the
+    /// pane's REPORTED selection (the ⌫ terms), the mode, and
+    /// `escapeIsOwnedElsewhere`. The pane then runs its own body — the roll's
+    /// `handleEscape`, the note editor's `handleEscapeKey(appDecision:)` —
+    /// which asks `handleEditorEscape(gestureLive:hasSelection:)` with its LIVE
+    /// facts: so `editorEscapeMountHits` still moves once per press, the ladder
+    /// is asked by one route and never restated, and each rung is applied by its
+    /// owner (the mode by this model, the gesture and the selection by the pane).
+    func handleEscapeFromKeyMonitor() -> Bool {
+        let target = EscapeKeyMonitorRouting.route(
+            open: openEditorSurface.reason,
+            rollHasSelection: pianoRollNoteSelection.hasSelection,
+            pitchEditorHasSelection: pitchEditorInteraction.hasNoteSelection,
+            maximized: panelLayout.editorMaximized,
+            blocked: escapeIsOwnedElsewhere)
+        escapeKeyMonitorTarget = target
+        switch target {
+        case .pianoRoll?: pianoRollNoteSelection.requestEscape()
+        case .pitchEditor?: pitchEditorInteraction.requestEscape()
+        case nil: return false
+        }
         return true
     }
 
@@ -2529,6 +2725,25 @@ final class AppModel {
     @ObservationIgnored private(set) var deleteKeyMonitorSeq = 0
     @ObservationIgnored private(set) var deleteKeyMonitorRefusedBy: DeleteKeyMonitorRefusal?
 
+    /// m23-ap p2-del — HOW MANY DELETE KEYSTROKES THE OPEN NOTE EDITOR SWALLOWED,
+    /// as a request to the pane to show its hint line. `handleDeleteKey` bumps it
+    /// on the `.pitchEditorOpen` refusal; `PitchEditorView` watches it and calls
+    /// `PitchEditorModel.refuseDeleteKey()` — the `PianoRollNoteSelectionBridge.
+    /// deleteNonce` shape, because the pane's model is `@State private` and
+    /// nothing outside can reach it.
+    ///
+    /// ⚠️ **OBSERVABLE, UNLIKE THE TWO MONITOR FIELDS ABOVE, AND IT HAS TO BE:** the
+    /// pane re-reads it through `ContentView`, and an `@ObservationIgnored`
+    /// nonce would never re-render the pane, so the key would be swallowed in
+    /// silence — "a tool that refused and a tool that did nothing must not look
+    /// the same". It moves only on a ⌫ pressed with the pane open, so the
+    /// invalidation it costs is one pane body per refused keystroke.
+    ///
+    /// A NONCE, NOT A STRING: the words are `DeleteMenuPolicy.pitchEditorOpenHint`
+    /// and live beside the rule that produces them; pressing ⌫ twice is two
+    /// requests with identical payloads, which only a counter can tell apart.
+    private(set) var pitchEditorDeleteKeyNonce = 0
+
     /// m34-j — THE ARROW MONITOR'S TIER, the `deleteKeyMonitorSeq` twin: how many
     /// ARROW key-downs reached the `NSEvent` monitor, and which guard refused the
     /// last one.
@@ -2549,6 +2764,22 @@ final class AppModel {
     /// this.
     @ObservationIgnored private(set) var arrowNudgeMonitorSeq = 0
     @ObservationIgnored private(set) var arrowNudgeMonitorRefusedBy: ArrowNudgeMonitorRefusal?
+
+    /// m34-k — THE ESCAPE MONITOR'S TIER, the arrows' twin: how many Escape
+    /// key-downs reached the `NSEvent` monitor, which guard refused the last one,
+    /// and which open editor the last ELIGIBLE one was handed to (`nil` = passed
+    /// on untouched: nothing open had anything to take down, or something above
+    /// the editors owns Escape).
+    ///
+    /// ⚠️ THE OLD INSTRUMENT STOPS ANSWERING AT THIS FIX, as the arrows' did at
+    /// m34-j: an Escape the monitor hands over is swallowed, so the SwiftUI
+    /// mounts' counters (`KeyPressProbe.pianoRollEscape`/`arrangeEscapeBackstop`,
+    /// `PitchEditorChromeLedger.escapeMountHits`) stay FLAT in the working case.
+    /// Verdicts read the editor's STATE (its selection, `editorMaximized`); these
+    /// fields only name a refusal or a route. `.otherKey` never appears here.
+    @ObservationIgnored private(set) var escapeKeyMonitorSeq = 0
+    @ObservationIgnored private(set) var escapeKeyMonitorRefusedBy: EscapeKeyMonitorRefusal?
+    @ObservationIgnored private(set) var escapeKeyMonitorTarget: EscapeKeyMonitorTarget?
 
     /// WHICH SURFACE OWNS A DELETE KEYSTROKE — resolved by `DeleteMenuPolicy`,
     /// never here.
@@ -2585,6 +2816,9 @@ final class AppModel {
             // `deleteMenuItem` read — never a second spelling of it.
             pianoRollHasNoteSelection: pianoRollWouldConsumeKey,
             automationPointCount: automationPointSelection.lanesWithSelection.count,
+            pitchEditorOpen: pitchEditorPaneOpen,
+            // m23-ap I4 — the SAME home `deleteMenuItem` reads.
+            pitchEditorHasNoteSelection: pitchEditorWouldConsumeKey,
             arrangeClipCount: arrangeSelection.count)
     }
 
@@ -2640,6 +2874,13 @@ final class AppModel {
     /// user — `deleteArrangeSelection` puts up the bubble — it is just not
     /// reported as "nobody wanted this key".
     ///
+    /// ⭐ m23-ap p2-del — "A SURFACE OWNED IT" NOW HAS ONE OWNER THAT DELETES
+    /// NOTHING: the open NOTE EDITOR. Its refusal (`.pitchEditorOpen`) returns
+    /// `true` with no surface, the pane draws a hint, and the vocal clip it
+    /// shows is untouched. The return is `DeleteMenuItem.consumesKeystroke`,
+    /// which is `surface != nil` for every other state — so nothing that shipped
+    /// before this item changes its answer.
+    ///
     /// ⚠️ AND `false` MUST STILL MEAN `.ignored` AT EVERY CALL SITE, so a DELETE
     /// nobody owns keeps propagating exactly as it does today.
     @discardableResult
@@ -2664,13 +2905,32 @@ final class AppModel {
             pianoRollNoteSelection.requestDelete()
         case .automationPoints:
             automationPointSelection.requestDelete()
+        case .pitchEditorNotes:
+            // ⭐ m23-ap I7b — NOTES SELECTED IN THE OPEN NOTE EDITOR: ⌫ CLEARS
+            // them (the user's `delete-clears = yes`). The pane is asked through
+            // its bridge (the roll's `requestDelete` shape) and runs its one
+            // Clear action — the right-click Clear's too. The vocal clip the
+            // pane shows is never the target. I4 kept this a refusal until the
+            // clear and its look existed; they do now.
+            pitchEditorInteraction.requestDelete()
         case .arrangeClips:
             // The arrange's own guard stack, deliberately — see
             // `handleArrangeDeleteKey`. Its result is DISCARDED on purpose: a
             // store refusal is not "the key was unclaimed" (see the banner).
             _ = handleArrangeDeleteKey()
         case nil:
-            return false
+            // ⛔ m23-ap p2-del — THE OPEN NOTE EDITOR OWNS THE KEY AND SAYS WHY
+            // NOTHING HAPPENED. The routing refused by name so the vocal clip
+            // the pane shows is never deleted; the pane is asked to draw its
+            // hint, and the keystroke is SWALLOWED (`consumesKeystroke`) — handed
+            // back, it would re-enter this funnel through a `.onKeyPress` delete
+            // mount and end unclaimed at AppKit. Every OTHER refusal still returns false and
+            // keeps propagating: `DeleteMenuRefusal.consumesKeystroke` is true
+            // for this one case only (I4's second, `.pitchEditorNotes`, became
+            // the live surface above at I7b), and `DeleteKeyRoutingTests` pins
+            // that.
+            if routing.refusedBy == .pitchEditorOpen { pitchEditorDeleteKeyNonce &+= 1 }
+            return routing.consumesKeystroke
         }
         return true
     }
@@ -3309,6 +3569,11 @@ final class AppModel {
     /// wants openness must call THIS, never spell `openEditorClip != nil`
     /// inline: that boolean never constructs `OpenEditorSurface` and silently
     /// drops the workspace term.
+    ///
+    /// ⭐ SECOND READER SINCE m23-ap p2-del: `pitchEditorPaneOpen`, the note-editor
+    /// refusal shared by the DELETE routes and (p2-del-2) Edit ▸ Cut / ⌘X. It asks
+    /// this verdict "is the note editor in front of the user", which is this
+    /// accessor's question exactly.
     var openEditorSurface: OpenEditorSurface {
         EditorSurfaceRouter.openSurface(
             workspaceIsArrange: workspaceMode == .arrange,
@@ -3408,18 +3673,23 @@ final class AppModel {
     /// checked FIRST only because reading it first makes the file honest; the
     /// key codes are disjoint, so this is documentation and not arbitration.
     ///
-    /// ⭐⭐⭐ FOUR KEY CLASSES SINCE m34-j, AND THE FOURTH ONE IS THE LAW THE
-    /// OTHERS WERE MISSING: **WHEN YOU RESCUE ONE KEY FROM A BROKEN ROUTE,
+    /// ⭐⭐⭐ FOUR KEY CLASSES SINCE m34-j (FIVE SINCE m34-k), AND THE FOURTH ONE
+    /// IS THE LAW THE OTHERS WERE MISSING: **WHEN YOU RESCUE ONE KEY FROM A BROKEN ROUTE,
     /// ENUMERATE EVERY OTHER RIDER ON THAT ROUTE THE SAME DAY.** m23-cf-3 fixed
     /// ⌫ and left ←/→/↑/↓ and Escape on the focus path it had just declared
     /// unreliable, because the rescue was framed as "fix delete" rather than
     /// "fix the class" — and the arrows were still latched dead twenty days
-    /// later. The arrow branch below is that debt paid; ESCAPE IS STILL OWED
-    /// (four mounts: `ContentView`'s maximized-editor backstop, `PianoRollView`,
-    /// `TimelineLanesView`, `TrackListView`).
+    /// later. The arrow branch below is that debt paid, and since m34-k so is
+    /// ESCAPE (the fifth key class): it reaches the OPEN editor pane's own
+    /// Escape path through its bridge — the roll's and the note editor's
+    /// `.onKeyPress(.escape)` mounts and `ContentView`'s backstop all rode the
+    /// focus path — and passes on to the two rename FIELDS'
+    /// mounts (`TimelineLanesView`, `TrackListView`) through its text-editing
+    /// refusal, because those ride the field editor's focus, which works.
     ///
-    /// ⚠️ ALL FOUR KEY SETS ARE DISJOINT — space 49, ⌫/⌦ 51/117, arrows 123–126,
-    /// and none of `MusicalTypingRouting.allCaps`'s 21 layout keys — so the
+    /// ⚠️ ALL FIVE KEY SETS ARE DISJOINT — space 49, ⌫/⌦ 51/117, Escape 53,
+    /// arrows 123–126, and none of `MusicalTypingRouting.allCaps`'s layout keys
+    /// (`escapeIsDisjointFromEveryOtherMonitorKey` pins Escape's half) — so the
     /// order below remains documentation rather than arbitration.
     func handleKeyDownEvent(_ event: NSEvent) -> NSEvent? {
         let deleteDecision = DeleteKeyMonitorRouting.decide(
@@ -3493,6 +3763,39 @@ final class AppModel {
                 return outcome.handled ? nil : event
             }
             return event
+        }
+        // ⭐⭐ ESCAPE (m34-k) — THE FOURTH KEY RESCUED FROM SwiftUI FOCUS, AND THE
+        // ONE THAT IS A DISMISSAL KEY. Measured dead twice: after any dismissed
+        // text field (m34-j's assessment, hits 1→1), and — the I4 ladder's whole
+        // point — on the maximized roll with notes selected (I7b, 7 of 7 presses
+        // landed on the backstop, which left the mode and kept the selection).
+        //
+        // ⚠️ SWALLOW ONLY WHAT AN EDITOR WOULD HAVE TAKEN; PASS EVERYTHING ELSE.
+        // Escape belongs to whatever is on top, and this monitor runs before the
+        // window's key equivalents and before any responder. So: a text field,
+        // another window, a chord or a repeat is refused by the predicate; a
+        // modal, the preset card or the explain mode blocks the ladder
+        // (`escapeIsOwnedElsewhere`); and with nothing to take down in the OPEN
+        // pane, `route` answers nil. Every one of those returns the event
+        // untouched — exactly what the mounts' `.ignored` does.
+        //
+        // ⚠️ THE EFFECT IS THE PANE'S, APPLIED ONE HOP LATER: the roll's and the
+        // pane's models are `@State private`, so the key is handed to the pane's
+        // OWN Escape path through its bridge, which re-asks the one ladder with
+        // its LIVE facts. `route` only predicts, and its prediction never claims
+        // a key the live answer would not consume (see `EscapeKeyMonitorRouting`).
+        let escapeDecision = EscapeKeyMonitorRouting.decide(
+            keyCode: event.keyCode,
+            modifiers: Self.transportKeyModifiers(event.modifierFlags),
+            isRepeat: event.isARepeat,
+            responder: Self.transportKeyResponder(event.window?.firstResponder),
+            window: transportKeyWindow(event.window))
+        if escapeDecision.refusedBy != .otherKey {
+            escapeKeyMonitorSeq += 1
+            escapeKeyMonitorRefusedBy = escapeDecision.refusedBy
+            escapeKeyMonitorTarget = nil
+            guard escapeDecision.eligible else { return event }
+            return handleEscapeFromKeyMonitor() ? nil : event
         }
         let decision = TransportKeyRouting.decide(
             keyCode: event.keyCode,
@@ -3596,6 +3899,23 @@ final class AppModel {
     /// deliberately non-observable for the same reason (it is written during
     /// `body`).
     @ObservationIgnored let pitchEditorChrome = PitchEditorChromeLedger()
+
+    /// m23-ap interaction batch I0 — the pitch editor pane's two-way channel
+    /// (`PitchEditorInteractionBridge`, the `pianoRollNoteSelection` shape): the
+    /// surface it MEASURED (scroll offsets, viewport, content) and DREW (the notes'
+    /// rects, the press in flight) out, for `debug.pitchEditor`; the debug tier's
+    /// staged steps and the Escape request in. App-held so it survives the pane's
+    /// `.id(clip.id)` rebuilds. The echo's handler lives in
+    /// `PitchEditorDebugStaging.swift`.
+    let pitchEditorInteraction = PitchEditorInteractionBridge()
+
+    /// m23-ap I1 UI hooks — HEAR THE NOTE IN THE PITCH EDITOR. Turns the pane
+    /// model's audition requests (press, drag step, stop) and its landed
+    /// commits (the release) into the store's audition doors, with the switch
+    /// (`panelLayout.auditionEnabled`) as their `enabled:`, and owns the pane's
+    /// honest-waiting line ("Preparing your note…"). App-held, so it outlives
+    /// the pane's `.id(clip.id)` rebuilds; `debug.pitchEditor` echoes it.
+    @ObservationIgnored let pitchEditorAudition: PitchEditorAuditionRouter
 
     /// Per-panel Simple/Pro density (M8 sp-a). App-side sticky PREFERENCE (never
     /// project data): the UserDefaults backing persists each panel's mode under
@@ -4272,6 +4592,7 @@ final class AppModel {
         // few at launch.
         store.pruneUntitledRecoveryBundles()
         self.store = store
+        self.pitchEditorAudition = PitchEditorAuditionRouter(doors: store)
         self.engine = engine
         // If a crash left restorable unsaved work, stage the launch offer (the
         // sheet reads this; nil = no offer). `recoveryStatus()` also confirms the
@@ -5412,9 +5733,10 @@ final class AppModel {
             // m23-ap Phase 2, item p2-c — the pitch editor's echo (design
             // §12.4). Handler in `PitchEditorDebugStaging.swift` (the
             // m23-cq-1 shape: debug tier, off allCommands/MCP, kept out of
-            // this file). Read-only, no params.
+            // this file). `{}` is the read-only echo; since interaction batch
+            // I0, `{act, …}` stages one step into the open pane first.
             case "debug.pitchEditor":
-                return self.pitchEditorDebug()
+                return try self.pitchEditorDebug(params)
             // m23-ap C-F3 — the preset door and its "Replace your hand
             // edits?" card, driven through the MENU'S OWN funnel. Handler in
             // `PitchCorrectionStaging.swift` (debug tier, off allCommands/MCP).
@@ -7175,6 +7497,12 @@ final class AppModel {
     ///     effect. And `deleteKeyHandled` means "a surface OWNED the key", never
     ///     "something was deleted" — a store refusal is `true` with an amber
     ///     bubble, exactly as a fully-clamped nudge reports `handled: true`.
+    ///     ⭐ m23-ap p2-del: the open NOTE EDITOR owns it too —
+    ///     `deleteKeyRefusedBy: "pitch-editor-open"` with `deleteKeyHandled: true`
+    ///     and `deleteKeySurface: null` is the key swallowed, the pane's hint
+    ///     requested (`debug.pitchEditor`'s `refusalText` shows the words once the
+    ///     pane has drawn), and the clip untouched. It is the ONLY refusal that
+    ///     reports `true`; every other one is still `false`.
     ///   - `{act:"nudge", direction:"left"|"right"|"up"|"down", option?, shift?,
     ///     command?, control?, repeat?}` (m23-x; ↑/↓ added by m23-aj-3) — the
     ///     ARROW key's HANDLER body including its six guards
@@ -7760,6 +8088,15 @@ final class AppModel {
             "arrowNudgeMonitorSeq": .number(Double(arrowNudgeMonitorSeq)),
             "arrowNudgeMonitorRefusedBy":
                 arrowNudgeMonitorRefusedBy.map { .string($0.rawValue) } ?? .null,
+            // m34-k — Escape's monitor tier: ARRIVALS, the refusal, and which open
+            // pane the last eligible press was handed to (null = passed on). The
+            // verdict is the pane's STATE, never these (see the fields' doc).
+            "escapeKeyMonitorSeq": .number(Double(escapeKeyMonitorSeq)),
+            "escapeKeyMonitorRefusedBy":
+                escapeKeyMonitorRefusedBy.map { .string($0.rawValue) } ?? .null,
+            "escapeKeyMonitorTarget":
+                escapeKeyMonitorTarget.map { .string($0.rawValue) } ?? .null,
+            "escapeIsOwnedElsewhere": .bool(escapeIsOwnedElsewhere),
             // ⭐ m23-fi — PER-MOUNT `.onKeyPress` ENTRY COUNTERS + the three
             // `@FocusState` VALUES they hang off. See `KeyPressProbe`. This is a
             // strictly finer instrument than the two fields above: the monitor

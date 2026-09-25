@@ -567,7 +567,8 @@ struct EngineNoticeEngineTests {
 
     /// What the LIVE graph would play for `clip`, as audio: an offline render
     /// whose stretch provider is the live engine's OWN resolver (the closure
-    /// the graph's reconcile calls — `.ready(url)` opens `url`, `.pending`
+    /// the graph's reconcile calls — `.ready(url)` opens `url`, `.bridge(url)`
+    /// opens the clip's PREVIOUS file `url` (p2-ren Stage A), `.pending`
     /// schedules nothing), rendered from the clip's start, written to a temp
     /// WAV and read back. The bounce path (`renderOffline`) is deliberately
     /// NOT used: it calls `renderIfNeeded` directly and would render the new
@@ -576,8 +577,10 @@ struct EngineNoticeEngineTests {
         let resolver = try #require(engine.graph.stretchResolver)
         let renderer = OfflineRenderer()
         renderer.stretchedFileProvider = { clip in
-            if case .ready(let url) = resolver(clip) { return url }
-            return nil
+            switch resolver(clip) {
+            case .ready(let url), .bridge(let url): return url
+            case .pending: return nil
+            }
         }
         let audio = try renderer.render(
             tracks: [Track(name: "Vox", kind: .audio, clips: [clip])],
@@ -611,28 +614,228 @@ struct EngineNoticeEngineTests {
         return (ok, "stretched: RMS \(late) in 1.02–1.15 s (past the 1 s source), pitch \(hz) Hz (want 440 ± 3 %)")
     }
 
+    // MARK: REPOINT_DIAG (I1-F2 follow-up; env-gated, off by default)
+
+    /// `REPOINT_DIAG=1`: where a rendered clip's re-render spends its time.
+    /// OFF by default, and then nothing below runs: `applyEdit` and
+    /// `renderedClipRig` take their original lines, and `observeAfterEdit` is
+    /// untouched. ON, the edit's `tracksDidChange` runs inside
+    /// `StretchRenderCache.$jobPhaseForTesting`, so the render job it starts
+    /// reports its phases with its own priority, and `observeAfterEditDiagnosed`
+    /// replaces `observeAfterEdit`: the same 10 ms samples and the same answer
+    /// for the window, plus when each thing happened and, if the window runs
+    /// out, up to 60 s more observation, to learn how long a stall lasts.
+    private static let repointDiagEnabled = ProcessInfo.processInfo.environment["REPOINT_DIAG"] != nil
+
+    /// One diagnosed render: the job's phases, stamped against `start`.
+    final class RepointDiag: @unchecked Sendable {
+        let label: String
+        let start = ContinuousClock.now
+        let wallStart = Date()
+        private let lock = NSLock()
+        private var phases: [(name: String, priority: TaskPriority, at: Duration)] = []
+
+        init(label: String) {
+            self.label = label
+            MainQueueWatch.start()
+        }
+
+        var recorder: @Sendable (String, TaskPriority) -> Void {
+            { [self] name, priority in
+                let at = ContinuousClock.now - start
+                lock.lock()
+                phases.append((name, priority, at))
+                lock.unlock()
+            }
+        }
+
+        func since(_ instant: ContinuousClock.Instant) -> Duration { instant - start }
+
+        /// "+123.4 ms (07:52:01.123)": offset from the edit, and wall-clock time.
+        func stamp(_ offset: Duration) -> String {
+            let ms = Double(offset.components.seconds) * 1_000
+                + Double(offset.components.attoseconds) / 1e15
+            let formatter = DateFormatter()
+            formatter.dateFormat = "HH:mm:ss.SSS"
+            return String(format: "+%.1f ms", ms)
+                + " (\(formatter.string(from: wallStart.addingTimeInterval(ms / 1_000))))"
+        }
+
+        var phaseLine: String {
+            lock.lock()
+            let copy = phases
+            lock.unlock()
+            return copy.map { "\($0.name) \(stamp($0.at)) priority \($0.priority.rawValue)" }
+                .joined(separator: "; ")
+        }
+    }
+
+    /// REPOINT_DIAG: how late the MAIN QUEUE runs a block, measured from a
+    /// GCD timer on its own queue, so the measurement needs no
+    /// cooperative-pool thread: a held pool cannot delay these pings, a busy
+    /// main thread can. Every 10 ms, if no ping is in flight, it posts one
+    /// block to the main queue; a ping that runs more than 250 ms after it
+    /// was posted is printed when it runs, as a `main-queue hold` with its
+    /// wall-clock span (the hold began within 10 ms of the posting). Started
+    /// by the first `RepointDiag`, it runs to the end of the process.
+    final class MainQueueWatch: @unchecked Sendable {
+        private static let shared = MainQueueWatch()
+        private let queue = DispatchQueue(label: "repoint-diag.main-queue-watch", qos: .userInteractive)
+        private let lock = NSLock()
+        private var posted: (at: ContinuousClock.Instant, wall: Date)?
+        private var timer: DispatchSourceTimer?
+
+        static func start() { _ = shared }
+
+        private init() {
+            let timer = DispatchSource.makeTimerSource(queue: queue)
+            timer.schedule(deadline: .now(), repeating: .milliseconds(10), leeway: .milliseconds(1))
+            timer.setEventHandler { [weak self] in self?.tick() }
+            self.timer = timer
+            timer.resume()
+        }
+
+        private func tick() {
+            lock.lock()
+            let inFlight = posted != nil
+            if !inFlight { posted = (ContinuousClock.now, Date()) }
+            lock.unlock()
+            guard !inFlight else { return }
+            DispatchQueue.main.async { [self] in landed() }
+        }
+
+        private func landed() {
+            lock.lock()
+            let sent = posted
+            posted = nil
+            lock.unlock()
+            guard let sent else { return }
+            let held = ContinuousClock.now - sent.at
+            guard held > .milliseconds(250) else { return }
+            let ms = Double(held.components.seconds) * 1_000 + Double(held.components.attoseconds) / 1e15
+            let formatter = DateFormatter()
+            formatter.dateFormat = "HH:mm:ss.SSS"
+            print(String(format: "repoint-diag| main-queue hold %.1f ms: %@ → %@", ms,
+                         formatter.string(from: sent.wall), formatter.string(from: Date())))
+        }
+    }
+
+    /// REPOINT_DIAG's twin of `observeAfterEdit` (see it for the contract):
+    /// the same samples at the same cadence, and the same answer for the
+    /// window. It also records when the status changed, when `renderCount`
+    /// rose (the job's debounce passed), when the render for the clip as it
+    /// now stands was committed, when the committed render plays, the loop's
+    /// own priority and its largest gap between wakes; and when the window
+    /// runs out it keeps observing, up to 60 s from the edit, then prints it
+    /// all on one `repoint-diag|` line.
+    private func observeAfterEditDiagnosed(_ engine: AudioEngine, trackID: UUID, clip: Clip,
+                                           seconds: Double, diag: RepointDiag) async throws
+        -> (statuses: [String], playerBack: Bool, elapsed: Double) {
+        let start = Date()
+        var statuses: [String] = []
+        var statusTimes: [String] = []
+        func sample() {
+            let status = "\(engine.clipStretchStatus(trackID: trackID, clipID: clip.id) ?? .idle)"
+            if statuses.last != status {
+                statuses.append(status)
+                statusTimes.append("\(status) \(diag.stamp(diag.since(.now)))")
+            }
+        }
+        func committedRenderPlays() -> Bool {
+            guard let played = engine.graph.clipFileURLForTesting(clipID: clip.id),
+                  let source = clip.audioFileURL,
+                  let committed = engine.stretchCache.cachedURL(
+                      source: source, params: StretchRenderCache.Params(clip: clip))
+            else { return false }
+            return played.standardizedFileURL == committed.standardizedFileURL
+        }
+        func committedForClip() -> Bool {
+            guard let source = clip.audioFileURL else { return false }
+            return engine.stretchCache.cachedURL(
+                source: source, params: StretchRenderCache.Params(clip: clip)) != nil
+        }
+        let loopPriority = Task.currentPriority
+        let rendersAtStart = engine.stretchCache.renderCount
+        var renderRose: Duration?
+        var committedAt: Duration?
+        var playerAt: Duration?
+        var lastWake = ContinuousClock.now
+        var maxGap = Duration.zero
+        var maxGapAt = Duration.zero
+        var wakes = 0
+        sample()
+        var playerBack = false
+        var windowResult: (statuses: [String], playerBack: Bool, elapsed: Double)?
+        while Date().timeIntervalSince(start) < 60 {
+            try await Task.sleep(for: .milliseconds(10))
+            let now = ContinuousClock.now
+            wakes += 1
+            if now - lastWake > maxGap {
+                maxGap = now - lastWake
+                maxGapAt = diag.since(now)
+            }
+            lastWake = now
+            sample()
+            if renderRose == nil, engine.stretchCache.renderCount > rendersAtStart { renderRose = diag.since(now) }
+            if committedAt == nil, committedForClip() { committedAt = diag.since(now) }
+            if committedRenderPlays() {
+                playerBack = true
+                playerAt = diag.since(now)
+                break
+            }
+            if windowResult == nil, Date().timeIntervalSince(start) >= seconds {
+                windowResult = (statuses, false, Date().timeIntervalSince(start))
+            }
+        }
+        let result = windowResult ?? (statuses, playerBack, Date().timeIntervalSince(start))
+        func show(_ offset: Duration?) -> String { offset.map { diag.stamp($0) } ?? "never (60 s)" }
+        print("repoint-diag| \(diag.label): window \(seconds) s, "
+              + (windowResult == nil ? "landed inside it" : "MISSED it, observed on to 60 s")
+              + "; statuses \(statusTimes); renderCount rose \(show(renderRose)); "
+              + "committed \(show(committedAt)); committed render plays \(show(playerAt)); "
+              + "job phases [\(diag.phaseLine)]; loop priority \(loopPriority.rawValue), "
+              + "\(wakes) wakes, largest gap \(diag.stamp(maxGap).split(separator: " ").first ?? "") "
+              + "ending \(diag.stamp(maxGapAt))")
+        return result
+    }
+
     /// Samples the clip's render status (the snapshot's source,
     /// `clipStretchStatus`) every 10 ms from the moment the edit returns until
-    /// the clip's player comes back or `seconds` elapse. Returns each DISTINCT
-    /// status in order — the first sample is taken synchronously, before the
-    /// kick's Task can have run, so a healthy sequence reads
-    /// `idle → rendering → idle` and a render that was never started reads
-    /// `idle` alone.
-    private func observeAfterEdit(_ engine: AudioEngine, trackID: UUID, clipID: UUID,
+    /// the clip's node plays the render COMMITTED for `clip` as it now stands,
+    /// or `seconds` elapse. Returns each DISTINCT status in order — the first
+    /// sample is taken synchronously, before the kick's Task can have run, so a
+    /// healthy sequence reads `idle → rendering → idle` and a render that was
+    /// never started reads `idle` alone.
+    ///
+    /// p2-ren Stage A: "the committed render plays", NOT "the clip has a
+    /// player". A pitch-only edit's clip now keeps a node while its render is
+    /// pending, playing its PREVIOUS file (the bridge), so a player alone no
+    /// longer says the render landed. For an edit that cannot bridge (a
+    /// repoint, a ratio edit, media that was missing) the two are the same
+    /// moment, exactly as before.
+    private func observeAfterEdit(_ engine: AudioEngine, trackID: UUID, clip: Clip,
                                   seconds: Double) async throws
         -> (statuses: [String], playerBack: Bool, elapsed: Double) {
         let start = Date()
         var statuses: [String] = []
         func sample() {
-            let status = "\(engine.clipStretchStatus(trackID: trackID, clipID: clipID) ?? .idle)"
+            let status = "\(engine.clipStretchStatus(trackID: trackID, clipID: clip.id) ?? .idle)"
             if statuses.last != status { statuses.append(status) }
+        }
+        func committedRenderPlays() -> Bool {
+            guard let played = engine.graph.clipFileURLForTesting(clipID: clip.id),
+                  let source = clip.audioFileURL,
+                  let committed = engine.stretchCache.cachedURL(
+                      source: source, params: StretchRenderCache.Params(clip: clip))
+            else { return false }
+            return played.standardizedFileURL == committed.standardizedFileURL
         }
         sample()
         var playerBack = false
         while Date().timeIntervalSince(start) < seconds {
             try await Task.sleep(for: .milliseconds(10))
             sample()
-            if engine.graph.clipPlayerForTesting(clipID: clipID) != nil {
+            if committedRenderPlays() {
                 playerBack = true
                 break
             }
@@ -660,11 +863,23 @@ struct EngineNoticeEngineTests {
         let track = Track(name: "Vox", kind: .audio, clips: [original])
 
         let renderStart = Date()
-        engine.tracksDidChange([track])
+        let diag = Self.repointDiagEnabled ? RepointDiag(label: "first render \(kind)") : nil
+        if let diag {
+            StretchRenderCache.$jobPhaseForTesting.withValue(diag.recorder) {
+                engine.tracksDidChange([track])
+            }
+        } else {
+            engine.tracksDidChange([track])
+        }
         #expect(engine.graph.clipPlayerForTesting(clipID: original.id) == nil,
                 "positive control: the \(kind) clip is pending right after the edit")
         #expect(try await waitForPlayer(engine, clipID: original.id), "the \(kind) render never landed")
         let firstRenderSeconds = Date().timeIntervalSince(renderStart)
+        if let diag {
+            print("repoint-diag| \(diag.label): player after \(firstRenderSeconds) s "
+                  + "(\(diag.stamp(diag.since(.now)))); job phases [\(diag.phaseLine)]; "
+                  + "test priority \(Task.currentPriority.rawValue)")
+        }
         #expect(engine.stretchCache.renderCount == 1)
         let before = Self.playsAsSet(original, try liveResolverRender(engine, clip: original,
                                                                       label: "\(kind)-before"))
@@ -685,11 +900,24 @@ struct EngineNoticeEngineTests {
         let edited = try edit(rig.clip)
         rig.clip = edited
         rig.track.clips = [edited]
-        engine.tracksDidChange([rig.track])
+        let diag = Self.repointDiagEnabled ? RepointDiag(label: "\(label) \(kind)") : nil
+        if let diag {
+            let track = rig.track
+            StretchRenderCache.$jobPhaseForTesting.withValue(diag.recorder) {
+                engine.tracksDidChange([track])
+            }
+        } else {
+            engine.tracksDidChange([rig.track])
+        }
 
         let window = max(5, rig.firstRenderSeconds * 10)
-        let observed = try await observeAfterEdit(engine, trackID: rig.track.id, clipID: edited.id,
-                                                  seconds: window)
+        let observed = if let diag {
+            try await observeAfterEditDiagnosed(engine, trackID: rig.track.id, clip: edited,
+                                                seconds: window, diag: diag)
+        } else {
+            try await observeAfterEdit(engine, trackID: rig.track.id, clip: edited,
+                                       seconds: window)
+        }
         let rendersAfter = engine.stretchCache.renderCount
         let editedSource = try #require(edited.audioFileURL)
         let committedForEdit = engine.stretchCache.cachedURL(
@@ -799,7 +1027,7 @@ struct EngineNoticeEngineTests {
         moved.startBeat = 1
         track.clips = [moved]
         engine.tracksDidChange([track])
-        let observed = try await observeAfterEdit(engine, trackID: track.id, clipID: moved.id, seconds: 5)
+        let observed = try await observeAfterEdit(engine, trackID: track.id, clip: moved, seconds: 5)
         let after = Self.playsAsSet(moved, try liveResolverRender(engine, clip: moved, label: "negzero-moved"))
         print("[measured] −0.0 semitones then move: node kept across the ±0 edit "
               + "\(playerAfterNegation === firstPlayer); after the move statuses \(observed.statuses), "
@@ -845,6 +1073,461 @@ struct EngineNoticeEngineTests {
         }
     }
 
+    // MARK: - p2-ren Stage A: the veto scenario (the bridge's ONE-predicate revert)
+
+    /// One scripted session on the REAL engine (no hardware), written down as
+    /// text: every answer the graph's resolver gives, and every engine notice,
+    /// step by step. `configure` runs once on the fresh engine before anything
+    /// else. "play" is what `startPlayers` runs on the graph (stop every
+    /// player, then `scheduleAll`), which is where render notices post.
+    ///
+    /// URLs are written as labels (`source`, or `render(<cents>c x<ratio>
+    /// t<timing delta>)` from the render key the step asked for), so the text
+    /// is the same on every run and every machine.
+    ///
+    /// The steps: open a tuned clip; a pitch edit; a ratio edit; a
+    /// timing-only edit; an undo to a render already on disk; a render that
+    /// FAILS (the cache folder made read-only after the edit, before the
+    /// render writes); two quick edits (the first render is cancelled); an
+    /// edit after the file the clip plays was deleted.
+    private func vetoScenarioTranscript(configure: (AudioEngine) -> Void) async throws -> [String] {
+        let engine = engineWithTempCache()
+        configure(engine)
+        let box = EventBox()
+        engine.engineNoticeHandler = { box.events.append($0) }
+        let source = try sineFixture(folder: "veto")
+        let tempo = TempoMap(constantBPM: 120)
+        let noteID = UUID()
+        func edits(_ cents: Double, timing: Double = 0) -> PitchEditSet {
+            PitchEditSet(segments: [
+                NoteSegment(id: noteID, startSeconds: 0.1, endSeconds: 0.9, detectedHz: 440,
+                            detectedConfidence: 0.9, pitchOffsetCents: cents,
+                            timeStartDeltaSeconds: timing)
+            ])
+        }
+        var clip = Clip(name: "Lead Vox", startBeat: 0, lengthBeats: 2, audioFileURL: source,
+                        pitchEdits: edits(100))
+        var track = Track(name: "Vox", kind: .audio, clips: [clip])
+
+        var labels: [String: String] = [:]
+        func remember(_ c: Clip) throws {
+            let key = try StretchRenderCache.cacheKey(source: source,
+                                                      params: StretchRenderCache.Params(clip: c))
+            let cents = c.pitchEdits?.segments.first?.pitchOffsetCents ?? 0
+            let timing = c.pitchEdits?.segments.first?.timeStartDeltaSeconds ?? 0
+            labels[key] = "render(\(cents)c x\(c.stretchRatio) t\(timing))"
+        }
+        func label(_ url: URL) -> String {
+            if url.standardizedFileURL == source.standardizedFileURL { return "source" }
+            return labels[url.deletingPathExtension().lastPathComponent]
+                ?? "unknown(\(url.lastPathComponent))"
+        }
+        var answers: [String] = []
+        let inner = try #require(engine.graph.stretchResolver)
+        engine.graph.stretchResolver = { c in
+            let answer = inner(c)
+            // The case name and its URL, without naming any case in this
+            // file, so the same text comes out of every build of the engine.
+            if let child = Mirror(reflecting: answer).children.first {
+                let url = child.value as? URL
+                answers.append("resolve \(child.label ?? "?")(\(url.map(label) ?? "?"))")
+            } else {
+                answers.append("resolve \(answer)")
+            }
+            return answer
+        }
+        var transcript: [String] = []
+        func flush(_ tag: String) {
+            transcript.append("-- \(tag)")
+            transcript += answers
+            transcript += box.events.map {
+                "notice \($0.code) | \($0.message) | beat \(String(describing: $0.beat))"
+            }
+            answers.removeAll()
+            box.events.removeAll()
+        }
+        func play() {
+            engine.graph.stopAllPlayers()
+            engine.graph.scheduleAll(fromBeat: 0, tempoMap: tempo)
+        }
+        func landed() -> Bool {
+            guard let played = engine.graph.clipFileURLForTesting(clipID: clip.id),
+                  let committed = engine.stretchCache.cachedURL(
+                      source: source, params: StretchRenderCache.Params(clip: clip))
+            else { return false }
+            return played.standardizedFileURL == committed.standardizedFileURL
+        }
+        /// Every wait below is a HANG GUARD (`HangGuard`), never a latency
+        /// claim: each event needs several main-actor turns (the kick, the
+        /// job's debounce, its render's return, the kick's re-entry), and in
+        /// the full suite a 20 s guard on the injected failure ran out while
+        /// the job was still on its way (08:47, the veto test 88.3 s).
+        func waitUntil(_ seconds: Double, _ condition: () -> Bool) async throws -> Bool {
+            let deadline = Date().addingTimeInterval(seconds)
+            while !condition(), Date() < deadline {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            return condition()
+        }
+        func edit(_ tag: String, _ change: (inout Clip) -> Void) async throws {
+            change(&clip)
+            try remember(clip)
+            track.clips = [clip]
+            engine.tracksDidChange([track])
+            play()
+            flush("\(tag): edit, then play")
+            try #require(try await waitUntil(HangGuard.seconds, landed), "\(tag): the render never reached the node")
+            flush("\(tag): the render landed")
+            play()
+            flush("\(tag): play again")
+        }
+
+        try remember(clip)
+        engine.tracksDidChange([track])
+        play()
+        flush("open +100c: open, then play")
+        try #require(try await waitUntil(HangGuard.seconds, landed), "open: the render never reached the node")
+        flush("open: the render landed")
+        play()
+        flush("open: play again")
+
+        try await edit("pitch +200c") { $0.pitchEdits = edits(200) }
+        try await edit("ratio 1.25") { $0.stretchRatio = 1.25 }
+        try await edit("timing-only +50 ms") { $0.pitchEdits = edits(200, timing: 0.05) }
+        try await edit("undo to +200c x1.25 (on disk)") { $0.pitchEdits = edits(200) }
+
+        // A render that FAILS: the cache folder turns read-only after the
+        // edit resolved and before the render (250 ms of debounce later)
+        // writes its partial file.
+        let cacheDir = engine.stretchCache.directory
+        clip.pitchEdits = edits(300)
+        try remember(clip)
+        track.clips = [clip]
+        engine.tracksDidChange([track])
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: cacheDir.path)
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755],
+                                                   ofItemAtPath: cacheDir.path)
+        }
+        play()
+        flush("failure +300c: edit, then play")
+        let failed = try await waitUntil(HangGuard.seconds) {
+            if case .failed? = engine.clipStretchStatus(trackID: track.id, clipID: clip.id) {
+                return true
+            }
+            return false
+        }
+        try #require(failed, "the injected render failure never happened")
+        // The kick's catch path runs: with a bridge playing it ends it (the
+        // failure rule); without one it does nothing, and the sleep covers it.
+        try #require(try await waitUntil(HangGuard.seconds) { !engine.graph.isPlayingBridge(clipID: clip.id) },
+                "the failed render's bridge never ended")
+        try await Task.sleep(for: .milliseconds(200))
+        flush("failure +300c: the render failed")
+        play()
+        flush("failure +300c: play again")
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cacheDir.path)
+
+        // Two quick edits: the first one's render is cancelled by the second.
+        clip.pitchEdits = edits(400)
+        try remember(clip)
+        track.clips = [clip]
+        engine.tracksDidChange([track])
+        flush("cancel +400c: the first edit")
+        try await Task.sleep(for: .milliseconds(60))
+        try await edit("cancel +500c") { $0.pitchEdits = edits(500) }
+
+        // The file the clip plays is deleted, then the next edit.
+        let playing = try #require(engine.graph.clipFileURLForTesting(clipID: clip.id))
+        try FileManager.default.removeItem(at: playing)
+        try await edit("deleted base +600c") { $0.pitchEdits = edits(600) }
+
+        #expect(!engine.isRunning, "the veto scenario started the audio hardware")
+        return transcript
+    }
+
+    /// TODAY: the veto scenario's transcript captured on the tree BEFORE any
+    /// p2-ren Stage A source change (2026-09-25, a one-off env-gated capture
+    /// run on the unchanged engine), verbatim. The bridge's veto must restore
+    /// exactly this.
+    private static let vetoGoldenToday: [String] = [
+        "-- open +100c: open, then play",
+        "resolve pending",
+        "notice clip-stretch-pending | The tuned version of 'Lead Vox' is still being prepared — the clip plays as silence until it's ready. | beat Optional(0.0)",
+        "-- open: the render landed",
+        "resolve ready(render(100.0c x1.0 t0.0))",
+        "-- open: play again",
+        "-- pitch +200c: edit, then play",
+        "resolve pending",
+        "notice clip-stretch-pending | The tuned version of 'Lead Vox' is still being prepared — the clip plays as silence until it's ready. | beat Optional(0.0)",
+        "-- pitch +200c: the render landed",
+        "resolve ready(render(200.0c x1.0 t0.0))",
+        "-- pitch +200c: play again",
+        "-- ratio 1.25: edit, then play",
+        "resolve pending",
+        "notice clip-stretch-pending | 'Lead Vox' is still being time-stretched — it plays as silence until the stretch is ready. | beat Optional(0.0)",
+        "-- ratio 1.25: the render landed",
+        "resolve ready(render(200.0c x1.25 t0.0))",
+        "-- ratio 1.25: play again",
+        "-- timing-only +50 ms: edit, then play",
+        "resolve pending",
+        "notice clip-stretch-pending | 'Lead Vox' is still being time-stretched — it plays as silence until the stretch is ready. | beat Optional(0.0)",
+        "-- timing-only +50 ms: the render landed",
+        "resolve ready(render(200.0c x1.25 t0.05))",
+        "-- timing-only +50 ms: play again",
+        "-- undo to +200c x1.25 (on disk): edit, then play",
+        "resolve ready(render(200.0c x1.25 t0.0))",
+        "-- undo to +200c x1.25 (on disk): the render landed",
+        "-- undo to +200c x1.25 (on disk): play again",
+        "-- failure +300c: edit, then play",
+        "resolve pending",
+        "notice clip-stretch-pending | 'Lead Vox' is still being time-stretched — it plays as silence until the stretch is ready. | beat Optional(0.0)",
+        "-- failure +300c: the render failed",
+        "-- failure +300c: play again",
+        "-- cancel +400c: the first edit",
+        "resolve pending",
+        "-- cancel +500c: edit, then play",
+        "resolve pending",
+        "-- cancel +500c: the render landed",
+        "resolve ready(render(500.0c x1.25 t0.0))",
+        "-- cancel +500c: play again",
+        "-- deleted base +600c: edit, then play",
+        "resolve pending",
+        "notice clip-stretch-pending | 'Lead Vox' is still being time-stretched — it plays as silence until the stretch is ready. | beat Optional(0.0)",
+        "-- deleted base +600c: the render landed",
+        "resolve ready(render(600.0c x1.25 t0.0))",
+        "-- deleted base +600c: play again",
+    ]
+
+    /// THE BRIDGE, AS DESIGNED (§5, §10, §11): the same session with the
+    /// bridge on, WRITTEN DOWN FROM THE DESIGN BEFORE IT WAS FIRST RUN — every
+    /// line that differs from today's is a rule:
+    ///  * a pitch edit, and a timing-only edit while the render ignores W
+    ///    (`StretchCurvePlan.readsTimeWarp == false`), bridge on the file the
+    ///    clip played, and say so once (`clip-render-previous`);
+    ///  * a RATIO edit never bridges (a different time base);
+    ///  * an undo to a render on disk is `.ready`, as today;
+    ///  * a render that FAILS ends its bridge (`resolve pending` at the
+    ///    failure), and the silence is then reported like any pending clip;
+    ///  * the first edit after a failure does not bridge: the kick is async,
+    ///    so at that resolve the clip's status is still the failed job's (it
+    ///    errs toward silence, today's behaviour);
+    ///  * a CANCELLED render (+400c, superseded by +500c) does not end it;
+    ///  * a previous file that was deleted cannot bridge.
+    private static let bridgeGolden: [String] = [
+        "-- open +100c: open, then play",
+        "resolve pending",
+        "notice clip-stretch-pending | The tuned version of 'Lead Vox' is still being prepared — the clip plays as silence until it's ready. | beat Optional(0.0)",
+        "-- open: the render landed",
+        "resolve ready(render(100.0c x1.0 t0.0))",
+        "-- open: play again",
+        "-- pitch +200c: edit, then play",
+        "resolve bridge(render(100.0c x1.0 t0.0))",
+        "notice clip-render-previous | 'Lead Vox' is playing its previous version for a moment: your latest change is still being prepared. | beat Optional(0.0)",
+        "-- pitch +200c: the render landed",
+        "resolve ready(render(200.0c x1.0 t0.0))",
+        "-- pitch +200c: play again",
+        "-- ratio 1.25: edit, then play",
+        "resolve pending",
+        "notice clip-stretch-pending | 'Lead Vox' is still being time-stretched — it plays as silence until the stretch is ready. | beat Optional(0.0)",
+        "-- ratio 1.25: the render landed",
+        "resolve ready(render(200.0c x1.25 t0.0))",
+        "-- ratio 1.25: play again",
+        "-- timing-only +50 ms: edit, then play",
+        "resolve bridge(render(200.0c x1.25 t0.0))",
+        "notice clip-render-previous | 'Lead Vox' is playing its previous version for a moment: your latest change is still being prepared. | beat Optional(0.0)",
+        "-- timing-only +50 ms: the render landed",
+        "resolve ready(render(200.0c x1.25 t0.05))",
+        "-- timing-only +50 ms: play again",
+        "-- undo to +200c x1.25 (on disk): edit, then play",
+        "resolve ready(render(200.0c x1.25 t0.0))",
+        "-- undo to +200c x1.25 (on disk): the render landed",
+        "-- undo to +200c x1.25 (on disk): play again",
+        "-- failure +300c: edit, then play",
+        "resolve bridge(render(200.0c x1.25 t0.0))",
+        "notice clip-render-previous | 'Lead Vox' is playing its previous version for a moment: your latest change is still being prepared. | beat Optional(0.0)",
+        "-- failure +300c: the render failed",
+        "resolve pending",
+        "-- failure +300c: play again",
+        "notice clip-stretch-pending | 'Lead Vox' is still being time-stretched — it plays as silence until the stretch is ready. | beat Optional(0.0)",
+        "-- cancel +400c: the first edit",
+        "resolve pending",
+        "-- cancel +500c: edit, then play",
+        "resolve bridge(render(200.0c x1.25 t0.0))",
+        "notice clip-render-previous | 'Lead Vox' is playing its previous version for a moment: your latest change is still being prepared. | beat Optional(0.0)",
+        "-- cancel +500c: the render landed",
+        "resolve ready(render(500.0c x1.25 t0.0))",
+        "-- cancel +500c: play again",
+        "-- deleted base +600c: edit, then play",
+        "resolve pending",
+        "notice clip-stretch-pending | 'Lead Vox' is still being time-stretched — it plays as silence until the stretch is ready. | beat Optional(0.0)",
+        "-- deleted base +600c: the render landed",
+        "resolve ready(render(600.0c x1.25 t0.0))",
+        "-- deleted base +600c: play again",
+    ]
+
+    /// The first line where two transcripts part, for a readable failure.
+    private static func firstDifference(_ got: [String], _ want: [String]) -> String {
+        for index in 0..<max(got.count, want.count) {
+            let a = index < got.count ? got[index] : "<end>"
+            let b = index < want.count ? want[index] : "<end>"
+            if a != b { return "line \(index): got «\(a)», want «\(b)»" }
+        }
+        return "none"
+    }
+
+    @Test("p2-ren Stage A veto: with the bridge vetoed (bridgeFile forced to nil), one scripted session's resolutions and notices are today's, line for line")
+    func vetoRestoresTodayExactly() async throws {
+        var vetoed: AudioEngine?
+        let transcript = try await vetoScenarioTranscript { engine in
+            engine.bridgeEnabled = false
+            vetoed = engine
+        }
+        #expect(transcript == Self.vetoGoldenToday,
+                "the vetoed engine is not today's: \(Self.firstDifference(transcript, Self.vetoGoldenToday))")
+        #expect(vetoed?.bridgeResolutionCountForTesting == 0)
+    }
+
+    @Test("p2-ren Stage A: with the bridge on, the same session bridges exactly where the design says: pitch and timing-only edits, never a ratio edit; a failure ends it, a cancellation does not, a deleted file cannot")
+    func bridgeSessionReadsAsDesigned() async throws {
+        var bridged: AudioEngine?
+        let transcript = try await vetoScenarioTranscript { bridged = $0 }
+        // The positive control for the veto test above: this session CAN tell
+        // the bridge from today.
+        #expect(transcript != Self.vetoGoldenToday, "the bridge changed nothing in this session")
+        #expect(transcript == Self.bridgeGolden,
+                "the bridge session is not as designed: \(Self.firstDifference(transcript, Self.bridgeGolden))")
+        let bridgeLines = transcript.filter { $0.hasPrefix("resolve bridge(") }.count
+        #expect(bridgeLines == 4)
+        #expect(bridged?.bridgeResolutionCountForTesting == bridgeLines,
+                "the engine's own count of bridge answers disagrees with the resolver's transcript")
+    }
+
+    // MARK: - p2-ren Stage A: the graph's side of a bridge
+
+    @Test("p2-ren Stage A: a bridged clip opens its previous file and says so ONCE per bridge, from the play pass only, never as clip-stretch-pending; a landed render re-arms it")
+    func bridgePostsRenderPreviousOncePerEpisode() throws {
+        let (_, graph) = try makeManualGraph()
+        let box = collectingSink(graph)
+        let url = try wavFixture()
+        let tempo = TempoMap(constantBPM: 120)
+        var answer = PlaybackGraph.StretchResolution.bridge(url)
+        graph.stretchResolver = { _ in answer }
+        var opened: [URL] = []
+        graph.onClipFileOpened = { _, file, _ in opened.append(file) }
+        let clip = Self.tunedClip(name: "Lead Vox", startBeat: 2, url: url)
+        var track = Track(name: "Vox", kind: .audio, clips: [clip])
+
+        // The edit (transport stopped): the clip keeps sounding, on its
+        // previous file, and nothing is said yet.
+        graph.reconcile(tracks: [track])
+        #expect(graph.isPlayingBridge(clipID: clip.id))
+        #expect(graph.clipFileURLForTesting(clipID: clip.id)?.standardizedFileURL == url.standardizedFileURL)
+        #expect(opened.map(\.standardizedFileURL) == [url.standardizedFileURL],
+                "the memo feed must see the bridge's open too")
+        #expect(box.events.isEmpty, "an edit's reconcile is not playback: \(box.events)")
+
+        // Play: one notice, in words a novice can act on, at the clip's beat.
+        graph.scheduleAll(fromBeat: 0, tempoMap: tempo)
+        #expect(box.events.map(\.code) == ["clip-render-previous"])
+        let event = try #require(box.events.first)
+        #expect(event.message == "'Lead Vox' is playing its previous version for a moment: "
+                + "your latest change is still being prepared.")
+        #expect(event.beat == 2)
+
+        // A seek, and an unrelated pass that keeps the node: the same bridge.
+        graph.stopAllPlayers()
+        graph.scheduleAll(fromBeat: 1, tempoMap: tempo)
+        graph.reconcile(tracks: [track])
+        graph.scheduleAll(fromBeat: 0, tempoMap: tempo)
+        #expect(box.events.count == 1, "one bridge, one notice: \(box.events.map(\.code))")
+
+        // The render lands: the node is rebuilt on it, and nothing is said.
+        answer = .ready(url)
+        graph.invalidateClipSchedule(clipID: clip.id)
+        graph.reconcile(tracks: [track])
+        #expect(!graph.isPlayingBridge(clipID: clip.id))
+        #expect(graph.clipPlayerForTesting(clipID: clip.id) != nil)
+        graph.scheduleAll(fromBeat: 0, tempoMap: tempo)
+        #expect(box.events.count == 1, "a landed render posts nothing")
+
+        // The next edit bridges again: a NEW bridge, so one more notice.
+        answer = .bridge(url)
+        var edited = clip
+        edited.pitchEdits = PitchEditSet(segments: [
+            NoteSegment(startSeconds: 0.1, endSeconds: 0.6, detectedHz: 220,
+                        detectedConfidence: 0.9, pitchOffsetCents: 75)
+        ])
+        track.clips = [edited]
+        graph.reconcile(tracks: [track])
+        #expect(graph.isPlayingBridge(clipID: clip.id))
+        graph.scheduleAll(fromBeat: 0, tempoMap: tempo)
+        #expect(box.events.map(\.code) == ["clip-render-previous", "clip-render-previous"])
+        #expect(!box.events.contains { $0.code == "clip-stretch-pending" })
+    }
+
+    @Test("p2-ren Stage A: a bridge the graph cannot open is no bridge: the clip gets no node, is reported as pending silence, and no cache file is named as missing media")
+    func unopenableBridgeIsPendingSilence() throws {
+        let (_, graph) = try makeManualGraph()
+        let box = collectingSink(graph)
+        let missing = FileManager.default.temporaryDirectory
+            .appendingPathComponent("daw-pro-bridge-gone-\(UUID().uuidString).caf")
+        graph.stretchResolver = { _ in .bridge(missing) }
+        var opened = 0
+        graph.onClipFileOpened = { _, _, _ in opened += 1 }
+        let clip = Self.tunedClip(name: "Lead Vox", startBeat: 2, url: try wavFixture())
+        graph.reconcile(tracks: [Track(name: "Vox", kind: .audio, clips: [clip])])
+        #expect(graph.clipPlayerForTesting(clipID: clip.id) == nil)
+        #expect(!graph.isPlayingBridge(clipID: clip.id))
+        #expect(opened == 0)
+        graph.scheduleAll(fromBeat: 0, tempoMap: TempoMap(constantBPM: 120))
+        #expect(box.events.map(\.code) == ["clip-stretch-pending"], "\(box.events.map(\.code))")
+    }
+
+    // MARK: - p2-ren Stage A: the bridge's notice through the REAL engine
+
+    @Test("p2-ren Stage A through the REAL engine: a pitch edit's clip keeps playing its previous render, one clip-render-previous at play, none when the render lands")
+    func realEngineBridgeNoticeOnce() async throws {
+        let engine = engineWithTempCache()
+        let box = EventBox()
+        engine.engineNoticeHandler = { box.events.append($0) }
+        let source = try sineFixture(folder: "bridge-notice")
+        let original = Self.renderingClip(.tuned, url: source)
+        var track = Track(name: "Vox", kind: .audio, clips: [original])
+        engine.tracksDidChange([track])
+        try #require(try await waitForPlayer(engine, clipID: original.id, seconds: HangGuard.seconds),
+                "the tuned render never landed")
+        let previous = try #require(engine.graph.clipFileURLForTesting(clipID: original.id))
+        box.events.removeAll()
+
+        var edited = original
+        edited.pitchEdits = PitchEditSet(segments: [
+            NoteSegment(startSeconds: 0.1, endSeconds: 0.9, detectedHz: 440,
+                        detectedConfidence: 0.9, pitchOffsetCents: 300)
+        ])
+        track.clips = [edited]
+        engine.tracksDidChange([track])
+        #expect(engine.graph.isPlayingBridge(clipID: edited.id))
+        #expect(engine.graph.clipFileURLForTesting(clipID: edited.id)?.standardizedFileURL
+                == previous.standardizedFileURL, "the bridge is not the file the clip played")
+        #expect(box.events.isEmpty, "stopped transport: \(box.events)")
+
+        // What pressing play runs.
+        engine.graph.stopAllPlayers()
+        engine.graph.scheduleAll(fromBeat: 0, tempoMap: TempoMap(constantBPM: 120))
+        #expect(box.events.map(\.code) == ["clip-render-previous"])
+        #expect(box.events.first?.message.contains("Tuned Vox") == true)
+
+        let observed = try await observeAfterEdit(engine, trackID: track.id, clip: edited,
+                                                  seconds: HangGuard.seconds)
+        try #require(observed.playerBack, "the +300 c render never reached the node")
+        #expect(!engine.graph.isPlayingBridge(clipID: edited.id))
+        engine.graph.stopAllPlayers()
+        engine.graph.scheduleAll(fromBeat: 0, tempoMap: TempoMap(constantBPM: 120))
+        #expect(box.events.count == 1, "the landing render must not post: \(box.events.map(\.code))")
+        #expect(!engine.isRunning)
+    }
+
     /// Media that is missing when the clip first resolves (a drive not yet
     /// mounted, a file being restored) has no render key, so nothing can
     /// render. When the file appears at that path, the next reconcile — any
@@ -865,7 +1548,7 @@ struct EngineNoticeEngineTests {
 
         try Self.writeSine(to: url)
         engine.tracksDidChange([track])  // the next edit's reconcile
-        let observed = try await observeAfterEdit(engine, trackID: track.id, clipID: clip.id, seconds: 5)
+        let observed = try await observeAfterEdit(engine, trackID: track.id, clip: clip, seconds: 5)
         let after = Self.playsAsSet(clip, try liveResolverRender(engine, clip: clip,
                                                                  label: "missing-then-present"))
         print("[measured] missing media that appears: statuses \(observed.statuses), player back "

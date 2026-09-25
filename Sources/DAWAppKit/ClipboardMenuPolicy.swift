@@ -113,7 +113,31 @@ public enum ClipboardMenuPolicy {
     ///      the SAME property the nudge guard and the Delete item read, never a
     ///      second spelling.
     ///   4. AN AUTOMATION LANE WOULD HAVE CONSUMED IT.
-    ///   5. Otherwise the ARRANGE owns it, if anything is selected.
+    ///   5. **CUT ONLY — THE NOTE EDITOR (pitch editor pane) IS OPEN** (m23-ap
+    ///      p2-del-2). Delete's own fifth guard, carried to the one verb here
+    ///      that deletes: Cut is "Copy plus the delete", and that delete is the
+    ///      thing `DeleteMenuPolicy.editMenuItem` now refuses while the pane is
+    ///      open, because the pane opens only on the arrange-selected clip, so
+    ///      ⌘X would cut the very vocal clip the pane is showing. Same
+    ///      term (`AppModel.pitchEditorPaneOpen`, the openness verdict ⌘A's
+    ///      `.pitchEditorOpen` arm reads), same place in the stack, same spelling
+    ///      (`pitch-editor-open`). ⭐ COPY IS NOT GOVERNED: it removes nothing, so
+    ///      refusing it would take a harmless verb away for no safety.
+    ///   6. Otherwise the ARRANGE owns it, if anything is selected.
+    ///
+    /// ⚠️ **⌘X IS SWALLOWED BY THE MENU SYSTEM, NOT BY THIS APP, AND THE PANE'S
+    /// HINT IS NOT RAISED FOR IT.** A refused Cut greys the native item, and a
+    /// greyed item's key equivalent runs no action (MEASURED for ⌘A at m25-s: 0
+    /// invocations against a positive control of 1; `performMenuSelectAll`'s doc).
+    /// ⚠️ INFERRED FOR ⌘X from that ⌘A measurement: same mechanism, not
+    /// re-measured for this key. On that inference ⌘X does nothing, exactly
+    /// like ⌘X with nothing selected, and no Cut code runs that could raise
+    /// the hint. `validateMenuItem` cannot raise it
+    /// either: it runs on every menu display, not only on ⌘X. The one tier that
+    /// sees the raw key-down (`AppModel.handleKeyDownEvent`) passes ⌘ chords
+    /// through on purpose, because they belong to the menu, so no branch was
+    /// added there. The ⌫ hint names both doors instead
+    /// (`DeleteMenuPolicy.pitchEditorOpenHint`).
     ///
     /// ⚠️ **AUTOMATION POINTS ARE OUT OF SCOPE FOR THE CLIPBOARD IN v1, AND
     /// STEP 4 THEREFORE REFUSES RATHER THAN FALLING THROUGH.** That is the
@@ -138,14 +162,21 @@ public enum ClipboardMenuPolicy {
     /// break the property.
     ///
     /// - Parameters:
-    ///   - verb: `.copy` or `.cut`. The ONLY difference between the two items is
-    ///     this word and what the action does afterwards — resolving both through
-    ///     one function is what stops Cut's enablement drifting from Copy's, when
-    ///     the whole point is that Cut is Copy plus the delete that already ships.
+    ///   - verb: `.copy` or `.cut`. Resolving both through one function is what
+    ///     stops Cut's enablement DRIFTING from Copy's: Cut is Copy plus the
+    ///     delete that already ships. ⚠️ **EXACTLY ONE DIVERGENCE, AND IT IS
+    ///     THAT DELETE** (step 5): while the note editor is open, Cut refuses and
+    ///     Copy does not. `ClipboardMenuPolicyTests.cutMirrorsCopyExceptTheNoteEditor`
+    ///     sweeps the whole space and fails on any other difference.
     ///   - arrangeWorkspace: `workspaceMode == .arrange`.
     ///   - isModalPresented: a blocking modal is on screen.
     ///   - pianoRollHasNoteSelection: `AppModel.pianoRollWouldConsumeKey`.
     ///   - automationPointCount: `automationPointSelection.lanesWithSelection.count`.
+    ///   - pitchEditorOpen: `AppModel.pitchEditorPaneOpen`, the note editor
+    ///     (pitch editor pane) is open. It is the SAME term both Delete doors
+    ///     read, and it has NO DEFAULT on purpose: a caller that forgets it
+    ///     fails to compile, instead of quietly letting ⌘X cut the clip under
+    ///     the pane. Read for `.cut` only.
     ///   - arrangeClipCount: `arrangeSelection.count`.
     public static func copyMenuItem(
         verb: ClipboardVerb,
@@ -153,6 +184,7 @@ public enum ClipboardMenuPolicy {
         isModalPresented: Bool,
         pianoRollHasNoteSelection: Bool,
         automationPointCount: Int,
+        pitchEditorOpen: Bool,
         arrangeClipCount: Int
     ) -> ClipboardMenuItem {
         guard arrangeWorkspace else { return ClipboardMenuItem(verb: verb, refusedBy: .workspace) }
@@ -175,6 +207,14 @@ public enum ClipboardMenuPolicy {
         }
         guard automationPointCount == 0 else {
             return ClipboardMenuItem(verb: verb, refusedBy: .automationSelection)
+        }
+        // Step 5 — Cut only. Placed where `DeleteMenuPolicy.editMenuItem` places
+        // its own note-editor guard (after both editors, before the empty
+        // selection), so the two verbs that remove a clip refuse in exactly the
+        // same states. `ClipboardMenuPolicyTests.cutRefusesExactlyWhereDeleteDoes`
+        // sweeps that.
+        if verb == .cut, pitchEditorOpen {
+            return ClipboardMenuItem(verb: verb, refusedBy: .pitchEditorOpen)
         }
         guard arrangeClipCount > 0 else {
             return ClipboardMenuItem(verb: verb, refusedBy: .emptySelection)
@@ -404,7 +444,8 @@ public enum ClipboardMenuPolicy {
 /// CARRIES ITS OWN MENU WORD so the verb and its title can never disagree, and
 /// so `copyMenuItem` can resolve Copy and Cut through one body — the property
 /// that keeps Cut's enablement from drifting from Copy's when Cut is defined as
-/// "Copy, plus the delete that already ships".
+/// "Copy, plus the delete that already ships". The one named exception is that
+/// delete being refused (the note editor open, `copyMenuItem`'s step 5).
 public enum ClipboardVerb: String, Sendable, CaseIterable, Equatable {
     case copy
     case cut
@@ -450,6 +491,19 @@ public enum ClipboardMenuRefusal: String, Sendable, CaseIterable, Equatable {
     /// `copyMenuItem`'s banner: refusing is honest, falling through would copy a
     /// surface the user was not pointing at.
     case automationSelection = "automation-selection"
+    /// CUT only (m23-ap p2-del-2): the NOTE EDITOR (pitch editor pane) is open,
+    /// and it opens only on the arrange-selected clip, so a Cut would remove
+    /// the vocal clip the pane is showing. `copyMenuItem`'s step 5 has the reasons.
+    ///
+    /// A CUT-SIDE TWIN OF `DeleteMenuRefusal.pitchEditorOpen`, NOT A REUSE:
+    /// `ClipboardMenuItem.refusedBy` is typed by this enum, and this file's
+    /// banner makes the split deliberate ("a SIBLING of `DeleteMenuPolicy`, not
+    /// an extension of it"). ⭐ THE SAME RAW SPELLING ON PURPOSE, as
+    /// `DeleteMenuRefusal.pitchEditorOpen` uses (and ⌘A's
+    /// `SelectAllRefusal.pitchEditorOpen` did, until m23-ap I4 made ⌘A live in
+    /// the pane and retired it), so the `debug.editClipboard` echo and a red
+    /// gate read one fact under one name wherever it appears.
+    case pitchEditorOpen = "pitch-editor-open"
     /// Copy/Cut only — nothing is selected on any surface this can act on.
     case emptySelection = "empty-selection"
     /// Paste only — nothing has been copied or cut yet.

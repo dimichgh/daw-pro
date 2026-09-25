@@ -430,6 +430,10 @@ struct PitchCurveRenderTests {
             "vibratoRateHz", "vibratoDepthCents", "vibratoOnsetSeconds",
             "formantOffsetSemitones", "timeStartDeltaSeconds",
             "timeEndDeltaSeconds", "amplitudeDb",
+            // I7a: hashed in the LEVEL block (slot 5), not inline, so a set
+            // with no cleared note keeps the bytes it had before the flag
+            // existed. The mutation row below proves the block carries it.
+            "isCleared",
         ]
         #expect(Set(fields) == Set(covered),
                 """
@@ -455,6 +459,9 @@ struct PitchCurveRenderTests {
             { s in s.timeStartDeltaSeconds = 0.01 },
             { s in s.timeEndDeltaSeconds = 0.01 },
             { s in s.amplitudeDb = -3 },
+            // I7a: the base note carries a pitch edit, so it is not identity
+            // either way, and ONLY the level block can make this re-key.
+            { s in s.isCleared = true },
         ] {
             var segment = base()
             change(&segment)
@@ -575,7 +582,18 @@ struct PitchCurveRenderTests {
             NoteSegment(startSeconds: 0, endSeconds: 1, detectedHz: 220,
                         detectedConfidence: 0.9, pitchOffsetCents: 25)
         ])
-        for set in [nil, PitchEditSet.empty, detectedOnly, edited] as [PitchEditSet?] {
+        // I7a/U-C: a clear alone, or a level alone, is a real edit. It renders
+        // (the mask), so it digests, and the model agrees.
+        var clearedOnly = detectedOnly
+        clearedOnly.segments[0].isCleared = true
+        var levelledOnly = detectedOnly
+        levelledOnly.segments[0].amplitudeDb = -72
+        #expect(!clearedOnly.isIdentity && !levelledOnly.isIdentity)
+        #expect(!PitchEditSetDigest.hex(clearedOnly).isEmpty,
+                "a cleared note digests to nothing: the cache would play the uncleared source")
+        #expect(!PitchEditSetDigest.hex(levelledOnly).isEmpty)
+        for set in [nil, PitchEditSet.empty, detectedOnly, edited, clearedOnly, levelledOnly]
+            as [PitchEditSet?] {
             let clip = Clip(name: "c", audioFileURL: URL(fileURLWithPath: "/tmp/x.wav"),
                             pitchEdits: set)
             #expect(clip.hasPitchEdits == !PitchEditSetDigest.hex(set).isEmpty,
@@ -596,9 +614,12 @@ struct PitchCurveRenderTests {
             NoteSegment(startSeconds: 0, endSeconds: 1, detectedHz: 220,
                         detectedConfidence: 0.9)
         ])
+        // I7a/U-C: a table whose only edit is a cleared note.
+        var clearedOnly = detectedOnly
+        clearedOnly.segments[0].isCleared = true
         for ratio in [1.0, 1.5] {
             for semitones in [0.0, 3.0] {
-                for set in [nil, detectedOnly, edited] as [PitchEditSet?] {
+                for set in [nil, detectedOnly, edited, clearedOnly] as [PitchEditSet?] {
                     let clip = Clip(name: "c",
                                     audioFileURL: URL(fileURLWithPath: "/tmp/x.wav"),
                                     stretchRatio: ratio,
@@ -1011,5 +1032,104 @@ struct PitchCurveRenderTests {
         // because a plausible second spelling of D really does differ on them.
         #expect(discriminating >= 3,
                 "only \(discriminating) fixture(s) distinguish n/sr from n·(1/sr); the pin would be vacuous")
+    }
+
+    // MARK: - (9) I7a/U-C: digest slot (5), THE LEVEL BLOCK
+
+    /// The block I7a appends (interaction-batch design §17.6), restated
+    /// independently: the marker (a literal here, because changing it would
+    /// silently re-key every cleared or levelled render), the mask version,
+    /// the note count, then ONE BYTE PER NOTE, its cleared flag. `amplitudeDb`
+    /// is not in it: that value has been hashed inline since the field
+    /// existed, and it stays there.
+    static func i7aLevelBlock(_ set: PitchEditSet) -> [UInt8] {
+        var bytes: [UInt8] = []
+        withUnsafeBytes(of: UInt64(0x4C31_4556_454C_5301).littleEndian) {
+            bytes.append(contentsOf: $0)
+        }
+        withUnsafeBytes(of: UInt64(bitPattern: Int64(PitchEditSet.levelMaskVersion)).littleEndian) {
+            bytes.append(contentsOf: $0)
+        }
+        withUnsafeBytes(of: UInt64(bitPattern: Int64(set.segments.count)).littleEndian) {
+            bytes.append(contentsOf: $0)
+        }
+        for segment in set.segments { bytes.append(segment.isCleared ? 1 : 0) }
+        return bytes
+    }
+
+    /// ⭐ THE STALE-KEY HAZARD, FOR LEVELS. A cleared note that kept its old
+    /// key would be served the audio rendered before it was cleared: a clear
+    /// that "does nothing" until some other edit happens to re-key the clip.
+    /// The re-key must be EXACTLY the level block, in slot (5), after the
+    /// time-warp block. That is proven against the independent restatement,
+    /// which is itself proven against the captured pre-C2 goldens first. And
+    /// every set with no level edit keeps its bytes (the legacy goldens).
+    @Test("(9) I7a: a cleared or levelled set re-keys by exactly the level block, in slot 5, after the time-warp block")
+    func i7aLevelBlockRekeysByExactlyTheBlock() {
+        for golden in Self.c21LegacyDigestGoldens + Self.c21PreC2TimedHex {
+            #expect(Self.c21SHA(Self.c21PreC2Material(Self.c21Set(golden.set))) == golden.hex,
+                    "the test's own layout restatement does not reproduce '\(golden.set)'")
+        }
+        #expect(PitchEditSetDigest.levelSuffixMarker == 0x4C31_4556_454C_5301)
+        #expect(PitchEditSet.levelMaskVersion == 1,
+                "a mask version bump re-keys every level-edited render: make it on purpose, then move this pin")
+
+        // No level edit: no block, the legacy bytes (the goldens above, unmoved).
+        for golden in Self.c21LegacyDigestGoldens {
+            let set = Self.c21Set(golden.set)
+            #expect(!set.hasLevelEdits)
+            #expect(PitchEditSetDigest.hex(set) == golden.hex)
+        }
+
+        // A clear alone, on a plain-offset set.
+        var cleared = Self.c21Set("offset")
+        cleared.segments[0].isCleared = true
+        #expect(cleared.hasLevelEdits)
+        let clearedHex = PitchEditSetDigest.hex(cleared)
+        #expect(clearedHex != Self.c21LegacyDigestGoldens[0].hex,
+                "a cleared note kept its pre-clear key: the old audio would be served as the clear")
+        #expect(clearedHex == Self.c21SHA(Self.c21PreC2Material(cleared) + Self.i7aLevelBlock(cleared)),
+                "a clear re-keyed, but not by exactly the level block")
+
+        // A level alone: amplitudeDb is already hashed inline, and the block
+        // (all flags 0) marks that the render now reads it.
+        var levelled = Self.c21Set("offset")
+        levelled.segments[0].amplitudeDb = -72
+        #expect(levelled.hasLevelEdits)
+        #expect(PitchEditSetDigest.hex(levelled)
+                == Self.c21SHA(Self.c21PreC2Material(levelled) + Self.i7aLevelBlock(levelled)))
+        #expect(PitchEditSetDigest.hex(levelled) != clearedHex)
+
+        // A clear on a note whose level was also set: both, and distinct from each.
+        var both = levelled
+        both.segments[0].isCleared = true
+        #expect(Set([PitchEditSetDigest.hex(both), clearedHex, PitchEditSetDigest.hex(levelled)]).count == 3)
+
+        // ORDER: the generator block (inside the material), then the time-warp
+        // block (slot 3), then the level block (slot 5).
+        var everything = Self.c21Set("generator")
+        everything.segments[1].timeStartDeltaSeconds = 0.02
+        everything.segments[0].isCleared = true
+        #expect(PitchEditSetDigest.hex(everything)
+                == Self.c21SHA(Self.c21PreC2Material(everything) + Self.c21WarpBlock()
+                               + Self.i7aLevelBlock(everything)),
+                "the level block is not in slot 5, after the time-warp block")
+
+        // A clear on a DETECTED-ONLY table is a real edit: it digests.
+        let detectedOnly = PitchEditSet(segments: [
+            NoteSegment(id: Self.c21IdA, startSeconds: 0, endSeconds: 1, detectedHz: 220,
+                        detectedConfidence: 0.9)
+        ])
+        #expect(PitchEditSetDigest.hex(detectedOnly).isEmpty)
+        var clearedDetectedOnly = detectedOnly
+        clearedDetectedOnly.segments[0].isCleared = true
+        #expect(PitchEditSetDigest.hex(clearedDetectedOnly)
+                == Self.c21SHA(Self.c21PreC2Material(clearedDetectedOnly)
+                               + Self.i7aLevelBlock(clearedDetectedOnly)))
+
+        // Restore is exact: the flag back to false is the pre-clear key, bit for bit.
+        var restored = cleared
+        restored.segments[0].isCleared = false
+        #expect(PitchEditSetDigest.hex(restored) == Self.c21LegacyDigestGoldens[0].hex)
     }
 }

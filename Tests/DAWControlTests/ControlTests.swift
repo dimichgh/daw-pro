@@ -1637,6 +1637,50 @@ struct CommandRouterTests {
             ]))
         let paramsByCommand: [String: [String: JSONValue]] = [
             "clip.getPlayedPitch": ["clipId": .string(playedPitchClipID)],
+            // I7a: clip.setNoteCleared is DRIVEN, not excluded, on the same
+            // setup clip as clip.getPlayedPitch above. Its stored one-note
+            // table, seeded off the wire, is exactly what the verb needs, so
+            // a real clear routes and succeeds. A cleared note changes nothing
+            // clip.getPlayedPitch needs, so their order in allCommands does
+            // not matter.
+            "clip.setNoteCleared": ["clipId": .string(playedPitchClipID),
+                                    "segmentIds": .array([.string(playedPitchSegmentID.uuidString)]),
+                                    "cleared": .bool(true)],
+            // U-D: clip.setNoteGain is DRIVEN, not excluded, the
+            // clip.setNoteCleared precedent immediately above — same setup
+            // clip, same stored one-note table. A level write changes
+            // nothing clip.getPlayedPitch needs either, so allCommands order
+            // still does not matter.
+            "clip.setNoteGain": ["clipId": .string(playedPitchClipID),
+                                 "segmentIds": .array([.string(playedPitchSegmentID.uuidString)]),
+                                 "gainDb": .number(-6)],
+            // m23-ap I4 wire leg: clip.setNotePitches is DRIVEN, not
+            // excluded, the clip.setNoteCleared/clip.setNoteGain precedent
+            // immediately above — same setup clip, same stored one-note
+            // table. This test only asserts `response.ok`, never a value, so
+            // a pitch write's effect on what clip.getPlayedPitch WOULD then
+            // return is irrelevant here (that assertion lives in
+            // PitchCorrectionCommandTests, not here) — allCommands order
+            // still does not matter.
+            "clip.setNotePitches": ["clipId": .string(playedPitchClipID),
+                                    "notes": .array([.object([
+                                        "segmentId": .string(playedPitchSegmentID.uuidString),
+                                        "cents": .number(50),
+                                    ])])],
+            // m23-ap I1 wire leg: clip.auditionNote is DRIVEN, not excluded,
+            // the clip.setNoteCleared/clip.setNoteGain/clip.setNotePitches
+            // precedent immediately above — same setup clip, same stored
+            // one-note table (a real audio clip, not MIDI; a non-empty
+            // stored table — clip.auditionNote's own two prerequisites,
+            // identical to clip.getPlayedPitch's). The engine here
+            // (FakeEngine) never overrides auditionClipSpan, so it answers
+            // through AudioEngineControlling's own protocol-extension
+            // default, `.unsupported` — a REAL, non-throwing answer
+            // (`audible: false`), which is still `response.ok == true`: a
+            // refusal without a throw is a SUCCESS on this door, never an
+            // error. allCommands order still does not matter.
+            "clip.auditionNote": ["clipId": .string(playedPitchClipID),
+                                  "segmentIds": .array([.string(playedPitchSegmentID.uuidString)])],
             // m22-g P2: OFF is the idempotent never-refusing side of the A/B
             // monitor (design §5.6) — a legitimate headless route.
             "reference.setMonitor": ["on": .bool(false)],

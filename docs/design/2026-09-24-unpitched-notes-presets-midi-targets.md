@@ -1,5 +1,7 @@
 # Unpitched sounds, the gentle-preset step, tuning to a MIDI melody, and the wobble dot (DESIGN)
 
+> **Amended 2026-09-24 by `2026-09-24-pitch-editor-interaction-batch.md` §17:** silencing a note is `isCleared` (one verb, one menu); per-note level is `amplitudeDb`, rendered, never silence. Passages below are updated to match.
+
 Status: DESIGN ONLY, no code. Author: daw-architect ("architect B"), 2026-09-24.
 
 Tags: [READ] = read at the cited `file:line` on 2026-09-24; [MEASURED] = measured, by whom stated;
@@ -34,7 +36,7 @@ entitlements, AUv3 or signing.
 | U3 | An unpitched sound borrows the pitch of the NEARER neighbouring note; a tie (it touches both) goes to the following note, the user's rule. It is a **drawing anchor**, not a pitch estimate, and no neighbour rule fixes a missed sung note (U-F3). | 1.5 |
 | U4 | Both note-table builders add unpitched segments after S2's splitter, always as IDENTITY under every preset and shape. The curve skips an untouched one, so every existing render stays byte-identical. Stored tables change only by an explicit pass or merge. | 1.6 |
 | U5 | Moving one applies its constant offset: it DOES pitch-shift a breath or an "s" (Melodyne never does). v1 says so on screen; "never transpose unpitched sounds" is follow-up U-F2. | 1.7 |
-| U6 | "Remove" silences the selected segments with no ripple (`clip.setNoteGain`). The offline render starts reading `amplitudeDb` (hashed, unread today); −72 dB, the range floor, means silent, and a gain-only set skips the stretcher. | 1.8 |
+| U6 | Silencing a note is `NoteSegment.isCleared`, set through I7b's menu and one verb `clip.setNoteCleared`. Restore un-clears it. Per-note level is `amplitudeDb`, rendered in the offline job through one envelope mask; −72 dB is a level, never silence. A level-only set skips the stretcher (interaction-batch §17). | 1.8 |
 | P1 | The gentle presets sound alike because they only move note CENTRES by 15–31 c RMS, under ~55 c of movement they leave alone, and the pull axis is already at its ceiling. The listening set varies ONE axis of Natural: how much of the singer's own wobble it keeps (100 / 60 / 30 / 0 %). | 2.1–2.2 |
 | P2 | Seven pre-registered checks, including a bit-exact anchor, a plant, physics that must fall with the axis, an audibility bound and true peak ≤ −1 dBTP. | 2.3 |
 | P3 | A middle pick ships as one additive option, `keepWobble`, on `PitchAutoCorrectOptions` and `clip.autoCorrectPitch`. | 2.4 |
@@ -186,7 +188,7 @@ public let origin: NoteOrigin      // a detection fact, like `detectedHz`: no ed
   `splitCarriesEveryEditFieldTheParentHad`.
 - **Digest slot (6), the origin block.** Gated on `segments.contains { $0.origin != .detected }`: a
   new marker, the count, then each segment's case index.
-  - Slot (5) is reserved for U-C's gain block (§1.8). The order goes by slot, not by landing order
+  - Slot (5) is reserved for the level block (cleared + gain), gated on either field (§1.8). The order goes by slot, not by landing order
     (the `StretchCurvePlan.swift` banner).
   - `digestCoversEveryStoredField` gains `"origin"` and one rebuild case, since it is a `let`, like
     `detectedHz`.
@@ -279,11 +281,10 @@ pitch" (U-E).
 ### §1.8 Removing a sound (U6)
 
 **What "remove/clear" does.** It silences the selected segments in place. Nothing moves (no ripple),
-and undo brings them back.
+and undo brings them back. Clear is `NoteSegment.isCleared`, set through architect A's I7b menu. Restore un-clears it (interaction-batch §17).
 - It works on any segment: a sound, or a "note" that is really hum.
-- "Remove sound" sets −72 dB, the `Clip.gainDbRange` floor, which means **exact silence**.
-  "Restore sound" sets 0.
-- Architect A owns the menu and multi-select; this section gives the verbs.
+- `clip.setNoteGain` sets per-note level (`amplitudeDb`) only, never silence. −72 dB is the quietest level, not a silence floor.
+- Architect A owns the menu and multi-select; this section gives the level verb.
 
 **Store and wire.** `setClipNoteGain(clipId:segmentIds:gainDb:seedIfAbsent:)`, in
 `ProjectStore+PitchNoteEdits.swift`, is one `performEdit` under `structuralKey`: it never coalesces.
@@ -292,18 +293,18 @@ It clamps to `Clip.gainDbRange` explicitly, because direct assignment bypasses t
 `clip_set_note_gain` add one command and one tool.
 
 **Render (U-C), in the offline job `StretchRenderCache.performRender`, never on the render thread.**
-1. **Envelope.** 1 outside a gained segment; g = 10^(dB/20) inside, and exactly 0 at −72 dB.
+1. **Envelope.** 1 outside a note; inside, 0 when cleared, else 10^(dB/20).
    - The 10 ms raised-cosine fades sit **inside** the span, so a neighbour is never touched.
    - It is evaluated per output frame through the curve plan's own output-frame → source-second
      mapping, so ratio and C2 retiming line up by construction.
-2. **The gain-only path.**
-   - `NoteSegment.isPitchIdentity` is `isIdentity` without the gain term, and
-     `StretchCurvePlan.make` guards on it. A gain-only set therefore takes no curve.
+2. **The level-only path.**
+   - `NoteSegment.isPitchIdentity` is `isIdentity` without both level terms (cleared and gain), and
+     `StretchCurvePlan.make` guards on it. A level-only set therefore takes no curve.
    - If ratio and semitones are identity too, the job **skips the stretcher**: the output is
      source × envelope. A breath removed from an untuned clip leaves every other sample bit-exact.
-3. **Digest slot (5), the gain block.** It is gated on `segments.contains { $0.amplitudeDb != 0 }`
-   and re-keys exactly the gain-edited sets, including those written before U-C, whose renders
-   ignored the gain (the time-warp block's F7 precedent).
+3. **Digest slot (5), the level block (cleared + gain).** It is gated on `segments.contains { $0.isCleared || $0.amplitudeDb != 0 }`
+   and re-keys exactly the level-edited sets, including those written before U-C, whose renders
+   ignored the level (the time-warp block's F7 precedent).
 
 **Why the alternatives lose.**
 - *Split the clip and delete the piece:* the note table fragments, stretched clips hit the F13/C2-0
@@ -348,8 +349,9 @@ Additive echoes: `origin` per segment on `clip.getPitchEdits`; `unpitchedCount` 
 - **Model:** both digest blocks and the reflection census. Codable omits the default and reads an
   unknown value as `.detected`. The merge never moves or re-identifies a segment, and undoes in
   one step.
-- **U-C:** gain-only renders are bit-exact outside the span; −72 dB gives exact zeros inside it
-  (fades excepted); on a tuned clip only the span changes.
+- **U-C** (merged with I7a, interaction-batch §17): level-only renders are bit-exact outside the
+  span; a CLEARED note gives exact zeros between its fades, and a −72 dB note must NOT (a −72 dB
+  plant fails the zeros gate, since −72 dB is a level); on a tuned clip only the span changes.
 - **Wire and MCP legs**, plus the real take: 38 ± 2 sounds on `DUR`'s take. That is a port check,
   not a pin.
 
@@ -444,8 +446,9 @@ Written down before any render. Each check has a plant that must fail it.
    - (iii) the independent YIN over transitions: the planted part's move must exceed the worst
      untouched transition's median |diff| against N0 by at least 10×. No absolute number is
      pre-registered here: L's 1.00–2.69 c came from unsplit held runs, and P-L changes those.
-4. **Physics.** Held-part wander W (`PitchWanderMeter`: SD about the note mean, 0.10 s edge margin,
-   octave-folded YIN) falls strictly: W(N0) > W(N1) > W(N2) > W(N3), and W(N3) ≤ 0.5 · W(N0).
+4. **Physics.** Held-part wander W (`PitchWanderMeter`: SD about the note mean, 0.10 s edge margin.
+   ⚠ Corrected 2026-09-24 by P-L: it is `M23QToneTracker`, a band-limited phase tracker, NOT an
+   octave-folded YIN; P-L gated on it and ran an independent octave-folded YIN as the second instrument) falls strictly: W(N0) > W(N1) > W(N2) > W(N3), and W(N3) ≤ 0.5 · W(N0).
 5. **Audibility.** Adjacent files must differ in W by ≥ 20 % of W(N0). If a pair fails, drop one
    of the two, never N0. If N0 against N3 fails, STOP and report: no page is published.
 6. **Level.** Every file is matched to one integrated loudness by pure gain, with true peak
@@ -693,9 +696,9 @@ looked-at gate. **No question for the user.** "A little more … to 31%" reads a
 | 1 | **P-L**: the Natural wobble listening set (§2.2–2.3) | S2 | audio-dsp-engineer | M |
 | 2 | **U-A**: the finder, `origin`, both builders, the curve skip, digest slot (6) | S2 | audio-dsp-engineer | M |
 | 3 | **U-B**: `clip.findUnpitchedSounds`, its MCP tool, the echoes | U-A | mcp-integration-engineer | S |
-| 4 | **U-C**: the gain render, the stretcher skip, digest slot (5) | S2 (the same files) | audio-dsp-engineer | M |
-| 5 | **U-D**: `setClipNoteGain`, `clip.setNoteGain`, `clip_set_note_gain` | U-C | mcp-integration-engineer | S |
-| 6 | **U-E**: sounds in the editor, and remove / restore | U-A, U-D, architect A's menu | ui-design-engineer + swift-app-engineer | M |
+| 4 | **U-C**: merged with A's I7a (interaction-batch §17) into one item: the level envelope (cleared + gain), the stretcher skip, digest slot (5) | S2 (the same files) | audio-dsp-engineer | M |
+| 5 | **U-D**: the LEVEL verb: `setClipNoteGain`, `clip.setNoteGain`, `clip_set_note_gain` | U-C | mcp-integration-engineer | S |
+| 6 | **U-E**: drawing sounds in the editor; remove / restore via I7b's menu | U-A, I4, I7b | ui-design-engineer + swift-app-engineer | M |
 | 7 | **M1**: `PitchMelodyTarget` and the `editSet` parameter | S2, U-A | audio-dsp-engineer | M |
 | 8 | **M2**: store, wire keys, MCP fields | M1 | swift-app-engineer + mcp-integration-engineer | M |
 | 9 | **M3**: the Tune to Melody card | M2 | ui-design-engineer | M |
@@ -716,7 +719,11 @@ looked-at gate. **No question for the user.** "A little more … to 31%" reads a
   - M-F2: retiming to the melody (with C2).
 
 **Owed to `docs/ARCHITECTURE.md` "Key future decisions"** (docs-scribe; this task allowed one file).
-The verbatim entry:
+⚠ **SUPERSEDED IN PART by interaction-batch §17:** this entry is to be MERGED with that doc's
+"Silencing a sung note is `NoteSegment.isCleared`…" entry into ONE entry, keeping the unpitched-sounds
+and melody-target sentences below and replacing the per-note-gain sentence and the "(5) gain" slot name
+(silence is `isCleared`; −72 dB is a level; slot (5) is the level block, cleared + gain). The entry as
+first written:
 > **Unpitched sounds, per-note gain and melody targets (2026-09-24,
 > `docs/design/2026-09-24-unpitched-notes-presets-midi-targets.md`).** Audible stretches with no
 > note (level ≥ the clip's own floor + 9 dB, where the floor is the 10th percentile of its unvoiced
@@ -752,3 +759,30 @@ V = VERIFIED: read, and quoted from the page or PDF. R = REPORTED: third-party o
   - https://www.protoolstraining.com/blog-help/pro-tools-blog/tips-and-tricks/189-antares-auto-tune-how-to-use-autotune
   - https://duc.avid.com/showthread.php?t=343210
   - https://gearspace.com/threads/using-the-target-notes-via-midi-function-with-autotune-and-protools-10.861076/
+
+## §8 P-L RESULT (2026-09-24, audio-dsp-engineer; record `DUR/P-L/README.txt`, pre-registration `DUR/P-L/PREREG.txt`)
+
+- **All seven §2.3 checks passed, and every one caught its plant [MEASURED].** N0 is bit-exact with L's
+  `07-natural-after.wav`; the orchestrator re-ran `cmp` and it is identical, while N1 differs (the control).
+- **W (gate, `PitchWanderMeter`, median over 19 held notes):** N0 39.05 c · N1 27.76 (71 %) · N2 18.94 (49 %) ·
+  N3 16.00 (41 %). The independent YIN reads 100 / 86 / 60 / 46 %.
+- **Audibility (§2.3 check 5):**
+  - N2–N3 is only 8 % apart, so **N2 was DROPPED** by the pre-registered rule.
+  - N0–N1 is 29 % apart on the gate but 14 % on YIN: the two instruments DISAGREE. The page says so.
+  - The page set is N0 / N1 / N3.
+- **"keep 0" is not flat:** 16 c on the gate, 8 c on YIN. The render can remove only the wobble the detector saw. The
+  page says "as steady as the tool can make them".
+- **Scope correction for P3:** "held parts" means all 52 held notes, including the 30 unsplit runs.
+- **Published on handoff v32**, ask `natural-wobble`, db doc `handoff/pitch-2026-09-24b`. MP3s all −21.5 LUFS,
+  true peak −1.2 / −2.7 / −2.1 dBTP, re-measured by the orchestrator on the decoded files. N0's MP3 is byte-identical
+  to the page's earlier `natural-01-split.mp3`.
+- ⚠ **For p2-seg-F-metric:** on the two lowest notes, `PitchWanderMeter` reads about 2× the wobble that both the
+  detector and YIN see. A per-part metric must choose its INSTRUMENT, not only its population.
+- **THE PICK (2026-09-25 00:41Z, db `handoff/pitch-2026-09-24b`): `natural-wobble = keep100`**, "All of it: keep
+  Natural as it is today". **P-ship (`keepWobble`, §2.4, §6 item 10) is therefore NOT built**, and Natural stays as it
+  is. The listening harness stays in the tree as the record (env-gated, it ships nothing).
+- **U3 CONFIRMED (same session):** the user read §1.5's page line (nearer neighbour; their "next note" rule breaks
+  ties) and answered: "Ok. then pick the options that would produce best results". So U3 stands as written, and the
+  defaults §5 lists as "one constant" (F + 9 dB, the tie rule, the steps) are the orchestrator's to set by
+  measurement. They are not questions for the user.
+

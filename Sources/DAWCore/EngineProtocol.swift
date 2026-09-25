@@ -624,6 +624,46 @@ public enum AuditionOutcome: String, Sendable, Equatable, Codable {
     public var isAudible: Bool { self == .sounded }
 }
 
+/// WHAT a clip-span audition plays (I1-F1, "hear the note WHILE editing it").
+///
+/// `.playbackFile` is I1's: the file playback plays for the clip now. The two
+/// span renders are I1-F1's: the clip's SOURCE is rendered through the ONE
+/// render loop playback's render uses (same curve, level mask, stretcher
+/// configuration, ratio and transpose), for the span only plus a short
+/// pre-roll, off the render thread, so an edit is heard without waiting for
+/// the whole recording to re-render.
+public enum ClipSpanAuditionSource: Sendable, Equatable {
+    /// The file playback plays for the clip NOW: its committed render, or its
+    /// source when it does not render. A render still in flight answers
+    /// `.inaudibleNotReady` and plays nothing.
+    case playbackFile
+    /// A span render of the clip's STORED edits: what the clip will sound
+    /// like once its whole-file render lands, without waiting for it.
+    case storedSpanRender
+    /// A span render with `draft` in place of the clip's stored edits (a drag
+    /// still in flight). Nothing is committed; the clip's own ratio,
+    /// transpose and formant setting still apply.
+    case draftSpanRender(PitchEditSet)
+}
+
+/// How one ACCEPTED clip-span audition ended (I1-F1; RT review H1).
+///
+/// `auditionClipSpan` answers synchronously, BEFORE anything is read or
+/// rendered, so its `.sounded` means "accepted: being prepared, and will play
+/// when ready". This is the real result, reported exactly once, on the main
+/// actor, for every call that answered `.sounded`, and never for any other.
+public enum ClipSpanAuditionDelivery: Sendable, Equatable {
+    /// The buffer is scheduled on the voice and sounds for `seconds`.
+    case played(seconds: Double)
+    /// Nothing plays: the audio could not be read or rendered, or the voice
+    /// could not start. `reason` is written for a person. The engine has also
+    /// written one stderr line and posted a `clip-audition-failed` notice.
+    case failed(reason: String)
+    /// A newer request, a stop, a transport start or a graph rebuild replaced
+    /// it before it played. Its work was cancelled, not only its result.
+    case dropped
+}
+
 /// The contract between the domain layer and the real-time audio engine.
 /// DAWCore (and everything above it) never sees AVFoundation types.
 @MainActor
@@ -1388,6 +1428,108 @@ public protocol AudioEngineControlling: AnyObject {
     /// main actor is about to stop being able to send note-offs.
     func stopAllAudition()
 
+    /// CLIP-NOTE AUDITION (I1, design `2026-09-24-pitch-editor-interaction-batch`
+    /// §4, decision (c) "hybrid, with no live DSP"): plays the SOURCE-second span
+    /// `[startSourceSeconds, endSourceSeconds)` of ONE audio clip, once, right
+    /// now, AS IT SOUNDS NOW. Never through a live pitch shifter.
+    ///
+    /// ⭐ **THE FILE IS THE ONE PLAYBACK PLAYS.** A clip that renders through the
+    /// stretch cache (a tuning, a stretch, a transpose) is resolved through the
+    /// SAME resolver the playback graph uses, never a second key derivation, so
+    /// the audition and the next transport pass read the same bytes. A render
+    /// still in flight answers `.inaudibleNotReady` and plays nothing, exactly
+    /// as playback plays that clip as silence until the render lands. A clip
+    /// that does not render plays its source file. Seconds map to the file's
+    /// frames through the render's own output↔source mapping.
+    ///
+    /// **Level:** the clip's gain × the track's fader, then the master fader
+    /// and the master insert chain (the voice joins the main mix). A muted
+    /// track, or one an active solo leaves out, answers `.inaudibleMuted` and
+    /// plays nothing. Unknown ids, a MIDI clip or an empty span answer
+    /// `.noRenderer`.
+    ///
+    /// ⚠️ **NAMED COST: THE VOICE SKIPS THE TRACK'S OWN INSERTS**, and with them
+    /// the track's pan, sends, bus routing and volume automation. It is the
+    /// clip's audio at the fader's level, not the strip's output: an EQ, a
+    /// compressor or a reverb on the vocal track is NOT heard in the audition.
+    /// The clip's own fade-in/out and gain envelope are not applied either, so
+    /// a note inside a clip fade plays at the clip's flat gain.
+    ///
+    /// One audition at a time: a new call replaces a sounding one. It stops by
+    /// itself at the span's end, and on a transport start, a graph rebuild and
+    /// `stopAllAudition()`. WHEN to call it (press, after a commit's render,
+    /// never while the transport runs) is the caller's policy:
+    /// `ClipNoteAuditionController`.
+    ///
+    /// `.sounded` means ACCEPTED: the span is being read and will start within
+    /// a few milliseconds. It is answered before the read runs, so it cannot
+    /// promise the read succeeds; a failure writes one stderr line and posts a
+    /// `clip-audition-failed` engine notice (RT review H1), and the form with a
+    /// `completion` below reports the real result. Real-time safety: the voice
+    /// is a stock player node the graph attached when it was built; the span is
+    /// read, faded and converted off the render thread and only scheduled from
+    /// the main actor. Same as the form below with `.playbackFile` and no
+    /// completion.
+    @discardableResult
+    func auditionClipSpan(trackID: UUID, clipID: UUID,
+                          startSourceSeconds: Double, endSourceSeconds: Double) -> AuditionOutcome
+
+    /// I1-F1: `auditionClipSpan` with a choice of WHAT plays and a report of
+    /// how it ENDED.
+    ///
+    /// * `source`: the playback file (I1), or a span render of the stored or
+    ///   a draft edit set through the one render loop
+    ///   (`ClipSpanAuditionSource`). A span render never waits for the
+    ///   whole-file render and never touches it.
+    /// * `completion`: called exactly once, on the main actor, for every call
+    ///   that answered `.sounded`, and never otherwise
+    ///   (`ClipSpanAuditionDelivery`). Never called re-entrantly from inside
+    ///   this call.
+    ///
+    /// LATEST WINS. A call cancels whatever is still being read or rendered
+    /// (its completion reports `.dropped`), so a buffer that was superseded
+    /// NEVER plays. A sounding audition keeps sounding until the new one's
+    /// buffer is ready and then gives way to it, so a drag heard step by step
+    /// has no gap between steps; a REFUSED call silences it at once.
+    ///
+    /// Refuses (`.noRenderer`) while the transport plays or records: the
+    /// caller's policy refuses first, and this is the engine's own guard (RT
+    /// review H6). The rest of the contract is the four-argument form's.
+    @discardableResult
+    func auditionClipSpan(trackID: UUID, clipID: UUID,
+                          startSourceSeconds: Double, endSourceSeconds: Double,
+                          source: ClipSpanAuditionSource,
+                          completion: (@MainActor @Sendable (ClipSpanAuditionDelivery) -> Void)?)
+        -> AuditionOutcome
+
+    /// Stops a sounding clip-note audition and discards one still being read
+    /// or rendered (its work is cancelled). Idempotent.
+    func stopClipSpanAudition()
+
+    /// Sink invoked on the main actor each time one clip's stretch/tuning render
+    /// COMMITS to the cache, with that clip's id (I1). This is the render cache's
+    /// own completion signal, so a caller waiting for "that clip's render" hears
+    /// about it the moment the file exists, not at the next status poll. A
+    /// superseded or failed render reports nothing. A function rather than a
+    /// `var` for the `setEndStopHandler` reason: a protocol property requirement
+    /// cannot carry a default.
+    func setClipRenderCompleteHandler(_ handler: ((UUID) -> Void)?)
+
+    /// I1-F2 (RT re-review, the span cap): how many SOURCE seconds of a clip
+    /// that plays at stretch `ratio` an audition covers so that what is HEARD
+    /// lasts `heardSeconds`, through the engine's one output↔source mapping.
+    /// `ClipNoteAuditionPolicy.maxSpanSeconds` caps what is heard; it used to
+    /// count source seconds, so at ratio 4 an audition played 24 s. The store
+    /// asks here before it resolves a span, and the engine's own plan asks the
+    /// same function, so the span the store reports is the span that plays.
+    /// Exact at ratio 1: `heardSeconds` itself.
+    ///
+    /// `nil` when this engine has no such mapping (fakes, headless): the
+    /// caller then counts source seconds, the behaviour before I1-F2. DAWCore
+    /// never does this arithmetic itself: the model owns source seconds, and
+    /// the output↔source mapping lives in the engine (`StretchCurvePlan`).
+    func clipAuditionSourceSeconds(heardSeconds: Double, ratio: Double) -> Double?
+
     /// END-OF-CONTENT STOP BOUND (m25-d): the linear beat at which playback
     /// should stop because there is no more material past it, or `nil` for
     /// "run linearly forever" (today's behaviour, and the value during a
@@ -1635,6 +1777,50 @@ extension AudioEngineControlling {
     /// The audition all-stop is optional capability (m23-d): an engine with no
     /// audition support holds no voices, so the default is a no-op.
     public func stopAllAudition() {}
+
+    /// Clip-note audition is optional capability (I1, the `setAuditionPitches`
+    /// precedent): fakes and headless engines have no audition voice, so the
+    /// default reports `.unsupported` and every existing conformer compiles
+    /// unchanged.
+    ///
+    /// ⚠️ THE `previewController` VACUITY RISK: an `AudioEngine` that forgot to
+    /// override this would answer `.unsupported` forever and the editor would
+    /// be silent while every policy test passed. `AuditionEngineTests`'
+    /// `clipSpanRealEngineOverridesTheDefault` closes it against the REAL
+    /// engine, without starting any device.
+    @discardableResult
+    public func auditionClipSpan(trackID: UUID, clipID: UUID,
+                                 startSourceSeconds: Double,
+                                 endSourceSeconds: Double) -> AuditionOutcome { .unsupported }
+
+    /// An engine with no span render (fakes, headless) answers `.unsupported`
+    /// for every source and never calls `completion`, which is the contract:
+    /// completion follows `.sounded` only. `ClipNoteAuditionController` reads
+    /// `.unsupported` as "no span render here" and keeps I1's behaviour (the
+    /// release waits for the whole-file render). ⚠️ The same vacuity risk as
+    /// the four-argument form: `AuditionEngineTests`' `clipSpanRender…` tests
+    /// call this through the PROTOCOL on the real engine.
+    @discardableResult
+    public func auditionClipSpan(trackID: UUID, clipID: UUID,
+                                 startSourceSeconds: Double, endSourceSeconds: Double,
+                                 source: ClipSpanAuditionSource,
+                                 completion: (@MainActor @Sendable (ClipSpanAuditionDelivery) -> Void)?)
+        -> AuditionOutcome { .unsupported }
+
+    /// An engine with no clip-note audition has nothing to stop.
+    public func stopClipSpanAudition() {}
+
+    /// An engine that renders nothing never completes a render, so the default
+    /// discards the sink (the `setEndStopHandler` precedent).
+    public func setClipRenderCompleteHandler(_ handler: ((UUID) -> Void)?) {}
+
+    /// An engine without the output↔source mapping cannot answer; the caller
+    /// counts source seconds (I1-F2). ⚠️ The `previewController` vacuity risk
+    /// again: an `AudioEngine` that forgot to override this would keep the
+    /// old source-second cap silently. `AuditionEngineTests`'
+    /// `clipSpanCapBoundsWhatIsHeard` asks the REAL engine through the
+    /// protocol.
+    public func clipAuditionSourceSeconds(heardSeconds: Double, ratio: Double) -> Double? { nil }
 
     /// The end-of-content stop bound is optional capability (m25-d, the
     /// `stopAllAudition` precedent). An engine that ignores it simply never

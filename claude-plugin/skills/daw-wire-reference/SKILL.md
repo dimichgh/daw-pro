@@ -74,19 +74,33 @@ by re-running the decomposition below, whose arithmetic then matched a live
 — the generated plugin bundle itself, `claude-plugin/server/index.mjs`, is a
 RELEASE-STEP regen this item did NOT run; treat the bundle as stale until
 that regen happens, the `daw-pro-project` §2026-09-20s precedent**) —
-**245 (42 direct + 203 wrapper, MEASURED 2026-09-24 at the m23-ap C-0c
-close)**; it was 244 (42 + 202) before that, 242 (42 + 200) before that, 239
+**249 (42 direct + 207 wrapper, MEASURED 2026-09-25 at the I1 wire leg
+close (mcp-integration-engineer, part 2 of 2), by the same two anchored
+name-capturing regexes — `^server\.registerTool($` / `^registerTool($` —
+`clip_audition_note`, positive control present in the wrapper set, a
+bogus name absent from both sets, 0 duplicates either side; THIS close
+DOES run the release-step regen — see the release note below for 0.17.0,
+so `claude-plugin/server/index.mjs` moves too, unlike every prior entry
+in this chain)**; it was 248 (42 + 206, MEASURED 2026-09-24/25 at the I4
+wire leg close, part 1 of 2 — `clip_set_note_pitches` — and STILL a
+RELEASE-STEP regen that item did NOT run: `claude-plugin/server/index.mjs`
+stayed at 247 (42 + 205) until this close) before that; it was 247
+(42 + 205, MEASURED 2026-09-24 at the U-D close) before that
+(`clip_set_note_gain`); 246 (42 + 204) before that at I7a's close
+(`clip_set_note_cleared`); 245
+(42 + 203) before that at the m23-ap C-0c
+close; 244 (42 + 202) before that, 242 (42 + 200) before that, 239
 (42 + 197) before that, 236 (42 + 194) before that, and 232 (41 + 191)
 before the drum
 machine, with a
 negative control (a name that is not a tool) correctly absent. The bijection
 test, `mcp-server/test/audit-tools.test.ts`, defines
-`tool count = commands + |exception table B| + |exception table C|` — **240**
-MIRRORED commands + 3 Table-B tools with no backing command at all
+`tool count = commands + |exception table B| + |exception table C|` — **244**
+MIRRORED commands (243 + `clip_audition_note`) + 3 Table-B tools with no backing command at all
 (`generate_image`, `generate_lyrics`, `generate_song_suno` — they call a
 generation provider directly) + 2 Table-C tools that bridge to an EXISTING
 command, `track.setInstrument`, under a friendlier name/shape
-(`instrument_set_sampler_param`, `instrument_set_sampler_zones`) = **245**.
+(`instrument_set_sampler_param`, `instrument_set_sampler_zones`) = **249**.
 ✅ **CLOSED, the pitch-editor command-surface door (2026-09-24,
 `docs/design/2026-09-22-pitch-editor-ui.md` §9): the pane had no command
 door at all — no way to open it, read it, or edit a note over the wire.
@@ -189,12 +203,12 @@ for all nine, the direct-vs-wrapper strictness split, the nested-strict-gap
 closure on `target` (the discriminated union) and `params` (the m30-c
 precedent), and every one of those verbatim carries.
 ⚠️ The authoritative pins are `mcp-server/test/integration.test.ts`'s
-`assert.equal(result.tools.length, 245)` and `mcp-server/test/mcp-log.test.ts`'s
-`assert.equal(instrumented.length, 245)` — **NOT** a `grep -c 'registerTool('`,
+`assert.equal(result.tools.length, 249)` and `mcp-server/test/mcp-log.test.ts`'s
+`assert.equal(instrumented.length, 249)` — **NOT** a `grep -c 'registerTool('`,
 which is a known liar on this file and previously anchored this paragraph at a
 stale 194) and
 `Sources/DAWControl/Commands.swift`
-(**240 commands** — the `CommandRouter.allCommands.count == 240` pin in
+(**244 commands** — the `CommandRouter.allCommands.count == 244` pin in
 `Tests/DAWControlTests/RenderCommandTests.swift`, and in eighteen sibling
 files — **twenty pin lines across nineteen files** (one file carries two),
 counted 2026-09-19 at the m39-f close, re-measured 2026-09-22 at the m23-q
@@ -214,7 +228,28 @@ the m23-ap C-0c close (239 -> 240, `clip.getPlayedPitch`, placed next to
 `clip.splitNote` — the same early-array pitch-editor-door cluster the
 command-surface-door close above used, NOT at the tail; still the same 20
 pin lines across 19 files, values only — verified by a fresh grep for the
-literal `239`, not carried over: zero remaining, 20 lines at `== 240`); ⚠️
+literal `239`, not carried over: zero remaining, 20 lines at `== 240`),
+re-measured again 2026-09-24 at I7a's close (240 -> 241, `clip.setNoteCleared`,
+placed immediately after `clip.getPlayedPitch`, in the same per-note
+pitch-editor-door cluster, NOT at the tail; still the same 20 pin lines
+across 19 files, values only), re-measured again 2026-09-24 at the U-D close
+(241 -> 242, `clip.setNoteGain`, placed immediately after
+`clip.setNoteCleared`, NOT at the tail; still the same 20 pin lines across
+19 files, values only — verified by a fresh grep for the literal `241`, not
+carried over: zero remaining, 20 lines at `== 242`), re-measured again
+2026-09-24/25 at the I4 wire leg close (mcp-integration-engineer, part 1 of
+2: 242 -> 243, `clip.setNotePitches`, the BATCH twin of `clip.setNotePitch`,
+placed immediately after `clip.setNoteGain`, in the same per-note
+pitch-editor-door cluster, NOT at the tail; still the same 20 pin lines
+across 19 files, values only — verified by a fresh grep for the literal
+`242`, not carried over: zero remaining, 20 lines at `== 243`), re-measured
+again 2026-09-25 at the I1 wire leg close (mcp-integration-engineer, part 2
+of 2: 243 -> 244, `clip.auditionNote`, HEAR one or more sung notes now,
+placed immediately after `clip.setNotePitches` — a deliberate departure
+from the tail-of-cluster rule, since this verb is not a per-note WRITER —
+still beside `clip.sliceToSampler`; still the same 20 pin lines across 19
+files, values only — verified by a fresh grep for the literal `243`, not
+carried over: zero remaining, 20 lines at `== 244`); ⚠️
 three of the twenty spell it `all.count == N` and
 seventeen `allCommands.count == N`, so grep the LITERAL number, not the
 idiom)

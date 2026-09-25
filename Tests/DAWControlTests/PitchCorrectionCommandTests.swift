@@ -262,8 +262,8 @@ struct PitchCorrectionCommandTests {
     // every hardTune write. That warning was TRUE the day it shipped (the
     // render built every curve with `contour: []`) and is FALSE now — the
     // render threads the detected contour through
-    // (`PitchCorrectionPresets.swift`'s own doc: 62.8 -> 18.2 cents median
-    // wander cut, measured). The one remaining honest caveat (the detector
+    // (`PitchCorrectionPresets.swift`'s own doc holds the measured per-note
+    // wander cut). The one remaining honest caveat (the detector
     // could not run AT RENDER TIME) is a render-time fact this WRITE-time
     // call cannot know in advance, and it already has its own channel — a
     // `clip-pitch-contour-unavailable` engine notice — so this response
@@ -558,6 +558,81 @@ struct PitchCorrectionCommandTests {
             params: ["clipId": .string(clipID), "replaceExisting": .bool(true)]))
         #expect(acResponse.result?["handEditedSinceAutoCorrect"]?.boolValue == false,
                  "a preset's own fresh output is never flagged against itself")
+    }
+
+    @Test("clip.getPitchEdits: hasTuningEdits is the PITCH half of hasPitchEdits — a clears-only clip reads true/false, a retuned clip reads true/true, an untouched clip reads false/false")
+    func hasTuningEditsThreeStates() async throws {
+        // 1. UNTOUCHED: never ran autoCorrectPitch at all — no stored table.
+        let untouchedEngine = makeMelodicEngine()
+        let (untouchedRouter, _) = makeRouter(engine: untouchedEngine)
+        let untouchedFile = try makeRealAudioFile()
+        defer { try? FileManager.default.removeItem(at: untouchedFile) }
+        let (_, untouchedClipID) = try await addAudioClip(untouchedRouter, path: untouchedFile.path)
+        let untouched = await untouchedRouter.handle(ControlRequest(
+            id: "u", command: "clip.getPitchEdits", params: ["clipId": .string(untouchedClipID)]))
+        #expect(untouched.ok, "\(untouched.error ?? "?")")
+        #expect(untouched.result?["hasPitchEdits"]?.boolValue == false)
+        #expect(untouched.result?["hasTuningEdits"]?.boolValue == false)
+
+        // 2. RETUNED: a plain autoCorrectPitch pass leaves pitchOffsetCents
+        //    genuinely non-zero (the setNotePitches fixture's own finding:
+        //    the default strength-1 pass pulls a real, non-zero amount) —
+        //    both true.
+        let retunedEngine = makeMelodicEngine()
+        let (retunedRouter, _) = makeRouter(engine: retunedEngine)
+        let retunedFile = try makeRealAudioFile()
+        defer { try? FileManager.default.removeItem(at: retunedFile) }
+        let (_, retunedClipID) = try await addAudioClip(retunedRouter, path: retunedFile.path)
+        _ = try await autoCorrectSegments(retunedRouter, clipID: retunedClipID)
+        let retuned = await retunedRouter.handle(ControlRequest(
+            id: "r", command: "clip.getPitchEdits", params: ["clipId": .string(retunedClipID)]))
+        #expect(retuned.ok, "\(retuned.error ?? "?")")
+        #expect(retuned.result?["hasPitchEdits"]?.boolValue == true)
+        #expect(retuned.result?["hasTuningEdits"]?.boolValue == true)
+
+        // 3. CLEARS-ONLY: autoCorrect, then bring EVERY note's pitch back
+        //    to IDENTITY by hand (cents: 0 — driftScale/vibratoScale and
+        //    every other pitch field are already at identity after a
+        //    plain, default (preserveVibrato:true) pass: `shapeScale == 1`
+        //    for a HELD part, `PitchCorrection.swift`'s own
+        //    `segment(forPart:...)` — so zeroing cents alone makes every
+        //    segment's `isPitchIdentity` true), THEN clear one note: the
+        //    LEVEL half moves (hasPitchEdits), the PITCH half does not
+        //    (hasTuningEdits stays false).
+        let clearsEngine = makeMelodicEngine()
+        let (clearsRouter, _) = makeRouter(engine: clearsEngine)
+        let clearsFile = try makeRealAudioFile()
+        defer { try? FileManager.default.removeItem(at: clearsFile) }
+        let (_, clearsClipID) = try await addAudioClip(clearsRouter, path: clearsFile.path)
+        let clearsSegments = try await autoCorrectSegments(clearsRouter, clipID: clearsClipID)
+        for segment in clearsSegments {
+            let id = try #require(segment["id"]?.stringValue)
+            let zero = await clearsRouter.handle(ControlRequest(
+                id: "z", command: "clip.setNotePitch",
+                params: ["clipId": .string(clearsClipID), "segmentId": .string(id), "cents": .number(0)]))
+            #expect(zero.ok, "\(zero.error ?? "?")")
+        }
+        let firstID = try #require(clearsSegments[0]["id"]?.stringValue)
+        let clear = await clearsRouter.handle(ControlRequest(
+            id: "c", command: "clip.setNoteCleared",
+            params: ["clipId": .string(clearsClipID), "segmentIds": .array([.string(firstID)]),
+                     "cleared": .bool(true)]))
+        #expect(clear.ok, "\(clear.error ?? "?")")
+        let clearsOnly = await clearsRouter.handle(ControlRequest(
+            id: "co", command: "clip.getPitchEdits", params: ["clipId": .string(clearsClipID)]))
+        #expect(clearsOnly.ok, "\(clearsOnly.error ?? "?")")
+        #expect(clearsOnly.result?["hasPitchEdits"]?.boolValue == true,
+                "a clear alone still trips hasPitchEdits — the level half")
+        #expect(clearsOnly.result?["hasTuningEdits"]?.boolValue == false,
+                "no pitch actually moved — the app's header would say NOTES EDITED, never TUNING APPLIED")
+        // A setter's return is not proof it took: confirm every note
+        // really is at identity pitch, read back from the RESPONSE table.
+        let stored = try #require(clearsOnly.result?["segments"]?.arrayValue)
+        for segment in stored {
+            #expect(segment["pitchOffsetCents"]?.doubleValue == 0)
+            #expect(segment["driftScale"]?.doubleValue == 1)
+            #expect(segment["vibratoScale"]?.doubleValue == 1)
+        }
     }
 
     @Test("clip.getPitchEdits: unknown clip surfaces clipNotFound; unknown params rejected")
@@ -1044,6 +1119,56 @@ struct PitchCorrectionCommandTests {
         _ = store
     }
 
+    @Test("getPlayedPitch: a cleared note's span is a HOLE in runs — no point falls inside it, and every OTHER point is unchanged (I7b-2's one producer, PitchPlayedLine.make)")
+    func getPlayedPitchHasNoPointOverAClearedNote() async throws {
+        let engine = makeMelodicEngine()
+        let (router, store) = makeRouter(engine: engine)
+        let fileURL = try makeRealAudioFile()
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let (_, clipID) = try await addAudioClip(router, path: fileURL.path)
+        let segments = try await autoCorrectSegments(router, clipID: clipID)
+        #expect(segments.count == 2)
+        let clearedID = try #require(segments[0]["id"]?.stringValue)
+        let clearedStart = try #require(segments[0]["startSeconds"]?.doubleValue)
+        let clearedEnd = try #require(segments[0]["endSeconds"]?.doubleValue)
+
+        func run(_ id: String) async throws -> ControlResponse {
+            await router.handle(ControlRequest(
+                id: id, command: "clip.getPlayedPitch", params: ["clipId": .string(clipID)]))
+        }
+        func inSpan(_ points: [PitchPlayedLine.Point]) -> [PitchPlayedLine.Point] {
+            points.filter { $0.sourceSeconds >= clearedStart && $0.sourceSeconds < clearedEnd }
+        }
+        func outsideSpan(_ points: [PitchPlayedLine.Point]) -> [PitchPlayedLine.Point] {
+            points.filter { !($0.sourceSeconds >= clearedStart && $0.sourceSeconds < clearedEnd) }
+        }
+
+        // BEFORE clearing: the positive control. Points DO exist over what
+        // is about to become the cleared note's span.
+        let before = try await run("before")
+        #expect(before.ok, "\(before.error ?? "?")")
+        let beforePoints = try decodeWireRuns(try #require(before.result?["runs"]?.arrayValue)).flatMap { $0 }
+        #expect(!inSpan(beforePoints).isEmpty,
+                "positive control: points exist over the soon-to-be-cleared span before clearing")
+
+        let clear = await router.handle(ControlRequest(
+            id: "clear", command: "clip.setNoteCleared",
+            params: ["clipId": .string(clipID), "segmentIds": .array([.string(clearedID)]),
+                     "cleared": .bool(true)]))
+        #expect(clear.ok, "\(clear.error ?? "?")")
+
+        let after = try await run("after")
+        #expect(after.ok, "\(after.error ?? "?")")
+        let afterPoints = try decodeWireRuns(try #require(after.result?["runs"]?.arrayValue)).flatMap { $0 }
+
+        #expect(inSpan(afterPoints).isEmpty,
+                "no point falls inside the cleared note's span — a hole, like an unvoiced gap")
+        // Everything OUTSIDE the cleared span is UNCHANGED, value for value
+        // — the invariance control that catches a cut in the wrong place.
+        #expect(afterPoints == outsideSpan(beforePoints),
+                "every point that was NOT inside the cleared span must be byte-identical to before clearing")
+    }
+
     @Test("getPlayedPitch refuses a clip with no stored note table (teaching error)")
     func getPlayedPitchRefusesNoStoredTable() async throws {
         let engine = makeMelodicEngine()
@@ -1342,5 +1467,1305 @@ struct PitchCorrectionCommandTests {
             id: "1", command: "clip.autoCorrectPitch",
             params: ["clipId": .string(clipID), "replaceExisting": .bool(true)]))
         #expect(response.ok)
+    }
+
+    // MARK: - clip.setNoteCleared (I7a, interaction-batch design §10, ruled in §17)
+
+    /// Each note's `cleared` flag off a wire table, keyed by id. `#require`
+    /// on every note: the key is on the wire for EVERY segment, true or false
+    /// (the FILE omits it when false; the wire does not).
+    private func clearedFlags(_ segments: [JSONValue]) throws -> [String: Bool] {
+        var flags: [String: Bool] = [:]
+        for segment in segments {
+            let id = try #require(segment["id"]?.stringValue)
+            flags[id] = try #require(segment["cleared"]?.boolValue,
+                                     "note \(id) carries no `cleared` key on the wire")
+        }
+        return flags
+    }
+
+    private func setNoteCleared(_ router: CommandRouter, clipID: String, _ ids: [String],
+                                cleared: Bool) async -> ControlResponse {
+        await router.handle(ControlRequest(
+            id: "snc", command: "clip.setNoteCleared",
+            params: ["clipId": .string(clipID), "segmentIds": .array(ids.map { .string($0) }),
+                     "cleared": .bool(cleared)]))
+    }
+
+    @Test("clip.setNoteCleared: clears the named note, reads the STORED flag back, leaves the other alone, and clip.getPitchEdits echoes it")
+    func setNoteClearedHappyPath() async throws {
+        let engine = makeMelodicEngine()
+        let (router, store) = makeRouter(engine: engine)
+        let fileURL = try makeRealAudioFile()
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let (_, clipID) = try await addAudioClip(router, path: fileURL.path)
+        let segments = try await autoCorrectSegments(router, clipID: clipID)
+        #expect(segments.count == 2)
+        let targetID = try #require(segments[0]["id"]?.stringValue)
+        let otherID = try #require(segments[1]["id"]?.stringValue)
+        #expect(try clearedFlags(segments) == [targetID: false, otherID: false],
+                "a never-cleared table must echo cleared:false on every note")
+
+        let response = await setNoteCleared(router, clipID: clipID, [targetID], cleared: true)
+        #expect(response.ok, "\(response.error ?? "?")")
+        #expect(response.result?["cleared"]?.boolValue == true)
+        #expect(response.result?["segmentIds"]?.arrayValue?.compactMap(\.stringValue) == [targetID])
+        #expect(response.result?["appliedOptions"] == nil, "a clear never applied a whole-clip pass")
+        let after = try #require(response.result?["segments"]?.arrayValue)
+        #expect(try clearedFlags(after) == [targetID: true, otherID: false])
+
+        // ⭐ A setter's return is not proof it took: read the STORE directly.
+        let stored = try #require(store.tracks.first?.clips.first?.pitchEdits)
+        #expect(stored.segments.first { $0.id.uuidString == targetID }?.isCleared == true)
+        #expect(stored.segments.first { $0.id.uuidString == otherID }?.isCleared == false)
+
+        // The getter echoes the flag too, on every note.
+        let get = await router.handle(ControlRequest(
+            id: "g", command: "clip.getPitchEdits", params: ["clipId": .string(clipID)]))
+        #expect(get.ok)
+        #expect(try clearedFlags(try #require(get.result?["segments"]?.arrayValue))
+                == [targetID: true, otherID: false])
+    }
+
+    /// A clip whose table bends nothing is not edited, and one cleared note
+    /// makes it edited: the render has something to do. The wire's
+    /// `hasPitchEdits` is `Clip.hasPitchEdits` itself (one predicate), and a
+    /// Restore puts both flags back exactly.
+    @Test("clip.setNoteCleared: a clear alone makes an unedited table an edit on the wire, and Restore undoes exactly that")
+    func setNoteClearedAloneIsAnEdit() async throws {
+        let (router, store) = makeRouter(engine: nil)
+        let fileURL = try makeRealAudioFile()
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let (_, clipID) = try await addAudioClip(router, path: fileURL.path)
+        let clipUUID = try #require(UUID(uuidString: clipID))
+        // Seed a DETECTED-ONLY table through the store (a 0-cent write stores
+        // the seed unchanged). The wire never seeds: it has no detector.
+        let seed = PitchEditSet(segments: [
+            NoteSegment(startSeconds: 0.1, endSeconds: 0.3, detectedHz: 220, detectedConfidence: 0.9),
+            NoteSegment(startSeconds: 0.4, endSeconds: 0.6, detectedHz: 247, detectedConfidence: 0.9),
+        ])
+        _ = try store.setClipNotePitchOffset(clipId: clipUUID, segmentId: seed.segments[0].id,
+                                             offsetCents: 0, seedIfAbsent: seed)
+        let noteID = seed.segments[1].id.uuidString
+
+        func readFlags() async throws -> (has: Bool?, identity: Bool?) {
+            let get = await router.handle(ControlRequest(
+                id: "g", command: "clip.getPitchEdits", params: ["clipId": .string(clipID)]))
+            #expect(get.ok)
+            return (get.result?["hasPitchEdits"]?.boolValue, get.result?["isIdentity"]?.boolValue)
+        }
+        let before = try await readFlags()
+        #expect(before.has == false && before.identity == true,
+                "CONTROL: a detected-only table must read as unedited")
+
+        let cleared = await setNoteCleared(router, clipID: clipID, [noteID], cleared: true)
+        #expect(cleared.ok, "\(cleared.error ?? "?")")
+        #expect(cleared.result?["hasPitchEdits"]?.boolValue == true)
+        let during = try await readFlags()
+        #expect(during.has == true && during.identity == false,
+                "a clear alone did not make the clip an edit: its render would be skipped")
+        #expect(during.has == store.tracks.first?.clips.first?.hasPitchEdits,
+                "the wire's hasPitchEdits is not Clip.hasPitchEdits")
+
+        let restored = await setNoteCleared(router, clipID: clipID, [noteID], cleared: false)
+        #expect(restored.ok)
+        #expect(restored.result?["cleared"]?.boolValue == false)
+        let after = try await readFlags()
+        #expect(after.has == false && after.identity == true, "Restore did not return the clip to unedited")
+    }
+
+    /// ONE call for N notes is ONE undo step (design §17.8); a repeated id is
+    /// folded; `segmentIds` echoes the notes named, deduplicated, in request
+    /// order; undo restores every flag.
+    @Test("clip.setNoteCleared: N notes in one call is ONE undo step, a repeated id is folded, and undo restores them all")
+    func setNoteClearedIsOneUndoStep() async throws {
+        let engine = makeMelodicEngine()
+        let (router, store) = makeRouter(engine: engine)
+        let fileURL = try makeRealAudioFile()
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let (_, clipID) = try await addAudioClip(router, path: fileURL.path)
+        let segments = try await autoCorrectSegments(router, clipID: clipID)
+        let first = try #require(segments[0]["id"]?.stringValue)
+        let second = try #require(segments[1]["id"]?.stringValue)
+        let depth = store.undoHistory().undo.count
+
+        let response = await setNoteCleared(router, clipID: clipID, [second, first, second],
+                                            cleared: true)
+        #expect(response.ok, "\(response.error ?? "?")")
+        #expect(response.result?["segmentIds"]?.arrayValue?.compactMap(\.stringValue)
+                == [second, first], "the notes named, deduplicated, in request order")
+        #expect(response.result?["cleared"]?.boolValue == true)
+        #expect(store.undoHistory().undo.count == depth + 1, "two notes must be ONE undo step")
+        #expect(store.undoHistory().undo.first == "Clear Notes")
+
+        #expect(try store.undo() == "Clear Notes")
+        let stored = try #require(store.tracks.first?.clips.first?.pitchEdits)
+        #expect(stored.segments.allSatisfy { !$0.isCleared }, "undo did not restore every note")
+    }
+
+    @Test("clip.setNoteCleared: a MIDI clip is refused, naming why, before any store mutation")
+    func setNoteClearedRejectsMIDIClip() async throws {
+        let engine = makeMelodicEngine()
+        let (router, _) = makeRouter(engine: engine)
+        let (_, midiClipID) = try await addMIDIClip(router)
+        let response = await setNoteCleared(router, clipID: midiClipID, [UUID().uuidString],
+                                            cleared: true)
+        #expect(!response.ok)
+        #expect(response.error?.contains("MIDI clip") == true)
+        #expect(engine.detectCalls == 0, "no detection on this wire path")
+    }
+
+    @Test("clip.setNoteCleared: a clip with no stored table refuses, teaching clip.autoCorrectPitch as the fix")
+    func setNoteClearedRequiresStoredTable() async throws {
+        let (router, store) = makeRouter(engine: nil)
+        let fileURL = try makeRealAudioFile()
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let (_, clipID) = try await addAudioClip(router, path: fileURL.path)
+        let response = await setNoteCleared(router, clipID: clipID, [UUID().uuidString],
+                                            cleared: true)
+        #expect(!response.ok)
+        #expect(response.error?.contains("clip.autoCorrectPitch") == true)
+        #expect(response.error?.contains("no notes to edit yet") == true)
+        #expect(store.tracks.first?.clips.first?.pitchEdits == nil, "the wire must never seed a table")
+    }
+
+    /// ALL OR NOTHING: an unknown id among real ones changes nothing, and the
+    /// refusal names how many notes the clip does carry.
+    @Test("clip.setNoteCleared: an unknown id among real ones changes nothing and names the clip's note count")
+    func setNoteClearedUnknownSegmentChangesNothing() async throws {
+        let engine = makeMelodicEngine()
+        let (router, store) = makeRouter(engine: engine)
+        let fileURL = try makeRealAudioFile()
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let (_, clipID) = try await addAudioClip(router, path: fileURL.path)
+        let segments = try await autoCorrectSegments(router, clipID: clipID)
+        let realID = try #require(segments[0]["id"]?.stringValue)
+        let before = store.tracks.first?.clips.first?.pitchEdits
+        let depth = store.undoHistory().undo.count
+
+        let response = await setNoteCleared(router, clipID: clipID, [realID, UUID().uuidString],
+                                            cleared: true)
+        #expect(!response.ok)
+        #expect(response.error?.contains("No note with id") == true)
+        #expect(response.error?.contains("2 note(s)") == true, "must name the ACTUAL count on this clip")
+        #expect(store.tracks.first?.clips.first?.pitchEdits == before,
+                "a refused call cleared the real note anyway")
+        #expect(store.undoHistory().undo.count == depth)
+    }
+
+    @Test("clip.setNoteCleared: parameters are validated in words (unknown clip or key, segmentIds shape, cleared required, empty list)")
+    func setNoteClearedValidatesItsParameters() async throws {
+        let engine = makeMelodicEngine()
+        let (router, _) = makeRouter(engine: engine)
+        let fileURL = try makeRealAudioFile()
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let (_, clipID) = try await addAudioClip(router, path: fileURL.path)
+        let segments = try await autoCorrectSegments(router, clipID: clipID)
+        let realID = try #require(segments[0]["id"]?.stringValue)
+
+        func call(_ params: [String: JSONValue]) async -> ControlResponse {
+            await router.handle(ControlRequest(id: "v", command: "clip.setNoteCleared", params: params))
+        }
+        let unknownClip = await setNoteCleared(router, clipID: UUID().uuidString, [realID],
+                                               cleared: true)
+        #expect(unknownClip.error?.contains("no clip with id") == true)
+
+        let unknownKey = await call(["clipId": .string(clipID), "segmentIds": .array([.string(realID)]),
+                                     "cleared": .bool(true), "bogus": .bool(true)])
+        #expect(unknownKey.error?.contains("unknown parameter 'bogus'") == true)
+
+        let notAnArray = await call(["clipId": .string(clipID), "segmentIds": .string(realID),
+                                     "cleared": .bool(true)])
+        #expect(notAnArray.error?.contains("'segmentIds' must be an array") == true)
+
+        let badUUID = await call(["clipId": .string(clipID),
+                                  "segmentIds": .array([.string(realID), .string("not-a-uuid")]),
+                                  "cleared": .bool(true)])
+        #expect(badUUID.error?.contains("segmentIds[1] is not a valid UUID") == true)
+
+        let noFlag = await call(["clipId": .string(clipID), "segmentIds": .array([.string(realID)])])
+        #expect(noFlag.error?.contains("'cleared'") == true, "cleared has no default: a caller must say which way")
+
+        let flagNotBool = await call(["clipId": .string(clipID), "segmentIds": .array([.string(realID)]),
+                                      "cleared": .string("yes")])
+        #expect(flagNotBool.error?.contains("'cleared'") == true)
+
+        let empty = await call(["clipId": .string(clipID), "segmentIds": .array([]),
+                                "cleared": .bool(true)])
+        #expect(empty.error?.contains("Name at least one note to clear") == true)
+
+        for response in [unknownClip, unknownKey, notAnArray, badUUID, noFlag, flagNotBool, empty] {
+            #expect(!response.ok)
+        }
+    }
+
+    /// Placed immediately after `clip.getPlayedPitch`, in the per-note door
+    /// cluster beside `clip.sliceToSampler`, NOT at the tail, so every
+    /// `dropLast(N)` window and the anchor + 1…+3 pin above stay true.
+    @Test("clip.setNoteCleared is registered immediately after clip.getPlayedPitch, beside clip.sliceToSampler")
+    func setNoteClearedRegistered() throws {
+        let all = CommandRouter.allCommands
+        let anchor = try #require(all.firstIndex(of: "clip.sliceToSampler"))
+        #expect(all[anchor + 4] == "clip.setNoteCleared")
+        #expect(all.filter { $0 == "clip.setNoteCleared" }.count == 1)
+        #expect(all.last != "clip.setNoteCleared")
+    }
+
+    // MARK: - clip.setNoteGain (U-D, the per-note LEVEL verb)
+
+    /// Each note's `amplitudeDb` off a wire table, keyed by id. `#require` on
+    /// every note: the key is on the wire for EVERY segment, the
+    /// `clearedFlags` idiom above.
+    private func gainLevels(_ segments: [JSONValue]) throws -> [String: Double] {
+        var levels: [String: Double] = [:]
+        for segment in segments {
+            let id = try #require(segment["id"]?.stringValue)
+            levels[id] = try #require(segment["amplitudeDb"]?.doubleValue,
+                                      "note \(id) carries no `amplitudeDb` key on the wire")
+        }
+        return levels
+    }
+
+    private func setNoteGain(_ router: CommandRouter, clipID: String, _ ids: [String],
+                             gainDb: Double) async -> ControlResponse {
+        await router.handle(ControlRequest(
+            id: "sng", command: "clip.setNoteGain",
+            params: ["clipId": .string(clipID), "segmentIds": .array(ids.map { .string($0) }),
+                     "gainDb": .number(gainDb)]))
+    }
+
+    @Test("clip.setNoteGain: sets the named note's level, reads the STORED value back, leaves the other alone, and clip.getPitchEdits echoes it")
+    func setNoteGainHappyPath() async throws {
+        let engine = makeMelodicEngine()
+        let (router, store) = makeRouter(engine: engine)
+        let fileURL = try makeRealAudioFile()
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let (_, clipID) = try await addAudioClip(router, path: fileURL.path)
+        let segments = try await autoCorrectSegments(router, clipID: clipID)
+        #expect(segments.count == 2)
+        let targetID = try #require(segments[0]["id"]?.stringValue)
+        let otherID = try #require(segments[1]["id"]?.stringValue)
+        #expect(try gainLevels(segments) == [targetID: 0, otherID: 0],
+                "a never-leveled table must echo amplitudeDb:0 on every note")
+
+        let response = await setNoteGain(router, clipID: clipID, [targetID], gainDb: -6)
+        #expect(response.ok, "\(response.error ?? "?")")
+        #expect(response.result?["gainDb"]?.doubleValue == -6)
+        #expect(response.result?["segmentIds"]?.arrayValue?.compactMap(\.stringValue) == [targetID])
+        #expect(response.result?["appliedOptions"] == nil, "a level set never applied a whole-clip pass")
+        let after = try #require(response.result?["segments"]?.arrayValue)
+        #expect(try gainLevels(after) == [targetID: -6, otherID: 0])
+
+        // ⭐ A setter's return is not proof it took: read the STORE directly.
+        let stored = try #require(store.tracks.first?.clips.first?.pitchEdits)
+        #expect(stored.segments.first { $0.id.uuidString == targetID }?.amplitudeDb == -6)
+        #expect(stored.segments.first { $0.id.uuidString == otherID }?.amplitudeDb == 0)
+
+        // The getter echoes the level too, on every note.
+        let get = await router.handle(ControlRequest(
+            id: "g", command: "clip.getPitchEdits", params: ["clipId": .string(clipID)]))
+        #expect(get.ok)
+        #expect(try gainLevels(try #require(get.result?["segments"]?.arrayValue))
+                == [targetID: -6, otherID: 0])
+    }
+
+    @Test("clip.setNoteGain: clamps to Clip.gainDbRange and reads the STORED, post-clamp value back — never the number sent")
+    func setNoteGainClampsAndReadsBack() async throws {
+        let engine = makeMelodicEngine()
+        let (router, store) = makeRouter(engine: engine)
+        let fileURL = try makeRealAudioFile()
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let (_, clipID) = try await addAudioClip(router, path: fileURL.path)
+        let segments = try await autoCorrectSegments(router, clipID: clipID)
+        let targetID = try #require(segments[0]["id"]?.stringValue)
+
+        let high = await setNoteGain(router, clipID: clipID, [targetID], gainDb: 999)
+        #expect(high.ok)
+        #expect(high.result?["gainDb"]?.doubleValue == Clip.gainDbRange.upperBound)
+
+        let low = await setNoteGain(router, clipID: clipID, [targetID], gainDb: -999)
+        #expect(low.ok)
+        #expect(low.result?["gainDb"]?.doubleValue == Clip.gainDbRange.lowerBound)
+
+        let clip = try #require(store.tracks.first?.clips.first)
+        let stored = try #require(clip.pitchEdits?.segments.first { $0.id.uuidString == targetID })
+        #expect(stored.amplitudeDb == Clip.gainDbRange.lowerBound,
+                "the STORE, not just the response, carries the clamped value")
+    }
+
+    /// A level alone makes an unedited table an edit on the wire — the
+    /// `clip.setNoteCleared` "a clear alone" test, adapted: `isIdentity` is
+    /// `segments.allSatisfy(.isIdentity)`, and `NoteSegment.isIdentity` reads
+    /// `hasLevelEdits` (`isCleared || amplitudeDb != 0`), so a level write
+    /// alone must flip it exactly as a clear does. Setting it back to 0 dB
+    /// ("as sung") returns the clip to unedited — it is a level, not a clear.
+    @Test("clip.setNoteGain: a level alone makes an unedited table an edit on the wire, and 0 dB undoes exactly that")
+    func setNoteGainAloneIsAnEdit() async throws {
+        let (router, store) = makeRouter(engine: nil)
+        let fileURL = try makeRealAudioFile()
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let (_, clipID) = try await addAudioClip(router, path: fileURL.path)
+        let clipUUID = try #require(UUID(uuidString: clipID))
+        // Seed a DETECTED-ONLY table through the store (a 0-cent write stores
+        // the seed unchanged). The wire never seeds: it has no detector.
+        let seed = PitchEditSet(segments: [
+            NoteSegment(startSeconds: 0.1, endSeconds: 0.3, detectedHz: 220, detectedConfidence: 0.9),
+            NoteSegment(startSeconds: 0.4, endSeconds: 0.6, detectedHz: 247, detectedConfidence: 0.9),
+        ])
+        _ = try store.setClipNotePitchOffset(clipId: clipUUID, segmentId: seed.segments[0].id,
+                                             offsetCents: 0, seedIfAbsent: seed)
+        let noteID = seed.segments[1].id.uuidString
+
+        func readFlags() async throws -> (has: Bool?, identity: Bool?) {
+            let get = await router.handle(ControlRequest(
+                id: "g", command: "clip.getPitchEdits", params: ["clipId": .string(clipID)]))
+            #expect(get.ok)
+            return (get.result?["hasPitchEdits"]?.boolValue, get.result?["isIdentity"]?.boolValue)
+        }
+        let before = try await readFlags()
+        #expect(before.has == false && before.identity == true,
+                "CONTROL: a detected-only table must read as unedited")
+
+        let leveled = await setNoteGain(router, clipID: clipID, [noteID], gainDb: -6)
+        #expect(leveled.ok, "\(leveled.error ?? "?")")
+        #expect(leveled.result?["hasPitchEdits"]?.boolValue == true)
+        let during = try await readFlags()
+        #expect(during.has == true && during.identity == false,
+                "a level alone did not make the clip an edit: its render would be skipped")
+        #expect(during.has == store.tracks.first?.clips.first?.hasPitchEdits,
+                "the wire's hasPitchEdits is not Clip.hasPitchEdits")
+
+        let restored = await setNoteGain(router, clipID: clipID, [noteID], gainDb: 0)
+        #expect(restored.ok)
+        #expect(restored.result?["gainDb"]?.doubleValue == 0)
+        let after = try await readFlags()
+        #expect(after.has == false && after.identity == true, "0 dB did not return the clip to unedited")
+    }
+
+    /// ONE call for N notes is ONE undo step; a repeated id is folded;
+    /// `segmentIds` echoes the notes named, deduplicated, in request order;
+    /// undo restores every level.
+    @Test("clip.setNoteGain: N notes in one call is ONE undo step, a repeated id is folded, and undo restores them all")
+    func setNoteGainIsOneUndoStep() async throws {
+        let engine = makeMelodicEngine()
+        let (router, store) = makeRouter(engine: engine)
+        let fileURL = try makeRealAudioFile()
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let (_, clipID) = try await addAudioClip(router, path: fileURL.path)
+        let segments = try await autoCorrectSegments(router, clipID: clipID)
+        let first = try #require(segments[0]["id"]?.stringValue)
+        let second = try #require(segments[1]["id"]?.stringValue)
+        let depth = store.undoHistory().undo.count
+
+        let response = await setNoteGain(router, clipID: clipID, [second, first, second], gainDb: -4)
+        #expect(response.ok, "\(response.error ?? "?")")
+        #expect(response.result?["segmentIds"]?.arrayValue?.compactMap(\.stringValue)
+                == [second, first], "the notes named, deduplicated, in request order")
+        #expect(response.result?["gainDb"]?.doubleValue == -4)
+        #expect(store.undoHistory().undo.count == depth + 1, "two notes must be ONE undo step")
+        #expect(store.undoHistory().undo.first == "Set Note Level")
+
+        #expect(try store.undo() == "Set Note Level")
+        let stored = try #require(store.tracks.first?.clips.first?.pitchEdits)
+        #expect(stored.segments.allSatisfy { $0.amplitudeDb == 0 }, "undo did not restore every note")
+    }
+
+    @Test("clip.setNoteGain: a no-op journals nothing, and a repeated id is folded")
+    func setNoteGainNoOpJournalsNothing() async throws {
+        let engine = makeMelodicEngine()
+        let (router, store) = makeRouter(engine: engine)
+        let fileURL = try makeRealAudioFile()
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let (_, clipID) = try await addAudioClip(router, path: fileURL.path)
+        let segments = try await autoCorrectSegments(router, clipID: clipID)
+        let targetID = try #require(segments[0]["id"]?.stringValue)
+
+        _ = await setNoteGain(router, clipID: clipID, [targetID], gainDb: -3)
+        let depth = store.undoHistory().undo.count
+        let response = await setNoteGain(router, clipID: clipID, [targetID], gainDb: -3)
+        #expect(response.ok)
+        #expect(store.undoHistory().undo.count == depth,
+                "setting a note to the level it already carries must journal nothing")
+    }
+
+    @Test("clip.setNoteGain: a MIDI clip is refused, naming why, before any store mutation")
+    func setNoteGainRejectsMIDIClip() async throws {
+        let engine = makeMelodicEngine()
+        let (router, _) = makeRouter(engine: engine)
+        let (_, midiClipID) = try await addMIDIClip(router)
+        let response = await setNoteGain(router, clipID: midiClipID, [UUID().uuidString], gainDb: -6)
+        #expect(!response.ok)
+        #expect(response.error?.contains("MIDI clip") == true)
+        #expect(engine.detectCalls == 0, "no detection on this wire path")
+    }
+
+    @Test("clip.setNoteGain: a clip with no stored table refuses, teaching clip.autoCorrectPitch as the fix")
+    func setNoteGainRequiresStoredTable() async throws {
+        let (router, store) = makeRouter(engine: nil)
+        let fileURL = try makeRealAudioFile()
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let (_, clipID) = try await addAudioClip(router, path: fileURL.path)
+        let response = await setNoteGain(router, clipID: clipID, [UUID().uuidString], gainDb: -6)
+        #expect(!response.ok)
+        #expect(response.error?.contains("clip.autoCorrectPitch") == true)
+        #expect(response.error?.contains("no notes to edit yet") == true)
+        #expect(store.tracks.first?.clips.first?.pitchEdits == nil, "the wire must never seed a table")
+    }
+
+    /// ALL OR NOTHING: an unknown id among real ones changes nothing, and the
+    /// refusal names how many notes the clip does carry.
+    @Test("clip.setNoteGain: an unknown id among real ones changes nothing and names the clip's note count")
+    func setNoteGainUnknownSegmentChangesNothing() async throws {
+        let engine = makeMelodicEngine()
+        let (router, store) = makeRouter(engine: engine)
+        let fileURL = try makeRealAudioFile()
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let (_, clipID) = try await addAudioClip(router, path: fileURL.path)
+        let segments = try await autoCorrectSegments(router, clipID: clipID)
+        let realID = try #require(segments[0]["id"]?.stringValue)
+        let before = store.tracks.first?.clips.first?.pitchEdits
+        let depth = store.undoHistory().undo.count
+
+        let response = await setNoteGain(router, clipID: clipID, [realID, UUID().uuidString], gainDb: -6)
+        #expect(!response.ok)
+        #expect(response.error?.contains("No note with id") == true)
+        #expect(response.error?.contains("2 note(s)") == true, "must name the ACTUAL count on this clip")
+        #expect(store.tracks.first?.clips.first?.pitchEdits == before,
+                "a refused level-set changed the real note anyway")
+        #expect(store.undoHistory().undo.count == depth)
+    }
+
+    @Test("clip.setNoteGain: parameters are validated in words (unknown clip or key, segmentIds shape, gainDb required, empty list)")
+    func setNoteGainValidatesItsParameters() async throws {
+        let engine = makeMelodicEngine()
+        let (router, _) = makeRouter(engine: engine)
+        let fileURL = try makeRealAudioFile()
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let (_, clipID) = try await addAudioClip(router, path: fileURL.path)
+        let segments = try await autoCorrectSegments(router, clipID: clipID)
+        let realID = try #require(segments[0]["id"]?.stringValue)
+
+        func call(_ params: [String: JSONValue]) async -> ControlResponse {
+            await router.handle(ControlRequest(id: "v", command: "clip.setNoteGain", params: params))
+        }
+        let unknownClip = await setNoteGain(router, clipID: UUID().uuidString, [realID], gainDb: -6)
+        #expect(unknownClip.error?.contains("no clip with id") == true)
+
+        let unknownKey = await call(["clipId": .string(clipID), "segmentIds": .array([.string(realID)]),
+                                     "gainDb": .number(-6), "bogus": .bool(true)])
+        #expect(unknownKey.error?.contains("unknown parameter 'bogus'") == true)
+
+        let notAnArray = await call(["clipId": .string(clipID), "segmentIds": .string(realID),
+                                     "gainDb": .number(-6)])
+        #expect(notAnArray.error?.contains("'segmentIds' must be an array") == true)
+
+        let badUUID = await call(["clipId": .string(clipID),
+                                  "segmentIds": .array([.string(realID), .string("not-a-uuid")]),
+                                  "gainDb": .number(-6)])
+        #expect(badUUID.error?.contains("segmentIds[1] is not a valid UUID") == true)
+
+        let noValue = await call(["clipId": .string(clipID), "segmentIds": .array([.string(realID)])])
+        #expect(noValue.error?.contains("'gainDb'") == true, "gainDb has no default: a caller must say what level")
+
+        let valueNotNumber = await call(["clipId": .string(clipID), "segmentIds": .array([.string(realID)]),
+                                         "gainDb": .string("-6")])
+        #expect(valueNotNumber.error?.contains("'gainDb'") == true)
+
+        let empty = await call(["clipId": .string(clipID), "segmentIds": .array([]), "gainDb": .number(-6)])
+        #expect(empty.error?.contains("Name at least one note to set the level of") == true)
+
+        for response in [unknownClip, unknownKey, notAnArray, badUUID, noValue, valueNotNumber, empty] {
+            #expect(!response.ok)
+        }
+    }
+
+    /// Placed immediately after `clip.setNoteCleared`, in the per-note door
+    /// cluster beside `clip.sliceToSampler`, NOT at the tail, so every
+    /// `dropLast(N)` window and every earlier anchor pin stay true.
+    @Test("clip.setNoteGain is registered immediately after clip.setNoteCleared, beside clip.sliceToSampler")
+    func setNoteGainRegistered() throws {
+        let all = CommandRouter.allCommands
+        let anchor = try #require(all.firstIndex(of: "clip.sliceToSampler"))
+        #expect(all[anchor + 5] == "clip.setNoteGain")
+        #expect(all.filter { $0 == "clip.setNoteGain" }.count == 1)
+        #expect(all.last != "clip.setNoteGain")
+    }
+
+    // MARK: - clip.setNotePitches (m23-ap I4 wire leg, the BATCH twin of clip.setNotePitch)
+
+    /// A tuple array is not itself `Equatable` (`Array`'s conformance needs
+    /// `Element: Equatable`, and a bare tuple type does not satisfy that even
+    /// though two tuples compare directly) — a named struct instead, so
+    /// `echoed == [EchoedNote(...), ...]` below just works.
+    private struct EchoedNote: Equatable {
+        let id: String
+        let cents: Double?
+    }
+
+    /// Each note's `{segmentId, pitchOffsetCents}` off a wire `notes` array,
+    /// IN ORDER — the `clearedFlags`/`gainLevels` idiom above, but returning
+    /// an ordered array (not a dictionary) since duplicate-order and
+    /// dedup-order are exactly what several tests below assert on.
+    private func pitchesEcho(_ response: ControlResponse) throws -> [EchoedNote] {
+        let notes = try #require(response.result?["notes"]?.arrayValue)
+        return try notes.map { note in
+            EchoedNote(id: try #require(note["segmentId"]?.stringValue),
+                       cents: note["pitchOffsetCents"]?.doubleValue)
+        }
+    }
+
+    private func setNotePitches(_ router: CommandRouter, clipID: String,
+                                _ notes: [(id: String, cents: Double)]) async -> ControlResponse {
+        await router.handle(ControlRequest(
+            id: "snps", command: "clip.setNotePitches",
+            params: ["clipId": .string(clipID),
+                     "notes": .array(notes.map {
+                         .object(["segmentId": .string($0.id), "cents": .number($0.cents)])
+                     })]))
+    }
+
+    @Test("clip.setNotePitches: happy path forwards the stored, post-clamp pitchOffsetCents; the OTHER note is untouched; clip.getPitchEdits echoes it")
+    func setNotePitchesHappyPath() async throws {
+        let engine = makeMelodicEngine()
+        let (router, store) = makeRouter(engine: engine)
+        let fileURL = try makeRealAudioFile()
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let (_, clipID) = try await addAudioClip(router, path: fileURL.path)
+        let segments = try await autoCorrectSegments(router, clipID: clipID)
+        #expect(segments.count == 2)
+        let targetID = try #require(segments[0]["id"]?.stringValue)
+        let otherID = try #require(segments[1]["id"]?.stringValue)
+        let otherOriginalCents = try #require(segments[1]["pitchOffsetCents"]?.doubleValue)
+
+        let response = await setNotePitches(router, clipID: clipID, [(targetID, 50)])
+        #expect(response.ok, "\(response.error ?? "?")")
+        let echoed = try pitchesEcho(response)
+        #expect(echoed == [EchoedNote(id: targetID, cents: 50)])
+        #expect(response.result?["appliedOptions"] == nil, "setNotePitches never applied a whole-clip pass")
+
+        let afterSegments = try #require(response.result?["segments"]?.arrayValue)
+        #expect(afterSegments.count == 2)
+        let other = try #require(afterSegments.first { $0["id"]?.stringValue == otherID })
+        #expect(other["pitchOffsetCents"]?.doubleValue == otherOriginalCents,
+                "the note nobody named stays at its pre-edit value")
+
+        // A setter's return is not proof it took: read the STORE directly.
+        let clip = try #require(store.tracks.first?.clips.first)
+        let stored = try #require(clip.pitchEdits?.segments.first { $0.id.uuidString == targetID })
+        #expect(stored.pitchOffsetCents == 50)
+
+        let get = await router.handle(ControlRequest(
+            id: "g", command: "clip.getPitchEdits", params: ["clipId": .string(clipID)]))
+        #expect(get.ok)
+        let gotSegments = try #require(get.result?["segments"]?.arrayValue)
+        #expect(gotSegments.first { $0["id"]?.stringValue == targetID }?["pitchOffsetCents"]?.doubleValue == 50)
+    }
+
+    /// The brief's echo spec names `hasPitchEdits` explicitly, alongside the
+    /// per-note cents — the `clip.setNoteGain`/`clip.setNoteCleared`
+    /// "alone is an edit" test, adapted: a cents write ALONE (even 0, even on
+    /// an otherwise untouched, freshly-detected table) must take the clip out
+    /// of the render's identity bypass exactly as a level or clear write
+    /// does, and landing every named note back at exactly its DETECTED
+    /// offset must return it to identity — `hasPitchEdits` is not a bare key
+    /// that merely EXISTS on the response (the shared builder guarantees
+    /// that for free); its VALUE must track the actual edit state.
+    @Test("clip.setNotePitches: a cents write alone makes an unedited table an edit on the wire, and landing back on the detected offset undoes exactly that")
+    func setNotePitchesAloneIsAnEdit() async throws {
+        let (router, store) = makeRouter(engine: nil)
+        let fileURL = try makeRealAudioFile()
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let (_, clipID) = try await addAudioClip(router, path: fileURL.path)
+        let clipUUID = try #require(UUID(uuidString: clipID))
+        // Seed a DETECTED-ONLY table through the store (a 0-cent write stores
+        // the seed unchanged). The wire never seeds: it has no detector.
+        let seed = PitchEditSet(segments: [
+            NoteSegment(startSeconds: 0.1, endSeconds: 0.3, detectedHz: 220, detectedConfidence: 0.9),
+            NoteSegment(startSeconds: 0.4, endSeconds: 0.6, detectedHz: 247, detectedConfidence: 0.9),
+        ])
+        _ = try store.setClipNotePitchOffset(clipId: clipUUID, segmentId: seed.segments[0].id,
+                                             offsetCents: 0, seedIfAbsent: seed)
+        let noteID = seed.segments[1].id.uuidString
+        let detectedCents = seed.segments[1].pitchOffsetCents  // 0: a freshly-detected note
+
+        func readFlags() async throws -> (has: Bool?, identity: Bool?) {
+            let get = await router.handle(ControlRequest(
+                id: "g", command: "clip.getPitchEdits", params: ["clipId": .string(clipID)]))
+            #expect(get.ok)
+            return (get.result?["hasPitchEdits"]?.boolValue, get.result?["isIdentity"]?.boolValue)
+        }
+        let before = try await readFlags()
+        #expect(before.has == false && before.identity == true,
+                "CONTROL: a detected-only table must read as unedited")
+
+        let moved = await setNotePitches(router, clipID: clipID, [(noteID, 50)])
+        #expect(moved.ok, "\(moved.error ?? "?")")
+        #expect(moved.result?["hasPitchEdits"]?.boolValue == true,
+                "the batch verb's OWN response must echo hasPitchEdits, not just the getter's")
+        let during = try await readFlags()
+        #expect(during.has == true && during.identity == false,
+                "a cents write alone did not make the clip an edit: its render would be skipped")
+        #expect(during.has == store.tracks.first?.clips.first?.hasPitchEdits,
+                "the wire's hasPitchEdits is not Clip.hasPitchEdits")
+
+        let restored = await setNotePitches(router, clipID: clipID, [(noteID, detectedCents)])
+        #expect(restored.ok)
+        #expect(restored.result?["hasPitchEdits"]?.boolValue == false,
+                "landing back on the detected offset must return the clip to unedited")
+        let after = try await readFlags()
+        #expect(after.has == false && after.identity == true,
+                "the detected offset did not return the clip to unedited")
+    }
+
+    /// THE core batch semantic the brief names: unlike `clip.setNoteGain`'s
+    /// ONE value shared by every named note, each note here lands at its OWN
+    /// absolute cents — "the intervals between notes are whatever you send."
+    /// A planted "broadcast the first value to every note" defect would
+    /// collapse this to two equal numbers; this test would catch it.
+    @Test("clip.setNotePitches: two notes in ONE call land at two DIFFERENT absolute offsets — intervals are whatever was sent")
+    func setNotePitchesKeepsDistinctPerNoteOffsets() async throws {
+        let engine = makeMelodicEngine()
+        let (router, store) = makeRouter(engine: engine)
+        let fileURL = try makeRealAudioFile()
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let (_, clipID) = try await addAudioClip(router, path: fileURL.path)
+        let segments = try await autoCorrectSegments(router, clipID: clipID)
+        let first = try #require(segments[0]["id"]?.stringValue)
+        let second = try #require(segments[1]["id"]?.stringValue)
+
+        let response = await setNotePitches(router, clipID: clipID, [(first, 50), (second, -30)])
+        #expect(response.ok, "\(response.error ?? "?")")
+        let echoed = try pitchesEcho(response)
+        #expect(echoed == [EchoedNote(id: first, cents: 50), EchoedNote(id: second, cents: -30)])
+
+        let clip = try #require(store.tracks.first?.clips.first)
+        #expect(clip.pitchEdits?.segments.first { $0.id.uuidString == first }?.pitchOffsetCents == 50)
+        #expect(clip.pitchEdits?.segments.first { $0.id.uuidString == second }?.pitchOffsetCents == -30)
+    }
+
+    @Test("clip.setNotePitches: clamps EACH note to +/-2400 independently and reads the STORED, post-clamp values back")
+    func setNotePitchesClampsAndReadsBack() async throws {
+        let engine = makeMelodicEngine()
+        let (router, store) = makeRouter(engine: engine)
+        let fileURL = try makeRealAudioFile()
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let (_, clipID) = try await addAudioClip(router, path: fileURL.path)
+        let segments = try await autoCorrectSegments(router, clipID: clipID)
+        let first = try #require(segments[0]["id"]?.stringValue)
+        let second = try #require(segments[1]["id"]?.stringValue)
+
+        let response = await setNotePitches(router, clipID: clipID, [(first, 9999), (second, -9999)])
+        #expect(response.ok, "\(response.error ?? "?")")
+        let echoed = try pitchesEcho(response)
+        #expect(echoed == [EchoedNote(id: first, cents: 2400), EchoedNote(id: second, cents: -2400)])
+
+        let clip = try #require(store.tracks.first?.clips.first)
+        #expect(clip.pitchEdits?.segments.first { $0.id.uuidString == first }?.pitchOffsetCents == 2400,
+                "the STORE, not just the response, carries the clamped value")
+        #expect(clip.pitchEdits?.segments.first { $0.id.uuidString == second }?.pitchOffsetCents == -2400)
+    }
+
+    /// ONE call for N notes is ONE undo step; a repeated id at the SAME
+    /// cents folds (deduplicated in the echo, in request order); undo
+    /// restores every note.
+    @Test("clip.setNotePitches: N notes in one call is ONE undo step, a repeated id at the SAME cents is folded, and undo restores them all")
+    func setNotePitchesIsOneUndoStepAndFoldsARepeatedID() async throws {
+        let engine = makeMelodicEngine()
+        let (router, store) = makeRouter(engine: engine)
+        let fileURL = try makeRealAudioFile()
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let (_, clipID) = try await addAudioClip(router, path: fileURL.path)
+        let segments = try await autoCorrectSegments(router, clipID: clipID)
+        let first = try #require(segments[0]["id"]?.stringValue)
+        let second = try #require(segments[1]["id"]?.stringValue)
+        // ⚠️ NOT necessarily 0 — the default strength-1 auto-correct pass
+        // already pulled both notes by some real amount (the
+        // `setNotePitchHappyPath` note, verbatim): capture the ACTUAL
+        // pre-edit values rather than assuming one.
+        let firstOriginal = try #require(segments[0]["pitchOffsetCents"]?.doubleValue)
+        let secondOriginal = try #require(segments[1]["pitchOffsetCents"]?.doubleValue)
+        let depth = store.undoHistory().undo.count
+
+        let response = await setNotePitches(
+            router, clipID: clipID, [(second, -20), (first, 50), (second, -20)])
+        #expect(response.ok, "\(response.error ?? "?")")
+        let echoed = try pitchesEcho(response)
+        #expect(echoed == [EchoedNote(id: second, cents: -20), EchoedNote(id: first, cents: 50)],
+                "the notes named, deduplicated, in request order")
+        #expect(store.undoHistory().undo.count == depth + 1, "two notes (one repeated) must be ONE undo step")
+        #expect(store.undoHistory().undo.first == "Tune Notes")
+
+        #expect(try store.undo() == "Tune Notes")
+        let stored = try #require(store.tracks.first?.clips.first?.pitchEdits)
+        #expect(stored.segments.first { $0.id.uuidString == first }?.pitchOffsetCents == firstOriginal,
+                "undo did not restore the first note")
+        #expect(stored.segments.first { $0.id.uuidString == second }?.pitchOffsetCents == secondOriginal,
+                "undo did not restore the second note")
+    }
+
+    /// A repeated id whose two cents CLAMP to the SAME value folds too — the
+    /// store clamps BEFORE comparing duplicates, so `9999`/`2400` (both ->
+    /// `2400`) is not a conflict even though the RAW numbers differ. Proves
+    /// the wire surfaces the store's clamp-first semantics rather than
+    /// pre-judging "two different numbers" on the request's own bytes.
+    @Test("clip.setNotePitches: a repeated id whose cents clamp to the SAME value folds, not refuses")
+    func setNotePitchesRepeatedIDFoldsWhenClampedToTheSameValue() async throws {
+        let engine = makeMelodicEngine()
+        let (router, _) = makeRouter(engine: engine)
+        let fileURL = try makeRealAudioFile()
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let (_, clipID) = try await addAudioClip(router, path: fileURL.path)
+        let segments = try await autoCorrectSegments(router, clipID: clipID)
+        let targetID = try #require(segments[0]["id"]?.stringValue)
+
+        let response = await setNotePitches(router, clipID: clipID, [(targetID, 9999), (targetID, 2400)])
+        #expect(response.ok, "9999 and 2400 both clamp to 2400 — this must fold, not refuse: \(response.error ?? "?")")
+        let echoed = try pitchesEcho(response)
+        #expect(echoed == [EchoedNote(id: targetID, cents: 2400)])
+    }
+
+    @Test("clip.setNotePitches: a no-op (every named note already at its sent cents) journals nothing")
+    func setNotePitchesNoOpJournalsNothing() async throws {
+        let engine = makeMelodicEngine()
+        let (router, store) = makeRouter(engine: engine)
+        let fileURL = try makeRealAudioFile()
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let (_, clipID) = try await addAudioClip(router, path: fileURL.path)
+        let segments = try await autoCorrectSegments(router, clipID: clipID)
+        let targetID = try #require(segments[0]["id"]?.stringValue)
+
+        _ = await setNotePitches(router, clipID: clipID, [(targetID, 50)])
+        let depth = store.undoHistory().undo.count
+        let response = await setNotePitches(router, clipID: clipID, [(targetID, 50)])
+        #expect(response.ok)
+        #expect(store.undoHistory().undo.count == depth,
+                "setting a note to the cents it already carries must journal nothing")
+    }
+
+    /// THE COALESCING RULE this lane chose: `PitchCorrectionUndoKey.structuralKey`
+    /// (nil) NEVER coalesces, unlike the in-process editor's own
+    /// `.group(clipID:selectionToken:)` (which folds two drags of the SAME
+    /// selection inside 800ms). Two SEPARATE wire calls — even naming the
+    /// SAME note, back to back, inside the journal's coalescing window —
+    /// must produce TWO undo entries, not one. The second call sends a
+    /// DIFFERENT cents value than the first (50, then 80): if it sent the
+    /// same value again this would be indistinguishable from the no-op test
+    /// above (0 NEW entries either way), so a wrongly-coalescing
+    /// implementation and a correctly-non-coalescing one would both pass.
+    @Test("clip.setNotePitches: never coalesces — two back-to-back calls on the same note are TWO undo steps")
+    func setNotePitchesNeverCoalescesAcrossCalls() async throws {
+        let engine = makeMelodicEngine()
+        let (router, store) = makeRouter(engine: engine)
+        let fileURL = try makeRealAudioFile()
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let (_, clipID) = try await addAudioClip(router, path: fileURL.path)
+        let segments = try await autoCorrectSegments(router, clipID: clipID)
+        let targetID = try #require(segments[0]["id"]?.stringValue)
+        // ⚠️ NOT necessarily 0 — the `setNotePitchHappyPath` note, verbatim.
+        let originalCents = try #require(segments[0]["pitchOffsetCents"]?.doubleValue)
+        let depth = store.undoHistory().undo.count
+
+        let first = await setNotePitches(router, clipID: clipID, [(targetID, 50)])
+        #expect(first.ok, "\(first.error ?? "?")")
+        let second = await setNotePitches(router, clipID: clipID, [(targetID, 80)])
+        #expect(second.ok, "\(second.error ?? "?")")
+
+        #expect(store.undoHistory().undo.count == depth + 2,
+                "two separate clip.setNotePitches calls must NEVER coalesce into one undo step, even on the same note inside the journal's coalescing window")
+        // Both entries are independently undoable back to the ORIGINAL value.
+        #expect(try store.undo() == "Tune Notes")
+        #expect(store.tracks.first?.clips.first?.pitchEdits?.segments
+            .first { $0.id.uuidString == targetID }?.pitchOffsetCents == 50)
+        #expect(try store.undo() == "Tune Notes")
+        #expect(store.tracks.first?.clips.first?.pitchEdits?.segments
+            .first { $0.id.uuidString == targetID }?.pitchOffsetCents == originalCents)
+    }
+
+    @Test("clip.setNotePitches: a repeated id with two DIFFERENT cents refuses, verbatim, and changes nothing")
+    func setNotePitchesRepeatedIDConflictRefuses() async throws {
+        let engine = makeMelodicEngine()
+        let (router, store) = makeRouter(engine: engine)
+        let fileURL = try makeRealAudioFile()
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let (_, clipID) = try await addAudioClip(router, path: fileURL.path)
+        let segments = try await autoCorrectSegments(router, clipID: clipID)
+        let targetID = try #require(segments[0]["id"]?.stringValue)
+        let before = store.tracks.first?.clips.first?.pitchEdits
+        let depth = store.undoHistory().undo.count
+
+        let response = await setNotePitches(router, clipID: clipID, [(targetID, 50), (targetID, 60)])
+        #expect(!response.ok)
+        #expect(response.error?.contains("is named twice with two different pitches") == true)
+        #expect(response.error?.contains("Name each note once") == true)
+        #expect(store.tracks.first?.clips.first?.pitchEdits == before, "a refused call changed the note anyway")
+        #expect(store.undoHistory().undo.count == depth)
+    }
+
+    /// ALL OR NOTHING: an unknown id among real ones changes NOTHING —
+    /// neither the real note named alongside it — and the refusal names how
+    /// many notes the clip does carry.
+    @Test("clip.setNotePitches: an unknown id among real ones changes nothing and names the clip's note count")
+    func setNotePitchesUnknownSegmentChangesNothing() async throws {
+        let engine = makeMelodicEngine()
+        let (router, store) = makeRouter(engine: engine)
+        let fileURL = try makeRealAudioFile()
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let (_, clipID) = try await addAudioClip(router, path: fileURL.path)
+        let segments = try await autoCorrectSegments(router, clipID: clipID)
+        let realID = try #require(segments[0]["id"]?.stringValue)
+        let before = store.tracks.first?.clips.first?.pitchEdits
+        let depth = store.undoHistory().undo.count
+
+        let response = await setNotePitches(router, clipID: clipID, [(realID, 50), (UUID().uuidString, 50)])
+        #expect(!response.ok)
+        #expect(response.error?.contains("No note with id") == true)
+        #expect(response.error?.contains("2 note(s)") == true, "must name the ACTUAL count on this clip")
+        #expect(store.tracks.first?.clips.first?.pitchEdits == before,
+                "a refused batch changed the real note anyway")
+        #expect(store.undoHistory().undo.count == depth)
+    }
+
+    @Test("clip.setNotePitches: a MIDI clip is refused, naming why, before any store mutation")
+    func setNotePitchesRejectsMIDIClip() async throws {
+        let engine = makeMelodicEngine()
+        let (router, _) = makeRouter(engine: engine)
+        let (_, midiClipID) = try await addMIDIClip(router)
+
+        let response = await setNotePitches(router, clipID: midiClipID, [(UUID().uuidString, 50)])
+        #expect(!response.ok)
+        #expect(response.error?.contains("MIDI clip") == true)
+        #expect(engine.detectCalls == 0, "no detection on this wire path, MIDI or not")
+    }
+
+    @Test("clip.setNotePitches: a clip with no stored table refuses, teaching clip.autoCorrectPitch as the fix")
+    func setNotePitchesRequiresStoredTable() async throws {
+        let (router, store) = makeRouter(engine: nil)
+        let fileURL = try makeRealAudioFile()
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let (_, clipID) = try await addAudioClip(router, path: fileURL.path)
+        // Deliberately never auto-corrected — `pitchEdits` is nil.
+
+        let response = await setNotePitches(router, clipID: clipID, [(UUID().uuidString, 50)])
+        #expect(!response.ok)
+        #expect(response.error?.contains("clip.autoCorrectPitch") == true)
+        #expect(response.error?.contains("no notes to edit yet") == true)
+        #expect(store.tracks.first?.clips.first?.pitchEdits == nil, "the wire must never seed a table")
+    }
+
+    @Test("clip.setNotePitches: parameters are validated in words (unknown clip/key, notes shape, empty list, per-note field shapes)")
+    func setNotePitchesValidatesItsParameters() async throws {
+        let engine = makeMelodicEngine()
+        let (router, _) = makeRouter(engine: engine)
+        let fileURL = try makeRealAudioFile()
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let (_, clipID) = try await addAudioClip(router, path: fileURL.path)
+        let segments = try await autoCorrectSegments(router, clipID: clipID)
+        let realID = try #require(segments[0]["id"]?.stringValue)
+
+        func call(_ params: [String: JSONValue]) async -> ControlResponse {
+            await router.handle(ControlRequest(id: "v", command: "clip.setNotePitches", params: params))
+        }
+
+        let unknownClip = await setNotePitches(router, clipID: UUID().uuidString, [(realID, 50)])
+        #expect(unknownClip.error?.contains("no clip with id") == true)
+
+        let unknownKey = await call(["clipId": .string(clipID),
+                                     "notes": .array([.object(["segmentId": .string(realID), "cents": .number(50)])]),
+                                     "bogus": .bool(true)])
+        #expect(unknownKey.error?.contains("unknown parameter 'bogus'") == true)
+
+        let notAnArray = await call(["clipId": .string(clipID), "notes": .string(realID)])
+        #expect(notAnArray.error?.contains("'notes' must be an array") == true)
+
+        let elementNotAnObject = await call(["clipId": .string(clipID), "notes": .array([.number(50)])])
+        #expect(elementNotAnObject.error?.contains("notes[0] must be {segmentId") == true)
+
+        let badUUID = await call(["clipId": .string(clipID),
+                                  "notes": .array([.object(["segmentId": .string("not-a-uuid"), "cents": .number(50)])])])
+        #expect(badUUID.error?.contains("notes[0].segmentId is not a valid UUID") == true)
+
+        let missingSegmentId = await call(["clipId": .string(clipID),
+                                           "notes": .array([.object(["cents": .number(50)])])])
+        #expect(missingSegmentId.error?.contains("notes[0].segmentId is not a valid UUID") == true)
+
+        let missingCents = await call(["clipId": .string(clipID),
+                                       "notes": .array([.object(["segmentId": .string(realID)])])])
+        #expect(missingCents.error?.contains("notes[0].cents must be a number") == true)
+
+        let centsNotNumber = await call(["clipId": .string(clipID),
+                                         "notes": .array([.object(["segmentId": .string(realID), "cents": .string("50")])])])
+        #expect(centsNotNumber.error?.contains("notes[0].cents must be a number") == true)
+
+        let empty = await setNotePitches(router, clipID: clipID, [])
+        #expect(empty.error?.contains("Name at least one note to tune") == true)
+
+        for response in [unknownClip, unknownKey, notAnArray, elementNotAnObject, badUUID,
+                          missingSegmentId, missingCents, centsNotNumber, empty] {
+            #expect(!response.ok)
+        }
+    }
+
+    /// "Registered next to `clip.setNotePitch`" (the brief) means: IN THE
+    /// SAME per-note pitch-editor door cluster beside `clip.sliceToSampler`
+    /// that `clip.setNotePitch` itself anchors — the `clip.setNoteCleared`/
+    /// `clip.setNoteGain` precedent, appended at the CLUSTER's tail rather
+    /// than literally adjacent to `clip.setNotePitch`, so every
+    /// `dropLast(N)` window and every earlier `anchor + N` pin above stays
+    /// true by construction (a near-`clip.setNotePitch` insertion was
+    /// measured, at THIS cluster's very first member, to break 99
+    /// `dropLast(N)` pins across 26 files).
+    @Test("clip.setNotePitches is registered immediately after clip.setNoteGain, beside clip.sliceToSampler")
+    func setNotePitchesRegistered() throws {
+        let all = CommandRouter.allCommands
+        let anchor = try #require(all.firstIndex(of: "clip.sliceToSampler"))
+        #expect(all[anchor + 6] == "clip.setNotePitches")
+        #expect(all.filter { $0 == "clip.setNotePitches" }.count == 1)
+        #expect(all.last != "clip.setNotePitches")
+    }
+
+    // MARK: - clip.auditionNote (m23-ap I1 wire leg, part 2 of 2: HEAR the note)
+
+    /// Engine spy for `clip.auditionNote`: records every span asked for (so
+    /// a refusal can be proven to have reached the engine ZERO times — the
+    /// all-or-nothing and transport-running tests below read `spanCalls`,
+    /// never just the response) and lets a test choose what the plain
+    /// `auditionClipSpan` answers. `AudioEngineControlling`'s protocol
+    /// extension defaults `auditionClipSpan` to `.unsupported` for any
+    /// conformer that does not override it (`EngineProtocol.swift`'s own
+    /// comment: "fakes and headless engines have no audition voice"), which
+    /// `makeMelodicEngine()`'s `FakePitchDetectionEngine` never overrides —
+    /// so THAT fake can reach every REFUSAL branch (an unknown id, no
+    /// stored table, transport running, …) but never `.sounded`
+    /// (`auditionNoteEngineWithoutAuditionSupport` below uses it exactly
+    /// for that: a real, non-throwing `.unsupported` answer). Reaching
+    /// `.sounded` for the round-trip test needs a conformer that answers
+    /// it, and `AudioEngine` is never used in a wire test — port 17600 is
+    /// the user's live app — so this is a NEW spy, never the real engine.
+    /// Required-member list copied from `AuditionCommandTests.
+    /// AuditionSpyEngine` (the `note.audition` precedent this brief
+    /// names), the minimal set `AudioEngineControlling` actually requires
+    /// with no protocol-extension default — confirmed by reading that
+    /// class, not guessed.
+    @MainActor
+    private final class NoteAuditionSpyEngine: AudioEngineControlling {
+        var isRunning = true
+        var meteringHandler: ((MeterFrame) -> Void)?
+        var trackMeteringHandler: ((UUID, MeterFrame) -> Void)?
+        var playheadHandler: ((Double) -> Void)?
+        /// Every span this spy was asked to play, in call order — the
+        /// PLAIN (4-argument) form `press` always tries first.
+        private(set) var spanCalls: [(trackID: UUID, clipID: UUID,
+                                      start: Double, end: Double)] = []
+        var outcomeStub: AuditionOutcome = .sounded
+
+        func auditionClipSpan(trackID: UUID, clipID: UUID, startSourceSeconds: Double,
+                              endSourceSeconds: Double) -> AuditionOutcome {
+            spanCalls.append((trackID, clipID, startSourceSeconds, endSourceSeconds))
+            return outcomeStub
+        }
+
+        /// The SPAN-RENDER (6-argument) overload (I1-F1) — `SpanRenderSpyEngine`
+        /// precedent (`Tests/DAWCoreTests/ClipNoteSpanAuditionTests.swift`).
+        /// Defaults to `.unsupported`, exactly the protocol-extension
+        /// default every test above already relies on by never touching
+        /// this override at all — so adding it changes nothing for them.
+        /// `press` only ever calls this SECOND, and only when the plain
+        /// call above answered `.inaudibleNotReady` first
+        /// (`auditionNoteEchoesSpanRenderSource` is the one test that sets
+        /// both `outcomeStub` and `spanAnswer` to reach it). The
+        /// completion closure is intentionally discarded, never called:
+        /// this door only ever reads `press`'s SYNCHRONOUS return.
+        private(set) var spanRenderCalls: [(trackID: UUID, clipID: UUID, start: Double,
+                                            end: Double, source: ClipSpanAuditionSource)] = []
+        var spanAnswer: AuditionOutcome = .unsupported
+
+        func auditionClipSpan(trackID: UUID, clipID: UUID, startSourceSeconds: Double,
+                              endSourceSeconds: Double, source: ClipSpanAuditionSource,
+                              completion: (@MainActor @Sendable (ClipSpanAuditionDelivery) -> Void)?)
+            -> AuditionOutcome {
+            spanRenderCalls.append((trackID, clipID, startSourceSeconds, endSourceSeconds, source))
+            return spanAnswer
+        }
+
+        func prepare() throws { isRunning = true }
+        func shutdown() { isRunning = false }
+        func tracksDidChange(_ tracks: [Track]) {}
+        func startPlayback(_ transport: TransportState) {}
+        func stopPlayback() {}
+        func seek(_ transport: TransportState) {}
+        func setTempo(_ transport: TransportState) {}
+        func loopChanged(_ transport: TransportState) {}
+        func masterVolumeChanged(_ volume: Double) {}
+        func renderMixdown(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
+                           masterEffects: [EffectDescriptor],
+                           masterAutomation: [AutomationLane],
+                           fromBeat: Double, durationSeconds: Double,
+                           to url: URL) async throws -> AudioFileInfo {
+            throw ProjectError.engineUnavailable
+        }
+        var recordPermission: RecordPermission { .granted }
+        func requestRecordPermission(_ completion: @escaping @MainActor (Bool) -> Void) {
+            completion(true)
+        }
+        func availableInputDevices() -> [AudioInputDevice] { [] }
+        func setInputDevice(uid: String?) throws {}
+        func startRecording(_ transport: TransportState, to url: URL,
+                            completion: @escaping @MainActor (Result<RecordingResult, Error>) -> Void) throws {
+            throw ProjectError.engineUnavailable
+        }
+        func startTake(_ transport: TransportState, audioURL: URL?, captureMIDI: Bool,
+                       completion: @escaping @MainActor (Result<TakeResult, Error>) -> Void) throws {}
+        func stopRecording() {}
+    }
+
+    private func auditionNote(_ router: CommandRouter, clipID: String, _ segmentIDs: [String],
+                              contextSeconds: Double? = nil) async -> ControlResponse {
+        var params: [String: JSONValue] = ["clipId": .string(clipID),
+                                           "segmentIds": .array(segmentIDs.map { .string($0) })]
+        if let contextSeconds { params["contextSeconds"] = .number(contextSeconds) }
+        return await router.handle(ControlRequest(id: "can", command: "clip.auditionNote", params: params))
+    }
+
+    /// Builds a clip with a stored note table (autoCorrect already ran) and
+    /// hands back its router/store plus both segment ids — the shared setup
+    /// every `clip.auditionNote` test below starts from, mirroring
+    /// `autoCorrectSegments`'s role for the setNotePitch(es) tests above.
+    /// Starts on `makeMelodicEngine()`'s fake so pitch detection needs no
+    /// real inference; callers that need `.sounded` swap `store.engine` to
+    /// `NoteAuditionSpyEngine` AFTERWARDS — the clip's stored table does not
+    /// care which engine is attached once it is written.
+    private func makeAuditionFixture() async throws
+        -> (router: CommandRouter, store: ProjectStore, clipID: String, segmentIDs: [String]) {
+        let engine = makeMelodicEngine()
+        let (router, store) = makeRouter(engine: engine)
+        let fileURL = try makeRealAudioFile()
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let (_, clipID) = try await addAudioClip(router, path: fileURL.path)
+        let segments = try await autoCorrectSegments(router, clipID: clipID)
+        #expect(segments.count == 2)
+        let ids = try segments.map { try #require($0["id"]?.stringValue) }
+        return (router, store, clipID, ids)
+    }
+
+    @Test("clip.auditionNote: happy path — a spy sounds it, and the response echoes clipId/segmentIds/the resolved span/source/audible/outcome, reason null")
+    func auditionNoteHappyPath() async throws {
+        let (router, store, clipID, ids) = try await makeAuditionFixture()
+        let spy = NoteAuditionSpyEngine()
+        spy.outcomeStub = .sounded
+        store.engine = spy
+
+        let response = await auditionNote(router, clipID: clipID, [ids[0]])
+        #expect(response.ok, "\(response.error ?? "?")")
+        #expect(response.result?["clipId"]?.stringValue == clipID)
+        #expect(response.result?["segmentIds"]?.arrayValue?.compactMap(\.stringValue) == [ids[0]])
+        #expect(response.result?["audible"]?.boolValue == true)
+        #expect(response.result?["outcome"]?.stringValue == "sounded")
+        #expect(response.result?["reason"]?.stringValue == nil, "audible: true carries no reason")
+        // hasPitchEdits is true after autoCorrect (the default strength-1
+        // pass pulls a real, non-zero offset — the setNotePitches fixture's
+        // own finding above), so rendersThroughStretchCache reads true by
+        // the model's own formula (`!isStretchIdentity || hasPitchEdits`,
+        // Model.swift) — read back, never assumed.
+        #expect(response.result?["source"]?.stringValue == "render")
+        let start = try #require(response.result?["startSeconds"]?.doubleValue)
+        let end = try #require(response.result?["endSeconds"]?.doubleValue)
+        #expect(end > start)
+
+        #expect(spy.spanCalls.count == 1)
+        let call = try #require(spy.spanCalls.first)
+        #expect(call.start == start)
+        #expect(call.end == end)
+    }
+
+    @Test("clip.auditionNote: a press whose plain read answers \"not ready\" escalates to a span render, and the wire echoes source:\"span-render\" (RT re-review NH-C)")
+    func auditionNoteEchoesSpanRenderSource() async throws {
+        let (router, store, clipID, ids) = try await makeAuditionFixture()
+        let spy = NoteAuditionSpyEngine()
+        spy.outcomeStub = .inaudibleNotReady
+        spy.spanAnswer = .sounded
+        store.engine = spy
+
+        let response = await auditionNote(router, clipID: clipID, [ids[0]])
+        #expect(response.ok, "\(response.error ?? "?")")
+        #expect(response.result?["source"]?.stringValue == "span-render")
+        #expect(response.result?["audible"]?.boolValue == true)
+        #expect(response.result?["outcome"]?.stringValue == "sounded")
+        #expect(response.result?["reason"]?.stringValue == nil)
+
+        // The PLAIN read is tried first (and answers not-ready) — THEN,
+        // and only then, the span render is asked for. Never both at
+        // once, never the other order: press's own escalation sequence.
+        #expect(spy.spanCalls.count == 1)
+        #expect(spy.spanRenderCalls.count == 1)
+        #expect(spy.spanRenderCalls.first?.source == .storedSpanRender,
+                "a press reads the clip's STORED edits, never a draft (drafts are the drag door's own)")
+    }
+
+    @Test("clip.auditionNote: several notes in one call span BOTH of them in ONE engine call, and a repeated id is folded in the segmentIds echo")
+    func auditionNoteCoversAllNamedNotesAndFoldsARepeat() async throws {
+        let (router, store, clipID, ids) = try await makeAuditionFixture()
+        let spy = NoteAuditionSpyEngine()
+        store.engine = spy
+        let response = await auditionNote(router, clipID: clipID, [ids[0], ids[1], ids[0]])
+        #expect(response.ok, "\(response.error ?? "?")")
+        #expect(response.result?["segmentIds"]?.arrayValue?.compactMap(\.stringValue) == [ids[0], ids[1]],
+                "deduplicated, in request order — the clip.setNoteGain/clip.setNotePitches segmentIds idiom")
+        #expect(spy.spanCalls.count == 1, "one audition call for the WHOLE named span, not one per note")
+    }
+
+    @Test("clip.auditionNote: while the transport plays, audible:false + reason:\"transport-running\" is a SUCCESS, not an error, and the engine is never touched (H6: .noRenderer can never surface on this door)")
+    func auditionNoteRefusesWhileTransportRunning() async throws {
+        let (router, store, clipID, ids) = try await makeAuditionFixture()
+        let spy = NoteAuditionSpyEngine()
+        store.engine = spy
+        let play = await router.handle(ControlRequest(id: "p", command: "transport.play", params: [:]))
+        #expect(play.ok, "\(play.error ?? "?")")
+        #expect(store.transport.isPlaying)
+
+        let response = await auditionNote(router, clipID: clipID, [ids[0]])
+        #expect(response.ok, "a refusal without a throw is a SUCCESS: \(response.error ?? "?")")
+        #expect(response.result?["audible"]?.boolValue == false)
+        #expect(response.result?["reason"]?.stringValue == "transport-running")
+        #expect(response.result?["outcome"]?.stringValue == nil, "refused before the engine answered anything")
+        #expect(spy.spanCalls.isEmpty,
+                "the transport-running guard fires BEFORE the engine is touched — H6's .noRenderer can never be this verb's answer")
+    }
+
+    @Test("clip.auditionNote: an engine with no clip-note audition support answers audible:false, outcome AND reason both \"unsupported\" — a real, not a refused-before-the-engine, answer")
+    func auditionNoteEngineWithoutAuditionSupport() async throws {
+        // Deliberately do NOT swap in the spy: makeMelodicEngine()'s
+        // FakePitchDetectionEngine never overrides auditionClipSpan, so it
+        // answers through AudioEngineControlling's own protocol-extension
+        // default, `.unsupported`.
+        let (router, _, clipID, ids) = try await makeAuditionFixture()
+        let response = await auditionNote(router, clipID: clipID, [ids[0]])
+        #expect(response.ok, "a real, non-throwing answer: \(response.error ?? "?")")
+        #expect(response.result?["audible"]?.boolValue == false)
+        #expect(response.result?["outcome"]?.stringValue == "unsupported")
+        #expect(response.result?["reason"]?.stringValue == "unsupported")
+    }
+
+    @Test("clip.auditionNote: an unknown id among real ones refuses, verbatim, naming the clip's note count, and the engine is never touched (all-or-nothing)")
+    func auditionNoteUnknownSegmentPlaysNothing() async throws {
+        let (router, store, clipID, ids) = try await makeAuditionFixture()
+        let spy = NoteAuditionSpyEngine()
+        store.engine = spy
+        let bogus = UUID().uuidString
+
+        let response = await auditionNote(router, clipID: clipID, [ids[0], bogus])
+        #expect(!response.ok)
+        #expect(response.error?.contains("No note with id \(bogus)") == true, "\(response.error ?? "?")")
+        #expect(response.error?.contains("carries 2 note(s)") == true, "\(response.error ?? "?")")
+        #expect(spy.spanCalls.isEmpty, "all-or-nothing: nothing plays when one id is unresolved")
+    }
+
+    @Test("clip.auditionNote: an unknown clip is refused, verbatim")
+    func auditionNoteRejectsUnknownClip() async throws {
+        let (router, store, _, ids) = try await makeAuditionFixture()
+        let spy = NoteAuditionSpyEngine()
+        store.engine = spy
+        let response = await auditionNote(router, clipID: UUID().uuidString, [ids[0]])
+        #expect(!response.ok)
+        #expect(response.error?.contains("no clip with id") == true, "\(response.error ?? "?")")
+        #expect(spy.spanCalls.isEmpty)
+    }
+
+    @Test("clip.auditionNote: a MIDI clip is refused, naming why, before any store mutation")
+    func auditionNoteRejectsMIDIClip() async throws {
+        let spy = NoteAuditionSpyEngine()
+        let (router, _) = makeRouter(engine: spy)
+        let (_, clipID) = try await addMIDIClip(router)
+        let response = await auditionNote(router, clipID: clipID, [UUID().uuidString])
+        #expect(!response.ok)
+        #expect(response.error?.contains("is a MIDI clip") == true, "\(response.error ?? "?")")
+        #expect(response.error?.contains("note.audition") == true, "\(response.error ?? "?")")
+        #expect(spy.spanCalls.isEmpty)
+    }
+
+    @Test("clip.auditionNote: a clip with no stored table refuses, teaching clip.autoCorrectPitch as the fix")
+    func auditionNoteRequiresStoredTable() async throws {
+        let spy = NoteAuditionSpyEngine()
+        let (router, _) = makeRouter(engine: spy)
+        let fileURL = try makeRealAudioFile()
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let (_, clipID) = try await addAudioClip(router, path: fileURL.path)
+        let response = await auditionNote(router, clipID: clipID, [UUID().uuidString])
+        #expect(!response.ok)
+        #expect(response.error?.contains("has no notes to hear yet") == true, "\(response.error ?? "?")")
+        #expect(response.error?.contains("clip.autoCorrectPitch") == true, "\(response.error ?? "?")")
+        #expect(spy.spanCalls.isEmpty)
+    }
+
+    @Test("clip.auditionNote: an empty segmentIds list refuses, teaching clip.getPitchEdits as the way to read ids first")
+    func auditionNoteRequiresAtLeastOneSegmentId() async throws {
+        let (router, store, clipID, _) = try await makeAuditionFixture()
+        let spy = NoteAuditionSpyEngine()
+        store.engine = spy
+        let response = await auditionNote(router, clipID: clipID, [])
+        #expect(!response.ok)
+        #expect(response.error?.contains("Name at least one note to hear") == true, "\(response.error ?? "?")")
+        #expect(response.error?.contains("clip.getPitchEdits") == true, "\(response.error ?? "?")")
+        #expect(spy.spanCalls.isEmpty)
+    }
+
+    @Test("clip.auditionNote: contextSeconds outside 0...2 refuses naming the legal range, and a non-numeric contextSeconds is refused at the wire layer")
+    func auditionNoteValidatesContextSecondsRange() async throws {
+        let (router, store, clipID, ids) = try await makeAuditionFixture()
+        let spy = NoteAuditionSpyEngine()
+        store.engine = spy
+
+        let tooWide = await auditionNote(router, clipID: clipID, [ids[0]], contextSeconds: 2.5)
+        #expect(!tooWide.ok)
+        #expect(tooWide.error?.contains("contextSeconds must be 0") == true, "\(tooWide.error ?? "?")")
+
+        let negative = await auditionNote(router, clipID: clipID, [ids[0]], contextSeconds: -0.1)
+        #expect(!negative.ok)
+        #expect(negative.error?.contains("contextSeconds must be") == true, "\(negative.error ?? "?")")
+
+        let wrongType = await router.handle(ControlRequest(
+            id: "can", command: "clip.auditionNote",
+            params: ["clipId": .string(clipID), "segmentIds": .array([.string(ids[0])]),
+                     "contextSeconds": .string("loud")]))
+        #expect(!wrongType.ok)
+        #expect(wrongType.error?.contains("'contextSeconds' must be a number") == true, "\(wrongType.error ?? "?")")
+
+        #expect(spy.spanCalls.isEmpty)
+    }
+
+    @Test("clip.auditionNote: parameters are validated in words (unknown key, missing clipId, segmentIds shape, per-element UUID shape)")
+    func auditionNoteValidatesItsParameters() async throws {
+        let (router, store, clipID, ids) = try await makeAuditionFixture()
+        let spy = NoteAuditionSpyEngine()
+        store.engine = spy
+        func call(_ params: [String: JSONValue]) async -> ControlResponse {
+            await router.handle(ControlRequest(id: "can", command: "clip.auditionNote", params: params))
+        }
+
+        let unknownKey = await call(["clipId": .string(clipID), "segmentIds": .array([.string(ids[0])]),
+                                     "bogus": .bool(true)])
+        #expect(unknownKey.error?.contains("unknown parameter 'bogus'") == true, "\(unknownKey.error ?? "?")")
+
+        let missingClipID = await call(["segmentIds": .array([.string(ids[0])])])
+        #expect(!missingClipID.ok)
+
+        let notAnArray = await call(["clipId": .string(clipID), "segmentIds": .string(ids[0])])
+        #expect(notAnArray.error?.contains("'segmentIds' must be an array") == true, "\(notAnArray.error ?? "?")")
+
+        let badUUID = await call(["clipId": .string(clipID), "segmentIds": .array([.string("not-a-uuid")])])
+        #expect(badUUID.error?.contains("segmentIds[0] is not a valid UUID") == true, "\(badUUID.error ?? "?")")
+
+        for response in [unknownKey, missingClipID, notAnArray, badUUID] {
+            #expect(!response.ok)
+        }
+        #expect(spy.spanCalls.isEmpty)
+    }
+
+    @Test("clip.auditionNote is registered immediately after clip.setNotePitches, beside clip.sliceToSampler")
+    func auditionNoteRegistered() throws {
+        let all = CommandRouter.allCommands
+        let anchor = try #require(all.firstIndex(of: "clip.sliceToSampler"))
+        #expect(all[anchor + 7] == "clip.auditionNote")
+        #expect(all.filter { $0 == "clip.auditionNote" }.count == 1)
+        #expect(all.last != "clip.auditionNote")
     }
 }

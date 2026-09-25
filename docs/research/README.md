@@ -10,6 +10,11 @@ Standing questions (pick these up first):
 - Time-stretch library options and licensing (élastique / RubberBand / signalsmith).
 - Sample-accurate sequencing patterns on AVAudioEngine vs custom render callback.
 - ACE-Step-1.5 ops: measured generation speed + peak memory on this M5 Max, packaging/auto-start UX for the sidecar, model download flow.
+- Hands-on spike: SoulX-Singer (Apache-2.0, `github.com/Soul-AILab/SoulX-Singer`) on this Mac. Does its
+  score-conditioned MIDI+lyrics mode actually run, at what speed/memory, and does the zero-shot voice cloning
+  sound usable? No independent listening test exists yet anywhere, including here (takeaway 2 of
+  `2026-09-24-lyrics-sung-on-a-melody.md`). Plan: `../design/2026-09-24-p2-sing-spike.md`. It needs the
+  user's word on that plan's §6 before it runs.
 
 Answered:
 - ~~Suno official API~~ — none exists publicly (2026-07-05); pivoted to local ACE-Step-1.5 → `2026-07-05-ace-step-local-song-generation.md`.

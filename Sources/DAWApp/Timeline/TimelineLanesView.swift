@@ -4079,7 +4079,7 @@ private struct ClipBlock: View {
             // robot effect". The render now shapes against the detected whole-file
             // contour and the label is true, so the menu offers it.
             // `PitchCorrectionPreset.offeredInUI`'s own doc holds the measurement
-            // (62.8 → 18.2 cents on the real vocal), and
+            // (measured on the real vocal, per held note), and
             // `uiDoorOffersEveryPresetTheRenderHonours` pins the list. Hard Tune is
             // listed LAST with no hairline before it — the same flat order as the
             // note editor's four chips. It is a different algorithm, not a fourth
@@ -4110,6 +4110,13 @@ private struct ClipBlock: View {
                 if clip.pitchEdits != nil {
                     Divider()
                     Button("Remove Tuning") { onClearPitchEdits() }
+                        // m23-ap I7b (design §17.4) — Remove Tuning wipes the
+                        // whole note table, and a cleared note's silence lives
+                        // in it: this ALSO brings every cleared note back. The
+                        // help says so, with the count — the note editor's own
+                        // "Remove tuning" carries the same sentence.
+                        .help(PitchEditorNoteMenu.removeTuningHelp(
+                            clearedNoteCount: clip.pitchEdits?.segments.filter(\.isCleared).count ?? 0))
                 }
             }
         }

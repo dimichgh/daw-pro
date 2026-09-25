@@ -21,7 +21,8 @@ struct ClipboardMenuPolicyTests {
     func copyRefusesInMixWorkspace() {
         let item = ClipboardMenuPolicy.copyMenuItem(
             verb: .copy, arrangeWorkspace: false, isModalPresented: false,
-            pianoRollHasNoteSelection: true, automationPointCount: 3, arrangeClipCount: 5)
+            pianoRollHasNoteSelection: true, automationPointCount: 3,
+            pitchEditorOpen: false, arrangeClipCount: 5)
         #expect(item.isEnabled == false)
         #expect(item.surface == nil)
         #expect(item.refusedBy == .workspace)
@@ -37,7 +38,8 @@ struct ClipboardMenuPolicyTests {
     func copyRefusesBehindAModal() {
         let item = ClipboardMenuPolicy.copyMenuItem(
             verb: .copy, arrangeWorkspace: true, isModalPresented: true,
-            pianoRollHasNoteSelection: true, automationPointCount: 1, arrangeClipCount: 4)
+            pianoRollHasNoteSelection: true, automationPointCount: 1,
+            pitchEditorOpen: false, arrangeClipCount: 4)
         #expect(item.refusedBy == .modal)
         #expect(item.title == "Copy")
     }
@@ -46,7 +48,8 @@ struct ClipboardMenuPolicyTests {
     func rollNoteSelectionWinsCopy() {
         let item = ClipboardMenuPolicy.copyMenuItem(
             verb: .copy, arrangeWorkspace: true, isModalPresented: false,
-            pianoRollHasNoteSelection: true, automationPointCount: 0, arrangeClipCount: 7)
+            pianoRollHasNoteSelection: true, automationPointCount: 0,
+            pitchEditorOpen: false, arrangeClipCount: 7)
         #expect(item.surface == .pianoRollNotes)
         // NO COUNT, and the seven selected clips prove it is not merely absent
         // for want of a number: the bridge publishes a Bool, so this policy does
@@ -59,7 +62,8 @@ struct ClipboardMenuPolicyTests {
     func automationSelectionRefusesCopy() {
         let item = ClipboardMenuPolicy.copyMenuItem(
             verb: .copy, arrangeWorkspace: true, isModalPresented: false,
-            pianoRollHasNoteSelection: false, automationPointCount: 2, arrangeClipCount: 6)
+            pianoRollHasNoteSelection: false, automationPointCount: 2,
+            pitchEditorOpen: false, arrangeClipCount: 6)
         // THE POINT OF THIS TEST: breakpoints are out of scope in v1, and the
         // honest v1 behaviour is to refuse. Falling through would COPY THE SIX
         // CLIPS while the user has two breakpoints selected — acting on a
@@ -74,7 +78,8 @@ struct ClipboardMenuPolicyTests {
     func emptySelectionRefusesCopy() {
         let item = ClipboardMenuPolicy.copyMenuItem(
             verb: .copy, arrangeWorkspace: true, isModalPresented: false,
-            pianoRollHasNoteSelection: false, automationPointCount: 0, arrangeClipCount: 0)
+            pianoRollHasNoteSelection: false, automationPointCount: 0,
+            pitchEditorOpen: false, arrangeClipCount: 0)
         #expect(item.refusedBy == .emptySelection)
         #expect(item.title == "Copy")
     }
@@ -83,42 +88,142 @@ struct ClipboardMenuPolicyTests {
     func arrangeOwnsCopy() {
         let one = ClipboardMenuPolicy.copyMenuItem(
             verb: .copy, arrangeWorkspace: true, isModalPresented: false,
-            pianoRollHasNoteSelection: false, automationPointCount: 0, arrangeClipCount: 1)
+            pianoRollHasNoteSelection: false, automationPointCount: 0,
+            pitchEditorOpen: false, arrangeClipCount: 1)
         #expect(one.surface == .arrangeClips)
         #expect(one.title == "Copy Clip")
 
         let many = ClipboardMenuPolicy.copyMenuItem(
             verb: .copy, arrangeWorkspace: true, isModalPresented: false,
-            pianoRollHasNoteSelection: false, automationPointCount: 0, arrangeClipCount: 3)
+            pianoRollHasNoteSelection: false, automationPointCount: 0,
+            pitchEditorOpen: false, arrangeClipCount: 3)
         #expect(many.title == "Copy 3 Clips")
     }
 
-    @Test("CUT resolves through the SAME body as COPY — only the verb differs")
-    func cutMirrorsCopyExactly() {
-        // The property this pins: Cut is "Copy, plus the delete that already
-        // ships", so its ENABLEMENT can never drift from Copy's. Swept over the
-        // whole input space rather than spot-checked, because a drift would
-        // most likely appear in one branch only.
-        let cases: [(Bool, Bool, Bool, Int, Int)] = [
-            (false, false, true, 3, 5), (true, true, true, 1, 4), (true, false, true, 0, 7),
-            (true, false, false, 2, 6), (true, false, false, 0, 0), (true, false, false, 0, 1),
-            (true, false, false, 0, 3),
-        ]
-        for (workspace, modal, roll, autoCount, clipCount) in cases {
-            let copy = ClipboardMenuPolicy.copyMenuItem(
-                verb: .copy, arrangeWorkspace: workspace, isModalPresented: modal,
-                pianoRollHasNoteSelection: roll, automationPointCount: autoCount,
-                arrangeClipCount: clipCount)
-            let cut = ClipboardMenuPolicy.copyMenuItem(
-                verb: .cut, arrangeWorkspace: workspace, isModalPresented: modal,
-                pianoRollHasNoteSelection: roll, automationPointCount: autoCount,
-                arrangeClipCount: clipCount)
-            #expect(copy.surface == cut.surface)
-            #expect(copy.refusedBy == cut.refusedBy)
-            #expect(copy.isEnabled == cut.isEnabled)
-            // The titles differ ONLY in the verb.
-            #expect(cut.title == copy.title.replacingOccurrences(of: "Copy", with: "Cut"))
+    // MARK: - The Copy/Cut state space (swept by the Cut laws below)
+
+    /// Every input `copyMenuItem` takes besides the verb, so the sweeps read as
+    /// state rather than as six positional arguments.
+    private struct State {
+        var arrange = true
+        var modal = false
+        var rollNotes = false
+        var points = 0
+        /// m23-ap p2-del-2 — the NOTE EDITOR (pitch editor pane) is open.
+        var pitch = false
+        var clips = 0
+    }
+
+    private func menuItem(_ verb: ClipboardVerb, _ s: State) -> ClipboardMenuItem {
+        ClipboardMenuPolicy.copyMenuItem(
+            verb: verb, arrangeWorkspace: s.arrange, isModalPresented: s.modal,
+            pianoRollHasNoteSelection: s.rollNotes, automationPointCount: s.points,
+            pitchEditorOpen: s.pitch, arrangeClipCount: s.clips)
+    }
+
+    /// The whole space: 2 × 2 × 2 × 3 × 2 × 3 = 144 states. Counts carry
+    /// 0/1/many because the plural rule and the "any lane claiming" rule both
+    /// change behaviour at 0→1 and neither changes again after. Some rows are
+    /// unreachable in the app (roll notes AND the note editor open; the pane
+    /// open with no clip selected) and are swept anyway: a pure rule must
+    /// answer every input, and an unswept row is an answer nobody chose.
+    private var allStates: [State] {
+        var out: [State] = []
+        for arrange in [true, false] {
+            for modal in [true, false] {
+                for notes in [true, false] {
+                    for points in [0, 1, 3] {
+                        for pitch in [true, false] {
+                            for clips in [0, 1, 4] {
+                                out.append(State(arrange: arrange, modal: modal, rollNotes: notes,
+                                                 points: points, pitch: pitch, clips: clips))
+                            }
+                        }
+                    }
+                }
+            }
         }
+        return out
+    }
+
+    @Test("CUT resolves through the SAME body as COPY — identical everywhere except where the note editor refuses Cut, over 144 states")
+    func cutMirrorsCopyExceptTheNoteEditor() {
+        // The property this pins: Cut is "Copy, plus the delete that already
+        // ships", so its ENABLEMENT can never drift from Copy's — with ONE named
+        // exception since m23-ap p2-del-2, and it is that delete: while the note
+        // editor is open, Delete refuses, so Cut must too. Copy removes nothing
+        // and is not governed.
+        //
+        // ⚠️ THIS REPLACES A SEVEN-CASE SPOT CHECK THAT PINNED "only the verb
+        // differs" — a law the ruling deliberately broke in one place. It is
+        // rewritten as the new law, swept over the whole space, because a drift
+        // would most likely appear in one branch only.
+        var sawIdentical = 0
+        var sawNoteEditorRefusal = 0
+        for s in allStates {
+            let copy = menuItem(.copy, s)
+            let cut = menuItem(.cut, s)
+            let governed = s.arrange && !s.modal && !s.rollNotes && s.points == 0 && s.pitch
+            if governed {
+                #expect(cut.refusedBy == .pitchEditorOpen)
+                #expect(cut.surface == nil)
+                #expect(cut.title == "Cut")
+                // COPY ANSWERS WHAT IT ANSWERED BEFORE: its answer with the pane shut.
+                var shut = s
+                shut.pitch = false
+                #expect(copy == menuItem(.copy, shut))
+                sawNoteEditorRefusal += 1
+            } else {
+                #expect(copy.surface == cut.surface)
+                #expect(copy.refusedBy == cut.refusedBy)
+                #expect(copy.isEnabled == cut.isEnabled)
+                // The titles differ ONLY in the verb.
+                #expect(cut.title == copy.title.replacingOccurrences(of: "Copy", with: "Cut"))
+                sawIdentical += 1
+            }
+            // THE UNGOVERNED HALF, PROVEN OVER THE WHOLE SPACE: Copy never
+            // refuses on the pane, and flipping the pane never changes its answer.
+            #expect(copy.refusedBy != .pitchEditorOpen)
+            var flipped = s
+            flipped.pitch.toggle()
+            #expect(copy == menuItem(.copy, flipped))
+        }
+        // ANTI-VACUITY: both arms populated, and the divergence is exactly the
+        // three governed rows (arrange, no modal, no roll notes, no points, the
+        // pane open × clips 0/1/4).
+        #expect(sawIdentical == 141)
+        #expect(sawNoteEditorRefusal == 3)
+    }
+
+    @Test("Cut removes clips exactly where Delete would, and refuses on the note editor exactly where Delete does — over 144 states")
+    func cutRefusesExactlyWhereDeleteDoes() {
+        // THE SAME OPENNESS VERDICT, TWO DOORS. Cut is "Copy plus the delete",
+        // so the states in which Cut may remove arrange clips must be the states
+        // in which Delete may, and the note editor must refuse both in the same
+        // states. `DeleteMenuPolicy.editMenuItem` takes the same six inputs (its
+        // text-editing guard is the KEY route's, not the menu's), so the two are
+        // compared state for state.
+        var sawRemoval = 0
+        var sawNoteEditorRefusal = 0
+        for s in allStates {
+            let cut = menuItem(.cut, s)
+            let delete = DeleteMenuPolicy.editMenuItem(
+                arrangeWorkspace: s.arrange, isModalPresented: s.modal,
+                pianoRollHasNoteSelection: s.rollNotes, automationPointCount: s.points,
+                pitchEditorOpen: s.pitch,
+                // Cut has no note term (there is no note clipboard): ⌘X keeps
+                // p2-del-2's refusal with notes selected. The notes arm is
+                // Delete's alone, swept in `DeleteKeyRoutingTests` (m23-ap I4).
+                pitchEditorHasNoteSelection: false, arrangeClipCount: s.clips)
+            #expect((cut.surface == .arrangeClips) == (delete.surface == .arrangeClips))
+            #expect((cut.refusedBy == .pitchEditorOpen) == (delete.refusedBy == .pitchEditorOpen))
+            if cut.surface == .arrangeClips { sawRemoval += 1 }
+            if cut.refusedBy == .pitchEditorOpen { sawNoteEditorRefusal += 1 }
+        }
+        // ANTI-VACUITY: removal happens only with the pane shut (clips 1 and 4);
+        // the refusal only with it open (clips 0, 1 and 4).
+        #expect(sawRemoval == 2)
+        #expect(sawNoteEditorRefusal == 3)
     }
 
     @Test("every Copy/Cut refusal branch is reachable and distinctly named")
@@ -126,27 +231,64 @@ struct ClipboardMenuPolicyTests {
         // The `refusedBy` idiom exists so a test that meant to prove one guard
         // cannot silently pass on another. That is only true if each branch is
         // actually reachable — swept here so a future reordering that shadows
-        // one guard fails loudly.
+        // one guard fails loudly. (No force-unwraps: a live item where a
+        // refusal was expected must read as a set mismatch, not crash the run.)
         var seen: Set<ClipboardMenuRefusal> = []
         for verb in [ClipboardVerb.copy, .cut] {
-            seen.insert(ClipboardMenuPolicy.copyMenuItem(
-                verb: verb, arrangeWorkspace: false, isModalPresented: false,
-                pianoRollHasNoteSelection: false, automationPointCount: 0,
-                arrangeClipCount: 1).refusedBy!)
-            seen.insert(ClipboardMenuPolicy.copyMenuItem(
-                verb: verb, arrangeWorkspace: true, isModalPresented: true,
-                pianoRollHasNoteSelection: false, automationPointCount: 0,
-                arrangeClipCount: 1).refusedBy!)
-            seen.insert(ClipboardMenuPolicy.copyMenuItem(
-                verb: verb, arrangeWorkspace: true, isModalPresented: false,
-                pianoRollHasNoteSelection: false, automationPointCount: 1,
-                arrangeClipCount: 1).refusedBy!)
-            seen.insert(ClipboardMenuPolicy.copyMenuItem(
-                verb: verb, arrangeWorkspace: true, isModalPresented: false,
-                pianoRollHasNoteSelection: false, automationPointCount: 0,
-                arrangeClipCount: 0).refusedBy!)
+            for s in [State(arrange: false, clips: 1), State(modal: true, clips: 1),
+                      State(points: 1, clips: 1), State(clips: 0)] {
+                if let refusal = menuItem(verb, s).refusedBy { seen.insert(refusal) }
+            }
         }
-        #expect(seen == [.workspace, .modal, .automationSelection, .emptySelection])
+        // m23-ap p2-del-2 — the fifth, CUT ONLY. Copy handed the very same state
+        // stays live on the clip: the ungoverned half.
+        if let refusal = menuItem(.cut, State(pitch: true, clips: 1)).refusedBy { seen.insert(refusal) }
+        #expect(menuItem(.copy, State(pitch: true, clips: 1)).surface == .arrangeClips)
+        #expect(seen == [.workspace, .modal, .automationSelection, .pitchEditorOpen, .emptySelection])
+    }
+
+    // MARK: - m23-ap p2-del-2 — the NOTE EDITOR (pitch editor) pane is open
+
+    @Test("⌘X with the note editor open on the selected vocal clip never cuts the clip")
+    func noteEditorOpenNeverCutsTheClip() {
+        // ⛔ RED FIRST, MEASURED 2026-09-24 BEFORE ANY SOURCE CHANGE: written
+        // against the six-argument API (no way to tell the policy the pane was
+        // open), this fixture failed with "(cut.surface → .arrangeClips) !=
+        // .arrangeClips" — Edit ▸ Cut, and so ⌘X, would have cut the vocal clip
+        // the pane showed.
+        //
+        // THE FIXTURE, AS THE APP FEEDS IT — F13's (`DeleteKeyRoutingTests`),
+        // because Cut is "Copy plus the delete": the pane opens only on the
+        // arrange FOCUS clip, so one clip is selected; the vocal is AUDIO, so no
+        // roll is open and `pianoRollWouldConsumeKey` is false; no lane holds a
+        // breakpoint. The pane-open verdict is the real router's, and the term
+        // handed to the policy is that verdict, as `AppModel.pitchEditorPaneOpen`
+        // computes it.
+        let open = EditorSurfaceRouter.openSurface(workspaceIsArrange: true, rollOpen: false,
+                                                   pitchEditorOpen: true)
+        #expect(open.reason == .pitchEditorOpen)
+        let fixture = State(pitch: open.reason == .pitchEditorOpen, clips: 1)
+        let cut = menuItem(.cut, fixture)
+        #expect(cut.surface != .arrangeClips,
+                "⌘X with the note editor open resolved to \(String(describing: cut.surface)) — it would cut the vocal clip the pane is showing")
+        // REFUSED BY NAME, so a red gate reads which guard fired…
+        #expect(cut.surface == nil)
+        #expect(cut.refusedBy == .pitchEditorOpen)
+        #expect(cut.title == "Cut")
+        // …and the native Edit ▸ Cut item GREYS. That is what makes ⌘X do
+        // nothing: a greyed item's key equivalent runs no action (measured for
+        // ⌘A at m25-s; `AppModel.performMenuSelectAll`'s doc).
+        #expect(ClipboardResponderRouting.presentation(for: cut).isEnabled == false)
+        // COPY IS NOT GOVERNED — it removes nothing. Same fixture, still live.
+        let copy = menuItem(.copy, fixture)
+        #expect(copy.surface == .arrangeClips)
+        #expect(copy.title == "Copy Clip")
+        // CONTROL: the pane SHUT, everything else identical — the shipped
+        // behaviour, and the one the user reaches on purpose by closing the
+        // note editor.
+        let shut = menuItem(.cut, State(clips: 1))
+        #expect(shut.surface == .arrangeClips)
+        #expect(shut.title == "Cut Clip")
     }
 
     // MARK: - Paste routes on clipboard KIND, not on a selection

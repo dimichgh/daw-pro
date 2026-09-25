@@ -914,7 +914,11 @@ struct ContentView: View {
                 onClose: { selectedClipID = nil },
                 // m25-b-1: ESCAPE's primary mount. The decision is the app's, and
                 // the arrange workspace's backstop mount calls the same one.
-                onEscape: { model.handleEditorEscape() },
+                // m23-ap I4: the roll hands its two facts (gesture live, notes
+                // selected) and gets the ladder's ONE rung back.
+                onEscape: { live, selected in
+                    model.handleEditorEscape(gestureLive: live, hasSelection: selected)
+                },
                 // m23-d: hear the pitch you drag, and the key you press in the
                 // gutter. The defeat switch is checked HERE rather than in the
                 // view, so the view keeps zero audition policy — and the
@@ -1044,7 +1048,36 @@ struct ContentView: View {
                 // The spy seam: the header reports the very strings it drew, so
                 // p2-c's `debug.pitchEditor` echo can publish the screen rather
                 // than a re-derivation of it.
-                chrome: model.pitchEditorChrome
+                chrome: model.pitchEditorChrome,
+                // m23-ap p2-del — ⌫ with this pane open is refused by
+                // `DeleteMenuPolicy` (it would have deleted this very clip) and
+                // swallowed by `handleDeleteKey`, which bumps this nonce so the
+                // pane can say why nothing happened. The pane decides nothing.
+                deleteKeyHintNonce: model.pitchEditorDeleteKeyNonce,
+                // m23-ap interaction batch I6a: ESCAPE's primary mount on THIS
+                // pane, exactly as the roll's `onEscape` above. The decision is
+                // the app's one (`handleEditorEscape`), which the arrange
+                // workspace's backstop mount also calls; the pane routes it
+                // through its model's I4 seam and decides nothing itself.
+                // m23-ap I4: the same two facts and the same one rung as the roll.
+                onEscape: { live, selected in
+                    model.handleEditorEscape(gestureLive: live, hasSelection: selected)
+                },
+                // m23-ap interaction batch I0 — the pane's channel out (the
+                // surface it measured and drew, for `debug.pitchEditor`) and in
+                // (the debug tier's staged steps). App-held, so it outlives the
+                // `.id(clip.id)` rebuild below.
+                interaction: model.pitchEditorInteraction,
+                // m23-ap I1 UI hooks — HEAR THE NOTE: the model's press, drag
+                // step and stop requests go to the app's router, which calls the
+                // store's doors with the switch as their `enabled:` (the roll's
+                // rule above: the UI doors check it, the wire ignores it). The
+                // release audition follows the commit, in `commitPitchNoteEdit`.
+                onAudition: { request in
+                    model.routePitchEditorAudition(request, clipID: clip.id)
+                },
+                // The router's honest-waiting line, drawn on the state row.
+                auditionLine: model.pitchEditorAudition.line
             )
             .id(clip.id)
             .frame(height: geo.size.height * editorPaneFraction(geoHeight: geo.size.height))
@@ -2472,8 +2505,18 @@ private struct ArrangeDeleteKey: ViewModifier {
             // consumes nothing. No `phases:` argument: unlike ⌫ and the arrows,
             // there is no auto-repeat hazard here (the second press finds the mode
             // already off and is a no-op), and Escape is not held down.
+            //
+            // ⚠️ m34-k: THIS BACKSTOP RIDES SwiftUI FOCUS, and m34-j measured that
+            // focus latched dead after any dismissed text field (hits 1→1). The
+            // app's key monitor (`AppModel.handleKeyDownEvent` →
+            // `EscapeKeyMonitorRouting`) now hands Escape to the OPEN editor pane
+            // whenever something there would be taken down, and swallows it, so
+            // this mount sees only what the monitor passed on. The first statement
+            // is its own delivery counter, apart from the roll's mount (the two
+            // used to share `editorEscapeMountHits` alone).
             .onKeyPress(.escape) {
-                model.handleEditorEscape() ? .handled : .ignored
+                KeyPressProbe.arrangeEscapeBackstop += 1   // m34-k probe, first statement
+                return model.handleEditorEscape() ? .handled : .ignored
             }
             .onChange(of: model.arrangeKeyFocusNonce) { _, _ in focused = true }
             // ⭐ m23-fi PROBE — the `@FocusState` VALUE, not the assertion above.

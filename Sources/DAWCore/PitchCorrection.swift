@@ -113,8 +113,9 @@ import Foundation
 // (`PitchContourCache.renderContour`, cached beside the renders, keyed by
 // content — design §7.2/§7.3) whenever a set asks for shaping, and builds the
 // curve through `PitchRenderContour.curve(editSet:…)`. Measured on the real dry
-// vocal through that path: Hard Tune cuts within-note wander 62.8 → 18.2 cents
-// (median 70 % per note) where Tight moves it by 1 %. When detection cannot
+// vocal through that path, Hard Tune flattens each held note onto its own note
+// while Tight leaves the wobble as sung (the figures live in ONE home,
+// `PitchCorrectionPreset.offeredInUI`'s doc). When detection cannot
 // run, the render still falls back to the constant per-note offset and names
 // the segments in `unresolvedShapingSegmentIDs` — that fallback is now a
 // failure path with a visible engine notice, not the product's only behaviour.
@@ -432,9 +433,33 @@ public struct NoteSegment: Identifiable, Codable, Sendable, Equatable {
     /// `healed` flag.
     public var timeStartDeltaSeconds: Double
     public var timeEndDeltaSeconds: Double
-    /// Phase 4 — carried, unread. Shares `Clip.gainDbRange` rather than
-    /// minting a second gain range.
+    /// The note's own LEVEL, dB (I7a merged with U-C, interaction-batch design
+    /// §17). Shares `Clip.gainDbRange` rather than minting a second gain range,
+    /// and means what a clip's gain means: −72 dB is a very quiet level
+    /// (2.5e-4), never silence — silence is `isCleared`. The offline render
+    /// reads it through `PitchEditSet.gain(atSourceSecond:)`, the ONE mask
+    /// home. ⚠️ Nothing writes it yet (U-D's `clip.setNoteGain` is the planned
+    /// writer), so only a hand-authored file carries a non-zero value today —
+    /// and the digest's level block (slot 5) re-keys exactly those sets, so
+    /// none of them is served a render made while this field was unread.
     public var amplitudeDb: Double
+
+    /// The note is CLEARED: silenced in place, nothing else moved (I7a, design
+    /// `docs/design/2026-09-24-pitch-editor-interaction-batch.md` §10/§17).
+    ///
+    /// ⭐ **SILENCE IS THIS FLAG, NEVER A LEVEL.** `amplitudeDb` at −72 dB is a
+    /// level. Restore flips this back and the note returns at ITS OWN level,
+    /// which a floor-as-silence scheme would have overwritten with 0 dB. The
+    /// pitch curve never reads it, so a cleared note keeps its place in the
+    /// curve and its neighbours render exactly as before.
+    ///
+    /// ⚠️ **DECLARED LAST ON PURPOSE.** It is the only field after the UUID that
+    /// is not a Double, so as the last stored property its padding sits at the
+    /// TAIL of the struct. `ClipRenderSignature.Tuning.bitIdentical` compares
+    /// each note's `size` bytes and relies on there being no INTERIOR padding;
+    /// `ClipRenderSignatureTests.noteBytesAreExactlyItsFields` pins that.
+    /// Codable key `cleared`, written only when true.
+    public var isCleared: Bool
 
     /// ±24 semitones expressed in cents — the same span as
     /// `Clip.pitchShiftSemitonesRange`, so a per-note offset can never ask for
@@ -521,13 +546,37 @@ public struct NoteSegment: Identifiable, Codable, Sendable, Equatable {
     /// through a full stretch render, and a ratio-1 stretch is not its own
     /// input. So the conservative direction for THESE two is to stay out.
     /// `NoteVibratoGeneratorTests` pins both halves of this.
-    public var isIdentity: Bool {
+    ///
+    /// **I7a/U-C (interaction-batch design §17): identity is two halves, each
+    /// with ONE home.** `isPitchIdentity` is everything the STRETCHER would
+    /// have to do for this note; `hasLevelEdits` is everything the LEVEL MASK
+    /// does (`isCleared`, `amplitudeDb`). A note bends nothing only when both
+    /// are quiet. `hasPitchEdits`, `rendersThroughStretchCache`, `isEdited` and
+    /// `ClipRenderSignature` follow from here with no second predicate.
+    public var isIdentity: Bool { isPitchIdentity && !hasLevelEdits }
+
+    /// True when the stretcher has nothing to do for this note: no pitch,
+    /// shaping, generator, formant or timing edit. It is `isIdentity` without
+    /// the two LEVEL terms, and it is the render's one bypass predicate
+    /// (`StretchCurvePlan.make` guards on `PitchEditSet.isPitchIdentity`). A
+    /// set whose only edits are levels therefore takes no curve, and on a
+    /// clip that is neither stretched nor transposed it never runs the
+    /// stretcher at all. A ratio-1 stretch is not its own input, and clearing
+    /// one breath must not recolour the take.
+    public var isPitchIdentity: Bool {
         pitchOffsetCents == 0 && driftScale == 1 && vibratoScale == 1
             && vibratoDepthCents == 0
             && formantOffsetSemitones == 0
             && timeStartDeltaSeconds == 0 && timeEndDeltaSeconds == 0
-            && amplitudeDb == 0
     }
+
+    /// True when the LEVEL MASK touches this note: it is cleared, or its level
+    /// is not 0 dB. ⭐ **THE ONE PREDICATE** for "does the mask read this note":
+    /// the digest's level block (slot 5), the render's mask pass,
+    /// `PitchEditSet.gain(atSourceSecond:)` and `isIdentity` all ask this and
+    /// none of them restates it. `-0.0` dB is no edit, as everywhere in this
+    /// type.
+    public var hasLevelEdits: Bool { isCleared || amplitudeDb != 0 }
 
     /// True when ANY per-note edit field departs from its default — "has
     /// anyone touched this note" (m23-ap C-0, design 2026-09-24 §4.4), the
@@ -589,7 +638,8 @@ public struct NoteSegment: Identifiable, Codable, Sendable, Equatable {
         formantOffsetSemitones: Double = 0,
         timeStartDeltaSeconds: Double = 0,
         timeEndDeltaSeconds: Double = 0,
-        amplitudeDb: Double = 0
+        amplitudeDb: Double = 0,
+        isCleared: Bool = false
     ) {
         self.id = id
         let start = max(0, PitchCorrectionMath.finite(startSeconds, default: 0))
@@ -627,6 +677,7 @@ public struct NoteSegment: Identifiable, Codable, Sendable, Equatable {
         self.timeEndDeltaSeconds = PitchCorrectionMath.finite(timeEndDeltaSeconds, default: 0)
         self.amplitudeDb = PitchCorrectionMath
             .finite(amplitudeDb, default: 0).clamped(to: Clip.gainDbRange)
+        self.isCleared = isCleared
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -634,6 +685,7 @@ public struct NoteSegment: Identifiable, Codable, Sendable, Equatable {
         case pitchOffsetCents, driftScale, vibratoScale
         case vibratoRateHz, vibratoDepthCents, vibratoOnsetSeconds
         case formantOffsetSemitones, timeStartDeltaSeconds, timeEndDeltaSeconds, amplitudeDb
+        case isCleared = "cleared"
     }
 
     /// Decoding routes through the healing `init` — the `Clip`/`MIDINote`
@@ -661,7 +713,10 @@ public struct NoteSegment: Identifiable, Codable, Sendable, Equatable {
                 Double.self, forKey: .timeStartDeltaSeconds) ?? 0,
             timeEndDeltaSeconds: try c.decodeIfPresent(
                 Double.self, forKey: .timeEndDeltaSeconds) ?? 0,
-            amplitudeDb: try c.decodeIfPresent(Double.self, forKey: .amplitudeDb) ?? 0)
+            amplitudeDb: try c.decodeIfPresent(Double.self, forKey: .amplitudeDb) ?? 0,
+            // I7a: absent from every set saved before clearing existed, and
+            // from every uncleared note since (it is written only when true).
+            isCleared: try c.decodeIfPresent(Bool.self, forKey: .isCleared) ?? false)
     }
 
     /// Writes the four detection facts always (they are what the segment IS),
@@ -700,6 +755,9 @@ public struct NoteSegment: Identifiable, Codable, Sendable, Equatable {
             try c.encode(timeEndDeltaSeconds, forKey: .timeEndDeltaSeconds)
         }
         if amplitudeDb != 0 { try c.encode(amplitudeDb, forKey: .amplitudeDb) }
+        // I7a: omit-when-default like every edit field, so a project with no
+        // cleared note saves byte-identically to one saved before the flag.
+        if isCleared { try c.encode(true, forKey: .isCleared) }
     }
 }
 
@@ -799,6 +857,20 @@ public struct PitchEditSet: Codable, Sendable, Equatable {
     /// today's linear loop byte for byte. Timing is invisible until it is used.
     public var hasTimeEdits: Bool { segments.contains(where: \.hasTimeEdits) }
 
+    /// True when every note is `NoteSegment.isPitchIdentity`: the set asks the
+    /// stretcher for nothing, whatever its levels. THE render's bypass
+    /// predicate (`StretchCurvePlan.make` returns nil on it). Distinct from
+    /// `isIdentity`, which is also false for a set that only clears or levels
+    /// notes; such a set still renders, through the level mask alone.
+    public var isPitchIdentity: Bool { segments.allSatisfy(\.isPitchIdentity) }
+
+    /// True when any note is cleared or carries a level:
+    /// `NoteSegment.hasLevelEdits`, the one predicate (I7a/U-C). When this is
+    /// false the digest emits no level block and the render never runs the
+    /// mask, so a set nobody cleared or levelled keys and renders byte for
+    /// byte as it did before either existed.
+    public var hasLevelEdits: Bool { segments.contains(where: \.hasLevelEdits) }
+
     public static let empty = PitchEditSet(analysisVersion: currentAnalysisVersion, segments: [])
 
     public init(analysisVersion: Int = PitchEditSet.currentAnalysisVersion,
@@ -887,11 +959,18 @@ public struct PitchEditSet: Codable, Sendable, Equatable {
 ///    or clear a whole auto-correct pass — passes `structuralKey` (`nil`) and
 ///    never coalesces with anything, including itself.
 ///  * A MULTI-SELECT edit over N segments is ONE entry over all N (the
-///    `clip.moveMany` group-verb precedent), so it uses `structuralKey` too — a
-///    per-segment key would either make N entries or coalesce two different
-///    multi-selects into one.
+///    `clip.moveMany` group-verb precedent). A per-segment key would either
+///    make N entries or coalesce two different multi-selects into one.
+///    ⭐ **CORRECTED AT m23-ap I4.** This bullet used to end "so it uses
+///    `structuralKey` too", which contradicted UI design §8.4 — the design this
+///    enum's own header cites. §8.4 gives a GROUP DRAG its own key,
+///    `group(clipID:selectionToken:)`, so a second drag of the SAME selection
+///    coalesces (one continuous decision, like dragging one note twice) and a
+///    drag of a DIFFERENT selection does not. A group edit that is not a drag
+///    — clearing or levelling notes (`setClipNotesCleared`/`setClipNoteGain`)
+///    — is a deliberate on/off and still passes `structuralKey`.
 ///
-/// No store operation exists yet; this task is model-layer only.
+/// The store operations live in `ProjectStore+PitchNoteEdits.swift`.
 public enum PitchCorrectionUndoKey {
     /// A pitch drag on one note.
     public static func segment(clipID: UUID, segmentID: UUID) -> String {
@@ -917,7 +996,23 @@ public enum PitchCorrectionUndoKey {
         "pitch.vibrato:\(clipID.uuidString):\(segmentID.uuidString)"
     }
 
-    /// Structural and multi-select edits: `nil` — never coalesces.
+    /// A pitch drag on a GROUP of selected notes (m23-ap I4, UI design §8.4).
+    ///
+    /// `selectionToken` is stable for the life of ONE selection — the pitch
+    /// editor re-mints it whenever the set of selected notes changes, and
+    /// never otherwise — so a second drag of the same selection inside the
+    /// journal's 800 ms window coalesces into the first, and a drag of a
+    /// different selection starts a new undo entry. ONE entry covers every
+    /// note the drag moved (`ProjectStore.setClipNotePitchOffsets`).
+    ///
+    /// ⚠️ **NOT THE SEGMENT KEY OF ANY MEMBER.** A one-note drag still uses
+    /// `segment(clipID:segmentID:)`, byte-identical to before; a group drag
+    /// that happened to share a member with it must not fold into it.
+    public static func group(clipID: UUID, selectionToken: UUID) -> String {
+        "pitch.group:\(clipID.uuidString):\(selectionToken.uuidString)"
+    }
+
+    /// Structural and deliberate on/off edits: `nil` — never coalesces.
     /// Named rather than written as a bare `nil` at each call site so the
     /// decision is greppable.
     public static let structuralKey: String? = nil

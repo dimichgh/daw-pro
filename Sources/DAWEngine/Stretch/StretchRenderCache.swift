@@ -206,14 +206,30 @@ public final class StretchRenderCache {
     /// cache dir (created lazily on the first render).
     public let directory: URL
 
-    /// Fired on the main actor after a render COMMITS (atomic rename done) —
-    /// the engine uses it to invalidate the clip's schedule entry and re-enter
-    /// the `tracksDidChange` restart seam so the rendered audio lands.
+    /// Fired on the main actor after a render COMMITS (atomic rename done), and
+    /// only by the job that still owns the clip's slot. Its one consumer is
+    /// I1's note audition: `AudioEngine.wireStretchCacheHooks` forwards it to
+    /// the store's `clipRenderDidComplete`. It is NOT how rendered audio
+    /// reaches playback: that restart seam is `AudioEngine.kickStretchRender`'s
+    /// own continuation after `renderIfNeeded` returns (it invalidates the
+    /// clip's schedule entry and re-enters `tracksDidChange`).
     public var onRenderComplete: (@MainActor (UUID) -> Void)?
 
     /// TEST SPY: number of renders that actually ran the stretcher (debounce
     /// survived, work started). Cache hits and superseded jobs don't count.
     private(set) var renderCount = 0
+
+    /// TEST SEAM (I1-F2 follow-up, the repoint test's render-stall
+    /// diagnosis), never bound in production. A task-local, so only a job
+    /// started inside a test's `withValue` scope reports (the engine's kick
+    /// task and the job task inherit it). Unbound, each call below is one
+    /// task-local lookup that finds nil (three per render job, on the main
+    /// actor, never on the render thread), and its arguments are never
+    /// evaluated. Called on the main actor with the job task's own
+    /// priority at `job-start` (the job task begins), `debounce-end` (its
+    /// debounce sleep returned) and `render-returned` (the detached render
+    /// handed back).
+    @TaskLocal static var jobPhaseForTesting: (@Sendable (_ phase: String, _ priority: TaskPriority) -> Void)?
 
     private struct Job {
         let token: UUID
@@ -491,10 +507,12 @@ public final class StretchRenderCache {
         let detector = contourDetector
         statuses[clipID] = .rendering
         let task = Task { @MainActor [weak self] () throws -> URL in
+            Self.jobPhaseForTesting?("job-start", Task.currentPriority)
             do {
                 // Debounce: cancellation during this sleep throws — the job
                 // dies before any file I/O happens.
                 try await Task.sleep(for: .milliseconds(Self.debounceMilliseconds))
+                Self.jobPhaseForTesting?("debounce-end", Task.currentPriority)
                 self?.renderCount += 1
                 // The blocking render runs detached — fetches-or-detects the
                 // contour when the edits need one, reads the FULL source,
@@ -510,6 +528,7 @@ public final class StretchRenderCache {
                             isCancelled: { cancelled.withLock { $0 } })
                     }
                 }.value
+                Self.jobPhaseForTesting?("render-returned", Task.currentPriority)
                 try Task.checkCancellation()
                 let rendered = try outcome.get()
                 let committed: URL
@@ -585,6 +604,14 @@ public final class StretchRenderCache {
     ///    there if one exists, since it is byte-identical by construction.
     ///    Never silence, and never the fallback under the resolved key, where
     ///    it would be served as the fix.
+    ///
+    /// **I7a/U-C, the level mask.** When a note is cleared or levelled
+    /// (`PitchEditSet.hasLevelEdits`), every delivered output frame inside
+    /// that note is multiplied by `PitchEditSet.gain(atSourceSecond:)`, on
+    /// every branch (`StretchCurvePlan.applyLevelMask`). A set whose only
+    /// edits are levels, on a clip that is neither stretched nor transposed,
+    /// takes the LEVEL-ONLY path: the stretcher never runs, and the output is
+    /// the source times the mask, bit-exact outside the level-edited notes.
     nonisolated static func performRender(
         source: URL, partial: URL, destination: URL, fallbackDestination: URL,
         params: Params, renderCacheDirectory: URL, detector: PitchContourCache.Detector,
@@ -595,15 +622,10 @@ public final class StretchRenderCache {
         // (1) The contour, when these edits shape against one. Detection is
         //     the slow part, and it runs before the source is even read so a
         //     fallback that is already on disk costs nothing further.
-        var contour: PitchRenderContour?
-        if let set = params.pitchEdits, set.needsDetectedContour {
-            if isCancelled() { throw OfflineStretcherError.cancelled }
-            contour = PitchContourCache.renderContour(
-                source: source, analysisVersion: set.analysisVersion,
-                renderCacheDirectory: renderCacheDirectory, detector: detector)
-            if isCancelled() { throw OfflineStretcherError.cancelled }
-        }
-        let fallbackReason = shortfallReason(contour)
+        let contour = try resolveRenderContour(
+            params: params, source: source, renderCacheDirectory: renderCacheDirectory,
+            detector: detector, isCancelled: isCancelled)
+        let fallbackReason = contour.fallbackReason
         let target = fallbackReason == nil ? destination : fallbackDestination
         if let fallbackReason, FileManager.default.fileExists(atPath: target.path) {
             return .fellBack(target, reason: fallbackReason)
@@ -634,41 +656,10 @@ public final class StretchRenderCache {
             }
         }
 
-        // m23-q Phase 1: a clip carrying pitch edits renders through the
-        // TIME-VARYING transpose path, latency-compensated. Everything else
-        // takes the constant call it always took, unchanged — an edit-free
-        // render is byte-identical to the one this cache produced before pitch
-        // correction existed, which `editFreeRenderIsByteIdenticalToTheConstantCall`
-        // pins rather than assumes.
-        //
-        // The curve SUBSUMES `params.semitones` (design §6.4/§7.8), so the
-        // constant is NOT also passed on this branch — doing both would
-        // transpose twice.
-        //
-        // contour-to-render: the contour goes in ONLY when it was detected.
-        // A fallback passes `nil`, which is the pre-contour curve bit for bit
-        // — the audio the legacy key has always held for these edits.
-        let plan = StretchCurvePlan.make(
-            editSet: params.pitchEdits,
-            clipPitchShiftSemitones: params.semitones,
-            sampleRate: format.sampleRate,
-            ratio: params.ratio,
-            contour: fallbackReason == nil ? contour : nil)
-        let stretched: [[Float]]
-        if let plan {
-            stretched = try OfflineStretcher.stretchTransposeCurve(
-                input: planar, sampleRate: format.sampleRate, ratio: params.ratio,
-                semitonesAtOutputFrame: { plan.semitones(atOutputFrame: $0) },
-                formantPreserve: params.formantPreserve,
-                compensation: OfflineStretcher.curveLatencyCompensation(
-                    sampleRate: format.sampleRate),
-                isCancelled: isCancelled)
-        } else {
-            stretched = try OfflineStretcher.stretch(
-                input: planar, sampleRate: format.sampleRate, ratio: params.ratio,
-                semitones: params.semitones, formantPreserve: params.formantPreserve,
-                isCancelled: isCancelled)
-        }
+        // (2) THE ONE RENDER LOOP'S BODY, over the whole source.
+        let stretched = try renderAudio(
+            whole: &planar, window: nil, sampleRate: format.sampleRate, params: params,
+            curveContour: contour.curveContour, isCancelled: isCancelled).output.planar
 
         let outFrames = stretched[0].count
         guard let outBuffer = AVAudioPCMBuffer(
@@ -706,5 +697,441 @@ public final class StretchRenderCache {
             return .fellBack(target, reason: fallbackReason)
         }
         return .rendered(target)
+    }
+
+    // MARK: - THE ONE RENDER LOOP'S BODY, and its second entry (I1-F1)
+
+    /// The contour a render of `params` shapes against, resolved through THE
+    /// seam (`PitchContourCache.renderContour`), and why it falls back when it
+    /// does. `performRender` and `renderSpan` both ask here, so a span can
+    /// never be shaped against a contour the whole-file render would not use.
+    ///
+    /// I1-F2 (RT re-review NH-A): `isCancelled` also reaches the seam, where a
+    /// caller WAITING for another caller's detection (the single flight) gives
+    /// up as soon as it is cancelled; it throws `.cancelled` on the poll just
+    /// below, so the seam's answer to a cancelled wait is never used.
+    ///
+    /// ⭐ **A DRAFT SPAN RENDER MAY START A DETECTION, not only wait for one**
+    /// (the re-review suggested never starting one). Decided, because:
+    ///  1. with the single flight, starting one costs at most ONE detection per
+    ///     entry however many drafts ask, and the leader always commits: the
+    ///     release's span render and the whole-file render need that same
+    ///     contour moments later, so the work is never wasted;
+    ///  2. not starting one would render the pre-contour curve: a drag would
+    ///     play one sound (the notes held at a constant offset) and the release
+    ///     and playback another (flattened). That is "the preview would be one
+    ///     shifter and the result another", which the design forbids, and it
+    ///     breaks R7 above (the span shaped against what the whole-file render
+    ///     uses);
+    ///  3. the display warms the entry when the editor opens, so a drag
+    ///     normally finds it hot, or waits for the display's detection as a
+    ///     follower anyway. "May start" matters only when nothing is in flight:
+    ///     a purged or re-keyed sidecar, or the wire's draft door on a clip no
+    ///     display has opened. There "never start" would leave every drag step
+    ///     playing the wrong curve until a press or a release came along.
+    /// The cost: on a cold entry, the first draft step plays once the
+    /// detection lands (0.5–0.6 s per 33 s of take, measured), once per entry.
+    nonisolated static func resolveRenderContour(
+        params: Params, source: URL, renderCacheDirectory: URL,
+        detector: PitchContourCache.Detector, isCancelled: () -> Bool
+    ) throws -> (curveContour: PitchRenderContour?, fallbackReason: String?) {
+        var contour: PitchRenderContour?
+        if let set = params.pitchEdits, set.needsDetectedContour {
+            if isCancelled() { throw OfflineStretcherError.cancelled }
+            contour = PitchContourCache.renderContour(
+                source: source, analysisVersion: set.analysisVersion,
+                renderCacheDirectory: renderCacheDirectory, detector: detector,
+                isCancelled: isCancelled)
+            if isCancelled() { throw OfflineStretcherError.cancelled }
+        }
+        let fallbackReason = shortfallReason(contour)
+        // contour-to-render: the contour goes in ONLY when it was detected.
+        // A fallback passes `nil`, which is the pre-contour curve bit for bit
+        // — the audio the legacy key has always held for these edits.
+        return (fallbackReason == nil ? contour : nil, fallbackReason)
+    }
+
+    /// Which branch of the one loop rendered something.
+    enum RenderPath: String, Sendable, Equatable {
+        /// The time-varying transpose loop (the clip's edits bend pitch).
+        case curve
+        /// Source × level mask; the stretcher never ran.
+        case levelOnly = "level-only"
+        /// The constant stretch/transpose loop.
+        case constant
+        /// No render at all: the clip plays its source file (identity params).
+        case sourceFile = "source-file"
+    }
+
+    /// **THE ONE RENDER LOOP'S BODY: the curve, the branch, the stretcher
+    /// configuration and the level mask**, for the whole source
+    /// (`performRender`, `window == nil`, reading `whole`) or for one WINDOW of
+    /// the whole-file render (`renderSpan`, I1-F1). Extracted from
+    /// `performRender` verbatim so the span render is a second ENTRY into it,
+    /// never a copy; `wholeFileGoldenCapture` diffs the whole-file bytes across
+    /// the extraction.
+    ///
+    /// m23-q Phase 1: a clip carrying pitch edits renders through the
+    /// TIME-VARYING transpose path, latency-compensated. Everything else takes
+    /// the constant call it always took, unchanged — an edit-free render is
+    /// byte-identical to the one this cache produced before pitch correction
+    /// existed, which `editFreeRenderIsByteIdenticalToTheConstantCall` pins
+    /// rather than assumes.
+    ///
+    /// The curve SUBSUMES `params.semitones` (design §6.4/§7.8), so the
+    /// constant is NOT also passed on that branch — doing both would transpose
+    /// twice.
+    ///
+    /// `whole` is consumed on the level-only path (the render becomes its sole
+    /// owner, so the mask pass never copies the take); pass `[]` with a window.
+    nonisolated static func renderAudio(
+        whole: inout [[Float]], window: StretchWindow?, sampleRate: Double, params: Params,
+        curveContour: PitchRenderContour?, isCancelled: () -> Bool
+    ) throws -> (output: StretchWindowOutput, path: RenderPath) {
+        let plan = StretchCurvePlan.make(
+            editSet: params.pitchEdits,
+            clipPitchShiftSemitones: params.semitones,
+            sampleRate: sampleRate,
+            ratio: params.ratio,
+            contour: curveContour)
+        // I7a/U-C (interaction-batch design §10/§17): cleared notes and per-note
+        // levels. `nil` when no note is cleared or levelled, and then nothing
+        // below differs from the render this cache made before the mask existed.
+        let levelEdits = params.pitchEdits.flatMap { $0.hasLevelEdits ? $0 : nil }
+        var rendered: StretchWindowOutput
+        let path: RenderPath
+        if let plan {
+            path = .curve
+            let semitones: (Int) -> Double = { plan.semitones(atOutputFrame: $0) }
+            let compensation = OfflineStretcher.curveLatencyCompensation(sampleRate: sampleRate)
+            if let window {
+                rendered = try OfflineStretcher.stretchTransposeCurve(
+                    window: window, sampleRate: sampleRate, ratio: params.ratio,
+                    semitonesAtOutputFrame: semitones,
+                    formantPreserve: params.formantPreserve,
+                    compensation: compensation, isCancelled: isCancelled)
+            } else {
+                rendered = StretchWindowOutput(
+                    planar: try OfflineStretcher.stretchTransposeCurve(
+                        input: whole, sampleRate: sampleRate, ratio: params.ratio,
+                        semitonesAtOutputFrame: semitones,
+                        formantPreserve: params.formantPreserve,
+                        compensation: compensation, isCancelled: isCancelled),
+                    firstOutputFrame: 0)
+            }
+        } else if levelEdits != nil,
+                  OfflineStretcher.isIdentity(ratio: params.ratio, semitones: params.semitones) {
+            // ⭐ THE LEVEL-ONLY PATH. Every note is pitch-identity (`make`
+            // returned nil) and the clip is neither stretched nor transposed,
+            // so the stretcher NEVER runs. A ratio-1 stretch is not its own
+            // input, and clearing one breath must not recolour the take. The
+            // output is the source times the mask, so every sample outside a
+            // level-edited note keeps the source's own bytes. At ratio 1 an
+            // output frame IS its source frame, so a window reads exactly its
+            // own frames and is exact by construction.
+            path = .levelOnly
+            if let window {
+                let start = min(window.startOutputFrame, window.sourceFrames)
+                let end = min(window.endOutputFrame, window.sourceFrames)
+                guard end > start else {
+                    throw OfflineStretcherError.invalidInput("empty window \(start)..<\(end)")
+                }
+                rendered = StretchWindowOutput(planar: try window.readSource(start..<end),
+                                               firstOutputFrame: start)
+            } else {
+                rendered = StretchWindowOutput(planar: whole, firstOutputFrame: 0)
+                whole = []  // sole owner, so the mask pass does not copy the take
+            }
+        } else {
+            path = .constant
+            if let window {
+                rendered = try OfflineStretcher.stretch(
+                    window: window, sampleRate: sampleRate, ratio: params.ratio,
+                    semitones: params.semitones, formantPreserve: params.formantPreserve,
+                    isCancelled: isCancelled)
+            } else {
+                rendered = StretchWindowOutput(
+                    planar: try OfflineStretcher.stretch(
+                        input: whole, sampleRate: sampleRate, ratio: params.ratio,
+                        semitones: params.semitones, formantPreserve: params.formantPreserve,
+                        isCancelled: isCancelled),
+                    firstOutputFrame: 0)
+            }
+        }
+        // The ONE mask, applied one way on every branch (design §17.5): each
+        // delivered output frame times `PitchEditSet.gain(atSourceSecond:)`
+        // at the source second the one mapping says it plays — for a window,
+        // at its WHOLE-FILE frames.
+        if let levelEdits {
+            try StretchCurvePlan.applyLevelMask(
+                levelEdits, to: &rendered.planar, sampleRate: sampleRate,
+                ratio: params.ratio, outputFrameOffset: rendered.firstOutputFrame,
+                isCancelled: isCancelled)
+        }
+        return (rendered, path)
+    }
+
+    /// **I1-F1's pick: how far before the first requested frame a span render
+    /// starts**, so its fresh stretcher has settled by then. MEASURED
+    /// 2026-09-25 with THIS window code on a synthetic voice at ratio 1
+    /// (`ClipSpanRenderTests.preRollConvergenceCurve`), a window starting in
+    /// untransposed audio: no pre-roll leaves the stretcher's warm-up in the
+    /// span (−79 dB over 0.5 s, −57 dB over its first 30 ms); 30 ms (one
+    /// block) and every longer pre-roll up to 2 s converge at −124 to −128 dB.
+    /// The pick is four blocks, and costs a few ms of render per request.
+    /// On the user's take (`spanRenderMeasurementsOnTheUsersTake`, same day),
+    /// from a gap: no pre-roll −88 dB, 0.1 s −137 dB. (An earlier probe of a
+    /// cruder slice construction, `phaseMemoryProbe`, needed 60 ms; the pick
+    /// covers every case measured.)
+    ///
+    /// ⚠️ It buys convergence only where the whole-file render arrives at the
+    /// window with untransposed history at ratio 1. A window that starts
+    /// INSIDE an edited note converges only once the pre-roll reaches back
+    /// before that note's start (on the take, a window 0.15 s into the note:
+    /// +4 dB at 0.1 s of pre-roll, −127 dB at 0.25 s), and transposed history
+    /// or a ratio ≠ 1 never converges at any pre-roll up to 2 s (−7 to +6 dB on
+    /// the take, −1 to +5 dB with transposed history at ratio 1: same pitch
+    /// and level, other partial phases). See `StretchWindow.swift`.
+    nonisolated static let spanPreRollSeconds = 0.12
+
+    /// R3 (incremental-note-render design §1): the pre-roll, in output frames,
+    /// that `renderOutputFrames` uses by default. THE one home of the number;
+    /// the playback lane reads it here rather than copying it.
+    nonisolated static func minimumPreRollFrames(sampleRate: Double) -> Int {
+        guard sampleRate.isFinite, sampleRate > 0 else { return 0 }
+        return Int((spanPreRollSeconds * sampleRate).rounded())
+    }
+
+    /// R3: the post-roll a window needs past its last requested frame: NONE.
+    /// A window runs the whole-file schedule, so its last block reads the input
+    /// the whole-file render reads for that block (up to one seek length plus
+    /// one block beyond the requested end, from the real source, never
+    /// silence), and every frame it delivers is final when delivered. Named so
+    /// no lane invents one.
+    nonisolated static func minimumPostRollFrames(sampleRate: Double) -> Int { 0 }
+
+    /// The source a span render reads: its identity (the contour seam keys on
+    /// the URL), its shape, and a caller-supplied reader (R10: the primitive
+    /// writes no audio and opens no source itself; `open(_:)` is the stock
+    /// `AVAudioFile` reader).
+    struct SpanSource {
+        let url: URL
+        let channels: Int
+        let sampleRate: Double
+        /// The whole source's length in frames.
+        let frames: Int
+        /// Source frames `range`, one array per channel of exactly
+        /// `range.count` frames; polls the given `isCancelled` between chunks.
+        let read: (Range<Int>, () -> Bool) throws -> [[Float]]
+
+        /// The source file, read through `AVAudioFile`. Not thread-safe: use one
+        /// instance per render, on one thread.
+        static func open(_ url: URL) throws -> SpanSource {
+            let file = try AVAudioFile(forReading: url)
+            let format = file.processingFormat  // deinterleaved float32, source rate
+            let channels = Int(format.channelCount)
+            let frames = Int(file.length)
+            guard frames > 0, channels > 0 else {
+                throw OfflineStretcherError.invalidInput("empty source \(url.path)")
+            }
+            return SpanSource(url: url, channels: channels, sampleRate: format.sampleRate,
+                              frames: frames,
+                              read: { range, isCancelled in
+                                  try readFrames(of: file, range: range, isCancelled: isCancelled)
+                              })
+        }
+    }
+
+    /// One span render: planar samples for WHOLE-FILE output frames
+    /// `firstOutputFrame ..< firstOutputFrame + planar[0].count` of the render
+    /// playback plays for `params` (for `.sourceFile`: of the source itself),
+    /// at the source's own rate and channel count.
+    struct SpanRender: Sendable {
+        let planar: [[Float]]
+        let sampleRate: Double
+        let firstOutputFrame: Int
+        /// The output-duration multiplier the frames are at (1 for the source).
+        let ratio: Double
+        let path: RenderPath
+        /// I1-F2: why these frames play the CONSTANT-OFFSET curve instead of the
+        /// contour-shaped one their edits ask for, or nil when they do not.
+        /// It is `resolveRenderContour`'s own reason, in the one wording
+        /// (`shortfallReason`) the whole-file render memos and
+        /// `contourShortfall` reports; it used to be dropped here. The engine
+        /// posts it through the notice the whole-file path posts
+        /// (`AudioEngine.postContourShortfallNotice`), so a span and the final
+        /// render of the same edit say the same thing.
+        var contourFallbackReason: String? = nil
+    }
+
+    /// **I1-F1: THE SECOND ENTRY INTO THE ONE RENDER LOOP, in frames (R1).**
+    /// Returns EXACTLY `frames.count` frames per channel, planar Float32 at the
+    /// source's rate and channel count, where result frame `i` IS frame
+    /// `frames.lowerBound + i` of the file the whole-file render writes for
+    /// `params` (of the source itself when `params` is identity).
+    ///
+    /// - The same `Params` (ratio, transpose, formant flag, the STORED or a
+    ///   DRAFT edit set), the same contour decision (`resolveRenderContour`,
+    ///   R7), the same curve, branch, stretcher configuration and level mask at
+    ///   GLOBAL frames (`renderAudio`, R6), on the same schedule
+    ///   (`StretchSchedule`: the whole file's input targets, the whole file's
+    ///   block grid, the curve read at the same lookup frames; R2), starting at
+    ///   a block boundary `preRollFrames` or more before `frames`.
+    /// - A plain function (R8): no main-actor hop, no state shared with the
+    ///   whole-file job (`jobs`, `statuses` are never touched), cancellation
+    ///   polled per block and per read chunk. Callers own their own
+    ///   latest-wins.
+    /// - Reads only the frames the window needs, so its cost follows the span,
+    ///   not the take. Writes no audio (R10). ⚠️ One exception, and it is R7's:
+    ///   a COLD contour-shaped render (`needsDetectedContour`) runs detection
+    ///   over the whole source through the one contour seam, which commits the
+    ///   contour sidecar into `renderCacheDirectory` (first writer wins): the
+    ///   very file the whole-file render writes, and whose cost follows the
+    ///   take (MEASURED on the 33 s take: 474 ms cold, 33 ms hot). The pitch
+    ///   editor's display reaches the same seam, so a drag normally finds it
+    ///   hot. I1-F2: ONE detection per entry runs at a time however many
+    ///   renders ask (the seam's single flight); a render waiting for another
+    ///   one's detection gives up as soon as it is cancelled.
+    /// - Deterministic (R9): the same inputs give bit-identical output.
+    ///
+    /// ⚠️ Exact (to float noise) only where the whole-file render arrives at the
+    /// window with an untransposed, ratio-1 history; otherwise same pitch and
+    /// level, different partial phases (`StretchWindow.swift`'s banner). The
+    /// level-only path is bit-exact always.
+    ///
+    /// BLOCKING, and allocating: call it from a detached task, never the main
+    /// actor, never the render thread.
+    nonisolated static func renderOutputFrames(
+        _ frames: Range<Int>, of source: SpanSource, params: Params,
+        preRollFrames: Int? = nil, renderCacheDirectory: URL,
+        detector: PitchContourCache.Detector, isCancelled: () -> Bool
+    ) throws -> SpanRender {
+        let identity = params.isIdentity
+        let ratio = identity ? 1 : params.ratio
+        let outputFrames = identity ? source.frames
+            : Int((Double(source.frames) * params.ratio).rounded())
+        guard frames.lowerBound >= 0, !frames.isEmpty, frames.upperBound <= outputFrames else {
+            throw OfflineStretcherError.invalidInput(
+                "frames \(frames) are not inside the render's 0..<\(outputFrames)")
+        }
+        if isCancelled() { throw OfflineStretcherError.cancelled }
+        // A clip that plays its source: its "render" is the source itself.
+        if identity {
+            return SpanRender(planar: try source.read(frames, isCancelled),
+                              sampleRate: source.sampleRate, firstOutputFrame: frames.lowerBound,
+                              ratio: 1, path: .sourceFile)
+        }
+        let contour = try resolveRenderContour(
+            params: params, source: source.url, renderCacheDirectory: renderCacheDirectory,
+            detector: detector, isCancelled: isCancelled)
+        let preRoll = max(0, preRollFrames ?? minimumPreRollFrames(sampleRate: source.sampleRate))
+        // The window's reader is stored, so it needs an escapable view of
+        // `isCancelled`; it never outlives this call (the render runs
+        // synchronously inside it).
+        let (rendered, path) = try withoutActuallyEscaping(isCancelled) { isCancelled in
+            let window = StretchWindow(
+                channels: source.channels, sourceFrames: source.frames,
+                startOutputFrame: max(0, frames.lowerBound - preRoll),
+                endOutputFrame: frames.upperBound,
+                readSource: { range in try source.read(range, isCancelled) })
+            var unused: [[Float]] = []
+            return try renderAudio(
+                whole: &unused, window: window, sampleRate: source.sampleRate, params: params,
+                curveContour: contour.curveContour, isCancelled: isCancelled)
+        }
+        // Drop the pre-roll: exactly the requested frames.
+        let skip = frames.lowerBound - rendered.firstOutputFrame
+        guard skip >= 0, let produced = rendered.planar.first?.count,
+              skip + frames.count <= produced else {
+            throw OfflineStretcherError.invalidInput(
+                "window \(rendered.firstOutputFrame)+\(rendered.planar.first?.count ?? 0) "
+                    + "does not cover \(frames)")
+        }
+        return SpanRender(
+            planar: rendered.planar.map { Array($0[skip..<(skip + frames.count)]) },
+            sampleRate: source.sampleRate, firstOutputFrame: frames.lowerBound, ratio: ratio,
+            path: path, contourFallbackReason: contour.fallbackReason)
+    }
+
+    /// The SOURCE-second form (the audition's): the frames of the render
+    /// playback plays for `params` that play source seconds
+    /// `startSourceSeconds ..< endSourceSeconds`, mapped through
+    /// `StretchCurvePlan.outputFrame(forSourceSecond:…)` (the one mapping) and
+    /// clipped to the render. A thin wrapper; the frames come from
+    /// `renderOutputFrames`.
+    nonisolated static func renderSpan(
+        source url: URL, params: Params, startSourceSeconds: Double, endSourceSeconds: Double,
+        preRollFrames: Int? = nil, renderCacheDirectory: URL,
+        detector: PitchContourCache.Detector, isCancelled: () -> Bool
+    ) throws -> SpanRender {
+        guard startSourceSeconds.isFinite, endSourceSeconds.isFinite,
+              endSourceSeconds > startSourceSeconds else {
+            throw OfflineStretcherError.invalidInput(
+                "span \(startSourceSeconds)…\(endSourceSeconds) s is empty")
+        }
+        if isCancelled() { throw OfflineStretcherError.cancelled }
+        let source = try SpanSource.open(url)
+        let ratio = params.isIdentity ? 1 : params.ratio
+        let outputFrames = params.isIdentity ? source.frames
+            : Int((Double(source.frames) * params.ratio).rounded())
+        let start = min(outputFrames, StretchCurvePlan.outputFrame(
+            forSourceSecond: startSourceSeconds, ratio: ratio, sampleRate: source.sampleRate))
+        let end = min(outputFrames, StretchCurvePlan.outputFrame(
+            forSourceSecond: endSourceSeconds, ratio: ratio, sampleRate: source.sampleRate))
+        guard end > start else {
+            throw OfflineStretcherError.invalidInput("span lies past the render's end")
+        }
+        return try renderOutputFrames(
+            start..<end, of: source, params: params, preRollFrames: preRollFrames,
+            renderCacheDirectory: renderCacheDirectory, detector: detector,
+            isCancelled: isCancelled)
+    }
+
+    /// R2/R4: the whole-file CURVE loop's schedule for a source of this shape:
+    /// the block grid (`blockFrames` is the stretcher's own hop, read from it,
+    /// never derived), the input targets, and where the flush starts. Chunk
+    /// `k` starts at output frame `k × blockFrames`, and the curve is read for
+    /// it at `OfflineStretcher.curveLookupFrame(outputFrame:compensation:
+    /// intervalSamples:)` with `OfflineStretcher.curveLatencyCompensation(
+    /// sampleRate:)`. The one grid, for any lane that must agree with it.
+    nonisolated static func curveSchedule(sourceFrames: Int, channels: Int, sampleRate: Double,
+                                          ratio: Double) throws -> StretchSchedule {
+        try OfflineStretcher.curveSchedule(sourceFrames: sourceFrames, channels: channels,
+                                           sampleRate: sampleRate, ratio: ratio)
+    }
+
+    /// Source frames `range` of `file`, planar. Loop read:
+    /// `AVAudioFile.read(into:)` can return short (measured elsewhere in this
+    /// codebase); a short file reads as silence past its end. Checks
+    /// `isCancelled` between chunks.
+    nonisolated static func readFrames(of file: AVAudioFile, range: Range<Int>,
+                                       isCancelled: () -> Bool) throws -> [[Float]] {
+        let format = file.processingFormat
+        let channelCount = Int(format.channelCount)
+        var planar = [[Float]](repeating: [], count: channelCount)
+        for channel in 0..<channelCount { planar[channel].reserveCapacity(range.count) }
+        guard !range.isEmpty else { return planar }
+        guard let chunk = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 16_384) else {
+            throw OfflineStretcherError.allocationFailed
+        }
+        file.framePosition = AVAudioFramePosition(range.lowerBound)
+        var remaining = range.count
+        while remaining > 0 {
+            if isCancelled() { throw OfflineStretcherError.cancelled }
+            try file.read(into: chunk, frameCount: AVAudioFrameCount(min(remaining, 16_384)))
+            let got = Int(chunk.frameLength)
+            guard got > 0, let data = chunk.floatChannelData else { break }
+            for channel in 0..<channelCount {
+                planar[channel].append(contentsOf: UnsafeBufferPointer(start: data[channel],
+                                                                       count: got))
+            }
+            remaining -= got
+        }
+        if remaining > 0 {
+            for channel in 0..<channelCount {
+                planar[channel].append(contentsOf: repeatElement(0, count: remaining))
+            }
+        }
+        return planar
     }
 }

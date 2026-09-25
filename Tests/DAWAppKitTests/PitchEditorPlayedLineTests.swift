@@ -499,7 +499,11 @@ struct PitchEditorPlayedLineSiteTests {
         #expect(view.contains("playedLine: playedSegments,"))
         #expect(view.contains("lineIsEstimate: model.playedLine.basis != .render,"))
         #expect(view.contains("unresolvedNoteIDs: model.unresolvedNoteIDs,"))
-        #expect(view.contains("hiddenBlobID: model.drag?.segmentID,"))
+        // m23-ap I4: EVERY moving note leaves the surface for the overlay (one
+        // for a one-note drag, the whole selection for a group drag) — was the
+        // single `hiddenBlobID: model.drag?.segmentID,` before I4.
+        #expect(view.contains("hiddenBlobIDs: Set(model.drag?.movingSegmentIDs ?? []),"))
+        #expect(view.contains("selectedIDs: model.selection,"))
         #expect(view.contains("draftLine: model.draftLineSegments,"))
         // ⛔ The old line — the measurement, left behind by a moved note.
         #expect(!view.contains("model.contourSegments"),

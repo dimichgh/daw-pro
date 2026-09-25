@@ -77,9 +77,19 @@ final class PlaybackGraph {
         /// The CAF is timeline-domain audio, so all downstream beat→frame
         /// math (fade bake, piece plans) is already correct.
         case ready(URL)
-        /// Render in flight (or failed): the clip is SKIPPED — honest
-        /// silence, never wrong-speed audio (spec §5). The engine's
-        /// render-completion hook re-resolves through the restart seam.
+        /// p2-ren Stage A, THE BRIDGE: the render the clip asks for is still
+        /// being made, and THIS file plays meanwhile. It is the file the clip's
+        /// node last opened, and it has the same time base as the render
+        /// (`RenderTimeBase`: the source, the ratio, and W once the render reads
+        /// it), so it plays at the right speed and in the right place, with the
+        /// clip's previous pitch and level. It is opened exactly like `.ready`.
+        /// It is never seen offline: the bounce's resolver is a lookup of
+        /// committed renders and cannot answer it. The engine's render
+        /// completion (or failure) replaces it through the restart seam.
+        case bridge(URL)
+        /// Render in flight (or failed) and no bridge available: the clip is
+        /// SKIPPED — honest silence, never wrong-speed audio (spec §5). The
+        /// engine's render-completion hook re-resolves through the restart seam.
         case pending
     }
 
@@ -87,6 +97,12 @@ final class PlaybackGraph {
         let player = AVAudioPlayerNode()
         let file: AVAudioFile
         let key: ClipKey
+        /// p2-ren Stage A: this node plays a BRIDGE (`StretchResolution.bridge`),
+        /// the clip's previous file, while the render its key asks for is being
+        /// made. On the NODE, not in a per-pass ledger: a bridged clip keeps its
+        /// node across later passes (its key no longer changes), so no later pass
+        /// re-resolves it, and only the node still knows what it plays.
+        let isBridge: Bool
         /// Main-actor domain copy for schedule-time work (fade bake evaluates
         /// `Clip.envelopeGain`); refreshed every reconcile pass so parameter
         /// edits (gainDb) stay current without a rebuild.
@@ -97,10 +113,11 @@ final class PlaybackGraph {
         /// read position is stateful — sharing it would race.
         private var bakeFile: AVAudioFile?
 
-        init(file: AVAudioFile, key: ClipKey, clip: Clip) {
+        init(file: AVAudioFile, key: ClipKey, clip: Clip, isBridge: Bool = false) {
             self.file = file
             self.key = key
             self.clip = clip
+            self.isBridge = isBridge
         }
 
         func bakeReader() throws -> AVAudioFile {
@@ -502,6 +519,105 @@ final class PlaybackGraph {
     /// clip-player asymmetry, design §2.3).
     private(set) var referenceScheduled = false
 
+    // MARK: Clip-note audition lane (I1, design 2026-09-24-pitch-editor-interaction-batch §4)
+
+    /// Live-only clip-note audition lane flag, **DEFAULT FALSE**: the
+    /// `referenceLaneEnabled` shape and fail-safe, verbatim. Only the live
+    /// `AudioEngine` sets it (in `wireGraphHooks`, before the first
+    /// `ensureMasterSandwich`), so `OfflineRenderer`'s graphs never carry the
+    /// voice and every offline byte-invariant holds by construction.
+    ///
+    /// With the flag TRUE the sandwich builder attaches, once per graph:
+    ///
+    ///     clipAuditionPlayers[0] ─► clipAuditionMixers[0] ─┐
+    ///     clipAuditionPlayers[1] ─► clipAuditionMixers[1] ─┼─► mainMixerNode ─► master chain ─► output
+    ///     clipAuditionPlayers[2] ─► clipAuditionMixers[2] ─┘
+    ///
+    /// STATIC for the graph's life: attached before the engine first renders
+    /// (so the m16-h attach-while-running class never applies), never re-wired,
+    /// never announce-capable. It is NOT a strip: no inserts, no sends, no
+    /// automation, no stem identity. That is I1's named cost: the voice skips
+    /// the edited track's inserts. The buffer it plays is read, faded and
+    /// levelled OFF the render thread (`ClipSpanAuditionReader`); only
+    /// `playClipAudition` / `fadeOutClipAudition` / `reapFadedClipAudition` /
+    /// `stopClipAudition` touch the players and mixers, from the main actor.
+    /// Zero new render-thread code: six stock nodes (three pairs, below).
+    ///
+    /// ⭐ PLAYER → MIXER PAIRS, SO A NEW BUFFER NEVER CUTS A SOUNDING ONE
+    /// (I1-F1, RT review H7: two pairs; I1-F2 made it three, see "THREE PAIRS,
+    /// NOT TWO" below). MEASURED 2026-09-25 in manual rendering
+    /// (`ClipSpanRenderTests.stopStepProbe`, `.rampVariantsProbe`):
+    ///  * `stop()` mid-buffer at a peak of a 0.5 cosine steps by 0.4957, 7.6×
+    ///    the waveform's own largest step (0.0653): a click;
+    ///  * a MIXER's `outputVolume` written 1 → 0 is RAMPED, linearly, never
+    ///    stepping more than the waveform does: silent 32 ms after the write
+    ///    at a 512-frame render quantum, 86 ms at 4096 (3 of 3 sequences);
+    ///  * a PLAYER's `volume` (the mixer's INPUT bus) depends on the topology:
+    ///    with two players on one shared mixer it STEPPED by 0.4957, exactly a
+    ///    cut (4 of 4 sequences); with each player on its own mixer it ramped
+    ///    (4 of 4). Undocumented AVAudioMixerNode behaviour, so nothing leans
+    ///    on it.
+    /// So each player has its own mixer, the fades ride the MIXERS'
+    /// `outputVolume` (the one knob that ramped in every topology measured),
+    /// and a new buffer starts on the idle pair while the sounding pair fades
+    /// out: a crossfade with no gap and no added latency, which a drag heard
+    /// step by step needs.
+    ///
+    /// ⭐ THREE PAIRS, NOT TWO (I1-F2, RT re-review NH-E). A volume write lands
+    /// at the NEXT render call, and the ramp then runs over whole calls. With
+    /// two pairs, a second new buffer arriving before the first fade had been
+    /// rendered found only the fading pair free and stopped it at full level.
+    /// MEASURED 2026-09-25 in manual rendering
+    /// (`ClipSpanRenderTests.doubleSwapProbe`, every call one IO buffer, cuts
+    /// at waveform peaks, `voiceNeverCuts`' limit 0.2309):
+    ///  * two swaps between the same two render calls: max |Δ| 0.4976 at 512
+    ///    AND at 4096 frames, a full cut;
+    ///  * one call apart: 0.2803 at 512 frames (the ramp spans ~3 calls there);
+    ///    0.1147 at 4096 (it ends inside one call);
+    ///  * two or more calls apart: within the limit at both.
+    /// Two deliveries ~45 ms apart (a drag's span renders) share one 4096-frame
+    /// call gap (85 ms) about half the time, so the cut was reachable. The third
+    /// pair is idle when the second swap comes, and `playClipAudition` stops a
+    /// fading pair only when no pair is idle, the one whose fade began first.
+    /// MEASURED after: two swaps k = 0…5 calls apart stay within the limit at
+    /// both sizes (worst 0.1989, 4096 frames, k 0; `doubleSwapGate`). What
+    /// remains: THREE new buffers between the same two render calls still
+    /// step 0.4976 at both sizes (at 4096 frames, three deliveries inside
+    /// ~85 ms); one call apart they stay within (`doubleSwapProbe`'s
+    /// three-swap rows).
+    var clipAuditionLaneEnabled = false
+
+    /// How many player → mixer pairs the voice has (see above).
+    static let clipAuditionPairCount = 3
+    /// The voice's players, `clipAuditionPairCount` of them (empty without the
+    /// lane). One carries the newest buffer; the others are idle or fading out.
+    private(set) var clipAuditionPlayers: [AVAudioPlayerNode] = []
+    /// Each player's own input to the main mix, index for index. Unity
+    /// except while fading (the level is baked into the buffer); written to 1
+    /// before every start, so a fade or an engine start never leaves a pair at
+    /// another level (the m22-g lesson: a written volume is not assumed to
+    /// survive a start).
+    private(set) var clipAuditionMixers: [AVAudioMixerNode] = []
+    /// Which pair carries the newest buffer.
+    private var clipAuditionActive = 0
+    /// The player carrying the newest buffer (I1's single-voice accessor).
+    var clipAuditionPlayer: AVAudioPlayerNode? {
+        clipAuditionPlayers.indices.contains(clipAuditionActive)
+            ? clipAuditionPlayers[clipAuditionActive] : nil
+    }
+    /// The mixer of the pair carrying the newest buffer.
+    var clipAuditionMixer: AVAudioMixerNode? {
+        clipAuditionMixers.indices.contains(clipAuditionActive)
+            ? clipAuditionMixers[clipAuditionActive] : nil
+    }
+    /// m19-f-style ledger, per player: raised by a schedule, lowered by a
+    /// stop, so an idle lane costs no start/stop handshakes.
+    private var clipAuditionScheduledFlags: [Bool] = []
+    /// Per player: when its fade-out began, or nil when it is not fading.
+    private var clipAuditionFadeStarted: [ContinuousClock.Instant?] = []
+    /// True while any player holds a schedule (sounding or fading).
+    var clipAuditionScheduled: Bool { clipAuditionScheduledFlags.contains(true) }
+
     private(set) var signature: [UUID: [ClipKey]] = [:]
     private(set) var instrumentSignature: [UUID: InstrumentTrackKey] = [:]
     /// Structural routing identity per source (audio + instrument) track.
@@ -591,7 +707,17 @@ final class PlaybackGraph {
     /// answer also KICKS the render job there); OfflineRenderer wires a pure
     /// cache lookup after the mixdown wait. nil (default, tests) means every
     /// non-identity clip is pending — silence, never wrong-speed audio.
+    /// p2-ren Stage A: the engine may also answer `.bridge` (the clip's
+    /// previous file, same time base); the offline lookup never does.
     var stretchResolver: (@MainActor (Clip) -> StretchResolution)?
+
+    /// p2-ren Stage A: told, on the main actor, about EVERY file the add loop
+    /// opens for an audio clip (the domain clip, the file's URL, its length in
+    /// frames), identity clips included (their source is what their first
+    /// edit bridges on). `AudioEngine` keeps the last one per clip: the
+    /// bridge's memo lives in the engine because `rebuildEngine` discards the
+    /// graph and keeps the caches. nil (offline renders, tests) = nothing kept.
+    var onClipFileOpened: (@MainActor (Clip, URL, AVAudioFramePosition) -> Void)?
 
     /// Per-track meter frames, called on the main actor. Fed by a tap on each
     /// track mixer; drives both the live engine's handler and offline tests.
@@ -644,6 +770,26 @@ final class PlaybackGraph {
     /// only through `AudioEngine.startPlayers` (play, record, seek/tempo/
     /// edit-while-rolling restarts, rebuild resume, recovery) — reports.
     private var stretchPendingClips: [PendingRenderSilence] = []
+
+    /// p2-ren Stage A: one audio clip the last reconcile pass left playing a
+    /// BRIDGE, its previous file, while its render is being made.
+    private struct PendingRenderBridge {
+        let clip: Clip
+        let beat: Double
+    }
+
+    /// The bridge ledger, in track/clip order: rebuilt WHOLE at the end of
+    /// every reconcile pass FROM THE NODES (a bridged node survives later
+    /// passes, which never re-resolve it), read by `scheduleAll`, where
+    /// `clip-render-previous` posts, for the same reason `clip-stretch-pending`
+    /// posts there and not at the edit.
+    private var stretchBridgedClips: [PendingRenderBridge] = []
+
+    /// Clip ids whose bridge has already been NOTICED: once per clip per bridge
+    /// EPISODE, the `stretchPendingNoticed` discipline. An episode ends when
+    /// the clip stops playing a bridge by any route: its render lands, it
+    /// fails, its time base changes, or it leaves the model.
+    private var stretchBridgeNoticed: Set<UUID> = []
 
     /// Clip ids whose media OPEN failed at graph-build time and have already
     /// posted their `clip-file-missing` notice (m16-c, audit F2): the skipped
@@ -977,14 +1123,24 @@ final class PlaybackGraph {
                 // `signature`, so this loop re-resolves on every reconcile
                 // pass and the engine's render-completion restart lands the
                 // CAF. Identity clips never invoke the resolver (the bypass
-                // contract).
+                // contract). p2-ren Stage A: a pending clip with a BRIDGE (its
+                // previous file, same time base) opens that file instead of
+                // going silent.
                 var fileURL = url
+                var bridged = false
                 if StretchRenderCache.needsRender(domainClip) {
                     switch stretchResolver?(domainClip) {
                     case .ready(let rendered):
                         // The episode ends here; the pass-end prune of
                         // `stretchPendingNoticed` re-arms the gate.
                         fileURL = rendered
+                    case .bridge(let previous):
+                        // Opened exactly like `.ready`. The node is marked, so
+                        // the schedule pass says what is playing
+                        // (`clip-render-previous`) and a failed render can end
+                        // it (`isPlayingBridge`).
+                        fileURL = previous
+                        bridged = true
                     case .pending, nil:
                         // m15-e (audit F6) → m23-ap-p2 p2-notice: RECORD, do
                         // not post. A reconcile is what an edit runs, with the
@@ -998,13 +1154,26 @@ final class PlaybackGraph {
                 }
                 do {
                     let file = try AVAudioFile(forReading: fileURL)
-                    let clipNode = ClipNode(file: file, key: key, clip: domainClip)
+                    let clipNode = ClipNode(file: file, key: key, clip: domainClip,
+                                            isBridge: bridged)
                     engine.attach(clipNode.player)
                     engine.connect(clipNode.player, to: node.sumMixer, format: file.processingFormat)
                     node.clips[key.id] = clipNode
                     // A clip that opens again healed — re-arm its notice.
                     fileOpenFailedNoticed.remove(key.id)
+                    // p2-ren Stage A: every successful open, identity clips
+                    // included, is what the next edit may bridge on.
+                    onClipFileOpened?(domainClip, fileURL, file.length)
                 } catch {
+                    if bridged {
+                        // p2-ren Stage A: a bridge that will not open is no
+                        // bridge. The clip is what it would have been without
+                        // one, pending silence, and never a `clip-file-missing`
+                        // naming a cache file the user never chose.
+                        pendingThisPass.append(
+                            PendingRenderSilence(clip: domainClip, beat: key.startBeat))
+                        continue
+                    }
                     // Skip this clip, keep playing the rest. m16-c (audit F2):
                     // a skipped clip gets NO player node, so the m16-a play
                     // guard (`startAllPlayers` walks existing ClipNodes only)
@@ -1237,6 +1406,18 @@ final class PlaybackGraph {
         // that ended here re-arms its notice.
         stretchPendingClips = pendingThisPass
         stretchPendingNoticed.formIntersection(pendingThisPass.map(\.clip.id))
+        // p2-ren Stage A: the bridge ledger, WHOLE, read off the NODES in
+        // track/clip order. A bridge opened in an earlier pass is still on its
+        // node, and no pass after the one that opened it re-resolves it.
+        var bridgedThisPass: [PendingRenderBridge] = []
+        for track in audioTracks {
+            guard let node = trackNodes[track.id] else { continue }
+            for clip in track.clips where node.clips[clip.id]?.isBridge == true {
+                bridgedThisPass.append(PendingRenderBridge(clip: clip, beat: clip.startBeat))
+            }
+        }
+        stretchBridgedClips = bridgedThisPass
+        stretchBridgeNoticed.formIntersection(bridgedThisPass.map(\.clip.id))
         return changed
     }
 
@@ -2217,6 +2398,36 @@ final class PlaybackGraph {
         } else {
             engine.connect(chainHost, to: engine.outputNode, format: format)
         }
+        if clipAuditionLaneEnabled {
+            // I1: clipAuditionPlayer → clipAuditionMixer → mainMixerNode. Fresh
+            // stock nodes, attached HERE for the reference lane's reason above
+            // (before the engine ever starts/renders in every production path,
+            // so the m16-h attach-while-running raise class never applies).
+            // Connected at the GRAPH format, and the buffer arrives already in
+            // it: a player node does not convert a scheduled buffer
+            // (AVAudioPlayerNode.h, FORMATS), so the detached read converts.
+            // I1-F1: player → mixer pairs, I1-F2: three of them (see
+            // `clipAuditionLaneEnabled`: the crossfade that replaces a cut rides
+            // each MIXER's volume, and a second swap inside a fade finds an
+            // idle pair).
+            let players = (0..<Self.clipAuditionPairCount).map { _ in AVAudioPlayerNode() }
+            let mixers = (0..<Self.clipAuditionPairCount).map { _ in AVAudioMixerNode() }
+            for (player, mixer) in zip(players, mixers) {
+                engine.attach(player)
+                engine.attach(mixer)
+                engine.connect(player, to: mixer, fromBus: 0, toBus: 0, format: format)
+                // The strips' own connect form: one more input on the main
+                // mixer, so the voice passes the master fader and the master
+                // chain, as a strip does.
+                engine.connect(mixer, to: engine.mainMixerNode, format: format)
+                mixer.outputVolume = 1
+            }
+            clipAuditionPlayers = players
+            clipAuditionMixers = mixers
+            clipAuditionActive = 0
+            clipAuditionScheduledFlags = Array(repeating: false, count: players.count)
+            clipAuditionFadeStarted = Array(repeating: nil, count: players.count)
+        }
         let processor: EffectChainProcessor
         if let hosted = ChainHostAU.chainProcessor(of: chainHost) {
             processor = hosted
@@ -2319,6 +2530,144 @@ final class PlaybackGraph {
         guard referenceScheduled, let player = referencePlayer else { return }
         player.stop()
         referenceScheduled = false
+    }
+
+    // MARK: - Clip-note audition lane control (I1, control plane only)
+
+    /// The format the clip-note audition voice is connected at, and so the
+    /// format every buffer it plays must already be in.
+    var clipAuditionFormat: AVAudioFormat { graphFormat() }
+
+    /// Plays ONE prepared audition buffer, now (I1). The buffer is already in
+    /// `clipAuditionFormat`, faded and levelled (`ClipSpanAuditionReader`).
+    /// One audition at a time, WITHOUT A CUT (I1-F1, H7): the buffer starts on
+    /// an idle player (at unity, written here before every start, so a fade
+    /// or an engine start never leaves it at another level) and the player
+    /// that was sounding fades out through its volume ramp, to be stopped by
+    /// `reapFadedClipAudition` once silent. Returns false when the lane is
+    /// absent or AVFAudio raised; a raise converts to one stderr line and a
+    /// skipped audition, never a crash, and the ledger stays raised so the
+    /// next stop still clears the queue (the reference lane's asymmetry). No
+    /// completion handler, on purpose: it would fire on a non-main thread, and
+    /// nothing here needs one.
+    ///
+    /// I1-F2 (RT re-review NH-E): the new buffer starts on an IDLE pair; a
+    /// fading pair is stopped for it only when no pair is idle, and then the
+    /// one whose fade began first (`nextClipAuditionPair`). With three pairs a
+    /// second swap inside a fade never cuts. ⚠️ What remains: a THIRD buffer
+    /// before the first fade has been rendered stops that pair at what is
+    /// left of its level (the lane doc's three-swap row).
+    @discardableResult
+    func playClipAudition(_ buffer: AVAudioPCMBuffer) -> Bool {
+        guard clipAuditionPlayers.count == Self.clipAuditionPairCount else { return false }
+        let previous = clipAuditionActive
+        let next = nextClipAuditionPair()
+        let player = clipAuditionPlayers[next]
+        do {
+            try withObjCExceptionBarrier("clip audition start") {
+                if clipAuditionScheduledFlags[next] { player.stop() }
+                clipAuditionMixers[next].outputVolume = 1
+                player.scheduleBuffer(buffer, at: nil, options: [], completionHandler: nil)
+                clipAuditionScheduledFlags[next] = true
+                clipAuditionFadeStarted[next] = nil
+                player.play()
+                if next != previous, clipAuditionScheduledFlags[previous],
+                   clipAuditionFadeStarted[previous] == nil {
+                    clipAuditionMixers[previous].outputVolume = 0
+                    clipAuditionFadeStarted[previous] = .now
+                }
+            }
+            clipAuditionActive = next
+            return true
+        } catch {
+            FileHandle.standardError.write(Data(
+                "PlaybackGraph: clip audition start raised — audition skipped: \(error)\n".utf8))
+            return false
+        }
+    }
+
+    /// The pair the next buffer starts on (I1-F2, NH-E): the newest pair
+    /// itself when it holds nothing (the lane is idle); otherwise a pair that
+    /// holds nothing; otherwise the pair whose fade began FIRST, the one most
+    /// likely silent by now. Never the pair carrying the newest buffer while
+    /// another exists. A non-newest pair that holds a schedule is always
+    /// fading (the swap that left it faded it, or a raised fade stopped it);
+    /// one that somehow is not counts as the youngest.
+    private func nextClipAuditionPair() -> Int {
+        let newest = clipAuditionActive
+        guard clipAuditionScheduledFlags[newest] else { return newest }
+        let others = clipAuditionPlayers.indices.filter { $0 != newest }
+        if let idle = others.first(where: { !clipAuditionScheduledFlags[$0] }) { return idle }
+        let now = ContinuousClock.now
+        return others.min {
+            (clipAuditionFadeStarted[$0] ?? now) < (clipAuditionFadeStarted[$1] ?? now)
+        } ?? newest
+    }
+
+    /// True while a player is fading out and not yet stopped.
+    var clipAuditionIsFading: Bool {
+        clipAuditionPlayers.indices.contains {
+            clipAuditionScheduledFlags[$0] && clipAuditionFadeStarted[$0] != nil
+        }
+    }
+
+    /// Silences the voice WITHOUT A CUT (H7): every sounding pair's MIXER
+    /// volume goes to 0, and the mixer ramps it down. Nothing is stopped here;
+    /// `reapFadedClipAudition(olderThan:)` stops each once its ramp is done.
+    /// Returns true when a player is fading.
+    @discardableResult
+    func fadeOutClipAudition() -> Bool {
+        for index in clipAuditionPlayers.indices
+        where clipAuditionScheduledFlags[index] && clipAuditionFadeStarted[index] == nil {
+            do {
+                try withObjCExceptionBarrier("clip audition fade") {
+                    clipAuditionMixers[index].outputVolume = 0
+                }
+                clipAuditionFadeStarted[index] = .now
+            } catch {
+                FileHandle.standardError.write(Data(
+                    "PlaybackGraph: clip audition fade raised — stopping instead: \(error)\n".utf8))
+                stopClipAuditionPlayer(index)
+            }
+        }
+        return clipAuditionIsFading
+    }
+
+    /// Stops every player whose fade began at least `age` ago, and puts its
+    /// mixer back to unity while it is silent.
+    func reapFadedClipAudition(olderThan age: Duration) {
+        let now = ContinuousClock.now
+        for index in clipAuditionPlayers.indices {
+            guard clipAuditionScheduledFlags[index], let started = clipAuditionFadeStarted[index],
+                  now - started >= age else { continue }
+            stopClipAuditionPlayer(index)
+        }
+    }
+
+    /// Stops the voice and clears its queue AT ONCE, every player: for a
+    /// voice already silent (its buffer ended), a graph being torn down, or
+    /// (I1-F2, NH-B) an engine that is not rendering, where a fade would never
+    /// ramp. Ledger-gated: an idle lane costs nothing.
+    func stopClipAudition() {
+        for index in clipAuditionPlayers.indices { stopClipAuditionPlayer(index) }
+    }
+
+    private func stopClipAuditionPlayer(_ index: Int) {
+        guard clipAuditionScheduledFlags.indices.contains(index),
+              clipAuditionScheduledFlags[index] else { return }
+        clipAuditionScheduledFlags[index] = false
+        clipAuditionFadeStarted[index] = nil
+        let player = clipAuditionPlayers[index]
+        let mixer = clipAuditionMixers[index]
+        do {
+            try withObjCExceptionBarrier("clip audition stop") {
+                player.stop()
+                mixer.outputVolume = 1
+            }
+        } catch {
+            FileHandle.standardError.write(Data(
+                "PlaybackGraph: clip audition stop raised: \(error)\n".utf8))
+        }
     }
 
     /// One strip's permanent insert sandwich (audio tracks and buses alike):
@@ -2430,6 +2779,17 @@ final class PlaybackGraph {
         // Its render just landed: no schedule pass may report it as pending
         // silence before the reconcile that follows re-resolves it.
         stretchPendingClips.removeAll { $0.clip.id == clipID }
+        // p2-ren Stage A: nor as playing its previous version — its bridge
+        // node is gone (a landed render, or a failed one ending the bridge).
+        stretchBridgedClips.removeAll { $0.clip.id == clipID }
+    }
+
+    /// p2-ren Stage A: true while this clip's node plays a BRIDGE, its previous
+    /// file, because the render its key asks for is still being made. The
+    /// engine's failure rule reads it: a render that fails ends a bridge that
+    /// plays, and touches nothing when none does.
+    func isPlayingBridge(clipID: UUID) -> Bool {
+        clipNode(for: clipID)?.isBridge ?? false
     }
 
     /// Tears down ONE instrument track's node (unpublish + flush, tap off,
@@ -2662,6 +3022,13 @@ final class PlaybackGraph {
     /// in-tree consumer reads clip-player state (design §5 invariant).
     func clipPlayerForTesting(clipID: UUID) -> AVAudioPlayerNode? {
         clipNode(for: clipID)?.player
+    }
+
+    /// Test seam (I1): the file one clip's player node OPENED, which is the
+    /// render or the source that playback actually plays. The clip-note
+    /// audition must resolve the same file (`AuditionEngineTests`).
+    func clipFileURLForTesting(clipID: UUID) -> URL? {
+        clipNode(for: clipID)?.file.url
     }
 
     private func clipNode(for clipID: UUID) -> ClipNode? {
@@ -2924,6 +3291,24 @@ final class PlaybackGraph {
                 message: Self.stretchPendingMessage(for: pending.clip),
                 beat: pending.beat))
         }
+        // p2-ren Stage A: a bridged clip is NOT silent, so it never gets the
+        // copy above ("plays as silence", which would lie about it). It says
+        // what it plays instead, once per bridge episode, from this same pass.
+        for bridged in stretchBridgedClips
+        where stretchBridgeNoticed.insert(bridged.clip.id).inserted {
+            noticeSink?(EngineNoticeEvent(
+                code: "clip-render-previous",
+                message: Self.renderPreviousMessage(for: bridged.clip),
+                beat: bridged.beat))
+        }
+    }
+
+    /// The `clip-render-previous` copy (p2-ren Stage A; design §5 step 5): a
+    /// clip whose change is still being prepared plays the way it sounded
+    /// before, and says so in words a beginner can act on.
+    static func renderPreviousMessage(for clip: Clip) -> String {
+        "'\(clip.name)' is playing its previous version for a moment: "
+            + "your latest change is still being prepared."
     }
 
     /// The `clip-stretch-pending` copy. m23-ap-p2 p2-notice split it: a TUNED
@@ -3758,6 +4143,7 @@ final class PlaybackGraph {
         trackNodes.removeAll()
         signature.removeAll()
         stretchPendingClips.removeAll()  // no clip is scheduled now, silent or otherwise
+        stretchBridgedClips.removeAll()  // p2-ren Stage A: nor bridged
         for node in instrumentNodes.values {
             node.renderer.publish(nil)
             node.renderer.requestFlush()
