@@ -163,7 +163,7 @@ audio voice, and a commit silences the clip until its render lands (F15).
 | Option | Latency | Real-time safety | Verdict |
 |---|---|---|---|
 | **(a)** On release, play the note from the fresh render. | 250 ms debounce + whole-file render (< 1 s on the user's take [REPORTED]) ≈ 0.3–1.3 s [INFERRED]; grows with take length (UI design P10). | Safe: a buffer on a static player; no DSP on the render thread. | Exact, but silent while dragging. |
-| **(b)** While dragging, shift the ORIGINAL through a live voice. | About one I/O buffer, 5–20 ms [INFERRED]. | signalsmith: FORBIDDEN (UI design P8, m23-q condition 5). `AVAudioUnitTimePitch` or varispeed: safe by Apple's contract [INFERRED], but still pitch DSP on the render thread. | **Loses on honesty.** You would hear shifter X mid-drag and shifter Y after release (ours measures +5.45 c sharp at +2 st, `PitchEditorModel.swift:88-92`); varispeed also changes speed and formants. The audio twin of the C-0 defect. |
+| **(b)** While dragging, shift the ORIGINAL through a live voice. | About one I/O buffer, 5–20 ms [INFERRED]. | signalsmith: FORBIDDEN (UI design P8, m23-q condition 5). `AVAudioUnitTimePitch` or varispeed: safe by Apple's contract [INFERRED], but still pitch DSP on the render thread. | **Loses on honesty.** You would hear shifter X mid-drag and shifter Y after release (ours measured +5.45 c sharp at +2 st before p2-acc's 2026-09-25 fix, `PitchEditorModel.swift:88-92`); varispeed also changes speed and formants. The audio twin of the C-0 defect. |
 | **(c)** Hybrid with no live DSP. | Press: tens of ms [INFERRED]. Release: as (a). | As (a). | **CHOSEN.** |
 
 **The decision, (c):**
@@ -258,6 +258,23 @@ pointer's beat holds within 0.5 px. Planted, shown red: an anchor re-derived per
 doc names (`PianoRollView.swift:389-397`).
 
 **Size S · after I0 · `swift-app-engineer`.**
+
+**AMENDED 2026-09-25 (orchestrator, from source, after I2-1…I2-5 landed and were verified):**
+- **The route:** the pinch does NOT write `layout.setPitchEditorPPB` from the pane. The pane pins "no slot writes"
+  (`PitchEditorInteractionSiteTests`), so it goes through `onZoom(.timeScale)` to
+  `AppModel.setPitchEditorTimeScale` (`DAWProApp.swift` ~:6664). That one writer then calls
+  `panelLayout.setPitchEditorPPB`.
+- **The anchor math** lives in `PitchEditorPinch.tick` (`PitchEditorViewport.swift` ~:300): the gesture-start scale
+  × the cumulative magnification, with the anchor captured once, as decided above.
+- **The staged seam is the `pinch` act** of the interaction bridge (`PitchEditorInteractionBridge.swift` ~:136). The
+  `debug.pitchEditor` echo carries a `pinch` block.
+- **The gate is `scripts/gates/m23ap-i2-pitch-pinch.mjs`: 28/28** on the orchestrator's own build. The anchored beat
+  held within 1 pt through the sweep, and the negative control drifted up to 320 pt.
+- **One gap remains:** a real trackpad pinch is not driven by anything in this tree (m23-g1). The user trying it on
+  the next build is the positive control.
+- ⚠️ **Known caveat (L2a finding):** after a scroll, zooming out past fit leaves I0's scroll reader at the old offset.
+  The ruler uses `shownOffsetX`, but the pinch anchor still reads the raw offset. That is the I6b/I0 owner's to fix
+  at the root.
 
 ## 6. I3: the cut line
 
@@ -401,6 +418,77 @@ pane wiring is a looked-at capture during playback. Planted, shown red: the scro
 path (the roll's warning, `PianoRollView.swift:3268-3273`).
 
 **Size M** (ruler S, follow M) **· after I0 · `swift-app-engineer`.**
+
+**AMENDED 2026-09-25 (the I5 lane, from source and staging measurements):**
+- **A sibling row, not a pinned overlay with an 18 pt inset.** The ruler is a row ABOVE the scrollers
+  (`editorBody` = `rulerRow` over `editorScrollers`), with a 52 pt `panelRaised` corner over the pitch-name
+  column. There is no inset, and the captures show the top pitch row fully visible in every state. An overlay
+  would need its inset kept in step with I0's vertical reader and I6c's fill height; a row outside the
+  scroller needs neither.
+- **The ruler's offset is `PitchEditorViewport.shownOffsetX`, not I0's raw reading.** MEASURED: scroll to 900
+  at 160 pt/beat, zoom out until the clip fits (1083 pt content in a 1364 pt box), then press TIME − again. The
+  reader then holds 900 while the grid draws at 0. A ruler drawn with the reading showed bar 8 over the clip's
+  first bar, and its click landed 28 beats late. `shownOffsetX` clamps to the scroller's real range; both the
+  band's `scrollX` and `rulerTick` use it. The root (a `scrollTo` issued while the content fits) is not fixed.
+- **The snap needs density `.pro`.** `SnapResolution.effective(appSnap:density: .pro, picked: .sixteenth)`,
+  because the Simple density locks placement to whole beats (a planted `.simple` went red). The snap is taken
+  in CLIP-LOCAL beats; the gate's clip starts at beat 3.1 so that a project-space snap is caught.
+- **⌘-click does not seek on a surface that draws no notes** (analysing, no notes found, refused): the router
+  answers `.inert` there, so no click happens. "It shows in every state" is true of the RULER, which places
+  the playhead in all of them; it is not true of ⌘-click.
+- **⌥ means "free" twice:** on the ruler and on ⌘-click it bypasses the 1/16 snap; on a note drag it is the
+  existing free-pitch modifier.
+- **Wiring:** the pane takes `appSnap` (the app's `effectiveClipSnap`), `onSeek` (installed on the MODEL; the
+  view never calls it; the app's closure calls `store.seek(toBeats:)`), `follow` and `isPlaying`. Follow's
+  `followDrives` includes "no pinch in progress", and the manual-scroll detector reads that same predicate, so
+  a pinch neither turns the page nor suspends follow.
+- **Echo and staged step:** `playhead {positionBeats, x, screenX, insideClip, rulerScrollX, placementCount,
+  lastPlacementBeat, follow {enabled, suspended}}`; `{act: "ruler", x, option?}` takes a RULER-LOCAL x.
+- **The ruler numbers are clip-local** (the band's documented convention), so for a clip that does not start
+  on a bar line, the transport's bar.beat and the ruler's differ by the clip's start. Recorded, not changed.
+- **Drifted cites:** the line numbers in this section (`PianoRollView.swift:3137-3158`, `:3115`, `:3268-3273`,
+  `PitchEditorView.swift:1488-1493`, `:44-52`) had moved before I5 was built. Cite by name: `scrubStrip`,
+  `scrubDrag`, the view's banner.
+- **The follow capture:** `captureUI` cannot film motion, and `scripts/video/screenrec` matched the staging
+  window but captured 0 frames. The gate's follow legs are the evidence instead: no page turn while a pinch
+  is live, a page turn once it ends, suspension on a manual scroll, and clearing on rearm.
+
+**AMENDED 2026-09-25, later (I5-F1: the ruler and the snap use the SONG's bars).** This supersedes the line above
+that reads "The ruler numbers are clip-local … Recorded, not changed", and the clip-local half of "The snap is
+taken in CLIP-LOCAL beats".
+- **Why:** looked at on staging (`i5-4-ruler-default-ppb32.png`, vocal at beat 3.1), the transport read 4.4 and the
+  arrange line sat just before bar 5, while this ruler's handle sat near "4.1¾". A beginner reads one song and one
+  set of bars.
+- **Numbers:** the ruler names the SONG's bars (`PitchEditorSongRuler.ticks`): a tick at every whole song beat inside
+  the clip, placed at `(beat − clip start) × pt/beat`; bars and labels from the project's `MeterMap.barBeat` (the
+  arrange ruler's and the transport readout's own call, with the arrange's `beatInBar < 0.001` bar test); labels
+  thinned on the song's bar index. Never a hard-coded 4/4 or a `beatsPerBar` scalar: a meter change inside the
+  clip re-spaces the ticks where the arrange does.
+- **Snap:** `placementBeat` snaps the PROJECT beat to the song's 1/16 (0.25 beat from beat 0; song bars always
+  start on whole beats), then clamps to the clip. At the clip's edges the clamp wins, so an edge can be off the
+  grid: x 0 on a clip at 3.1 snaps to 3.0 and clamps back to 3.1. The ⌘-click and the ghost line share the one
+  producer, so they moved too.
+- **Tempo:** no change needed, and none made. This pane's x axis is beats, like the arrange's; the tempo map only
+  places the audio on it. A tempo change inside the clip moves the notes against the ruler and moves no tick
+  (pinned with a two-segment map).
+- **Why the roll's clip-local reason does not apply here:** the roll draws bar lines on its note grid counting from
+  the clip's first beat, and its ruler must agree with them. This pane draws no time grid (its lines are pitch
+  rows), so the ruler's ticks are the only bar lines on screen.
+- **The band:** `PianoRollScrubRulerBand` gains `songMeter: MeterMap?` (default `nil`). Set, it draws an `Equatable`
+  song canvas through the same renderer (`RulerCanvas.draw`); `nil` is the roll's call, whose inputs and pixels are
+  unchanged. ~~The piano roll's ruler, grid emphasis, `BAR n` readout and scrub snap are still clip-local~~ →
+  **Superseded 2026-09-25 by I5-F2:** the roll passes `songMeter` too, and all four of its sites move together:
+  the ruler; the grid's bar lines (`PianoRollSongGrid.forEachLine`); the header's `BAR n`
+  (`PianoRollBarOps.targetBar`, song bar, with the insert/delete range on that same bar); and `placementLocalBeat`
+  (the song beat snapped, then clamped to the clip). The snap SIZE stays the roll's `effectiveSnap`; only where the
+  grid starts moved. **Open, as I5-F3 (in progress 2026-09-25):** note add/move/resize/scale/paste still snap
+  clip-locally, so an off-grid clip can place notes between the drawn lines. I5-F3 moves them onto the song grid and
+  refuses, in words, a delete of a bar that lies only partly inside the clip.
+- **Echo:** `debug.pitchEditor` `playhead` gains `transportReadout` (the transport bar's own string) and
+  `ruler {numbering: "song", labels: [{x, text, isBar}]}`, computed through `PitchEditorSongRuler.ticks` from the
+  pane's geometry and `transport.meterMap`. The gate's snap legs now assert the song grid (and that the placement is
+  OFF the clip-local grid); new legs assert the first bar label ("2" at 0.9 beat), a click on "5" reading "5.1",
+  and the ruler's bar under the playhead matching the transport's.
 
 ## 9. I6: a bigger editor, and autoscroll
 

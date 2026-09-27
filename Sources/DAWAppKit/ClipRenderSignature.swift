@@ -27,7 +27,7 @@ import DAWCore
 /// |---|---|
 /// | source path ‖ size ‖ mtime (`sourceIdentityFields`) | `audioFileURL`. `ProjectStore.save` rewrites it IN PLACE when media is copied into the bundle. Size and mtime are file-system facts: stat-ing files on every body evaluation is not an option, so a file rewritten at the same path is invisible here. |
 /// | ratio and semitones BIT PATTERNS, formant flag | the same bit patterns and flag |
-/// | `stretchEngineVersion`, `shaping:` version | nothing: per-build constants |
+/// | `stretchEngineVersion`, `pv:` transposer version, `shaping:` version | nothing: per-build constants (`pv:` is present on a transposing render, an edited render, or a 0-st render within ±5 % of ratio 1: a predicate over the semitones, the edit digest and the ratio, all mirrored here) |
 /// | `pitch:` + `PitchEditSetDigest.hex(pitchEdits)`, only when non-empty | `Tuning`, below |
 /// | `contour:` key (contour-shaping sets only) | nothing extra: it depends on the source and the edits (both above) and on the per-process detector (a constant) |
 ///
@@ -46,12 +46,20 @@ import DAWCore
 ///   equal, and so does `Hashable`. The digest does not, so a lone ±0 flip
 ///   re-keys the render (and silences the clip while it re-renders). Comparing
 ///   bytes also compares a field added to `NoteSegment` tomorrow with no list
-///   here to update. That is sound because a note is plain data: a UUID,
-///   Doubles, and (since I7a) ONE trailing Bool, `isCleared`. Its first `size`
-///   bytes are exactly its fields and only its tail is padding, which the
-///   comparison skips. A future field that added INTERIOR padding or a
-///   reference could only make EQUAL notes compare unequal (one spare poll),
-///   never the reverse, and `noteBytesAreExactlyItsFields` would say so first;
+///   here to update. That is sound because a note is plain data with ONE
+///   exception: a UUID, Doubles, the drawn shape's start index (an `Int`) and
+///   sample array (C5b-1), and two trailing one-byte fields, `isCleared` (I7a)
+///   and `origin` (U-A). Its first `size` bytes are exactly its fields and
+///   only its tail is padding, which the comparison skips;
+/// * **the drawn shape's samples BY CONTENTS.** The array is the one
+///   REFERENCE in a note: its 8 bytes are a pointer, and comparing pointers
+///   would call two equal drawings unequal whenever they live in different
+///   storage (a decode, an undo), and says nothing about the samples. So
+///   `bitIdentical` compares every byte EXCEPT those 8, then the two arrays
+///   with `==` (exact for `Int16`: no signed zero to lose). A future field that
+///   added INTERIOR padding or another reference could only make EQUAL notes
+///   compare unequal (one spare poll), never the reverse, and
+///   `noteBytesAreExactlyItsFields` would say so first;
 /// * **everything else through the type's own synthesized `==`**, on a copy with
 ///   the notes emptied and the stamp cleared, so a set-level field added
 ///   tomorrow is compared the day it lands.
@@ -72,7 +80,8 @@ import DAWCore
 /// `hasPitchEdits`, which stops at the first edited note; it reads the whole
 /// table only when nothing, or only the last note, is edited. Comparing an
 /// unchanged tuning is O(1), because the note arrays share storage. Only a
-/// tuning that really changed (or was rebuilt) costs one `memcmp` over its notes.
+/// tuning that really changed (or was rebuilt) costs one `memcmp` over its notes,
+/// plus one `==` per note's drawn-shape array (free when both share storage).
 public struct ClipRenderSignature: Equatable, Sendable {
 
     /// Clip id → the inputs its render is keyed on, for every clip that plays
@@ -131,33 +140,71 @@ public struct ClipRenderSignature: Equatable, Sendable {
                 && bitIdentical(lhs.notes, rhs.notes)
         }
 
-        /// True when both tables hold the same bytes. Shared storage (the common
-        /// case: nothing touched the set) answers without reading a note.
+        /// True when both tables hold the same bytes and the same drawn
+        /// samples. Shared storage (the common case: nothing touched the set)
+        /// answers without reading a note.
         ///
         /// ⚠️ **Each note is compared over its `size` bytes, never its
-        /// `stride`.** Since I7a added `isCleared` (a Bool, declared last), a
-        /// note is 129 bytes stored at a 136-byte stride, and the 7 tail bytes
-        /// are padding that nothing initialises. Comparing them would let two
-        /// EQUAL tables read unequal depending on what the allocator left
-        /// there. `noteBytesAreExactlyItsFields` pins that all padding is at the
-        /// tail, so a note's first `size` bytes are exactly its fields.
+        /// `stride`.** `isCleared` (a Bool) and `origin` (a one-byte enum) are
+        /// declared last, so a note's `size` is not a multiple of 8 and the
+        /// tail up to its `stride` is padding that nothing initialises.
+        /// Comparing it would let two EQUAL tables read unequal depending on
+        /// what the allocator left there. `noteBytesAreExactlyItsFields` pins
+        /// that all padding is at the tail, so a note's first `size` bytes are
+        /// exactly its fields.
+        ///
+        /// ⚠️ **C5b-1: the 8 bytes of `shapeTenthsOfCents` are SKIPPED and its
+        /// samples compared with `==` instead.** They are a pointer. Pointer
+        /// bytes would call equal drawings in different storage unequal, and
+        /// they are not the samples the render hears.
         static func bitIdentical(_ lhs: [NoteSegment], _ rhs: [NoteSegment]) -> Bool {
             guard lhs.count == rhs.count else { return false }
-            return lhs.withUnsafeBytes { left in
+            var sharedStorage = false
+            let bytesEqual = lhs.withUnsafeBytes { left in
                 rhs.withUnsafeBytes { right in
                     guard let l = left.baseAddress, let r = right.baseAddress else {
                         return left.count == right.count
                     }
-                    if l == r { return true }
+                    if l == r {
+                        sharedStorage = true
+                        return true
+                    }
                     let size = MemoryLayout<NoteSegment>.size
                     let stride = MemoryLayout<NoteSegment>.stride
-                    for index in 0..<lhs.count
-                    where memcmp(l + index * stride, r + index * stride, size) != 0 {
-                        return false
+                    let pointer = shapePointerBytes
+                    for index in 0..<lhs.count {
+                        let a = l + index * stride
+                        let b = r + index * stride
+                        if memcmp(a, b, pointer.lowerBound) != 0
+                            || memcmp(a + pointer.upperBound, b + pointer.upperBound,
+                                      size - pointer.upperBound) != 0 {
+                            return false
+                        }
                     }
                     return true
                 }
             }
+            // One table in shared storage holds the same arrays too: O(1).
+            guard bytesEqual, !sharedStorage else { return bytesEqual }
+            // `Array ==` answers two arrays in shared storage (and two empty
+            // ones) without reading a sample.
+            for index in lhs.indices
+            where lhs[index].shapeTenthsOfCents != rhs[index].shapeTenthsOfCents {
+                return false
+            }
+            return true
         }
+
+        /// The byte range of `NoteSegment.shapeTenthsOfCents` inside a note:
+        /// its offset, and one array reference's size.
+        /// `noteBytesAreExactlyItsFields` pins that it sits right before
+        /// `isCleared`. `offset(of:)` is nil only for a computed property, so
+        /// the fallback (compare nothing as a pointer: every byte, a spare
+        /// poll at worst) is unreachable while the field is stored.
+        static let shapePointerBytes: Range<Int> = {
+            guard let offset = MemoryLayout<NoteSegment>.offset(of: \NoteSegment.shapeTenthsOfCents)
+            else { return MemoryLayout<NoteSegment>.size..<MemoryLayout<NoteSegment>.size }
+            return offset..<(offset + MemoryLayout<[Int16]>.size)
+        }()
     }
 }

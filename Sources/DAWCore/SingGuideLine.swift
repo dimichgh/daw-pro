@@ -1,0 +1,233 @@
+import Foundation
+
+// p2-sing-d3 (design docs/design/2026-09-27-p2-sing-integration.md §5.4, §3.7): the ONE guided line a singer records
+// to add their own voice — Fixture P1, "Row, row, row your boat, gently down the stream" — and the two bundled guide
+// tunes that teach it. This file is the ONE place that knows P1's notes, its words, the guides' layout and where their
+// bytes live. Pure Foundation (DAWCore's rule): it resolves URLs and parses our own PCM16 WAVs; it never plays audio.
+//
+// Every consumer reads P1 from here: `VoiceClipCheck` (the spike's single-offset alignment and its 4.8 s span),
+// `VoiceReferenceLabeler` (Route N's DTW guide and the words), and the recorder UI (the two tunes).
+
+/// Fixture P1 and its two sing-along guide tunes.
+public enum SingGuideLine {
+
+    // MARK: - The line
+
+    /// The words exactly as the recorder shows them.
+    public static let text = "Row, row, row your boat, gently down the stream"
+
+    /// Tempo of the guide tunes, and so of the line as written.
+    public static let tempoBpm = 100.0
+    /// 0.6 s per beat, through `TempoMap` (the one home of beat↔seconds conversion; the tempo lint enforces it).
+    public static var secondsPerBeat: Double { TempoMap(constantBPM: tempoBpm).secondsPerBeat(atBeat: 0) }
+
+    /// One written note of P1, relative to the line's starting pitch.
+    public struct Note: Sendable, Equatable {
+        /// Semitones above the line's first note (C4 on the higher tune, C3 on the lower).
+        public let semitonesAboveStart: Int
+        public let startBeat: Double
+        public let lengthBeats: Double
+        /// The syllable sung on this note ("gent-" and "-ly" split "gently").
+        public let syllable: String
+    }
+
+    /// P1 as written (`own_voice.py` `P1_NOTES` / `make_guides.py` `P1`, which agree): 10 notes, 8 beats.
+    public static let notes: [Note] = [
+        Note(semitonesAboveStart: 0, startBeat: 0, lengthBeats: 1, syllable: "Row"),
+        Note(semitonesAboveStart: 0, startBeat: 1, lengthBeats: 1, syllable: "row"),
+        Note(semitonesAboveStart: 0, startBeat: 2, lengthBeats: 0.75, syllable: "row"),
+        Note(semitonesAboveStart: 2, startBeat: 2.75, lengthBeats: 0.25, syllable: "your"),
+        Note(semitonesAboveStart: 4, startBeat: 3, lengthBeats: 1, syllable: "boat"),
+        Note(semitonesAboveStart: 4, startBeat: 4, lengthBeats: 0.75, syllable: "gent-"),
+        Note(semitonesAboveStart: 2, startBeat: 4.75, lengthBeats: 0.25, syllable: "-ly"),
+        Note(semitonesAboveStart: 4, startBeat: 5, lengthBeats: 0.75, syllable: "down"),
+        Note(semitonesAboveStart: 5, startBeat: 5.75, lengthBeats: 0.25, syllable: "the"),
+        Note(semitonesAboveStart: 7, startBeat: 6, lengthBeats: 2, syllable: "stream"),
+    ]
+
+    /// One word of the line and the notes it is sung on (`own_voice.py` `P1_WORDS`). "gently" spans two notes.
+    public struct Word: Sendable, Equatable {
+        public let text: String
+        public let noteIndices: [Int]
+    }
+
+    public static let words: [Word] = [
+        Word(text: "Row", noteIndices: [0]), Word(text: "row", noteIndices: [1]), Word(text: "row", noteIndices: [2]),
+        Word(text: "your", noteIndices: [3]), Word(text: "boat", noteIndices: [4]),
+        Word(text: "gently", noteIndices: [5, 6]), Word(text: "down", noteIndices: [7]),
+        Word(text: "the", noteIndices: [8]), Word(text: "stream", noteIndices: [9]),
+    ]
+
+    /// 8 beats.
+    public static var lengthBeats: Double { notes.map { $0.startBeat + $0.lengthBeats }.max() ?? 0 }
+    /// 8 × 0.6 = 4.8 s — the spike's `P1_SPAN`, which the clip check's `not_cut_off` and `levels` use verbatim.
+    public static var spanSeconds: Double { lengthBeats * secondsPerBeat }
+
+    /// A written note placed in seconds, relative to the line's first onset.
+    public struct TimedNote: Sendable, Equatable {
+        public let startSeconds: Double
+        public let endSeconds: Double
+        public let midi: Int
+    }
+
+    /// P1 in seconds from its first onset, starting on `startMidi` (the spike's `P1_REL` for `startMidi` 60).
+    public static func timedNotes(startMidi: Int = 60) -> [TimedNote] {
+        notes.map {
+            TimedNote(startSeconds: $0.startBeat * secondsPerBeat,
+                      endSeconds: ($0.startBeat + $0.lengthBeats) * secondsPerBeat,
+                      midi: startMidi + $0.semitonesAboveStart)
+        }
+    }
+
+    // MARK: - The two guide tunes
+
+    /// The two bundled tunes (§5.4 step 1: "Pick the tune that's easiest for you").
+    public enum Guide: String, CaseIterable, Sendable {
+        case high
+        case low
+
+        /// The line's first note: C4 on the higher tune, C3 on the lower (`make_guides.py` `START_MIDI`).
+        public var startMidi: Int { self == .high ? 60 : 48 }
+        public var fileName: String { "row-guide-\(rawValue).wav" }
+        /// SHA-256 of the shipped bytes — the published SING-6 page files, regenerated byte-for-byte by
+        /// `scratchpad/w6/SING6/make_guides.py` (twice, 2026-09-27). A test pins these.
+        public var sha256: String {
+            self == .high
+                ? "2b16520a3e7617789a8852e03ae45ba6fe15b53d00372d686f2a0c6c129535cb"
+                : "05608e40c4a7e2344485f7dd31823ae70b4714761e75e96a9f2966f67953264c"
+        }
+        /// Measured by SING-6 on the published bytes [M]: −9.5 dBTP (higher), −9.1 dBTP (lower). Re-gated by a test.
+        public var measuredTruePeakDbtp: Double { self == .high ? -9.5 : -9.1 }
+    }
+
+    /// Both tunes were loudness-matched to −18.0 LUFS [M, SING-6]. Re-gated by a test.
+    public static let guideIntegratedLufs = -18.0
+
+    /// File layout, identical for both tunes (`make_guides.py`): 48 kHz mono 16-bit PCM; 0.25 s of silence, four
+    /// count-in clicks 0.6 s apart, the 4.8 s melody, 1.0 s of silence — 8.45 s in all.
+    public static let guideSampleRate = 48_000.0
+    public static let guideFrames = 405_600
+    public static let guideLeadSilenceSeconds = 0.25
+    public static let guideCountInBeats = 4
+    public static let guideTailSilenceSeconds = 1.0
+    /// Where the melody's first note starts inside a guide file: 0.25 + 4 × 0.6 = 2.65 s.
+    public static var guideMelodyStartSeconds: Double {
+        guideLeadSilenceSeconds + Double(guideCountInBeats) * secondsPerBeat
+    }
+
+    /// The written notes as they sound inside `guide`'s file (absolute file seconds).
+    public static func notesInGuideFile(_ guide: Guide) -> [TimedNote] {
+        timedNotes(startMidi: guide.startMidi).map {
+            TimedNote(startSeconds: $0.startSeconds + guideMelodyStartSeconds,
+                      endSeconds: $0.endSeconds + guideMelodyStartSeconds, midi: $0.midi)
+        }
+    }
+
+    // MARK: - Resource resolution (the `BundledSamples.url(for:)` precedent, candidate for candidate)
+
+    /// Anchors `Bundle(for:)` to the image DAWCore was linked into. Never instantiated.
+    private final class BundleAnchor {}
+
+    /// The shipped guide file, or nil if it did not make it into this build. NOT `Bundle.module` (its accessor ends
+    /// in `fatalError`), and anchored on `Bundle(for:)` rather than `Bundle.main` — see `BundledSamples.url(for:)`.
+    public static func url(for guide: Guide) -> URL? {
+        let bundleName = "daw-pro_DAWCore.bundle"
+        let code = Bundle(for: BundleAnchor.self)
+        var candidates: [URL?] = [
+            code.resourceURL?.appendingPathComponent(bundleName),
+            code.bundleURL.appendingPathComponent(bundleName),
+        ]
+        if code.bundleURL.pathExtension == "xctest" {
+            candidates.append(code.bundleURL.deletingLastPathComponent().appendingPathComponent(bundleName))
+        }
+        let stem = (guide.fileName as NSString).deletingPathExtension
+        for url in candidates.compactMap({ $0 }) {
+            guard let bundle = Bundle(url: url) else { continue }
+            // `.copy("Resources/BundledSamples")` keeps the folder, so the file sits at
+            // `BundledSamples/sing-guides/<file>` inside the resource bundle.
+            if let resource = bundle.url(forResource: stem, withExtension: "wav",
+                                         subdirectory: "BundledSamples/sing-guides") {
+                return resource
+            }
+        }
+        return nil
+    }
+
+    /// Why a guide could not be loaded.
+    public enum GuideError: Error, Equatable, CustomStringConvertible {
+        case missing(String)
+        case unreadable(String)
+        case unsupportedFormat(String)
+
+        public var description: String {
+            switch self {
+            case .missing(let s), .unreadable(let s), .unsupportedFormat(let s): return s
+            }
+        }
+    }
+
+    /// The guide's samples, decoded from the shipped bytes.
+    public static func loadGuide(_ guide: Guide) throws -> RenderedAudio {
+        guard let url = url(for: guide) else {
+            throw GuideError.missing("the \(guide.rawValue) guide tune (\(guide.fileName)) is missing from this build")
+        }
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch {
+            throw GuideError.unreadable("could not read \(guide.fileName): \(error.localizedDescription)")
+        }
+        return try decodePCM16WAV(data)
+    }
+
+    /// A minimal RIFF/WAVE reader for 16-bit integer PCM — the ONE format this repo's generators write for bundled
+    /// content. Walks the chunk list (so an extra chunk before `data` is tolerated) and refuses anything else loudly;
+    /// it is not a general decoder, and DAWCore never needs one (the engine decodes user files).
+    public static func decodePCM16WAV(_ data: Data) throws -> RenderedAudio {
+        let bytes = [UInt8](data)
+        func u32(_ at: Int) -> Int {
+            Int(bytes[at]) | Int(bytes[at + 1]) << 8 | Int(bytes[at + 2]) << 16 | Int(bytes[at + 3]) << 24
+        }
+        func u16(_ at: Int) -> Int { Int(bytes[at]) | Int(bytes[at + 1]) << 8 }
+        guard bytes.count >= 12, String(decoding: bytes[0..<4], as: UTF8.self) == "RIFF",
+              String(decoding: bytes[8..<12], as: UTF8.self) == "WAVE" else {
+            throw GuideError.unsupportedFormat("not a RIFF/WAVE file")
+        }
+        var offset = 12
+        var channels = 0
+        var sampleRate = 0
+        var bits = 0
+        var format = 0
+        var dataRange: Range<Int>?
+        while offset + 8 <= bytes.count {
+            let id = String(decoding: bytes[offset..<offset + 4], as: UTF8.self)
+            let size = u32(offset + 4)
+            let body = offset + 8
+            guard body + size <= bytes.count else { break }
+            if id == "fmt ", size >= 16 {
+                format = u16(body)
+                channels = u16(body + 2)
+                sampleRate = u32(body + 4)
+                bits = u16(body + 14)
+            } else if id == "data" {
+                dataRange = body..<(body + size)
+            }
+            offset = body + size + (size & 1)
+        }
+        guard format == 1, bits == 16, channels >= 1, sampleRate > 0, let range = dataRange else {
+            throw GuideError.unsupportedFormat(
+                "expected 16-bit integer PCM, got format \(format), \(bits) bits, \(channels) channel(s)")
+        }
+        let frameCount = range.count / (2 * channels)
+        var channelData = [[Float]](repeating: [Float](repeating: 0, count: frameCount), count: channels)
+        var at = range.lowerBound
+        for frame in 0..<frameCount {
+            for channel in 0..<channels {
+                let raw = Int16(bitPattern: UInt16(bytes[at]) | UInt16(bytes[at + 1]) << 8)
+                channelData[channel][frame] = Float(raw) / 32768.0
+                at += 2
+            }
+        }
+        return RenderedAudio(sampleRate: Double(sampleRate), channelData: channelData)
+    }
+}

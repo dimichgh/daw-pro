@@ -143,6 +143,7 @@ let package = Package(
             name: "CSignalsmithStretch",
             exclude: [
                 "VENDORED.md",
+                "patches",
                 "vendor/signalsmith-stretch/LICENSE.txt",
                 "vendor/signalsmith-linear/LICENSE.txt",
             ],

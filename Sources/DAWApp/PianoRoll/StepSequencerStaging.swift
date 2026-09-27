@@ -44,7 +44,9 @@ extension AppModel {
     ///     count, and `rowHeight`/`stepWidth`. All four are unknowable from
     ///     outside — the lane set depends on the track's instrument AND on which
     ///     pitches the clip already uses, and the column count on the clip
-    ///     length and the picked step size.
+    ///     length and the picked step size. m23-ap I5-F4 adds `phaseBeats`,
+    ///     `firstStepSongBeat` and `barStarts` — where the columns sit on the
+    ///     SONG's grid, which an off-grid clip shifts.
     ///   - `{mode:"steps"|"notes"}` — show that editor. A gate MUST be able to
     ///     put the pane in steps mode: on a non-drum track the surface does not
     ///     exist until somebody asks for it.
@@ -174,6 +176,16 @@ extension AppModel {
         object["stepWidth"] = .number(Double(stepSequencer.reportedStepWidth))
         object["laneCount"] = .number(Double(lanes.count))
         object["lanes"] = .array(lanes)
+        // m23-ap I5-F4 — WHERE the drawn columns sit on the song's grid: column
+        // k starts at clip-local beat `k · stepBeats − phaseBeats` (song beat
+        // `firstStepSongBeat + k · stepBeats`), and `barStarts` are the columns
+        // the grid drew as bar lines with their SONG bar numbers. Reported up
+        // from the drawing layer like everything else here.
+        object["phaseBeats"] = .number(stepSequencer.reportedPhaseBeats)
+        object["firstStepSongBeat"] = .number(stepSequencer.reportedFirstStepSongBeat)
+        object["barStarts"] = .array(stepSequencer.reportedBarMarks.map { mark in
+            .object(["step": .number(Double(mark.step)), "bar": .number(Double(mark.bar))])
+        })
         // The PATTERN the grid drew.
         object["filled"] = .array(filled)
         // The clip the editor is ACTUALLY open on — so a red leg reads "no clip

@@ -41,6 +41,28 @@ public enum SnapResolution: String, CaseIterable, Sendable {
         }
     }
 
+    /// **THE PITCH EDITOR'S GRID ARITHMETIC** (m23-ap I5):
+    /// `beat` rounded to the NEAREST line of this grid, floored at 0; `off`
+    /// passes it through (still floored at 0).
+    ///
+    /// ⚠️ m23-ap I5-F3: the piano roll no longer snaps here. Its one home is
+    /// `PianoRollSongGrid.snapLocalBeat`, which phases the grid from the SONG's
+    /// beat 0 and makes `.bar` meter-aware; its on-grid branch repeats this
+    /// expression VERBATIM on purpose, because that repetition is what the
+    /// bit-identity pin (`PianoRollSongGridTests.onGridSnapsAreBitIdentical`)
+    /// compares. The paragraph below is the history of that move.
+    ///
+    /// Hoisted out of `PianoRollModel.snap(beat:resolution:)`, which now forwards
+    /// here, because the pitch editor's playhead placement needs the same rule and
+    /// has no roll model to ask — an instance method on a `@MainActor` class was
+    /// the only home the rounding had. One rule, two surfaces (the user's
+    /// 2026-08-13 ruling, `PianoRollPlayhead.scrubProjectBeat`'s doc), and
+    /// never a second `(beat / grid).rounded() * grid` beside it.
+    public func snapped(_ beat: Double) -> Double {
+        guard let grid = beats, grid > 0 else { return max(0, beat) }
+        return max(0, (beat / grid).rounded() * grid)
+    }
+
     /// Chip / menu label.
     public var label: String {
         switch self {
@@ -171,6 +193,19 @@ public final class PianoRollModel {
     public var selection: Set<UUID> = []
     /// Clip length in beats — defines the grid's drawn width.
     public var clipLengthBeats: Double
+    /// m23-ap I5-F3 — where the edited clip sits on the SONG's grid (its start on
+    /// the song timeline and the song's meter map). Every snap this model makes —
+    /// `snap`/`snapUp`, so note add, move, resize, group scale and the paste
+    /// anchors — lands on the song's lines through `PianoRollSongGrid
+    /// .snapLocalBeat`, the lines the grid draws.
+    ///
+    /// Defaults to `.clipLocal` (a clip at song beat 0 in 4/4), where the song's
+    /// grid and the clip's are the same lines and every snap is bit-identical to
+    /// before I5-F3 — so a model built headless snaps as it always did. The roll
+    /// view sets the real clip's context at init and on every clip move or meter
+    /// change. `@ObservationIgnored`: nothing draws it; a gesture reads it when it
+    /// snaps.
+    @ObservationIgnored public var songGrid: PianoRollSongGrid.Context = .clipLocal
 
     /// Per-note snapshot captured at the start of a move drag so each tick maps
     /// the raw translation off the original position (no accumulated drift).
@@ -381,9 +416,14 @@ public final class PianoRollModel {
 
     /// Snaps `beat` to the nearest grid line (>= 0). `off` passes the value
     /// through (still floored at 0).
+    ///
+    /// ⭐ m23-ap I5-F3: the lines are the SONG's (`songGrid`), through
+    /// `PianoRollSongGrid.snapLocalBeat` — the roll's one home for its grid
+    /// arithmetic. It used to forward to `SnapResolution.snapped`, which counts
+    /// from the clip's first beat; for a clip that starts on a grid line the
+    /// two are bit-identical (pinned in `PianoRollSongGridTests`).
     public func snap(beat: Double, resolution: SnapResolution) -> Double {
-        guard let grid = resolution.beats, grid > 0 else { return max(0, beat) }
-        return max(0, (beat / grid).rounded() * grid)
+        PianoRollSongGrid.snapLocalBeat(beat, context: songGrid, resolution: resolution)
     }
 
     /// Snaps `beat` UP to the next grid line at or after it (>= 0). `off` passes
@@ -401,9 +441,12 @@ public final class PianoRollModel {
     ///
     /// It lives HERE, beside `snap`, so the roll keeps ONE home for grid
     /// arithmetic — `PasteAnchorPolicy` deliberately does not re-derive it.
+    ///
+    /// m23-ap I5-F3: on the SONG's grid too (`songGrid`), the `.upward` twin of
+    /// `snap`.
     public func snapUp(beat: Double, resolution: SnapResolution) -> Double {
-        guard let grid = resolution.beats, grid > 0 else { return max(0, beat) }
-        return max(0, (beat / grid).rounded(.up) * grid)
+        PianoRollSongGrid.snapLocalBeat(beat, context: songGrid, resolution: resolution,
+                                        direction: .upward)
     }
 
     /// Length a freshly-added note gets: one grid cell, or 1 beat when snapping

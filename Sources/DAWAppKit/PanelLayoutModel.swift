@@ -280,9 +280,11 @@ public final class PanelLayoutStore {
     /// value for the whole console — channel strips, bus strips, and the master
     /// chain all read it, the way density is read per-console and never per-strip.
     public private(set) var mixerInsertsCollapsed: Bool
-    /// Whether the arrange lanes and the piano-roll bands keep the playhead in
-    /// frame during playback (m23-c2). ONE value for both surfaces — the follow
-    /// POLICY is shared, so its switch is too.
+    /// Whether the arrange lanes, the piano-roll bands and the pitch (note)
+    /// editor keep the playhead in frame during playback (m23-c2; the pitch
+    /// editor since m23-ap I5). ONE value for all three surfaces — the follow
+    /// POLICY is shared, so its switch is too. Each surface keeps its own
+    /// runtime (`FollowPlayheadModel`), so scrolling one never suspends another.
     public private(set) var followPlayhead: Bool
     /// Whether a piano-roll drag / keyboard-gutter click sounds the pitch on
     /// the track's instrument (m23-d). ONE value for both audition surfaces.
@@ -410,7 +412,8 @@ public final class PanelLayoutStore {
     ///
     /// Drivers: `AppModel.zoomPitchEditorIn/Out/Reset` (⌘+ / ⌘− / ⌘0, routed by
     /// `EditorSurfaceRouter.resolve` — never by a raw
-    /// `openPitchEditorClip != nil`) and `debug.panelLayout {pitchEditorPPB}`.
+    /// `openPitchEditorClip != nil`), `AppModel.setPitchEditorTimeScale` (the
+    /// pane's pinch, m23-ap I2) and `debug.panelLayout {pitchEditorPPB}`.
     public func setPitchEditorPPB(_ value: CGFloat) {
         pitchEditorPPB = value.clamped(to: Self.pitchEditorPPBRange)
         backing.storeValue(Double(pitchEditorPPB), forKey: Self.pitchEditorPPBKey)

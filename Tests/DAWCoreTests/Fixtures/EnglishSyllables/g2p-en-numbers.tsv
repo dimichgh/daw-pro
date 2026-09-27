@@ -1,0 +1,4470 @@
+# What the singing facade SINGS for a number token, and how many syllables that is (W7-SD1, 2026-09-27).
+#
+# The facade (scripts/sing/singlib/phonemes.py, G2PPhonemizer.__call__) phonemizes a lyric word as
+#     g2p(normalize_numbers(word.lower()).replace("-", " "))
+# and sings the whole result across that word's notes. Column 1 is the word, column 2 is exactly that
+# pre-g2p text, column 3 is its syllable count: the stress-marked phones of each word's FIRST CMUdict
+# pronunciation. EnglishSyllables.estimate(column 1) must equal column 3 on every row.
+#
+# Made with REAL g2p_en, not a re-derivation:
+#   python: the p2-sing spike's venv-alt, run with -B so nothing was written into the spike;
+#   g2p_en 2.1.0 and inflect 7.5.0 (the versions scripts/sing/requirements.lock pins);
+#   normalize_numbers loaded from g2p_en/expand.py BY FILE PATH (sha256
+#     b31f9f2173280f4479de1272d57540382d64496662ef127cf4d05af5a49d70db), so g2p_en/__init__.py and its
+#     import-time nltk.download() never ran;
+#   CMUdict: the spike's NLTK copy, sha256 cad209c39eb87677d64e93d97f8eed10b7e6f9bdd42de8e7ca8efc8e17d62e8a
+#     (the file cmudict-1000.tsv came from);
+#   the loop, per word w:  t = normalize_numbers(w.lower()).replace("-", " ");
+#     syllables = sum(stress digits of cmudict[x] for x in re.findall(r"[a-z']+", t)).
+#
+# Inputs, a fixed rule: every cardinal 0-3100; 10000 12345 99999 100000 250000 1000000 1234567 20000000;
+# every ordinal 0th-1300th; 1999th 2000th 2001st 2019th 2026th 10000th 1000000th; the plurals 10s 20s ... 100s
+# 1800s 1900s 1950s 1960s 1990s 2000s 2010s and 20's 60's 80's 90's; the decimals 0.5 3.5 2.25 10.01 3.14 99.9
+# 1.0 0.001 12.5; the comma numbers 1,000 10,000 1,999 2,026 1,000,000 100,000 3,001.
+#
+# LEFT OUT (12 rows): g2p_en sends a word that is not in CMUdict to its neural guesser, and no table can
+# pin a guess: 0th (zeroth), 20s (twentys), 30s (thirtys), 40s (fortys), 50s (fiftys), 60s (sixtys), 70s (seventys), 80s (eightys), 90s (ninetys), 1950s (nineteen fiftys), 1960s (nineteen sixtys), 1990s (nineteen ninetys).
+#
+# 4442 rows.
+0	zero	2
+1	one	1
+2	two	1
+3	three	1
+4	four	1
+5	five	1
+6	six	1
+7	seven	2
+8	eight	1
+9	nine	1
+10	ten	1
+11	eleven	3
+12	twelve	1
+13	thirteen	2
+14	fourteen	2
+15	fifteen	2
+16	sixteen	2
+17	seventeen	3
+18	eighteen	2
+19	nineteen	2
+20	twenty	2
+21	twenty one	3
+22	twenty two	3
+23	twenty three	3
+24	twenty four	3
+25	twenty five	3
+26	twenty six	3
+27	twenty seven	4
+28	twenty eight	3
+29	twenty nine	3
+30	thirty	2
+31	thirty one	3
+32	thirty two	3
+33	thirty three	3
+34	thirty four	3
+35	thirty five	3
+36	thirty six	3
+37	thirty seven	4
+38	thirty eight	3
+39	thirty nine	3
+40	forty	2
+41	forty one	3
+42	forty two	3
+43	forty three	3
+44	forty four	3
+45	forty five	3
+46	forty six	3
+47	forty seven	4
+48	forty eight	3
+49	forty nine	3
+50	fifty	2
+51	fifty one	3
+52	fifty two	3
+53	fifty three	3
+54	fifty four	3
+55	fifty five	3
+56	fifty six	3
+57	fifty seven	4
+58	fifty eight	3
+59	fifty nine	3
+60	sixty	2
+61	sixty one	3
+62	sixty two	3
+63	sixty three	3
+64	sixty four	3
+65	sixty five	3
+66	sixty six	3
+67	sixty seven	4
+68	sixty eight	3
+69	sixty nine	3
+70	seventy	3
+71	seventy one	4
+72	seventy two	4
+73	seventy three	4
+74	seventy four	4
+75	seventy five	4
+76	seventy six	4
+77	seventy seven	5
+78	seventy eight	4
+79	seventy nine	4
+80	eighty	2
+81	eighty one	3
+82	eighty two	3
+83	eighty three	3
+84	eighty four	3
+85	eighty five	3
+86	eighty six	3
+87	eighty seven	4
+88	eighty eight	3
+89	eighty nine	3
+90	ninety	2
+91	ninety one	3
+92	ninety two	3
+93	ninety three	3
+94	ninety four	3
+95	ninety five	3
+96	ninety six	3
+97	ninety seven	4
+98	ninety eight	3
+99	ninety nine	3
+100	one hundred	3
+101	one hundred one	4
+102	one hundred two	4
+103	one hundred three	4
+104	one hundred four	4
+105	one hundred five	4
+106	one hundred six	4
+107	one hundred seven	5
+108	one hundred eight	4
+109	one hundred nine	4
+110	one hundred ten	4
+111	one hundred eleven	6
+112	one hundred twelve	4
+113	one hundred thirteen	5
+114	one hundred fourteen	5
+115	one hundred fifteen	5
+116	one hundred sixteen	5
+117	one hundred seventeen	6
+118	one hundred eighteen	5
+119	one hundred nineteen	5
+120	one hundred twenty	5
+121	one hundred twenty one	6
+122	one hundred twenty two	6
+123	one hundred twenty three	6
+124	one hundred twenty four	6
+125	one hundred twenty five	6
+126	one hundred twenty six	6
+127	one hundred twenty seven	7
+128	one hundred twenty eight	6
+129	one hundred twenty nine	6
+130	one hundred thirty	5
+131	one hundred thirty one	6
+132	one hundred thirty two	6
+133	one hundred thirty three	6
+134	one hundred thirty four	6
+135	one hundred thirty five	6
+136	one hundred thirty six	6
+137	one hundred thirty seven	7
+138	one hundred thirty eight	6
+139	one hundred thirty nine	6
+140	one hundred forty	5
+141	one hundred forty one	6
+142	one hundred forty two	6
+143	one hundred forty three	6
+144	one hundred forty four	6
+145	one hundred forty five	6
+146	one hundred forty six	6
+147	one hundred forty seven	7
+148	one hundred forty eight	6
+149	one hundred forty nine	6
+150	one hundred fifty	5
+151	one hundred fifty one	6
+152	one hundred fifty two	6
+153	one hundred fifty three	6
+154	one hundred fifty four	6
+155	one hundred fifty five	6
+156	one hundred fifty six	6
+157	one hundred fifty seven	7
+158	one hundred fifty eight	6
+159	one hundred fifty nine	6
+160	one hundred sixty	5
+161	one hundred sixty one	6
+162	one hundred sixty two	6
+163	one hundred sixty three	6
+164	one hundred sixty four	6
+165	one hundred sixty five	6
+166	one hundred sixty six	6
+167	one hundred sixty seven	7
+168	one hundred sixty eight	6
+169	one hundred sixty nine	6
+170	one hundred seventy	6
+171	one hundred seventy one	7
+172	one hundred seventy two	7
+173	one hundred seventy three	7
+174	one hundred seventy four	7
+175	one hundred seventy five	7
+176	one hundred seventy six	7
+177	one hundred seventy seven	8
+178	one hundred seventy eight	7
+179	one hundred seventy nine	7
+180	one hundred eighty	5
+181	one hundred eighty one	6
+182	one hundred eighty two	6
+183	one hundred eighty three	6
+184	one hundred eighty four	6
+185	one hundred eighty five	6
+186	one hundred eighty six	6
+187	one hundred eighty seven	7
+188	one hundred eighty eight	6
+189	one hundred eighty nine	6
+190	one hundred ninety	5
+191	one hundred ninety one	6
+192	one hundred ninety two	6
+193	one hundred ninety three	6
+194	one hundred ninety four	6
+195	one hundred ninety five	6
+196	one hundred ninety six	6
+197	one hundred ninety seven	7
+198	one hundred ninety eight	6
+199	one hundred ninety nine	6
+200	two hundred	3
+201	two hundred one	4
+202	two hundred two	4
+203	two hundred three	4
+204	two hundred four	4
+205	two hundred five	4
+206	two hundred six	4
+207	two hundred seven	5
+208	two hundred eight	4
+209	two hundred nine	4
+210	two hundred ten	4
+211	two hundred eleven	6
+212	two hundred twelve	4
+213	two hundred thirteen	5
+214	two hundred fourteen	5
+215	two hundred fifteen	5
+216	two hundred sixteen	5
+217	two hundred seventeen	6
+218	two hundred eighteen	5
+219	two hundred nineteen	5
+220	two hundred twenty	5
+221	two hundred twenty one	6
+222	two hundred twenty two	6
+223	two hundred twenty three	6
+224	two hundred twenty four	6
+225	two hundred twenty five	6
+226	two hundred twenty six	6
+227	two hundred twenty seven	7
+228	two hundred twenty eight	6
+229	two hundred twenty nine	6
+230	two hundred thirty	5
+231	two hundred thirty one	6
+232	two hundred thirty two	6
+233	two hundred thirty three	6
+234	two hundred thirty four	6
+235	two hundred thirty five	6
+236	two hundred thirty six	6
+237	two hundred thirty seven	7
+238	two hundred thirty eight	6
+239	two hundred thirty nine	6
+240	two hundred forty	5
+241	two hundred forty one	6
+242	two hundred forty two	6
+243	two hundred forty three	6
+244	two hundred forty four	6
+245	two hundred forty five	6
+246	two hundred forty six	6
+247	two hundred forty seven	7
+248	two hundred forty eight	6
+249	two hundred forty nine	6
+250	two hundred fifty	5
+251	two hundred fifty one	6
+252	two hundred fifty two	6
+253	two hundred fifty three	6
+254	two hundred fifty four	6
+255	two hundred fifty five	6
+256	two hundred fifty six	6
+257	two hundred fifty seven	7
+258	two hundred fifty eight	6
+259	two hundred fifty nine	6
+260	two hundred sixty	5
+261	two hundred sixty one	6
+262	two hundred sixty two	6
+263	two hundred sixty three	6
+264	two hundred sixty four	6
+265	two hundred sixty five	6
+266	two hundred sixty six	6
+267	two hundred sixty seven	7
+268	two hundred sixty eight	6
+269	two hundred sixty nine	6
+270	two hundred seventy	6
+271	two hundred seventy one	7
+272	two hundred seventy two	7
+273	two hundred seventy three	7
+274	two hundred seventy four	7
+275	two hundred seventy five	7
+276	two hundred seventy six	7
+277	two hundred seventy seven	8
+278	two hundred seventy eight	7
+279	two hundred seventy nine	7
+280	two hundred eighty	5
+281	two hundred eighty one	6
+282	two hundred eighty two	6
+283	two hundred eighty three	6
+284	two hundred eighty four	6
+285	two hundred eighty five	6
+286	two hundred eighty six	6
+287	two hundred eighty seven	7
+288	two hundred eighty eight	6
+289	two hundred eighty nine	6
+290	two hundred ninety	5
+291	two hundred ninety one	6
+292	two hundred ninety two	6
+293	two hundred ninety three	6
+294	two hundred ninety four	6
+295	two hundred ninety five	6
+296	two hundred ninety six	6
+297	two hundred ninety seven	7
+298	two hundred ninety eight	6
+299	two hundred ninety nine	6
+300	three hundred	3
+301	three hundred one	4
+302	three hundred two	4
+303	three hundred three	4
+304	three hundred four	4
+305	three hundred five	4
+306	three hundred six	4
+307	three hundred seven	5
+308	three hundred eight	4
+309	three hundred nine	4
+310	three hundred ten	4
+311	three hundred eleven	6
+312	three hundred twelve	4
+313	three hundred thirteen	5
+314	three hundred fourteen	5
+315	three hundred fifteen	5
+316	three hundred sixteen	5
+317	three hundred seventeen	6
+318	three hundred eighteen	5
+319	three hundred nineteen	5
+320	three hundred twenty	5
+321	three hundred twenty one	6
+322	three hundred twenty two	6
+323	three hundred twenty three	6
+324	three hundred twenty four	6
+325	three hundred twenty five	6
+326	three hundred twenty six	6
+327	three hundred twenty seven	7
+328	three hundred twenty eight	6
+329	three hundred twenty nine	6
+330	three hundred thirty	5
+331	three hundred thirty one	6
+332	three hundred thirty two	6
+333	three hundred thirty three	6
+334	three hundred thirty four	6
+335	three hundred thirty five	6
+336	three hundred thirty six	6
+337	three hundred thirty seven	7
+338	three hundred thirty eight	6
+339	three hundred thirty nine	6
+340	three hundred forty	5
+341	three hundred forty one	6
+342	three hundred forty two	6
+343	three hundred forty three	6
+344	three hundred forty four	6
+345	three hundred forty five	6
+346	three hundred forty six	6
+347	three hundred forty seven	7
+348	three hundred forty eight	6
+349	three hundred forty nine	6
+350	three hundred fifty	5
+351	three hundred fifty one	6
+352	three hundred fifty two	6
+353	three hundred fifty three	6
+354	three hundred fifty four	6
+355	three hundred fifty five	6
+356	three hundred fifty six	6
+357	three hundred fifty seven	7
+358	three hundred fifty eight	6
+359	three hundred fifty nine	6
+360	three hundred sixty	5
+361	three hundred sixty one	6
+362	three hundred sixty two	6
+363	three hundred sixty three	6
+364	three hundred sixty four	6
+365	three hundred sixty five	6
+366	three hundred sixty six	6
+367	three hundred sixty seven	7
+368	three hundred sixty eight	6
+369	three hundred sixty nine	6
+370	three hundred seventy	6
+371	three hundred seventy one	7
+372	three hundred seventy two	7
+373	three hundred seventy three	7
+374	three hundred seventy four	7
+375	three hundred seventy five	7
+376	three hundred seventy six	7
+377	three hundred seventy seven	8
+378	three hundred seventy eight	7
+379	three hundred seventy nine	7
+380	three hundred eighty	5
+381	three hundred eighty one	6
+382	three hundred eighty two	6
+383	three hundred eighty three	6
+384	three hundred eighty four	6
+385	three hundred eighty five	6
+386	three hundred eighty six	6
+387	three hundred eighty seven	7
+388	three hundred eighty eight	6
+389	three hundred eighty nine	6
+390	three hundred ninety	5
+391	three hundred ninety one	6
+392	three hundred ninety two	6
+393	three hundred ninety three	6
+394	three hundred ninety four	6
+395	three hundred ninety five	6
+396	three hundred ninety six	6
+397	three hundred ninety seven	7
+398	three hundred ninety eight	6
+399	three hundred ninety nine	6
+400	four hundred	3
+401	four hundred one	4
+402	four hundred two	4
+403	four hundred three	4
+404	four hundred four	4
+405	four hundred five	4
+406	four hundred six	4
+407	four hundred seven	5
+408	four hundred eight	4
+409	four hundred nine	4
+410	four hundred ten	4
+411	four hundred eleven	6
+412	four hundred twelve	4
+413	four hundred thirteen	5
+414	four hundred fourteen	5
+415	four hundred fifteen	5
+416	four hundred sixteen	5
+417	four hundred seventeen	6
+418	four hundred eighteen	5
+419	four hundred nineteen	5
+420	four hundred twenty	5
+421	four hundred twenty one	6
+422	four hundred twenty two	6
+423	four hundred twenty three	6
+424	four hundred twenty four	6
+425	four hundred twenty five	6
+426	four hundred twenty six	6
+427	four hundred twenty seven	7
+428	four hundred twenty eight	6
+429	four hundred twenty nine	6
+430	four hundred thirty	5
+431	four hundred thirty one	6
+432	four hundred thirty two	6
+433	four hundred thirty three	6
+434	four hundred thirty four	6
+435	four hundred thirty five	6
+436	four hundred thirty six	6
+437	four hundred thirty seven	7
+438	four hundred thirty eight	6
+439	four hundred thirty nine	6
+440	four hundred forty	5
+441	four hundred forty one	6
+442	four hundred forty two	6
+443	four hundred forty three	6
+444	four hundred forty four	6
+445	four hundred forty five	6
+446	four hundred forty six	6
+447	four hundred forty seven	7
+448	four hundred forty eight	6
+449	four hundred forty nine	6
+450	four hundred fifty	5
+451	four hundred fifty one	6
+452	four hundred fifty two	6
+453	four hundred fifty three	6
+454	four hundred fifty four	6
+455	four hundred fifty five	6
+456	four hundred fifty six	6
+457	four hundred fifty seven	7
+458	four hundred fifty eight	6
+459	four hundred fifty nine	6
+460	four hundred sixty	5
+461	four hundred sixty one	6
+462	four hundred sixty two	6
+463	four hundred sixty three	6
+464	four hundred sixty four	6
+465	four hundred sixty five	6
+466	four hundred sixty six	6
+467	four hundred sixty seven	7
+468	four hundred sixty eight	6
+469	four hundred sixty nine	6
+470	four hundred seventy	6
+471	four hundred seventy one	7
+472	four hundred seventy two	7
+473	four hundred seventy three	7
+474	four hundred seventy four	7
+475	four hundred seventy five	7
+476	four hundred seventy six	7
+477	four hundred seventy seven	8
+478	four hundred seventy eight	7
+479	four hundred seventy nine	7
+480	four hundred eighty	5
+481	four hundred eighty one	6
+482	four hundred eighty two	6
+483	four hundred eighty three	6
+484	four hundred eighty four	6
+485	four hundred eighty five	6
+486	four hundred eighty six	6
+487	four hundred eighty seven	7
+488	four hundred eighty eight	6
+489	four hundred eighty nine	6
+490	four hundred ninety	5
+491	four hundred ninety one	6
+492	four hundred ninety two	6
+493	four hundred ninety three	6
+494	four hundred ninety four	6
+495	four hundred ninety five	6
+496	four hundred ninety six	6
+497	four hundred ninety seven	7
+498	four hundred ninety eight	6
+499	four hundred ninety nine	6
+500	five hundred	3
+501	five hundred one	4
+502	five hundred two	4
+503	five hundred three	4
+504	five hundred four	4
+505	five hundred five	4
+506	five hundred six	4
+507	five hundred seven	5
+508	five hundred eight	4
+509	five hundred nine	4
+510	five hundred ten	4
+511	five hundred eleven	6
+512	five hundred twelve	4
+513	five hundred thirteen	5
+514	five hundred fourteen	5
+515	five hundred fifteen	5
+516	five hundred sixteen	5
+517	five hundred seventeen	6
+518	five hundred eighteen	5
+519	five hundred nineteen	5
+520	five hundred twenty	5
+521	five hundred twenty one	6
+522	five hundred twenty two	6
+523	five hundred twenty three	6
+524	five hundred twenty four	6
+525	five hundred twenty five	6
+526	five hundred twenty six	6
+527	five hundred twenty seven	7
+528	five hundred twenty eight	6
+529	five hundred twenty nine	6
+530	five hundred thirty	5
+531	five hundred thirty one	6
+532	five hundred thirty two	6
+533	five hundred thirty three	6
+534	five hundred thirty four	6
+535	five hundred thirty five	6
+536	five hundred thirty six	6
+537	five hundred thirty seven	7
+538	five hundred thirty eight	6
+539	five hundred thirty nine	6
+540	five hundred forty	5
+541	five hundred forty one	6
+542	five hundred forty two	6
+543	five hundred forty three	6
+544	five hundred forty four	6
+545	five hundred forty five	6
+546	five hundred forty six	6
+547	five hundred forty seven	7
+548	five hundred forty eight	6
+549	five hundred forty nine	6
+550	five hundred fifty	5
+551	five hundred fifty one	6
+552	five hundred fifty two	6
+553	five hundred fifty three	6
+554	five hundred fifty four	6
+555	five hundred fifty five	6
+556	five hundred fifty six	6
+557	five hundred fifty seven	7
+558	five hundred fifty eight	6
+559	five hundred fifty nine	6
+560	five hundred sixty	5
+561	five hundred sixty one	6
+562	five hundred sixty two	6
+563	five hundred sixty three	6
+564	five hundred sixty four	6
+565	five hundred sixty five	6
+566	five hundred sixty six	6
+567	five hundred sixty seven	7
+568	five hundred sixty eight	6
+569	five hundred sixty nine	6
+570	five hundred seventy	6
+571	five hundred seventy one	7
+572	five hundred seventy two	7
+573	five hundred seventy three	7
+574	five hundred seventy four	7
+575	five hundred seventy five	7
+576	five hundred seventy six	7
+577	five hundred seventy seven	8
+578	five hundred seventy eight	7
+579	five hundred seventy nine	7
+580	five hundred eighty	5
+581	five hundred eighty one	6
+582	five hundred eighty two	6
+583	five hundred eighty three	6
+584	five hundred eighty four	6
+585	five hundred eighty five	6
+586	five hundred eighty six	6
+587	five hundred eighty seven	7
+588	five hundred eighty eight	6
+589	five hundred eighty nine	6
+590	five hundred ninety	5
+591	five hundred ninety one	6
+592	five hundred ninety two	6
+593	five hundred ninety three	6
+594	five hundred ninety four	6
+595	five hundred ninety five	6
+596	five hundred ninety six	6
+597	five hundred ninety seven	7
+598	five hundred ninety eight	6
+599	five hundred ninety nine	6
+600	six hundred	3
+601	six hundred one	4
+602	six hundred two	4
+603	six hundred three	4
+604	six hundred four	4
+605	six hundred five	4
+606	six hundred six	4
+607	six hundred seven	5
+608	six hundred eight	4
+609	six hundred nine	4
+610	six hundred ten	4
+611	six hundred eleven	6
+612	six hundred twelve	4
+613	six hundred thirteen	5
+614	six hundred fourteen	5
+615	six hundred fifteen	5
+616	six hundred sixteen	5
+617	six hundred seventeen	6
+618	six hundred eighteen	5
+619	six hundred nineteen	5
+620	six hundred twenty	5
+621	six hundred twenty one	6
+622	six hundred twenty two	6
+623	six hundred twenty three	6
+624	six hundred twenty four	6
+625	six hundred twenty five	6
+626	six hundred twenty six	6
+627	six hundred twenty seven	7
+628	six hundred twenty eight	6
+629	six hundred twenty nine	6
+630	six hundred thirty	5
+631	six hundred thirty one	6
+632	six hundred thirty two	6
+633	six hundred thirty three	6
+634	six hundred thirty four	6
+635	six hundred thirty five	6
+636	six hundred thirty six	6
+637	six hundred thirty seven	7
+638	six hundred thirty eight	6
+639	six hundred thirty nine	6
+640	six hundred forty	5
+641	six hundred forty one	6
+642	six hundred forty two	6
+643	six hundred forty three	6
+644	six hundred forty four	6
+645	six hundred forty five	6
+646	six hundred forty six	6
+647	six hundred forty seven	7
+648	six hundred forty eight	6
+649	six hundred forty nine	6
+650	six hundred fifty	5
+651	six hundred fifty one	6
+652	six hundred fifty two	6
+653	six hundred fifty three	6
+654	six hundred fifty four	6
+655	six hundred fifty five	6
+656	six hundred fifty six	6
+657	six hundred fifty seven	7
+658	six hundred fifty eight	6
+659	six hundred fifty nine	6
+660	six hundred sixty	5
+661	six hundred sixty one	6
+662	six hundred sixty two	6
+663	six hundred sixty three	6
+664	six hundred sixty four	6
+665	six hundred sixty five	6
+666	six hundred sixty six	6
+667	six hundred sixty seven	7
+668	six hundred sixty eight	6
+669	six hundred sixty nine	6
+670	six hundred seventy	6
+671	six hundred seventy one	7
+672	six hundred seventy two	7
+673	six hundred seventy three	7
+674	six hundred seventy four	7
+675	six hundred seventy five	7
+676	six hundred seventy six	7
+677	six hundred seventy seven	8
+678	six hundred seventy eight	7
+679	six hundred seventy nine	7
+680	six hundred eighty	5
+681	six hundred eighty one	6
+682	six hundred eighty two	6
+683	six hundred eighty three	6
+684	six hundred eighty four	6
+685	six hundred eighty five	6
+686	six hundred eighty six	6
+687	six hundred eighty seven	7
+688	six hundred eighty eight	6
+689	six hundred eighty nine	6
+690	six hundred ninety	5
+691	six hundred ninety one	6
+692	six hundred ninety two	6
+693	six hundred ninety three	6
+694	six hundred ninety four	6
+695	six hundred ninety five	6
+696	six hundred ninety six	6
+697	six hundred ninety seven	7
+698	six hundred ninety eight	6
+699	six hundred ninety nine	6
+700	seven hundred	4
+701	seven hundred one	5
+702	seven hundred two	5
+703	seven hundred three	5
+704	seven hundred four	5
+705	seven hundred five	5
+706	seven hundred six	5
+707	seven hundred seven	6
+708	seven hundred eight	5
+709	seven hundred nine	5
+710	seven hundred ten	5
+711	seven hundred eleven	7
+712	seven hundred twelve	5
+713	seven hundred thirteen	6
+714	seven hundred fourteen	6
+715	seven hundred fifteen	6
+716	seven hundred sixteen	6
+717	seven hundred seventeen	7
+718	seven hundred eighteen	6
+719	seven hundred nineteen	6
+720	seven hundred twenty	6
+721	seven hundred twenty one	7
+722	seven hundred twenty two	7
+723	seven hundred twenty three	7
+724	seven hundred twenty four	7
+725	seven hundred twenty five	7
+726	seven hundred twenty six	7
+727	seven hundred twenty seven	8
+728	seven hundred twenty eight	7
+729	seven hundred twenty nine	7
+730	seven hundred thirty	6
+731	seven hundred thirty one	7
+732	seven hundred thirty two	7
+733	seven hundred thirty three	7
+734	seven hundred thirty four	7
+735	seven hundred thirty five	7
+736	seven hundred thirty six	7
+737	seven hundred thirty seven	8
+738	seven hundred thirty eight	7
+739	seven hundred thirty nine	7
+740	seven hundred forty	6
+741	seven hundred forty one	7
+742	seven hundred forty two	7
+743	seven hundred forty three	7
+744	seven hundred forty four	7
+745	seven hundred forty five	7
+746	seven hundred forty six	7
+747	seven hundred forty seven	8
+748	seven hundred forty eight	7
+749	seven hundred forty nine	7
+750	seven hundred fifty	6
+751	seven hundred fifty one	7
+752	seven hundred fifty two	7
+753	seven hundred fifty three	7
+754	seven hundred fifty four	7
+755	seven hundred fifty five	7
+756	seven hundred fifty six	7
+757	seven hundred fifty seven	8
+758	seven hundred fifty eight	7
+759	seven hundred fifty nine	7
+760	seven hundred sixty	6
+761	seven hundred sixty one	7
+762	seven hundred sixty two	7
+763	seven hundred sixty three	7
+764	seven hundred sixty four	7
+765	seven hundred sixty five	7
+766	seven hundred sixty six	7
+767	seven hundred sixty seven	8
+768	seven hundred sixty eight	7
+769	seven hundred sixty nine	7
+770	seven hundred seventy	7
+771	seven hundred seventy one	8
+772	seven hundred seventy two	8
+773	seven hundred seventy three	8
+774	seven hundred seventy four	8
+775	seven hundred seventy five	8
+776	seven hundred seventy six	8
+777	seven hundred seventy seven	9
+778	seven hundred seventy eight	8
+779	seven hundred seventy nine	8
+780	seven hundred eighty	6
+781	seven hundred eighty one	7
+782	seven hundred eighty two	7
+783	seven hundred eighty three	7
+784	seven hundred eighty four	7
+785	seven hundred eighty five	7
+786	seven hundred eighty six	7
+787	seven hundred eighty seven	8
+788	seven hundred eighty eight	7
+789	seven hundred eighty nine	7
+790	seven hundred ninety	6
+791	seven hundred ninety one	7
+792	seven hundred ninety two	7
+793	seven hundred ninety three	7
+794	seven hundred ninety four	7
+795	seven hundred ninety five	7
+796	seven hundred ninety six	7
+797	seven hundred ninety seven	8
+798	seven hundred ninety eight	7
+799	seven hundred ninety nine	7
+800	eight hundred	3
+801	eight hundred one	4
+802	eight hundred two	4
+803	eight hundred three	4
+804	eight hundred four	4
+805	eight hundred five	4
+806	eight hundred six	4
+807	eight hundred seven	5
+808	eight hundred eight	4
+809	eight hundred nine	4
+810	eight hundred ten	4
+811	eight hundred eleven	6
+812	eight hundred twelve	4
+813	eight hundred thirteen	5
+814	eight hundred fourteen	5
+815	eight hundred fifteen	5
+816	eight hundred sixteen	5
+817	eight hundred seventeen	6
+818	eight hundred eighteen	5
+819	eight hundred nineteen	5
+820	eight hundred twenty	5
+821	eight hundred twenty one	6
+822	eight hundred twenty two	6
+823	eight hundred twenty three	6
+824	eight hundred twenty four	6
+825	eight hundred twenty five	6
+826	eight hundred twenty six	6
+827	eight hundred twenty seven	7
+828	eight hundred twenty eight	6
+829	eight hundred twenty nine	6
+830	eight hundred thirty	5
+831	eight hundred thirty one	6
+832	eight hundred thirty two	6
+833	eight hundred thirty three	6
+834	eight hundred thirty four	6
+835	eight hundred thirty five	6
+836	eight hundred thirty six	6
+837	eight hundred thirty seven	7
+838	eight hundred thirty eight	6
+839	eight hundred thirty nine	6
+840	eight hundred forty	5
+841	eight hundred forty one	6
+842	eight hundred forty two	6
+843	eight hundred forty three	6
+844	eight hundred forty four	6
+845	eight hundred forty five	6
+846	eight hundred forty six	6
+847	eight hundred forty seven	7
+848	eight hundred forty eight	6
+849	eight hundred forty nine	6
+850	eight hundred fifty	5
+851	eight hundred fifty one	6
+852	eight hundred fifty two	6
+853	eight hundred fifty three	6
+854	eight hundred fifty four	6
+855	eight hundred fifty five	6
+856	eight hundred fifty six	6
+857	eight hundred fifty seven	7
+858	eight hundred fifty eight	6
+859	eight hundred fifty nine	6
+860	eight hundred sixty	5
+861	eight hundred sixty one	6
+862	eight hundred sixty two	6
+863	eight hundred sixty three	6
+864	eight hundred sixty four	6
+865	eight hundred sixty five	6
+866	eight hundred sixty six	6
+867	eight hundred sixty seven	7
+868	eight hundred sixty eight	6
+869	eight hundred sixty nine	6
+870	eight hundred seventy	6
+871	eight hundred seventy one	7
+872	eight hundred seventy two	7
+873	eight hundred seventy three	7
+874	eight hundred seventy four	7
+875	eight hundred seventy five	7
+876	eight hundred seventy six	7
+877	eight hundred seventy seven	8
+878	eight hundred seventy eight	7
+879	eight hundred seventy nine	7
+880	eight hundred eighty	5
+881	eight hundred eighty one	6
+882	eight hundred eighty two	6
+883	eight hundred eighty three	6
+884	eight hundred eighty four	6
+885	eight hundred eighty five	6
+886	eight hundred eighty six	6
+887	eight hundred eighty seven	7
+888	eight hundred eighty eight	6
+889	eight hundred eighty nine	6
+890	eight hundred ninety	5
+891	eight hundred ninety one	6
+892	eight hundred ninety two	6
+893	eight hundred ninety three	6
+894	eight hundred ninety four	6
+895	eight hundred ninety five	6
+896	eight hundred ninety six	6
+897	eight hundred ninety seven	7
+898	eight hundred ninety eight	6
+899	eight hundred ninety nine	6
+900	nine hundred	3
+901	nine hundred one	4
+902	nine hundred two	4
+903	nine hundred three	4
+904	nine hundred four	4
+905	nine hundred five	4
+906	nine hundred six	4
+907	nine hundred seven	5
+908	nine hundred eight	4
+909	nine hundred nine	4
+910	nine hundred ten	4
+911	nine hundred eleven	6
+912	nine hundred twelve	4
+913	nine hundred thirteen	5
+914	nine hundred fourteen	5
+915	nine hundred fifteen	5
+916	nine hundred sixteen	5
+917	nine hundred seventeen	6
+918	nine hundred eighteen	5
+919	nine hundred nineteen	5
+920	nine hundred twenty	5
+921	nine hundred twenty one	6
+922	nine hundred twenty two	6
+923	nine hundred twenty three	6
+924	nine hundred twenty four	6
+925	nine hundred twenty five	6
+926	nine hundred twenty six	6
+927	nine hundred twenty seven	7
+928	nine hundred twenty eight	6
+929	nine hundred twenty nine	6
+930	nine hundred thirty	5
+931	nine hundred thirty one	6
+932	nine hundred thirty two	6
+933	nine hundred thirty three	6
+934	nine hundred thirty four	6
+935	nine hundred thirty five	6
+936	nine hundred thirty six	6
+937	nine hundred thirty seven	7
+938	nine hundred thirty eight	6
+939	nine hundred thirty nine	6
+940	nine hundred forty	5
+941	nine hundred forty one	6
+942	nine hundred forty two	6
+943	nine hundred forty three	6
+944	nine hundred forty four	6
+945	nine hundred forty five	6
+946	nine hundred forty six	6
+947	nine hundred forty seven	7
+948	nine hundred forty eight	6
+949	nine hundred forty nine	6
+950	nine hundred fifty	5
+951	nine hundred fifty one	6
+952	nine hundred fifty two	6
+953	nine hundred fifty three	6
+954	nine hundred fifty four	6
+955	nine hundred fifty five	6
+956	nine hundred fifty six	6
+957	nine hundred fifty seven	7
+958	nine hundred fifty eight	6
+959	nine hundred fifty nine	6
+960	nine hundred sixty	5
+961	nine hundred sixty one	6
+962	nine hundred sixty two	6
+963	nine hundred sixty three	6
+964	nine hundred sixty four	6
+965	nine hundred sixty five	6
+966	nine hundred sixty six	6
+967	nine hundred sixty seven	7
+968	nine hundred sixty eight	6
+969	nine hundred sixty nine	6
+970	nine hundred seventy	6
+971	nine hundred seventy one	7
+972	nine hundred seventy two	7
+973	nine hundred seventy three	7
+974	nine hundred seventy four	7
+975	nine hundred seventy five	7
+976	nine hundred seventy six	7
+977	nine hundred seventy seven	8
+978	nine hundred seventy eight	7
+979	nine hundred seventy nine	7
+980	nine hundred eighty	5
+981	nine hundred eighty one	6
+982	nine hundred eighty two	6
+983	nine hundred eighty three	6
+984	nine hundred eighty four	6
+985	nine hundred eighty five	6
+986	nine hundred eighty six	6
+987	nine hundred eighty seven	7
+988	nine hundred eighty eight	6
+989	nine hundred eighty nine	6
+990	nine hundred ninety	5
+991	nine hundred ninety one	6
+992	nine hundred ninety two	6
+993	nine hundred ninety three	6
+994	nine hundred ninety four	6
+995	nine hundred ninety five	6
+996	nine hundred ninety six	6
+997	nine hundred ninety seven	7
+998	nine hundred ninety eight	6
+999	nine hundred ninety nine	6
+1000	one thousand	3
+1001	ten oh one	3
+1002	ten oh two	3
+1003	ten oh three	3
+1004	ten oh four	3
+1005	ten oh five	3
+1006	ten oh six	3
+1007	ten oh seven	4
+1008	ten oh eight	3
+1009	ten oh nine	3
+1010	ten ten	2
+1011	ten eleven	4
+1012	ten twelve	2
+1013	ten thirteen	3
+1014	ten fourteen	3
+1015	ten fifteen	3
+1016	ten sixteen	3
+1017	ten seventeen	4
+1018	ten eighteen	3
+1019	ten nineteen	3
+1020	ten twenty	3
+1021	ten twenty one	4
+1022	ten twenty two	4
+1023	ten twenty three	4
+1024	ten twenty four	4
+1025	ten twenty five	4
+1026	ten twenty six	4
+1027	ten twenty seven	5
+1028	ten twenty eight	4
+1029	ten twenty nine	4
+1030	ten thirty	3
+1031	ten thirty one	4
+1032	ten thirty two	4
+1033	ten thirty three	4
+1034	ten thirty four	4
+1035	ten thirty five	4
+1036	ten thirty six	4
+1037	ten thirty seven	5
+1038	ten thirty eight	4
+1039	ten thirty nine	4
+1040	ten forty	3
+1041	ten forty one	4
+1042	ten forty two	4
+1043	ten forty three	4
+1044	ten forty four	4
+1045	ten forty five	4
+1046	ten forty six	4
+1047	ten forty seven	5
+1048	ten forty eight	4
+1049	ten forty nine	4
+1050	ten fifty	3
+1051	ten fifty one	4
+1052	ten fifty two	4
+1053	ten fifty three	4
+1054	ten fifty four	4
+1055	ten fifty five	4
+1056	ten fifty six	4
+1057	ten fifty seven	5
+1058	ten fifty eight	4
+1059	ten fifty nine	4
+1060	ten sixty	3
+1061	ten sixty one	4
+1062	ten sixty two	4
+1063	ten sixty three	4
+1064	ten sixty four	4
+1065	ten sixty five	4
+1066	ten sixty six	4
+1067	ten sixty seven	5
+1068	ten sixty eight	4
+1069	ten sixty nine	4
+1070	ten seventy	4
+1071	ten seventy one	5
+1072	ten seventy two	5
+1073	ten seventy three	5
+1074	ten seventy four	5
+1075	ten seventy five	5
+1076	ten seventy six	5
+1077	ten seventy seven	6
+1078	ten seventy eight	5
+1079	ten seventy nine	5
+1080	ten eighty	3
+1081	ten eighty one	4
+1082	ten eighty two	4
+1083	ten eighty three	4
+1084	ten eighty four	4
+1085	ten eighty five	4
+1086	ten eighty six	4
+1087	ten eighty seven	5
+1088	ten eighty eight	4
+1089	ten eighty nine	4
+1090	ten ninety	3
+1091	ten ninety one	4
+1092	ten ninety two	4
+1093	ten ninety three	4
+1094	ten ninety four	4
+1095	ten ninety five	4
+1096	ten ninety six	4
+1097	ten ninety seven	5
+1098	ten ninety eight	4
+1099	ten ninety nine	4
+1100	eleven hundred	5
+1101	eleven oh one	5
+1102	eleven oh two	5
+1103	eleven oh three	5
+1104	eleven oh four	5
+1105	eleven oh five	5
+1106	eleven oh six	5
+1107	eleven oh seven	6
+1108	eleven oh eight	5
+1109	eleven oh nine	5
+1110	eleven ten	4
+1111	eleven eleven	6
+1112	eleven twelve	4
+1113	eleven thirteen	5
+1114	eleven fourteen	5
+1115	eleven fifteen	5
+1116	eleven sixteen	5
+1117	eleven seventeen	6
+1118	eleven eighteen	5
+1119	eleven nineteen	5
+1120	eleven twenty	5
+1121	eleven twenty one	6
+1122	eleven twenty two	6
+1123	eleven twenty three	6
+1124	eleven twenty four	6
+1125	eleven twenty five	6
+1126	eleven twenty six	6
+1127	eleven twenty seven	7
+1128	eleven twenty eight	6
+1129	eleven twenty nine	6
+1130	eleven thirty	5
+1131	eleven thirty one	6
+1132	eleven thirty two	6
+1133	eleven thirty three	6
+1134	eleven thirty four	6
+1135	eleven thirty five	6
+1136	eleven thirty six	6
+1137	eleven thirty seven	7
+1138	eleven thirty eight	6
+1139	eleven thirty nine	6
+1140	eleven forty	5
+1141	eleven forty one	6
+1142	eleven forty two	6
+1143	eleven forty three	6
+1144	eleven forty four	6
+1145	eleven forty five	6
+1146	eleven forty six	6
+1147	eleven forty seven	7
+1148	eleven forty eight	6
+1149	eleven forty nine	6
+1150	eleven fifty	5
+1151	eleven fifty one	6
+1152	eleven fifty two	6
+1153	eleven fifty three	6
+1154	eleven fifty four	6
+1155	eleven fifty five	6
+1156	eleven fifty six	6
+1157	eleven fifty seven	7
+1158	eleven fifty eight	6
+1159	eleven fifty nine	6
+1160	eleven sixty	5
+1161	eleven sixty one	6
+1162	eleven sixty two	6
+1163	eleven sixty three	6
+1164	eleven sixty four	6
+1165	eleven sixty five	6
+1166	eleven sixty six	6
+1167	eleven sixty seven	7
+1168	eleven sixty eight	6
+1169	eleven sixty nine	6
+1170	eleven seventy	6
+1171	eleven seventy one	7
+1172	eleven seventy two	7
+1173	eleven seventy three	7
+1174	eleven seventy four	7
+1175	eleven seventy five	7
+1176	eleven seventy six	7
+1177	eleven seventy seven	8
+1178	eleven seventy eight	7
+1179	eleven seventy nine	7
+1180	eleven eighty	5
+1181	eleven eighty one	6
+1182	eleven eighty two	6
+1183	eleven eighty three	6
+1184	eleven eighty four	6
+1185	eleven eighty five	6
+1186	eleven eighty six	6
+1187	eleven eighty seven	7
+1188	eleven eighty eight	6
+1189	eleven eighty nine	6
+1190	eleven ninety	5
+1191	eleven ninety one	6
+1192	eleven ninety two	6
+1193	eleven ninety three	6
+1194	eleven ninety four	6
+1195	eleven ninety five	6
+1196	eleven ninety six	6
+1197	eleven ninety seven	7
+1198	eleven ninety eight	6
+1199	eleven ninety nine	6
+1200	twelve hundred	3
+1201	twelve oh one	3
+1202	twelve oh two	3
+1203	twelve oh three	3
+1204	twelve oh four	3
+1205	twelve oh five	3
+1206	twelve oh six	3
+1207	twelve oh seven	4
+1208	twelve oh eight	3
+1209	twelve oh nine	3
+1210	twelve ten	2
+1211	twelve eleven	4
+1212	twelve twelve	2
+1213	twelve thirteen	3
+1214	twelve fourteen	3
+1215	twelve fifteen	3
+1216	twelve sixteen	3
+1217	twelve seventeen	4
+1218	twelve eighteen	3
+1219	twelve nineteen	3
+1220	twelve twenty	3
+1221	twelve twenty one	4
+1222	twelve twenty two	4
+1223	twelve twenty three	4
+1224	twelve twenty four	4
+1225	twelve twenty five	4
+1226	twelve twenty six	4
+1227	twelve twenty seven	5
+1228	twelve twenty eight	4
+1229	twelve twenty nine	4
+1230	twelve thirty	3
+1231	twelve thirty one	4
+1232	twelve thirty two	4
+1233	twelve thirty three	4
+1234	twelve thirty four	4
+1235	twelve thirty five	4
+1236	twelve thirty six	4
+1237	twelve thirty seven	5
+1238	twelve thirty eight	4
+1239	twelve thirty nine	4
+1240	twelve forty	3
+1241	twelve forty one	4
+1242	twelve forty two	4
+1243	twelve forty three	4
+1244	twelve forty four	4
+1245	twelve forty five	4
+1246	twelve forty six	4
+1247	twelve forty seven	5
+1248	twelve forty eight	4
+1249	twelve forty nine	4
+1250	twelve fifty	3
+1251	twelve fifty one	4
+1252	twelve fifty two	4
+1253	twelve fifty three	4
+1254	twelve fifty four	4
+1255	twelve fifty five	4
+1256	twelve fifty six	4
+1257	twelve fifty seven	5
+1258	twelve fifty eight	4
+1259	twelve fifty nine	4
+1260	twelve sixty	3
+1261	twelve sixty one	4
+1262	twelve sixty two	4
+1263	twelve sixty three	4
+1264	twelve sixty four	4
+1265	twelve sixty five	4
+1266	twelve sixty six	4
+1267	twelve sixty seven	5
+1268	twelve sixty eight	4
+1269	twelve sixty nine	4
+1270	twelve seventy	4
+1271	twelve seventy one	5
+1272	twelve seventy two	5
+1273	twelve seventy three	5
+1274	twelve seventy four	5
+1275	twelve seventy five	5
+1276	twelve seventy six	5
+1277	twelve seventy seven	6
+1278	twelve seventy eight	5
+1279	twelve seventy nine	5
+1280	twelve eighty	3
+1281	twelve eighty one	4
+1282	twelve eighty two	4
+1283	twelve eighty three	4
+1284	twelve eighty four	4
+1285	twelve eighty five	4
+1286	twelve eighty six	4
+1287	twelve eighty seven	5
+1288	twelve eighty eight	4
+1289	twelve eighty nine	4
+1290	twelve ninety	3
+1291	twelve ninety one	4
+1292	twelve ninety two	4
+1293	twelve ninety three	4
+1294	twelve ninety four	4
+1295	twelve ninety five	4
+1296	twelve ninety six	4
+1297	twelve ninety seven	5
+1298	twelve ninety eight	4
+1299	twelve ninety nine	4
+1300	thirteen hundred	4
+1301	thirteen oh one	4
+1302	thirteen oh two	4
+1303	thirteen oh three	4
+1304	thirteen oh four	4
+1305	thirteen oh five	4
+1306	thirteen oh six	4
+1307	thirteen oh seven	5
+1308	thirteen oh eight	4
+1309	thirteen oh nine	4
+1310	thirteen ten	3
+1311	thirteen eleven	5
+1312	thirteen twelve	3
+1313	thirteen thirteen	4
+1314	thirteen fourteen	4
+1315	thirteen fifteen	4
+1316	thirteen sixteen	4
+1317	thirteen seventeen	5
+1318	thirteen eighteen	4
+1319	thirteen nineteen	4
+1320	thirteen twenty	4
+1321	thirteen twenty one	5
+1322	thirteen twenty two	5
+1323	thirteen twenty three	5
+1324	thirteen twenty four	5
+1325	thirteen twenty five	5
+1326	thirteen twenty six	5
+1327	thirteen twenty seven	6
+1328	thirteen twenty eight	5
+1329	thirteen twenty nine	5
+1330	thirteen thirty	4
+1331	thirteen thirty one	5
+1332	thirteen thirty two	5
+1333	thirteen thirty three	5
+1334	thirteen thirty four	5
+1335	thirteen thirty five	5
+1336	thirteen thirty six	5
+1337	thirteen thirty seven	6
+1338	thirteen thirty eight	5
+1339	thirteen thirty nine	5
+1340	thirteen forty	4
+1341	thirteen forty one	5
+1342	thirteen forty two	5
+1343	thirteen forty three	5
+1344	thirteen forty four	5
+1345	thirteen forty five	5
+1346	thirteen forty six	5
+1347	thirteen forty seven	6
+1348	thirteen forty eight	5
+1349	thirteen forty nine	5
+1350	thirteen fifty	4
+1351	thirteen fifty one	5
+1352	thirteen fifty two	5
+1353	thirteen fifty three	5
+1354	thirteen fifty four	5
+1355	thirteen fifty five	5
+1356	thirteen fifty six	5
+1357	thirteen fifty seven	6
+1358	thirteen fifty eight	5
+1359	thirteen fifty nine	5
+1360	thirteen sixty	4
+1361	thirteen sixty one	5
+1362	thirteen sixty two	5
+1363	thirteen sixty three	5
+1364	thirteen sixty four	5
+1365	thirteen sixty five	5
+1366	thirteen sixty six	5
+1367	thirteen sixty seven	6
+1368	thirteen sixty eight	5
+1369	thirteen sixty nine	5
+1370	thirteen seventy	5
+1371	thirteen seventy one	6
+1372	thirteen seventy two	6
+1373	thirteen seventy three	6
+1374	thirteen seventy four	6
+1375	thirteen seventy five	6
+1376	thirteen seventy six	6
+1377	thirteen seventy seven	7
+1378	thirteen seventy eight	6
+1379	thirteen seventy nine	6
+1380	thirteen eighty	4
+1381	thirteen eighty one	5
+1382	thirteen eighty two	5
+1383	thirteen eighty three	5
+1384	thirteen eighty four	5
+1385	thirteen eighty five	5
+1386	thirteen eighty six	5
+1387	thirteen eighty seven	6
+1388	thirteen eighty eight	5
+1389	thirteen eighty nine	5
+1390	thirteen ninety	4
+1391	thirteen ninety one	5
+1392	thirteen ninety two	5
+1393	thirteen ninety three	5
+1394	thirteen ninety four	5
+1395	thirteen ninety five	5
+1396	thirteen ninety six	5
+1397	thirteen ninety seven	6
+1398	thirteen ninety eight	5
+1399	thirteen ninety nine	5
+1400	fourteen hundred	4
+1401	fourteen oh one	4
+1402	fourteen oh two	4
+1403	fourteen oh three	4
+1404	fourteen oh four	4
+1405	fourteen oh five	4
+1406	fourteen oh six	4
+1407	fourteen oh seven	5
+1408	fourteen oh eight	4
+1409	fourteen oh nine	4
+1410	fourteen ten	3
+1411	fourteen eleven	5
+1412	fourteen twelve	3
+1413	fourteen thirteen	4
+1414	fourteen fourteen	4
+1415	fourteen fifteen	4
+1416	fourteen sixteen	4
+1417	fourteen seventeen	5
+1418	fourteen eighteen	4
+1419	fourteen nineteen	4
+1420	fourteen twenty	4
+1421	fourteen twenty one	5
+1422	fourteen twenty two	5
+1423	fourteen twenty three	5
+1424	fourteen twenty four	5
+1425	fourteen twenty five	5
+1426	fourteen twenty six	5
+1427	fourteen twenty seven	6
+1428	fourteen twenty eight	5
+1429	fourteen twenty nine	5
+1430	fourteen thirty	4
+1431	fourteen thirty one	5
+1432	fourteen thirty two	5
+1433	fourteen thirty three	5
+1434	fourteen thirty four	5
+1435	fourteen thirty five	5
+1436	fourteen thirty six	5
+1437	fourteen thirty seven	6
+1438	fourteen thirty eight	5
+1439	fourteen thirty nine	5
+1440	fourteen forty	4
+1441	fourteen forty one	5
+1442	fourteen forty two	5
+1443	fourteen forty three	5
+1444	fourteen forty four	5
+1445	fourteen forty five	5
+1446	fourteen forty six	5
+1447	fourteen forty seven	6
+1448	fourteen forty eight	5
+1449	fourteen forty nine	5
+1450	fourteen fifty	4
+1451	fourteen fifty one	5
+1452	fourteen fifty two	5
+1453	fourteen fifty three	5
+1454	fourteen fifty four	5
+1455	fourteen fifty five	5
+1456	fourteen fifty six	5
+1457	fourteen fifty seven	6
+1458	fourteen fifty eight	5
+1459	fourteen fifty nine	5
+1460	fourteen sixty	4
+1461	fourteen sixty one	5
+1462	fourteen sixty two	5
+1463	fourteen sixty three	5
+1464	fourteen sixty four	5
+1465	fourteen sixty five	5
+1466	fourteen sixty six	5
+1467	fourteen sixty seven	6
+1468	fourteen sixty eight	5
+1469	fourteen sixty nine	5
+1470	fourteen seventy	5
+1471	fourteen seventy one	6
+1472	fourteen seventy two	6
+1473	fourteen seventy three	6
+1474	fourteen seventy four	6
+1475	fourteen seventy five	6
+1476	fourteen seventy six	6
+1477	fourteen seventy seven	7
+1478	fourteen seventy eight	6
+1479	fourteen seventy nine	6
+1480	fourteen eighty	4
+1481	fourteen eighty one	5
+1482	fourteen eighty two	5
+1483	fourteen eighty three	5
+1484	fourteen eighty four	5
+1485	fourteen eighty five	5
+1486	fourteen eighty six	5
+1487	fourteen eighty seven	6
+1488	fourteen eighty eight	5
+1489	fourteen eighty nine	5
+1490	fourteen ninety	4
+1491	fourteen ninety one	5
+1492	fourteen ninety two	5
+1493	fourteen ninety three	5
+1494	fourteen ninety four	5
+1495	fourteen ninety five	5
+1496	fourteen ninety six	5
+1497	fourteen ninety seven	6
+1498	fourteen ninety eight	5
+1499	fourteen ninety nine	5
+1500	fifteen hundred	4
+1501	fifteen oh one	4
+1502	fifteen oh two	4
+1503	fifteen oh three	4
+1504	fifteen oh four	4
+1505	fifteen oh five	4
+1506	fifteen oh six	4
+1507	fifteen oh seven	5
+1508	fifteen oh eight	4
+1509	fifteen oh nine	4
+1510	fifteen ten	3
+1511	fifteen eleven	5
+1512	fifteen twelve	3
+1513	fifteen thirteen	4
+1514	fifteen fourteen	4
+1515	fifteen fifteen	4
+1516	fifteen sixteen	4
+1517	fifteen seventeen	5
+1518	fifteen eighteen	4
+1519	fifteen nineteen	4
+1520	fifteen twenty	4
+1521	fifteen twenty one	5
+1522	fifteen twenty two	5
+1523	fifteen twenty three	5
+1524	fifteen twenty four	5
+1525	fifteen twenty five	5
+1526	fifteen twenty six	5
+1527	fifteen twenty seven	6
+1528	fifteen twenty eight	5
+1529	fifteen twenty nine	5
+1530	fifteen thirty	4
+1531	fifteen thirty one	5
+1532	fifteen thirty two	5
+1533	fifteen thirty three	5
+1534	fifteen thirty four	5
+1535	fifteen thirty five	5
+1536	fifteen thirty six	5
+1537	fifteen thirty seven	6
+1538	fifteen thirty eight	5
+1539	fifteen thirty nine	5
+1540	fifteen forty	4
+1541	fifteen forty one	5
+1542	fifteen forty two	5
+1543	fifteen forty three	5
+1544	fifteen forty four	5
+1545	fifteen forty five	5
+1546	fifteen forty six	5
+1547	fifteen forty seven	6
+1548	fifteen forty eight	5
+1549	fifteen forty nine	5
+1550	fifteen fifty	4
+1551	fifteen fifty one	5
+1552	fifteen fifty two	5
+1553	fifteen fifty three	5
+1554	fifteen fifty four	5
+1555	fifteen fifty five	5
+1556	fifteen fifty six	5
+1557	fifteen fifty seven	6
+1558	fifteen fifty eight	5
+1559	fifteen fifty nine	5
+1560	fifteen sixty	4
+1561	fifteen sixty one	5
+1562	fifteen sixty two	5
+1563	fifteen sixty three	5
+1564	fifteen sixty four	5
+1565	fifteen sixty five	5
+1566	fifteen sixty six	5
+1567	fifteen sixty seven	6
+1568	fifteen sixty eight	5
+1569	fifteen sixty nine	5
+1570	fifteen seventy	5
+1571	fifteen seventy one	6
+1572	fifteen seventy two	6
+1573	fifteen seventy three	6
+1574	fifteen seventy four	6
+1575	fifteen seventy five	6
+1576	fifteen seventy six	6
+1577	fifteen seventy seven	7
+1578	fifteen seventy eight	6
+1579	fifteen seventy nine	6
+1580	fifteen eighty	4
+1581	fifteen eighty one	5
+1582	fifteen eighty two	5
+1583	fifteen eighty three	5
+1584	fifteen eighty four	5
+1585	fifteen eighty five	5
+1586	fifteen eighty six	5
+1587	fifteen eighty seven	6
+1588	fifteen eighty eight	5
+1589	fifteen eighty nine	5
+1590	fifteen ninety	4
+1591	fifteen ninety one	5
+1592	fifteen ninety two	5
+1593	fifteen ninety three	5
+1594	fifteen ninety four	5
+1595	fifteen ninety five	5
+1596	fifteen ninety six	5
+1597	fifteen ninety seven	6
+1598	fifteen ninety eight	5
+1599	fifteen ninety nine	5
+1600	sixteen hundred	4
+1601	sixteen oh one	4
+1602	sixteen oh two	4
+1603	sixteen oh three	4
+1604	sixteen oh four	4
+1605	sixteen oh five	4
+1606	sixteen oh six	4
+1607	sixteen oh seven	5
+1608	sixteen oh eight	4
+1609	sixteen oh nine	4
+1610	sixteen ten	3
+1611	sixteen eleven	5
+1612	sixteen twelve	3
+1613	sixteen thirteen	4
+1614	sixteen fourteen	4
+1615	sixteen fifteen	4
+1616	sixteen sixteen	4
+1617	sixteen seventeen	5
+1618	sixteen eighteen	4
+1619	sixteen nineteen	4
+1620	sixteen twenty	4
+1621	sixteen twenty one	5
+1622	sixteen twenty two	5
+1623	sixteen twenty three	5
+1624	sixteen twenty four	5
+1625	sixteen twenty five	5
+1626	sixteen twenty six	5
+1627	sixteen twenty seven	6
+1628	sixteen twenty eight	5
+1629	sixteen twenty nine	5
+1630	sixteen thirty	4
+1631	sixteen thirty one	5
+1632	sixteen thirty two	5
+1633	sixteen thirty three	5
+1634	sixteen thirty four	5
+1635	sixteen thirty five	5
+1636	sixteen thirty six	5
+1637	sixteen thirty seven	6
+1638	sixteen thirty eight	5
+1639	sixteen thirty nine	5
+1640	sixteen forty	4
+1641	sixteen forty one	5
+1642	sixteen forty two	5
+1643	sixteen forty three	5
+1644	sixteen forty four	5
+1645	sixteen forty five	5
+1646	sixteen forty six	5
+1647	sixteen forty seven	6
+1648	sixteen forty eight	5
+1649	sixteen forty nine	5
+1650	sixteen fifty	4
+1651	sixteen fifty one	5
+1652	sixteen fifty two	5
+1653	sixteen fifty three	5
+1654	sixteen fifty four	5
+1655	sixteen fifty five	5
+1656	sixteen fifty six	5
+1657	sixteen fifty seven	6
+1658	sixteen fifty eight	5
+1659	sixteen fifty nine	5
+1660	sixteen sixty	4
+1661	sixteen sixty one	5
+1662	sixteen sixty two	5
+1663	sixteen sixty three	5
+1664	sixteen sixty four	5
+1665	sixteen sixty five	5
+1666	sixteen sixty six	5
+1667	sixteen sixty seven	6
+1668	sixteen sixty eight	5
+1669	sixteen sixty nine	5
+1670	sixteen seventy	5
+1671	sixteen seventy one	6
+1672	sixteen seventy two	6
+1673	sixteen seventy three	6
+1674	sixteen seventy four	6
+1675	sixteen seventy five	6
+1676	sixteen seventy six	6
+1677	sixteen seventy seven	7
+1678	sixteen seventy eight	6
+1679	sixteen seventy nine	6
+1680	sixteen eighty	4
+1681	sixteen eighty one	5
+1682	sixteen eighty two	5
+1683	sixteen eighty three	5
+1684	sixteen eighty four	5
+1685	sixteen eighty five	5
+1686	sixteen eighty six	5
+1687	sixteen eighty seven	6
+1688	sixteen eighty eight	5
+1689	sixteen eighty nine	5
+1690	sixteen ninety	4
+1691	sixteen ninety one	5
+1692	sixteen ninety two	5
+1693	sixteen ninety three	5
+1694	sixteen ninety four	5
+1695	sixteen ninety five	5
+1696	sixteen ninety six	5
+1697	sixteen ninety seven	6
+1698	sixteen ninety eight	5
+1699	sixteen ninety nine	5
+1700	seventeen hundred	5
+1701	seventeen oh one	5
+1702	seventeen oh two	5
+1703	seventeen oh three	5
+1704	seventeen oh four	5
+1705	seventeen oh five	5
+1706	seventeen oh six	5
+1707	seventeen oh seven	6
+1708	seventeen oh eight	5
+1709	seventeen oh nine	5
+1710	seventeen ten	4
+1711	seventeen eleven	6
+1712	seventeen twelve	4
+1713	seventeen thirteen	5
+1714	seventeen fourteen	5
+1715	seventeen fifteen	5
+1716	seventeen sixteen	5
+1717	seventeen seventeen	6
+1718	seventeen eighteen	5
+1719	seventeen nineteen	5
+1720	seventeen twenty	5
+1721	seventeen twenty one	6
+1722	seventeen twenty two	6
+1723	seventeen twenty three	6
+1724	seventeen twenty four	6
+1725	seventeen twenty five	6
+1726	seventeen twenty six	6
+1727	seventeen twenty seven	7
+1728	seventeen twenty eight	6
+1729	seventeen twenty nine	6
+1730	seventeen thirty	5
+1731	seventeen thirty one	6
+1732	seventeen thirty two	6
+1733	seventeen thirty three	6
+1734	seventeen thirty four	6
+1735	seventeen thirty five	6
+1736	seventeen thirty six	6
+1737	seventeen thirty seven	7
+1738	seventeen thirty eight	6
+1739	seventeen thirty nine	6
+1740	seventeen forty	5
+1741	seventeen forty one	6
+1742	seventeen forty two	6
+1743	seventeen forty three	6
+1744	seventeen forty four	6
+1745	seventeen forty five	6
+1746	seventeen forty six	6
+1747	seventeen forty seven	7
+1748	seventeen forty eight	6
+1749	seventeen forty nine	6
+1750	seventeen fifty	5
+1751	seventeen fifty one	6
+1752	seventeen fifty two	6
+1753	seventeen fifty three	6
+1754	seventeen fifty four	6
+1755	seventeen fifty five	6
+1756	seventeen fifty six	6
+1757	seventeen fifty seven	7
+1758	seventeen fifty eight	6
+1759	seventeen fifty nine	6
+1760	seventeen sixty	5
+1761	seventeen sixty one	6
+1762	seventeen sixty two	6
+1763	seventeen sixty three	6
+1764	seventeen sixty four	6
+1765	seventeen sixty five	6
+1766	seventeen sixty six	6
+1767	seventeen sixty seven	7
+1768	seventeen sixty eight	6
+1769	seventeen sixty nine	6
+1770	seventeen seventy	6
+1771	seventeen seventy one	7
+1772	seventeen seventy two	7
+1773	seventeen seventy three	7
+1774	seventeen seventy four	7
+1775	seventeen seventy five	7
+1776	seventeen seventy six	7
+1777	seventeen seventy seven	8
+1778	seventeen seventy eight	7
+1779	seventeen seventy nine	7
+1780	seventeen eighty	5
+1781	seventeen eighty one	6
+1782	seventeen eighty two	6
+1783	seventeen eighty three	6
+1784	seventeen eighty four	6
+1785	seventeen eighty five	6
+1786	seventeen eighty six	6
+1787	seventeen eighty seven	7
+1788	seventeen eighty eight	6
+1789	seventeen eighty nine	6
+1790	seventeen ninety	5
+1791	seventeen ninety one	6
+1792	seventeen ninety two	6
+1793	seventeen ninety three	6
+1794	seventeen ninety four	6
+1795	seventeen ninety five	6
+1796	seventeen ninety six	6
+1797	seventeen ninety seven	7
+1798	seventeen ninety eight	6
+1799	seventeen ninety nine	6
+1800	eighteen hundred	4
+1801	eighteen oh one	4
+1802	eighteen oh two	4
+1803	eighteen oh three	4
+1804	eighteen oh four	4
+1805	eighteen oh five	4
+1806	eighteen oh six	4
+1807	eighteen oh seven	5
+1808	eighteen oh eight	4
+1809	eighteen oh nine	4
+1810	eighteen ten	3
+1811	eighteen eleven	5
+1812	eighteen twelve	3
+1813	eighteen thirteen	4
+1814	eighteen fourteen	4
+1815	eighteen fifteen	4
+1816	eighteen sixteen	4
+1817	eighteen seventeen	5
+1818	eighteen eighteen	4
+1819	eighteen nineteen	4
+1820	eighteen twenty	4
+1821	eighteen twenty one	5
+1822	eighteen twenty two	5
+1823	eighteen twenty three	5
+1824	eighteen twenty four	5
+1825	eighteen twenty five	5
+1826	eighteen twenty six	5
+1827	eighteen twenty seven	6
+1828	eighteen twenty eight	5
+1829	eighteen twenty nine	5
+1830	eighteen thirty	4
+1831	eighteen thirty one	5
+1832	eighteen thirty two	5
+1833	eighteen thirty three	5
+1834	eighteen thirty four	5
+1835	eighteen thirty five	5
+1836	eighteen thirty six	5
+1837	eighteen thirty seven	6
+1838	eighteen thirty eight	5
+1839	eighteen thirty nine	5
+1840	eighteen forty	4
+1841	eighteen forty one	5
+1842	eighteen forty two	5
+1843	eighteen forty three	5
+1844	eighteen forty four	5
+1845	eighteen forty five	5
+1846	eighteen forty six	5
+1847	eighteen forty seven	6
+1848	eighteen forty eight	5
+1849	eighteen forty nine	5
+1850	eighteen fifty	4
+1851	eighteen fifty one	5
+1852	eighteen fifty two	5
+1853	eighteen fifty three	5
+1854	eighteen fifty four	5
+1855	eighteen fifty five	5
+1856	eighteen fifty six	5
+1857	eighteen fifty seven	6
+1858	eighteen fifty eight	5
+1859	eighteen fifty nine	5
+1860	eighteen sixty	4
+1861	eighteen sixty one	5
+1862	eighteen sixty two	5
+1863	eighteen sixty three	5
+1864	eighteen sixty four	5
+1865	eighteen sixty five	5
+1866	eighteen sixty six	5
+1867	eighteen sixty seven	6
+1868	eighteen sixty eight	5
+1869	eighteen sixty nine	5
+1870	eighteen seventy	5
+1871	eighteen seventy one	6
+1872	eighteen seventy two	6
+1873	eighteen seventy three	6
+1874	eighteen seventy four	6
+1875	eighteen seventy five	6
+1876	eighteen seventy six	6
+1877	eighteen seventy seven	7
+1878	eighteen seventy eight	6
+1879	eighteen seventy nine	6
+1880	eighteen eighty	4
+1881	eighteen eighty one	5
+1882	eighteen eighty two	5
+1883	eighteen eighty three	5
+1884	eighteen eighty four	5
+1885	eighteen eighty five	5
+1886	eighteen eighty six	5
+1887	eighteen eighty seven	6
+1888	eighteen eighty eight	5
+1889	eighteen eighty nine	5
+1890	eighteen ninety	4
+1891	eighteen ninety one	5
+1892	eighteen ninety two	5
+1893	eighteen ninety three	5
+1894	eighteen ninety four	5
+1895	eighteen ninety five	5
+1896	eighteen ninety six	5
+1897	eighteen ninety seven	6
+1898	eighteen ninety eight	5
+1899	eighteen ninety nine	5
+1900	nineteen hundred	4
+1901	nineteen oh one	4
+1902	nineteen oh two	4
+1903	nineteen oh three	4
+1904	nineteen oh four	4
+1905	nineteen oh five	4
+1906	nineteen oh six	4
+1907	nineteen oh seven	5
+1908	nineteen oh eight	4
+1909	nineteen oh nine	4
+1910	nineteen ten	3
+1911	nineteen eleven	5
+1912	nineteen twelve	3
+1913	nineteen thirteen	4
+1914	nineteen fourteen	4
+1915	nineteen fifteen	4
+1916	nineteen sixteen	4
+1917	nineteen seventeen	5
+1918	nineteen eighteen	4
+1919	nineteen nineteen	4
+1920	nineteen twenty	4
+1921	nineteen twenty one	5
+1922	nineteen twenty two	5
+1923	nineteen twenty three	5
+1924	nineteen twenty four	5
+1925	nineteen twenty five	5
+1926	nineteen twenty six	5
+1927	nineteen twenty seven	6
+1928	nineteen twenty eight	5
+1929	nineteen twenty nine	5
+1930	nineteen thirty	4
+1931	nineteen thirty one	5
+1932	nineteen thirty two	5
+1933	nineteen thirty three	5
+1934	nineteen thirty four	5
+1935	nineteen thirty five	5
+1936	nineteen thirty six	5
+1937	nineteen thirty seven	6
+1938	nineteen thirty eight	5
+1939	nineteen thirty nine	5
+1940	nineteen forty	4
+1941	nineteen forty one	5
+1942	nineteen forty two	5
+1943	nineteen forty three	5
+1944	nineteen forty four	5
+1945	nineteen forty five	5
+1946	nineteen forty six	5
+1947	nineteen forty seven	6
+1948	nineteen forty eight	5
+1949	nineteen forty nine	5
+1950	nineteen fifty	4
+1951	nineteen fifty one	5
+1952	nineteen fifty two	5
+1953	nineteen fifty three	5
+1954	nineteen fifty four	5
+1955	nineteen fifty five	5
+1956	nineteen fifty six	5
+1957	nineteen fifty seven	6
+1958	nineteen fifty eight	5
+1959	nineteen fifty nine	5
+1960	nineteen sixty	4
+1961	nineteen sixty one	5
+1962	nineteen sixty two	5
+1963	nineteen sixty three	5
+1964	nineteen sixty four	5
+1965	nineteen sixty five	5
+1966	nineteen sixty six	5
+1967	nineteen sixty seven	6
+1968	nineteen sixty eight	5
+1969	nineteen sixty nine	5
+1970	nineteen seventy	5
+1971	nineteen seventy one	6
+1972	nineteen seventy two	6
+1973	nineteen seventy three	6
+1974	nineteen seventy four	6
+1975	nineteen seventy five	6
+1976	nineteen seventy six	6
+1977	nineteen seventy seven	7
+1978	nineteen seventy eight	6
+1979	nineteen seventy nine	6
+1980	nineteen eighty	4
+1981	nineteen eighty one	5
+1982	nineteen eighty two	5
+1983	nineteen eighty three	5
+1984	nineteen eighty four	5
+1985	nineteen eighty five	5
+1986	nineteen eighty six	5
+1987	nineteen eighty seven	6
+1988	nineteen eighty eight	5
+1989	nineteen eighty nine	5
+1990	nineteen ninety	4
+1991	nineteen ninety one	5
+1992	nineteen ninety two	5
+1993	nineteen ninety three	5
+1994	nineteen ninety four	5
+1995	nineteen ninety five	5
+1996	nineteen ninety six	5
+1997	nineteen ninety seven	6
+1998	nineteen ninety eight	5
+1999	nineteen ninety nine	5
+2000	two thousand	3
+2001	two thousand one	4
+2002	two thousand two	4
+2003	two thousand three	4
+2004	two thousand four	4
+2005	two thousand five	4
+2006	two thousand six	4
+2007	two thousand seven	5
+2008	two thousand eight	4
+2009	two thousand nine	4
+2010	twenty ten	3
+2011	twenty eleven	5
+2012	twenty twelve	3
+2013	twenty thirteen	4
+2014	twenty fourteen	4
+2015	twenty fifteen	4
+2016	twenty sixteen	4
+2017	twenty seventeen	5
+2018	twenty eighteen	4
+2019	twenty nineteen	4
+2020	twenty twenty	4
+2021	twenty twenty one	5
+2022	twenty twenty two	5
+2023	twenty twenty three	5
+2024	twenty twenty four	5
+2025	twenty twenty five	5
+2026	twenty twenty six	5
+2027	twenty twenty seven	6
+2028	twenty twenty eight	5
+2029	twenty twenty nine	5
+2030	twenty thirty	4
+2031	twenty thirty one	5
+2032	twenty thirty two	5
+2033	twenty thirty three	5
+2034	twenty thirty four	5
+2035	twenty thirty five	5
+2036	twenty thirty six	5
+2037	twenty thirty seven	6
+2038	twenty thirty eight	5
+2039	twenty thirty nine	5
+2040	twenty forty	4
+2041	twenty forty one	5
+2042	twenty forty two	5
+2043	twenty forty three	5
+2044	twenty forty four	5
+2045	twenty forty five	5
+2046	twenty forty six	5
+2047	twenty forty seven	6
+2048	twenty forty eight	5
+2049	twenty forty nine	5
+2050	twenty fifty	4
+2051	twenty fifty one	5
+2052	twenty fifty two	5
+2053	twenty fifty three	5
+2054	twenty fifty four	5
+2055	twenty fifty five	5
+2056	twenty fifty six	5
+2057	twenty fifty seven	6
+2058	twenty fifty eight	5
+2059	twenty fifty nine	5
+2060	twenty sixty	4
+2061	twenty sixty one	5
+2062	twenty sixty two	5
+2063	twenty sixty three	5
+2064	twenty sixty four	5
+2065	twenty sixty five	5
+2066	twenty sixty six	5
+2067	twenty sixty seven	6
+2068	twenty sixty eight	5
+2069	twenty sixty nine	5
+2070	twenty seventy	5
+2071	twenty seventy one	6
+2072	twenty seventy two	6
+2073	twenty seventy three	6
+2074	twenty seventy four	6
+2075	twenty seventy five	6
+2076	twenty seventy six	6
+2077	twenty seventy seven	7
+2078	twenty seventy eight	6
+2079	twenty seventy nine	6
+2080	twenty eighty	4
+2081	twenty eighty one	5
+2082	twenty eighty two	5
+2083	twenty eighty three	5
+2084	twenty eighty four	5
+2085	twenty eighty five	5
+2086	twenty eighty six	5
+2087	twenty eighty seven	6
+2088	twenty eighty eight	5
+2089	twenty eighty nine	5
+2090	twenty ninety	4
+2091	twenty ninety one	5
+2092	twenty ninety two	5
+2093	twenty ninety three	5
+2094	twenty ninety four	5
+2095	twenty ninety five	5
+2096	twenty ninety six	5
+2097	twenty ninety seven	6
+2098	twenty ninety eight	5
+2099	twenty ninety nine	5
+2100	twenty one hundred	5
+2101	twenty one oh one	5
+2102	twenty one oh two	5
+2103	twenty one oh three	5
+2104	twenty one oh four	5
+2105	twenty one oh five	5
+2106	twenty one oh six	5
+2107	twenty one oh seven	6
+2108	twenty one oh eight	5
+2109	twenty one oh nine	5
+2110	twenty one ten	4
+2111	twenty one eleven	6
+2112	twenty one twelve	4
+2113	twenty one thirteen	5
+2114	twenty one fourteen	5
+2115	twenty one fifteen	5
+2116	twenty one sixteen	5
+2117	twenty one seventeen	6
+2118	twenty one eighteen	5
+2119	twenty one nineteen	5
+2120	twenty one twenty	5
+2121	twenty one twenty one	6
+2122	twenty one twenty two	6
+2123	twenty one twenty three	6
+2124	twenty one twenty four	6
+2125	twenty one twenty five	6
+2126	twenty one twenty six	6
+2127	twenty one twenty seven	7
+2128	twenty one twenty eight	6
+2129	twenty one twenty nine	6
+2130	twenty one thirty	5
+2131	twenty one thirty one	6
+2132	twenty one thirty two	6
+2133	twenty one thirty three	6
+2134	twenty one thirty four	6
+2135	twenty one thirty five	6
+2136	twenty one thirty six	6
+2137	twenty one thirty seven	7
+2138	twenty one thirty eight	6
+2139	twenty one thirty nine	6
+2140	twenty one forty	5
+2141	twenty one forty one	6
+2142	twenty one forty two	6
+2143	twenty one forty three	6
+2144	twenty one forty four	6
+2145	twenty one forty five	6
+2146	twenty one forty six	6
+2147	twenty one forty seven	7
+2148	twenty one forty eight	6
+2149	twenty one forty nine	6
+2150	twenty one fifty	5
+2151	twenty one fifty one	6
+2152	twenty one fifty two	6
+2153	twenty one fifty three	6
+2154	twenty one fifty four	6
+2155	twenty one fifty five	6
+2156	twenty one fifty six	6
+2157	twenty one fifty seven	7
+2158	twenty one fifty eight	6
+2159	twenty one fifty nine	6
+2160	twenty one sixty	5
+2161	twenty one sixty one	6
+2162	twenty one sixty two	6
+2163	twenty one sixty three	6
+2164	twenty one sixty four	6
+2165	twenty one sixty five	6
+2166	twenty one sixty six	6
+2167	twenty one sixty seven	7
+2168	twenty one sixty eight	6
+2169	twenty one sixty nine	6
+2170	twenty one seventy	6
+2171	twenty one seventy one	7
+2172	twenty one seventy two	7
+2173	twenty one seventy three	7
+2174	twenty one seventy four	7
+2175	twenty one seventy five	7
+2176	twenty one seventy six	7
+2177	twenty one seventy seven	8
+2178	twenty one seventy eight	7
+2179	twenty one seventy nine	7
+2180	twenty one eighty	5
+2181	twenty one eighty one	6
+2182	twenty one eighty two	6
+2183	twenty one eighty three	6
+2184	twenty one eighty four	6
+2185	twenty one eighty five	6
+2186	twenty one eighty six	6
+2187	twenty one eighty seven	7
+2188	twenty one eighty eight	6
+2189	twenty one eighty nine	6
+2190	twenty one ninety	5
+2191	twenty one ninety one	6
+2192	twenty one ninety two	6
+2193	twenty one ninety three	6
+2194	twenty one ninety four	6
+2195	twenty one ninety five	6
+2196	twenty one ninety six	6
+2197	twenty one ninety seven	7
+2198	twenty one ninety eight	6
+2199	twenty one ninety nine	6
+2200	twenty two hundred	5
+2201	twenty two oh one	5
+2202	twenty two oh two	5
+2203	twenty two oh three	5
+2204	twenty two oh four	5
+2205	twenty two oh five	5
+2206	twenty two oh six	5
+2207	twenty two oh seven	6
+2208	twenty two oh eight	5
+2209	twenty two oh nine	5
+2210	twenty two ten	4
+2211	twenty two eleven	6
+2212	twenty two twelve	4
+2213	twenty two thirteen	5
+2214	twenty two fourteen	5
+2215	twenty two fifteen	5
+2216	twenty two sixteen	5
+2217	twenty two seventeen	6
+2218	twenty two eighteen	5
+2219	twenty two nineteen	5
+2220	twenty two twenty	5
+2221	twenty two twenty one	6
+2222	twenty two twenty two	6
+2223	twenty two twenty three	6
+2224	twenty two twenty four	6
+2225	twenty two twenty five	6
+2226	twenty two twenty six	6
+2227	twenty two twenty seven	7
+2228	twenty two twenty eight	6
+2229	twenty two twenty nine	6
+2230	twenty two thirty	5
+2231	twenty two thirty one	6
+2232	twenty two thirty two	6
+2233	twenty two thirty three	6
+2234	twenty two thirty four	6
+2235	twenty two thirty five	6
+2236	twenty two thirty six	6
+2237	twenty two thirty seven	7
+2238	twenty two thirty eight	6
+2239	twenty two thirty nine	6
+2240	twenty two forty	5
+2241	twenty two forty one	6
+2242	twenty two forty two	6
+2243	twenty two forty three	6
+2244	twenty two forty four	6
+2245	twenty two forty five	6
+2246	twenty two forty six	6
+2247	twenty two forty seven	7
+2248	twenty two forty eight	6
+2249	twenty two forty nine	6
+2250	twenty two fifty	5
+2251	twenty two fifty one	6
+2252	twenty two fifty two	6
+2253	twenty two fifty three	6
+2254	twenty two fifty four	6
+2255	twenty two fifty five	6
+2256	twenty two fifty six	6
+2257	twenty two fifty seven	7
+2258	twenty two fifty eight	6
+2259	twenty two fifty nine	6
+2260	twenty two sixty	5
+2261	twenty two sixty one	6
+2262	twenty two sixty two	6
+2263	twenty two sixty three	6
+2264	twenty two sixty four	6
+2265	twenty two sixty five	6
+2266	twenty two sixty six	6
+2267	twenty two sixty seven	7
+2268	twenty two sixty eight	6
+2269	twenty two sixty nine	6
+2270	twenty two seventy	6
+2271	twenty two seventy one	7
+2272	twenty two seventy two	7
+2273	twenty two seventy three	7
+2274	twenty two seventy four	7
+2275	twenty two seventy five	7
+2276	twenty two seventy six	7
+2277	twenty two seventy seven	8
+2278	twenty two seventy eight	7
+2279	twenty two seventy nine	7
+2280	twenty two eighty	5
+2281	twenty two eighty one	6
+2282	twenty two eighty two	6
+2283	twenty two eighty three	6
+2284	twenty two eighty four	6
+2285	twenty two eighty five	6
+2286	twenty two eighty six	6
+2287	twenty two eighty seven	7
+2288	twenty two eighty eight	6
+2289	twenty two eighty nine	6
+2290	twenty two ninety	5
+2291	twenty two ninety one	6
+2292	twenty two ninety two	6
+2293	twenty two ninety three	6
+2294	twenty two ninety four	6
+2295	twenty two ninety five	6
+2296	twenty two ninety six	6
+2297	twenty two ninety seven	7
+2298	twenty two ninety eight	6
+2299	twenty two ninety nine	6
+2300	twenty three hundred	5
+2301	twenty three oh one	5
+2302	twenty three oh two	5
+2303	twenty three oh three	5
+2304	twenty three oh four	5
+2305	twenty three oh five	5
+2306	twenty three oh six	5
+2307	twenty three oh seven	6
+2308	twenty three oh eight	5
+2309	twenty three oh nine	5
+2310	twenty three ten	4
+2311	twenty three eleven	6
+2312	twenty three twelve	4
+2313	twenty three thirteen	5
+2314	twenty three fourteen	5
+2315	twenty three fifteen	5
+2316	twenty three sixteen	5
+2317	twenty three seventeen	6
+2318	twenty three eighteen	5
+2319	twenty three nineteen	5
+2320	twenty three twenty	5
+2321	twenty three twenty one	6
+2322	twenty three twenty two	6
+2323	twenty three twenty three	6
+2324	twenty three twenty four	6
+2325	twenty three twenty five	6
+2326	twenty three twenty six	6
+2327	twenty three twenty seven	7
+2328	twenty three twenty eight	6
+2329	twenty three twenty nine	6
+2330	twenty three thirty	5
+2331	twenty three thirty one	6
+2332	twenty three thirty two	6
+2333	twenty three thirty three	6
+2334	twenty three thirty four	6
+2335	twenty three thirty five	6
+2336	twenty three thirty six	6
+2337	twenty three thirty seven	7
+2338	twenty three thirty eight	6
+2339	twenty three thirty nine	6
+2340	twenty three forty	5
+2341	twenty three forty one	6
+2342	twenty three forty two	6
+2343	twenty three forty three	6
+2344	twenty three forty four	6
+2345	twenty three forty five	6
+2346	twenty three forty six	6
+2347	twenty three forty seven	7
+2348	twenty three forty eight	6
+2349	twenty three forty nine	6
+2350	twenty three fifty	5
+2351	twenty three fifty one	6
+2352	twenty three fifty two	6
+2353	twenty three fifty three	6
+2354	twenty three fifty four	6
+2355	twenty three fifty five	6
+2356	twenty three fifty six	6
+2357	twenty three fifty seven	7
+2358	twenty three fifty eight	6
+2359	twenty three fifty nine	6
+2360	twenty three sixty	5
+2361	twenty three sixty one	6
+2362	twenty three sixty two	6
+2363	twenty three sixty three	6
+2364	twenty three sixty four	6
+2365	twenty three sixty five	6
+2366	twenty three sixty six	6
+2367	twenty three sixty seven	7
+2368	twenty three sixty eight	6
+2369	twenty three sixty nine	6
+2370	twenty three seventy	6
+2371	twenty three seventy one	7
+2372	twenty three seventy two	7
+2373	twenty three seventy three	7
+2374	twenty three seventy four	7
+2375	twenty three seventy five	7
+2376	twenty three seventy six	7
+2377	twenty three seventy seven	8
+2378	twenty three seventy eight	7
+2379	twenty three seventy nine	7
+2380	twenty three eighty	5
+2381	twenty three eighty one	6
+2382	twenty three eighty two	6
+2383	twenty three eighty three	6
+2384	twenty three eighty four	6
+2385	twenty three eighty five	6
+2386	twenty three eighty six	6
+2387	twenty three eighty seven	7
+2388	twenty three eighty eight	6
+2389	twenty three eighty nine	6
+2390	twenty three ninety	5
+2391	twenty three ninety one	6
+2392	twenty three ninety two	6
+2393	twenty three ninety three	6
+2394	twenty three ninety four	6
+2395	twenty three ninety five	6
+2396	twenty three ninety six	6
+2397	twenty three ninety seven	7
+2398	twenty three ninety eight	6
+2399	twenty three ninety nine	6
+2400	twenty four hundred	5
+2401	twenty four oh one	5
+2402	twenty four oh two	5
+2403	twenty four oh three	5
+2404	twenty four oh four	5
+2405	twenty four oh five	5
+2406	twenty four oh six	5
+2407	twenty four oh seven	6
+2408	twenty four oh eight	5
+2409	twenty four oh nine	5
+2410	twenty four ten	4
+2411	twenty four eleven	6
+2412	twenty four twelve	4
+2413	twenty four thirteen	5
+2414	twenty four fourteen	5
+2415	twenty four fifteen	5
+2416	twenty four sixteen	5
+2417	twenty four seventeen	6
+2418	twenty four eighteen	5
+2419	twenty four nineteen	5
+2420	twenty four twenty	5
+2421	twenty four twenty one	6
+2422	twenty four twenty two	6
+2423	twenty four twenty three	6
+2424	twenty four twenty four	6
+2425	twenty four twenty five	6
+2426	twenty four twenty six	6
+2427	twenty four twenty seven	7
+2428	twenty four twenty eight	6
+2429	twenty four twenty nine	6
+2430	twenty four thirty	5
+2431	twenty four thirty one	6
+2432	twenty four thirty two	6
+2433	twenty four thirty three	6
+2434	twenty four thirty four	6
+2435	twenty four thirty five	6
+2436	twenty four thirty six	6
+2437	twenty four thirty seven	7
+2438	twenty four thirty eight	6
+2439	twenty four thirty nine	6
+2440	twenty four forty	5
+2441	twenty four forty one	6
+2442	twenty four forty two	6
+2443	twenty four forty three	6
+2444	twenty four forty four	6
+2445	twenty four forty five	6
+2446	twenty four forty six	6
+2447	twenty four forty seven	7
+2448	twenty four forty eight	6
+2449	twenty four forty nine	6
+2450	twenty four fifty	5
+2451	twenty four fifty one	6
+2452	twenty four fifty two	6
+2453	twenty four fifty three	6
+2454	twenty four fifty four	6
+2455	twenty four fifty five	6
+2456	twenty four fifty six	6
+2457	twenty four fifty seven	7
+2458	twenty four fifty eight	6
+2459	twenty four fifty nine	6
+2460	twenty four sixty	5
+2461	twenty four sixty one	6
+2462	twenty four sixty two	6
+2463	twenty four sixty three	6
+2464	twenty four sixty four	6
+2465	twenty four sixty five	6
+2466	twenty four sixty six	6
+2467	twenty four sixty seven	7
+2468	twenty four sixty eight	6
+2469	twenty four sixty nine	6
+2470	twenty four seventy	6
+2471	twenty four seventy one	7
+2472	twenty four seventy two	7
+2473	twenty four seventy three	7
+2474	twenty four seventy four	7
+2475	twenty four seventy five	7
+2476	twenty four seventy six	7
+2477	twenty four seventy seven	8
+2478	twenty four seventy eight	7
+2479	twenty four seventy nine	7
+2480	twenty four eighty	5
+2481	twenty four eighty one	6
+2482	twenty four eighty two	6
+2483	twenty four eighty three	6
+2484	twenty four eighty four	6
+2485	twenty four eighty five	6
+2486	twenty four eighty six	6
+2487	twenty four eighty seven	7
+2488	twenty four eighty eight	6
+2489	twenty four eighty nine	6
+2490	twenty four ninety	5
+2491	twenty four ninety one	6
+2492	twenty four ninety two	6
+2493	twenty four ninety three	6
+2494	twenty four ninety four	6
+2495	twenty four ninety five	6
+2496	twenty four ninety six	6
+2497	twenty four ninety seven	7
+2498	twenty four ninety eight	6
+2499	twenty four ninety nine	6
+2500	twenty five hundred	5
+2501	twenty five oh one	5
+2502	twenty five oh two	5
+2503	twenty five oh three	5
+2504	twenty five oh four	5
+2505	twenty five oh five	5
+2506	twenty five oh six	5
+2507	twenty five oh seven	6
+2508	twenty five oh eight	5
+2509	twenty five oh nine	5
+2510	twenty five ten	4
+2511	twenty five eleven	6
+2512	twenty five twelve	4
+2513	twenty five thirteen	5
+2514	twenty five fourteen	5
+2515	twenty five fifteen	5
+2516	twenty five sixteen	5
+2517	twenty five seventeen	6
+2518	twenty five eighteen	5
+2519	twenty five nineteen	5
+2520	twenty five twenty	5
+2521	twenty five twenty one	6
+2522	twenty five twenty two	6
+2523	twenty five twenty three	6
+2524	twenty five twenty four	6
+2525	twenty five twenty five	6
+2526	twenty five twenty six	6
+2527	twenty five twenty seven	7
+2528	twenty five twenty eight	6
+2529	twenty five twenty nine	6
+2530	twenty five thirty	5
+2531	twenty five thirty one	6
+2532	twenty five thirty two	6
+2533	twenty five thirty three	6
+2534	twenty five thirty four	6
+2535	twenty five thirty five	6
+2536	twenty five thirty six	6
+2537	twenty five thirty seven	7
+2538	twenty five thirty eight	6
+2539	twenty five thirty nine	6
+2540	twenty five forty	5
+2541	twenty five forty one	6
+2542	twenty five forty two	6
+2543	twenty five forty three	6
+2544	twenty five forty four	6
+2545	twenty five forty five	6
+2546	twenty five forty six	6
+2547	twenty five forty seven	7
+2548	twenty five forty eight	6
+2549	twenty five forty nine	6
+2550	twenty five fifty	5
+2551	twenty five fifty one	6
+2552	twenty five fifty two	6
+2553	twenty five fifty three	6
+2554	twenty five fifty four	6
+2555	twenty five fifty five	6
+2556	twenty five fifty six	6
+2557	twenty five fifty seven	7
+2558	twenty five fifty eight	6
+2559	twenty five fifty nine	6
+2560	twenty five sixty	5
+2561	twenty five sixty one	6
+2562	twenty five sixty two	6
+2563	twenty five sixty three	6
+2564	twenty five sixty four	6
+2565	twenty five sixty five	6
+2566	twenty five sixty six	6
+2567	twenty five sixty seven	7
+2568	twenty five sixty eight	6
+2569	twenty five sixty nine	6
+2570	twenty five seventy	6
+2571	twenty five seventy one	7
+2572	twenty five seventy two	7
+2573	twenty five seventy three	7
+2574	twenty five seventy four	7
+2575	twenty five seventy five	7
+2576	twenty five seventy six	7
+2577	twenty five seventy seven	8
+2578	twenty five seventy eight	7
+2579	twenty five seventy nine	7
+2580	twenty five eighty	5
+2581	twenty five eighty one	6
+2582	twenty five eighty two	6
+2583	twenty five eighty three	6
+2584	twenty five eighty four	6
+2585	twenty five eighty five	6
+2586	twenty five eighty six	6
+2587	twenty five eighty seven	7
+2588	twenty five eighty eight	6
+2589	twenty five eighty nine	6
+2590	twenty five ninety	5
+2591	twenty five ninety one	6
+2592	twenty five ninety two	6
+2593	twenty five ninety three	6
+2594	twenty five ninety four	6
+2595	twenty five ninety five	6
+2596	twenty five ninety six	6
+2597	twenty five ninety seven	7
+2598	twenty five ninety eight	6
+2599	twenty five ninety nine	6
+2600	twenty six hundred	5
+2601	twenty six oh one	5
+2602	twenty six oh two	5
+2603	twenty six oh three	5
+2604	twenty six oh four	5
+2605	twenty six oh five	5
+2606	twenty six oh six	5
+2607	twenty six oh seven	6
+2608	twenty six oh eight	5
+2609	twenty six oh nine	5
+2610	twenty six ten	4
+2611	twenty six eleven	6
+2612	twenty six twelve	4
+2613	twenty six thirteen	5
+2614	twenty six fourteen	5
+2615	twenty six fifteen	5
+2616	twenty six sixteen	5
+2617	twenty six seventeen	6
+2618	twenty six eighteen	5
+2619	twenty six nineteen	5
+2620	twenty six twenty	5
+2621	twenty six twenty one	6
+2622	twenty six twenty two	6
+2623	twenty six twenty three	6
+2624	twenty six twenty four	6
+2625	twenty six twenty five	6
+2626	twenty six twenty six	6
+2627	twenty six twenty seven	7
+2628	twenty six twenty eight	6
+2629	twenty six twenty nine	6
+2630	twenty six thirty	5
+2631	twenty six thirty one	6
+2632	twenty six thirty two	6
+2633	twenty six thirty three	6
+2634	twenty six thirty four	6
+2635	twenty six thirty five	6
+2636	twenty six thirty six	6
+2637	twenty six thirty seven	7
+2638	twenty six thirty eight	6
+2639	twenty six thirty nine	6
+2640	twenty six forty	5
+2641	twenty six forty one	6
+2642	twenty six forty two	6
+2643	twenty six forty three	6
+2644	twenty six forty four	6
+2645	twenty six forty five	6
+2646	twenty six forty six	6
+2647	twenty six forty seven	7
+2648	twenty six forty eight	6
+2649	twenty six forty nine	6
+2650	twenty six fifty	5
+2651	twenty six fifty one	6
+2652	twenty six fifty two	6
+2653	twenty six fifty three	6
+2654	twenty six fifty four	6
+2655	twenty six fifty five	6
+2656	twenty six fifty six	6
+2657	twenty six fifty seven	7
+2658	twenty six fifty eight	6
+2659	twenty six fifty nine	6
+2660	twenty six sixty	5
+2661	twenty six sixty one	6
+2662	twenty six sixty two	6
+2663	twenty six sixty three	6
+2664	twenty six sixty four	6
+2665	twenty six sixty five	6
+2666	twenty six sixty six	6
+2667	twenty six sixty seven	7
+2668	twenty six sixty eight	6
+2669	twenty six sixty nine	6
+2670	twenty six seventy	6
+2671	twenty six seventy one	7
+2672	twenty six seventy two	7
+2673	twenty six seventy three	7
+2674	twenty six seventy four	7
+2675	twenty six seventy five	7
+2676	twenty six seventy six	7
+2677	twenty six seventy seven	8
+2678	twenty six seventy eight	7
+2679	twenty six seventy nine	7
+2680	twenty six eighty	5
+2681	twenty six eighty one	6
+2682	twenty six eighty two	6
+2683	twenty six eighty three	6
+2684	twenty six eighty four	6
+2685	twenty six eighty five	6
+2686	twenty six eighty six	6
+2687	twenty six eighty seven	7
+2688	twenty six eighty eight	6
+2689	twenty six eighty nine	6
+2690	twenty six ninety	5
+2691	twenty six ninety one	6
+2692	twenty six ninety two	6
+2693	twenty six ninety three	6
+2694	twenty six ninety four	6
+2695	twenty six ninety five	6
+2696	twenty six ninety six	6
+2697	twenty six ninety seven	7
+2698	twenty six ninety eight	6
+2699	twenty six ninety nine	6
+2700	twenty seven hundred	6
+2701	twenty seven oh one	6
+2702	twenty seven oh two	6
+2703	twenty seven oh three	6
+2704	twenty seven oh four	6
+2705	twenty seven oh five	6
+2706	twenty seven oh six	6
+2707	twenty seven oh seven	7
+2708	twenty seven oh eight	6
+2709	twenty seven oh nine	6
+2710	twenty seven ten	5
+2711	twenty seven eleven	7
+2712	twenty seven twelve	5
+2713	twenty seven thirteen	6
+2714	twenty seven fourteen	6
+2715	twenty seven fifteen	6
+2716	twenty seven sixteen	6
+2717	twenty seven seventeen	7
+2718	twenty seven eighteen	6
+2719	twenty seven nineteen	6
+2720	twenty seven twenty	6
+2721	twenty seven twenty one	7
+2722	twenty seven twenty two	7
+2723	twenty seven twenty three	7
+2724	twenty seven twenty four	7
+2725	twenty seven twenty five	7
+2726	twenty seven twenty six	7
+2727	twenty seven twenty seven	8
+2728	twenty seven twenty eight	7
+2729	twenty seven twenty nine	7
+2730	twenty seven thirty	6
+2731	twenty seven thirty one	7
+2732	twenty seven thirty two	7
+2733	twenty seven thirty three	7
+2734	twenty seven thirty four	7
+2735	twenty seven thirty five	7
+2736	twenty seven thirty six	7
+2737	twenty seven thirty seven	8
+2738	twenty seven thirty eight	7
+2739	twenty seven thirty nine	7
+2740	twenty seven forty	6
+2741	twenty seven forty one	7
+2742	twenty seven forty two	7
+2743	twenty seven forty three	7
+2744	twenty seven forty four	7
+2745	twenty seven forty five	7
+2746	twenty seven forty six	7
+2747	twenty seven forty seven	8
+2748	twenty seven forty eight	7
+2749	twenty seven forty nine	7
+2750	twenty seven fifty	6
+2751	twenty seven fifty one	7
+2752	twenty seven fifty two	7
+2753	twenty seven fifty three	7
+2754	twenty seven fifty four	7
+2755	twenty seven fifty five	7
+2756	twenty seven fifty six	7
+2757	twenty seven fifty seven	8
+2758	twenty seven fifty eight	7
+2759	twenty seven fifty nine	7
+2760	twenty seven sixty	6
+2761	twenty seven sixty one	7
+2762	twenty seven sixty two	7
+2763	twenty seven sixty three	7
+2764	twenty seven sixty four	7
+2765	twenty seven sixty five	7
+2766	twenty seven sixty six	7
+2767	twenty seven sixty seven	8
+2768	twenty seven sixty eight	7
+2769	twenty seven sixty nine	7
+2770	twenty seven seventy	7
+2771	twenty seven seventy one	8
+2772	twenty seven seventy two	8
+2773	twenty seven seventy three	8
+2774	twenty seven seventy four	8
+2775	twenty seven seventy five	8
+2776	twenty seven seventy six	8
+2777	twenty seven seventy seven	9
+2778	twenty seven seventy eight	8
+2779	twenty seven seventy nine	8
+2780	twenty seven eighty	6
+2781	twenty seven eighty one	7
+2782	twenty seven eighty two	7
+2783	twenty seven eighty three	7
+2784	twenty seven eighty four	7
+2785	twenty seven eighty five	7
+2786	twenty seven eighty six	7
+2787	twenty seven eighty seven	8
+2788	twenty seven eighty eight	7
+2789	twenty seven eighty nine	7
+2790	twenty seven ninety	6
+2791	twenty seven ninety one	7
+2792	twenty seven ninety two	7
+2793	twenty seven ninety three	7
+2794	twenty seven ninety four	7
+2795	twenty seven ninety five	7
+2796	twenty seven ninety six	7
+2797	twenty seven ninety seven	8
+2798	twenty seven ninety eight	7
+2799	twenty seven ninety nine	7
+2800	twenty eight hundred	5
+2801	twenty eight oh one	5
+2802	twenty eight oh two	5
+2803	twenty eight oh three	5
+2804	twenty eight oh four	5
+2805	twenty eight oh five	5
+2806	twenty eight oh six	5
+2807	twenty eight oh seven	6
+2808	twenty eight oh eight	5
+2809	twenty eight oh nine	5
+2810	twenty eight ten	4
+2811	twenty eight eleven	6
+2812	twenty eight twelve	4
+2813	twenty eight thirteen	5
+2814	twenty eight fourteen	5
+2815	twenty eight fifteen	5
+2816	twenty eight sixteen	5
+2817	twenty eight seventeen	6
+2818	twenty eight eighteen	5
+2819	twenty eight nineteen	5
+2820	twenty eight twenty	5
+2821	twenty eight twenty one	6
+2822	twenty eight twenty two	6
+2823	twenty eight twenty three	6
+2824	twenty eight twenty four	6
+2825	twenty eight twenty five	6
+2826	twenty eight twenty six	6
+2827	twenty eight twenty seven	7
+2828	twenty eight twenty eight	6
+2829	twenty eight twenty nine	6
+2830	twenty eight thirty	5
+2831	twenty eight thirty one	6
+2832	twenty eight thirty two	6
+2833	twenty eight thirty three	6
+2834	twenty eight thirty four	6
+2835	twenty eight thirty five	6
+2836	twenty eight thirty six	6
+2837	twenty eight thirty seven	7
+2838	twenty eight thirty eight	6
+2839	twenty eight thirty nine	6
+2840	twenty eight forty	5
+2841	twenty eight forty one	6
+2842	twenty eight forty two	6
+2843	twenty eight forty three	6
+2844	twenty eight forty four	6
+2845	twenty eight forty five	6
+2846	twenty eight forty six	6
+2847	twenty eight forty seven	7
+2848	twenty eight forty eight	6
+2849	twenty eight forty nine	6
+2850	twenty eight fifty	5
+2851	twenty eight fifty one	6
+2852	twenty eight fifty two	6
+2853	twenty eight fifty three	6
+2854	twenty eight fifty four	6
+2855	twenty eight fifty five	6
+2856	twenty eight fifty six	6
+2857	twenty eight fifty seven	7
+2858	twenty eight fifty eight	6
+2859	twenty eight fifty nine	6
+2860	twenty eight sixty	5
+2861	twenty eight sixty one	6
+2862	twenty eight sixty two	6
+2863	twenty eight sixty three	6
+2864	twenty eight sixty four	6
+2865	twenty eight sixty five	6
+2866	twenty eight sixty six	6
+2867	twenty eight sixty seven	7
+2868	twenty eight sixty eight	6
+2869	twenty eight sixty nine	6
+2870	twenty eight seventy	6
+2871	twenty eight seventy one	7
+2872	twenty eight seventy two	7
+2873	twenty eight seventy three	7
+2874	twenty eight seventy four	7
+2875	twenty eight seventy five	7
+2876	twenty eight seventy six	7
+2877	twenty eight seventy seven	8
+2878	twenty eight seventy eight	7
+2879	twenty eight seventy nine	7
+2880	twenty eight eighty	5
+2881	twenty eight eighty one	6
+2882	twenty eight eighty two	6
+2883	twenty eight eighty three	6
+2884	twenty eight eighty four	6
+2885	twenty eight eighty five	6
+2886	twenty eight eighty six	6
+2887	twenty eight eighty seven	7
+2888	twenty eight eighty eight	6
+2889	twenty eight eighty nine	6
+2890	twenty eight ninety	5
+2891	twenty eight ninety one	6
+2892	twenty eight ninety two	6
+2893	twenty eight ninety three	6
+2894	twenty eight ninety four	6
+2895	twenty eight ninety five	6
+2896	twenty eight ninety six	6
+2897	twenty eight ninety seven	7
+2898	twenty eight ninety eight	6
+2899	twenty eight ninety nine	6
+2900	twenty nine hundred	5
+2901	twenty nine oh one	5
+2902	twenty nine oh two	5
+2903	twenty nine oh three	5
+2904	twenty nine oh four	5
+2905	twenty nine oh five	5
+2906	twenty nine oh six	5
+2907	twenty nine oh seven	6
+2908	twenty nine oh eight	5
+2909	twenty nine oh nine	5
+2910	twenty nine ten	4
+2911	twenty nine eleven	6
+2912	twenty nine twelve	4
+2913	twenty nine thirteen	5
+2914	twenty nine fourteen	5
+2915	twenty nine fifteen	5
+2916	twenty nine sixteen	5
+2917	twenty nine seventeen	6
+2918	twenty nine eighteen	5
+2919	twenty nine nineteen	5
+2920	twenty nine twenty	5
+2921	twenty nine twenty one	6
+2922	twenty nine twenty two	6
+2923	twenty nine twenty three	6
+2924	twenty nine twenty four	6
+2925	twenty nine twenty five	6
+2926	twenty nine twenty six	6
+2927	twenty nine twenty seven	7
+2928	twenty nine twenty eight	6
+2929	twenty nine twenty nine	6
+2930	twenty nine thirty	5
+2931	twenty nine thirty one	6
+2932	twenty nine thirty two	6
+2933	twenty nine thirty three	6
+2934	twenty nine thirty four	6
+2935	twenty nine thirty five	6
+2936	twenty nine thirty six	6
+2937	twenty nine thirty seven	7
+2938	twenty nine thirty eight	6
+2939	twenty nine thirty nine	6
+2940	twenty nine forty	5
+2941	twenty nine forty one	6
+2942	twenty nine forty two	6
+2943	twenty nine forty three	6
+2944	twenty nine forty four	6
+2945	twenty nine forty five	6
+2946	twenty nine forty six	6
+2947	twenty nine forty seven	7
+2948	twenty nine forty eight	6
+2949	twenty nine forty nine	6
+2950	twenty nine fifty	5
+2951	twenty nine fifty one	6
+2952	twenty nine fifty two	6
+2953	twenty nine fifty three	6
+2954	twenty nine fifty four	6
+2955	twenty nine fifty five	6
+2956	twenty nine fifty six	6
+2957	twenty nine fifty seven	7
+2958	twenty nine fifty eight	6
+2959	twenty nine fifty nine	6
+2960	twenty nine sixty	5
+2961	twenty nine sixty one	6
+2962	twenty nine sixty two	6
+2963	twenty nine sixty three	6
+2964	twenty nine sixty four	6
+2965	twenty nine sixty five	6
+2966	twenty nine sixty six	6
+2967	twenty nine sixty seven	7
+2968	twenty nine sixty eight	6
+2969	twenty nine sixty nine	6
+2970	twenty nine seventy	6
+2971	twenty nine seventy one	7
+2972	twenty nine seventy two	7
+2973	twenty nine seventy three	7
+2974	twenty nine seventy four	7
+2975	twenty nine seventy five	7
+2976	twenty nine seventy six	7
+2977	twenty nine seventy seven	8
+2978	twenty nine seventy eight	7
+2979	twenty nine seventy nine	7
+2980	twenty nine eighty	5
+2981	twenty nine eighty one	6
+2982	twenty nine eighty two	6
+2983	twenty nine eighty three	6
+2984	twenty nine eighty four	6
+2985	twenty nine eighty five	6
+2986	twenty nine eighty six	6
+2987	twenty nine eighty seven	7
+2988	twenty nine eighty eight	6
+2989	twenty nine eighty nine	6
+2990	twenty nine ninety	5
+2991	twenty nine ninety one	6
+2992	twenty nine ninety two	6
+2993	twenty nine ninety three	6
+2994	twenty nine ninety four	6
+2995	twenty nine ninety five	6
+2996	twenty nine ninety six	6
+2997	twenty nine ninety seven	7
+2998	twenty nine ninety eight	6
+2999	twenty nine ninety nine	6
+3000	three thousand	3
+3001	three thousand one	4
+3002	three thousand two	4
+3003	three thousand three	4
+3004	three thousand four	4
+3005	three thousand five	4
+3006	three thousand six	4
+3007	three thousand seven	5
+3008	three thousand eight	4
+3009	three thousand nine	4
+3010	three thousand ten	4
+3011	three thousand eleven	6
+3012	three thousand twelve	4
+3013	three thousand thirteen	5
+3014	three thousand fourteen	5
+3015	three thousand fifteen	5
+3016	three thousand sixteen	5
+3017	three thousand seventeen	6
+3018	three thousand eighteen	5
+3019	three thousand nineteen	5
+3020	three thousand twenty	5
+3021	three thousand twenty one	6
+3022	three thousand twenty two	6
+3023	three thousand twenty three	6
+3024	three thousand twenty four	6
+3025	three thousand twenty five	6
+3026	three thousand twenty six	6
+3027	three thousand twenty seven	7
+3028	three thousand twenty eight	6
+3029	three thousand twenty nine	6
+3030	three thousand thirty	5
+3031	three thousand thirty one	6
+3032	three thousand thirty two	6
+3033	three thousand thirty three	6
+3034	three thousand thirty four	6
+3035	three thousand thirty five	6
+3036	three thousand thirty six	6
+3037	three thousand thirty seven	7
+3038	three thousand thirty eight	6
+3039	three thousand thirty nine	6
+3040	three thousand forty	5
+3041	three thousand forty one	6
+3042	three thousand forty two	6
+3043	three thousand forty three	6
+3044	three thousand forty four	6
+3045	three thousand forty five	6
+3046	three thousand forty six	6
+3047	three thousand forty seven	7
+3048	three thousand forty eight	6
+3049	three thousand forty nine	6
+3050	three thousand fifty	5
+3051	three thousand fifty one	6
+3052	three thousand fifty two	6
+3053	three thousand fifty three	6
+3054	three thousand fifty four	6
+3055	three thousand fifty five	6
+3056	three thousand fifty six	6
+3057	three thousand fifty seven	7
+3058	three thousand fifty eight	6
+3059	three thousand fifty nine	6
+3060	three thousand sixty	5
+3061	three thousand sixty one	6
+3062	three thousand sixty two	6
+3063	three thousand sixty three	6
+3064	three thousand sixty four	6
+3065	three thousand sixty five	6
+3066	three thousand sixty six	6
+3067	three thousand sixty seven	7
+3068	three thousand sixty eight	6
+3069	three thousand sixty nine	6
+3070	three thousand seventy	6
+3071	three thousand seventy one	7
+3072	three thousand seventy two	7
+3073	three thousand seventy three	7
+3074	three thousand seventy four	7
+3075	three thousand seventy five	7
+3076	three thousand seventy six	7
+3077	three thousand seventy seven	8
+3078	three thousand seventy eight	7
+3079	three thousand seventy nine	7
+3080	three thousand eighty	5
+3081	three thousand eighty one	6
+3082	three thousand eighty two	6
+3083	three thousand eighty three	6
+3084	three thousand eighty four	6
+3085	three thousand eighty five	6
+3086	three thousand eighty six	6
+3087	three thousand eighty seven	7
+3088	three thousand eighty eight	6
+3089	three thousand eighty nine	6
+3090	three thousand ninety	5
+3091	three thousand ninety one	6
+3092	three thousand ninety two	6
+3093	three thousand ninety three	6
+3094	three thousand ninety four	6
+3095	three thousand ninety five	6
+3096	three thousand ninety six	6
+3097	three thousand ninety seven	7
+3098	three thousand ninety eight	6
+3099	three thousand ninety nine	6
+3100	three thousand, one hundred	6
+10000	ten thousand	3
+12345	twelve thousand, three hundred forty five	9
+99999	ninety nine thousand, nine hundred ninety nine	11
+100000	one hundred thousand	5
+250000	two hundred fifty thousand	7
+1000000	one million	3
+1234567	one million, two hundred thirty four thousand, five hundred sixty seven	18
+20000000	twenty million	4
+1st	first	1
+2nd	second	2
+3rd	third	1
+4th	fourth	1
+5th	fifth	1
+6th	sixth	1
+7th	seventh	2
+8th	eighth	1
+9th	ninth	1
+10th	tenth	1
+11th	eleventh	3
+12th	twelfth	1
+13th	thirteenth	2
+14th	fourteenth	2
+15th	fifteenth	2
+16th	sixteenth	2
+17th	seventeenth	3
+18th	eighteenth	2
+19th	nineteenth	2
+20th	twentieth	3
+21st	twenty first	3
+22nd	twenty second	4
+23rd	twenty third	3
+24th	twenty fourth	3
+25th	twenty fifth	3
+26th	twenty sixth	3
+27th	twenty seventh	4
+28th	twenty eighth	3
+29th	twenty ninth	3
+30th	thirtieth	3
+31st	thirty first	3
+32nd	thirty second	4
+33rd	thirty third	3
+34th	thirty fourth	3
+35th	thirty fifth	3
+36th	thirty sixth	3
+37th	thirty seventh	4
+38th	thirty eighth	3
+39th	thirty ninth	3
+40th	fortieth	3
+41st	forty first	3
+42nd	forty second	4
+43rd	forty third	3
+44th	forty fourth	3
+45th	forty fifth	3
+46th	forty sixth	3
+47th	forty seventh	4
+48th	forty eighth	3
+49th	forty ninth	3
+50th	fiftieth	3
+51st	fifty first	3
+52nd	fifty second	4
+53rd	fifty third	3
+54th	fifty fourth	3
+55th	fifty fifth	3
+56th	fifty sixth	3
+57th	fifty seventh	4
+58th	fifty eighth	3
+59th	fifty ninth	3
+60th	sixtieth	3
+61st	sixty first	3
+62nd	sixty second	4
+63rd	sixty third	3
+64th	sixty fourth	3
+65th	sixty fifth	3
+66th	sixty sixth	3
+67th	sixty seventh	4
+68th	sixty eighth	3
+69th	sixty ninth	3
+70th	seventieth	4
+71st	seventy first	4
+72nd	seventy second	5
+73rd	seventy third	4
+74th	seventy fourth	4
+75th	seventy fifth	4
+76th	seventy sixth	4
+77th	seventy seventh	5
+78th	seventy eighth	4
+79th	seventy ninth	4
+80th	eightieth	3
+81st	eighty first	3
+82nd	eighty second	4
+83rd	eighty third	3
+84th	eighty fourth	3
+85th	eighty fifth	3
+86th	eighty sixth	3
+87th	eighty seventh	4
+88th	eighty eighth	3
+89th	eighty ninth	3
+90th	ninetieth	3
+91st	ninety first	3
+92nd	ninety second	4
+93rd	ninety third	3
+94th	ninety fourth	3
+95th	ninety fifth	3
+96th	ninety sixth	3
+97th	ninety seventh	4
+98th	ninety eighth	3
+99th	ninety ninth	3
+100th	one hundredth	3
+101st	one hundred and first	5
+102nd	one hundred and second	6
+103rd	one hundred and third	5
+104th	one hundred and fourth	5
+105th	one hundred and fifth	5
+106th	one hundred and sixth	5
+107th	one hundred and seventh	6
+108th	one hundred and eighth	5
+109th	one hundred and ninth	5
+110th	one hundred and tenth	5
+111th	one hundred and eleventh	7
+112th	one hundred and twelfth	5
+113th	one hundred and thirteenth	6
+114th	one hundred and fourteenth	6
+115th	one hundred and fifteenth	6
+116th	one hundred and sixteenth	6
+117th	one hundred and seventeenth	7
+118th	one hundred and eighteenth	6
+119th	one hundred and nineteenth	6
+120th	one hundred and twentieth	7
+121st	one hundred and twenty first	7
+122nd	one hundred and twenty second	8
+123rd	one hundred and twenty third	7
+124th	one hundred and twenty fourth	7
+125th	one hundred and twenty fifth	7
+126th	one hundred and twenty sixth	7
+127th	one hundred and twenty seventh	8
+128th	one hundred and twenty eighth	7
+129th	one hundred and twenty ninth	7
+130th	one hundred and thirtieth	7
+131st	one hundred and thirty first	7
+132nd	one hundred and thirty second	8
+133rd	one hundred and thirty third	7
+134th	one hundred and thirty fourth	7
+135th	one hundred and thirty fifth	7
+136th	one hundred and thirty sixth	7
+137th	one hundred and thirty seventh	8
+138th	one hundred and thirty eighth	7
+139th	one hundred and thirty ninth	7
+140th	one hundred and fortieth	7
+141st	one hundred and forty first	7
+142nd	one hundred and forty second	8
+143rd	one hundred and forty third	7
+144th	one hundred and forty fourth	7
+145th	one hundred and forty fifth	7
+146th	one hundred and forty sixth	7
+147th	one hundred and forty seventh	8
+148th	one hundred and forty eighth	7
+149th	one hundred and forty ninth	7
+150th	one hundred and fiftieth	7
+151st	one hundred and fifty first	7
+152nd	one hundred and fifty second	8
+153rd	one hundred and fifty third	7
+154th	one hundred and fifty fourth	7
+155th	one hundred and fifty fifth	7
+156th	one hundred and fifty sixth	7
+157th	one hundred and fifty seventh	8
+158th	one hundred and fifty eighth	7
+159th	one hundred and fifty ninth	7
+160th	one hundred and sixtieth	7
+161st	one hundred and sixty first	7
+162nd	one hundred and sixty second	8
+163rd	one hundred and sixty third	7
+164th	one hundred and sixty fourth	7
+165th	one hundred and sixty fifth	7
+166th	one hundred and sixty sixth	7
+167th	one hundred and sixty seventh	8
+168th	one hundred and sixty eighth	7
+169th	one hundred and sixty ninth	7
+170th	one hundred and seventieth	8
+171st	one hundred and seventy first	8
+172nd	one hundred and seventy second	9
+173rd	one hundred and seventy third	8
+174th	one hundred and seventy fourth	8
+175th	one hundred and seventy fifth	8
+176th	one hundred and seventy sixth	8
+177th	one hundred and seventy seventh	9
+178th	one hundred and seventy eighth	8
+179th	one hundred and seventy ninth	8
+180th	one hundred and eightieth	7
+181st	one hundred and eighty first	7
+182nd	one hundred and eighty second	8
+183rd	one hundred and eighty third	7
+184th	one hundred and eighty fourth	7
+185th	one hundred and eighty fifth	7
+186th	one hundred and eighty sixth	7
+187th	one hundred and eighty seventh	8
+188th	one hundred and eighty eighth	7
+189th	one hundred and eighty ninth	7
+190th	one hundred and ninetieth	7
+191st	one hundred and ninety first	7
+192nd	one hundred and ninety second	8
+193rd	one hundred and ninety third	7
+194th	one hundred and ninety fourth	7
+195th	one hundred and ninety fifth	7
+196th	one hundred and ninety sixth	7
+197th	one hundred and ninety seventh	8
+198th	one hundred and ninety eighth	7
+199th	one hundred and ninety ninth	7
+200th	two hundredth	3
+201st	two hundred and first	5
+202nd	two hundred and second	6
+203rd	two hundred and third	5
+204th	two hundred and fourth	5
+205th	two hundred and fifth	5
+206th	two hundred and sixth	5
+207th	two hundred and seventh	6
+208th	two hundred and eighth	5
+209th	two hundred and ninth	5
+210th	two hundred and tenth	5
+211th	two hundred and eleventh	7
+212th	two hundred and twelfth	5
+213th	two hundred and thirteenth	6
+214th	two hundred and fourteenth	6
+215th	two hundred and fifteenth	6
+216th	two hundred and sixteenth	6
+217th	two hundred and seventeenth	7
+218th	two hundred and eighteenth	6
+219th	two hundred and nineteenth	6
+220th	two hundred and twentieth	7
+221st	two hundred and twenty first	7
+222nd	two hundred and twenty second	8
+223rd	two hundred and twenty third	7
+224th	two hundred and twenty fourth	7
+225th	two hundred and twenty fifth	7
+226th	two hundred and twenty sixth	7
+227th	two hundred and twenty seventh	8
+228th	two hundred and twenty eighth	7
+229th	two hundred and twenty ninth	7
+230th	two hundred and thirtieth	7
+231st	two hundred and thirty first	7
+232nd	two hundred and thirty second	8
+233rd	two hundred and thirty third	7
+234th	two hundred and thirty fourth	7
+235th	two hundred and thirty fifth	7
+236th	two hundred and thirty sixth	7
+237th	two hundred and thirty seventh	8
+238th	two hundred and thirty eighth	7
+239th	two hundred and thirty ninth	7
+240th	two hundred and fortieth	7
+241st	two hundred and forty first	7
+242nd	two hundred and forty second	8
+243rd	two hundred and forty third	7
+244th	two hundred and forty fourth	7
+245th	two hundred and forty fifth	7
+246th	two hundred and forty sixth	7
+247th	two hundred and forty seventh	8
+248th	two hundred and forty eighth	7
+249th	two hundred and forty ninth	7
+250th	two hundred and fiftieth	7
+251st	two hundred and fifty first	7
+252nd	two hundred and fifty second	8
+253rd	two hundred and fifty third	7
+254th	two hundred and fifty fourth	7
+255th	two hundred and fifty fifth	7
+256th	two hundred and fifty sixth	7
+257th	two hundred and fifty seventh	8
+258th	two hundred and fifty eighth	7
+259th	two hundred and fifty ninth	7
+260th	two hundred and sixtieth	7
+261st	two hundred and sixty first	7
+262nd	two hundred and sixty second	8
+263rd	two hundred and sixty third	7
+264th	two hundred and sixty fourth	7
+265th	two hundred and sixty fifth	7
+266th	two hundred and sixty sixth	7
+267th	two hundred and sixty seventh	8
+268th	two hundred and sixty eighth	7
+269th	two hundred and sixty ninth	7
+270th	two hundred and seventieth	8
+271st	two hundred and seventy first	8
+272nd	two hundred and seventy second	9
+273rd	two hundred and seventy third	8
+274th	two hundred and seventy fourth	8
+275th	two hundred and seventy fifth	8
+276th	two hundred and seventy sixth	8
+277th	two hundred and seventy seventh	9
+278th	two hundred and seventy eighth	8
+279th	two hundred and seventy ninth	8
+280th	two hundred and eightieth	7
+281st	two hundred and eighty first	7
+282nd	two hundred and eighty second	8
+283rd	two hundred and eighty third	7
+284th	two hundred and eighty fourth	7
+285th	two hundred and eighty fifth	7
+286th	two hundred and eighty sixth	7
+287th	two hundred and eighty seventh	8
+288th	two hundred and eighty eighth	7
+289th	two hundred and eighty ninth	7
+290th	two hundred and ninetieth	7
+291st	two hundred and ninety first	7
+292nd	two hundred and ninety second	8
+293rd	two hundred and ninety third	7
+294th	two hundred and ninety fourth	7
+295th	two hundred and ninety fifth	7
+296th	two hundred and ninety sixth	7
+297th	two hundred and ninety seventh	8
+298th	two hundred and ninety eighth	7
+299th	two hundred and ninety ninth	7
+300th	three hundredth	3
+301st	three hundred and first	5
+302nd	three hundred and second	6
+303rd	three hundred and third	5
+304th	three hundred and fourth	5
+305th	three hundred and fifth	5
+306th	three hundred and sixth	5
+307th	three hundred and seventh	6
+308th	three hundred and eighth	5
+309th	three hundred and ninth	5
+310th	three hundred and tenth	5
+311th	three hundred and eleventh	7
+312th	three hundred and twelfth	5
+313th	three hundred and thirteenth	6
+314th	three hundred and fourteenth	6
+315th	three hundred and fifteenth	6
+316th	three hundred and sixteenth	6
+317th	three hundred and seventeenth	7
+318th	three hundred and eighteenth	6
+319th	three hundred and nineteenth	6
+320th	three hundred and twentieth	7
+321st	three hundred and twenty first	7
+322nd	three hundred and twenty second	8
+323rd	three hundred and twenty third	7
+324th	three hundred and twenty fourth	7
+325th	three hundred and twenty fifth	7
+326th	three hundred and twenty sixth	7
+327th	three hundred and twenty seventh	8
+328th	three hundred and twenty eighth	7
+329th	three hundred and twenty ninth	7
+330th	three hundred and thirtieth	7
+331st	three hundred and thirty first	7
+332nd	three hundred and thirty second	8
+333rd	three hundred and thirty third	7
+334th	three hundred and thirty fourth	7
+335th	three hundred and thirty fifth	7
+336th	three hundred and thirty sixth	7
+337th	three hundred and thirty seventh	8
+338th	three hundred and thirty eighth	7
+339th	three hundred and thirty ninth	7
+340th	three hundred and fortieth	7
+341st	three hundred and forty first	7
+342nd	three hundred and forty second	8
+343rd	three hundred and forty third	7
+344th	three hundred and forty fourth	7
+345th	three hundred and forty fifth	7
+346th	three hundred and forty sixth	7
+347th	three hundred and forty seventh	8
+348th	three hundred and forty eighth	7
+349th	three hundred and forty ninth	7
+350th	three hundred and fiftieth	7
+351st	three hundred and fifty first	7
+352nd	three hundred and fifty second	8
+353rd	three hundred and fifty third	7
+354th	three hundred and fifty fourth	7
+355th	three hundred and fifty fifth	7
+356th	three hundred and fifty sixth	7
+357th	three hundred and fifty seventh	8
+358th	three hundred and fifty eighth	7
+359th	three hundred and fifty ninth	7
+360th	three hundred and sixtieth	7
+361st	three hundred and sixty first	7
+362nd	three hundred and sixty second	8
+363rd	three hundred and sixty third	7
+364th	three hundred and sixty fourth	7
+365th	three hundred and sixty fifth	7
+366th	three hundred and sixty sixth	7
+367th	three hundred and sixty seventh	8
+368th	three hundred and sixty eighth	7
+369th	three hundred and sixty ninth	7
+370th	three hundred and seventieth	8
+371st	three hundred and seventy first	8
+372nd	three hundred and seventy second	9
+373rd	three hundred and seventy third	8
+374th	three hundred and seventy fourth	8
+375th	three hundred and seventy fifth	8
+376th	three hundred and seventy sixth	8
+377th	three hundred and seventy seventh	9
+378th	three hundred and seventy eighth	8
+379th	three hundred and seventy ninth	8
+380th	three hundred and eightieth	7
+381st	three hundred and eighty first	7
+382nd	three hundred and eighty second	8
+383rd	three hundred and eighty third	7
+384th	three hundred and eighty fourth	7
+385th	three hundred and eighty fifth	7
+386th	three hundred and eighty sixth	7
+387th	three hundred and eighty seventh	8
+388th	three hundred and eighty eighth	7
+389th	three hundred and eighty ninth	7
+390th	three hundred and ninetieth	7
+391st	three hundred and ninety first	7
+392nd	three hundred and ninety second	8
+393rd	three hundred and ninety third	7
+394th	three hundred and ninety fourth	7
+395th	three hundred and ninety fifth	7
+396th	three hundred and ninety sixth	7
+397th	three hundred and ninety seventh	8
+398th	three hundred and ninety eighth	7
+399th	three hundred and ninety ninth	7
+400th	four hundredth	3
+401st	four hundred and first	5
+402nd	four hundred and second	6
+403rd	four hundred and third	5
+404th	four hundred and fourth	5
+405th	four hundred and fifth	5
+406th	four hundred and sixth	5
+407th	four hundred and seventh	6
+408th	four hundred and eighth	5
+409th	four hundred and ninth	5
+410th	four hundred and tenth	5
+411th	four hundred and eleventh	7
+412th	four hundred and twelfth	5
+413th	four hundred and thirteenth	6
+414th	four hundred and fourteenth	6
+415th	four hundred and fifteenth	6
+416th	four hundred and sixteenth	6
+417th	four hundred and seventeenth	7
+418th	four hundred and eighteenth	6
+419th	four hundred and nineteenth	6
+420th	four hundred and twentieth	7
+421st	four hundred and twenty first	7
+422nd	four hundred and twenty second	8
+423rd	four hundred and twenty third	7
+424th	four hundred and twenty fourth	7
+425th	four hundred and twenty fifth	7
+426th	four hundred and twenty sixth	7
+427th	four hundred and twenty seventh	8
+428th	four hundred and twenty eighth	7
+429th	four hundred and twenty ninth	7
+430th	four hundred and thirtieth	7
+431st	four hundred and thirty first	7
+432nd	four hundred and thirty second	8
+433rd	four hundred and thirty third	7
+434th	four hundred and thirty fourth	7
+435th	four hundred and thirty fifth	7
+436th	four hundred and thirty sixth	7
+437th	four hundred and thirty seventh	8
+438th	four hundred and thirty eighth	7
+439th	four hundred and thirty ninth	7
+440th	four hundred and fortieth	7
+441st	four hundred and forty first	7
+442nd	four hundred and forty second	8
+443rd	four hundred and forty third	7
+444th	four hundred and forty fourth	7
+445th	four hundred and forty fifth	7
+446th	four hundred and forty sixth	7
+447th	four hundred and forty seventh	8
+448th	four hundred and forty eighth	7
+449th	four hundred and forty ninth	7
+450th	four hundred and fiftieth	7
+451st	four hundred and fifty first	7
+452nd	four hundred and fifty second	8
+453rd	four hundred and fifty third	7
+454th	four hundred and fifty fourth	7
+455th	four hundred and fifty fifth	7
+456th	four hundred and fifty sixth	7
+457th	four hundred and fifty seventh	8
+458th	four hundred and fifty eighth	7
+459th	four hundred and fifty ninth	7
+460th	four hundred and sixtieth	7
+461st	four hundred and sixty first	7
+462nd	four hundred and sixty second	8
+463rd	four hundred and sixty third	7
+464th	four hundred and sixty fourth	7
+465th	four hundred and sixty fifth	7
+466th	four hundred and sixty sixth	7
+467th	four hundred and sixty seventh	8
+468th	four hundred and sixty eighth	7
+469th	four hundred and sixty ninth	7
+470th	four hundred and seventieth	8
+471st	four hundred and seventy first	8
+472nd	four hundred and seventy second	9
+473rd	four hundred and seventy third	8
+474th	four hundred and seventy fourth	8
+475th	four hundred and seventy fifth	8
+476th	four hundred and seventy sixth	8
+477th	four hundred and seventy seventh	9
+478th	four hundred and seventy eighth	8
+479th	four hundred and seventy ninth	8
+480th	four hundred and eightieth	7
+481st	four hundred and eighty first	7
+482nd	four hundred and eighty second	8
+483rd	four hundred and eighty third	7
+484th	four hundred and eighty fourth	7
+485th	four hundred and eighty fifth	7
+486th	four hundred and eighty sixth	7
+487th	four hundred and eighty seventh	8
+488th	four hundred and eighty eighth	7
+489th	four hundred and eighty ninth	7
+490th	four hundred and ninetieth	7
+491st	four hundred and ninety first	7
+492nd	four hundred and ninety second	8
+493rd	four hundred and ninety third	7
+494th	four hundred and ninety fourth	7
+495th	four hundred and ninety fifth	7
+496th	four hundred and ninety sixth	7
+497th	four hundred and ninety seventh	8
+498th	four hundred and ninety eighth	7
+499th	four hundred and ninety ninth	7
+500th	five hundredth	3
+501st	five hundred and first	5
+502nd	five hundred and second	6
+503rd	five hundred and third	5
+504th	five hundred and fourth	5
+505th	five hundred and fifth	5
+506th	five hundred and sixth	5
+507th	five hundred and seventh	6
+508th	five hundred and eighth	5
+509th	five hundred and ninth	5
+510th	five hundred and tenth	5
+511th	five hundred and eleventh	7
+512th	five hundred and twelfth	5
+513th	five hundred and thirteenth	6
+514th	five hundred and fourteenth	6
+515th	five hundred and fifteenth	6
+516th	five hundred and sixteenth	6
+517th	five hundred and seventeenth	7
+518th	five hundred and eighteenth	6
+519th	five hundred and nineteenth	6
+520th	five hundred and twentieth	7
+521st	five hundred and twenty first	7
+522nd	five hundred and twenty second	8
+523rd	five hundred and twenty third	7
+524th	five hundred and twenty fourth	7
+525th	five hundred and twenty fifth	7
+526th	five hundred and twenty sixth	7
+527th	five hundred and twenty seventh	8
+528th	five hundred and twenty eighth	7
+529th	five hundred and twenty ninth	7
+530th	five hundred and thirtieth	7
+531st	five hundred and thirty first	7
+532nd	five hundred and thirty second	8
+533rd	five hundred and thirty third	7
+534th	five hundred and thirty fourth	7
+535th	five hundred and thirty fifth	7
+536th	five hundred and thirty sixth	7
+537th	five hundred and thirty seventh	8
+538th	five hundred and thirty eighth	7
+539th	five hundred and thirty ninth	7
+540th	five hundred and fortieth	7
+541st	five hundred and forty first	7
+542nd	five hundred and forty second	8
+543rd	five hundred and forty third	7
+544th	five hundred and forty fourth	7
+545th	five hundred and forty fifth	7
+546th	five hundred and forty sixth	7
+547th	five hundred and forty seventh	8
+548th	five hundred and forty eighth	7
+549th	five hundred and forty ninth	7
+550th	five hundred and fiftieth	7
+551st	five hundred and fifty first	7
+552nd	five hundred and fifty second	8
+553rd	five hundred and fifty third	7
+554th	five hundred and fifty fourth	7
+555th	five hundred and fifty fifth	7
+556th	five hundred and fifty sixth	7
+557th	five hundred and fifty seventh	8
+558th	five hundred and fifty eighth	7
+559th	five hundred and fifty ninth	7
+560th	five hundred and sixtieth	7
+561st	five hundred and sixty first	7
+562nd	five hundred and sixty second	8
+563rd	five hundred and sixty third	7
+564th	five hundred and sixty fourth	7
+565th	five hundred and sixty fifth	7
+566th	five hundred and sixty sixth	7
+567th	five hundred and sixty seventh	8
+568th	five hundred and sixty eighth	7
+569th	five hundred and sixty ninth	7
+570th	five hundred and seventieth	8
+571st	five hundred and seventy first	8
+572nd	five hundred and seventy second	9
+573rd	five hundred and seventy third	8
+574th	five hundred and seventy fourth	8
+575th	five hundred and seventy fifth	8
+576th	five hundred and seventy sixth	8
+577th	five hundred and seventy seventh	9
+578th	five hundred and seventy eighth	8
+579th	five hundred and seventy ninth	8
+580th	five hundred and eightieth	7
+581st	five hundred and eighty first	7
+582nd	five hundred and eighty second	8
+583rd	five hundred and eighty third	7
+584th	five hundred and eighty fourth	7
+585th	five hundred and eighty fifth	7
+586th	five hundred and eighty sixth	7
+587th	five hundred and eighty seventh	8
+588th	five hundred and eighty eighth	7
+589th	five hundred and eighty ninth	7
+590th	five hundred and ninetieth	7
+591st	five hundred and ninety first	7
+592nd	five hundred and ninety second	8
+593rd	five hundred and ninety third	7
+594th	five hundred and ninety fourth	7
+595th	five hundred and ninety fifth	7
+596th	five hundred and ninety sixth	7
+597th	five hundred and ninety seventh	8
+598th	five hundred and ninety eighth	7
+599th	five hundred and ninety ninth	7
+600th	six hundredth	3
+601st	six hundred and first	5
+602nd	six hundred and second	6
+603rd	six hundred and third	5
+604th	six hundred and fourth	5
+605th	six hundred and fifth	5
+606th	six hundred and sixth	5
+607th	six hundred and seventh	6
+608th	six hundred and eighth	5
+609th	six hundred and ninth	5
+610th	six hundred and tenth	5
+611th	six hundred and eleventh	7
+612th	six hundred and twelfth	5
+613th	six hundred and thirteenth	6
+614th	six hundred and fourteenth	6
+615th	six hundred and fifteenth	6
+616th	six hundred and sixteenth	6
+617th	six hundred and seventeenth	7
+618th	six hundred and eighteenth	6
+619th	six hundred and nineteenth	6
+620th	six hundred and twentieth	7
+621st	six hundred and twenty first	7
+622nd	six hundred and twenty second	8
+623rd	six hundred and twenty third	7
+624th	six hundred and twenty fourth	7
+625th	six hundred and twenty fifth	7
+626th	six hundred and twenty sixth	7
+627th	six hundred and twenty seventh	8
+628th	six hundred and twenty eighth	7
+629th	six hundred and twenty ninth	7
+630th	six hundred and thirtieth	7
+631st	six hundred and thirty first	7
+632nd	six hundred and thirty second	8
+633rd	six hundred and thirty third	7
+634th	six hundred and thirty fourth	7
+635th	six hundred and thirty fifth	7
+636th	six hundred and thirty sixth	7
+637th	six hundred and thirty seventh	8
+638th	six hundred and thirty eighth	7
+639th	six hundred and thirty ninth	7
+640th	six hundred and fortieth	7
+641st	six hundred and forty first	7
+642nd	six hundred and forty second	8
+643rd	six hundred and forty third	7
+644th	six hundred and forty fourth	7
+645th	six hundred and forty fifth	7
+646th	six hundred and forty sixth	7
+647th	six hundred and forty seventh	8
+648th	six hundred and forty eighth	7
+649th	six hundred and forty ninth	7
+650th	six hundred and fiftieth	7
+651st	six hundred and fifty first	7
+652nd	six hundred and fifty second	8
+653rd	six hundred and fifty third	7
+654th	six hundred and fifty fourth	7
+655th	six hundred and fifty fifth	7
+656th	six hundred and fifty sixth	7
+657th	six hundred and fifty seventh	8
+658th	six hundred and fifty eighth	7
+659th	six hundred and fifty ninth	7
+660th	six hundred and sixtieth	7
+661st	six hundred and sixty first	7
+662nd	six hundred and sixty second	8
+663rd	six hundred and sixty third	7
+664th	six hundred and sixty fourth	7
+665th	six hundred and sixty fifth	7
+666th	six hundred and sixty sixth	7
+667th	six hundred and sixty seventh	8
+668th	six hundred and sixty eighth	7
+669th	six hundred and sixty ninth	7
+670th	six hundred and seventieth	8
+671st	six hundred and seventy first	8
+672nd	six hundred and seventy second	9
+673rd	six hundred and seventy third	8
+674th	six hundred and seventy fourth	8
+675th	six hundred and seventy fifth	8
+676th	six hundred and seventy sixth	8
+677th	six hundred and seventy seventh	9
+678th	six hundred and seventy eighth	8
+679th	six hundred and seventy ninth	8
+680th	six hundred and eightieth	7
+681st	six hundred and eighty first	7
+682nd	six hundred and eighty second	8
+683rd	six hundred and eighty third	7
+684th	six hundred and eighty fourth	7
+685th	six hundred and eighty fifth	7
+686th	six hundred and eighty sixth	7
+687th	six hundred and eighty seventh	8
+688th	six hundred and eighty eighth	7
+689th	six hundred and eighty ninth	7
+690th	six hundred and ninetieth	7
+691st	six hundred and ninety first	7
+692nd	six hundred and ninety second	8
+693rd	six hundred and ninety third	7
+694th	six hundred and ninety fourth	7
+695th	six hundred and ninety fifth	7
+696th	six hundred and ninety sixth	7
+697th	six hundred and ninety seventh	8
+698th	six hundred and ninety eighth	7
+699th	six hundred and ninety ninth	7
+700th	seven hundredth	4
+701st	seven hundred and first	6
+702nd	seven hundred and second	7
+703rd	seven hundred and third	6
+704th	seven hundred and fourth	6
+705th	seven hundred and fifth	6
+706th	seven hundred and sixth	6
+707th	seven hundred and seventh	7
+708th	seven hundred and eighth	6
+709th	seven hundred and ninth	6
+710th	seven hundred and tenth	6
+711th	seven hundred and eleventh	8
+712th	seven hundred and twelfth	6
+713th	seven hundred and thirteenth	7
+714th	seven hundred and fourteenth	7
+715th	seven hundred and fifteenth	7
+716th	seven hundred and sixteenth	7
+717th	seven hundred and seventeenth	8
+718th	seven hundred and eighteenth	7
+719th	seven hundred and nineteenth	7
+720th	seven hundred and twentieth	8
+721st	seven hundred and twenty first	8
+722nd	seven hundred and twenty second	9
+723rd	seven hundred and twenty third	8
+724th	seven hundred and twenty fourth	8
+725th	seven hundred and twenty fifth	8
+726th	seven hundred and twenty sixth	8
+727th	seven hundred and twenty seventh	9
+728th	seven hundred and twenty eighth	8
+729th	seven hundred and twenty ninth	8
+730th	seven hundred and thirtieth	8
+731st	seven hundred and thirty first	8
+732nd	seven hundred and thirty second	9
+733rd	seven hundred and thirty third	8
+734th	seven hundred and thirty fourth	8
+735th	seven hundred and thirty fifth	8
+736th	seven hundred and thirty sixth	8
+737th	seven hundred and thirty seventh	9
+738th	seven hundred and thirty eighth	8
+739th	seven hundred and thirty ninth	8
+740th	seven hundred and fortieth	8
+741st	seven hundred and forty first	8
+742nd	seven hundred and forty second	9
+743rd	seven hundred and forty third	8
+744th	seven hundred and forty fourth	8
+745th	seven hundred and forty fifth	8
+746th	seven hundred and forty sixth	8
+747th	seven hundred and forty seventh	9
+748th	seven hundred and forty eighth	8
+749th	seven hundred and forty ninth	8
+750th	seven hundred and fiftieth	8
+751st	seven hundred and fifty first	8
+752nd	seven hundred and fifty second	9
+753rd	seven hundred and fifty third	8
+754th	seven hundred and fifty fourth	8
+755th	seven hundred and fifty fifth	8
+756th	seven hundred and fifty sixth	8
+757th	seven hundred and fifty seventh	9
+758th	seven hundred and fifty eighth	8
+759th	seven hundred and fifty ninth	8
+760th	seven hundred and sixtieth	8
+761st	seven hundred and sixty first	8
+762nd	seven hundred and sixty second	9
+763rd	seven hundred and sixty third	8
+764th	seven hundred and sixty fourth	8
+765th	seven hundred and sixty fifth	8
+766th	seven hundred and sixty sixth	8
+767th	seven hundred and sixty seventh	9
+768th	seven hundred and sixty eighth	8
+769th	seven hundred and sixty ninth	8
+770th	seven hundred and seventieth	9
+771st	seven hundred and seventy first	9
+772nd	seven hundred and seventy second	10
+773rd	seven hundred and seventy third	9
+774th	seven hundred and seventy fourth	9
+775th	seven hundred and seventy fifth	9
+776th	seven hundred and seventy sixth	9
+777th	seven hundred and seventy seventh	10
+778th	seven hundred and seventy eighth	9
+779th	seven hundred and seventy ninth	9
+780th	seven hundred and eightieth	8
+781st	seven hundred and eighty first	8
+782nd	seven hundred and eighty second	9
+783rd	seven hundred and eighty third	8
+784th	seven hundred and eighty fourth	8
+785th	seven hundred and eighty fifth	8
+786th	seven hundred and eighty sixth	8
+787th	seven hundred and eighty seventh	9
+788th	seven hundred and eighty eighth	8
+789th	seven hundred and eighty ninth	8
+790th	seven hundred and ninetieth	8
+791st	seven hundred and ninety first	8
+792nd	seven hundred and ninety second	9
+793rd	seven hundred and ninety third	8
+794th	seven hundred and ninety fourth	8
+795th	seven hundred and ninety fifth	8
+796th	seven hundred and ninety sixth	8
+797th	seven hundred and ninety seventh	9
+798th	seven hundred and ninety eighth	8
+799th	seven hundred and ninety ninth	8
+800th	eight hundredth	3
+801st	eight hundred and first	5
+802nd	eight hundred and second	6
+803rd	eight hundred and third	5
+804th	eight hundred and fourth	5
+805th	eight hundred and fifth	5
+806th	eight hundred and sixth	5
+807th	eight hundred and seventh	6
+808th	eight hundred and eighth	5
+809th	eight hundred and ninth	5
+810th	eight hundred and tenth	5
+811th	eight hundred and eleventh	7
+812th	eight hundred and twelfth	5
+813th	eight hundred and thirteenth	6
+814th	eight hundred and fourteenth	6
+815th	eight hundred and fifteenth	6
+816th	eight hundred and sixteenth	6
+817th	eight hundred and seventeenth	7
+818th	eight hundred and eighteenth	6
+819th	eight hundred and nineteenth	6
+820th	eight hundred and twentieth	7
+821st	eight hundred and twenty first	7
+822nd	eight hundred and twenty second	8
+823rd	eight hundred and twenty third	7
+824th	eight hundred and twenty fourth	7
+825th	eight hundred and twenty fifth	7
+826th	eight hundred and twenty sixth	7
+827th	eight hundred and twenty seventh	8
+828th	eight hundred and twenty eighth	7
+829th	eight hundred and twenty ninth	7
+830th	eight hundred and thirtieth	7
+831st	eight hundred and thirty first	7
+832nd	eight hundred and thirty second	8
+833rd	eight hundred and thirty third	7
+834th	eight hundred and thirty fourth	7
+835th	eight hundred and thirty fifth	7
+836th	eight hundred and thirty sixth	7
+837th	eight hundred and thirty seventh	8
+838th	eight hundred and thirty eighth	7
+839th	eight hundred and thirty ninth	7
+840th	eight hundred and fortieth	7
+841st	eight hundred and forty first	7
+842nd	eight hundred and forty second	8
+843rd	eight hundred and forty third	7
+844th	eight hundred and forty fourth	7
+845th	eight hundred and forty fifth	7
+846th	eight hundred and forty sixth	7
+847th	eight hundred and forty seventh	8
+848th	eight hundred and forty eighth	7
+849th	eight hundred and forty ninth	7
+850th	eight hundred and fiftieth	7
+851st	eight hundred and fifty first	7
+852nd	eight hundred and fifty second	8
+853rd	eight hundred and fifty third	7
+854th	eight hundred and fifty fourth	7
+855th	eight hundred and fifty fifth	7
+856th	eight hundred and fifty sixth	7
+857th	eight hundred and fifty seventh	8
+858th	eight hundred and fifty eighth	7
+859th	eight hundred and fifty ninth	7
+860th	eight hundred and sixtieth	7
+861st	eight hundred and sixty first	7
+862nd	eight hundred and sixty second	8
+863rd	eight hundred and sixty third	7
+864th	eight hundred and sixty fourth	7
+865th	eight hundred and sixty fifth	7
+866th	eight hundred and sixty sixth	7
+867th	eight hundred and sixty seventh	8
+868th	eight hundred and sixty eighth	7
+869th	eight hundred and sixty ninth	7
+870th	eight hundred and seventieth	8
+871st	eight hundred and seventy first	8
+872nd	eight hundred and seventy second	9
+873rd	eight hundred and seventy third	8
+874th	eight hundred and seventy fourth	8
+875th	eight hundred and seventy fifth	8
+876th	eight hundred and seventy sixth	8
+877th	eight hundred and seventy seventh	9
+878th	eight hundred and seventy eighth	8
+879th	eight hundred and seventy ninth	8
+880th	eight hundred and eightieth	7
+881st	eight hundred and eighty first	7
+882nd	eight hundred and eighty second	8
+883rd	eight hundred and eighty third	7
+884th	eight hundred and eighty fourth	7
+885th	eight hundred and eighty fifth	7
+886th	eight hundred and eighty sixth	7
+887th	eight hundred and eighty seventh	8
+888th	eight hundred and eighty eighth	7
+889th	eight hundred and eighty ninth	7
+890th	eight hundred and ninetieth	7
+891st	eight hundred and ninety first	7
+892nd	eight hundred and ninety second	8
+893rd	eight hundred and ninety third	7
+894th	eight hundred and ninety fourth	7
+895th	eight hundred and ninety fifth	7
+896th	eight hundred and ninety sixth	7
+897th	eight hundred and ninety seventh	8
+898th	eight hundred and ninety eighth	7
+899th	eight hundred and ninety ninth	7
+900th	nine hundredth	3
+901st	nine hundred and first	5
+902nd	nine hundred and second	6
+903rd	nine hundred and third	5
+904th	nine hundred and fourth	5
+905th	nine hundred and fifth	5
+906th	nine hundred and sixth	5
+907th	nine hundred and seventh	6
+908th	nine hundred and eighth	5
+909th	nine hundred and ninth	5
+910th	nine hundred and tenth	5
+911th	nine hundred and eleventh	7
+912th	nine hundred and twelfth	5
+913th	nine hundred and thirteenth	6
+914th	nine hundred and fourteenth	6
+915th	nine hundred and fifteenth	6
+916th	nine hundred and sixteenth	6
+917th	nine hundred and seventeenth	7
+918th	nine hundred and eighteenth	6
+919th	nine hundred and nineteenth	6
+920th	nine hundred and twentieth	7
+921st	nine hundred and twenty first	7
+922nd	nine hundred and twenty second	8
+923rd	nine hundred and twenty third	7
+924th	nine hundred and twenty fourth	7
+925th	nine hundred and twenty fifth	7
+926th	nine hundred and twenty sixth	7
+927th	nine hundred and twenty seventh	8
+928th	nine hundred and twenty eighth	7
+929th	nine hundred and twenty ninth	7
+930th	nine hundred and thirtieth	7
+931st	nine hundred and thirty first	7
+932nd	nine hundred and thirty second	8
+933rd	nine hundred and thirty third	7
+934th	nine hundred and thirty fourth	7
+935th	nine hundred and thirty fifth	7
+936th	nine hundred and thirty sixth	7
+937th	nine hundred and thirty seventh	8
+938th	nine hundred and thirty eighth	7
+939th	nine hundred and thirty ninth	7
+940th	nine hundred and fortieth	7
+941st	nine hundred and forty first	7
+942nd	nine hundred and forty second	8
+943rd	nine hundred and forty third	7
+944th	nine hundred and forty fourth	7
+945th	nine hundred and forty fifth	7
+946th	nine hundred and forty sixth	7
+947th	nine hundred and forty seventh	8
+948th	nine hundred and forty eighth	7
+949th	nine hundred and forty ninth	7
+950th	nine hundred and fiftieth	7
+951st	nine hundred and fifty first	7
+952nd	nine hundred and fifty second	8
+953rd	nine hundred and fifty third	7
+954th	nine hundred and fifty fourth	7
+955th	nine hundred and fifty fifth	7
+956th	nine hundred and fifty sixth	7
+957th	nine hundred and fifty seventh	8
+958th	nine hundred and fifty eighth	7
+959th	nine hundred and fifty ninth	7
+960th	nine hundred and sixtieth	7
+961st	nine hundred and sixty first	7
+962nd	nine hundred and sixty second	8
+963rd	nine hundred and sixty third	7
+964th	nine hundred and sixty fourth	7
+965th	nine hundred and sixty fifth	7
+966th	nine hundred and sixty sixth	7
+967th	nine hundred and sixty seventh	8
+968th	nine hundred and sixty eighth	7
+969th	nine hundred and sixty ninth	7
+970th	nine hundred and seventieth	8
+971st	nine hundred and seventy first	8
+972nd	nine hundred and seventy second	9
+973rd	nine hundred and seventy third	8
+974th	nine hundred and seventy fourth	8
+975th	nine hundred and seventy fifth	8
+976th	nine hundred and seventy sixth	8
+977th	nine hundred and seventy seventh	9
+978th	nine hundred and seventy eighth	8
+979th	nine hundred and seventy ninth	8
+980th	nine hundred and eightieth	7
+981st	nine hundred and eighty first	7
+982nd	nine hundred and eighty second	8
+983rd	nine hundred and eighty third	7
+984th	nine hundred and eighty fourth	7
+985th	nine hundred and eighty fifth	7
+986th	nine hundred and eighty sixth	7
+987th	nine hundred and eighty seventh	8
+988th	nine hundred and eighty eighth	7
+989th	nine hundred and eighty ninth	7
+990th	nine hundred and ninetieth	7
+991st	nine hundred and ninety first	7
+992nd	nine hundred and ninety second	8
+993rd	nine hundred and ninety third	7
+994th	nine hundred and ninety fourth	7
+995th	nine hundred and ninety fifth	7
+996th	nine hundred and ninety sixth	7
+997th	nine hundred and ninety seventh	8
+998th	nine hundred and ninety eighth	7
+999th	nine hundred and ninety ninth	7
+1000th	one thousandth	3
+1001st	one thousand and first	5
+1002nd	one thousand and second	6
+1003rd	one thousand and third	5
+1004th	one thousand and fourth	5
+1005th	one thousand and fifth	5
+1006th	one thousand and sixth	5
+1007th	one thousand and seventh	6
+1008th	one thousand and eighth	5
+1009th	one thousand and ninth	5
+1010th	one thousand and tenth	5
+1011th	one thousand and eleventh	7
+1012th	one thousand and twelfth	5
+1013th	one thousand and thirteenth	6
+1014th	one thousand and fourteenth	6
+1015th	one thousand and fifteenth	6
+1016th	one thousand and sixteenth	6
+1017th	one thousand and seventeenth	7
+1018th	one thousand and eighteenth	6
+1019th	one thousand and nineteenth	6
+1020th	one thousand and twentieth	7
+1021st	one thousand and twenty first	7
+1022nd	one thousand and twenty second	8
+1023rd	one thousand and twenty third	7
+1024th	one thousand and twenty fourth	7
+1025th	one thousand and twenty fifth	7
+1026th	one thousand and twenty sixth	7
+1027th	one thousand and twenty seventh	8
+1028th	one thousand and twenty eighth	7
+1029th	one thousand and twenty ninth	7
+1030th	one thousand and thirtieth	7
+1031st	one thousand and thirty first	7
+1032nd	one thousand and thirty second	8
+1033rd	one thousand and thirty third	7
+1034th	one thousand and thirty fourth	7
+1035th	one thousand and thirty fifth	7
+1036th	one thousand and thirty sixth	7
+1037th	one thousand and thirty seventh	8
+1038th	one thousand and thirty eighth	7
+1039th	one thousand and thirty ninth	7
+1040th	one thousand and fortieth	7
+1041st	one thousand and forty first	7
+1042nd	one thousand and forty second	8
+1043rd	one thousand and forty third	7
+1044th	one thousand and forty fourth	7
+1045th	one thousand and forty fifth	7
+1046th	one thousand and forty sixth	7
+1047th	one thousand and forty seventh	8
+1048th	one thousand and forty eighth	7
+1049th	one thousand and forty ninth	7
+1050th	one thousand and fiftieth	7
+1051st	one thousand and fifty first	7
+1052nd	one thousand and fifty second	8
+1053rd	one thousand and fifty third	7
+1054th	one thousand and fifty fourth	7
+1055th	one thousand and fifty fifth	7
+1056th	one thousand and fifty sixth	7
+1057th	one thousand and fifty seventh	8
+1058th	one thousand and fifty eighth	7
+1059th	one thousand and fifty ninth	7
+1060th	one thousand and sixtieth	7
+1061st	one thousand and sixty first	7
+1062nd	one thousand and sixty second	8
+1063rd	one thousand and sixty third	7
+1064th	one thousand and sixty fourth	7
+1065th	one thousand and sixty fifth	7
+1066th	one thousand and sixty sixth	7
+1067th	one thousand and sixty seventh	8
+1068th	one thousand and sixty eighth	7
+1069th	one thousand and sixty ninth	7
+1070th	one thousand and seventieth	8
+1071st	one thousand and seventy first	8
+1072nd	one thousand and seventy second	9
+1073rd	one thousand and seventy third	8
+1074th	one thousand and seventy fourth	8
+1075th	one thousand and seventy fifth	8
+1076th	one thousand and seventy sixth	8
+1077th	one thousand and seventy seventh	9
+1078th	one thousand and seventy eighth	8
+1079th	one thousand and seventy ninth	8
+1080th	one thousand and eightieth	7
+1081st	one thousand and eighty first	7
+1082nd	one thousand and eighty second	8
+1083rd	one thousand and eighty third	7
+1084th	one thousand and eighty fourth	7
+1085th	one thousand and eighty fifth	7
+1086th	one thousand and eighty sixth	7
+1087th	one thousand and eighty seventh	8
+1088th	one thousand and eighty eighth	7
+1089th	one thousand and eighty ninth	7
+1090th	one thousand and ninetieth	7
+1091st	one thousand and ninety first	7
+1092nd	one thousand and ninety second	8
+1093rd	one thousand and ninety third	7
+1094th	one thousand and ninety fourth	7
+1095th	one thousand and ninety fifth	7
+1096th	one thousand and ninety sixth	7
+1097th	one thousand and ninety seventh	8
+1098th	one thousand and ninety eighth	7
+1099th	one thousand and ninety ninth	7
+1100th	one thousand, one hundredth	6
+1101st	one thousand, one hundred and first	8
+1102nd	one thousand, one hundred and second	9
+1103rd	one thousand, one hundred and third	8
+1104th	one thousand, one hundred and fourth	8
+1105th	one thousand, one hundred and fifth	8
+1106th	one thousand, one hundred and sixth	8
+1107th	one thousand, one hundred and seventh	9
+1108th	one thousand, one hundred and eighth	8
+1109th	one thousand, one hundred and ninth	8
+1110th	one thousand, one hundred and tenth	8
+1111th	one thousand, one hundred and eleventh	10
+1112th	one thousand, one hundred and twelfth	8
+1113th	one thousand, one hundred and thirteenth	9
+1114th	one thousand, one hundred and fourteenth	9
+1115th	one thousand, one hundred and fifteenth	9
+1116th	one thousand, one hundred and sixteenth	9
+1117th	one thousand, one hundred and seventeenth	10
+1118th	one thousand, one hundred and eighteenth	9
+1119th	one thousand, one hundred and nineteenth	9
+1120th	one thousand, one hundred and twentieth	10
+1121st	one thousand, one hundred and twenty first	10
+1122nd	one thousand, one hundred and twenty second	11
+1123rd	one thousand, one hundred and twenty third	10
+1124th	one thousand, one hundred and twenty fourth	10
+1125th	one thousand, one hundred and twenty fifth	10
+1126th	one thousand, one hundred and twenty sixth	10
+1127th	one thousand, one hundred and twenty seventh	11
+1128th	one thousand, one hundred and twenty eighth	10
+1129th	one thousand, one hundred and twenty ninth	10
+1130th	one thousand, one hundred and thirtieth	10
+1131st	one thousand, one hundred and thirty first	10
+1132nd	one thousand, one hundred and thirty second	11
+1133rd	one thousand, one hundred and thirty third	10
+1134th	one thousand, one hundred and thirty fourth	10
+1135th	one thousand, one hundred and thirty fifth	10
+1136th	one thousand, one hundred and thirty sixth	10
+1137th	one thousand, one hundred and thirty seventh	11
+1138th	one thousand, one hundred and thirty eighth	10
+1139th	one thousand, one hundred and thirty ninth	10
+1140th	one thousand, one hundred and fortieth	10
+1141st	one thousand, one hundred and forty first	10
+1142nd	one thousand, one hundred and forty second	11
+1143rd	one thousand, one hundred and forty third	10
+1144th	one thousand, one hundred and forty fourth	10
+1145th	one thousand, one hundred and forty fifth	10
+1146th	one thousand, one hundred and forty sixth	10
+1147th	one thousand, one hundred and forty seventh	11
+1148th	one thousand, one hundred and forty eighth	10
+1149th	one thousand, one hundred and forty ninth	10
+1150th	one thousand, one hundred and fiftieth	10
+1151st	one thousand, one hundred and fifty first	10
+1152nd	one thousand, one hundred and fifty second	11
+1153rd	one thousand, one hundred and fifty third	10
+1154th	one thousand, one hundred and fifty fourth	10
+1155th	one thousand, one hundred and fifty fifth	10
+1156th	one thousand, one hundred and fifty sixth	10
+1157th	one thousand, one hundred and fifty seventh	11
+1158th	one thousand, one hundred and fifty eighth	10
+1159th	one thousand, one hundred and fifty ninth	10
+1160th	one thousand, one hundred and sixtieth	10
+1161st	one thousand, one hundred and sixty first	10
+1162nd	one thousand, one hundred and sixty second	11
+1163rd	one thousand, one hundred and sixty third	10
+1164th	one thousand, one hundred and sixty fourth	10
+1165th	one thousand, one hundred and sixty fifth	10
+1166th	one thousand, one hundred and sixty sixth	10
+1167th	one thousand, one hundred and sixty seventh	11
+1168th	one thousand, one hundred and sixty eighth	10
+1169th	one thousand, one hundred and sixty ninth	10
+1170th	one thousand, one hundred and seventieth	11
+1171st	one thousand, one hundred and seventy first	11
+1172nd	one thousand, one hundred and seventy second	12
+1173rd	one thousand, one hundred and seventy third	11
+1174th	one thousand, one hundred and seventy fourth	11
+1175th	one thousand, one hundred and seventy fifth	11
+1176th	one thousand, one hundred and seventy sixth	11
+1177th	one thousand, one hundred and seventy seventh	12
+1178th	one thousand, one hundred and seventy eighth	11
+1179th	one thousand, one hundred and seventy ninth	11
+1180th	one thousand, one hundred and eightieth	10
+1181st	one thousand, one hundred and eighty first	10
+1182nd	one thousand, one hundred and eighty second	11
+1183rd	one thousand, one hundred and eighty third	10
+1184th	one thousand, one hundred and eighty fourth	10
+1185th	one thousand, one hundred and eighty fifth	10
+1186th	one thousand, one hundred and eighty sixth	10
+1187th	one thousand, one hundred and eighty seventh	11
+1188th	one thousand, one hundred and eighty eighth	10
+1189th	one thousand, one hundred and eighty ninth	10
+1190th	one thousand, one hundred and ninetieth	10
+1191st	one thousand, one hundred and ninety first	10
+1192nd	one thousand, one hundred and ninety second	11
+1193rd	one thousand, one hundred and ninety third	10
+1194th	one thousand, one hundred and ninety fourth	10
+1195th	one thousand, one hundred and ninety fifth	10
+1196th	one thousand, one hundred and ninety sixth	10
+1197th	one thousand, one hundred and ninety seventh	11
+1198th	one thousand, one hundred and ninety eighth	10
+1199th	one thousand, one hundred and ninety ninth	10
+1200th	one thousand, two hundredth	6
+1201st	one thousand, two hundred and first	8
+1202nd	one thousand, two hundred and second	9
+1203rd	one thousand, two hundred and third	8
+1204th	one thousand, two hundred and fourth	8
+1205th	one thousand, two hundred and fifth	8
+1206th	one thousand, two hundred and sixth	8
+1207th	one thousand, two hundred and seventh	9
+1208th	one thousand, two hundred and eighth	8
+1209th	one thousand, two hundred and ninth	8
+1210th	one thousand, two hundred and tenth	8
+1211th	one thousand, two hundred and eleventh	10
+1212th	one thousand, two hundred and twelfth	8
+1213th	one thousand, two hundred and thirteenth	9
+1214th	one thousand, two hundred and fourteenth	9
+1215th	one thousand, two hundred and fifteenth	9
+1216th	one thousand, two hundred and sixteenth	9
+1217th	one thousand, two hundred and seventeenth	10
+1218th	one thousand, two hundred and eighteenth	9
+1219th	one thousand, two hundred and nineteenth	9
+1220th	one thousand, two hundred and twentieth	10
+1221st	one thousand, two hundred and twenty first	10
+1222nd	one thousand, two hundred and twenty second	11
+1223rd	one thousand, two hundred and twenty third	10
+1224th	one thousand, two hundred and twenty fourth	10
+1225th	one thousand, two hundred and twenty fifth	10
+1226th	one thousand, two hundred and twenty sixth	10
+1227th	one thousand, two hundred and twenty seventh	11
+1228th	one thousand, two hundred and twenty eighth	10
+1229th	one thousand, two hundred and twenty ninth	10
+1230th	one thousand, two hundred and thirtieth	10
+1231st	one thousand, two hundred and thirty first	10
+1232nd	one thousand, two hundred and thirty second	11
+1233rd	one thousand, two hundred and thirty third	10
+1234th	one thousand, two hundred and thirty fourth	10
+1235th	one thousand, two hundred and thirty fifth	10
+1236th	one thousand, two hundred and thirty sixth	10
+1237th	one thousand, two hundred and thirty seventh	11
+1238th	one thousand, two hundred and thirty eighth	10
+1239th	one thousand, two hundred and thirty ninth	10
+1240th	one thousand, two hundred and fortieth	10
+1241st	one thousand, two hundred and forty first	10
+1242nd	one thousand, two hundred and forty second	11
+1243rd	one thousand, two hundred and forty third	10
+1244th	one thousand, two hundred and forty fourth	10
+1245th	one thousand, two hundred and forty fifth	10
+1246th	one thousand, two hundred and forty sixth	10
+1247th	one thousand, two hundred and forty seventh	11
+1248th	one thousand, two hundred and forty eighth	10
+1249th	one thousand, two hundred and forty ninth	10
+1250th	one thousand, two hundred and fiftieth	10
+1251st	one thousand, two hundred and fifty first	10
+1252nd	one thousand, two hundred and fifty second	11
+1253rd	one thousand, two hundred and fifty third	10
+1254th	one thousand, two hundred and fifty fourth	10
+1255th	one thousand, two hundred and fifty fifth	10
+1256th	one thousand, two hundred and fifty sixth	10
+1257th	one thousand, two hundred and fifty seventh	11
+1258th	one thousand, two hundred and fifty eighth	10
+1259th	one thousand, two hundred and fifty ninth	10
+1260th	one thousand, two hundred and sixtieth	10
+1261st	one thousand, two hundred and sixty first	10
+1262nd	one thousand, two hundred and sixty second	11
+1263rd	one thousand, two hundred and sixty third	10
+1264th	one thousand, two hundred and sixty fourth	10
+1265th	one thousand, two hundred and sixty fifth	10
+1266th	one thousand, two hundred and sixty sixth	10
+1267th	one thousand, two hundred and sixty seventh	11
+1268th	one thousand, two hundred and sixty eighth	10
+1269th	one thousand, two hundred and sixty ninth	10
+1270th	one thousand, two hundred and seventieth	11
+1271st	one thousand, two hundred and seventy first	11
+1272nd	one thousand, two hundred and seventy second	12
+1273rd	one thousand, two hundred and seventy third	11
+1274th	one thousand, two hundred and seventy fourth	11
+1275th	one thousand, two hundred and seventy fifth	11
+1276th	one thousand, two hundred and seventy sixth	11
+1277th	one thousand, two hundred and seventy seventh	12
+1278th	one thousand, two hundred and seventy eighth	11
+1279th	one thousand, two hundred and seventy ninth	11
+1280th	one thousand, two hundred and eightieth	10
+1281st	one thousand, two hundred and eighty first	10
+1282nd	one thousand, two hundred and eighty second	11
+1283rd	one thousand, two hundred and eighty third	10
+1284th	one thousand, two hundred and eighty fourth	10
+1285th	one thousand, two hundred and eighty fifth	10
+1286th	one thousand, two hundred and eighty sixth	10
+1287th	one thousand, two hundred and eighty seventh	11
+1288th	one thousand, two hundred and eighty eighth	10
+1289th	one thousand, two hundred and eighty ninth	10
+1290th	one thousand, two hundred and ninetieth	10
+1291st	one thousand, two hundred and ninety first	10
+1292nd	one thousand, two hundred and ninety second	11
+1293rd	one thousand, two hundred and ninety third	10
+1294th	one thousand, two hundred and ninety fourth	10
+1295th	one thousand, two hundred and ninety fifth	10
+1296th	one thousand, two hundred and ninety sixth	10
+1297th	one thousand, two hundred and ninety seventh	11
+1298th	one thousand, two hundred and ninety eighth	10
+1299th	one thousand, two hundred and ninety ninth	10
+1300th	one thousand, three hundredth	6
+1999th	one thousand, nine hundred and ninety ninth	10
+2000th	two thousandth	3
+2001st	two thousand and first	5
+2019th	two thousand and nineteenth	6
+2026th	two thousand and twenty sixth	7
+10000th	ten thousandth	3
+1000000th	one millionth	3
+10s	tens	1
+100s	one hundreds	3
+1800s	eighteen hundreds	4
+1900s	nineteen hundreds	4
+2000s	two thousands	3
+2010s	twenty tens	3
+20's	twenty's	2
+60's	sixty's	2
+80's	eighty's	2
+90's	ninety's	2
+0.5	zero point five	4
+3.5	three point five	3
+2.25	two point twenty five	5
+10.01	ten point one	3
+3.14	three point fourteen	4
+99.9	ninety nine point nine	5
+1.0	one point zero	4
+0.001	zero point one	4
+12.5	twelve point five	3
+1,000	one thousand	3
+10,000	ten thousand	3
+1,999	nineteen ninety nine	5
+2,026	twenty twenty six	5
+1,000,000	one million	3
+100,000	one hundred thousand	5
+3,001	three thousand one	4

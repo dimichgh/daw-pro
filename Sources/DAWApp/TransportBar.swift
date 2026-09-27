@@ -36,6 +36,34 @@ struct TransportBar: View {
     @State private var deckLength: LoopDeckControlModel.LengthChoice =
         LoopDeckControlModel.defaultLength
 
+    /// TB-F1 — the two measurements the fit rule needs, taken from the bar's own
+    /// layout (`onGeometryChange` in `body`). ⚠️ **NEITHER DEPENDS ON THE PLAN, AND
+    /// THAT IS THE POINT:** the bar's width is its proposal (the outer frame is
+    /// `minWidth: 0, maxWidth: .infinity`), and the leading cluster is fixed-size
+    /// content. A probe on the RIGHT region itself would report its OVERFLOWING
+    /// width once it no longer fits — and a rule fed that number would conclude
+    /// there was room and never compact anything. Zero until the first layout,
+    /// which the rule reads as "no room": the first frame is the tightest plan,
+    /// never an overflowing one.
+    @State private var barWidth: CGFloat = 0
+    @State private var leadingClusterWidth: CGFloat = 0
+
+    /// TB-F1 — which of the right region's controls take their compact form
+    /// (`TransportBarFit`, pure and pinned by `TransportBarFitTests`). TB's
+    /// word-drops (KEYS, EXPORT, the door) stay `ViewThatFits`; this decides only
+    /// the gives TB could not make — the test tone, the notices count, and the
+    /// looper's compact forms — and only when they are unavoidable.
+    private var fitPlan: TransportBarFit.Plan {
+        TransportBarFit.plan(
+            regionWidth: TransportBarFit.regionWidth(barWidth: barWidth,
+                                                     leadingClusterWidth: leadingClusterWidth),
+            state: TransportBarFit.State(
+                isPro: isPro,
+                looper: store.loopDeckStatus.map { TransportBarFit.Looper.open(lamps: $0.lamps.count) }
+                    ?? .closed,
+                noticeCount: store.engineNotices.count))
+    }
+
     /// Which loop-deck controls are live right now, and the sentence each shows
     /// when it is not. ⚠️ The bar's house idiom is `try? store.verb()`, which
     /// swallows the store's teaching refusals whole — this resolver is what lets
@@ -57,38 +85,132 @@ struct TransportBar: View {
             activeTrackID: appModel.activeTrackID)
     }
 
+    /// The leading cluster's fixed width — the Position/Time anchor.
+    static let leadingAnchorWidth: CGFloat = 340
+
     var body: some View {
-        HStack(spacing: 20) {
-            // Fixed leading width so PUNCH hiding closes the chip row up (LOOP +
-            // CLICK go adjacent) WITHOUT moving the Position/Time readouts — the
-            // bar's visual anchor. The freed room reads as breathing room before
-            // the section Divider, never a PUNCH-shaped hole in the row.
-            transportButtons
-                .frame(width: 340, alignment: .leading)
+        HStack(spacing: TransportBarFit.clusterSpacing) {
+            // The LEADING CLUSTER, one fixed-size group so the fit rule can
+            // measure it (TB-F1). Same items, same 20 pt spacing, same place.
+            HStack(spacing: TransportBarFit.clusterSpacing) {
+                // Fixed leading width so PUNCH hiding closes the chip row up (LOOP +
+                // CLICK go adjacent) WITHOUT moving the Position/Time readouts — the
+                // bar's visual anchor. The freed room reads as breathing room before
+                // the section Divider, never a PUNCH-shaped hole in the row.
+                //
+                // ⚠️ PINNED, then framed (TB): the cluster is laid out at its OWN
+                // width and never squeezed to fit the anchor. Before TB it was
+                // squeezed in Pro at EVERY window width — see `transportButtons`.
+                transportButtons
+                    .fixedSize()
+                    .frame(width: Self.leadingAnchorWidth, alignment: .leading)
 
-            Divider().frame(height: 36).overlay(DAWTheme.hairline)
+                Divider().frame(height: 36).overlay(DAWTheme.hairline)
 
-            DigitalReadout(
-                label: "Position",
-                value: store.transport.barsBeatsDisplay,
-                color: DAWTheme.playback,
-                valueSize: 24
-            )
-            .frame(minWidth: 76, alignment: .leading)
-            .explainable(.transportPosition)
+                // ⭐ A NUMBER NEVER SHRINKS (TB, the m22-g law). Every readout is
+                // PINNED — `.fixedSize()` AFTER its `minWidth` frame, so the pin is
+                // `max(minWidth, ideal)` and a long value (`1000.1`) grows the cell
+                // instead of drawing past it. Before TB the three were compressible,
+                // and at the 1208 pt window floor the tempo read `12…`. The room a
+                // narrow window lacks is found on the RIGHT (the collapsing chips).
+                DigitalReadout(
+                    label: "Position",
+                    value: store.transport.barsBeatsDisplay,
+                    color: DAWTheme.playback,
+                    valueSize: 24
+                )
+                .frame(minWidth: 76, alignment: .leading)
+                .fixedSize()
+                .explainable(.transportPosition)
 
-            DigitalReadout(
-                label: "Time",
-                value: store.transport.clockDisplay,
-                color: DAWTheme.playback
-            )
-            .frame(minWidth: 104, alignment: .leading)
-            .explainable(.transportTime)
+                DigitalReadout(
+                    label: "Time",
+                    value: store.transport.clockDisplay,
+                    color: DAWTheme.playback
+                )
+                .frame(minWidth: 104, alignment: .leading)
+                .fixedSize()
+                .explainable(.transportTime)
 
-            tempoCluster
-                .explainable(.transportTempo)
+                tempoCluster
+                    .fixedSize()
+                    .explainable(.transportTempo)
+            }
+            // TB-F1 probe ②: content-sized, so it grows with a 4-digit bar or a
+            // 10-minute clock and the rule takes that room from the right region.
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: {
+                leadingClusterWidth = $0
+            }
 
-            Spacer()
+            rightRegion
+        }
+        .padding(.horizontal, TransportBarFit.barHorizontalPadding)
+        .padding(.vertical, 10)
+        // ⭐ IF THE BAR STILL CANNOT FIT, IT OVERFLOWS TO THE RIGHT (TB). The
+        // default was to CENTRE an over-wide row, which cut the return-to-zero
+        // button off the LEFT edge and moved Position/Time with it (measured,
+        // Pro at the 1208 pt floor). Leading-anchored, the glass panel's clip
+        // cuts the far-right mode chip instead, and the transport controls
+        // never leave the window. A no-op whenever the bar fits.
+        .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+        // TB-F1 probe ①: this frame takes exactly its proposal (min 0, max ∞), so
+        // its width is the bar's, whatever the content does — never the plan's.
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: {
+            barWidth = $0
+        }
+        .glassPanel()
+    }
+
+    /// The right region's give-way ORDER (TB) — the LOWEST priority gives
+    /// first. `layoutPriority` is what makes it an order: the stack offers the
+    /// higher-priority chips the room first, so a chip keeps its wider form for
+    /// as long as the gaps and every lower-priority chip can pay for it.
+    ///
+    /// ⭐ **A GIVE THAT LOSES NO WORD GOES BEFORE ONE THAT DOES.** In Pro the
+    /// loop deck's first give only re-stacks it (the length choice rides under
+    /// the door, every word still on screen), so it goes first. Then the chips
+    /// drop their words in order of how well the glyph reads ALONE: EXPORT (the
+    /// share arrow), then KEYS (a piano), and — in Simple, where the deck's only
+    /// give IS its word — the LOOPER door last, because a stack of squares says
+    /// nothing on its own. MEASURED, Pro: every word shows down to ~1300 pt,
+    /// and the window floor still fits with all three gives taken.
+    private var collapsePriority: (keys: Double, deck: Double, export: Double) {
+        isPro ? (keys: 3, deck: 1, export: 2) : (keys: 2, deck: 3, export: 1)
+    }
+
+    /// Everything right of the tempo readout, right-packed.
+    ///
+    /// ⭐⭐ **THE NARROW-WINDOW RULE (TB, 2026-09-25): NO LABEL BREAKS INSIDE A
+    /// WORD, AND THE ROOM IS MADE HERE, IN THIS ORDER.** At the 1208 pt window
+    /// floor this region used to be handed less than its width and SwiftUI
+    /// squeezed whatever would squeeze: `KEY`/`S`, `LOO`/`PER`, `EXP`/`ORT`, the
+    /// mode chip as `S…`/`P…` (and in Pro the whole bar overflowed the
+    /// window). Now every label and readout is pinned, and the region gives
+    /// way in a fixed order as the window narrows — first the gaps between its
+    /// controls close from 20 pt to 8 (`TransportGap`), then the chips give in
+    /// `collapsePriority` order. Each give is a `ViewThatFits` of a wider and a
+    /// narrower form; a chip's glyph-only form is `TransportChipFace`, and its
+    /// word stays in the tooltip and the accessibility label.
+    ///
+    /// MEASURED at 1208 × 672 (explain frames): the left cluster is 741 pt of
+    /// the 1184 the window gives the bar, leaving this region 443. Simple's
+    /// full region is 513.5 at 20 pt gaps; Pro's is 694.
+    ///
+    /// ⭐⭐ **AND WHAT TB'S GIVES COULD NOT PAY FOR, `fitPlan` DOES (TB-F1,
+    /// 2026-09-27).** With every TB give taken, three states still overflowed the
+    /// floor and the glass clip cut the master meter and the mode toggle: a
+    /// looper session (Simple +66.5 pt, Pro +112.5) and Pro's notices chip
+    /// (+38.5). Those surfaces are stateful, so no `ViewThatFits` may choose them;
+    /// the pure rule does, from the MEASURED width this region is offered, taking
+    /// the cheapest set of gives that fits: the test tone shrinks (no word lost),
+    /// then the notices chip drops its count, then the looper compacts. Whatever
+    /// room is left, TB's `ViewThatFits` chips take back as words.
+    private var rightRegion: some View {
+        let plan = fitPlan
+        return HStack(spacing: 0) {
+            // `minLength: 0` — the outer stack's 20 pt already separates this
+            // region from the tempo readout.
+            Spacer(minLength: 0)
 
             // ⭐ MUSICAL TYPING (m23-ct) — THE ONLY REAL-TIME NOTE INPUT THIS USER
             // CAN HAVE (they own no hardware controller). Shows in BOTH densities,
@@ -101,6 +223,9 @@ struct TransportBar: View {
             // anchor — Position/Time stay put (the export button's rule).
             musicalTypingToggle
                 .explainable(.musicalTyping)
+                .layoutPriority(collapsePriority.keys)
+
+            TransportGap()
 
             // ⭐ LIVE LOOPING (m34-h-1 strip, m34-h-2 controls) — the loop
             // deck's surface: the LOOPER chip that OPENS a session, and, once
@@ -133,6 +258,10 @@ struct TransportBar: View {
                 playheadBeat: store.transport.positionBeats,
                 model: loopDeckControlModel,
                 isPro: isPro,
+                // TB-F1: the rule's choice — never a `ViewThatFits`, because the
+                // open deck is stateful and animated.
+                form: plan.looper,
+                lampBoxWidth: plan.lampBoxWidth,
                 length: $deckLength,
                 // ⚠️ `_ = try?`, NOT a bare `try?`: `@discardableResult` does NOT
                 // survive the `try?` wrapper (the OPTIONAL it produces is a new,
@@ -153,17 +282,24 @@ struct TransportBar: View {
                 }
             )
             .explainable(.loopDeck)
+            .layoutPriority(collapsePriority.deck)
+
+            TransportGap()
 
             // EXPORT: bounce the whole mix to a file. A core beginner action, so it
             // shows in BOTH densities. Right-region, past the Spacer — it never
             // touches the 340 pt readout anchor on the left (Position/Time stay put).
             exportButton
                 .explainable(.transportExport)
+                .layoutPriority(collapsePriority.export)
 
             // Pro-only diagnostic. Right-packed, so hiding it only grows the
-            // Spacer — the master cluster and the mode chip stay put.
+            // Spacer — the master cluster and the mode chip stay put. Its narrow
+            // form (TB-F1) is the rule's first give: smaller, not wordless — it
+            // never had a word.
             if isPro {
-                testToneButton
+                TransportGap()
+                testToneButton(compact: plan.testTone == .compact)
                     .explainable(.transportTestTone)
             }
 
@@ -178,27 +314,25 @@ struct TransportBar: View {
             // than a pro, not less, so hiding a "something sounded off" indicator from
             // Simple would be user-hostile. Click toggles the popover list.
             if !store.engineNotices.isEmpty {
-                EngineNoticesChip(
-                    model: EngineNoticesModel(notices: store.engineNotices),
-                    isOpen: appModel.showEngineNotices
-                ) {
-                    withAnimation(.easeOut(duration: 0.15)) {
-                        appModel.showEngineNotices.toggle()
-                    }
-                }
-                .explainable(.transportEngineNotices)
+                TransportGap()
+                noticesChip(compact: plan.notices == .compact)
+                    .explainable(.transportEngineNotices)
             }
 
             // The session vibe meter — the signature glowing instrument (vm-b). It's
             // read-only STATUS chrome, so it shows in BOTH Simple and Pro, sitting just
             // left of the master cluster. Reads the seed override, else the live poll.
+            TransportGap()
             VibeMeterView(snapshot: { appModel.vibeSeed ?? store.masterAnalysis() },
                           onFrame: { appModel.liveLayers.recordVibeFrame($0) })
-                .frame(width: 74, height: 44)
+                .frame(width: TransportBarFit.vibeMeterWidth, height: 44)
                 .explainable(.vibeMeter)
 
+            TransportGap()
             masterCluster
                 .explainable(.transportMasterFader)
+
+            TransportGap()
 
             // The bar's mode chip, pinned far-right (past the master cluster) so
             // it never reads as part of the record cluster and its presence never
@@ -208,15 +342,26 @@ struct TransportBar: View {
                 panelID: Self.panelID,
                 help: "Simple: play, loop, click, tempo. Pro: punch recording, test tone."
             )
+            // Pinned at the call site (TB): the shared chip does not pin its own
+            // width, and at the floor it was squeezed to `S…`/`P…`.
+            .fixedSize()
             .explainable(.panelDensity)   // shared density id (ex-b) — same card on all four panels
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .glassPanel()
     }
 
+    /// The leading cluster's spacing. ⛔ **PRO NEEDS 5, AND THAT WAS MEASURED,
+    /// NOT CHOSEN** (TB, 2026-09-25): PANIC (m23-af) and the count-in stepper
+    /// (m15-b) arrived after the 340 pt anchor was set, and Pro's content — four
+    /// 38 pt buttons, LOOP 46, PUNCH, and the 58 pt CLICK/count-in column — came
+    /// to 369 at 10 pt spacing. The anchor squeezed it, and PUNCH, LOOP and CLICK
+    /// read `PU…`, `L…`, `CL…` at EVERY window width, 2400 pt included. At 5 pt
+    /// the Pro row is 339 and fits with 1 pt to spare; Simple (306 at 10 pt)
+    /// keeps its spacing and renders exactly as before. Widening the anchor
+    /// instead would have moved Simple's Position/Time 30 pt at every width.
+    private var leadingSpacing: CGFloat { isPro ? 5 : 10 }
+
     private var transportButtons: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: leadingSpacing) {
             TransportButton(
                 systemName: "backward.end.fill",
                 isActive: false,
@@ -328,6 +473,7 @@ struct TransportBar: View {
                     )
                 )
                 .glow(DAWTheme.playback, radius: 5, intensity: isOn ? 0.5 : 0)
+                .fixedSize()
         }
         .buttonStyle(.plain)
         .help(isOn ? "Looping on" : "Loop playback")
@@ -356,6 +502,7 @@ struct TransportBar: View {
                     )
                 )
                 .glow(DAWTheme.record, radius: 5, intensity: isOn ? 0.5 : 0)
+                .fixedSize()
         }
         .buttonStyle(.plain)
         .disabled(store.transport.isRecording)  // punch changes are refused mid-take
@@ -385,6 +532,7 @@ struct TransportBar: View {
                     )
                 )
                 .glow(DAWTheme.signal, radius: 5, intensity: isOn ? 0.5 : 0)
+                .fixedSize()
         }
         .buttonStyle(.plain)
         .disabled(store.transport.isRecording)  // metronome changes are refused mid-take
@@ -407,6 +555,7 @@ struct TransportBar: View {
                 .tracking(0.5)
                 .foregroundStyle(bars > 0 ? DAWTheme.signal : DAWTheme.textDim)
                 .frame(minWidth: 24)
+                .fixedSize()
             CountInNudgeButton(label: "+") { setCountInBars(bars + 1) }
                 .disabled(bars >= TransportState.countInBarsRange.upperBound)
         }
@@ -476,26 +625,24 @@ struct TransportBar: View {
     /// `store.renderBounce` (via `appModel.exportSong`); completion flows through the
     /// store's `renderCompletedCount`, so the onboarding tour's export step advances
     /// on the same one path.
+    ///
+    /// Collapses to its glyph on a narrow window (TB) — FIRST of the three, since
+    /// the share arrow is the one glyph here a beginner already reads as a word.
     private var exportButton: some View {
+        ViewThatFits(in: .horizontal) {
+            exportChip(compact: false)
+            exportChip(compact: true)
+        }
+    }
+
+    private func exportChip(compact: Bool) -> some View {
         Button { appModel.exportSong() } label: {
-            HStack(spacing: 5) {
-                Image(systemName: "square.and.arrow.up")
-                    .font(.system(size: 11, weight: .semibold))
-                Text("EXPORT")
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                    .tracking(0.6)
-            }
-            .foregroundStyle(DAWTheme.textDim)
-            .padding(.horizontal, 9)
-            .frame(height: 26)
-            .background(DAWTheme.panelRaised)
-            .clipShape(RoundedRectangle(cornerRadius: 5))
-            .overlay(
-                RoundedRectangle(cornerRadius: 5).stroke(DAWTheme.hairline, lineWidth: 1)
-            )
+            TransportChipFace(systemName: "square.and.arrow.up", word: "EXPORT",
+                              compact: compact, ink: DAWTheme.textDim)
         }
         .buttonStyle(.plain)
         .help("Export your song to an audio file")
+        .accessibilityLabel("Export")
     }
 
     /// **THE MODE TOGGLE AND ITS INDICATOR — one control, m23-ct.**
@@ -511,25 +658,28 @@ struct TransportBar: View {
     /// a fixed-width neighbourhood; the tooltip and the strip's own header carry
     /// the full name, and the strip appears the instant this is on, so the chip
     /// never has to explain itself alone.
+    ///
+    /// ⭐ NARROW WINDOWS (TB): the chip gives up its WORD before the bar can cut
+    /// it — `TransportChipFace`'s glyph-only form, chosen by `ViewThatFits`
+    /// only when the full chip does not fit. The word lives on in the tooltip
+    /// and the accessibility label. Its collapse ORDER is `rightRegion`'s.
     private var musicalTypingToggle: some View {
+        ViewThatFits(in: .horizontal) {
+            musicalTypingChip(compact: false)
+            musicalTypingChip(compact: true)
+        }
+    }
+
+    private func musicalTypingChip(compact: Bool) -> some View {
         let on = appModel.musicalTyping.isEnabled
         return Button { appModel.setMusicalTypingEnabled(!on) } label: {
-            HStack(spacing: 5) {
-                Image(systemName: "pianokeys")
-                    .font(.system(size: 11, weight: .semibold))
-                Text("KEYS")
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                    .tracking(0.6)
-            }
-            .foregroundStyle(on ? DAWTheme.playback : DAWTheme.textDim)
-            .padding(.horizontal, 9)
-            .frame(height: 26)
-            .background(on ? DAWTheme.playback.opacity(0.18) : DAWTheme.panelRaised)
-            .clipShape(RoundedRectangle(cornerRadius: 5))
-            .overlay(
-                RoundedRectangle(cornerRadius: 5)
-                    .stroke(on ? DAWTheme.playback.opacity(0.55) : DAWTheme.hairline,
-                            lineWidth: 1)
+            TransportChipFace(
+                systemName: "pianokeys",
+                word: "KEYS",
+                compact: compact,
+                ink: on ? DAWTheme.playback : DAWTheme.textDim,
+                fill: on ? DAWTheme.playback.opacity(0.18) : DAWTheme.panelRaised,
+                stroke: on ? DAWTheme.playback.opacity(0.55) : DAWTheme.hairline
             )
             // Glow ONLY while on — earned by state, never static chrome.
             .glow(DAWTheme.playback, radius: on ? 7 : 0, intensity: on ? 0.45 : 0)
@@ -538,13 +688,19 @@ struct TransportBar: View {
         .help(on
               ? "Musical Typing is ON — letter keys play notes. Click to turn it off."
               : "Musical Typing: play notes with your computer keyboard and an on-screen piano.")
+        .accessibilityLabel("Keys, Musical Typing")
     }
 
-    private var testToneButton: some View {
+    /// The Pro test tone. `compact` (TB-F1) draws the same round button at the
+    /// chip scale — 26 pt, glyph 11 — the cheapest give the fit rule has, since
+    /// the control never had a word to lose. Tooltip and label in both forms.
+    private func testToneButton(compact: Bool) -> some View {
         TransportButton(
             systemName: "tuningfork",
             isActive: engine.isTonePlaying,
-            activeColor: DAWTheme.signal
+            activeColor: DAWTheme.signal,
+            side: compact ? TransportBarFit.chipSide : TransportBarFit.testToneWidth,
+            glyphSize: compact ? 11 : 15
         ) {
             if engine.isTonePlaying {
                 engine.stopTestTone()
@@ -553,6 +709,53 @@ struct TransportBar: View {
             }
         }
         .help("Test tone (verifies audio output)")
+        .accessibilityLabel("Test tone")
+    }
+
+    /// The engine-notices chip. Full: `EngineNoticesChip` (amber triangle + the
+    /// count of distinct problems), pinned so its count is always drawn. ⭐ **COMPACT (TB-F1): the same amber, the same
+    /// glow, the same pressed-in fill while the list is open — without the count.**
+    /// The number moves to the tooltip (`chipHelp` already says it) and the
+    /// accessibility label, so nothing is lost but its pixels. It is the rule's
+    /// second give, before the looper's: a count the popover lists anyway matters
+    /// less than a performer's track names. The face is `TransportChipFace`'s
+    /// glyph-only square, so it sits in the same family as KEYS and EXPORT.
+    @ViewBuilder
+    private func noticesChip(compact: Bool) -> some View {
+        let model = EngineNoticesModel(notices: store.engineNotices)
+        let isOpen = appModel.showEngineNotices
+        let toggle = {
+            withAnimation(.easeOut(duration: 0.15)) {
+                appModel.showEngineNotices.toggle()
+            }
+        }
+        if compact {
+            Button(action: toggle) {
+                TransportChipFace(systemName: "exclamationmark.triangle.fill",
+                                  word: "NOTICES",
+                                  compact: true,
+                                  ink: DAWTheme.record,
+                                  fill: DAWTheme.record.opacity(isOpen ? 0.22 : 0.14),
+                                  stroke: DAWTheme.record.opacity(0.6))
+                    // Earned by state (Rule 3): the chip only exists while a
+                    // real degradation is on record.
+                    .glow(DAWTheme.record, radius: 5, intensity: 0.5)
+            }
+            .buttonStyle(.plain)
+            .help(model.chipHelp)
+            .accessibilityLabel(model.badgeCount == 1
+                                ? "1 playback notice"
+                                : "\(model.badgeCount) playback notices")
+        } else {
+            // ⛔ PINNED AT THE CALL SITE (TB-F1) — A NUMBER NEVER SHRINKS. The
+            // shared chip does not pin its own width, and once TB's gaps became
+            // flexible SwiftUI offered it less than its width at EVERY window
+            // size: the count compressed to nothing and the chip read as a bare
+            // triangle (measured 36.5 pt at 1208 and at 1600; 43.5 with its "1"
+            // before TB). The room it needs is the fit rule's to find.
+            EngineNoticesChip(model: model, isOpen: isOpen, action: toggle)
+                .fixedSize()
+        }
     }
 }
 
@@ -560,14 +763,18 @@ struct TransportButton: View {
     var systemName: String
     var isActive: Bool
     var activeColor: Color
+    /// The circle's diameter and glyph size: the transport's 38 / 15, or the
+    /// test tone's compact 26 / 11 (TB-F1).
+    var side: CGFloat = 38
+    var glyphSize: CGFloat = 15
     var action: () -> Void
 
     var body: some View {
         Button(action: action) {
             Image(systemName: systemName)
-                .font(.system(size: 15, weight: .semibold))
+                .font(.system(size: glyphSize, weight: .semibold))
                 .foregroundStyle(isActive ? activeColor : DAWTheme.textPrimary)
-                .frame(width: 38, height: 38)
+                .frame(width: side, height: side)
                 .background(
                     Circle()
                         .fill(isActive ? activeColor.opacity(0.15) : DAWTheme.panelRaised)
@@ -581,6 +788,80 @@ struct TransportButton: View {
                 .glow(activeColor, radius: 8, intensity: isActive ? 0.7 : 0)
         }
         .buttonStyle(.plain)
+    }
+}
+
+/// The face of the transport's glyph-and-word ACTION chips — KEYS, EXPORT and
+/// the LOOPER door (`LoopDeckControls`) — in both of its widths (TB, 2026-09-25).
+///
+/// ⛔ **A LABEL MAY NOT BREAK INSIDE A WORD.** At the 1208 pt window floor the
+/// bar used to hand these chips less than their width, and SwiftUI wrapped the
+/// words: `KEY`/`S`, `LOO`/`PER`, `EXP`/`ORT`. So the face is PINNED
+/// (`.fixedSize()` on the OUTER stack — the m22-g rule: an inner `Text` pin
+/// still lets the padding compress), and the room is made a different way:
+/// each chip is a `ViewThatFits` of this face `compact: false` then
+/// `compact: true`, so on a narrow window it gives up its WORD, whole, and
+/// keeps its glyph. The word is never lost — the chip's tooltip and its
+/// accessibility label carry it.
+///
+/// The compact face is SQUARE at the chip's own 26 pt height, the loop deck's
+/// `DeckIconButton` scale, so a collapsed chip reads as the same family as the
+/// deck's glyph-only controls. A plain value input throughout: the caller
+/// owns state colour (`ink`/`fill`/`stroke`) and any glow.
+struct TransportChipFace: View {
+    var systemName: String
+    var word: String
+    /// Glyph only — the narrow-window form.
+    var compact: Bool
+    var ink: Color
+    var fill: Color = DAWTheme.panelRaised
+    var stroke: Color = DAWTheme.hairline
+
+    /// Side of the glyph-only face — the fit rule's `chipSide`, read rather than
+    /// restated so the rule models exactly what this draws (TB-F1).
+    static let compactSide: CGFloat = TransportBarFit.chipSide
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: systemName)
+                .font(.system(size: 11, weight: .semibold))
+            if !compact {
+                Text(word)
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .tracking(0.6)
+                    .lineLimit(1)
+            }
+        }
+        .foregroundStyle(ink)
+        .padding(.horizontal, compact ? 0 : 9)
+        .frame(width: compact ? Self.compactSide : nil, height: 26)
+        .background(fill)
+        .clipShape(RoundedRectangle(cornerRadius: 5))
+        .overlay(
+            RoundedRectangle(cornerRadius: 5).stroke(stroke, lineWidth: 1)
+        )
+        .fixedSize()
+    }
+}
+
+/// A gap between two controls in the transport's right region that gives way
+/// BEFORE any control does (TB, 2026-09-25). It is the bar's own 20 pt spacing
+/// whenever there is room, and closes toward 8 pt as the window narrows; only
+/// once every gap is at 8 does an action chip start dropping its word (the
+/// chips carry `layoutPriority`, the gaps do not). Zero height, so it can never
+/// grow the bar past the 64 pt `WindowFloor.fixedChromeHeight` budgets for it.
+///
+/// Why 8 and not 10: MEASURED (explain frames, 1208 × 672), Pro's fully
+/// compacted right region is 389 pt of controls + 6 gaps in the 443 pt it is
+/// given — 449 at 10 pt gaps (over), 437 at 8.
+struct TransportGap: View {
+    static let full: CGFloat = 20
+    static let tightest: CGFloat = 8
+
+    var body: some View {
+        Color.clear
+            .frame(minWidth: Self.tightest, maxWidth: Self.full, maxHeight: 0)
+            .accessibilityHidden(true)
     }
 }
 

@@ -445,8 +445,21 @@ public struct MeterMap: Sendable {
         let change = changes[i]
         let bpb = Double(change.beatsPerBar)
         let rel = max(0, beat - change.startBeat)
-        return (bar: barsBefore[i] + Int(rel / bpb),
-                beatInBar: rel.truncatingRemainder(dividingBy: bpb))
+        // TOTAL (m23-ap I5-F4 round 4): `Int(rel / bpb)` trapped on an infinite
+        // beat and on one 2^63 or more bars in (~3.7e19 beats in 4/4), and the
+        // sum, or `nearestBarline`'s `bar + 1`, could overflow. A bar that would
+        // pass 2^62 pins there, at beat 0 of that bar. Every beat whose bar is
+        // below 2^62 (every position the app can hold: `TimelineLimits` stops
+        // them at 2^20 beats) takes the unchanged expression.
+        let farthest = 4_611_686_018_427_387_904.0   // 2^62
+        let bars = rel / bpb
+        if bars < farthest {
+            let (bar, overflow) = barsBefore[i].addingReportingOverflow(Int(bars))
+            if !overflow, bar <= Int(farthest) {
+                return (bar: bar, beatInBar: rel.truncatingRemainder(dividingBy: bpb))
+            }
+        }
+        return (bar: Int(farthest), beatInBar: 0)
     }
 
     /// Snaps `beat` to the nearest barline of the accumulated meter — the

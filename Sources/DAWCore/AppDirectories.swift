@@ -85,6 +85,25 @@ public enum AppDirectories {
         /// `scripts/rvc/` checkout — before m23-fp the facade wrote its output
         /// into `scripts/rvc/runtime/out/` because nothing set `RVC_OUT_DIR`.
         case voiceConversions = "VoiceConversions"
+        /// The local singing-engine RUNTIME (design
+        /// `docs/design/2026-09-27-p2-sing-integration.md` §2.3, item p2-sing-c): uv-managed
+        /// CPython, the venv, the pinned SoulX-Singer checkout, `model.pt`/`config.yaml`, NLTK
+        /// data, the built-in voice, redirected caches, `install.json` and the pidfile.
+        /// Profile-aware, like every category here — unlike RVC's own `installedRuntimeDir()`
+        /// — so a staging E2E that exercises uninstall can never delete the user's real
+        /// install. NOT user content: see `.singingVoices` for that.
+        case singingEngine = "SingingEngine"
+        /// The user's recorded/imported singing-voice references (design §2.3):
+        /// `<voiceId>/reference.wav` (the take as recorded, Float32 mono at its native rate)
+        /// plus `voice.json` (name, measured range, the clip-check result, Route N's labels).
+        /// Deliberately NOT inside `.singingEngine` — uninstalling the engine must never delete
+        /// a voice.
+        case singingVoices = "SingingVoices"
+        /// The rendered-phrase LRU cache (design §2.3), keyed by content. Purgeable, not user
+        /// content. Whoever first creates this directory is responsible for marking it
+        /// `isExcludedFromBackupKey = true` — this type only resolves paths; it never creates a
+        /// directory or sets a resource value for any category.
+        case singingCache = "SingingCache"
 
         /// The on-disk directory name.
         public var directoryName: String { rawValue }

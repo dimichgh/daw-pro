@@ -619,9 +619,10 @@ agent will not read a DSP file.
    That staircase is the instrument's real resolution. Smoothing it draws a
    precision the detector does not have.
 3. **ANY CENTS READOUT MUST RESPECT A ±12.90 CENT FLOOR.** Half a bin. Display
-   whole numbers at most (`-31 cents`), never a decimal. And ⚠️ the transposer we
-   ship is itself sharp — **+5.45 cents at +2 st, +3.95 at −2 st** — so a readout
-   implying closed-loop exactness is wrong twice over. The honest product claim,
+   whole numbers at most (`-31 cents`), never a decimal. (The transposer used to
+   add a second error, **+5.45 cents at +2 st, +3.95 at −2 st**, until p2-acc's
+   vendored patch on 2026-09-25; it now lands within 0.5 c for |shift| ≤ 3 st.
+   This floor never depended on it.) The honest product claim,
    from the same header: *"pulls a note's centre onto the scale, to roughly the
    detector's own resolution."*
 4. **CONFIDENCE IS VOICING, NOT ACCURACY.** A 440 Hz sine reads 437.55 Hz — 9.7

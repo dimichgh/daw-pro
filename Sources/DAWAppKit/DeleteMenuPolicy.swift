@@ -120,7 +120,13 @@ public enum DeleteMenuPolicy {
     /// cannot see the flags) and the pane answers with one line —
     /// `PitchEditorNoteMenu.alreadyClearedLine` — pointing at Restore, and
     /// commits nothing. Every other row changes something.
-    public static let pitchEditorClearTitle = "Clear Selected Notes"
+    ///
+    /// UE-2 — THE NOUN FOLLOWS THE SELECTION: this is the title for a selection
+    /// of NOTES; sounds read "Clear Selected Sounds" and a mix "Clear Selected"
+    /// (`PitchEditorNoteMenu.selectionClearTitle`, the right-click menu's own
+    /// nouns). Still no count, for the reason above: the bridge publishes the
+    /// selection's KINDS, not its size.
+    public static let pitchEditorClearTitle = PitchEditorNoteMenu.selectionClearTitle(kinds: [.note])
 
     // MARK: - Edit ▸ Delete
 
@@ -223,6 +229,13 @@ public enum DeleteMenuPolicy {
     ///     `pitchEditorOpen`'s two reasons. The arm below ALSO requires
     ///     `pitchEditorOpen`, so a stale bridge bit handed in with the pane shut
     ///     cannot claim the key (or clear anything).
+    ///   - pitchEditorSelectionKinds: UE-2 — what KINDS that selection holds
+    ///     (`AppModel.pitchEditorSelectionKinds`, the pane's bridge report): the
+    ///     Clear title's NOUN only ("Clear Selected Sounds"). ⚠️ **DEFAULTED,
+    ///     AND THAT IS NOT `pitchEditorOpen`'s CASE:** it decides no route and
+    ///     no enabled state — a call site that forgets it can only print "Notes"
+    ///     over a sound, never claim or refuse a key. The two app call sites
+    ///     are pinned to pass it by `PitchEditorInteractionSiteTests`.
     ///   - arrangeClipCount: `arrangeSelection.count`.
     public static func editMenuItem(
         arrangeWorkspace: Bool,
@@ -231,6 +244,7 @@ public enum DeleteMenuPolicy {
         automationPointCount: Int,
         pitchEditorOpen: Bool,
         pitchEditorHasNoteSelection: Bool,
+        pitchEditorSelectionKinds: Set<PitchEditorNoteMenu.Kind> = [.note],
         arrangeClipCount: Int
     ) -> DeleteMenuItem {
         guard arrangeWorkspace else { return DeleteMenuItem(refusedBy: .workspace) }
@@ -299,7 +313,9 @@ public enum DeleteMenuPolicy {
         // .noteEditorSelectionClearsTheNotes` measured this fixture resolving
         // I4's refusal before the change.
         if pitchEditorOpen && pitchEditorHasNoteSelection {
-            return DeleteMenuItem(title: pitchEditorClearTitle, surface: .pitchEditorNotes)
+            return DeleteMenuItem(
+                title: PitchEditorNoteMenu.selectionClearTitle(kinds: pitchEditorSelectionKinds),
+                surface: .pitchEditorNotes)
         }
         if pitchEditorOpen { return DeleteMenuItem(refusedBy: .pitchEditorOpen) }
         guard arrangeClipCount > 0 else { return DeleteMenuItem(refusedBy: .emptySelection) }
@@ -414,6 +430,7 @@ public enum DeleteMenuPolicy {
         automationPointCount: Int,
         pitchEditorOpen: Bool,
         pitchEditorHasNoteSelection: Bool,
+        pitchEditorSelectionKinds: Set<PitchEditorNoteMenu.Kind> = [.note],
         arrangeClipCount: Int
     ) -> DeleteMenuItem {
         guard !isTextEditingFocused else { return DeleteMenuItem(refusedBy: .textEditing) }
@@ -424,6 +441,7 @@ public enum DeleteMenuPolicy {
             automationPointCount: automationPointCount,
             pitchEditorOpen: pitchEditorOpen,
             pitchEditorHasNoteSelection: pitchEditorHasNoteSelection,
+            pitchEditorSelectionKinds: pitchEditorSelectionKinds,
             arrangeClipCount: arrangeClipCount)
     }
 

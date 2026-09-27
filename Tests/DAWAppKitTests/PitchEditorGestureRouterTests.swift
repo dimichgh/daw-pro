@@ -30,16 +30,19 @@ struct PitchEditorGestureRouterTests {
 
     // MARK: - route: the full truth table, tool × chord × hit
 
-    /// The six (tool, hit) answers, each spelled out. Iterated under all four
-    /// chords below: 24 rows.
+    /// The six (tool, hit) answers, each spelled out TWICE: without ⌘ (plain
+    /// and ⇧) and with it (⌘ and ⇧⌘). Iterated under all four chords below:
+    /// 24 rows. m23-ap C5b-4b — ⌘ on a note in the Move tool is the BRUSH;
+    /// every other row reads the same with and without it.
     private static let routeRows: [(tool: PitchEditorTool, hit: PitchEditorPressHit,
-                                    expected: PitchEditorPressKind)] = [
-        (.pointer, .note(noteA), .noteDrag(noteA)),
-        (.pointer, .empty, .band),
-        (.pointer, .inert, .none),
-        (.scissors, .note(noteA), .cut),
-        (.scissors, .empty, .cut),
-        (.scissors, .inert, .none),
+                                    expected: PitchEditorPressKind,
+                                    withCommand: PitchEditorPressKind)] = [
+        (.pointer, .note(noteA), .noteDrag(noteA), .brush(noteA)),
+        (.pointer, .empty, .band, .band),
+        (.pointer, .inert, .none, .none),
+        (.scissors, .note(noteA), .cut, .cut),
+        (.scissors, .empty, .cut, .cut),
+        (.scissors, .inert, .none, .none),
     ]
 
     @Test("⭐ the full truth table: 2 tools × 4 chords × 3 hits, every row a literal")
@@ -49,27 +52,56 @@ struct PitchEditorGestureRouterTests {
             for row in Self.routeRows {
                 let kind = PitchEditorGestureRouter.route(tool: row.tool, modifiersAtPress: chord.value,
                                                           hit: row.hit)
-                #expect(kind == row.expected, "\(row.tool) + \(chord.name) on \(row.hit)")
+                let expected = chord.value.contains(.command) ? row.withCommand : row.expected
+                #expect(kind == expected, "\(row.tool) + \(chord.name) on \(row.hit)")
                 rows += 1
             }
         }
         #expect(rows == 24)
     }
 
-    /// The table above cannot tell "the chord is ignored" from "every chord
-    /// happens to agree". This leg states it: no kind depends on the press-time
-    /// chord YET — the kinds that will (C5b-4's ⌘-brush, C2-5's ⌘-edge) are
-    /// designed and not built, and adding one must be a deliberate row change.
-    @Test("no kind depends on the press chord yet — the designed ⌘ kinds are not built")
-    func chordIsInertToday() {
-        for row in Self.routeRows {
-            let plain = PitchEditorGestureRouter.route(tool: row.tool, modifiersAtPress: .none, hit: row.hit)
-            for chord in Self.chords {
-                #expect(PitchEditorGestureRouter.route(tool: row.tool, modifiersAtPress: chord.value,
-                                                       hit: row.hit) == plain,
-                        "\(row.tool) + \(chord.name) on \(row.hit)")
+    /// ⚠️ RETIRED BY NAME at m23-ap C5b-4b: "no kind depends on the press chord
+    /// yet — the designed ⌘ kinds are not built" (`chordIsInertToday`). Its own
+    /// doc said adding the ⌘-brush "must be a deliberate row change", and this
+    /// is that change: the claim it pinned is now false by design.
+    ///
+    /// Its replacement states EXACTLY which (tool, hit) pairs the chord
+    /// changes — every pair in all three tools, dots included: ⇧ changes
+    /// nothing anywhere; ⌘ changes precisely the note and dot presses of the
+    /// Move and Wobble tools, into `.brush` on that note; the knife, empty
+    /// surface and an inert surface ignore every chord. A router that let ⌘
+    /// reach the knife, or ⇧ start a stroke, fails here by name.
+    @Test("C5b-4b — only ⌘, and only on a note or its dot in Move or Wobble, changes a kind: into the brush on that note")
+    func onlyCommandOnANoteChangesAKind() {
+        let a = Self.noteA
+        let hits: [PitchEditorPressHit] = [.note(a), .dot(a), .empty, .inert]
+        var changed: [String] = []
+        for tool in PitchEditorTool.allCases {
+            for hit in hits {
+                let plain = PitchEditorGestureRouter.route(tool: tool, modifiersAtPress: .none, hit: hit)
+                #expect(PitchEditorGestureRouter.route(tool: tool, modifiersAtPress: .shift, hit: hit) == plain,
+                        "⇧ changed \(tool) on \(hit)")
+                let command = PitchEditorGestureRouter.route(tool: tool, modifiersAtPress: .command, hit: hit)
+                #expect(PitchEditorGestureRouter.route(tool: tool, modifiersAtPress: [.shift, .command],
+                                                       hit: hit) == command,
+                        "⇧⌘ disagrees with ⌘ on \(tool) on \(hit)")
+                if command != plain {
+                    #expect(command == .brush(a), "⌘ on \(tool) on \(hit) routed \(command), not the brush")
+                    changed.append("\(tool.rawValue)/\(hit)")
+                }
             }
         }
+        // W7-NTU U3 — the Voice tool draws with ⌘ too ("⌘ held at mouse-down
+        // is the C5b brush in every tool"), and still only on a note.
+        #expect(changed == ["pointer/note(\(a))", "pointer/dot(\(a))",
+                            "wobble/note(\(a))", "wobble/dot(\(a))",
+                            "voice/note(\(a))", "voice/dot(\(a))"],
+                "⌘ changed exactly these presses: \(changed)")
+        // The one home of "does ⌘ draw here", literal per tool.
+        #expect(PitchEditorGestureRouter.commandDraws(in: .pointer))
+        #expect(PitchEditorGestureRouter.commandDraws(in: .wobble))
+        #expect(PitchEditorGestureRouter.commandDraws(in: .voice))
+        #expect(!PitchEditorGestureRouter.commandDraws(in: .scissors))
     }
 
     @Test("the pressed note rides on the kind; its echo tags are stable")
@@ -83,6 +115,11 @@ struct PitchEditorGestureRouterTests {
         #expect([PitchEditorReleaseAction.endNoteDrag(Self.noteA), .endBand, .cut(at: .zero),
                  .click(.deselect), .nothing].map(\.key)
                 == ["endNoteDrag", "endBand", "cut", "click", "nothing"])
+        // C5b-4b — the brush's press and release.
+        #expect(PitchEditorPressKind.brush(Self.noteB).noteID == Self.noteB)
+        #expect(PitchEditorPressKind.brush(Self.noteB).wobbleDoor == nil)
+        #expect(PitchEditorPressKind.brush(Self.noteB).key == "brush")
+        #expect(PitchEditorReleaseAction.endBrush(Self.noteB).key == "endBrush")
     }
 
     // MARK: - release: kind × travelled × chord-at-release
@@ -116,6 +153,15 @@ struct PitchEditorGestureRouterTests {
             (.none, false, .none, .nothing),
             (.none, true, .none, .nothing),
             (.none, false, .command, .nothing),
+            // C5b-4b — the brush: travelled ends the stroke whatever is held at
+            // the release; a press that never left the slop is the house click,
+            // read with the chord AT RELEASE (⌘ let go first: a plain click).
+            (.brush(a), true, .none, .endBrush(a)),
+            (.brush(a), true, .command, .endBrush(a)),
+            (.brush(a), true, [.shift, .command], .endBrush(a)),
+            (.brush(a), false, .command, .click(.toggle(a))),
+            (.brush(a), false, .shift, .click(.toggle(a))),
+            (.brush(a), false, .none, .click(.selectOnly(a))),
         ]
         for (kind, travelled, chord, expected) in rows {
             let action = PitchEditorGestureRouter.release(kind: kind, travelled: travelled, origin: origin,
@@ -302,5 +348,198 @@ struct PitchEditorGestureRouterTests {
         let tick = tracker.tick(start: start, location: start, tool: .pointer, modifiers: .none, hit: hit)
         #expect(tick.isFirst && !tick.isPromoted)
         #expect(hitCalls == 2)
+    }
+
+    // MARK: - m23-ap C5a-4b — the Wobble tool's rows
+
+    /// The Wobble tool's routes and releases, every answer a literal, beside
+    /// the Move and Split rows it must not disturb. A `.dot` hit is only ever
+    /// REPORTED in the Wobble tool, but the table is total: Move answers it as
+    /// the note it sits on, Split as a cut.
+    ///
+    /// Planted and seen red: `(.wobble, .note)` routed `.noteDrag` (the Wobble
+    /// tool moving pitch), and the dot's ⌥ read from the press chord instead
+    /// of `optionAtRelease` (every ⌥-click a step UP).
+    @Test("C5a-4b — the Wobble tool routes a note press to the wobble (door drag), a dot press to its step (door dot), empty to a band; its release: travelled ends the drag, a still dot is ONE step (⌥ at release = smaller), a still note press is the house click; Move and Split unchanged")
+    func wobbleToolRowsAreLiterals() {
+        let a = Self.noteA
+        // C5b-4b — each row spelled with and without ⌘: ⌘ at the press on a
+        // note or its dot is the BRUSH in the Wobble tool too (vibrato design
+        // §4.2), and the knife ignores it.
+        let routes: [(tool: PitchEditorTool, hit: PitchEditorPressHit, expected: PitchEditorPressKind,
+                      withCommand: PitchEditorPressKind)] = [
+            (.wobble, .note(a), .wobble(a, door: .drag), .brush(a)),
+            (.wobble, .dot(a), .wobble(a, door: .dot), .brush(a)),
+            (.wobble, .empty, .band, .band),
+            (.wobble, .inert, .none, .none),
+            // Move and Split, re-asked with the new hit: unchanged in meaning.
+            (.pointer, .dot(a), .noteDrag(a), .brush(a)),
+            (.scissors, .dot(a), .cut, .cut),
+        ]
+        for chord in Self.chords {
+            for row in routes {
+                let expected = chord.value.contains(.command) ? row.withCommand : row.expected
+                #expect(PitchEditorGestureRouter.route(tool: row.tool, modifiersAtPress: chord.value,
+                                                       hit: row.hit) == expected,
+                        "\(row.tool) + \(chord.name) on \(row.hit)")
+            }
+        }
+        // The Move tool's own table, re-read with the new ⌥ argument at both
+        // values: ⌥ at release means nothing outside the Wobble tool.
+        let origin = CGPoint(x: 40, y: 12)
+        for travelled in [false, true] {
+            for option in [false, true] {
+                #expect(PitchEditorGestureRouter.release(kind: .noteDrag(a), travelled: travelled,
+                                                         origin: origin, modifiersAtRelease: .none,
+                                                         optionAtRelease: option)
+                        == (travelled ? .endNoteDrag(a) : .click(.selectOnly(a))))
+                #expect(PitchEditorGestureRouter.release(kind: .band, travelled: travelled,
+                                                         origin: origin, modifiersAtRelease: .none,
+                                                         optionAtRelease: option)
+                        == (travelled ? .endBand : .click(.deselect)))
+            }
+        }
+        let releases: [(PitchEditorPressKind, Bool, Bool, ArrangeClickModifiers, PitchEditorReleaseAction)] = [
+            // (kind, travelled, ⌥ at release, chord, expected)
+            (.wobble(a, door: .dot), false, false, .none, .wobbleStep(a, bigger: true)),
+            (.wobble(a, door: .dot), false, true, .none, .wobbleStep(a, bigger: false)),
+            (.wobble(a, door: .dot), false, false, .shift, .wobbleStep(a, bigger: true)),
+            (.wobble(a, door: .dot), true, false, .none, .endWobble(a)),
+            (.wobble(a, door: .dot), true, true, .none, .endWobble(a)),
+            (.wobble(a, door: .drag), true, false, .none, .endWobble(a)),
+            (.wobble(a, door: .drag), true, true, .command, .endWobble(a)),
+            (.wobble(a, door: .drag), false, false, .none, .click(.selectOnly(a))),
+            (.wobble(a, door: .drag), false, true, .none, .click(.selectOnly(a))),
+            (.wobble(a, door: .drag), false, false, .shift, .click(.toggle(a))),
+        ]
+        for (kind, travelled, option, chord, expected) in releases {
+            #expect(PitchEditorGestureRouter.release(kind: kind, travelled: travelled, origin: origin,
+                                                     modifiersAtRelease: chord,
+                                                     optionAtRelease: option) == expected,
+                    "\(kind) travelled=\(travelled) ⌥=\(option) chord=\(chord.rawValue)")
+        }
+        // The echo's tags and payloads.
+        #expect(PitchEditorPressKind.wobble(a, door: .dot).key == "wobble")
+        #expect(PitchEditorPressKind.wobble(a, door: .dot).noteID == a)
+        #expect(PitchEditorPressKind.wobble(a, door: .drag).wobbleDoor == .drag)
+        #expect(PitchEditorPressKind.noteDrag(a).wobbleDoor == nil)
+        #expect([PitchEditorReleaseAction.endWobble(a), .wobbleStep(a, bigger: true)].map(\.key)
+                == ["endWobble", "wobbleStep"])
+    }
+
+    /// ⭐ **4 pt IS A DRAG, not a step** — the Wobble tool borrows the ONE slop
+    /// (vibrato-handle §18.8): a dot press that travelled exactly
+    /// `PitchEditorGestureRouter.slop` releases as the end of a drag; 3.99 pt
+    /// is still a click, so a step. Through the tracker, the way the pane runs
+    /// it. Planted and seen red: the wobble release reading `hasTravelled` with
+    /// `>` (4 pt a step).
+    @Test("C5a-4b — 4 pt of travel on the dot is a DRAG (endWobble); 3.99 pt is still a click (one step)")
+    func fourPointsOnTheDotIsADrag() {
+        let a = Self.noteA
+        let start = CGPoint(x: 100, y: 100)
+        for (end, expected) in [(CGPoint(x: 104, y: 100), PitchEditorReleaseAction.endWobble(a)),
+                                (CGPoint(x: 100, y: 96), .endWobble(a)),
+                                (CGPoint(x: 103.99, y: 100), .wobbleStep(a, bigger: true))] {
+            var tracker = PitchEditorPressTracker()
+            _ = tracker.tick(start: start, location: start, tool: .wobble, modifiers: .none,
+                             hit: { _ in .dot(a) })
+            _ = tracker.tick(start: start, location: end, tool: .wobble, modifiers: .none,
+                             hit: { _ in .dot(a) })
+            #expect(tracker.release(start: start, at: end, modifiers: .none) == expected,
+                    "released at \(end)")
+        }
+    }
+
+    // MARK: - W7-NTU U3 — the Voice tool
+
+    /// Planted and seen red (W7-NTU P-v-route): `(.voice, .note)` routed
+    /// `.noteDrag` (the Voice tool moving pitch).
+    @Test("W7-NTU U3 — the Voice tool routes a note press to its Voice (the brush with ⌘), empty to a band, an inert surface to nothing; every row a literal under all four chords")
+    func voiceToolRowsAreLiterals() {
+        let a = Self.noteA
+        let routes: [(hit: PitchEditorPressHit, expected: PitchEditorPressKind,
+                      withCommand: PitchEditorPressKind)] = [
+            (.note(a), .formantDrag(a), .brush(a)),
+            (.dot(a), .formantDrag(a), .brush(a)),
+            (.empty, .band, .band),
+            (.inert, .none, .none),
+        ]
+        var rows = 0
+        for chord in Self.chords {
+            for row in routes {
+                let expected = chord.value.contains(.command) ? row.withCommand : row.expected
+                #expect(PitchEditorGestureRouter.route(tool: .voice, modifiersAtPress: chord.value,
+                                                       hit: row.hit) == expected,
+                        "voice + \(chord.name) on \(row.hit)")
+                rows += 1
+            }
+        }
+        #expect(rows == 16)
+        #expect(PitchEditorPressKind.formantDrag(a).key == "formantDrag")
+        #expect(PitchEditorPressKind.formantDrag(a).noteID == a)
+        #expect(PitchEditorPressKind.formantDrag(a).wobbleDoor == nil)
+        #expect([PitchEditorReleaseAction.endFormantDrag(a), .formantReset(a)].map(\.key)
+                == ["endFormantDrag", "formantReset"])
+    }
+
+    /// Planted and seen red (W7-NTU P-v-dbl): the click count ignored (a
+    /// double-click is two selects and never a reset).
+    @Test("W7-NTU U3 — a Voice press's release: travelled ends the drag whatever the count; a still press is the house click, and the SECOND click of a double-click resets; no other kind reads the count")
+    func voiceReleaseReadsTheClickCount() {
+        let a = Self.noteA
+        let origin = CGPoint(x: 40, y: 12)
+        let rows: [(travelled: Bool, clicks: Int, chord: ArrangeClickModifiers,
+                    expected: PitchEditorReleaseAction)] = [
+            (true, 1, .none, .endFormantDrag(a)),
+            (true, 2, .none, .endFormantDrag(a)),
+            (true, 1, .command, .endFormantDrag(a)),
+            (false, 1, .none, .click(.selectOnly(a))),
+            (false, 1, .shift, .click(.toggle(a))),
+            (false, 1, .command, .click(.toggle(a))),
+            (false, 2, .none, .formantReset(a)),
+            (false, 2, .shift, .formantReset(a)),
+            (false, 3, .none, .formantReset(a)),
+        ]
+        for row in rows {
+            #expect(PitchEditorGestureRouter.release(kind: .formantDrag(a), travelled: row.travelled,
+                                                     origin: origin, modifiersAtRelease: row.chord,
+                                                     clickCount: row.clicks) == row.expected,
+                    "travelled=\(row.travelled) clicks=\(row.clicks) chord=\(row.chord.rawValue)")
+        }
+        // Every other kind ignores the count: a double-click in the Move tool
+        // is still a select, on empty surface still a deselect.
+        #expect(PitchEditorGestureRouter.release(kind: .noteDrag(a), travelled: false, origin: origin,
+                                                 modifiersAtRelease: .none, clickCount: 2)
+                == .click(.selectOnly(a)))
+        #expect(PitchEditorGestureRouter.release(kind: .band, travelled: false, origin: origin,
+                                                 modifiersAtRelease: .none, clickCount: 2)
+                == .click(.deselect))
+        #expect(PitchEditorGestureRouter.release(kind: .wobble(a, door: .drag), travelled: false,
+                                                 origin: origin, modifiersAtRelease: .none,
+                                                 clickCount: 2)
+                == .click(.selectOnly(a)))
+    }
+
+    /// Planted and seen red (W7-NTU P-v-track): the tracker not handing the
+    /// count on.
+    @Test("W7-NTU U3 — through the tracker, the way the pane runs it: the release's click count reaches the router")
+    func trackerHandsTheClickCountOn() {
+        let a = Self.noteA
+        let start = CGPoint(x: 100, y: 100)
+        for (clicks, expected) in [(1, PitchEditorReleaseAction.click(.selectOnly(a))),
+                                   (2, .formantReset(a))] {
+            var tracker = PitchEditorPressTracker()
+            _ = tracker.tick(start: start, location: start, tool: .voice, modifiers: .none,
+                             hit: { _ in .note(a) })
+            #expect(tracker.release(start: start, at: start, modifiers: .none, clickCount: clicks)
+                    == expected, "clicks=\(clicks)")
+        }
+        // 4 pt of travel is a drag, a double-click or not.
+        var tracker = PitchEditorPressTracker()
+        _ = tracker.tick(start: start, location: start, tool: .voice, modifiers: .none, hit: { _ in .note(a) })
+        _ = tracker.tick(start: start, location: CGPoint(x: 100, y: 96), tool: .voice, modifiers: .none,
+                         hit: { _ in .note(a) })
+        #expect(tracker.release(start: start, at: CGPoint(x: 100, y: 96), modifiers: .none, clickCount: 2)
+                == .endFormantDrag(a))
     }
 }

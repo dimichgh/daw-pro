@@ -156,13 +156,39 @@ public final class OfflineRenderer {
     /// complete) before `render`/`renderToWAV` for those tracks to sound — a
     /// hosted track without this pre-step renders the silent placeholder with
     /// a stderr warning.
+    ///
+    /// AUR-1: the body is the two halves below, in this order (instruments,
+    /// then inserts: the pre-AUR-1 body verbatim), so every render still
+    /// prepares exactly what it always did. They are split so the compensation
+    /// plan can run the insert half alone (`AudioEngine.offlineCompensationTargets`).
     public func prepareAudioUnits(tracks: [Track]) async {
+        await prepareHostedInstruments(tracks: tracks)
+        await prepareHostedInsertEffects(tracks: tracks)
+    }
+
+    /// The instrument half of `prepareAudioUnits`: one hosted instrument per
+    /// `.audioUnit` / `.soundBank` instrument track.
+    func prepareHostedInstruments(tracks: [Track]) async {
         for track in tracks
         where track.kind == .instrument
             && [.audioUnit, .soundBank].contains((track.instrument ?? .default).kind) {
             await auRegistry.prepare(track: track, sampleRate: sampleRate)
         }
-        // Hosted insert effects too (M4 v) — every strip kind can carry them.
+    }
+
+    /// The insert half of `prepareAudioUnits`: every hosted (`.audioUnit`)
+    /// insert effect, on every strip kind (M4 v), instrument strips included.
+    ///
+    /// ⭐ AUR-1 (docs/design/2026-09-27-au-instance-reuse.md §3.1): this half
+    /// ALONE is what `compensationPlanTargets` needs. The plan's only input is
+    /// each strip's insert-chain latency (`PlaybackGraph.recomputeCompensation`
+    /// reads `EffectChainState`, never an instrument), and an instrument strip
+    /// whose hosted instrument was not prepared reconciles against the silent
+    /// placeholder with the SAME chain state, so skipping the instrument half
+    /// moves no target. `OfflinePlanPrepareScopeTests` pins that parity against
+    /// the both-halves plan. ⚠️ Inserts on INSTRUMENT strips stay in: a hosted
+    /// limiter on an instrument track is plan input like any other.
+    func prepareHostedInsertEffects(tracks: [Track]) async {
         for track in tracks {
             for effect in track.effects
             where effect.kind == .audioUnit {
@@ -193,18 +219,29 @@ public final class OfflineRenderer {
     /// `masterAutomation` (m15-c): the master volume lane this render applies
     /// — same class-level-default rationale; `[]` leaves the master fader at
     /// the static `masterVolume`, byte-identical to pre-m15-c.
+    ///
+    /// `masterModulationSources` / `masterModulationRoutes` (m39-e-2): the
+    /// MASTER strip's modulation this render applies — same class-level-default
+    /// rationale; `[]` for both is the graph's own default, byte-identical to
+    /// pre-m39-e-2. Before m39-e-2 no offline render could carry master
+    /// modulation at all: this graph was never given it, so an LFO or macro on
+    /// the master fader moved live and was missing from every export.
     public func render(tracks: [Track], tempoMap: TempoMap,
                        fromBeat: Double = 0,
                        durationSeconds: Double,
                        masterVolume: Double = 1,
                        masterEffects: [EffectDescriptor] = [],
                        masterAutomation: [AutomationLane] = [],
+                       masterModulationSources: [ModulationSource] = [],
+                       masterModulationRoutes: [ModulationRoute] = [],
                        metronomeEnabled: Bool = false,
                        meterMap: MeterMap = MeterMap(constant: TimeSignature())) throws -> RenderedAudio {
         let session = try beginSession(
             tracks: tracks, tempoMap: tempoMap, fromBeat: fromBeat,
             durationSeconds: durationSeconds, masterVolume: masterVolume,
             masterEffects: masterEffects, masterAutomation: masterAutomation,
+            masterModulationSources: masterModulationSources,
+            masterModulationRoutes: masterModulationRoutes,
             metronomeEnabled: metronomeEnabled, meterMap: meterMap)
         while !session.isComplete {
             try session.pullNextQuantum()
@@ -237,6 +274,8 @@ public final class OfflineRenderer {
         masterVolume: Double = 1,
         masterEffects: [EffectDescriptor] = [],
         masterAutomation: [AutomationLane] = [],
+        masterModulationSources: [ModulationSource] = [],
+        masterModulationRoutes: [ModulationRoute] = [],
         metronomeEnabled: Bool = false,
         meterMap: MeterMap = MeterMap(constant: TimeSignature())
     ) async throws -> RenderedAudio {
@@ -245,6 +284,8 @@ public final class OfflineRenderer {
                 tracks: tracks, tempoMap: tempoMap, fromBeat: fromBeat,
                 durationSeconds: durationSeconds, masterVolume: masterVolume,
                 masterEffects: masterEffects, masterAutomation: masterAutomation,
+                masterModulationSources: masterModulationSources,
+                masterModulationRoutes: masterModulationRoutes,
                 metronomeEnabled: metronomeEnabled, meterMap: meterMap)
         }
         while !session.isComplete {
@@ -268,6 +309,8 @@ public final class OfflineRenderer {
                               masterVolume: Double,
                               masterEffects: [EffectDescriptor],
                               masterAutomation: [AutomationLane],
+                              masterModulationSources: [ModulationSource],
+                              masterModulationRoutes: [ModulationRoute],
                               metronomeEnabled: Bool,
                               meterMap: MeterMap) throws -> OfflineRenderSession {
         // m22-f: tempo-synced delays bounce at the tempo governing the render
@@ -304,6 +347,14 @@ public final class OfflineRenderer {
         // fader (lane active) or leaves the static write below untouched.
         graph.masterAutomation = masterAutomation
         graph.manualMasterVolume = masterVolume.clamped(to: Track.volumeRange)
+        // Master modulation (m39-e-2): the `masterAutomation` twin, landing at
+        // the same moment for the same reason. The pre-start pass below pins
+        // the master fader to unity under a volume route (the stage in the
+        // master chain host then carries base × modulation from frame 0) and
+        // publishes the master snapshot; roll start re-publishes the anchor it
+        // needs. `[]` for both is the graph's own default: no byte moves.
+        graph.masterModulationSources = masterModulationSources
+        graph.masterModulationRoutes = masterModulationRoutes
 
         guard let format = AVAudioFormat(
             standardFormatWithSampleRate: sampleRate,
@@ -530,9 +581,11 @@ public final class OfflineRenderer {
     /// §5): builds the offline graph — manual-rendering mode, reconcile, one
     /// pre-start parameter pass, which is the recompute choke point `render`
     /// itself runs — and reads the graph's plan. No frames are rendered and
-    /// the engine never starts. Hosted-AU latency requires
-    /// `prepareAudioUnits(tracks:)` to have completed first (the `render`
-    /// rule). Empty when the graph can't form (no strips, format failure).
+    /// the engine never starts. Hosted-insert latency requires
+    /// `prepareHostedInsertEffects(tracks:)` (or `prepareAudioUnits(tracks:)`,
+    /// which runs it) to have completed first; a hosted instrument is never
+    /// plan input (AUR-1). Empty when the graph can't form (no strips, format
+    /// failure).
     func compensationPlanTargets(tracks: [Track]) -> [UUID: Int] {
         let engine = AVAudioEngine()
         // m20-c: injected rate, same rule as `beginSession` — and no longer
@@ -568,13 +621,17 @@ public final class OfflineRenderer {
     public func renderToWAV(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
                             masterEffects: [EffectDescriptor] = [],
                             masterAutomation: [AutomationLane] = [],
+                            masterModulationSources: [ModulationSource] = [],
+                            masterModulationRoutes: [ModulationRoute] = [],
                             fromBeat: Double, durationSeconds: Double,
                             to url: URL) throws -> AudioFileInfo {
         let audio = try render(
             tracks: tracks, tempoMap: tempoMap, fromBeat: fromBeat,
             durationSeconds: durationSeconds, masterVolume: masterVolume,
             masterEffects: masterEffects,
-            masterAutomation: masterAutomation
+            masterAutomation: masterAutomation,
+            masterModulationSources: masterModulationSources,
+            masterModulationRoutes: masterModulationRoutes
         )
         return try Self.writeAudioFile(audio, to: url)
     }

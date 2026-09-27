@@ -176,6 +176,12 @@ public enum CompFlattener {
         let sortedComp = group.comp.sorted { $0.startBeat < $1.startBeat }
 
         var members: [Member] = []
+        // Lyrics (p2-sing-d1b): a lane's words are placed once, and each member
+        // carries the words that start inside its own window
+        // (`ClipLyrics.WordPlacement`), so two members of one lane never sing
+        // the same word. The lane keeps its whole text while the group exists.
+        var placements: [UUID: ClipLyrics.WordPlacement] = [:]
+        var lanesWithAMember = Set<UUID>()
         for (idx, seg) in sortedComp.enumerated() {
             guard let lane = laneByID[seg.laneID] else { continue }
             let source = lane.clip
@@ -187,6 +193,12 @@ public enum CompFlattener {
             // material — that part is honest silence).
             guard memberEnd > memberStart else { continue }
             let memberLength = memberEnd - memberStart
+            let isFirstWindow = lanesWithAMember.insert(lane.id).inserted
+            if placements[lane.id] == nil, let placement = ClipLyrics.WordPlacement(clip: source, tempoMap: tempoMap) {
+                placements[lane.id] = placement
+            }
+            let memberLyrics = placements[lane.id]?.window((memberStart - laneStart)..<(memberEnd - laneStart),
+                                                           isFirstWindow: isFirstWindow)
             let ratio = source.stretchRatio > 0 ? source.stretchRatio : 1
             // Windowing = the splitClip math, generalized for stretch (spec §2):
             // the source-domain offset advances by the timeline span
@@ -256,7 +268,8 @@ public enum CompFlattener {
                 //
                 // Lossless either way at the model layer: the lane keeps its own
                 // clip with the full set, and flatten is re-runnable from it.
-                pitchEdits: source.pitchEdits
+                pitchEdits: source.pitchEdits,
+                lyrics: memberLyrics
             )
             member.takeGroupID = group.id
 

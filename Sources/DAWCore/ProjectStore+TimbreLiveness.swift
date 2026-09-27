@@ -182,8 +182,10 @@ extension ProjectStore {
             // Report the preset when the kit matches one exactly, and say
             // "custom" otherwise, so a liveness verdict in a log can be traced
             // back to a sound without a second round trip.
-            let kit = instrument.resolvedDrumKit
-            let preset = DrumKitParams.presets.first { $0.params == kit }
+            // m39-tpl-0: named by SOUND, whatever the note layout, so a `gm`
+            // lofi kit is still "the lofi kit". `matchingPreset` ignores the
+            // layout by construction (it is defined through `applyingPreset`).
+            let preset = instrument.resolvedDrumKit.matchingPreset
             return "drum machine, \(preset.map { "\($0.name) kit" } ?? "custom kit")"
         case .polySynth, .testTone:
             return nil

@@ -6,8 +6,10 @@ import Foundation
 /// m39-dm — the built-in 808/909-lineage synthesised drum machine.
 ///
 /// Eight fixed, NAMED, monophonic one-shot voices, each a hand-written
-/// synthesis topology rather than a generic engine with a mode switch. Notes
-/// 36–43 map one-to-one onto the voices (the MPC/Drum Rack base).
+/// synthesis topology rather than a generic engine with a mode switch. Which
+/// note plays which voice is the kit's `noteLayout` (m39-tpl-0): `pads`, notes
+/// 36–43 one-to-one (the MPC/Drum Rack base), or `gm`, the General MIDI drum
+/// map — `DrumVoice.voice(forNote:layout:)`, the one home for both.
 ///
 /// ⭐ WHY THIS INSTRUMENT NEEDS NONE OF POLYSYNTH'S MODULATION MACHINERY:
 /// a one-shot consumes its parameters AT NOTE-ON and nowhere else. That is what
@@ -492,8 +494,17 @@ final class DrumSynthInstrument: InstrumentRendering, @unchecked Sendable {
         // A one-shot ignores note-off entirely — every trigger plays to its end
         // — and it consumes no CC, bend or aftertouch, which is what
         // `MIDIControllerRouting` tells the user out loud.
+        //
+        // m39-tpl-0 — ⛔ RENDER THREAD. The layout is read from `kit`, THIS
+        // thread's own copy, adopted from the atomic slot at the top of the
+        // quantum; it is never read from the model here. The lookup is a plain
+        // `switch` (no table, no `allCases` scan: F-4). A layout change
+        // therefore takes effect at the next note-on, and a hit already
+        // sounding keeps playing — it is latched in its slot by topology, not
+        // by note.
         guard event.kind == ScheduledMIDIEvent.noteOn, event.velocity > 0,
-              let voice = DrumVoice.voice(forNote: event.pitch) else { return }
+              let voice = DrumVoice.voice(forNote: event.pitch, layout: kit.noteLayout)
+        else { return }
         trigger(voice: voice, velocity: event.velocity, atSample: sample,
                 modulation: modulation, modulationSample: modulationSample)
     }

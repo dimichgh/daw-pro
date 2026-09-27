@@ -1,5 +1,7 @@
 # Pitch editor: per-note timing (C2) and freehand reshaping (C5b)
 
+> **Amended 2026-09-25 by `docs/design/2026-09-25-natural-tuning.md` (natural tuning, the user's MUST).** Where this document and that one disagree, that one wins. Amended sections here: §3.6 (soft/silence join definition), §3.8 (shared note-edge spec), and a new subsection "Shared note-edge spec (R12, natural tuning)" before §3.9.
+
 Design and implementation plan, 2026-09-24, daw-architect.
 
 **Status: DESIGN. Nothing in this document is shipped.** It extends
@@ -730,11 +732,13 @@ must go red.
 
 ### 3.6 The neighbour rule (decision A5)
 
+> **Amended (natural tuning, R15 / §4):** "Detected notes never abut" is replaced by a soft/silence join definition: a join is soft if notes abut bit-for-bit OR the gap is shorter than `consonantMinimumGapSeconds`; else it is a gap. The hairline at soft joins (:748-750) is the ONE hairline idiom, owned by C2 (R12 :1693). See also R12 subsection below.
+
 - **Connected** means `left.endSeconds == right.startSeconds` exactly, in source
-  seconds. Detected notes never abut: a voiced run ends at a hole or at a frame gap
-  (`PitchAutoCorrect.voicedRuns`), so there is always a gap. C3's split always makes
+  seconds. A voiced run ends at a hole or at a frame gap (`PitchAutoCorrect.voicedRuns`);
+  soft joins are the abutting case or short holes within one run. C3's split always makes
   abutting halves (the left half's new end is the right half's start, F9). So
-  "connected" means "one sung note the user cut in two". That is Melodyne's
+  "connected" means "one sung note the user cut in two" (or a gap so short it counts as soft). That is Melodyne's
   connected pair (F25): a legato line that the segmenter reported as one run.
 - **Dragging a connected edge moves both notes.** The setter writes the same delta
   to the left note's end and the right note's start. The two knots then coincide,
@@ -800,6 +804,8 @@ because a drag must never snap back to where it started. That matches
 
 ### 3.8 Interaction (decision A6)
 
+> **Amended (natural tuning, R12 / §4, R13):** The edge zone rule (below) is shared with §4's vertical join-width drag and applies only at soft joins (R15's predicate). This sharing is enforced by a new subsection "Shared note-edge spec (R12, natural tuning)" below.
+
 **Zones on a blob `w` px wide** (F26: Melodyne does not publish its zone sizes, so
 these are picks):
 - **Edges:** `clamp(0.25·w, 4, 8)` px at each end. **Body:** the rest.
@@ -844,6 +850,23 @@ Times are shown in whole milliseconds.
   vocal for the whole drag.
 - The readout then says "Rendering… you'll hear it in a moment" until the render's
   pending state clears. The existing pending notice is the signal.
+
+### 3.8b Shared note-edge spec (R12, natural tuning)
+
+> **Verbatim from `2026-09-25-natural-tuning.md` R12 :1682–1700. This spec unifies the C2 timing-edge drag with §4's transition-width drag into one interaction.**
+
+- **One edge zone** per blob: C2's `clamp(0.25·w, 4, 8)` px at each end; no edge zone on a blob narrower than 12 px.
+- **Axis lock** after 4 px of travel: horizontal → C2 timing (as C2 designed); vertical, on the REAR zone of the left
+  note of a soft join (R15's predicate) → that join's width. Drag DOWN = gentler (wider), UP = steeper (narrower),
+  double-click = back to Auto. A vertical drag on a rear zone that is not at a soft join is a normal pitch drag.
+- **One hairline idiom** at soft joins, owned by C2 (`signal` ink at 40 %, READ timing design :748-750). §4 adds no
+  second hairline; it adds a drawn (NOT hover-only) caption "Slide: Auto" / "Slide: 120 ms" under every soft join
+  whose Δ ≥ 100 c. Captions are drawn because tooltips are invisible to `view.capture` (READ
+  PitchEditorModel.swift:1137-1140).
+- **Note menu row:** "Smoother slide into the next note" / "Sharper slide" / "Slide: Auto", so every join is reachable
+  without the zone (narrow notes, keyboard-less use).
+- Ownership: this spec is carried into the timing design by NT-D (the only lane that edits it) BEFORE NT-U2 starts;
+  the router's press kind is `.edgeDrag(noteID, edge)` resolved to `.timingDrag` or `.transitionDrag` by the lock.
 
 ### 3.9 Store, wire and MCP (one command surface)
 
@@ -1470,6 +1493,45 @@ tooltip, and the palette already follows this rule
 "Let go to hear it" is the one sentence a novice most needs. The clip renders once
 per stroke and is silent while it does (F5).
 
+**AS BUILT 2026-09-27 (C5b-4b, the brush UI).** §5.5 and §5.6 shipped with these
+differences. Everything not listed shipped as written.
+- **Where ⌘ draws.** A ⌘-press on a note, or on its dot, draws in the **Move** tool
+  and in the **Wobble** tool. The Split tool never draws: its press is a cut.
+  `PitchEditorGestureRouter.commandDraws(in:)` is the one rule.
+  - There is **no "Shape" palette slot yet.** It is a follow-up; ⌘ is the only way in.
+  - **⌘ over empty surface does not draw.** It keeps I5's playhead ghost, so the band
+    appears only over a note a ⌘-press would draw on.
+  - A ⌘-click that stays inside the 4 pt slop is still the house ⌘-click: it toggles
+    the note's selection and draws nothing.
+- **The band tells the truth before the press.** Where the press would be refused (the
+  line is an estimate, or the note is a breath or a consonant), the band is dimmed and
+  dashed. The palette's help slot then shows the refusal sentence instead of the brush's
+  help. The press asks the same function (`PitchShapeStroke.begin`), so the band and the
+  press cannot disagree.
+- **The cursor is the crosshair, not a pencil.** `CursorModel` gives every place-and-paint
+  surface the crosshair, and there is no pencil cursor in the house set.
+- **On a sound, the words are the brush's own**: "This is a breath or a consonant, not a
+  sung note — it has no pitch line to draw." The store's refusal names the note by its id
+  and is written for agents. It still shows if the store itself ever refuses a stroke.
+- **The Move help** is "Drag a note up or down to change its pitch. Hold ⌘ to draw its
+  line; hold ⌥ to move it freely." The timing clause waits for C2 to ship. **The Wobble
+  help** gains "Hold ⌘ to draw instead."
+- **After the release** the touched notes play through the pitch drag's release
+  audition. While the render lands, the state row says "Preparing your note…" (when
+  Hear is on). The design's "Rendering… you'll hear it in a moment." line is not built.
+- **No edge autoscroll during a stroke.**
+- **The live window is DAWCore's.** Each drafted note's window is
+  `PitchEditSet.pitchDragReach(ofSegmentAt:)`, the same rule as a pitch or a wobble
+  drag (D4-1 #2). So the FIRST stroke on a vocal that predates natural tuning redraws
+  the whole line live, because its release updates the whole vocal.
+- **One commit, as designed.** The release is one `setClipNoteShapes` call, labelled
+  "Draw Pitch", through `PitchEditorShapeWrite`, which reads the write back. "Reset
+  drawn shape" is one call of clears, labelled "Reset Drawn Shape".
+- **Tests** live in the existing suites (`PitchEditorModelTests`, `PitchShapeBrushTests`,
+  `PitchEditorGestureRouterTests`, `PitchEditorNoteMenuTests`,
+  `PitchEditorInteractionSiteTests`), not in a new file: the @MainActor suite cap is
+  full. **Looked-at gate:** `scripts/gates/m23ap-c5b-brush.mjs`.
+
 ### 5.7 Store, wire and MCP
 
 **Store** (`Sources/DAWCore/ProjectStore+PitchNoteEdits.swift`): one function for
@@ -1499,6 +1561,9 @@ exactly one of the two.
 - The response is `clip.getPitchEdits`'s shape.
 - `clip.getPitchEdits` gains, for each segment, `shape: {startSeconds, stepSeconds:
   0.01, cents: [...]}`.
+  - **ERRATUM 2026-09-26 (C5b-3b):** shipped as ONLY-WHEN-DRAWN. `shape` appears only on a
+    note that has a drawing, and the key is omitted otherwise. `clip.setNoteShape`'s own
+    response always carries it, empty when cleared.
 - The setter uses `rejectUnknownKeys`, and the change is additive only.
 
 **MCP:** `clip_set_note_shape`: "Redraw part of a note's pitch line. Give points

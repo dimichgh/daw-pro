@@ -916,6 +916,12 @@ struct OfflineStretcherCurveTests {
     /// come out? `OfflineStretcherTests` checks pitch by zero-crossing rate
     /// within ±3 % (≈±52 cents), which is far too loose to see this, and a
     /// pitch CORRECTOR that trusts the setter inherits whatever bias is here.
+    ///
+    /// Tightened ±25 → ±0.5 c by p2-acc (2026-09-25): the bias this leg found
+    /// (+5.45 c at +2 st, +3.95 at −2 st) was the vendored transposer's
+    /// fractional-bin phase read, fixed by VENDORED.md patch 0001. Measured
+    /// after 0001: −0.27 c at +2 st, +0.24 c at −2 st, −0.02 c at 0; after
+    /// 0002+0003 (p2-acc-3): −0.003 c at +2 st, −0.021 c at −2 st, −0.019 c at 0.
     @Test("constant-shift pitch accuracy, in cents")
     func constantShiftPitchAccuracy() throws {
         let input = [Self.sine()]
@@ -937,7 +943,7 @@ struct OfflineStretcherCurveTests {
                 "pitch",
                 "constant \(semitones) st: expected \(expected) Hz, measured "
                     + "\(median) Hz, error \(error) cents")
-            #expect(abs(error) < 25, "constant shift is \(error) cents off at \(semitones) st")
+            #expect(abs(error) < 0.5, "constant shift is \(error) cents off at \(semitones) st")
         }
     }
 

@@ -210,7 +210,7 @@ tool call — id-capture rules and etiquette live there.
   the same way `instrument_list_audio_units` does for instruments.
 - **The built-in drum machine (`drumSynth`).** Eight fixed, named one-shot
   voices — `kick`, `snare`, `closedHat`, `openHat`, `clap`, `tom`, `rim`,
-  `cymbal`, triggered by MIDI notes 36-43 in that order — addressed by 75
+  `cymbal` — addressed by 75
   dotted parameter names (`kick.decay`, `closedHat.tune`, `kit.gain`, …),
   never by index. Three ways to set them: `track_set_instrument`'s
   `drumKit` object is a PARTIAL OVERLAY (only the fields you send move;
@@ -242,6 +242,21 @@ tool call — id-capture rules and etiquette live there.
   automation lanes don't reach ANY instrument parameter yet (drum or Poly
   Synth alike), so modulation routes are currently the only way to move a
   drum parameter over time.
+  ⭐ **Which note plays which drum is the kit's `noteLayout`**, not a fixed
+  fact. `pads` (the default, and what every kit made before the setting
+  existed reads as) plays notes 36-43 as kick, snare, closed hat, open hat,
+  clap, tom, rim and cymbal, in that order. `gm` plays General MIDI drum
+  notes: 35/36 kick, 37 rim, 38/40 snare, 39 clap, 42/44 closed hat, 46 open
+  hat, all six tom notes on the one tom, crashes and rides on the one
+  cymbal, and every other General MIDI drum note plays nothing. A beat
+  written from General MIDI numbers (an imported .mid file, or one an AI
+  wrote from GM numbers) plays the WRONG drums on a `pads` kit, with no
+  error: set `drumKit.noteLayout: "gm"` through `track_set_instrument` for
+  it. It is structural, like `chokeGroup`: `instrument_set_drum_param`
+  refuses it and `instrument_load_drum_preset` keeps it. **Read `voiceNotes`
+  from `instrument_describe_drum_kit` before writing or handing off drum
+  notes**: it lists, for THIS kit's layout, exactly which notes play each
+  voice, and `silentGMNotes` lists the ones that play nothing.
 - **Hosted plugin UIs.** `plugin_open_ui`/`plugin_close_ui`/
   `plugin_list_open_uis` open/close a hosted Audio Unit's native window when
   a plugin's real UI matters more than its generic parameter list.

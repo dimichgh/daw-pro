@@ -136,6 +136,19 @@ function stripNotesFromResult(result: unknown): unknown {
 
 const bridge = new DawBridge();
 
+/**
+ * The timeline ceiling (m23-ap I5-F4 round 4): no beat position, length or
+ * offset, and no bar number or number of bars, may be further than 2^20 =
+ * 1048576 from 0. It is `TimelineLimits.maximumBeats` in DAWCore, repeated
+ * here because TypeScript cannot import it (timeline-ceiling.test.ts pins the
+ * number on both sides). The app refuses anything past it for every command;
+ * these schemas refuse it at the MCP boundary first, and `tools/list` shows it
+ * as each field's `maximum`.
+ */
+const TIMELINE_MAX_BEATS = 1048576;
+const PAST_TIMELINE = "past the timeline limit: at most 1048576 beats (2^20) from beat 0";
+const PAST_TIMELINE_BARS = "past the timeline limit: at most 1048576 (2^20)";
+
 export const server = new McpServer({
   name: "daw-pro",
   version: "0.1.0",
@@ -258,6 +271,7 @@ registerTool(
       beats: z
         .number()
         .min(0)
+        .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
         .optional()
         .describe(
           "Absolute position in beats (quarter notes) from timeline start. Must be >= 0. " +
@@ -298,6 +312,7 @@ registerTool(
       beat: z
         .number()
         .min(0)
+        .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
         .describe("Absolute timeline position in beats (quarter notes) to place the marker. Must be >= 0."),
     },
   },
@@ -351,6 +366,7 @@ registerTool(
       beat: z
         .number()
         .min(0)
+        .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
         .describe("New absolute timeline position in beats (quarter notes). Clamped to >= 0."),
     },
   },
@@ -436,6 +452,7 @@ registerTool(
             startBeat: z
               .number()
               .min(0)
+              .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
               .describe("Beat where this tempo begins. Segment 0 must be 0; later segments strictly increasing."),
             bpm: z
               .number()
@@ -456,6 +473,7 @@ registerTool(
             startBeat: z
               .number()
               .min(0)
+              .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
               .describe("Beat where this time signature begins. Change 0 must be 0."),
             beatsPerBar: z
               .number()
@@ -827,6 +845,7 @@ registerTool(
       startBeat: z
         .number()
         .min(0)
+        .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
         .optional()
         .describe(
           "Loop start position in beats (quarter notes) from timeline start. Must be >= 0. " +
@@ -835,6 +854,7 @@ registerTool(
       endBeat: z
         .number()
         .gt(0)
+        .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
         .optional()
         .describe(
           "Loop end position in beats (quarter notes) from timeline start. Must be > 0 and " +
@@ -869,6 +889,7 @@ registerTool(
       inBeat: z
         .number()
         .min(0)
+        .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
         .optional()
         .describe(
           "Punch-in position in beats (quarter notes) from timeline start, where recording " +
@@ -877,6 +898,7 @@ registerTool(
       outBeat: z
         .number()
         .gt(0)
+        .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
         .optional()
         .describe(
           "Punch-out position in beats (quarter notes) from timeline start, where recording " +
@@ -2083,7 +2105,9 @@ function drumNoteField() {
     .number()
     .optional()
     .describe(
-      "Read-only/derived — the MIDI note (36-43) that triggers this voice. Present so you can " +
+      "Read-only/derived — the LOWEST MIDI note that triggers this voice in the kit's " +
+        "`noteLayout` (36-43 in the default `pads` layout; in `gm` a voice answers several " +
+        "notes, all listed in instrument_describe_drum_kit's `voiceNotes`). Present so you can " +
         "feed instrument_describe_drum_kit's or instrument_load_drum_preset's `drumKit` response " +
         "straight back into this object; IGNORED if you send it, never an error."
     );
@@ -2494,6 +2518,24 @@ const drumKitSchema = z
       "0-1 linear, default 0.25. Extra level (and half a share of extra brightness) an " +
         "accented hit receives, on every voice."
     ),
+    noteLayout: z
+      .enum(["pads", "gm"])
+      .optional()
+      .describe(
+        "Which MIDI notes play which drum. `pads` (the default, and what every kit made before " +
+          "this field existed reads as): notes 36-43 play kick, snare, closedHat, openHat, clap, " +
+          "tom, rim, cymbal in that order, one note each. `gm`: General MIDI drum notes — 35/36 " +
+          "kick, 37 rim (side stick), 38/40 snare, 39 clap, 42/44 closedHat, 46 openHat, " +
+          "41/43/45/47/48/50 the one tom, 49/51/52/53/55/57/59 the one cymbal; every other GM " +
+          "drum note (tambourine, cowbell, congas…) plays NOTHING. ⚠️ A General MIDI beat " +
+          "(written from GM drum numbers, or imported from a .mid file) plays the WRONG DRUMS " +
+          "on a `pads` kit, with no error: set `gm` for it. STRUCTURAL, like `chokeGroup`: not " +
+          "one of the 75 sound parameters, so instrument_set_drum_param REFUSES it and it cannot " +
+          "be modulated; instrument_load_drum_preset KEEPS it. Omit the key to leave the layout " +
+          "untouched. ⭐ Before writing drum notes, read `voiceNotes` from " +
+          "instrument_describe_drum_kit: it lists, for THIS kit's layout, exactly which notes " +
+          "play each voice."
+      ),
   })
   .strict()
   .describe(
@@ -2530,10 +2572,12 @@ const drumKitSchema = z
       "`null` deliberately CLEARS it, omitting the key leaves it untouched. Both hats default " +
       "to group 0 (so they choke each other) — clearing that is a real, supported edit and " +
       "must not be silently undone by an unrelated knob turn. " +
-      "There is deliberately NO discrete/enum parameter anywhere on this instrument (see " +
+      "There is deliberately NO discrete/enum parameter among the 75 sound parameters (see " +
       "instrument_list_drum_presets) — the 808/909/acoustic/lofi/trap factory kits differ " +
       "only in these same 75 numbers, never in topology, which is what makes 'every drum " +
-      "parameter is automatable' literally true here. For the full picture of a track's " +
+      "parameter is automatable' literally true here. The two non-number fields, `chokeGroup` " +
+      "(per voice) and `noteLayout` (which MIDI notes play which drum: `pads` 36-43 or General " +
+      "MIDI `gm`), are STRUCTURAL, not sound parameters. For the full picture of a track's " +
       "current kit — ranges, defaults, engine-applied values, which settings are silently " +
       "inert right now, route budget — call instrument_describe_drum_kit rather than guessing " +
       "from this schema alone."
@@ -4561,6 +4605,15 @@ registerTool(
       "the SAME sentence track_set_instrument's own out-of-range error uses for that " +
       "parameter, so the two can never drift apart), plus `effective` (what the engine " +
       "actually applies right now) and `default`. " +
+      "⭐ `curve` (m39-f-2) is present ONLY on the 7 parameters with a declared `ParamCurve` " +
+      "(cutoffHz/resonance/gain/sustain/attack/decay/release — omitted, not fabricated, on " +
+      "the other 17) and means exactly what fx_describe's `curve` means: how MODULATION " +
+      "(mod_add_route) reads that parameter's 0...1 depth — `logarithmic` for cutoffHz AND " +
+      "for attack/decay/release (depth is even in octave-like doublings of time), `linear` " +
+      "for resonance/gain/sustain. ⚠️ `attack`/`decay`/`release` ADDITIONALLY carry a `note` " +
+      "explaining a real, open disagreement: the ON-SCREEN KNOB for these three still moves " +
+      "in even seconds today, NOT doublings, so `curve` here describes what modulation does, " +
+      "not what the knob looks like — read the note before assuming the two match. " +
       "⭐⭐ THE SIXTEEN ADDITIVE-OPTIONAL PARAMETERS (pedalHoldLimit + all fifteen m39-g " +
       "knobs) additionally carry `optional: true`, `isSet` (was this ever written on this " +
       "track), `value` (present ONLY when isSet — omitted, never null, when unset), and " +
@@ -4628,6 +4681,8 @@ registerTool(
       "every valid `kick.*` name), so the error teaches the correct spelling rather than just " +
       "failing. ⚠️ `chokeGroup` is NOT reachable here — it is structural, not one of the 75 " +
       "names; set it via track_set_instrument's `drumKit.<voice>.chokeGroup` instead. " +
+      "`noteLayout` (which MIDI notes play which drum) is structural too and is REFUSED here " +
+      "with a pointer to track_set_instrument's `drumKit.noteLayout`. " +
       "`value` is CLAMPED into that parameter's range, exactly like track_set_instrument's " +
       "`drumKit` object — the ONLY refusal on `value` itself is a non-finite number (NaN/" +
       "Infinity), since those survive clamping unchanged and the render thread turns several " +
@@ -4687,10 +4742,15 @@ registerTool(
       "and an unknown trackId — there is deliberately no 'never configured' refusal, matching " +
       "instrument_describe_synth: every instrument track HAS a kit (the default's) even " +
       "untouched. " +
-      "Returns {trackId, kind, isActiveInstrument, isConfigured, voices, kit, parameterCount " +
-      "(75), order, presets, routesUsed, routeBudget, warnings}. `voices` is keyed by the " +
+      "Returns {trackId, kind, isActiveInstrument, isConfigured, noteLayout, noteLayoutMeaning, " +
+      "voiceNotes, silentGMNotes, voices, kit, parameterCount (75), order, presets, routesUsed, " +
+      "routeBudget, warnings}. ⭐ READ `voiceNotes` BEFORE WRITING DRUM NOTES: it maps each " +
+      "voice name to EVERY MIDI note that plays it in this kit's `noteLayout` (`pads`: one " +
+      "note each, 36-43; `gm`: General MIDI drum notes, e.g. the six tom notes all play `tom`), " +
+      "and `silentGMNotes` lists the General MIDI drum notes (35-81) that play nothing on this " +
+      "kit. `noteLayoutMeaning` says the same in one sentence. `voices` is keyed by the " +
       "eight voice names (`kick`/`snare`/`closedHat`/`openHat`/`clap`/`tom`/`rim`/`cymbal`), " +
-      "each `{displayName, note (the MIDI note 36-43 that triggers it), parameters, " +
+      "each `{displayName, note (the LOWEST MIDI note that triggers it in this layout), parameters, " +
       "chokeGroup?}` — `parameters` is keyed by leaf name (`tune`/`decay`/... — ONLY the " +
       "leaves that voice actually has, 8-10 of them) and `chokeGroup` (0-63) is present ONLY " +
       "when set — absent means this voice chokes nothing and is choked by nothing, which is " +
@@ -4747,13 +4807,16 @@ registerTool(
       "closed-down hats), and `trap` (a very long sub kick, a tight clap-forward snare, fast " +
       "bright hats built for rolls). Call instrument_list_drum_presets first for a one-line " +
       "summary of each, or read the full numeric recipe via instrument_describe_drum_kit " +
-      "after loading one. ⭐ THERE IS NO `character` ENUM AND NO DISCRETE PARAMETER ANYWHERE " +
-      "ON THIS INSTRUMENT — the five lineages differ only in these same 75 numbers, never in " +
+      "after loading one. It KEEPS the kit's `noteLayout`: a preset changes how the drums " +
+      "sound, never which MIDI note plays which drum (the response's `noteLayout` says which). " +
+      "⭐ THERE IS NO `character` ENUM AND NO DISCRETE PARAMETER AMONG THE 75 SOUND PARAMETERS " +
+      "— the five lineages differ only in these same 75 numbers, never in " +
       "topology, so anything a preset sets can also be dialled by hand or reached one knob at " +
       "a time afterward via instrument_set_drum_param. An unknown `name` is REFUSED and lists " +
       "the five valid names rather than a bare 'not found'. " +
       "Returns {trackId, name (the canonical preset name), summary, replacedAllParameters " +
-      "(true), parameterCount (75), kind, isActiveInstrument, drumKit (the full resulting kit " +
+      "(true), noteLayout (KEPT from the kit), parameterCount (75), kind, isActiveInstrument, " +
+      "drumKit (the full resulting kit " +
       "— the same per-voice/kit-wide numeric shape instrument_describe_drum_kit's `voices`/" +
       "`kit` use, so you can read exactly what landed without a follow-up describe call)}. " +
       "Refuses readably for an audio/bus track and an unknown trackId.",
@@ -5003,7 +5066,11 @@ registerTool(
       "number / unrecognised mode with a readable error, so a typo cannot land as a " +
       "silently-different setting (see " +
       "`param`'s own description for each range). Returns the full resolved instrument " +
-      "object, same shape as track_set_instrument.",
+      "object, same shape as track_set_instrument. If every zone sets its own value for the " +
+      "global you set (`attack`, `decay`, `sustain`, `release` or `oneShot` — common on " +
+      "imported libraries), the value is still stored but changes nothing you can hear, and " +
+      "the reply says so in a `warnings` entry, with `effectiveGlobals` " +
+      "(instrument_describe_sampler's shape, whose `note` names the per-zone fix) beside it.",
     inputSchema: {
       trackId: z.string().min(1).describe("Id of the instrument track, from project_snapshot."),
       param: samplerGlobalParamSchema,
@@ -6703,7 +6770,8 @@ server.registerTool(
     description:
       "Look up the parameter schema for one or every available effect kind — the " +
       "reference for fx_add's `params` and fx_set_param's `name`/`value`. Returns, per " +
-      "kind, its parameter list as `{name, min, max, default, unit, curve}` (`unit` is a " +
+      "kind, its parameter list as `{name, min, max, default, unit, curve, modulatable}` " +
+      "(`unit` is a " +
       "short human label, e.g. \"linear gain\", \"dB\", \"Hz\", \"ms\", \"seconds\"), plus a " +
       "teaching `note` on parameters whose bare range hides semantics (the eq's " +
       "nil-means-off high/low-pass, 12/24 slope snapping, 0/1 per-band bypass). " +
@@ -6720,7 +6788,15 @@ server.registerTool(
       "than at 8000 Hz. Step the FRACTION `f`, not the Hz, for an even-sounding result. " +
       "`decibel` is the same multiplicative curve read in dB rather than octaves (no " +
       "shipping parameter uses it yet — reserved for one that should read evenly in dB from " +
-      "birth). Omit `kind` " +
+      "birth). " +
+      "⭐ `modulatable` (m39-f-3) is whether mod_add_route may target this exact parameter, " +
+      "and how honestly: `yes` modulates cleanly (quantum-rate stores are smoothed, or the " +
+      "parameter is inherently smooth), `warned` is permitted but mod_add_route's response " +
+      "names an artefact (e.g. a rate above roughly 18.75 Hz aliasing), and `refused` means " +
+      "mod_add_route throws — most often because the parameter is discrete (a switch, an " +
+      "enum, a rounded step) and an LFO cannot drive it meaningfully. This is the SAME " +
+      "verdict mod_add_route itself applies, read from the one place it is declared, not a " +
+      "separate guess. Omit `kind` " +
       "to list every available kind at once. Available kinds: `gain` (simple linear " +
       "gain stage), `eq` (parametric — low shelf, two peaking bands, high shelf, plus " +
       "optional high/low-pass filters, shelf Q, and per-band `*Enabled` bypass), " +
@@ -7075,6 +7151,7 @@ const noteSchema = z.object({
   startBeat: z
     .number()
     .min(0)
+    .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
     .describe(
       "Note start position in beats (quarter notes), RELATIVE TO THE CLIP'S START " +
         "(not the timeline). Must be >= 0."
@@ -7082,6 +7159,7 @@ const noteSchema = z.object({
   lengthBeats: z
     .number()
     .positive()
+    .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
     .optional()
     .describe("Note duration in beats. Must be > 0. Defaults to 1 beat."),
   id: z
@@ -7131,6 +7209,7 @@ registerTool(
       atBeat: z
         .number()
         .min(0)
+        .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
         .optional()
         .describe(
           "Timeline position in beats (quarter notes) to place the clip's start. " +
@@ -7191,6 +7270,7 @@ registerTool(
       atBeat: z
         .number()
         .min(0)
+        .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
         .optional()
         .describe(
           "Timeline position in beats (quarter notes) to place the clip's start. " +
@@ -7199,6 +7279,7 @@ registerTool(
       lengthBeats: z
         .number()
         .positive()
+        .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
         .optional()
         .describe(
           "Clip length in beats. Must be > 0. Omit to default to fit the notes " +
@@ -7343,6 +7424,8 @@ registerTool(
       clipId: z.string().uuid().describe("Id of the MIDI clip to read, from project_snapshot or clip_add_midi."),
       fromBeat: z
         .number()
+        .min(-TIMELINE_MAX_BEATS, PAST_TIMELINE)
+        .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
         .optional()
         .describe(
           "Only return notes whose startBeat is >= this (CLIP-RELATIVE beats, " +
@@ -7351,6 +7434,8 @@ registerTool(
         ),
       toBeat: z
         .number()
+        .min(-TIMELINE_MAX_BEATS, PAST_TIMELINE)
+        .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
         .optional()
         .describe(
           "Only return notes whose startBeat is < this (CLIP-RELATIVE beats, " +
@@ -7423,6 +7508,8 @@ registerTool(
       clipId: z.string().uuid().describe("Id of the MIDI clip to repeat notes within, from project_snapshot."),
       fromBeat: z
         .number()
+        .min(-TIMELINE_MAX_BEATS, PAST_TIMELINE)
+        .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
         .optional()
         .describe(
           "Only select source notes whose startBeat is >= this (CLIP-RELATIVE beats). " +
@@ -7430,6 +7517,8 @@ registerTool(
         ),
       toBeat: z
         .number()
+        .min(-TIMELINE_MAX_BEATS, PAST_TIMELINE)
+        .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
         .optional()
         .describe(
           "Only select source notes whose startBeat is < this (CLIP-RELATIVE beats). " +
@@ -7444,6 +7533,8 @@ registerTool(
         ),
       periodBeats: z
         .number()
+        .min(-TIMELINE_MAX_BEATS, PAST_TIMELINE)
+        .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
         .describe(
           "Beats between the start of each copy. Must be > 0. Explicit and meter-blind by " +
             "design — see the tool description for why."
@@ -7459,6 +7550,8 @@ registerTool(
         ),
       firstCopyAtBeat: z
         .number()
+        .min(-TIMELINE_MAX_BEATS, PAST_TIMELINE)
+        .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
         .optional()
         .describe(
           "CLIP-RELATIVE start beat of copy 1. Omit to place it immediately after the source " +
@@ -7529,6 +7622,7 @@ const notePatchSchema = z
     startBeat: z
       .number()
       .min(0)
+      .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
       .optional()
       .describe(
         "New start position in beats (quarter notes), RELATIVE TO THE CLIP'S START " +
@@ -7537,6 +7631,7 @@ const notePatchSchema = z
     lengthBeats: z
       .number()
       .positive()
+      .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
       .optional()
       .describe("New duration in beats. Must be > 0. Omit to leave it unchanged."),
   })
@@ -7650,6 +7745,8 @@ registerTool(
       clipId: z.string().uuid().describe("Id of the clip to split, from project_snapshot."),
       atBeat: z
         .number()
+        .min(-TIMELINE_MAX_BEATS, PAST_TIMELINE)
+        .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
         .describe(
           "Timeline position in beats (quarter notes) to cut at. Must fall strictly " +
             "inside the clip's span [startBeat, startBeat + lengthBeats] — splitting at " +
@@ -7694,9 +7791,13 @@ registerTool(
       clipId: z.string().uuid().describe("Id of the clip to trim, from project_snapshot."),
       newStartBeat: z
         .number()
+        .min(-TIMELINE_MAX_BEATS, PAST_TIMELINE)
+        .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
         .describe("New timeline start in beats (quarter notes). Clamped to >= 0."),
       newLengthBeats: z
         .number()
+        .min(-TIMELINE_MAX_BEATS, PAST_TIMELINE)
+        .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
         .describe(
           "New clip length in beats. Clamped to a minimum of 1/32 beat (a 128th note " +
             "in 4/4) — a clip can never collapse to zero length."
@@ -7754,6 +7855,8 @@ registerTool(
       clipId: z.string().uuid().describe("Id of the clip to move, from project_snapshot."),
       toStartBeat: z
         .number()
+        .min(-TIMELINE_MAX_BEATS, PAST_TIMELINE)
+        .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
         .describe("New timeline start in beats (quarter notes). Clamped to >= 0."),
     },
   },
@@ -7801,6 +7904,7 @@ registerTool(
       toStartBeat: z
         .number()
         .min(0)
+        .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
         .optional()
         .describe(
           "New timeline start in beats (quarter notes) for the copy. Must be >= 0. Omit to " +
@@ -7886,6 +7990,7 @@ registerTool(
             beat: z
               .number()
               .min(0)
+              .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
               .describe(
                 "Breakpoint position in beats, RELATIVE TO THE CLIP'S START (not the " +
                   "timeline). Clamped into 0..the clip's length."
@@ -7932,10 +8037,12 @@ registerTool(
       fadeInBeats: z
         .number()
         .min(0)
+        .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
         .describe("Fade-in length in beats, from the clip's start. Must be >= 0."),
       fadeOutBeats: z
         .number()
         .min(0)
+        .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
         .describe("Fade-out length in beats, into the clip's end. Must be >= 0."),
       fadeInCurve: fadeCurveSchema.optional(),
       fadeOutCurve: fadeCurveSchema.optional(),
@@ -7977,6 +8084,7 @@ registerTool(
       lengthBeats: z
         .number()
         .positive()
+        .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
         .describe(
           "Crossfade length in beats (quarter notes). Must be > 0. For adjacent clips " +
             "this is the overlap that gets created; for already-overlapping clips it is " +
@@ -8040,7 +8148,10 @@ registerTool(
         .optional()
         .describe(
           "Keep formants at the source position while pitch-shifting (vocal mode) so a " +
-            "shifted voice stays natural. Omit to keep the current setting."
+            "shifted voice stays natural. Omit to keep the current setting. " +
+            "This flag governs the WHOLE-CLIP transpose only. A per-note pitch edit's own " +
+            "voice size is a separate, additive control -- see clip_set_formant_correction / " +
+            "clip_set_note_formant."
         ),
     },
   },
@@ -8073,6 +8184,8 @@ registerTool(
       clipId: z.string().uuid().describe("Id of the AUDIO clip to stretch, from project_snapshot."),
       lengthBeats: z
         .number()
+        .min(-TIMELINE_MAX_BEATS, PAST_TIMELINE)
+        .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
         .describe(
           "New timeline length in beats (quarter notes). Floored at 1/32 beat. The " +
             "clip's stretch ratio scales to match so it reads the same source window."
@@ -8089,13 +8202,22 @@ registerTool(
     title: "Quantize a MIDI clip's timing to the grid",
     description:
       "Snap a MIDI clip's note onsets toward a rhythmic GRID (destructive, but one " +
-      "undo step reverts it). `gridBeats` is the grid resolution in BEATS (quarter " +
+      "undo step reverts it). The grid is the SONG's: its lines count from the song's " +
+      "start (beat 0), not from the clip's start, so they are the lines the piano roll " +
+      "draws. That means the notes of a clip that does not start on a grid line still " +
+      "land on the lines you see (a clip at beat 2.1 quantized to 1/16 puts notes on " +
+      "song beats 2.25, 2.5, 2.75…, never 2.35). Swing and grooves count from the " +
+      "song's beats too, not the clip's start: the notes that swing are the song's " +
+      "offbeats wherever the clip starts, just as in clip_quantize_audio. " +
+      "`gridBeats` is the grid resolution in BEATS (quarter " +
       "notes): 1 = 1/4 note, 0.5 = 1/8, 0.25 = 1/16, 0.125 = 1/32; use 2/3-scaled " +
-      "values for triplets (~0.3333 = 1/8 triplet, ~0.1667 = 1/16 triplet). " +
+      "values for triplets (~0.3333 = 1/8 triplet, ~0.1667 = 1/16 triplet). The finest " +
+      "grid accepted is 1/1024 beat (0.0009765625), 64 times finer than the app's finest " +
+      "(1/64 note = 0.0625); a finer or non-finite grid is refused. " +
       "`strength` (0..1, default 1) is HOW FAR each note moves toward its target slot: " +
       "1 snaps fully to the grid, 0.5 moves it exactly halfway (tightens the feel while " +
       "keeping human timing), 0 leaves it untouched. `swing` (50..75, MPC convention, " +
-      "default 50) shuffles the feel by DELAYING the offbeat slots: 50 = straight, " +
+      "default 50) shuffles the feel by DELAYING the song's offbeat slots: 50 = straight, " +
       "66 ~ classic MPC groove, 75 = maximum (a half-grid late, a triplet-ish shuffle); " +
       "it is applied to the grid targets BEFORE the strength move. `quantizeEnds` " +
       "(default false) also snaps each note's END to the grid — otherwise note LENGTHS " +
@@ -8113,10 +8235,12 @@ registerTool(
       clipId: z.string().uuid().describe("Id of the MIDI clip to quantize, from project_snapshot."),
       gridBeats: z
         .number()
-        .positive()
+        .finite("gridBeats must be a finite number of beats")
+        .min(1 / 1024, "gridBeats must be at least 1/1024 beat (0.0009765625), the finest grid accepted")
+        .max(TIMELINE_MAX_BEATS, "gridBeats must be at most 1048576 beats (2^20), the timeline limit")
         .describe(
           "Grid resolution in beats (quarter notes): 1 = 1/4 note, 0.5 = 1/8, 0.25 = " +
-            "1/16, 0.125 = 1/32; ~0.3333 = 1/8 triplet. Must be > 0."
+            "1/16, 0.125 = 1/32; ~0.3333 = 1/8 triplet. At least 1/1024 beat (0.0009765625)."
         ),
       strength: z
         .number()
@@ -8134,7 +8258,8 @@ registerTool(
         .optional()
         .describe(
           "MPC swing percent, 50..75 (default 50). 50 = straight; higher DELAYS the " +
-            "offbeat slots — 66 ~ classic groove, 75 = max (a half-grid late)."
+            "song's offbeat slots (counted from the song's start, not the clip's) — " +
+            "66 ~ classic groove, 75 = max (a half-grid late)."
         ),
       quantizeEnds: z
         .boolean()
@@ -8411,7 +8536,8 @@ registerTool(
       "equal-power CROSSFADES so the joins are seamless. Destructive, but ONE undo step " +
       "reverts it. `gridBeats` is the grid in beats (1 = 1/4 note, 0.5 = 1/8, 0.25 = " +
       "1/16) and may be OMITTED when `strength` is 0, where nothing is nudged and a " +
-      "pure chop needs no grid. `strength` (0..1, default 1) is how far each slice moves " +
+      "pure chop needs no grid; a grid you do send must be at least 1/1024 beat " +
+      "(0.0009765625) and finite, even at strength 0. `strength` (0..1, default 1) is how far each slice moves " +
       "toward its slot (1 = snap fully, 0.5 = halfway, 0 = chop only). `swing` (50..75, " +
       "default 50) delays the offbeat slots (MPC groove). `sensitivity` (0..1, default " +
       "0.5) tunes onset detection (low = strong hits only, high = more onsets). " +
@@ -8431,11 +8557,13 @@ registerTool(
       clipId: z.string().uuid().describe("Id of the AUDIO clip to quantize, from project_snapshot."),
       gridBeats: z
         .number()
-        .positive()
+        .finite("gridBeats must be a finite number of beats")
+        .min(1 / 1024, "gridBeats must be at least 1/1024 beat (0.0009765625), the finest grid accepted")
+        .max(TIMELINE_MAX_BEATS, "gridBeats must be at most 1048576 beats (2^20), the timeline limit")
         .optional()
         .describe(
           "Grid resolution in beats: 1 = 1/4 note, 0.5 = 1/8, 0.25 = 1/16, 0.125 = 1/32. " +
-            "Must be > 0. REQUIRED unless strength is 0 — at strength 0 nothing is nudged, " +
+            "At least 1/1024 beat (0.0009765625). REQUIRED unless strength is 0 — at strength 0 nothing is nudged, " +
             "so a pure chop needs no grid and this may be omitted."
         ),
       divisions: z
@@ -8647,11 +8775,13 @@ registerTool(
         ),
       gridBeats: z
         .number()
-        .positive()
+        .finite("gridBeats must be a finite number of beats")
+        .min(1 / 1024, "gridBeats must be at least 1/1024 beat (0.0009765625), the finest grid accepted")
+        .max(TIMELINE_MAX_BEATS, "gridBeats must be at most 1048576 beats (2^20), the timeline limit")
         .optional()
         .describe(
           "Grid resolution in beats (1 = 1/4 note, 0.5 = 1/8, 0.25 = 1/16). Required by " +
-            "(and only valid in) mode \"grid\"."
+            "(and only valid in) mode \"grid\". At least 1/1024 beat (0.0009765625)."
         ),
       minSliceSeconds: z
         .number()
@@ -8711,6 +8841,7 @@ registerTool(
       atBeat: z
         .number()
         .min(0)
+        .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
         .optional()
         .describe(
           "Where the reconstruction clip lands (default: the source clip's own start, so " +
@@ -8896,8 +9027,15 @@ registerTool(
       "independent of `preset` (a preset says how correction behaves, the scale says which " +
       "notes are allowed -- so 'gentle, in G minor' is expressible). `strength`/`retuneMs`/" +
       "`preserveVibrato`, when given, OVERRIDE whatever a named preset would otherwise use " +
-      "for that one knob, so 'gentle, but instant' is one call. Be honest about what this " +
-      "buys: the detector's own quantisation floor is about +/-13 cents before correction " +
+      "for that one knob, so 'gentle, but instant' is one call. THE COUPLING TRAP: " +
+      "`preserveVibrato:false` with `strength` < 1 pulls the note only `strength` of the way " +
+      "to pitch (leaving `1-strength` of the original mistuning) AND keeps `1-strength` of " +
+      "the wobble, off the SAME knob -- a lower strength is simultaneously LESS in tune and " +
+      "MORE wobbly, never one without the other -- for 'in tune, " +
+      "keep the wobble' correct with `preserveVibrato:true` (or a preset) instead, then shape " +
+      "each note's wobble with clip_set_note_vibrato/clip_set_note_vibratos, which keep the " +
+      "two axes independent (see `preserveVibrato`'s own field text). Be honest about what " +
+      "this buys: the detector's own quantisation floor is about +/-13 cents before correction " +
       "even runs, and the shipped pitch transposer is itself a few cents sharp -- this pulls " +
       "a note's centre onto the scale to roughly the detector's own resolution, it does not " +
       "tune to +/-5 cents. A clip with no voiced notes (silence, an instrumental, material " +
@@ -8926,30 +9064,59 @@ registerTool(
       "The TUNED audio is rendered in the background after this returns: a pitch edit " +
       "keeps the clip's time base, so meanwhile the clip plays its PREVIOUS version " +
       "(source, or its last render) rather than going silent (notice `clip-render-" +
-      "previous`) -- it falls back to SILENCE only if there is no previous version, or " +
+      "previous`) -- on a clip where only a few notes actually moved, it may instead " +
+      "briefly play a quick spliced PREVIEW of the new tuning once one is built (notice " +
+      "`clip-render-preview`); a whole-clip retune touching most of the take is usually " +
+      "too large to preview and stays on the previous version until the exact render " +
+      "lands -- it falls back to SILENCE only if there is no previous version, or " +
       "the render fails. project_snapshot marks the clip `stretchRendering: true` while " +
-      "the render is in flight (or carries `stretchError` if it failed) -- poll that " +
-      "before transport_play when you need to hear the result. " +
+      "the render is in flight (or carries `stretchError` if it failed), and its " +
+      "`renderAudible` field (`exact`/`preview`/`previous`/`silent`) says which one is " +
+      "actually sounding -- poll before transport_play when you need to hear the result. " +
       "Coalescing: never (this is a structural edit, like split or a whole preset apply -- " +
       "each call is its own undo step). Returns {clipId, hasPitchEdits, analysisVersion, " +
       "retuneMs, segmentCount, isIdentity, appliedOptions: {scale, strength, retuneMs, " +
-      "preserveVibrato}, segments: [{id, startSeconds, endSeconds (SOURCE-FILE-absolute " +
+      "preserveVibrato, formantCorrection (only when you passed one)}, segments: [{id, " +
+      "startSeconds, endSeconds (SOURCE-FILE-absolute " +
       "seconds, the clip_detect_pitch/clip_set_note_pitch/clip_split_note domain), " +
       "detectedHz, detectedConfidence, pitchOffsetCents, driftScale, vibratoScale, " +
-      "vibratoRateHz/vibratoDepthCents/vibratoOnsetSeconds (a synthesised-vibrato generator " +
-      "with no wire writer yet -- always 0 today), formantOffsetSemitones/" +
+      "vibratoRateHz/vibratoDepthCents/vibratoOnsetSeconds (a synthesised-vibrato generator -- " +
+      "0 on every note this pass produces, since it only detects and segments; write these " +
+      "with clip_set_note_vibrato/clip_set_note_vibratos, which also gain driftScale/" +
+      "vibratoScale their OWN keep/flatten meaning: 1 = as sung, 0 = removed, independent of " +
+      "the new-wobble fields above), formantOffsetSemitones (this note's OWN voice-size " +
+      "offset, in semitones, 0 = as sung -- RENDERED now that natural tuning's formant " +
+      "curve has landed, written by clip_set_note_formant; this text used to say 'unread " +
+      "by any renderer today, always 0' -- that is no longer true), " +
       "timeStartDeltaSeconds/timeEndDeltaSeconds (carried for a later phase, unread by any " +
       "renderer today, always 0), amplitudeDb (the note's LEVEL in dB, 0 = as sung -- " +
       "RENDERED since the contour-to-render work, written by clip_set_note_gain; -72 is " +
       "the quietest level, never silence -- use clip_set_note_cleared for that), cleared " +
       "(silenced in place when true, written by clip_set_note_cleared, independent of the " +
-      "level above)}], warnings} -- " +
+      "level above), transitionOutMs/glideFollow (the slide into the NEXT note -- width in " +
+      "ms of the original take, 0 = Auto, and how much this note follows its neighbours " +
+      "when it is a sung slide; write with clip_set_note_transition/" +
+      "clip_set_note_glide_follow), origin ('detected' for a note the splitter found, " +
+      "'transition' for a " +
+      "sung slide, or 'unpitched' for a SOUND with no detected pitch -- a breath or a " +
+      "consonant, see clip_find_unpitched_sounds)}], warnings, unpitchedCount, " +
+      "unpitchedSkippedReason} -- " +
       "every segment field is ALWAYS present, unlike the clip's own on-disk storage which " +
       "omits defaults, so you can't mistake 'default value' for 'field absent' when reading " +
-      "this back. By default this REPLACES whatever was on the clip already (unchanged " +
+      "this back. This pass ALREADY searches for sounds with no detected pitch and includes " +
+      "them in `segments` -- you do not need to call clip_find_unpitched_sounds afterward on " +
+      "a freshly-corrected clip. `unpitchedCount` counts how many of the stored segments are " +
+      "sounds (0 when `strength: 0` never ran that search, or none were found); " +
+      "`unpitchedSkippedReason` is present only when that search declined on purpose -- " +
+      "'notEnoughQuiet'/'tooNoisy'/'noNotes', the same three reasons clip_find_unpitched_sounds " +
+      "can report, in the same words there. By default this REPLACES whatever was on the clip " +
+      "already (unchanged " +
       "behavior) -- pass `replaceExisting: false` to refuse instead when the clip's current " +
       "table carries hand edits since its last auto-correct pass, see that parameter's own " +
-      "description.",
+      "description. Pass `formantCorrection` (0 to 1) to choose how much of the singer's own " +
+      "voice size the new tuning keeps; leave it out and the clip keeps its own setting. " +
+      "Re-running a preset also keeps a consonant setting you chose with " +
+      "clip_set_consonant_protection.",
     inputSchema: {
       clipId: z.string().uuid().describe("Id of the AUDIO clip to correct, from project_snapshot."),
       preset: z
@@ -9006,7 +9173,17 @@ registerTool(
           "true (default) moves only the note's CENTRE and leaves vibrato/drift/scoop " +
             "untouched -- a musical result. false flattens the contour onto the target too " +
             "(the hardTune algorithm) -- see the tool description's render-path warning " +
-            "before using this. Overrides a preset's own value when both are given."
+            "before using this. Overrides a preset's own value when both are given. THE " +
+            "COUPLING TRAP: false with strength < 1 does NOT trade 'less in tune' for 'more " +
+            "wobble kept' -- both move the SAME way off the one knob: it pulls the note only " +
+            "`strength` of the way to the target (leaving `1 - strength` of the original " +
+            "mistuning) AND keeps `1 - strength` of the wobble, so a lower strength is " +
+            "simultaneously LESS in tune and MORE wobbly, never one traded for the other. " +
+            "If what you actually want is 'in tune, but keep the wobble', do NOT reach for " +
+            "this pair: correct with preserveVibrato true (or a preset), then restore/scale " +
+            "the wobble per note with clip_set_note_vibrato/clip_set_note_vibratos, which " +
+            "separates the two axes cleanly (vibratoScale/driftScale keep-factors are " +
+            "independent of how far a note is pulled onto pitch)."
         ),
       replaceExisting: z
         .boolean()
@@ -9023,9 +9200,33 @@ registerTool(
             "first if you are not sure which state a clip is in -- true means THIS call would " +
             "refuse right now."
         ),
+      formantCorrection: z
+        .number()
+        .min(0)
+        .max(1)
+        .optional()
+        .describe(
+          "0..1: how much of the singer's own voice size the new tuning keeps when it moves " +
+            "notes (1 = all of it, the default for new tuning; 0 = none, the old 'chipmunk' " +
+            "shift). Leave it out to keep this clip's own setting: a clip whose voice size was " +
+            "already chosen keeps it, and a clip tuned for the first time starts at 1. A " +
+            "number here wins over both. null is not accepted: to go back to the behaviour " +
+            "from before voice-keeping, call clip_set_formant_correction with amount null " +
+            "after this call."
+        ),
     },
   },
-  async ({ clipId, preset, tonicPitchClass, mode, strength, retuneMs, preserveVibrato, replaceExisting }) =>
+  async ({
+    clipId,
+    preset,
+    tonicPitchClass,
+    mode,
+    strength,
+    retuneMs,
+    preserveVibrato,
+    replaceExisting,
+    formantCorrection,
+  }) =>
     toToolResult(() =>
       bridge.send("clip.autoCorrectPitch", {
         clipId,
@@ -9036,6 +9237,7 @@ registerTool(
         retuneMs,
         preserveVibrato,
         replaceExisting,
+        formantCorrection,
       })
     )
 );
@@ -9070,12 +9272,61 @@ registerTool(
       "segments:[]. Returns the same shape as clip_auto_correct_pitch minus " +
       "`appliedOptions` (nothing was applied this call): {clipId, hasPitchEdits, " +
       "hasTuningEdits, analysisVersion, retuneMs, segmentCount, isIdentity, " +
-      "handEditedSinceAutoCorrect, segments: [{id, startSeconds, " +
+      "handEditedSinceAutoCorrect, formantCorrection, transitionSlopeCentsPerSecond, " +
+      "predatesNaturalTuning, keepConsonantsUntuned, consonantsOffByChoice, consonantProtection, " +
+      "segments: [{id, startSeconds, " +
       "endSeconds, detectedHz, detectedConfidence, pitchOffsetCents, driftScale, " +
       "vibratoScale, vibratoRateHz, vibratoDepthCents, vibratoOnsetSeconds, " +
-      "formantOffsetSemitones, timeStartDeltaSeconds, timeEndDeltaSeconds, amplitudeDb, " +
-      "cleared}], " +
-      "warnings}. TWO FLAGS, not one: `hasPitchEdits` is true whenever ANYTHING was written " +
+      "vibratoPhaseAnchorSeconds, heardVibratoRateHz, " +
+      "formantOffsetSemitones, transitionOutMs, glideFollow, joinToNext, " +
+      "effectiveTransitionMs, timeStartDeltaSeconds, timeEndDeltaSeconds, amplitudeDb, " +
+      "cleared, origin}], " +
+      "warnings}. " +
+      "Natural tuning's set-level fields (additive): `formantCorrection` (0..1 or null -- " +
+      "how much of a moved note's voice-size shift the render removes; null means this " +
+      "clip's whole-clip `formantPreserve` flag governs instead, see clip_set_stretch; " +
+      "write with clip_set_formant_correction), `transitionSlopeCentsPerSecond` (how fast " +
+      "an added correction may travel across a soft join between two notes, 0 = this set " +
+      "has never engaged soft joins; write with clip_set_pitch_transition_smoothness), and " +
+      "`predatesNaturalTuning` (true for a tuned vocal made before this feature existed -- " +
+      "`formantCorrection` is null AND the set actually bends pitch; the first per-note edit " +
+      "THAT CHANGES A NOTE on such a vocal -- any note verb, split, wobble, drawn shape, " +
+      "level, clear -- updates the whole vocal (an edit that changes nothing leaves it " +
+      "exactly as it is) to natural tuning as one undo step; the set-level verbs do not, or " +
+      "call clip_upgrade_natural_tuning to do it without touching a note), " +
+      "`keepConsonantsUntuned` " +
+      "(this clip's stored preference; write with clip_set_consonant_protection, which keeps " +
+      "breaths and consonants at the singer's original pitch when notes move -- the render " +
+      "plays the original recording in the time between notes, with a 10 ms blend at each " +
+      "note edge), `consonantsOffByChoice` (true when that protection was switched off on " +
+      "purpose with clip_set_consonant_protection -- re-running clip_auto_correct_pitch keeps " +
+      "it off; false with keepConsonantsUntuned false means nobody chose, and a preset " +
+      "re-run switches it on, the default for new tuning), and " +
+      "`consonantProtection` ({active, inactiveReason}: `active` true means the mix is " +
+      "RUNNING right now in the render -- the flag is on, the set actually bends pitch, and " +
+      "nothing below stops it; the exact condition the render checks, never a promise beyond " +
+      "it. `inactiveReason` names what stops it -- 'clip stretched' " +
+      "(clip_set_stretch's ratio != 1), 'clip transposed' (its semitones != 0), 'time edits' " +
+      "(a retimed note the render reads), or null when nothing does. Its per-note fields: " +
+      "`transitionOutMs` (the slide width INTO the next note, ms of the original take, 0 = " +
+      "Auto; write with clip_set_note_transition), `glideFollow` (0..1, how much a sung " +
+      "slide follows the notes beside it; write with clip_set_note_glide_follow), " +
+      "`joinToNext` ('soft' | 'gap' | 'last' -- what the join to this note's RIGHT actually " +
+      "is: a soft join the curve crossfades across, a gap/silence with no slide to shape, " +
+      "or nothing after this note; null only for a SOUND), and `effectiveTransitionMs` " +
+      "(the width THIS join actually renders with right now, or null on a gap/last join or " +
+      "a legacy set with no width rule for it -- lets you see what the Auto rule chose). " +
+      "`vibratoPhaseAnchorSeconds` and `heardVibratoRateHz` are additive fields " +
+      "written by clip_set_note_vibrato/clip_set_note_vibratos: the first is where the " +
+      "note's wobble cycle is anchored, SOURCE-FILE-absolute seconds (0 until a call sets " +
+      "it); the second is what the wobble actually SOUNDS like once the clip's stretchRatio " +
+      "is applied (`vibratoRateHz` divided by stretchRatio) -- read this one, not " +
+      "`vibratoRateHz`, when reporting a rate back to a person. `segmentCount`/`segments` now include SOUNDS WITH NO DETECTED PITCH -- a " +
+      "breath, an 's', a 't' -- alongside notes (see clip_find_unpitched_sounds); each " +
+      "segment's `origin` says which it is: 'detected' (a note the splitter found), " +
+      "'transition' (a sung slide) or 'unpitched' (one of those sounds). A fresh " +
+      "clip_auto_correct_pitch pass already finds and includes them, so most callers see them " +
+      "here without ever calling clip_find_unpitched_sounds. TWO FLAGS, not one: `hasPitchEdits` is true whenever ANYTHING was written " +
       "(a pitch move, a clear, or a level change) and gates whether the clip renders through " +
       "the tuning path at all. `hasTuningEdits` is true only when a PITCH actually moved -- " +
       "so `hasPitchEdits && !hasTuningEdits` means every edit on this clip was a clear or a " +
@@ -9119,14 +9370,20 @@ registerTool(
       "segmentId all refuse with a teaching error. Coalescing: two calls on the SAME note " +
       "within 800ms fold into one undo step (like a continuous drag); a different note " +
       "always starts a new one. Like clip_auto_correct_pitch, the retuned audio renders in " +
-      "the background -- meanwhile the clip plays its PREVIOUS version (a note-pitch edit " +
-      "keeps the clip's time base; notice `clip-render-previous`), or SILENCE if there is no " +
-      "previous version or the render fails (`clip-stretch-pending`) -- poll " +
-      "project_snapshot's per-clip `stretchRendering` before playing it. Returns the same " +
+      "the background -- meanwhile the clip keeps sounding, a note-pitch edit keeping the " +
+      "clip's time base: at first its PREVIOUS version (notice `clip-render-previous`), then " +
+      "often a quick spliced PREVIEW of the new pitch once one is built (notice " +
+      "`clip-render-preview`, usually well under a second for a single note), or SILENCE if " +
+      "there is no previous version or the render fails (`clip-stretch-pending`) -- poll " +
+      "project_snapshot's per-clip `renderAudible` (`exact`/`preview`/`previous`/`silent`) to " +
+      "know which one is sounding right now, or just `stretchRendering` if you only need to " +
+      "wait for the exact result. Returns the same " +
       "full-table shape as " +
       "clip_get_pitch_edits " +
       "(every OTHER note included, unchanged) plus `segmentId` (echoing what you sent) and " +
-      "the stored, post-clamp `pitchOffsetCents`.",
+      "the stored, post-clamp `pitchOffsetCents`. " +
+      "Moving a note 3+ semitones? Formants are kept natural by `formantCorrection` " +
+      "(default 100 %); use clip_set_note_formant to make one note deeper or brighter.",
     inputSchema: {
       clipId: z.string().uuid().describe("Id of the AUDIO clip the note belongs to."),
       segmentId: z
@@ -9221,7 +9478,29 @@ registerTool(
       "resolution on just the part you care about, or raise `maxPoints`. " +
       "This may compute-and-cache the clip's whole-file pitch analysis on first call (an " +
       "on-device model pass) -- your FIRST call on a given clip is not a cheap read; later " +
-      "calls reuse the cache.",
+      "calls reuse the cache. " +
+      "Also returns `notes`: one entry per note OVERLAPPING the returned window (not one per " +
+      "point, and not the whole clip's table -- narrow `fromSeconds`/`durationSeconds` to " +
+      "narrow this too), `{segmentId, wobble, wobbleNote?}`. When `basis` is `'estimate'`, " +
+      "`wobble` is `null` on every note and `wobbleNote` repeats this response's own top-level " +
+      "`reason` in the same words -- one honest 'not measured' rather than a second, possibly " +
+      "-drifting sentence. Otherwise `wobble` is `{sung, played}`: `played` is ALWAYS a Reading, " +
+      "never null. `sung` alone can independently read `null` (this particular note's contour " +
+      "did not resolve, even though the response as a whole is `'render'`-based); when it is " +
+      "not null it is the SAME Reading shape as `played` `{kind, heardRateHz, anchorSeconds, fit, " +
+      "depthCents?, depthResponse?, reason?}`. `kind` is `'wobble'`, `'noWobble'` (a flat, " +
+      "unwavering note) or `'unmeasurable'` (too short, or its pitch slides rather than " +
+      "wobbles evenly) -- `depthCents`/`depthResponse` and the other fields are ONLY present " +
+      "on `'wobble'`. NEVER PRINTS A WIDTH THE DETECTOR CANNOT SUPPORT: at low pitch (roughly " +
+      "below 127 Hz today) the detector under-reads a wobble's actual width, so `depthCents` " +
+      "is WITHHELD there and `reason` explains why in words -- `heardRateHz`/`anchorSeconds`/" +
+      "`fit` are still given, since only the WIDTH reading is unreliable at low pitch, never " +
+      "the speed or the phase. Where a width IS given, `depthResponse` (0.5-1.1) is the " +
+      "detector's own measured share at that pitch -- ridealong context for correcting the " +
+      "number, never a claim that `depthCents` itself is already corrected. `heardRateHz` is " +
+      "the wobble's SOUNDING rate (already divided by the clip's stretchRatio), matching " +
+      "clip_set_note_vibrato's own `heardRateHz` and clip_get_pitch_edits' " +
+      "`heardVibratoRateHz` so the three tools never make you convert three different ways.",
     inputSchema: {
       clipId: z.string().uuid().describe("Id of the AUDIO clip to read, from project_snapshot."),
       fromSeconds: z
@@ -9515,6 +9794,728 @@ registerTool(
 );
 
 registerTool(
+  "clip_find_unpitched_sounds",
+  {
+    title: "Find sounds with no pitch (breaths, consonants) between a clip's notes",
+    description:
+      "A SOUND WITH NO PITCH is a breath, an unvoiced consonant like an 's' or a 't', or a " +
+      "piece of a sung note the detector never committed to a pitch -- audible, but with " +
+      "nothing for a pitch detector to grab. This tool finds those stretches and adds them to " +
+      "a clip's STORED note table as their own segments (`origin: 'unpitched'` in " +
+      "clip_get_pitch_edits' `segments`), so the pitch editor and this MCP surface can show, " +
+      "hear and (if you choose) move them instead of leaving unexplained gaps between notes. " +
+      "IT ONLY FILLS TIME NO NOTE ALREADY COVERS, AND IT NEVER MOVES OR RE-IDENTIFIES " +
+      "ANYTHING ALREADY STORED: every existing note, slide and sound keeps its own id, span " +
+      "and edits exactly as they were: a sound is only ever added into a gap nothing else " +
+      "claims, and an already-found sound is never itself lent out as another sound's anchor. " +
+      "You do NOT need this after clip_auto_correct_pitch on a clip that has never been " +
+      "corrected before: BOTH the auto-correct pass and the note editor already run this same " +
+      "search when they build a fresh table, so its sounds are already in `segments` (and " +
+      "clip_auto_correct_pitch's own response now carries `unpitchedCount`). This tool exists " +
+      "for a table built BEFORE this search existed (still on disk from an older correction), " +
+      "or after you want to re-scan with a different `marginDb`. " +
+      "WHERE A SOUND IS DRAWN: each sound borrows `anchorHz` from its NEARER neighbouring " +
+      "note (a tie goes to the note AFTER it) -- that pitch is a DRAWING ANCHOR ONLY, never a " +
+      "measurement of the sound itself, so do not read it as 'this breath was sung at that " +
+      "pitch'. Left alone, a sound never enters the rendered pitch curve and changes nothing " +
+      "about how the clip sounds. If you (or the user, dragging in the editor) DO move a " +
+      "sound with clip_set_note_pitch, it transposes like any other note -- a breath gets " +
+      "audibly brighter or darker -- which is a deliberate, different choice from a note " +
+      "you have not touched. " +
+      "REQUIRES A STORED NOTE TABLE ALREADY ON THE CLIP -- the clip_set_note_pitch rule: a " +
+      "clip nothing has corrected yet has nothing to merge sounds into (run " +
+      "clip_auto_correct_pitch first, which already includes the sounds in one call); a table " +
+      "from a different, older pitch-detector version is refused too, naming " +
+      "clip_auto_correct_pitch as the fix, since this search cannot line new sounds up " +
+      "against notes an old detector generation found. " +
+      "FINDING NOTHING IS A REAL ANSWER, NOT AN ERROR: a clip that is too noisy for its own " +
+      "quiet stretches to stand out, has under a second of quiet to measure a noise floor " +
+      "from, or has no note to anchor a sound against, comes back with `added: 0` and a " +
+      "`skippedReason`/`skippedMessage` explaining which of those happened -- read those " +
+      "before assuming the clip simply has no breaths. " +
+      "Returns clip_get_pitch_edits' own shape (the full stored table -- every note AND " +
+      "sound, `segmentCount` counting both) plus: `added` (how many sounds THIS call stored), " +
+      "`sounds` (only the newly-added ones, in time order: `{segmentId, startSeconds, " +
+      "endSeconds, anchorHz, borrowedFromSegmentId, borrowedFrom}`, `borrowedFrom` being " +
+      "'previous' or 'following'), `marginDb` (the margin actually used), `floorDbfs`/" +
+      "`thresholdDbfs` (the clip's own measured noise floor and the level a stretch had to " +
+      "clear -- ABSENT when the floor could not be measured, or when it is exact digital " +
+      "silence -- see `floorIsDigitalSilence`), `singingDbfs` (the sung level these were " +
+      "measured against, when any voiced frame had one), and `skippedReason`/`skippedMessage` " +
+      "(present only when nothing was added on purpose).",
+    inputSchema: {
+      clipId: z.string().uuid().describe("Id of the AUDIO clip to search, from project_snapshot."),
+      marginDb: z
+        .number()
+        .min(0)
+        .max(60)
+        .optional()
+        .describe(
+          "How many dB above the clip's own noise floor a no-note stretch must reach to " +
+            "count as an audible sound rather than silence (default 9, tuned on one real " +
+            "vocal take -- re-tune this per clip if a very noisy or very clean recording " +
+            "finds too many or too few sounds)."
+        ),
+    },
+  },
+  async ({ clipId, marginDb }) =>
+    toToolResult(() => bridge.send("clip.findUnpitchedSounds", { clipId, marginDb }))
+);
+
+registerTool(
+  "clip_set_note_vibrato",
+  {
+    title: "Change one note's wobble (vibrato and slow drift)",
+    description:
+      "Change one note's wobble (vibrato). Two separate mechanisms, combinable in one call. " +
+      "(1) vibratoScale and driftScale keep or flatten the SINGER's own wobble and slow drift: " +
+      "1 = as sung, 0 = removed, above 1 exaggerates (up to 4, though the app's own tools stop " +
+      "at 2). These are RELATIVE levers, NOT depths in cents. To flatten a note properly send " +
+      "BOTH at 0 -- vibratoScale 0 alone leaves part of the wobble behind (it can even sound " +
+      "INVERTED). `driftScale` alone steadies the slow drift and leaves the fast wobble alone; " +
+      "`vibratoScale` alone reduces the wobble and leaves the drift alone. (2) vibratoRateHz, " +
+      "vibratoDepthCents, vibratoOnsetSeconds and vibratoPhaseAnchorSeconds make a NEW sine " +
+      "wobble that is ADDED on top (depth 0 = none). To replace the singer's wobble with a new " +
+      "one, send vibratoScale 0, driftScale 0 and the new wobble in one call. vibratoRateHz is " +
+      "per SOURCE second: what is heard is vibratoRateHz divided by the clip's stretchRatio " +
+      "(returned as heardRateHz), and the render cannot carry more than 8 heard per second. " +
+      "vibratoDepthCents is a peak, \"each way\"; expect the render to land within about 7 " +
+      "cents of it. Set vibratoPhaseAnchorSeconds to the note's middle " +
+      "((startSeconds + endSeconds) / 2 from clip_get_pitch_edits) to centre the wobble on the " +
+      "note; left unset on an EXISTING wobble it keeps its own anchor, and on a BRAND NEW one " +
+      "it defaults to source second 0 (the start of the recording), not the note's middle. " +
+      "Send reset: true ALONE to put the note back to how it was sung (all six fields to their " +
+      "defaults) -- reset together with any other field is refused, since the two mean opposite " +
+      "things in one call. " +
+      "REQUIRES A STORED NOTE TABLE ALREADY ON THE CLIP, the clip_set_note_pitch rule verbatim " +
+      "-- there is NO pitch detection on this wire path: run clip_auto_correct_pitch first, " +
+      "then read note ids back with clip_get_pitch_edits. A MIDI clip is refused. A SOUND (a " +
+      "breath or a consonant, see clip_find_unpitched_sounds) named alone is refused too: " +
+      "\"No pitch here, so there is no wobble to change.\" " +
+      "Coalescing: two calls on the SAME note within 800ms fold into one undo step (like a " +
+      "continuous drag); reset is always its own step. " +
+      "Check the result with clip_get_played_pitch, which also measures each note's wobble -- " +
+      "or read this call's own response, which already carries the estimator's ceiling as " +
+      "`heardRateHz`. " +
+      "Returns clip_get_pitch_edits' own shape (every note, unchanged, plus this one) plus " +
+      "`segmentId` and `vibrato: {requested, applied, heardRateHz, clamped, silentWobble, " +
+      "parkedRate, note?}`. `requested` echoes ONLY the fields you sent (not `reset`); " +
+      "`applied` is ALL SIX fields as actually STORED, post-clamp -- read this back rather " +
+      "than trusting the numbers you sent. `clamped` names which limit(s) bound a value (for " +
+      "example `[\"heardRateCeiling\"]` when a fast rate was slowed down to fit a stretched " +
+      "clip's speed ceiling); `note` explains any clamp in words, or says when the result is " +
+      "audibly a no-op (`silentWobble`: a depth with no rate never moves, yet the clip still " +
+      "re-renders for nothing; `parkedRate`: a rate with no depth is stored but silent, ready " +
+      "for a later depth). `skippedSoundIds` is ALWAYS present on this response too (always " +
+      "empty here) so one parser can read both this tool and clip_set_note_vibratos.",
+    inputSchema: {
+      clipId: z.string().uuid().describe("Id of the AUDIO clip the note belongs to."),
+      segmentId: z
+        .string()
+        .uuid()
+        .describe("Id of the note (from clip_get_pitch_edits / clip_auto_correct_pitch's `segments`)."),
+      vibratoRateHz: z
+        .number()
+        .optional()
+        .describe(
+          "The NEW wobble's speed, cycles per SOURCE second (0-8; clamped further on a " +
+            "stretched clip so it never asks to be heard faster than 8/s -- see heardRateHz in " +
+            "the response). Omit to leave it unchanged."
+        ),
+      vibratoDepthCents: z
+        .number()
+        .optional()
+        .describe(
+          "The NEW wobble's peak width, cents EACH WAY (0-200; 0 = none). Omit to leave it " +
+            "unchanged."
+        ),
+      vibratoOnsetSeconds: z
+        .number()
+        .optional()
+        .describe(
+          "How long the NEW wobble takes to fade in from the note's start, seconds (0-5). " +
+            "Omit to leave it unchanged."
+        ),
+      vibratoPhaseAnchorSeconds: z
+        .number()
+        .optional()
+        .describe(
+          "Where the NEW wobble's cycle is anchored, SOURCE-FILE-absolute seconds (same domain " +
+            "as a segment's own startSeconds/endSeconds). Set it to the note's own middle to " +
+            "centre the wobble; 0 anchors at the start of the recording. Omit to leave it " +
+            "unchanged."
+        ),
+      vibratoScale: z
+        .number()
+        .optional()
+        .describe(
+          "Keep/flatten lever for the SINGER's OWN fast wobble: 1 = as sung, 0 = removed (0-4). " +
+            "NOT a depth in cents. Omit to leave it unchanged."
+        ),
+      driftScale: z
+        .number()
+        .optional()
+        .describe(
+          "Keep/flatten lever for the SINGER's OWN slow drift (the note's wandering centre): " +
+            "1 = as sung, 0 = removed (0-4). NOT a depth in cents. Omit to leave it unchanged."
+        ),
+      reset: z
+        .boolean()
+        .optional()
+        .describe(
+          "Send true ALONE (no other field on this call) to put every one of the six wobble " +
+            "settings back to how the note was sung. Refused if any other field is also sent."
+        ),
+    },
+  },
+  async ({
+    clipId, segmentId, vibratoRateHz, vibratoDepthCents, vibratoOnsetSeconds,
+    vibratoPhaseAnchorSeconds, vibratoScale, driftScale, reset,
+  }) =>
+    toToolResult(() =>
+      bridge.send("clip.setNoteVibrato", {
+        clipId, segmentId, vibratoRateHz, vibratoDepthCents, vibratoOnsetSeconds,
+        vibratoPhaseAnchorSeconds, vibratoScale, driftScale, reset,
+      })
+    )
+);
+
+registerTool(
+  "clip_set_note_vibratos",
+  {
+    title: "Steady or loosen several notes' wobble and drift at once (one undo step)",
+    description:
+      "Changes several notes' wobble/drift in ONE call and ONE undo step -- the BATCH sibling " +
+      "of clip_set_note_vibrato, for editing a whole phrase without one round trip per note. " +
+      "Each note item carries its OWN values, exactly clip_set_note_vibrato's six fields " +
+      "(vibratoRateHz, vibratoDepthCents, vibratoOnsetSeconds, vibratoPhaseAnchorSeconds, " +
+      "vibratoScale, driftScale), each ABSOLUTE, never a delta -- the clip_set_note_pitches " +
+      "rule verbatim: send the same list twice and every note ends up in the same place both " +
+      "times. No `reset` on this call -- reset stays single-note, clip_set_note_vibrato's job " +
+      "alone. " +
+      "driftScale is the note's SLOW wander (its centre wandering up and down); vibratoScale " +
+      "is the FAST wobble (the singer's own vibrato): 1 = as sung, 0 = removed, up to 2 from " +
+      "the app's own tools (the model allows 4). They are RELATIVE keep/flatten levers, NOT " +
+      "depths in cents -- to steady a note without making it sound robotic, lower driftScale " +
+      "and leave vibratoScale at 1; to flatten a note fully (wobble AND drift), send both at " +
+      "0. `driftScale` alone steadies the slow drift and leaves the fast wobble alone; " +
+      "`vibratoScale` alone reduces the wobble and leaves the drift alone. " +
+      "ALL OR NOTHING: every segmentId is resolved before anything is written, so ONE unknown " +
+      "id among several refuses the WHOLE call and changes nothing. Naming the same note twice " +
+      "with the SAME (post-clamp) values is harmless (folded); naming it twice with two " +
+      "DIFFERENT values refuses the whole call -- an unresolvable contradiction inside one " +
+      "call, never a silent \"last one wins\". " +
+      "A SOUND (a breath or a consonant, see clip_find_unpitched_sounds) named BESIDE sung " +
+      "notes is SKIPPED and reported -- never written, never silent: `skippedSoundIds` names " +
+      "it and `skippedSoundsSentence` says so in words. This lets you send a whole selection's " +
+      "worth of ids, breaths included, without checking each one first: \"select all, then " +
+      "steady\" is the macro this batch verb exists for. A batch that is ENTIRELY sounds is " +
+      "refused outright -- a call that changes nothing must not succeed. " +
+      "NEVER COALESCES: unlike a live drag in the app (which folds repeats of the SAME " +
+      "selection inside 800ms into one undo step), each clip_set_note_vibratos call is its OWN " +
+      "undo step even sending the identical list twice in a row. " +
+      "REQUIRES A STORED NOTE TABLE ALREADY ON THE CLIP, the clip_set_note_pitch rule verbatim " +
+      "-- there is NO pitch detection on this wire path: run clip_auto_correct_pitch first, " +
+      "then read note ids back with clip_get_pitch_edits. A MIDI clip is refused. An empty " +
+      "notes list is refused too, naming clip_get_pitch_edits as the way to read note ids " +
+      "first. " +
+      "Returns clip_get_pitch_edits' own shape (every note, the full table) plus `notes`: an " +
+      "array of {segmentId, requested, applied, heardRateHz, clamped, silentWobble, " +
+      "parkedRate, note?} -- one per note THIS call actually wrote (deduplicated, in request " +
+      "order; a skipped SOUND is excluded here, it only appears in `skippedSoundIds`) -- each " +
+      "read back from the STORED, post-clamp segment, never the numbers you sent -- plus " +
+      "`skippedSoundIds` (ALWAYS present, empty when nothing was skipped) and " +
+      "`skippedSoundsSentence` (present only when something was).",
+    inputSchema: {
+      clipId: z.string().uuid().describe("Id of the AUDIO clip the notes belong to."),
+      notes: z
+        .array(
+          z.object({
+            segmentId: z
+              .string()
+              .uuid()
+              .describe("Id of the note (from clip_get_pitch_edits / clip_auto_correct_pitch's `segments`)."),
+            vibratoRateHz: z.number().optional().describe("See clip_set_note_vibrato's own field."),
+            vibratoDepthCents: z.number().optional().describe("See clip_set_note_vibrato's own field."),
+            vibratoOnsetSeconds: z.number().optional().describe("See clip_set_note_vibrato's own field."),
+            vibratoPhaseAnchorSeconds: z
+              .number()
+              .optional()
+              .describe("See clip_set_note_vibrato's own field."),
+            vibratoScale: z.number().optional().describe("See clip_set_note_vibrato's own field."),
+            driftScale: z.number().optional().describe("See clip_set_note_vibrato's own field."),
+          })
+            // `.strict()` (m30-c, the clip_set_note_pitches precedent): a
+            // typo'd field inside one `notes` element would otherwise be
+            // silently stripped instead of rejected.
+            .strict()
+        )
+        .describe(
+          "The notes to change, each with its OWN wobble/drift values (at least one field " +
+            "besides segmentId; the app refuses an item with none, naming which one). At " +
+            "least one note is required (an empty list is refused by the app, naming " +
+            "clip_get_pitch_edits as the way to read note ids first). ALL OR NOTHING: an " +
+            "unknown segmentId among several refuses the whole call and changes nothing. A " +
+            "SOUND named beside sung notes is skipped and reported, not refused; a batch that " +
+            "is entirely sounds IS refused."
+        ),
+    },
+  },
+  async ({ clipId, notes }) =>
+    toToolResult(() => bridge.send("clip.setNoteVibratos", { clipId, notes }))
+);
+
+// --- Natural tuning (NT-W): voice (formant) + slide (transition) tools -----
+
+registerTool(
+  "clip_set_note_formant",
+  {
+    title: "Make one or more sung notes' voice deeper or brighter, without changing pitch",
+    description:
+      "Set one or more notes' VOICE (formant) offset, in semitones -- the per-note Voice " +
+      "tool's wire door, the clip_set_note_gain shape (absolute, all-or-nothing, one undo " +
+      "step for N notes). `formantSemitones` is each named note's FINAL offset from where " +
+      "it was sung, 0 = as sung, NOT a delta: send -2 twice in a row and the note still " +
+      "reads back -2, not -4. Negative = deeper, positive = brighter -- the note's PITCH " +
+      "never moves, only how big or small the voice sounds. Clamped to +/-24 semitones -- " +
+      "read the response back rather than trusting the number you sent, in case it was " +
+      "clamped (`clamped`/`note` say so). " +
+      "Moving a note 3+ semitones? Formants are kept natural by `formantCorrection` " +
+      "(default 100 %); use this tool to make one note deeper or brighter on top of that " +
+      "(see clip_set_formant_correction for the clip-wide amount). " +
+      "Takes N note ids and ONE value applied to all of them, in ONE undo step -- the " +
+      "clip_set_note_gain/clip_set_note_cleared group-verb precedent. A repeated id is " +
+      "folded; an unknown id among several REFUSES THE WHOLE CALL -- ALL OR NOTHING. A " +
+      "SOUND (a breath or a consonant, see clip_find_unpitched_sounds) named among the ids " +
+      "is refused too: it has no sung pitch and so no voice to reshape. " +
+      "REQUIRES A STORED NOTE TABLE ALREADY ON THE CLIP, the clip_set_note_pitch rule " +
+      "verbatim -- there is NO pitch detection on this wire path: run clip_auto_correct_pitch " +
+      "first, then read note ids back with clip_get_pitch_edits. A MIDI clip is refused. " +
+      "Returns clip_get_pitch_edits' own shape (every note, each with its " +
+      "`formantOffsetSemitones`) plus `segmentIds` (the notes this call named, " +
+      "deduplicated, in request order), `formantSemitones` (read back from the STORED " +
+      "notes), `formantCorrection` (the clip's OWN voice-size-kept amount -- the other " +
+      "half of natural tuning's voice control, see clip_set_formant_correction), and " +
+      "`clamped`/`note` when the request was out of range.",
+    inputSchema: {
+      clipId: z.string().uuid().describe("Id of the AUDIO clip the notes belong to."),
+      segmentIds: z
+        .array(z.string().uuid())
+        .describe(
+          "Ids of the notes to make deeper/brighter (from clip_get_pitch_edits / " +
+            "clip_auto_correct_pitch's `segments`). At least one is required; a repeated id " +
+            "is harmless (folded). ALL OR NOTHING: an unknown id, or a SOUND named among " +
+            "several, refuses the whole call and changes nothing."
+        ),
+      formantSemitones: z
+        .number()
+        .describe(
+          "Each named note's FINAL voice-size offset, semitones, 0 = as sung. Absolute, " +
+            "not a delta. Negative = deeper, positive = brighter; the note's PITCH is " +
+            "unaffected. Clamped to +/-24."
+        ),
+    },
+  },
+  async ({ clipId, segmentIds, formantSemitones }) =>
+    toToolResult(() => bridge.send("clip.setNoteFormant", { clipId, segmentIds, formantSemitones }))
+);
+
+registerTool(
+  "clip_set_formant_correction",
+  {
+    title: "Set how much of the voice's natural size a tuned clip keeps",
+    description:
+      "Set the CLIP-LEVEL 'keep voice natural' amount -- how much of a moved note's " +
+      "formant (voice-size) shift the render removes, so raising a note does not make the " +
+      "singer sound small and squeaky. `amount` 1.0 = fully kept (the singer's own voice " +
+      "size -- the recommended default for a new tune), 0.0 = follows the note untouched " +
+      "(brighter/smaller as the pitch rises), values between blend the two. `null` " +
+      "restores LEGACY behaviour: this clip's own whole-clip `formantPreserve` flag " +
+      "(clip_set_stretch) governs instead, exactly as a clip tuned before this feature " +
+      "existed still renders. `amount` is REQUIRED on every call -- send `null` " +
+      "explicitly rather than omitting the key, since a dropped key and an explicit " +
+      "'go back to legacy' mean different things. Clamped to 0..1 when a number is sent; " +
+      "a non-finite value is refused rather than silently read as legacy. " +
+      "REQUIRES A STORED NOTE TABLE ALREADY ON THE CLIP, the clip_set_note_pitch rule " +
+      "verbatim: run clip_auto_correct_pitch first. A MIDI clip is refused. " +
+      "Returns clip_get_pitch_edits' own shape plus `amount` (the STORED value, null when " +
+      "legacy), `clamped`/`note` when an in-range request was clamped, and " +
+      "`plainLanguage` -- a one-line sentence naming the size kept (e.g. \"Voice kept " +
+      "natural: 100 %\") or, on legacy, which whole-clip flag now governs.",
+    inputSchema: {
+      clipId: z.string().uuid().describe("Id of the AUDIO clip to set, from project_snapshot."),
+      amount: z
+        .number()
+        .nullable()
+        .optional()
+        .describe(
+          "0..1: how much of a moved note's voice size is kept (1 = fully kept, 0 = " +
+            "follows the note untouched). Clamped to 0..1; UNCHECKED range at this schema " +
+            "layer (the clamp is the app's job, so a clamped response is visible rather " +
+            "than silently refused). Send `null` explicitly to go back to the clip's own " +
+            "whole-clip `formantPreserve` flag instead of an explicit amount — the app's " +
+            "own wire contract REQUIRES this key on every call and refuses an omitted one " +
+            "in words (a dropped key reaches the app as genuinely absent, the same as a " +
+            "raw wire caller who forgot it), so leaving this out surfaces that teaching " +
+            "error rather than going back to legacy silently."
+        ),
+    },
+  },
+  async ({ clipId, amount }) =>
+    toToolResult(() => bridge.send("clip.setFormantCorrection", { clipId, amount }))
+);
+
+registerTool(
+  "clip_set_note_transition",
+  {
+    title: "Widen or sharpen the slide from one sung note into the next",
+    description:
+      "Makes the slide from one note into the next smoother (wider) or sharper. Use after " +
+      "moving a note by 3 or more semitones if the jump sounds robotic. " +
+      "`noteId` is the LEFT note of the join (Melodyne's \"rear part of the note\"); " +
+      "`widthMs` is milliseconds OF THE ORIGINAL TAKE (the clip_detect_pitch/" +
+      "clip_get_pitch_edits source-time axis, never clip-local or stretched time). `null` " +
+      "or `0` = Auto -- the width grows on its own with the size of the jump the " +
+      "correction has to travel across the join; otherwise clamped to 30..1000 ms, and " +
+      "further capped at RENDER TIME to the shorter of the two notes either side (the " +
+      "response's `effectiveWidthMs` reports what actually applies -- the stored value " +
+      "itself is never silently rewritten by that cap). `widthMs` is REQUIRED on every " +
+      "call: send `null`/`0` explicitly for Auto rather than omitting the key. " +
+      "REQUIRES A STORED NOTE TABLE ALREADY ON THE CLIP, the clip_set_note_pitch rule " +
+      "verbatim: run clip_auto_correct_pitch first, then read note ids back with " +
+      "clip_get_pitch_edits. A MIDI clip is refused, as is a SOUND named as the left note, " +
+      "the LAST sung note (nothing to slide into), or a note whose right edge faces a GAP " +
+      "(a silence/breath/consonant -- no slide there to shape). " +
+      "Coalescing: two width changes on the SAME join within 800ms fold into one undo " +
+      "step (like a continuous drag); a different join always starts a new one. " +
+      "Returns clip_get_pitch_edits' own shape plus `noteId`, `widthMs` (the STORED " +
+      "value, 0 = Auto), `effectiveWidthMs` (the width THIS join renders with right now, " +
+      "or null on a gap/last join, or a legacy set with no width rule for it yet), " +
+      "`joinToNext` (this join's kind: 'soft'/'gap'/'last'), and `clamped`/`note` when " +
+      "the raw 30..1000 clamp applied.",
+    inputSchema: {
+      clipId: z.string().uuid().describe("Id of the AUDIO clip the note belongs to."),
+      noteId: z
+        .string()
+        .uuid()
+        .describe(
+          "Id of the LEFT note of the join to shape (from clip_get_pitch_edits / " +
+            "clip_auto_correct_pitch's `segments`)."
+        ),
+      widthMs: z
+        .number()
+        .nullable()
+        .optional()
+        .describe(
+          "Slide width, milliseconds OF THE ORIGINAL TAKE. `null` or `0` = Auto. " +
+            "Otherwise clamped to 30..1000, then further capped to the shorter of the two " +
+            "notes at render time (see `effectiveWidthMs` in the response). The app's own " +
+            "wire contract REQUIRES this key on every call and refuses an omitted one in " +
+            "words (a dropped key reaches the app as genuinely absent, the same as a raw " +
+            "wire caller who forgot it) — always send `null` explicitly for Auto rather " +
+            "than leaving this out."
+        ),
+    },
+  },
+  async ({ clipId, noteId, widthMs }) =>
+    toToolResult(() => bridge.send("clip.setNoteTransition", { clipId, noteId, widthMs }))
+);
+
+registerTool(
+  "clip_set_pitch_transition_smoothness",
+  {
+    title: "Set how smoothly every moved note slides into the next, clip-wide",
+    description:
+      "Makes the slide from one note into the next smoother (wider) or sharper, for the " +
+      "WHOLE clip at once. Use after moving a note by 3 or more semitones if the jump " +
+      "sounds robotic. `centsPerSecond` is the fastest speed the ADDED correction may " +
+      "travel across a soft join, per SOURCE second (the clip_detect_pitch time axis); " +
+      "`null` = the default (3000). Otherwise clamped to 500..20000. `0` is REFUSED, in " +
+      "words: going back to the behaviour from before this feature is Undo's job, never a " +
+      "setting. An explicit call upgrades even a LEGACY (never-tuned-with-this-feature) " +
+      "clip on this one field alone. " +
+      "REQUIRES A STORED NOTE TABLE ALREADY ON THE CLIP, the clip_set_note_pitch rule " +
+      "verbatim: run clip_auto_correct_pitch first. A MIDI clip is refused. " +
+      "Returns clip_get_pitch_edits' own shape plus `centsPerSecond` (the STORED value -- " +
+      "never the request) and `clamped`/`note` when an in-range request was clamped.",
+    inputSchema: {
+      clipId: z.string().uuid().describe("Id of the AUDIO clip to set, from project_snapshot."),
+      centsPerSecond: z
+        .number()
+        .nullable()
+        .optional()
+        .describe(
+          "500..20000 cents per second, or `null` for the default (3000). `0` is REFUSED " +
+            "(use edit_undo to go back to the behaviour from before this feature instead). " +
+            "The app's own wire contract REQUIRES this key on every call and refuses an " +
+            "omitted one in words — send `null` explicitly for the default rather than " +
+            "leaving this out."
+        ),
+    },
+  },
+  async ({ clipId, centsPerSecond }) =>
+    toToolResult(() => bridge.send("clip.setPitchTransitionSmoothness", { clipId, centsPerSecond }))
+);
+
+registerTool(
+  "clip_set_note_glide_follow",
+  {
+    title: "Make a sung slide follow the notes beside it, or stop following",
+    description:
+      "Makes the slide from one note into the next smoother (wider) or sharper, by making " +
+      "the slide itself track a moved neighbour instead of snapping back to where it was " +
+      "sung. Use after moving a note by 3 or more semitones next to a sung slide, if the " +
+      "slide's start or landing sounds robotic. `amount` 0 = the slide keeps its own pitch " +
+      "(today's behaviour); 1 = it TILTS fully, starting at the previous note's offset and " +
+      "landing on the next one's, so a slide next to a moved note starts where that note " +
+      "now is rather than snapping back. Clamped to 0..1, never refused for being out of " +
+      "range. Works on ANY sung note joined to a neighbour, not only a detected slide -- " +
+      "read a note's `origin` on clip_get_pitch_edits ('transition' = a sung slide) to find " +
+      "candidates on a preset-built table, which never marks this itself. " +
+      "REQUIRES A STORED NOTE TABLE ALREADY ON THE CLIP, the clip_set_note_pitch rule " +
+      "verbatim: run clip_auto_correct_pitch first, then read note ids back with " +
+      "clip_get_pitch_edits. A MIDI clip is refused, as is a SOUND, or an amount above 0 " +
+      "on a note joined to no curve note on either side (the write would take and do " +
+      "nothing) -- `0` is always allowed there. " +
+      "Returns clip_get_pitch_edits' own shape plus `noteId`, `amount` (the STORED, " +
+      "post-clamp value), and `clamped`/`note` when the request was out of range.",
+    inputSchema: {
+      clipId: z.string().uuid().describe("Id of the AUDIO clip the note belongs to."),
+      noteId: z
+        .string()
+        .uuid()
+        .describe("Id of the note (from clip_get_pitch_edits / clip_auto_correct_pitch's `segments`)."),
+      amount: z
+        .number()
+        .describe(
+          "0..1: how much this note follows the notes beside it (0 = its own pitch, 1 = " +
+            "tilts fully between its neighbours' offsets). Clamped to 0..1."
+        ),
+    },
+  },
+  async ({ clipId, noteId, amount }) =>
+    toToolResult(() => bridge.send("clip.setNoteGlideFollow", { clipId, noteId, amount }))
+);
+
+registerTool(
+  "clip_set_consonant_protection",
+  {
+    title: "Keep breaths and consonants at their own pitch while the notes around them are tuned",
+    description:
+      "Keeps breaths and consonants (s, t, p, ch) at the singer's original pitch when notes " +
+      "are moved: the time between notes plays the original recording, with a 10 ms blend at " +
+      "each note edge. Works on clips that are not stretched or transposed; otherwise it " +
+      "reports why (`consonantProtection.inactiveReason` on clip_get_pitch_edits: 'clip " +
+      "stretched' / 'clip transposed' / 'time edits'). `consonantProtection.active` on that " +
+      "same response reads true only when this setting is on AND the tuning actually bends a " +
+      "note AND nothing above stops it -- the exact condition the render checks, so `active` " +
+      "never promises more than the render does. On by default for newly tuned vocals. " +
+      "Limits: an 's' sung onto the end of a vowel is part of that note and still moves with " +
+      "it; a gap shorter than 64 ms stays tuned; a breath or consonant dragged on purpose " +
+      "moves with the drag; switching this setting makes the clip render again in full. " +
+      "Switching it off is remembered: re-running clip_auto_correct_pitch, or the " +
+      "natural-tuning update, keeps it off. " +
+      "REQUIRES THIS CLIP TO ALREADY HAVE TUNING (run clip_auto_correct_pitch first, or " +
+      "make one hand edit with clip_set_note_pitch) -- an untuned clip has no " +
+      "breaths-vs-notes distinction to keep yet, and is refused in words rather than " +
+      "silently minting an empty table. A MIDI clip is refused too. ONE undo step (\"Keep " +
+      "Consonants\"); calling it again with the SAME value adds no extra undo entry. " +
+      "Returns clip_get_pitch_edits' own shape plus `enabled` (the STORED flag, read back " +
+      "rather than trusted from the request).",
+    inputSchema: {
+      clipId: z.string().uuid().describe("Id of the AUDIO clip to set, from project_snapshot."),
+      enabled: z
+        .boolean()
+        .describe(
+          "true: keep breaths and consonants at their own recorded pitch while the notes " +
+            "around them are tuned. false: they play through the tuned render like the rest " +
+            "of the clip."
+        ),
+    },
+  },
+  async ({ clipId, enabled }) =>
+    toToolResult(() => bridge.send("clip.setConsonantProtection", { clipId, enabled }))
+);
+
+// C5b-3b (freehand design §5.7): the nested {seconds, cents} point schema
+// needs its OWN `.strict()` — `registerTool`'s wrapper only strictens the
+// TOP level of a tool's inputSchema (the sax-team defect B / m30-c nested-
+// strict-gap precedent), so an extra key inside one array element would
+// otherwise be silently stripped before the wire's own `rejectUnknownKeys`
+// ever saw it.
+const noteShapePointSchema = z
+  .object({
+    seconds: z.number().describe("SOURCE time in the recording, seconds (the clip_get_played_pitch axis)."),
+    cents: z.number().describe("The drawn offset at that moment, in cents. Clamped to +/-1200."),
+  })
+  .strict();
+
+registerTool(
+  "clip_set_note_shape",
+  {
+    title: "Draw a freehand pitch line on top of one note",
+    description:
+      "Redraws part of a note's pitch line: a freehand shape on top of everything else the " +
+      "note does (its detected pitch, any pitch move, vibrato, slides). Give `points` (seconds, " +
+      "cents) -- the line between them moves by that many cents, linearly interpolated; outside " +
+      "the span your points cover, the note keeps exactly what it already plays. Send " +
+      "`clear: true` instead to remove a note's drawing entirely. EXACTLY ONE of `points`/`clear` " +
+      "per call -- never both, never neither. " +
+      "REQUIRES A STORED NOTE TABLE ALREADY ON THE CLIP, the clip_set_note_pitch rule verbatim: " +
+      "run clip_auto_correct_pitch first, then read note ids back with clip_get_pitch_edits. A " +
+      "MIDI clip is refused, as is a SOUND (breath/consonant) named as the note -- it has no " +
+      "pitch line to draw -- UNLESS the call clears a drawing it already carries. Points that " +
+      "land entirely outside the note, or off the 10ms drawing grid, are refused rather than " +
+      "silently doing nothing. " +
+      "A drawn line is a HAND EDIT: on a vocal tuned before this feature existed, it upgrades " +
+      "the WHOLE vocal to natural tuning in the same undo step, same as every other hand edit " +
+      "on this door. " +
+      "Check the result by ear with clip_get_played_pitch (the actual output line, after this " +
+      "drawing). " +
+      "Returns clip_get_pitch_edits' own shape plus `noteId` and `shape` (this note's drawing " +
+      "exactly as stored: `{startSeconds, stepSeconds: 0.01, cents: [...]}`, ALWAYS present -- " +
+      "empty `cents` when cleared).",
+    inputSchema: {
+      clipId: z.string().uuid().describe("Id of the AUDIO clip the note belongs to."),
+      noteId: z
+        .string()
+        .uuid()
+        .describe("Id of the note (from clip_get_pitch_edits / clip_auto_correct_pitch's `segments`)."),
+      points: z
+        .array(noteShapePointSchema)
+        .optional()
+        .describe(
+          "Sparse points to draw, SOURCE seconds each -- sorted here, interpolated linearly " +
+            "between the first and last. Give this OR `clear`, never both."
+        ),
+      clear: z
+        .boolean()
+        .optional()
+        .describe("true to remove this note's drawing entirely. Give this OR `points`, never both."),
+    },
+  },
+  async ({ clipId, noteId, points, clear }) =>
+    toToolResult(() => bridge.send("clip.setNoteShape", { clipId, noteId, points, clear }))
+);
+
+registerTool(
+  "clip_set_note_shapes",
+  {
+    title: "Draw a freehand pitch line across several notes at once (one undo step)",
+    description:
+      "Redraws part of several notes' pitch lines in ONE call and ONE undo step -- the BATCH " +
+      "sibling of clip_set_note_shape, for a line one hand drag brush-strokes across a whole " +
+      "phrase (a single Cmd-drag stroke in the pitch editor commits this way). Each note item " +
+      "carries the SAME two keys as clip_set_note_shape minus clipId: `noteId` and EXACTLY " +
+      "ONE of `points` (spliced onto that note's CURRENT drawing, never replacing the rest of " +
+      "it) or `clear` (true, to remove the note's drawing). Use clip_set_note_shape instead " +
+      "for one note. " +
+      "ALL OR NOTHING: every note is resolved before anything is written, so one bad item " +
+      "refuses the whole call and changes nothing. The SAME note named twice refuses the " +
+      "whole call too -- send each note once (unlike clip_set_note_vibratos, a repeat is " +
+      "never folded, even when the two writes are identical). " +
+      "A SOUND (a breath or a consonant, see clip_find_unpitched_sounds) named with `points` " +
+      "beside a sung note is SKIPPED and reported -- never written, never silent: " +
+      "`skippedSoundIds` names it and `skippedSoundsSentence` says so in words, the " +
+      "clip_set_note_vibratos precedent. If NO item's `points` name a sung note (every one is " +
+      "a sound, or the call is all `clear`), nothing is filtered: a `points` item on a sound " +
+      "then refuses the whole call with the SAME words a single clip_set_note_shape call on " +
+      "that note would give. A `clear` item on a sound always passes through -- the one write " +
+      "a sound accepts, since only a hand-authored file could have put a drawing there to " +
+      "remove. " +
+      "REQUIRES A STORED NOTE TABLE ALREADY ON THE CLIP, the clip_set_note_pitch rule " +
+      "verbatim -- there is NO pitch detection on this wire path: run clip_auto_correct_pitch " +
+      "first, then read note ids back with clip_get_pitch_edits. A MIDI clip is refused. " +
+      "A drawn line is a HAND EDIT: on a vocal tuned before natural tuning existed, writing " +
+      "at least one note's drawing upgrades the WHOLE vocal in the same undo step, same as " +
+      "clip_set_note_shape. " +
+      "NEVER COALESCES: each call is its own undo step, the clip_set_note_vibratos rule -- a " +
+      "one-shot wire call has no open selection gesture for a second call to continue. " +
+      "Returns clip_get_pitch_edits' own shape plus `notes`: an array of {noteId, shape} -- " +
+      "one per note THIS call actually wrote (request order, a skipped sound excluded), each " +
+      "`shape` read back from the STORED segment (`{startSeconds, stepSeconds: 0.01, " +
+      "cents: [...]}`), never rebuilt from what you sent -- plus `skippedSoundIds` (ALWAYS " +
+      "present, empty when nothing was skipped) and `skippedSoundsSentence` (present only " +
+      "when something was).",
+    inputSchema: {
+      clipId: z.string().uuid().describe("Id of the AUDIO clip the notes belong to."),
+      notes: z
+        .array(
+          z.object({
+            noteId: z
+              .string()
+              .uuid()
+              .describe("Id of the note (from clip_get_pitch_edits / clip_auto_correct_pitch's `segments`)."),
+            points: z
+              .array(noteShapePointSchema)
+              .optional()
+              .describe(
+                "Sparse points to splice onto this note's CURRENT drawing, SOURCE seconds " +
+                  "each. Give this OR `clear`, never both."
+              ),
+            clear: z
+              .boolean()
+              .optional()
+              .describe("true to remove this note's drawing entirely. Give this OR `points`, never both."),
+          })
+            // `.strict()` (m30-c nested-strict precedent, the clip_set_note_shape/
+            // clip_set_note_vibratos precedent): a typo'd field inside one
+            // `notes` element would otherwise be silently stripped instead
+            // of rejected.
+            .strict()
+        )
+        // W7-WIRE2: unlike clip_set_note_vibratos/clip_set_note_pitches, an
+        // empty list IS refused HERE, at the schema layer, zero bridge
+        // calls -- a deliberate departure from those two, decided for this
+        // tool.
+        .min(1)
+        .describe(
+          "The notes to draw on, each with its OWN points or clear. At least one is required " +
+            "-- an empty list is refused here, at the schema layer. ALL OR NOTHING: a bad " +
+            "item, or the same note named twice, refuses the whole call and changes nothing."
+        ),
+    },
+  },
+  async ({ clipId, notes }) =>
+    toToolResult(() => bridge.send("clip.setNoteShapes", { clipId, notes }))
+);
+
+registerTool(
+  "clip_upgrade_natural_tuning",
+  {
+    title: "Turn on natural tuning for a vocal tuned before this feature existed",
+    description:
+      "Turns natural tuning ON for a vocal that was tuned before this feature shipped, in " +
+      "one call: keeps the singer's own voice size (formant correction at its default), " +
+      "leaves breaths and consonants at their own pitch (unless you switched that off with " +
+      "clip_set_consonant_protection -- a switch you made is kept, like a slide smoothness " +
+      "you chose), and softens the joins between notes " +
+      "at the default slide smoothness -- the SAME update the first per-note edit THAT " +
+      "CHANGES A NOTE on such a vocal already makes automatically (dragging a note, drawing " +
+      "a shape, splitting, adjusting " +
+      "vibrato, level, or clearing a note all trigger it too, but only when the edit actually " +
+      "changes something -- one that changes nothing leaves an old vocal exactly as it is). " +
+      "Use this to get the update " +
+      "WITHOUT touching a note first. One undo step. If you already chose your own slide " +
+      "smoothness with clip_set_pitch_transition_smoothness, that choice is kept -- only a " +
+      "smoothness still at its untouched default is filled in. " +
+      "REQUIRES THIS CLIP TO ALREADY HAVE TUNING (run clip_auto_correct_pitch first, or make " +
+      "one hand edit) -- a clip with no stored tuning at all has nothing to update yet, and is " +
+      "refused in words rather than silently minting an empty table. Harmless to call on a " +
+      "clip that is already fully natural (freshly auto-corrected, or already upgraded): " +
+      "nothing changes and no undo step is added -- note this is a NARROWER question than " +
+      "`predatesNaturalTuning` on clip_get_pitch_edits, which can already read false on an " +
+      "untouched clip whose fields still sit at the old defaults; calling this tool on one of " +
+      "those still does real work, the first time. A MIDI clip is refused too. Returns " +
+      "clip_get_pitch_edits' own shape -- no extra keys.",
+    inputSchema: {
+      clipId: z.string().uuid().describe("Id of the AUDIO clip to update, from project_snapshot."),
+    },
+  },
+  async ({ clipId }) => toToolResult(() => bridge.send("clip.upgradeNaturalTuning", { clipId }))
+);
+
+registerTool(
   "clip_delete_time_range",
   {
     title: "Delete a time range from a MIDI clip (excise + close the gap)",
@@ -9541,6 +10542,7 @@ registerTool(
       startBeat: z
         .number()
         .min(0)
+        .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
         .describe(
           "CLIP-LOCAL start of the range to delete, in beats (quarter notes), relative to " +
             "the clip's own start (not the timeline). Must fall inside [0, clip length)."
@@ -9548,6 +10550,7 @@ registerTool(
       lengthBeats: z
         .number()
         .positive()
+        .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
         .describe(
           "Length of the range to delete, in beats. Must be > 0. A range extending past the " +
             "clip's end is truncated at the clip's end (the clip can't shrink past what exists)."
@@ -9584,6 +10587,7 @@ registerTool(
       atBeat: z
         .number()
         .min(0)
+        .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
         .describe(
           "CLIP-LOCAL position to insert silence at, in beats (quarter notes), relative to " +
             "the clip's own start (not the timeline). Must fall inside [0, clip length] — " +
@@ -9592,6 +10596,7 @@ registerTool(
       lengthBeats: z
         .number()
         .positive()
+        .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
         .describe("Length of silence to insert, in beats. Must be > 0. The clip grows by exactly this amount."),
     },
   },
@@ -9608,6 +10613,7 @@ const controllerPointSchema = z.object({
   beat: z
     .number()
     .min(0)
+    .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
     .describe(
       "Point position in beats, RELATIVE TO THE CLIP'S START (not the timeline). Must " +
         "be >= 0."
@@ -10726,12 +11732,13 @@ registerTool(
         .number()
         .int()
         .min(1)
+        .max(TIMELINE_MAX_BEATS, PAST_TIMELINE_BARS)
         .describe(
           "1-based bar number to insert before (bar 1 is the very start of the timeline, " +
             "beat 0). The new bars land immediately before this bar; everything at or after " +
             "it shifts right."
         ),
-      count: z.number().int().min(1).describe("How many bars to insert. Whole number, >= 1."),
+      count: z.number().int().min(1).max(TIMELINE_MAX_BEATS, PAST_TIMELINE_BARS).describe("How many bars to insert. Whole number, >= 1."),
     },
   },
   async ({ atBar, count }) => toToolResult(() => bridge.send("arrange.insertBars", { atBar, count }))
@@ -10763,11 +11770,12 @@ registerTool(
         .number()
         .int()
         .min(1)
+        .max(TIMELINE_MAX_BEATS, PAST_TIMELINE_BARS)
         .describe(
           "1-based bar number to start deleting from (bar 1 is the very start of the " +
             "timeline, beat 0)."
         ),
-      count: z.number().int().min(1).describe("How many bars to delete. Whole number, >= 1."),
+      count: z.number().int().min(1).max(TIMELINE_MAX_BEATS, PAST_TIMELINE_BARS).describe("How many bars to delete. Whole number, >= 1."),
     },
   },
   async ({ fromBar, count }) => toToolResult(() => bridge.send("arrange.deleteBars", { fromBar, count }))
@@ -10800,9 +11808,11 @@ const compSegmentSchema = z.object({
     .string()
     .uuid()
     .describe("Id of the lane (take) this segment plays, from take_group's result or project_snapshot."),
-  startBeat: z.number().describe("Segment start, in ABSOLUTE timeline beats (not lane-relative)."),
+  startBeat: z.number().min(-TIMELINE_MAX_BEATS, PAST_TIMELINE).max(TIMELINE_MAX_BEATS, PAST_TIMELINE).describe("Segment start, in ABSOLUTE timeline beats (not lane-relative)."),
   endBeat: z
     .number()
+    .min(-TIMELINE_MAX_BEATS, PAST_TIMELINE)
+    .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
     .describe("Segment end, in ABSOLUTE timeline beats. Must be greater than startBeat."),
 })
   // `.strict()` (m30-c): closes the same per-element hole for
@@ -10981,6 +11991,8 @@ registerTool(
         .describe("Id of the take group to move, from take_group's result or project_snapshot."),
       toStartBeat: z
         .number()
+        .min(-TIMELINE_MAX_BEATS, PAST_TIMELINE)
+        .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
         .describe("New timeline start in beats (quarter notes) for the group's range. Clamped to >= 0."),
     },
   },
@@ -11099,9 +12111,14 @@ registerTool(
       "you played (ahead of / behind the grid) are AVERAGED per slot and folded into " +
       "the cycle, so the result is the characteristic push/lay-back of the take. Slots " +
       "with no onset read 0 (straight). `gridBeats` (default 0.25 = 1/16) is the slot " +
-      "resolution the offsets are measured on; `cycleBeats` (default 4 = one bar at x/4) " +
-      "is the pattern length that repeats. Onsets are read relative to the clip start, " +
-      "so the groove is independent of where the clip sits. Reversible with edit_undo. " +
+      "resolution the offsets are measured on, at least 1/1024 beat (0.0009765625); " +
+      "`cycleBeats` (default 4 = one bar at x/4) " +
+      "is the pattern length that repeats, at most 65536 slots long (cycleBeats / gridBeats); " +
+      "a finer grid or a longer cycle is refused. Onsets are measured from the song's grid " +
+      "lines (the ones clip_quantize lands notes on), and slots count from the song's " +
+      "beats, not the clip's start, so the groove lines up with the song's beats in any " +
+      "clip, wherever it starts: a push you played on each \"and\" stays on the \"and\". " +
+      "Reversible with edit_undo. " +
       "Then apply it via the `groove` param on clip_quantize / clip_quantize_audio " +
       "(pass the returned id or name). Returns {groove}.",
     inputSchema: {
@@ -11112,17 +12129,23 @@ registerTool(
       name: z.string().min(1).describe("Display name for the saved groove, e.g. \"Verse drums feel\"."),
       gridBeats: z
         .number()
-        .positive()
+        .finite("gridBeats must be a finite number of beats")
+        .min(1 / 1024, "gridBeats must be at least 1/1024 beat (0.0009765625), the finest grid accepted")
+        .max(TIMELINE_MAX_BEATS, "gridBeats must be at most 1048576 beats (2^20), the timeline limit")
         .optional()
         .describe(
           "Slot resolution in beats the offsets are measured on (default 0.25 = 1/16; " +
-            "0.5 = 1/8). Must be > 0."
+            "0.5 = 1/8). At least 1/1024 beat (0.0009765625)."
         ),
       cycleBeats: z
         .number()
+        .finite("cycleBeats must be a finite number of beats")
         .positive()
         .optional()
-        .describe("Pattern length in beats that the groove repeats over (default 4 = one bar at x/4). Must be > 0."),
+        .describe(
+          "Pattern length in beats that the groove repeats over (default 4 = one bar at x/4). " +
+            "Must be > 0, and at most 65536 slots long (cycleBeats / gridBeats), which the app checks."
+        ),
     },
   },
   async ({ clipId, name, gridBeats, cycleBeats }) =>
@@ -12202,6 +13225,8 @@ const automationTargetSchema = z
 const automationPointSchema = z.object({
   beat: z
     .number()
+    .min(-TIMELINE_MAX_BEATS, PAST_TIMELINE)
+    .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
     .describe(
       "Timeline position in beats (quarter notes) from project start. Negative values " +
         "clamp to 0."
@@ -12975,6 +14000,8 @@ server.registerTool(
         ),
       atBeat: z
         .number()
+        .min(-TIMELINE_MAX_BEATS, PAST_TIMELINE)
+        .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
         .optional()
         .describe(
           "Timeline position in beats to evaluate sources at. Omit to use the current " +
@@ -13031,6 +14058,7 @@ registerTool(
       fromBeat: z
         .number()
         .min(0)
+        .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
         .optional()
         .default(0)
         .describe(
@@ -13169,6 +14197,7 @@ registerTool(
       fromBeat: z
         .number()
         .min(0)
+        .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
         .optional()
         .default(0)
         .describe(
@@ -13270,6 +14299,7 @@ registerTool(
       fromBeat: z
         .number()
         .min(0)
+        .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
         .optional()
         .default(0)
         .describe(
@@ -13458,6 +14488,7 @@ registerTool(
       fromBeat: z
         .number()
         .min(0)
+        .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
         .optional()
         .default(0)
         .describe(
@@ -13631,6 +14662,7 @@ registerTool(
       fromBeat: z
         .number()
         .min(0)
+        .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
         .optional()
         .default(0)
         .describe(
@@ -13969,6 +15001,8 @@ registerTool(
         ),
       atBeat: z
         .number()
+        .min(-TIMELINE_MAX_BEATS, PAST_TIMELINE)
+        .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
         .optional()
         .describe(
           "Project beat to anchor the paste on. The EARLIEST copied clip " +
@@ -14025,16 +15059,22 @@ server.registerTool(
       "DEGRADATION reports — cases where playback proceeded on time but not exactly as " +
       "the project describes (e.g. a fade or gain envelope that couldn't be prepared in " +
       "time so the clip played without it, or a clip whose render wasn't ready yet, so it " +
-      "played its PREVIOUS version or SILENCE, depending on whether the edit kept its " +
-      "time base — reported when playback actually starts " +
+      "played its PREVIOUS version, a quick spliced PREVIEW of the change, or SILENCE, " +
+      "depending on whether the edit kept its time base and how much of the clip it " +
+      "changed — reported when playback actually starts " +
       "over it, never at the edit itself). Each entry is `{code, message, beat, count, " +
       "lastAt}`: `code` is a stable machine key naming the degradation family (the current " +
       "ones are `clip-stretch-pending` — a pending clip playing SILENCE meanwhile, because " +
       "its edit changed the stretch ratio, its render failed, or it has no previous " +
-      "version to fall back on — and `clip-render-previous` — a pending clip playing its " +
+      "version to fall back on — `clip-render-previous` — a pending clip playing its " +
       "PREVIOUS version meanwhile instead, because its edit (a transpose, or a note's " +
       "pitch, level, clear or timing edit) kept the stretch ratio and a previous version " +
-      "exists; never both for the same clip at once — plus `clip-fades-skipped`, " +
+      "exists — and `clip-render-preview` — a pending clip playing a quick, spliced " +
+      "PREVIEW of the change meanwhile instead, once one could be built (usually only for " +
+      "a small, localized edit; the previous version plays until the preview is ready); " +
+      "never more than one of these three for the same clip at once, though a clip may " +
+      "move from `clip-render-previous` to `clip-render-preview` as the same edit's " +
+      "render progresses — plus `clip-fades-skipped`, " +
       "`clip-envelope-skipped`, `clip-unplayable`, `clip-file-missing`, " +
       "`clip-pitch-contour-unavailable`, `instrument-unavailable`, " +
       "`output-device-unavailable`, `engine-exception` and `ai-generation-interrupted`) " +
@@ -14050,15 +15090,21 @@ server.registerTool(
       "anything sounded off. " +
       "Audio clips that play from an offline RENDER rather than straight off their file — " +
       "a time-stretch or transpose (clip_set_stretch / clip_stretch_to_length) OR a tuning " +
-      "(clip_auto_correct_pitch / clip_set_note_pitch / clip_split_note) — may carry two " +
-      "transient, never-saved fields: `stretchRendering: true` while that render is in " +
-      "flight -- meanwhile the clip plays its PREVIOUS version if the edit kept its " +
-      "stretch ratio (notice `clip-render-previous`), or SILENCE if it did not, or there " +
-      "is no previous version to fall back on (notice `clip-stretch-pending`) -- and " +
-      "`stretchError`, a readable reason, when it FAILED (the clip stays silent, never " +
-      "bridged to a previous version, until the edit changes). Both are " +
-      "ABSENT when there is nothing to report and never appear on an untouched clip; poll " +
-      "until `stretchRendering` clears before transport_play when you need to hear the edit. " +
+      "(clip_auto_correct_pitch / clip_set_note_pitch / clip_split_note) — may carry three " +
+      "transient, never-saved fields: `stretchRendering: true` while the EXACT render is in " +
+      "flight (this is about that FINAL render's own job, independent of what the clip is " +
+      "audibly playing meanwhile -- see `renderAudible` below); `stretchError`, a readable " +
+      "reason, when it FAILED (the clip stays on whatever it was playing, or silent, until " +
+      "the edit changes); and `renderAudible` (`exact`/`preview`/`previous`/`silent`) naming " +
+      "what the clip's node is ACTUALLY PLAYING right now -- `preview` for a quick spliced " +
+      "provisional of the change (notice `clip-render-preview`, usually only reachable for a " +
+      "small, localized edit), `previous` for the clip's last version if the edit kept its " +
+      "stretch ratio (notice `clip-render-previous`), or `silent` if there is no previous " +
+      "version to fall back on (notice `clip-stretch-pending`) or the render failed. All " +
+      "three are ABSENT when there is nothing to report (`renderAudible` also omits itself " +
+      "for the common `exact` case) and never appear on an untouched clip; poll " +
+      "`renderAudible` to know what you would actually hear right now, or just " +
+      "`stretchRendering` if you only need to wait for the exact result before transport_play. " +
       "MIDI clips (from " +
       "clip_add_midi) carry a `notes` array (pitch, velocity, startBeat relative " +
       "to the clip, lengthBeats); audio clips do not. MIDI clips may also carry a " +
@@ -14609,6 +15655,7 @@ registerTool(
       atBeat: z
         .number()
         .min(0)
+        .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
         .optional()
         .describe(
           "Where the converted clip lands, in beats (quarter notes) from timeline start. " +
@@ -15167,6 +16214,7 @@ registerTool(
       atBeat: z
         .number()
         .min(0)
+        .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
         .optional()
         .describe("Beat position where the clip lands. Omit for 0 (the start of the timeline)."),
       setProjectTempo: z
@@ -15372,6 +16420,7 @@ registerTool(
       atBeat: z
         .number()
         .min(0)
+        .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
         .optional()
         .describe(
           "Beat position where every imported clip lands (they share one start — stems are " +
@@ -15571,12 +16620,16 @@ registerTool(
         ),
       startBeat: z
         .number()
+        .min(-TIMELINE_MAX_BEATS, PAST_TIMELINE)
+        .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
         .describe(
           "Start of the region to repaint, in ABSOLUTE timeline beats (the same space as " +
             "clip_split/clip_move). Must lie inside the target clip/comp span."
         ),
       endBeat: z
         .number()
+        .min(-TIMELINE_MAX_BEATS, PAST_TIMELINE)
+        .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
         .describe(
           "End of the region to repaint, in ABSOLUTE timeline beats. Must be greater than " +
             "startBeat and inside the span. The region must be at least 0.1 s long."
@@ -16066,6 +17119,7 @@ registerTool(
       atBeat: z
         .number()
         .min(0)
+        .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
         .optional()
         .describe(
           "Timeline beat (quarter notes) that file tick 0 lands on — every created clip " +
@@ -16174,6 +17228,7 @@ registerTool(
       atBeat: z
         .number()
         .min(0)
+        .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
         .optional()
         .describe(
           "CLIP-RELATIVE beat offset applied to the imported content — an offset from the " +
@@ -16700,6 +17755,8 @@ registerTool(
         ),
       byBeats: z
         .number()
+        .min(-TIMELINE_MAX_BEATS, PAST_TIMELINE)
+        .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
         .describe(
           "Signed beat delta applied identically to every listed clip. Positive moves " +
             "later, negative moves earlier. May be reduced (never per-clip) if it would " +
@@ -16778,6 +17835,8 @@ registerTool(
         ),
       byBeats: z
         .number()
+        .min(-TIMELINE_MAX_BEATS, PAST_TIMELINE)
+        .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
         .optional()
         .describe(
           "Optional signed beat delta applied at the same time, so one call can move " +
@@ -16849,6 +17908,8 @@ registerTool(
         ),
       byBeats: z
         .number()
+        .min(-TIMELINE_MAX_BEATS, PAST_TIMELINE)
+        .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
         .optional()
         .describe(
           "Optional signed beat delta applied at the same time, so one call can move " +

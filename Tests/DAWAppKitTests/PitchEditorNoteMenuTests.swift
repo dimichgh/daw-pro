@@ -109,6 +109,25 @@ struct PitchEditorNoteMenuTests {
         #expect(!blob(0).isEdited)
     }
 
+    @Test("C5b-4b — \"Reset drawn shape\" is offered only when a target carries a drawing, after the wobble row, for a sound too")
+    func resetDrawnShapeRow() {
+        let plain = PitchEditorNoteMenu.Target(kind: .note, isCleared: false)
+        let drawn = PitchEditorNoteMenu.Target(kind: .note, isCleared: false, hasDrawnShape: true)
+        let wobbled = PitchEditorNoteMenu.Target(kind: .note, isCleared: false, hasWobbleEdit: true)
+        let drawnSound = PitchEditorNoteMenu.Target(kind: .sound, isCleared: false, hasDrawnShape: true)
+        #expect(menu([plain]) == ["Clear Note"])
+        #expect(menu([drawn]) == ["Clear Note", "Reset drawn shape"])
+        #expect(menu([plain, drawn]) == ["Clear 2 Notes", "Reset drawn shape"])
+        #expect(PitchEditorNoteMenu.items(for: [wobbled, drawn]).map(\.action) == [.clear, .resetWobble, .resetShape])
+        // A sound can carry a drawing only from a hand-written file; the store
+        // allows clearing it, so the row is offered there too.
+        #expect(menu([drawnSound]) == ["Clear Sound", "Reset drawn shape"])
+        #expect(PitchEditorNoteMenu.resetShapeTitle == "Reset drawn shape")
+        // The debug tier's spelling.
+        #expect(PitchEditorNoteMenu.Action(rawValue: "resetShape") == .resetShape)
+        #expect(PitchEditorStagedStep.keys(PitchEditorChord(command: true)).key == "keys")
+    }
+
     @Test("the staged menu step is its own act on the debug tier")
     func stagedStepKey() {
         #expect(PitchEditorStagedStep.noteMenu(.clear, nil).key == "noteMenu")

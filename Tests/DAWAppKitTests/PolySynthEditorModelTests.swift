@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Testing
 @testable import DAWAppKit
@@ -1442,6 +1443,172 @@ struct PolySynthEditorModelTests {
         // …but dragging OFF a rail does change, and must commit.
         #expect(MixerMath.adjustedFraction(start: 1.0, dragPoints: -30,
                                            throwPoints: throwPoints) != 1.0)
+    }
+
+    // MARK: Sampler — globals every zone overrides (W7-SMP, the sax-team ② card half)
+    //
+    // Field report 2026-08-20: a global Release of 3.4465 s on an imported
+    // library whose every zone released in 0.5 s. `instrument.describeSampler`
+    // learned to say so that day; this card went on drawing a live-looking knob
+    // that did nothing when turned. The census is the ENGINE's precedence, not
+    // the field names: attack, decay, sustain, release (the `-1` inherit
+    // sentinel) and oneShot (−1/0/1 at note-off). Gain multiplies and is never
+    // inert.
+
+    /// Two zones over real files. `field` is set on BOTH (the global reaches no
+    /// zone: INERT) or — with `inheritingSecond` — on the FIRST only (zone two
+    /// still hears the global: LIVE). The first zone always overrides, so a
+    /// verdict that looks only at `zones.first` gets the mixed case wrong.
+    private static func overridingParams(_ field: String,
+                                         inheritingSecond: Bool = false) -> SamplerParams {
+        func zone(_ url: URL, _ lo: Int, _ hi: Int, own: Bool) -> SamplerZone {
+            SamplerZone(audioFileURL: url, minPitch: lo, maxPitch: hi,
+                        oneShot: own && field == "oneShot" ? true : nil,
+                        attack: own && field == "attack" ? 0.3 : nil,
+                        decay: own && field == "decay" ? 1.5 : nil,
+                        sustain: own && field == "sustain" ? 0.25 : nil,
+                        release: own && field == "release" ? 0.5 : nil)
+        }
+        return SamplerParams(zones: [zone(ping, 0, 59, own: true),
+                                     zone(tink, 60, 127, own: !inheritingSecond)],
+                             release: 3.4465)
+    }
+
+    /// DAWCore's own fold, named per field here INDEPENDENTLY of the model's
+    /// switch — the cross-check that the card and `instrument.describeSampler`
+    /// (which shapes these same folds into `effectiveGlobals`) agree.
+    private static func domainSaysInert(_ field: String, _ params: SamplerParams) -> Bool {
+        switch field {
+        case "attack": return SamplerGlobalUse.attack(of: params).globalIsInert
+        case "decay": return SamplerGlobalUse.decay(of: params).globalIsInert
+        case "sustain": return SamplerGlobalUse.sustain(of: params).globalIsInert
+        case "release": return SamplerGlobalUse.release(of: params).globalIsInert
+        case "oneShot": return SamplerOneShotUse.oneShot(of: params).globalIsInert
+        default: return false
+        }
+    }
+
+    @Test("W7-SMP: each census global reads INERT when every zone sets its own, LIVE while one zone inherits")
+    func samplerGlobalInertPerCensusGlobal() throws {
+        #expect(SamplerEditorModel.zoneOverridableGlobals
+                == ["attack", "decay", "sustain", "release", "oneShot"])
+        for field in SamplerEditorModel.zoneOverridableGlobals {
+            let all = try Self.samplerFixture(Self.overridingParams(field))
+            #expect(all.model.globalIsInert(field),
+                    "\(field): every zone sets its own — the global is never heard")
+            // ONLY this field: every other global still reaches both zones.
+            for other in SamplerEditorModel.zoneOverridableGlobals where other != field {
+                #expect(all.model.globalIsInert(other) == false,
+                        "\(field) fixture: \(other) must stay live")
+            }
+            // The card's verdict is the DOMAIN's, never a local re-derivation.
+            let stored = try #require(Self.storedSampler(all.store, all.trackID))
+            #expect(all.model.globalIsInert(field) == Self.domainSaysInert(field, stored))
+
+            // The MIXED library — zone two inherits, so the global IS heard.
+            let mixed = try Self.samplerFixture(Self.overridingParams(field, inheritingSecond: true))
+            #expect(mixed.model.globalIsInert(field) == false,
+                    "\(field): zone two still inherits — the global is LIVE")
+        }
+        // Zero zones: silent for a reason that has nothing to do with any knob,
+        // and calling a global "inert" there would point at the wrong repair.
+        let empty = try Self.samplerFixture(SamplerParams(zones: [], release: 3.4465))
+        for field in SamplerEditorModel.zoneOverridableGlobals {
+            #expect(empty.model.globalIsInert(field) == false, "\(field) on a zoneless sampler")
+        }
+    }
+
+    @Test("W7-SMP control: gain is never inert — each zone's gain scales the global, it never replaces it")
+    func samplerGainIsNeverInert() throws {
+        // `SamplerZone.gain` is non-optional, so EVERY zone carries one — and the
+        // global still reaches every voice as the output gain.
+        let zones = [SamplerZone(audioFileURL: Self.ping, maxPitch: 59, gain: 0.5),
+                     SamplerZone(audioFileURL: Self.tink, minPitch: 60, gain: 1.5)]
+        let f = try Self.samplerFixture(SamplerParams(zones: zones))
+        #expect(f.model.globalIsInert("gain") == false)
+        // Outside the census entirely — glide keeps its own rule (`glideIsInert`).
+        #expect(f.model.globalIsInert("glideTime") == false)
+        #expect(f.model.globalIsInert("no-such-global") == false)
+        #expect(f.model.inertGlobalLabels.isEmpty)
+        #expect(f.model.inertGlobalsNote == nil)
+    }
+
+    @Test("W7-SMP: an inert knob is DIM BUT LIVE — the edit still writes the global, and zone two's own reset makes it heard")
+    func samplerInertGlobalStillWritesAndRecovers() throws {
+        let f = try Self.samplerFixture(Self.overridingParams("release"))
+        #expect(f.model.globalIsInert("release"))
+        #expect(f.model.inertGlobalLabels == ["Release"])
+        #expect(f.model.inertGlobalsNote == "Release does nothing: set per zone.")
+
+        // The card writes what the wire writes: the stored global moves…
+        f.model.set(name: "release", value: 1.25)
+        #expect(Self.storedSampler(f.store, f.trackID)?.release == 1.25)
+        #expect(f.model.lastErrorMessage == nil)
+        // …and is STILL not heard: no zone listens to it.
+        #expect(f.model.globalIsInert("release"))
+
+        // Hand zone two back to the global with the card's own per-zone reset,
+        // and the light goes out — the verdict follows the zones, live.
+        let secondZone = try #require(Self.storedSampler(f.store, f.trackID)?.zones.last?.id)
+        f.model.select(zoneID: secondZone)
+        f.model.resetZoneParam(Self.samplerZoneSpec("release"))
+        #expect(Self.storedSampler(f.store, f.trackID)?.zones.last?.release == nil)
+        #expect(f.model.globalIsInert("release") == false)
+        #expect(f.model.inertGlobalsNote == nil)
+    }
+
+    @Test("W7-SMP: the note names every dimmed control in card order, One Shot included")
+    func samplerInertGlobalLabelsFollowTheCard() throws {
+        func zone(_ url: URL, _ lo: Int, _ hi: Int) -> SamplerZone {
+            SamplerZone(audioFileURL: url, minPitch: lo, maxPitch: hi, oneShot: true,
+                        attack: 0.3, decay: 1, sustain: 0.5, release: 0.5)
+        }
+        let f = try Self.samplerFixture(SamplerParams(zones: [zone(Self.ping, 0, 59),
+                                                              zone(Self.tink, 60, 127)]))
+        #expect(f.model.inertGlobalLabels == ["Attack", "Release", "One Shot"])
+        #expect(f.model.inertGlobalsNote == "Attack, Release, One Shot do nothing: set per zone.")
+        // Global decay/sustain are inert too, but the card draws no control for
+        // them, so the note must not name a control nobody can see.
+        #expect(f.model.globalIsInert("decay"))
+        #expect(f.model.globalIsInert("sustain"))
+    }
+
+    @Test("W7-SMP: the inert-globals note fits ONE line in every combination — m34-u's budget, measured")
+    func samplerInertGlobalsNoteFitsOneLine() throws {
+        // The line the note draws in: the card's 308 pt interior (340 − 2 × 16)
+        // less the 12 pt warning glyph (NSImage, 9 pt, measured 2026-09-27) and
+        // the 5 pt gap beside it. The face is the card's `.system(size: 9)`.
+        let face = NSFont.systemFont(ofSize: 9)
+        func width(_ text: String) -> CGFloat {
+            (text as NSString).size(withAttributes: [.font: face]).width
+        }
+        let line: CGFloat = 308 - 12 - 5
+
+        // Every combination of the controls the card DRAWS that can go inert,
+        // derived from the model's own tables so a new one joins the sweep.
+        let drawn = SamplerEditorModel.specs
+            .filter { SamplerEditorModel.zoneOverridableGlobals.contains($0.name) }
+            .map(\.label) + [SamplerEditorModel.oneShotSpec.label]
+        #expect(drawn == ["Attack", "Release", "One Shot"])
+        for mask in 1..<(1 << drawn.count) {
+            let labels = drawn.indices.filter { mask & (1 << $0) != 0 }.map { drawn[$0] }
+            let note = try #require(SamplerEditorModel.inertGlobalsNote(labels: labels))
+            print("[measured] \(note.count) chars, \(width(note)) pt: \(note)")
+            #expect(note.count <= 51, "\(note.count) chars will wrap and cost a zone row")
+            #expect(width(note) <= line, "\(width(note)) pt overruns the \(line) pt line")
+            // It names the FAULT, not merely the cause.
+            #expect(note.contains("nothing"))
+        }
+        #expect(SamplerEditorModel.inertGlobalsNote(labels: []) == nil)
+
+        // Calibration: the glide note, seen on a capture as ONE line, passes.
+        #expect(width(SamplerEditorModel.glideInertNote) <= line)
+        // Positive control — the gate CAN fail: the brief's own example
+        // sentence would wrap here and cost a zone row.
+        let wraps = "Each sound in this instrument sets its own release, so this knob has "
+            + "no effect. Change a sound's release instead."
+        #expect(width(wraps) > line)
+        #expect(wraps.count > 51)
     }
 
     // MARK: - SamplerCardLayout (the collapsed-zone-list regression)

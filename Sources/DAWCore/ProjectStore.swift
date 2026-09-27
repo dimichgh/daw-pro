@@ -2813,7 +2813,7 @@ public final class ProjectStore {
         performEdit("Set \(Self.effectDisplayName(kind)) Parameter",
                     key: "fx.param:master:\(effectID.uuidString):\(name)") {
             if let ei = masterEffects.firstIndex(where: { $0.id == effectID }) {
-                Self.applyEffectParam(&masterEffects[ei], name: name, value: clamped)
+                masterEffects[ei].applySetting(name, clamped)
             }
             engine?.masterEffectsChanged(masterEffects)
         }
@@ -3479,7 +3479,7 @@ public final class ProjectStore {
         editTrack(id: trackID, label: "Set \(Self.effectDisplayName(kind)) Parameter",
                   key: "fx.param:\(trackID.uuidString):\(effectID.uuidString):\(name)") {
             if let ei = $0.effects.firstIndex(where: { $0.id == effectID }) {
-                Self.applyEffectParam(&$0.effects[ei], name: name, value: clamped)
+                $0.effects[ei].applySetting(name, clamped)
             }
         }
         return tracks[ti].effects[ei]
@@ -3510,51 +3510,9 @@ public final class ProjectStore {
         guard let ei = tracks[ti].effects.firstIndex(where: { $0.id == effectID }) else {
             throw ProjectError.effectNotFound(effectID)
         }
-        let kind = tracks[ti].effects[ei].kind
-        guard kind == .compressor || kind == .gate else {
-            throw ProjectError.sidechainUnsupportedEffect(kind)
-        }
-        if let sourceTrackID {
-            // Destination strip must physically own a ChainHostAU insert
-            // point (audio/bus sandwich) — instrument strips walk their chain
-            // inside the source node, which has no input bus for a key edge.
-            guard tracks[ti].kind == .audio || tracks[ti].kind == .bus else {
-                throw ProjectError.sidechainUnsupportedTrack(tracks[ti].kind)
-            }
-            guard let si = tracks.firstIndex(where: { $0.id == sourceTrackID }) else {
-                throw ProjectError.trackNotFound(sourceTrackID)
-            }
-            guard tracks[si].kind != .bus else {
-                throw ProjectError.sidechainUnsupportedSource(
-                    "'\(tracks[si].name)' is a bus — bus key sources are deferred in v1; key from a source track feeding it instead")
-            }
-            // One key input per strip (v1): a DIFFERENT effect already keyed
-            // on this strip rejects; re-keying the same effect is fine.
-            if let taken = tracks[ti].effects.first(where: {
-                $0.id != effectID && $0.sidechainSourceTrackID != nil
-            }) {
-                throw ProjectError.sidechainOneSourcePerStrip(
-                    "strip '\(tracks[ti].name)' already has a keyed \(taken.kind.rawValue) (effect \(taken.id.uuidString)) — one sidechain key per strip in v1; clear it first")
-            }
-            // Cycle validation BEFORE the edit commits: the new key edge
-            // source → destination must not close an existing signal path
-            // destination → … → source (AVAudioEngine graph cycles are
-            // undefined behavior; rejected here, never discovered there).
-            if let cycle = SidechainGraph.cyclePath(
-                ifKeying: trackID, from: sourceTrackID, tracks: tracks) {
-                let names = cycle.map { id in
-                    tracks.first(where: { $0.id == id })?.name ?? id.uuidString
-                }
-                let sourceName = tracks[si].name
-                // `names` runs destination → … → source; the new key edge
-                // source → destination closes it — show the full loop.
-                let path = (names + [tracks[ti].name]).joined(separator: " → ")
-                throw ProjectError.sidechainWouldCreateCycle(
-                    trackID == sourceTrackID
-                        ? "a strip cannot key itself — '\(sourceName)' is the keyed strip"
-                        : "sidechain would create a feedback cycle: '\(tracks[ti].name)' already feeds '\(sourceName)' (\(path)) — keying it from '\(sourceName)' closes the loop")
-            }
-        }
+        // m39-tpl-1: the key rules are `SidechainRules.check` (SidechainRules.swift),
+        // pure over track values so a template's keys are judged by the same code.
+        try SidechainRules.check(keying: trackID, effect: effectID, from: sourceTrackID, in: tracks)
         let name = tracks[ti].name
         editTrack(id: trackID, label: "Set Sidechain on '\(name)'") {
             if let ei = $0.effects.firstIndex(where: { $0.id == effectID }) {
@@ -3701,363 +3659,6 @@ public final class ProjectStore {
             }
         }
         return tracks[ti].automation[li]
-    }
-
-    /// Writes a validated, already-clamped parameter into an effect descriptor.
-    /// The per-kind name→field mapping — the single place the control/wire name
-    /// resolves onto a model field. New kinds (iv) extend this switch. The value
-    /// is already clamped to the spec range, which matches each struct's own
-    /// clamping init, so field writes stay in-model-range by construction.
-    private static func applyEffectParam(_ effect: inout EffectDescriptor, name: String, value: Double) {
-        switch effect.kind {
-        case .gain:
-            // m38-a: read-modify-write, NOT a fresh GainParams per name — a
-            // rebuild from one field would silently reset the other (setting
-            // gainLinear would clear an armed polarity flip). `invertPolarity`
-            // is binary on the numeric surface (the truePeak/pingPong
-            // precedent, >= 0.5 = on).
-            var params = effect.resolvedGain
-            switch name {
-            case "gainLinear": params.gainLinear = value
-            case "invertPolarity": params.invertPolarity = value >= 0.5
-            default: return
-            }
-            effect.gain = params
-        case .eq:
-            var params = effect.resolvedEQ
-            switch name {
-            case "lowShelfFreq": params.lowShelfFreq = value
-            case "lowShelfGainDb": params.lowShelfGainDb = value
-            case "peak1Freq": params.peak1Freq = value
-            case "peak1GainDb": params.peak1GainDb = value
-            case "peak1Q": params.peak1Q = value
-            case "peak2Freq": params.peak2Freq = value
-            case "peak2GainDb": params.peak2GainDb = value
-            case "peak2Q": params.peak2Q = value
-            case "highShelfFreq": params.highShelfFreq = value
-            case "highShelfGainDb": params.highShelfGainDb = value
-            // m22-a EQ v2. Setting an HP/LP frequency ACTIVATES that filter
-            // (nil freq = off); slopes snap to 12/24; `*Enabled` is binary on
-            // the numeric surface (the pingPong precedent, ≥ 0.5 = on).
-            // Enabling an HP/LP that has no corner yet materializes the spec
-            // default (20 Hz / 20 kHz) so the toggle is never a silent no-op.
-            case "highPassFreq": params.highPassFreq = value
-            case "highPassSlopeDbPerOct": params.highPassSlopeDbPerOct = EQParams.snapSlope(value)
-            case "highPassEnabled":
-                let on = value >= 0.5
-                params.highPassEnabled = on
-                if on, params.highPassFreq == nil {
-                    params.highPassFreq = EQParams.highPassFreqRange.lowerBound
-                }
-            case "lowPassFreq": params.lowPassFreq = value
-            case "lowPassSlopeDbPerOct": params.lowPassSlopeDbPerOct = EQParams.snapSlope(value)
-            case "lowPassEnabled":
-                let on = value >= 0.5
-                params.lowPassEnabled = on
-                if on, params.lowPassFreq == nil {
-                    params.lowPassFreq = EQParams.lowPassFreqRange.upperBound
-                }
-            case "lowShelfQ": params.lowShelfQ = value
-            case "highShelfQ": params.highShelfQ = value
-            case "lowShelfEnabled": params.lowShelfEnabled = value >= 0.5
-            case "peak1Enabled": params.peak1Enabled = value >= 0.5
-            case "peak2Enabled": params.peak2Enabled = value >= 0.5
-            case "highShelfEnabled": params.highShelfEnabled = value >= 0.5
-            default: return
-            }
-            effect.eq = params
-        case .compressor:
-            var params = effect.resolvedCompressor
-            switch name {
-            case "thresholdDb": params.thresholdDb = value
-            case "ratio": params.ratio = value
-            case "attackMs": params.attackMs = value
-            case "releaseMs": params.releaseMs = value
-            case "kneeDb": params.kneeDb = value
-            case "makeupDb": params.makeupDb = value
-            // m23-ck parallel compression: 1 fully wet (the default), 0 a
-            // bit-exact bypass. Already clamped to 0…1 by the spec range.
-            case "mix": params.mix = value
-            // m39-ae the de-esser. All three are already clamped to their spec
-            // ranges by the caller; `detectorMode` is stored UNSNAPPED on
-            // purpose — the `phaser.stages` / `clipper.mode` precedent, where
-            // the store keeps what was asked for and the render thread snaps
-            // through the one home (`CompressorParams.detectorMode(at:)`). The
-            // wire echoes `resolvedDetectorMode` so the difference is visible
-            // rather than a surprise.
-            case "detectorMode": params.detectorMode = value
-            case "detectorFreqHz": params.detectorFreqHz = value
-            case "detectorQ": params.detectorQ = value
-            default: return
-            }
-            effect.compressor = params
-        case .limiter:
-            var params = effect.resolvedLimiter
-            switch name {
-            case "ceilingDb": params.ceilingDb = value
-            case "releaseMs": params.releaseMs = value
-            case "truePeak": params.truePeak = value >= 0.5
-            default: return
-            }
-            effect.limiter = params
-        case .reverb:
-            var params = effect.resolvedReverb
-            switch name {
-            case "roomSize": params.roomSize = value
-            case "damping": params.damping = value
-            case "mix": params.mix = value
-            case "preDelayMs": params.preDelayMs = value
-            case "width": params.width = value
-            default: return
-            }
-            effect.reverb = params
-        case .delay:
-            var params = effect.resolvedDelay
-            switch name {
-            case "timeMs": params.timeMs = value
-            case "feedback": params.feedback = value
-            case "mix": params.mix = value
-            // pingPong snaps to 0/1 through the clamping init (numeric bool);
-            // the rebuild carries the m22-f fields so a pingPong write can
-            // never silently drop sync/division.
-            case "pingPong": params = DelayParams(timeMs: params.timeMs,
-                                                  feedback: params.feedback,
-                                                  mix: params.mix, pingPong: value,
-                                                  highCutHz: params.highCutHz,
-                                                  sync: params.sync,
-                                                  division: params.division)
-            case "highCutHz": params.highCutHz = value
-            // m22-f tempo sync: binary on the numeric surface (the pingPong
-            // precedent, ≥ 0.5 = on); division rides as its length in beats
-            // and snaps to the nearest legal note value.
-            case "sync": params.sync = value >= 0.5
-            case "division": params.division = NoteDivision.nearest(toBeats: value)
-            default: return
-            }
-            effect.delay = params
-        case .saturator:
-            var params = effect.resolvedSaturator
-            switch name {
-            case "driveDb": params.driveDb = value
-            case "mix": params.mix = value
-            case "outputDb": params.outputDb = value
-            // m39-ad. Stored UNSNAPPED, exactly like `clipper.oversampling` and
-            // `phaser.stages`: the setter clamps to the range but does not snap,
-            // so a stored 3 renders as 4. `resolvedOversampling` on the wire is
-            // what the render thread actually uses.
-            case "oversampling": params.oversampling = value
-            default: return
-            }
-            effect.saturator = params
-        case .gate:
-            var params = effect.resolvedGate
-            switch name {
-            case "thresholdDb": params.thresholdDb = value
-            case "attackMs": params.attackMs = value
-            case "holdMs": params.holdMs = value
-            case "releaseMs": params.releaseMs = value
-            default: return
-            }
-            effect.gate = params
-        case .chorus:
-            var params = effect.resolvedChorus
-            switch name {
-            case "rateHz": params.rateHz = value
-            case "depthMs": params.depthMs = value
-            case "mix": params.mix = value
-            default: return
-            }
-            effect.chorus = params
-        case .bassEnhancer:
-            var params = effect.resolvedBassEnhancer
-            switch name {
-            case "crossoverHz": params.crossoverHz = value
-            case "amount": params.amount = value
-            case "mix": params.mix = value
-            default: return
-            }
-            effect.bassEnhancer = params
-        case .bitCrusher:
-            var params = effect.resolvedBitCrusher
-            switch name {
-            // `bits` snaps to a whole number through the clamping init (the
-            // pingPong numeric-but-discrete precedent); the rebuild carries
-            // every other field so a bits write can never silently drop them.
-            case "bits": params = BitCrusherParams(
-                bits: value, downsampleHz: params.downsampleHz,
-                antiAlias: params.antiAlias, dither: params.dither, mix: params.mix)
-            case "downsampleHz": params.downsampleHz = value
-            // Binary on the numeric surface (the truePeak/pingPong precedent).
-            case "antiAlias": params.antiAlias = value >= 0.5
-            case "dither": params.dither = value >= 0.5
-            case "mix": params.mix = value
-            default: return
-            }
-            effect.bitCrusher = params
-        case .djFilter:
-            var params = effect.resolvedDJFilter
-            switch name {
-            case "position": params.position = value
-            case "resonance": params.resonance = value
-            // Numeric-but-discrete: the rebuild routes through the clamping
-            // init so the 12/24 snap happens here, exactly where a bare field
-            // write would have left an un-snapped 17 in the model (the
-            // `bitCrusher.bits` precedent, same shape, same reason).
-            case "slopeDbPerOct": params = DJFilterParams(
-                position: params.position, resonance: params.resonance,
-                slopeDbPerOct: value, deadZoneWidth: params.deadZoneWidth,
-                resonanceTrack: params.resonanceTrack)
-            case "deadZoneWidth": params.deadZoneWidth = value
-            case "resonanceTrack": params.resonanceTrack = value
-            default: return
-            }
-            effect.djFilter = params
-        case .ringMod:
-            var params = effect.resolvedRingMod
-            switch name {
-            case "carrierHz": params.carrierHz = value
-            case "mix": params.mix = value
-            // Numeric-but-discrete: the rebuild routes through the clamping
-            // init so the 0/1/2/3 snap happens HERE, exactly where a bare
-            // field write would have left an un-snapped 1.7 in the model that
-            // `fx.describe` would then report as the setting (the
-            // `bitCrusher.bits` / `djFilter.slopeDbPerOct` precedent).
-            case "waveform": params = RingModParams(
-                carrierHz: params.carrierHz, mix: params.mix, waveform: value,
-                inputHighCutHz: params.inputHighCutHz,
-                stereoSpreadDeg: params.stereoSpreadDeg)
-            case "inputHighCutHz": params.inputHighCutHz = value
-            case "stereoSpreadDeg": params.stereoSpreadDeg = value
-            default: return
-            }
-            effect.ringMod = params
-        case .flanger:
-            var params = effect.resolvedFlanger
-            switch name {
-            case "rateHz": params.rateHz = value
-            case "depthMs": params.depthMs = value
-            case "delayMs": params.delayMs = value
-            case "feedback": params.feedback = value
-            case "mix": params.mix = value
-            case "stereoPhaseDeg": params.stereoPhaseDeg = value
-            default: return
-            }
-            effect.flanger = params
-        case .hallReverb:
-            var params = effect.resolvedHallReverb
-            switch name {
-            case "mix": params.mix = value
-            case "decaySeconds": params.decaySeconds = value
-            case "sizeMeters": params.sizeMeters = value
-            case "preDelayMs": params.preDelayMs = value
-            case "width": params.width = value
-            case "diffusion": params.diffusion = value
-            case "earlyLateBalance": params.earlyLateBalance = value
-            case "lowDecayMultiplier": params.lowDecayMultiplier = value
-            case "highDecayMultiplier": params.highDecayMultiplier = value
-            case "lowCrossoverHz": params.lowCrossoverHz = value
-            case "highCrossoverHz": params.highCrossoverHz = value
-            case "modRateHz": params.modRateHz = value
-            case "modDepthMs": params.modDepthMs = value
-            // `freeze` is a SWITCH on a numeric surface, but unlike
-            // `bitCrusher.antiAlias` it is stored as the raw 0...1 number
-            // rather than a Bool, so a bare field write is exactly right here
-            // and there is nothing to snap: `HallReverbParams.isFrozen`
-            // interprets it at the ONE place that cares (the DSP).
-            case "freeze": params.freeze = value
-            default: return
-            }
-            effect.hallReverb = params
-        case .tapeDelay:
-            var params = effect.resolvedTapeDelay
-            switch name {
-            case "timeMs": params.timeMs = value
-            case "feedback": params.feedback = value
-            case "mix": params.mix = value
-            case "wowDepthMs": params.wowDepthMs = value
-            case "wowRateHz": params.wowRateHz = value
-            case "flutterDepthMs": params.flutterDepthMs = value
-            case "saturationDrive": params.saturationDrive = value
-            case "highCutHz": params.highCutHz = value
-            default: return
-            }
-            effect.tapeDelay = params
-        case .stereoWidth:
-            var params = effect.resolvedStereoWidth
-            switch name {
-            case "width": params.width = value
-            case "spread": params.spread = value
-            case "bassMonoHz": params.bassMonoHz = value
-            case "bassMonoAmount": params.bassMonoAmount = value
-            default: return
-            }
-            effect.stereoWidth = params
-        case .phaser:
-            var params = effect.resolvedPhaser
-            switch name {
-            case "rateHz": params.rateHz = value
-            case "centerHz": params.centerHz = value
-            case "depthOctaves": params.depthOctaves = value
-            // SNAPPED through the law — `stages` is discrete, and storing the
-            // raw 7 would make `fx.setParam`'s echo disagree with what is in
-            // force (the `RingModParams.waveform` precedent).
-            case "stages": params.stages = Double(PhaserParams.snappedStages(value))
-            case "feedback": params.feedback = value
-            case "mix": params.mix = value
-            case "stereoPhaseDeg": params.stereoPhaseDeg = value
-            default: return
-            }
-            effect.phaser = params
-        case .transientShaper:
-            var params = effect.resolvedTransientShaper
-            switch name {
-            case "attackDb": params.attackDb = value
-            case "sustainDb": params.sustainDb = value
-            case "attackMs": params.attackMs = value
-            case "sustainMs": params.sustainMs = value
-            case "outputDb": params.outputDb = value
-            case "mix": params.mix = value
-            default: return
-            }
-            effect.transientShaper = params
-        case .freqShifter:
-            var params = effect.resolvedFreqShifter
-            switch name {
-            case "shiftHz": params.shiftHz = value
-            case "fineHz": params.fineHz = value
-            case "stereoSpreadHz": params.stereoSpreadHz = value
-            case "mix": params.mix = value
-            case "outputDb": params.outputDb = value
-            default: return
-            }
-            effect.freqShifter = params
-        case .clipper:
-            var params = effect.resolvedClipper
-            switch name {
-            case "driveDb": params.driveDb = value
-            case "ceilingDb": params.ceilingDb = value
-            case "mode": params.mode = value
-            case "oversampling": params.oversampling = value
-            case "mix": params.mix = value
-            case "outputDb": params.outputDb = value
-            default: return
-            }
-            effect.clipper = params
-        case .dynamicEQ:
-            // m39-af — 32 names through the ONE name↔field home in DAWCore
-            // rather than a fourth hand-copied 32-case switch. `setValue`
-            // returns false for an unknown name, which is this switch's `return`
-            // (leave the descriptor untouched); `setEffectParam` has already
-            // clamped `value` to the spec range.
-            var params = effect.resolvedDynamicEQ
-            guard params.setValue(value, forParamName: name) else { return }
-            effect.dynamicEQ = params
-        case .audioUnit:
-            // Unreachable: specs(for: .audioUnit) is empty, so name validation
-            // in setEffectParam rejects every name first. AU params are not
-            // on the generic surface in v0.
-            return
-        }
     }
 
     /// Sets the built-in instrument for an INSTRUMENT track. PARTIAL update for
@@ -4555,6 +4156,13 @@ public final class ProjectStore {
         engine?.clipStretchStatus(trackID: trackID, clipID: clipID)
     }
 
+    /// p2-ren Stage B′ (nil when running headless) — surfaced in snapshots as
+    /// the transient `renderAudible` field, beside `stretchRendering` /
+    /// `stretchError` above.
+    public func renderAudible(trackID: UUID, clipID: UUID) -> ClipRenderAudible? {
+        engine?.renderAudible(trackID: trackID, clipID: clipID)
+    }
+
     // MARK: - Insert-effect latency (engine forwarders)
 
     /// Fixed latency of one live insert-effect instance as the engine reports
@@ -4913,10 +4521,15 @@ public final class ProjectStore {
         }
         let ordered = MIDINote.canonicallyOrdered(reclamped)
 
-        // Decide the grow BEFORE the edit opens — `ClipAutoExtend` is pure, and
-        // the meter is sampled at the clip's start exactly as the piano roll
-        // samples it for its own bar lines (`ContentView`: `beatsPerBar(atBeat:
-        // clip.startBeat)`), so the new end lands on a line the user can see.
+        // Decide the grow BEFORE the edit opens — `ClipAutoExtend` is pure. It
+        // is handed the clip's place in the SONG (its start beat and the song's
+        // meter map) because the piano roll draws the SONG's bar lines
+        // (`PianoRollSongGrid`, m23-ap I5-F2): the new end lands on the next of
+        // those lines, where the user can see it. Bars counted from the clip's
+        // first beat put it BETWEEN two drawn lines for a clip that starts off a
+        // bar line (m23-ap AX). A clip that starts on a bar line gets exactly
+        // the length it always got; in a song whose meter changes, bars are
+        // still counted from the clip's start (`ClipAutoExtend.songBarPhase`).
         let clip = tracks[t].clips[c]
         // ⚠️ m25-a-2 — `.map { … } ?? .notNeeded`, NOT `.flatMap`, AND THE
         // DIFFERENCE IS THE FEATURE. `coverage` returns nil when `extendToCover`
@@ -4931,7 +4544,8 @@ public final class ProjectStore {
                     currentLengthBeats: clip.lengthBeats,
                     coveringOnsetBeat: span.onsetBeat,
                     coveringEndBeat: span.endBeat,
-                    beatsPerBar: transport.meterMap.beatsPerBar(atBeat: clip.startBeat),
+                    clipStartBeat: clip.startBeat,
+                    meterMap: transport.meterMap,
                     maxLengthBeats: trailingHeadroom(trackIndex: t, clipIndex: c))
             } ?? .notNeeded
         lastAutoExtendOutcome = outcome
@@ -5476,6 +5090,10 @@ public final class ProjectStore {
         // in SOURCE seconds (`splitSeconds / ratio`, C2-0), because ii-d maps
         // `startOffsetSeconds` back through × ratio at schedule time. Until
         // C2-0 this comment said the offset math needed no change; it did.
+        // Lyrics (p2-sing-d1b): the words go with the notes they start on
+        // (`ClipLyrics.WordPlacement`), the rule the notes above follow.
+        let lyricsHalves = ClipLyrics.WordPlacement(clip: clip, tempoMap: transport.tempoMap)?
+            .split(atClipBeat: relBeat)
         let first = Clip(
             id: clip.id, name: clip.name,
             startBeat: clip.startBeat, lengthBeats: firstLength,
@@ -5505,7 +5123,8 @@ public final class ProjectStore {
             // only ever evaluated over the source window a half actually plays,
             // so an out-of-window segment costs nothing, and a split is
             // reversible by re-joining while discarded tuning is not.
-            pitchEdits: clip.pitchEdits)
+            pitchEdits: clip.pitchEdits,
+            lyrics: lyricsHalves?.left)
         let second = Clip(
             id: UUID(), name: clip.name,
             startBeat: clip.startBeat + firstLength, lengthBeats: secondLength,
@@ -5520,7 +5139,8 @@ public final class ProjectStore {
             // Same verbatim carry as the first half — see the note above. This
             // is the half where a re-anchoring mistake would actually change the
             // sound, because its `startOffsetSeconds` moved.
-            pitchEdits: clip.pitchEdits)
+            pitchEdits: clip.pitchEdits,
+            lyrics: lyricsHalves?.right)
 
         performEdit("Split Clip '\(clip.name)'") {
             tracks[t].clips[c] = first
@@ -5626,7 +5246,9 @@ public final class ProjectStore {
             // accounts for. Segments outside the new window are KEPT: a trim is
             // a non-destructive window change the user can drag back open, so
             // dropping them would turn a reversible gesture into lost tuning.
-            pitchEdits: clip.pitchEdits)
+            pitchEdits: clip.pitchEdits,
+            // Lyrics (p2-sing-d1b): a trim keeps the text exactly.
+            lyrics: clip.lyrics)
 
         performEdit(label, key: key) {
             tracks[t].clips[c] = rebuilt
@@ -6567,7 +6189,11 @@ public final class ProjectStore {
             // `deleteBars` re-mint their SPLIT-OFF TAILS through here, and those
             // REPLACE the original clip — so an omission is real data loss, not
             // just an untuned copy.
-            pitchEdits: clip.pitchEdits)
+            pitchEdits: clip.pitchEdits,
+            // Lyrics (p2-sing-d1b): a copy keeps the text exactly. The bar
+            // insert/delete tails re-minted here are re-shared by
+            // `ClipLyrics.distribute` in `clipAfterInsert` / `clipAfterDelete`.
+            lyrics: clip.lyrics)
     }
 
     /// Duplicates a clip (m15-d) — a VALUE-COPY of everything (`reidentified`)
@@ -6705,7 +6331,9 @@ public final class ProjectStore {
             // user's tuning). Reached by the overlap-resolution choke point, so
             // an omission here loses tuning on a STATIONARY clip the user never
             // touched — the worst shape this bug can take.
-            pitchEdits: clip.pitchEdits)
+            pitchEdits: clip.pitchEdits,
+            // Lyrics (p2-sing-d1b): a trim keeps the text exactly.
+            lyrics: clip.lyrics)
     }
 
     /// Resolves how one STATIONARY same-track clip must change so it no longer
@@ -7054,7 +6682,8 @@ public final class ProjectStore {
         if let tail = clipTrimmedToWindow(clip, newStart: pivot, newLength: end - pivot, tempoMap: tempoMap) {
             pieces.append(reidentified(tail, id: UUID(), startBeat: pivot + delta))
         }
-        return pieces
+        // Lyrics (p2-sing-d1b): a straddling clip is a split in disguise.
+        return ClipLyrics.distribute(pieces, cutFrom: clip, atClipBeat: pivot - start, tempoMap: tempoMap)
     }
 
     /// The 0, 1, or 2 clips that replace `clip` under a delete of
@@ -7083,7 +6712,9 @@ public final class ProjectStore {
             let tailID = pieces.isEmpty ? clip.id : UUID()
             pieces.append(reidentified(tail, id: tailID, startBeat: deleteEnd - delta))
         }
-        return pieces
+        // Lyrics (p2-sing-d1b): head AND tail is a split at the delete's start;
+        // the words inside the deleted range go with the tail, a trim.
+        return ClipLyrics.distribute(pieces, cutFrom: clip, atClipBeat: deleteStart - start, tempoMap: tempoMap)
     }
 
     /// Automation-point shift for an insert: a point at/after `pivot` moves right
@@ -7719,6 +7350,10 @@ public final class ProjectStore {
             masterVolume: masterVolume,
             masterEffects: masterEffects,  // MASTERED class (m13-d, design §2)
             masterAutomation: masterAutomation,  // rides the class (m15-c)
+            // …and so does the master strip's modulation (m39-e-2): an LFO or
+            // macro on the master fader is part of the song the user exports.
+            masterModulationSources: masterModulationSources,
+            masterModulationRoutes: masterModulationRoutes,
             fromBeat: startBeat,
             durationSeconds: duration,
             to: url,

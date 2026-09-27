@@ -118,7 +118,7 @@ function lastLogLine(): any {
 // Instrumentation coverage (both registration paths)
 // ---------------------------------------------------------------------------
 
-test("both registration paths are instrumented: 249 total, empty symmetric difference vs tools/list", async () => {
+test("both registration paths are instrumented: 261 total, empty symmetric difference vs tools/list", async () => {
   const instrumented = instrumentedToolNames();
   // m34-l: 208 -> 209 with `play_sustain`.
   // m34-h-1: 209 -> 216 with the seven-verb `looper_*` LIVE LOOPING family.
@@ -174,7 +174,59 @@ test("both registration paths are instrumented: 249 total, empty symmetric diffe
   // I1 wire leg MCP mirror (2026-09-25, mcp-integration-engineer part 2 of
   // 2): 248 -> 249 with `clip_audition_note`, through the wrapper (the
   // note_audition precedent) — instrumented the same way.
-  assert.equal(instrumented.length, 249, `expected 249 instrumented registrations, got ${instrumented.length}`);
+  // UB-2 MCP mirror (2026-09-25, mcp-integration-engineer): 249 -> 250 with
+  // `clip_find_unpitched_sounds`, through the wrapper (the
+  // `clip_auto_correct_pitch` precedent — real, typo-worth-catching
+  // `clipId`/`marginDb` params) — instrumented the same way, both
+  // registration paths running through the same patched
+  // `server.registerTool` underneath.
+  // NT-W MCP mirror (2026-09-25, mcp-integration-engineer): 252 -> 257 with
+  // `clip_set_note_formant`/`clip_set_formant_correction`/
+  // `clip_set_note_transition`/`clip_set_pitch_transition_smoothness`/
+  // `clip_set_note_glide_follow`, all five through the wrapper (the
+  // `clip_set_note_vibrato`/`clip_set_note_vibratos` precedent) —
+  // instrumented the same way, both registration paths running through the
+  // same patched `server.registerTool` underneath. The same close's
+  // additive `formantCorrection`/`transitionSlopeCentsPerSecond`/
+  // `predatesNaturalTuning` (set-level) and `transitionOutMs`/`glideFollow`/
+  // `joinToNext`/`effectiveTransitionMs` (per-note) on `clip_get_pitch_edits`
+  // add zero, being fields on an already-instrumented tool.
+  // C5a-3/NT-L3 MCP mirror (2026-09-25, mcp-integration-engineer): 250 -> 252
+  // with `clip_set_note_vibrato` and its batch twin `clip_set_note_vibratos`,
+  // both through the wrapper (the `clip_set_note_pitch`/`clip_set_note_pitches`
+  // precedent pair) — instrumented the same way, both registration paths
+  // running through the same patched `server.registerTool` underneath. The
+  // same close's additive `vibratoPhaseAnchorSeconds`/`heardVibratoRateHz`
+  // (`clip_get_pitch_edits`) and per-note `wobble` reading
+  // (`clip_get_played_pitch`) add zero, being fields on already-instrumented
+  // tools.
+  // C5b-3b MCP mirror (2026-09-26, mcp-integration-engineer): 258 -> 259
+  // with `clip_set_note_shape`, through the wrapper (the
+  // `clip_set_note_glide_follow` precedent) — instrumented the same way.
+  // Additive per-segment `shape` on `clip_get_pitch_edits` adds zero.
+  // NT-W over NT-C C2 MCP mirror (2026-09-25, mcp-integration-engineer):
+  // 257 -> 258 with `clip_set_consonant_protection`, through the wrapper
+  // (the `clip_set_note_glide_follow` precedent) — instrumented the same
+  // way. Additive `keepConsonantsUntuned`/`consonantProtection` on
+  // `clip_get_pitch_edits` add zero. Built, mirrored and instrumented ahead
+  // of the render mix landing — NT-E2 has SINCE LANDED (2026-09-26) and the
+  // mix is live in the product render.
+  // W7-WIRE2 MCP mirror (2026-09-27, mcp-integration-engineer): 260 -> 261
+  // with `clip_set_note_shapes`, through the wrapper (the
+  // `clip_set_note_shape` precedent) — instrumented the same way, both
+  // registration paths running through the same patched
+  // `server.registerTool` underneath. The same close's additive
+  // `consonantsOffByChoice` (`clip_get_pitch_edits`) and `formantCorrection`
+  // argument (`clip_auto_correct_pitch`) add zero, being additions to
+  // already-instrumented tools.
+  // X4 MCP mirror (2026-09-27, mcp-integration-engineer): 259 -> 260 with
+  // `clip_upgrade_natural_tuning`, through the wrapper (the
+  // `clip_set_consonant_protection` precedent) — instrumented the same way.
+  // Additive text on `clip_get_pitch_edits`' `predatesNaturalTuning` field
+  // (which per-note verbs upgrade a legacy vocal, and that this tool does
+  // the same without one) adds zero, being a description change on an
+  // already-instrumented tool.
+  assert.equal(instrumented.length, 261, `expected 261 instrumented registrations, got ${instrumented.length}`);
 
   const listed = await client.listTools();
   const listedNames = new Set(listed.tools.map((t) => t.name));

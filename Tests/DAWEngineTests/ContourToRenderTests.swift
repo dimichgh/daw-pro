@@ -126,7 +126,10 @@ struct ContourToRenderTests {
 
     /// The pre-contour key formula, VERBATIM — the golden every clip that
     /// needs no contour must still hit, and the key every contour clip's
-    /// FALLBACK must still live at.
+    /// FALLBACK must still live at. Plus p2-acc's `pv:` field, a SEPARATE and
+    /// deliberate re-key (the transposer's audio changed, so a transposed or
+    /// edited render — this fallback included — must not answer to its old key;
+    /// since vendored patch 0003, a 0-st render within ±5 % of ratio 1 too).
     static func preContourKey(source: URL, ratio: Double, semitones: Double,
                               formant: Bool, edits: PitchEditSet?) throws -> String {
         let path = source.standardizedFileURL.path
@@ -140,6 +143,9 @@ struct ContourToRenderTests {
         ]
         let digest = PitchEditSetDigest.hex(edits)
         if !digest.isEmpty { fields.append("pitch:" + digest) }
+        if semitones != 0 || !digest.isEmpty || StretchRenderCache.phaseVocoderNearUnity(ratio) {
+            fields.append("pv:\(StretchRenderCache.transposeEngineVersion)")
+        }
         var hasher = SHA256()
         for field in fields {
             hasher.update(data: Data(field.utf8))
@@ -227,6 +233,7 @@ struct ContourToRenderTests {
         hasherFields += [String(1.0.bitPattern), String(0.0.bitPattern), "0",
                          String(StretchRenderCache.stretchEngineVersion),
                          "pitch:" + PitchEditSetDigest.hex(Self.hardTuneSet()),
+                         "pv:\(StretchRenderCache.transposeEngineVersion)",
                          "contour:" + (try PitchContourCache.key(source: source, detector: .product)),
                          "shaping:\(PitchRenderContour.shapingVersion)"]
         #expect(product.resolved == StretchRenderCache.keyDigest(hasherFields))
@@ -532,15 +539,28 @@ struct ContourToRenderTests {
                     .contains("planted detector failure") == true,
                 "the fallback plays and nothing says why")
 
-        // BYTE-IDENTICAL to what the pre-contour code rendered for this set.
+        // BYTE-IDENTICAL to what the pre-contour code rendered for this set:
+        // the pre-contour CURVE (contour nil), with the set's formant curve,
+        // which the product applies since NT-E1b (an auto-corrected set is
+        // seeded with `newSetFormantCorrection`, so it engages).
         let legacyPlan = try #require(StretchCurvePlan.make(
             editSet: hard, clipPitchShiftSemitones: 0, sampleRate: Self.sampleRate, ratio: 1))
         #expect(legacyPlan.curve.unresolvedShapingSegmentIDs.count == hard.segments.count)
-        let legacy = try OfflineStretcher.stretchTransposeCurve(
+        var legacy = try OfflineStretcher.stretchTransposeCurve(
             input: [input], sampleRate: Self.sampleRate, ratio: 1,
             semitonesAtOutputFrame: { legacyPlan.semitones(atOutputFrame: $0) },
             formantPreserve: false,
+            formant: legacyPlan.formantCurve(formantPreserve: false),
             compensation: OfflineStretcher.curveLatencyCompensation(sampleRate: Self.sampleRate))[0]
+        // Natural tuning §2 (NT-E2): the render body then mixes the source
+        // back into the gaps of a set that keeps consonants untuned (an
+        // auto-corrected set is seeded so), under the render's own gate.
+        if StretchCurvePlan.consonantMixActive(params) {
+            var mixed = [legacy]
+            try StretchCurvePlan.applyConsonantMix(hard.consonantRegions(), wet: &mixed, dry: [input],
+                                                   sampleRate: Self.sampleRate, ratio: 1)
+            legacy = mixed[0]
+        }
         let committed = try TestSignals.readFile(fell)[0]
         #expect(committed.count == legacy.count)
         var differing = 0
@@ -671,18 +691,35 @@ struct ContourToRenderTests {
 
     /// ⭐ **THE BORING INVARIANCE CONTROL — historically the one that catches
     /// the bug.** `vibratoScale: 0` on ONE note of three flattens THAT note in
-    /// the product render and leaves its neighbours' wobble alone.
+    /// the product render and leaves its neighbours' wobble alone. The edited
+    /// note (note 2 / B3, `driftScale` left at its default 1) is an
+    /// UNEQUAL-scale note, so since W7-C3 (2026-09-27) it takes the v2
+    /// triangular separator (L 0.16 s truncate), not v1's 250 ms boxcar — the
+    /// v1 mechanism below is dated history, not what this render does today.
     ///
-    /// **Measured 2026-09-24:** the edited note (B3, ±45 c at 5.5 Hz) comes
-    /// back 31.35 → 20.57 c — a 34 % cut, not Hard Tune's ~50 %, and that is
-    /// understood rather than tolerated: with `driftScale` left at 1 the
-    /// 250 ms drift separator hands 121 % of a 5.5 Hz wobble to "vibrato",
-    /// and at B3 SwiftF0 reads 97 % of the depth, so the curve over-corrects;
-    /// the same edit at A3, where the detector reads 80 %, cuts 56 %
-    /// (`PitchRenderContour.shapingVersion`'s doc carries the sweep). The
-    /// neighbours come back 0.00 c from where they were, in wander AND centre.
-    /// The bound below is set from that measurement with margin; the planted
-    /// no-contour defect leaves the note at ~0 % and fails it.
+    /// **v1, measured 2026-09-24:** the edited note (B3, ±45 c at 5.5 Hz) came
+    /// back 31.35 → 20.57 c — a 34 % cut, not Hard Tune's ~50 %, and that was
+    /// understood rather than tolerated: with `driftScale` left at 1 the 250 ms
+    /// drift separator hands 121 % of a 5.5 Hz wobble to "vibrato", and at B3
+    /// SwiftF0 reads 97 % of the depth, so the curve over-corrected; the same
+    /// edit at A3, where the detector reads 80 %, cut 56 %.
+    ///
+    /// ⚠️ **Neither 09-24 figure reproduces even under v1 any more** — W7-C3
+    /// measured (2026-09-27, before its own v2 install) this SAME fixture
+    /// cutting only 26–31 % at B3 and 44–46 % at A3: the RENDERER changed
+    /// between the two dates, the separator arithmetic did not
+    /// (`PitchCorrection.swift`'s `shapingVersion` doc carries both dates).
+    ///
+    /// **v2, MEASURED here (W7-STX, 2026-09-27; `engagesFormantCurve` is
+    /// printed and false — no formant base on this render):** the edited note
+    /// comes back 31.35 → 17.68 c — a 44 % cut. A3, cross-referenced from
+    /// `ContourShapingSweepTests` under `CONTOUR_SWEEP=1` (a different, longer
+    /// fixture, same run): 48–51 % depending on sub-case. The neighbours still
+    /// come back ~0.00 c from where they were, in wander AND centre (measured:
+    /// note 1 and note 3 both 0 % cut here). The bound below is set with
+    /// margin under every one of these measurements; the planted no-contour
+    /// defect leaves the note at ~0 % and fails it. See `docs/ROADMAP.md`
+    /// "W7-C3: drift/wobble separator v2 DONE".
     @Test("§3 vibratoScale 0 on one note flattens that note and leaves its neighbours alone")
     @MainActor
     func oneNoteVibratoScaleZero() async throws {
@@ -727,10 +764,13 @@ struct ContourToRenderTests {
         let after = PitchWanderMeter.readNotes(rendered.audio, sampleRate: Self.sampleRate,
                                                segments: set.segments)
         try #require(before.count == 3 && after.count == 3)
+        Self.log("engagesFormantCurve \(set.engagesFormantCurve) (whether this render carries a formant base)")
         for i in 0..<3 {
-            Self.log(String(format: "note %d (%@): wander %.2f -> %.2f c, centre %.2f -> %.2f Hz",
+            let cutPercent = before[i].spreadCents > 0
+                ? (1 - after[i].spreadCents / before[i].spreadCents) * 100 : 0
+            Self.log(String(format: "note %d (%@): wander %.2f -> %.2f c (%.0f%% cut), centre %.2f -> %.2f Hz",
                             i + 1, (i == 1 ? "vibratoScale 0" : "untouched") as NSString,
-                            before[i].spreadCents, after[i].spreadCents,
+                            before[i].spreadCents, after[i].spreadCents, cutPercent,
                             before[i].medianHz, after[i].medianHz))
         }
         // The edited note is flattened (measured 34 %; the bound is 20 %)…
@@ -789,9 +829,25 @@ struct ContourToRenderTests {
             lookups.append((lookup, plan.semitones(atOutputFrame: lookup)))
             outFrame += interval
         }
-        let exact = try OfflineStretcher.stretchTransposeCurve(
-            input: [input], sampleRate: Self.sampleRate, ratio: 1, curve: lookups,
-            formantPreserve: false, compensation: compensation)[0]
+        // The array entry's own step lookup, through the closure entry, so
+        // the harness can also be fed the set's formant curve: the product
+        // applies it since NT-E1b (the auto-corrected set is seeded with
+        // `newSetFormantCorrection`). Pitch-only, the two entries are one loop.
+        var exact = try OfflineStretcher.stretchTransposeCurve(
+            input: [input], sampleRate: Self.sampleRate, ratio: 1,
+            semitonesAtOutputFrame: { OfflineStretcher.transposeCurveValue(lookups, at: $0) },
+            formantPreserve: false, formant: plan.formantCurve(formantPreserve: false),
+            compensation: compensation)[0]
+        // Natural tuning §2 (NT-E2): the render body's consonant mix, under
+        // its own gate (the auto-corrected set keeps consonants untuned).
+        let productParams = StretchRenderCache.Params(
+            clip: Clip(name: "sung", audioFileURL: source, pitchEdits: hard))
+        if StretchCurvePlan.consonantMixActive(productParams) {
+            var mixed = [exact]
+            try StretchCurvePlan.applyConsonantMix(hard.consonantRegions(), wet: &mixed, dry: [input],
+                                                   sampleRate: Self.sampleRate, ratio: 1)
+            exact = mixed[0]
+        }
         var exactDiffering = 0
         for (a, b) in zip(exact, product.audio) where a.bitPattern != b.bitPattern {
             exactDiffering += 1

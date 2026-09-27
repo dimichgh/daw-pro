@@ -415,3 +415,46 @@ test("project_snapshot teaches the m22-e per-effect gainReductionDb meter (addit
   );
   assert.match(description, /masterEffects/, "teaches that master inserts carry it too");
 });
+
+test("project_snapshot teaches the p2-ren Stage B′ renderAudible field and clip-render-preview notice (additive)", () => {
+  // Stage B′ rides two ADDITIVE surfaces the bijection above can't see: a new
+  // per-clip snapshot field (`renderAudible`) and a new notice code
+  // (`clip-render-preview`) alongside the existing Stage A pair
+  // (`clip-stretch-pending` / `clip-render-previous`). The tool description is
+  // the agent's only manual for both — pin the teaching here, the same way
+  // gainReductionDb is pinned above.
+  const snapshot = tools.find((t) => t.name === "project_snapshot");
+  assert.ok(snapshot, "project_snapshot tool exists");
+  const description = snapshot!.description ?? "";
+  assert.match(description, /`renderAudible`/, "teaches the renderAudible field name");
+  assert.match(
+    description,
+    /`exact`.*`preview`.*`previous`.*`silent`/s,
+    "teaches all four renderAudible values, in the wire's own order"
+  );
+  assert.match(description, /clip-render-preview/, "teaches the clip-render-preview notice code");
+  assert.match(description, /clip-render-previous/, "still teaches the Stage A clip-render-previous code");
+  assert.match(description, /clip-stretch-pending/, "still teaches the honest-silence code");
+  assert.match(description, /stretchRendering/, "still teaches stretchRendering — a different axis (the FINAL job), not replaced by renderAudible");
+});
+
+test("clip_set_note_pitch and clip_auto_correct_pitch teach the clip-render-preview notice (a note/preset edit's dirty span usually fits Stage B's cap)", () => {
+  const notePitch = tools.find((t) => t.name === "clip_set_note_pitch");
+  const autoCorrect = tools.find((t) => t.name === "clip_auto_correct_pitch");
+  assert.ok(notePitch, "clip_set_note_pitch tool exists");
+  assert.ok(autoCorrect, "clip_auto_correct_pitch tool exists");
+  assert.match(notePitch!.description ?? "", /clip-render-preview/);
+  assert.match(autoCorrect!.description ?? "", /clip-render-preview/);
+});
+
+test("clip_stretch_to_length teaches it NEVER gets a preview or a bridge (a ratio change always moves the time base)", () => {
+  // Control for the test above: clip_stretch_to_length ALWAYS scales the
+  // stretch ratio, so RenderDiff never even considers it (the time base
+  // itself changed) — it must keep saying so, not gain a false "preview"
+  // claim by copy-paste drift the next time this file is touched.
+  const stretchToLength = tools.find((t) => t.name === "clip_stretch_to_length");
+  assert.ok(stretchToLength, "clip_stretch_to_length tool exists");
+  const description = stretchToLength!.description ?? "";
+  assert.match(description, /never `clip-render-previous`|never a previous version/i);
+  assert.doesNotMatch(description, /clip-render-preview/);
+});

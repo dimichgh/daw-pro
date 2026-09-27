@@ -226,6 +226,27 @@ struct RepeatNotesTests {
         #expect(survivor?.lengthBeats == 4)
     }
 
+    // MARK: - 6b. m23-ap AX — the SONG's bar line
+
+    /// Repeat runs the same rule, and its REPORT (what the wire's
+    /// `clip.repeatNotes` reply carries as `clipLengthBeats`) says so: a clip at
+    /// song beat 2 in 4/4 with one copy at local 4…5 (song 6…7) grows to local 6
+    /// (song 8), not local 8 (song 10).
+    @Test("m23-ap AX — a repeat past an OFF-bar clip's end grows it to the SONG's next bar line, and the report says so")
+    func offBarRepeatGrowsToTheSongsBarLine() throws {
+        let store = ProjectStore()
+        let track = store.addTrack(kind: .instrument)
+        let clip = try store.addMIDIClip(toTrack: track.id, atBeat: 2, lengthBeats: 4,
+                                         notes: [MIDINote(pitch: 60, startBeat: 0, lengthBeats: 1)])
+        let report = try store.repeatNotes(clipID: clip.id, fromBeat: 0, toBeat: 1,
+                                           periodBeats: 4, count: 1, extendClip: true)
+        #expect(report.extended == true)
+        #expect(report.extendRefusal == nil)
+        #expect(report.clipLengthBeats == 6)
+        #expect(report.latentNotesPastClipEnd == 0)
+        #expect(store.tracks[0].clips.first { $0.id == clip.id }?.lengthBeats == 6)
+    }
+
     // MARK: - 7. extendClip: false
 
     @Test("extendClip: false — length unchanged, notes still stored (m18-f legal-but-latent), latent count reported")

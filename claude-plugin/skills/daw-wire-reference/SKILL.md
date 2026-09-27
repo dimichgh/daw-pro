@@ -74,14 +74,21 @@ by re-running the decomposition below, whose arithmetic then matched a live
 — the generated plugin bundle itself, `claude-plugin/server/index.mjs`, is a
 RELEASE-STEP regen this item did NOT run; treat the bundle as stale until
 that regen happens, the `daw-pro-project` §2026-09-20s precedent**) —
-**249 (42 direct + 207 wrapper, MEASURED 2026-09-25 at the I1 wire leg
+**250 (42 direct + 208 wrapper, MEASURED 2026-09-25 at the UB-2 close
+(mcp-integration-engineer), by the same two anchored name-capturing
+regexes — `^server\.registerTool($` / `^registerTool($` —
+`clip_find_unpitched_sounds`, positive control present in the wrapper
+set, a bogus name absent from both sets, 0 duplicates either side; NOT a
+plugin release — `claude-plugin/server/index.mjs` and the agent
+allowlists stay at 0.17.0/249 until the release lane regenerates them)**;
+it was 249 (42 direct + 207 wrapper, MEASURED 2026-09-25 at the I1 wire leg
 close (mcp-integration-engineer, part 2 of 2), by the same two anchored
 name-capturing regexes — `^server\.registerTool($` / `^registerTool($` —
 `clip_audition_note`, positive control present in the wrapper set, a
 bogus name absent from both sets, 0 duplicates either side; THIS close
 DOES run the release-step regen — see the release note below for 0.17.0,
 so `claude-plugin/server/index.mjs` moves too, unlike every prior entry
-in this chain)**; it was 248 (42 + 206, MEASURED 2026-09-24/25 at the I4
+in this chain) before that; it was 248 (42 + 206, MEASURED 2026-09-24/25 at the I4
 wire leg close, part 1 of 2 — `clip_set_note_pitches` — and STILL a
 RELEASE-STEP regen that item did NOT run: `claude-plugin/server/index.mjs`
 stayed at 247 (42 + 205) until this close) before that; it was 247
@@ -95,12 +102,12 @@ before the drum
 machine, with a
 negative control (a name that is not a tool) correctly absent. The bijection
 test, `mcp-server/test/audit-tools.test.ts`, defines
-`tool count = commands + |exception table B| + |exception table C|` — **244**
-MIRRORED commands (243 + `clip_audition_note`) + 3 Table-B tools with no backing command at all
+`tool count = commands + |exception table B| + |exception table C|` — **245**
+MIRRORED commands (244 + `clip_find_unpitched_sounds`) + 3 Table-B tools with no backing command at all
 (`generate_image`, `generate_lyrics`, `generate_song_suno` — they call a
 generation provider directly) + 2 Table-C tools that bridge to an EXISTING
 command, `track.setInstrument`, under a friendlier name/shape
-(`instrument_set_sampler_param`, `instrument_set_sampler_zones`) = **249**.
+(`instrument_set_sampler_param`, `instrument_set_sampler_zones`) = **250**.
 ✅ **CLOSED, the pitch-editor command-surface door (2026-09-24,
 `docs/design/2026-09-22-pitch-editor-ui.md` §9): the pane had no command
 door at all — no way to open it, read it, or edit a note over the wire.
@@ -203,15 +210,79 @@ for all nine, the direct-vs-wrapper strictness split, the nested-strict-gap
 closure on `target` (the discriminated union) and `params` (the m30-c
 precedent), and every one of those verbatim carries.
 ⚠️ The authoritative pins are `mcp-server/test/integration.test.ts`'s
-`assert.equal(result.tools.length, 249)` and `mcp-server/test/mcp-log.test.ts`'s
-`assert.equal(instrumented.length, 249)` — **NOT** a `grep -c 'registerTool('`,
+`assert.equal(result.tools.length, 261)` and `mcp-server/test/mcp-log.test.ts`'s
+`assert.equal(instrumented.length, 261)` (bumped from 260 at the W7-WIRE2 close,
+2026-09-27, which itself was bumped from 259 at the X4 close, 2026-09-27, which
+itself was bumped from 258 at the C5b-3b close, 2026-09-26, which itself was
+bumped from 257 at the NT-W over
+NT-C C2 close, 2026-09-25) — **NOT** a `grep -c 'registerTool('`,
 which is a known liar on this file and previously anchored this paragraph at a
 stale 194) and
 `Sources/DAWControl/Commands.swift`
-(**244 commands** — the `CommandRouter.allCommands.count == 244` pin in
-`Tests/DAWControlTests/RenderCommandTests.swift`, and in eighteen sibling
-files — **twenty pin lines across nineteen files** (one file carries two),
-counted 2026-09-19 at the m39-f close, re-measured 2026-09-22 at the m23-q
+(**256 commands** — re-measured 2026-09-27 at W7-WIRE2 (mcp-integration-engineer):
+headline moved 255 -> 256, ONE verb (`clip.setNoteShapes`, the BATCH twin of
+`clip.setNoteShape` over the SAME `ProjectStore.setClipNoteShapes` the single
+verb already calls), placed
+next to `clip.setNoteShape` in the same per-note pitch-editor door cluster,
+NOT at the tail. MEASURED by direct census, not assumed: `grep -rnoE
+"[A-Za-z_]+\.count == 256\b" Tests/` (positive-controlled — the same pattern
+against the retired value 255 returns nothing) finds **19 pin lines across 18
+files** — the SAME shape as the prior census (only the target number moved;
+no pin site was added or removed this close). The same close also gave
+`clip.autoCorrectPitch` an optional `formantCorrection` argument and
+`clip.getPitchEdits` a new `consonantsOffByChoice` boolean — neither is a new
+verb, so neither moves this count. Previously re-measured 2026-09-27 at X4 (mcp-integration-engineer):
+headline moved 254 -> 255, ONE verb (`clip.upgradeNaturalTuning`, natural
+tuning's ONE upgrade path over `ProjectStore.upgradeToNaturalTuning`), placed
+next to `clip.setNoteShape` in the same per-note pitch-editor door cluster,
+NOT at the tail. MEASURED by direct census, not assumed: `grep -rnoE
+"[A-Za-z_]+\.count == 255\b" Tests/` (positive-controlled — the same pattern
+against the retired value 254 returns nothing) finds **19 pin lines across 18
+files** — the SAME shape as the prior census (only the target number moved;
+no pin site was added or removed this close). Previously re-measured
+2026-09-26 at C5b-3b (mcp-integration-engineer):
+headline moved 253 -> 254, ONE verb (`clip.setNoteShape`, the freehand DRAWN
+pitch-line verb over `ProjectStore.setClipNoteShapes`), placed next to
+`clip.setConsonantProtection` in the same per-note pitch-editor door cluster,
+NOT at the tail. MEASURED by direct census, not assumed: `grep -rnoE
+"[A-Za-z_]+\.count == 254\b" Tests/` (positive-controlled — the same pattern
+against the retired value 253 returns nothing) finds **19 pin lines across 18
+files**, not the "twenty pin lines across nineteen files" this paragraph
+claimed as of 2026-09-25 — 16 as `CommandRouter.allCommands.count == 254` in
+`Tests/DAWControlTests/RenderCommandTests.swift` and 14 siblings
+(`FXSpectrumCommandTests` carrying two), plus 3 more as `all.count == 254` (a
+locally-named copy of the same array) in `ClipTranscribeCommandTests`/
+`ModelLifecycleCommandTests`/`SpeechModelInstallCommandTests`, which the prior
+census had missed entirely. `Tests/DAWControlTests/ZeroParamVerbRejectionTests.swift`
+carries no literal pin at all — `sourceCallSites.count ==
+CommandRouter.allCommands.count`, a dynamic self-check, never a magic number
+— so it was never "the 20th line" the prior paragraph named. Previously
+re-measured 2026-09-25 at the NT-W over NT-C C2 close: headline moved 252 ->
+253, ONE verb (`clip.setConsonantProtection`, NT-C C2's "keep
+breaths/consonants at their own pitch" toggle), placed next to
+`clip.setNoteGlideFollow` in the same per-note pitch-editor door cluster, NOT
+at the tail; held on NT-E2 at the time — NT-E2 has since landed (2026-09-26)
+and the render mix is live; built and tested regardless. Previously re-measured at the NT-W close:
+headline moved 247 -> 252, five verbs landing together (`clip.setNoteFormant`/
+`clip.setFormantCorrection`/`clip.setNoteTransition`/
+`clip.setPitchTransitionSmoothness`/`clip.setNoteGlideFollow`), placed next to
+`clip.setNoteVibratos` in the same per-note pitch-editor door cluster, NOT at
+the tail.
+⚠️ **The MCP TOOL count above (lines 213-214) moves too, from this same
+close: `mcp-server/test/integration.test.ts`/`mcp-log.test.ts`'s hardcoded
+260 pins were bumped to 261 (one WRAPPED tool lands: `clip_set_note_shapes`,
+the BATCH twin of `clip_set_note_shape`)
+— those two test files are the authoritative, EXECUTABLE pins; this prose
+paragraph is not re-derived here and is known to rot on its own account
+(memory law: report the method, not the number). Previously bumped from 259
+to 260 (one WRAPPED tool lands: `clip_upgrade_natural_tuning`). Previously
+bumped from 258
+to 259 (one WRAPPED tool lands: `clip_set_note_shape`). Previously bumped from 257
+to 258 (one WRAPPED tool lands: `clip_set_consonant_protection`, held on
+NT-E2 at the time, since landed). Previously bumped from 252 to 257 (five WRAPPED tools land: `clip_set_note_formant`/
+`clip_set_formant_correction`/`clip_set_note_transition`/
+`clip_set_pitch_transition_smoothness`/`clip_set_note_glide_follow`).**
+Previously counted 2026-09-19 at the m39-f close, re-measured 2026-09-22 at the m23-q
 writer-leg close (231 -> 234, `clip.autoCorrectPitch`/`clip.clearPitchEdits`/
 `clip.getPitchEdits`, appended at the tail), re-measured again 2026-09-24 at
 the pitch-editor command-surface-door close (234 -> 237,
@@ -249,7 +320,18 @@ placed immediately after `clip.setNotePitches` — a deliberate departure
 from the tail-of-cluster rule, since this verb is not a per-note WRITER —
 still beside `clip.sliceToSampler`; still the same 20 pin lines across 19
 files, values only — verified by a fresh grep for the literal `243`, not
-carried over: zero remaining, 20 lines at `== 244`); ⚠️
+carried over: zero remaining, 20 lines at `== 244`), re-measured again
+2026-09-25 at the UB-2 close (mcp-integration-engineer: 244 -> 245,
+`clip.findUnpitchedSounds`, placed immediately after `clip.auditionNote`,
+in the same per-note pitch-editor-door cluster, NOT at the tail; still the
+same 20 pin lines across 19 files, values only — verified by a fresh grep
+for the literal `244`, not carried over: zero remaining, 20 lines at
+`== 245`), re-measured again 2026-09-25 at C5a-3/NT-L3 (mcp-integration-engineer:
+245 -> 247, `clip.setNoteVibrato`/`clip.setNoteVibratos` landing TOGETHER,
+placed immediately after `clip.findUnpitchedSounds`, in the same per-note
+pitch-editor-door cluster, NOT at the tail; still the same 20 pin lines
+across 19 files, values only — verified by a fresh grep for the literal
+`245`, not carried over: zero remaining, 20 lines at `== 247`); ⚠️
 three of the twenty spell it `all.count == N` and
 seventeen `allCommands.count == N`, so grep the LITERAL number, not the
 idiom)
@@ -643,7 +725,7 @@ change it between phrases or drop `mix` to 0 first.
 `flutterCents` inside that insert's `params` object: the actual peak pitch
 deviation the current `wowDepthMs`/`wowRateHz`/`flutterDepthMs` produce.
 ⚠️ They are **per-instance echoes, not schema**, so they are **not** in
-`fx.describe`, which returns `{name, min, max, default, curve, note}` and no
+`fx.describe`, which returns `{name, min, max, default, unit, curve, modulatable, note}` and no
 values at all. (`wowCents` is the UPWARD peak; the downward one is a fraction
 larger — `−1200·log2(1 − π·f·D)` — because the pitch ratio is `1 − d'(t)`.) The
 defaults give about 10.8 cents of wow (a tenth of a semitone: obvious on a
@@ -736,7 +818,7 @@ for a phaser "around 400 Hz" by setting `centerHz` and then READ the answer:
 every `fx.add` / `fx.setParam` result — and `project.snapshot` — echoes
 `notchCount` and `firstNotchHz` inside that insert's `params` object.
 ⚠️ They are **per-instance echoes, not schema**, so they are **not** in
-`fx.describe`, which returns `{name, min, max, default, curve, note}` and no
+`fx.describe`, which returns `{name, min, max, default, unit, curve, modulatable, note}` and no
 values at all.
 
 ⛔ **`phaser.stages` IS EVEN-ONLY AND SNAPS SILENTLY.** `fx.setParam {name:
@@ -833,7 +915,7 @@ is at full strength for a step onset is `attackMs × 0.28927`, so the default
 / `fx.setParam` result and `project.snapshot` echo `attackWindowMs`,
 `fullShapeDifferentialDb` and `detectorFloorDb` inside that insert's `params`
 object. ⚠️ Those are **per-instance echoes, not schema**, so they are **not** in
-`fx.describe`, which returns `{name, min, max, default, curve, note}` and no
+`fx.describe`, which returns `{name, min, max, default, unit, curve, modulatable, note}` and no
 values at all.
 
 ⛔ **NOTHING BELOW −70 dBFS IS SHAPED AT ALL** (`detectorFloorDb`), and it is a

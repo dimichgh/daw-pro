@@ -37,6 +37,15 @@ public enum PitchEditorPressHit: Sendable, Equatable {
     /// every gesture path carried before I0), stated as an input so `.none` is a
     /// real row of the truth table rather than a dead case.
     case inert
+    /// m23-ap C5a-4b — the Wobble tool's DOT on a note, by `NoteSegment.id`:
+    /// within `PitchWobbleGesture.knobHitRadius` of the dot at the note's top
+    /// centre. `PitchEditorModel.pressHit(at:)` reports it ONLY in the Wobble
+    /// tool and only on a note that tool can grab, so every other row of the
+    /// table sees exactly the hits it saw before. ⚠️ The dot's 12 pt radius
+    /// reaches ABOVE the blob, past `hitSlop` — a press there is on the dot
+    /// although `blob(at:)` finds no note, which is why this is a hit of its
+    /// own and not a flag on `.note`.
+    case dot(UUID)
 }
 
 /// What a press on the pitch editor's surface IS — decided ONCE, on the
@@ -55,6 +64,28 @@ public enum PitchEditorPressKind: Sendable, Equatable {
     case cut
     /// Nothing on the surface can be pressed (`PitchEditorPressHit.inert`).
     case none
+    /// m23-ap C5a-4b — Wobble tool, on a note: that note's wobble, through the
+    /// DOOR the press came in by (unpitched design §4): `.dot` (the top-centre
+    /// knob: released within the slop it is ONE STEP) or `.drag` (anywhere else
+    /// on the note: released within the slop it is the house click). Past the
+    /// slop both are the same drag (`PitchWobbleSession`).
+    case wobble(UUID, door: PitchWobbleDoor)
+    /// m23-ap C5b-4b — ⌘ held AT THE PRESS, on a note, in a tool where ⌘ draws
+    /// (`PitchEditorGestureRouter.commandDraws`: Move and Wobble): the FREEHAND
+    /// BRUSH, starting on that note (design 2026-09-24 timing-and-freehand
+    /// §5.5; vibrato design §4.2, "⌘ held at mouse-down is the C5b brush in
+    /// every tool, Wobble included"). Past the slop the stroke begins at the
+    /// press point and may cross into other notes (`PitchEditorModel.trackPress`
+    /// drives it whole); released within the slop the press is the house CLICK
+    /// (⌘ on a note toggles it), exactly what a ⌘-click did before the brush.
+    case brush(UUID)
+    /// W7-NTU U3 — Voice tool, on a note: that note's VOICE (natural tuning
+    /// §1(f) item 2), once the press travels past the slop: a vertical drag,
+    /// up brighter, down deeper, the pitch never moved
+    /// (`PitchEditorModel.updateVoiceDrag`). Released within the slop it is
+    /// the house CLICK, or on a DOUBLE-click the reset to as sung (the knob
+    /// law, `PitchEditorGestureRouter.release`).
+    case formantDrag(UUID)
 
     /// Stable machine tag for the `debug.pitchEditor` echo.
     public var key: String {
@@ -63,12 +94,24 @@ public enum PitchEditorPressKind: Sendable, Equatable {
         case .band: return "band"
         case .cut: return "cut"
         case .none: return "none"
+        case .wobble: return "wobble"
+        case .brush: return "brush"
+        case .formantDrag: return "formantDrag"
         }
     }
 
-    /// The pressed note, for `.noteDrag`.
+    /// The pressed note, for `.noteDrag`, `.wobble`, `.brush` and
+    /// `.formantDrag`.
     public var noteID: UUID? {
-        if case .noteDrag(let id) = self { return id }
+        switch self {
+        case .noteDrag(let id), .wobble(let id, _), .brush(let id), .formantDrag(let id): return id
+        case .band, .cut, .none: return nil
+        }
+    }
+
+    /// The Wobble tool's door, for `.wobble` (the echo's `press.door`).
+    public var wobbleDoor: PitchWobbleDoor? {
+        if case .wobble(_, let door) = self { return door }
         return nil
     }
 }
@@ -81,22 +124,67 @@ public enum PitchEditorGestureRouter {
     /// - Parameters:
     ///   - tool: the palette's engaged tool AT PRESS.
     ///   - modifiersAtPress: the chord at press (⇧/⌘, `ArrangeClickModifiers`,
-    ///     the house click chord). ⚠️ **NO KIND DEPENDS ON IT YET, AND THE TRUTH
-    ///     TABLE PINS THAT ON PURPOSE.** It is in the signature because the kinds
-    ///     that are designed and not built do: ⌘ on a note becomes C5b-4's brush
-    ///     (past the slop), and a ⌘-press on an edge zone is C2-5's edge drag
-    ///     (design §14 (c)(i): the edge beats ⌘). ⌥ is deliberately NOT here: it
-    ///     is read PER TICK (free pitch, C1), never decided at press. ⌃ is not
-    ///     here either: macOS turns a ⌃-press into the secondary click, which is
-    ///     the context menu's (I7b), not a drag.
+    ///     the house click chord). ⭐ m23-ap C5b-4b — **⌘ IS THE ONE KEY A KIND
+    ///     DEPENDS ON, AND ONLY ON A NOTE**: ⌘ on a note (or the Wobble tool's
+    ///     dot) in a tool where ⌘ draws (`commandDraws`) is the BRUSH. ⇧ changes
+    ///     no kind; ⌘ on empty surface is still the band (its click places the
+    ///     playhead, I5); the knife ignores every chord. The truth table pins
+    ///     each of those as a literal row. Still designed and not built: a
+    ///     ⌘-press on an edge zone is C2-5's edge drag (design §14 (c)(i): the
+    ///     edge beats ⌘), a new row here when it lands. ⌥ is deliberately NOT
+    ///     here: it is read PER TICK (free pitch, C1), never decided at press. ⌃
+    ///     is not here either: macOS turns a ⌃-press into the secondary click,
+    ///     which is the context menu's (I7b), not a drag.
     ///   - hit: what is under the press point.
+    ///
+    /// m23-ap C5a-4b — the Wobble tool's rows: on a note, `.wobble` through the
+    /// door the hit names (`.dot` or anywhere else on the note, `.drag`); on
+    /// empty surface a band, as in the Move tool, so a person can still select
+    /// in the tool they are in. A `.dot` hit is only ever reported in the Wobble
+    /// tool (`PitchEditorModel.pressHit`); the Move and Split rows answer it as
+    /// they answer the note it sits on, so the table stays total.
+    ///
+    /// W7-NTU U3 — the Voice tool's rows (natural tuning §1(f) item 2): on a
+    /// note, `.formantDrag`, or the brush with ⌘ (⌘ draws in every tool but
+    /// the knife); on empty surface a band, as in the Move and Wobble tools.
+    /// A `.dot` hit never reaches it (only the Wobble tool reports one), and
+    /// it answers one as the note the dot sits on, so the table stays total.
     public static func route(tool: PitchEditorTool, modifiersAtPress: ArrangeClickModifiers,
                              hit: PitchEditorPressHit) -> PitchEditorPressKind {
+        // C5b-4b — decided with the tool, never after it: the knife's rows
+        // below never see ⌘ because `commandDraws` is false for it.
+        let draws = modifiersAtPress.contains(.command) && commandDraws(in: tool)
         switch (tool, hit) {
         case (_, .inert): return .none
         case (.scissors, _): return .cut
-        case (.pointer, .note(let id)): return .noteDrag(id)
+        case (.pointer, .note(let id)), (.pointer, .dot(let id)):
+            return draws ? .brush(id) : .noteDrag(id)
         case (.pointer, .empty): return .band
+        case (.wobble, .note(let id)): return draws ? .brush(id) : .wobble(id, door: .drag)
+        case (.wobble, .dot(let id)): return draws ? .brush(id) : .wobble(id, door: .dot)
+        case (.wobble, .empty): return .band
+        case (.voice, .note(let id)), (.voice, .dot(let id)):
+            return draws ? .brush(id) : .formantDrag(id)
+        case (.voice, .empty): return .band
+        }
+    }
+
+    /// m23-ap C5b-4b — whether ⌘ held at a press DRAWS in `tool`: the Move and
+    /// Wobble tools (vibrato design §4.2: "⌘ held at mouse-down is the C5b
+    /// brush in every tool, Wobble included"), and NOT the Split tool. The
+    /// knife is a click by definition and lands where the press began (the C3
+    /// rule); a ⌘-press there stays a cut, so a person reaching for a stroke
+    /// with the knife engaged never has it turned into a drawing, and never
+    /// the other way round. ONE home: the router's rows, the palette's help
+    /// and the brush band all ask this.
+    ///
+    /// W7-NTU U3 — the Voice tool draws too: "⌘ held at mouse-down is the C5b
+    /// brush in every tool" (vibrato design §4.2, repeated for the Drift tool
+    /// in natural tuning §3), and the knife stays the one exception.
+    public static func commandDraws(in tool: PitchEditorTool) -> Bool {
+        switch tool {
+        case .pointer, .wobble, .voice: return true
+        case .scissors: return false
         }
     }
 
@@ -126,8 +214,33 @@ public enum PitchEditorGestureRouter {
     /// - The knife is a click by definition and ignores travel: it lands where
     ///   the press BEGAN ("a hand that slipped two points during it did not mean
     ///   to move the knife", the C3 rule).
+    ///
+    /// m23-ap C5a-4b — a `.wobble` press resolves through the dot's own input
+    /// table (`PitchWobbleGesture.release`, unpitched design §4): travelled is
+    /// the end of the drag; a DOT press released inside the slop is one step,
+    /// bigger or — with ⌥ held AT RELEASE (`optionAtRelease`) — smaller; any
+    /// other press on the note released inside the slop is the house click.
+    /// ⌥ rides in its own argument because `ArrangeClickModifiers` carries ⇧
+    /// and ⌘ only (see `route`); it defaults to false, so every caller before
+    /// C5a-4b reads exactly what it did.
+    ///
+    /// m23-ap C5b-4b — a `.brush` press that travelled is the end of the stroke
+    /// (`endBrush`: one commit for every note it drew on, none for a stroke
+    /// that changed nothing); one that never left the slop is the house click,
+    /// read with the chord AT RELEASE like every other click.
+    ///
+    /// W7-NTU U3 — a `.formantDrag` press that travelled ends the Voice drag
+    /// (`endFormantDrag`: at most one commit). One that never left the slop is
+    /// the house click, unless it is the SECOND click of a double-click
+    /// (`clickCount` ≥ 2, the mouse-up's own count), which puts the note's
+    /// Voice back as sung (`formantReset`, the knob law's double-click).
+    /// Travel beats the count: a double-click that dragged is a drag.
+    /// `clickCount` defaults to 1, so every caller before U3 reads as it did,
+    /// and no other kind reads it.
     public static func release(kind: PitchEditorPressKind, travelled: Bool, origin: CGPoint,
-                               modifiersAtRelease: ArrangeClickModifiers) -> PitchEditorReleaseAction {
+                               modifiersAtRelease: ArrangeClickModifiers,
+                               optionAtRelease: Bool = false,
+                               clickCount: Int = 1) -> PitchEditorReleaseAction {
         switch kind {
         case .none:
             return .nothing
@@ -141,6 +254,21 @@ public enum PitchEditorGestureRouter {
             return travelled
                 ? .endBand
                 : .click(PianoRollGridPress.release(noteID: nil, modifiers: modifiersAtRelease))
+        case .wobble(let id, let door):
+            switch PitchWobbleGesture.release(door: door, travelled: travelled,
+                                              optionHeld: optionAtRelease) {
+            case .endDrag: return .endWobble(id)
+            case .step(let bigger): return .wobbleStep(id, bigger: bigger)
+            case .click: return .click(PianoRollGridPress.release(noteID: id, modifiers: modifiersAtRelease))
+            }
+        case .brush(let id):
+            return travelled
+                ? .endBrush(id)
+                : .click(PianoRollGridPress.release(noteID: id, modifiers: modifiersAtRelease))
+        case .formantDrag(let id):
+            if travelled { return .endFormantDrag(id) }
+            if clickCount >= 2 { return .formantReset(id) }
+            return .click(PianoRollGridPress.release(noteID: id, modifiers: modifiersAtRelease))
         }
     }
 }
@@ -161,6 +289,25 @@ public enum PitchEditorReleaseAction: Sendable, Equatable {
     case click(PianoRollGridRelease)
     /// Nothing: an inert surface, or no press in flight.
     case nothing
+    /// m23-ap C5a-4b — a wobble drag that travelled: commit it
+    /// (`PitchEditorModel.endWobbleDrag`, at most one write, none for a
+    /// gesture that plays like the stored note).
+    case endWobble(UUID)
+    /// m23-ap C5a-4b — a click on the Wobble tool's dot: ONE step, bigger, or
+    /// smaller with ⌥ (`PitchEditorModel.stepWobble`, one write).
+    case wobbleStep(UUID, bigger: Bool)
+    /// m23-ap C5b-4b — a brush stroke that travelled, begun on this note:
+    /// commit it (`PitchEditorModel.endBrush`, at most one write for every
+    /// note the stroke drew on, none for a stroke that changed nothing).
+    case endBrush(UUID)
+    /// W7-NTU U3 — a Voice drag that travelled: commit it
+    /// (`PitchEditorModel.endVoiceDrag`, at most one write, none for a drag
+    /// that ends on the stored value).
+    case endFormantDrag(UUID)
+    /// W7-NTU U3 — a double-click on a note in the Voice tool: its Voice back
+    /// as sung (`PitchEditorModel.resetVoice`, one write, none when it
+    /// already is).
+    case formantReset(UUID)
 
     /// Stable machine tag for the `debug.pitchEditor` echo.
     public var key: String {
@@ -170,6 +317,11 @@ public enum PitchEditorReleaseAction: Sendable, Equatable {
         case .cut: return "cut"
         case .click: return "click"
         case .nothing: return "nothing"
+        case .endWobble: return "endWobble"
+        case .wobbleStep: return "wobbleStep"
+        case .endBrush: return "endBrush"
+        case .endFormantDrag: return "endFormantDrag"
+        case .formantReset: return "formantReset"
         }
     }
 }
@@ -266,8 +418,15 @@ public struct PitchEditorPressTracker: Sendable, Equatable {
     /// does, and the press is over. `.nothing` when no press is in flight, or
     /// when the one in flight belongs to a DIFFERENT gesture (a stale press whose
     /// release was dropped — acting on it would commit a gesture that is over).
+    ///
+    /// `optionAtRelease` is ⌥ at the release (C5a-4b: the dot's smaller step);
+    /// defaulted, so a caller that never had one reads exactly as before.
+    /// `clickCount` is the mouse-up's click count (W7-NTU U3: the Voice tool's
+    /// double-click reset), defaulted to 1 for the same reason.
     public mutating func release(start: CGPoint, at location: CGPoint,
-                                 modifiers: ArrangeClickModifiers) -> PitchEditorReleaseAction {
+                                 modifiers: ArrangeClickModifiers,
+                                 optionAtRelease: Bool = false,
+                                 clickCount: Int = 1) -> PitchEditorReleaseAction {
         guard let press = current else { return .nothing }
         current = nil
         guard press.origin == start else { return .nothing }
@@ -275,7 +434,9 @@ public struct PitchEditorPressTracker: Sendable, Equatable {
             || PitchEditorGestureRouter.hasTravelled(from: press.origin, to: location)
         return PitchEditorGestureRouter.release(kind: press.kind, travelled: travelled,
                                                 origin: press.origin,
-                                                modifiersAtRelease: modifiers)
+                                                modifiersAtRelease: modifiers,
+                                                optionAtRelease: optionAtRelease,
+                                                clickCount: clickCount)
     }
 
     /// The gesture was abandoned (the pane went away, a clip switched).

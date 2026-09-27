@@ -23,6 +23,54 @@ import Testing
 /// entry below documents its own wiring in prose that would satisfy a naive
 /// grep — including the literal words `allCases` and `offeredInUI`, which one
 /// assertion here is specifically about.
+/// W7-NTU (W7-D2's item 3) — a `detectPitch` stub, so the replace card's
+/// store leg runs the REAL `ProjectStore.autoCorrectClipPitch`: the
+/// `ClipRenderSignatureTests` fake (itself `PitchCorrectionWriterTests`'),
+/// copied because test files cannot share a private type.
+@MainActor
+private final class TuneDoorFakeDetectEngine: AudioEngineControlling {
+    var isRunning = false
+    var meteringHandler: ((MeterFrame) -> Void)?
+    var trackMeteringHandler: ((UUID, MeterFrame) -> Void)?
+    var playheadHandler: ((Double) -> Void)?
+    var recordPermission: RecordPermission = .granted
+
+    var stubResult: PitchDetectionResult
+    var detectCalls = 0
+
+    init(stubResult: PitchDetectionResult) { self.stubResult = stubResult }
+
+    func detectPitch(inFileAt url: URL, fromSeconds: Double, durationSeconds: Double,
+                     confidenceThreshold: Double,
+                     silenceFloorDbfs: Double) async throws -> PitchDetectionResult {
+        detectCalls += 1
+        return stubResult
+    }
+
+    func prepare() throws { isRunning = true }
+    func shutdown() { isRunning = false }
+    func tracksDidChange(_ tracks: [Track]) {}
+    func startPlayback(_ transport: TransportState) {}
+    func stopPlayback() {}
+    func seek(_ transport: TransportState) {}
+    func setTempo(_ transport: TransportState) {}
+    func loopChanged(_ transport: TransportState) {}
+    func masterVolumeChanged(_ volume: Double) {}
+    func requestRecordPermission(_ completion: @escaping @MainActor (Bool) -> Void) {}
+    func availableInputDevices() -> [AudioInputDevice] { [] }
+    func setInputDevice(uid: String?) throws {}
+    func startRecording(_ transport: TransportState, to url: URL,
+                        completion: @escaping @MainActor (Result<RecordingResult, Error>) -> Void) throws {}
+    func stopRecording() {}
+    func renderMixdown(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
+                       masterEffects: [EffectDescriptor],
+                       masterAutomation: [AutomationLane],
+                       fromBeat: Double, durationSeconds: Double,
+                       to url: URL) async throws -> AudioFileInfo {
+        AudioFileInfo(durationSeconds: durationSeconds, sampleRate: 48_000, channelCount: 2)
+    }
+}
+
 @Suite("Tune Vocal door wiring (m23-ap Phase 2)")
 struct PitchTuneDoorSiteTests {
 
@@ -403,7 +451,12 @@ struct PitchTuneDoorSiteTests {
         #expect(gate.request(.tight, clipID: clip, clipName: "Lead",
                              current: Self.handEdited()) == .askFirst,
                 "a preset over hand edits applied without asking (F22)")
-        let asked = PitchPresetReplaceRequest(clipID: clip, clipName: "Lead", preset: .tight)
+        // W7-NTU — the held request carries what the preset will do to the
+        // settings, read from the set AT THE CLICK (this fixture is a vocal
+        // tuned before natural tuning: all three change).
+        let asked = PitchPresetReplaceRequest(clipID: clip, clipName: "Lead", preset: .tight,
+                                              settings: PitchPresetReplaceSettings(current: Self.handEdited()))
+        #expect(asked.settings.changed.count == 3)
         #expect(gate.pending == asked)
         #expect(gate.confirm() == asked, "Replace applied something other than what the card showed")
         #expect(gate.pending == nil)
@@ -432,9 +485,22 @@ struct PitchTuneDoorSiteTests {
         #expect(copy.body.contains("“Lead Vocal”"))
         #expect(copy.body.contains(PitchPresetReplaceCopy.handEdits))
         #expect(copy.undoNote.contains("Undo (⌘Z)"))
+        // W7-NTU (W7-D2's item 3) — every item says "any": the card also asks
+        // when only a SETTING changed since the preset, and then "the notes you
+        // moved" would claim edits nobody made.
+        #expect(PitchPresetReplaceCopy.handEdits
+                == "any note you moved or split by hand, any note you made deeper or brighter, "
+                + "any wobble you changed and any pitch line you drew")
+        #expect(!copy.body.contains("the notes you moved"))
         // ONLY what a hand can do today. A warning that lists losses nobody could
         // have made teaches people to stop reading warnings. No jargon either.
-        for word in ["timing", "drawn", "shape", "wobble", "vibrato", "segment", "cents", "preset"] {
+        // C5a-4b — "wobble" left this list when the Wobble tool shipped: a
+        // wobble is now a hand edit a preset erases (vibrato-handle V14), named
+        // in the palette's own word; "vibrato" stays banned as jargon.
+        // C5b-4b (2026-09-27) — "drawn" left this list the same way when ⌘-drag
+        // drawing shipped: a drawn pitch line is now a hand edit a preset erases.
+        // "shape" stays banned as jargon.
+        for word in ["timing", "shape", "vibrato", "segment", "cents", "preset"] {
             #expect(!copy.body.lowercased().contains(word),
                     "the card's sentence says '\(word)' — either an edit nobody can make yet, or a word a non-musician does not know")
         }
@@ -452,15 +518,188 @@ struct PitchTuneDoorSiteTests {
     @Test("C-F3 tripwire: the card names every kind of hand edit the editor's tools make")
     func replaceCopyNamesEveryEditorTool() {
         let tools = PitchEditorTool.allCases.map(\.rawValue)
-        #expect(PitchEditorTool.allCases == [.pointer, .scissors],
+        #expect(PitchEditorTool.allCases == [.pointer, .scissors, .wobble, .voice],
                 """
                 The note editor gained a tool (\(tools)). "Replace your hand edits?" \
-                still names only moves and splits: add the new edit's words to \
-                PitchPresetReplaceCopy.handEdits, then update this list.
+                still names only moves, splits, wobbles and voices: add the new edit's \
+                words to PitchPresetReplaceCopy.handEdits, then update this list.
                 """)
         #expect(PitchEditorTool.pointer.label == "Move" && PitchEditorTool.scissors.label == "Split")
+        #expect(PitchEditorTool.wobble.label == "Wobble")
+        #expect(PitchEditorTool.voice.label == "Voice")
         #expect(PitchPresetReplaceCopy.handEdits.contains("moved"))
         #expect(PitchPresetReplaceCopy.handEdits.contains("split"))
+        // C5a-4b — the Wobble tool's edit, in the palette's own word.
+        #expect(PitchPresetReplaceCopy.handEdits.contains("wobble"))
+        // W7-NTU U3 — the Voice tool's edit, by what it DOES (its help's own
+        // words): "voice" alone would read as the header's "Keep voice size",
+        // which a preset keeps.
+        #expect(PitchPresetReplaceCopy.handEdits.contains("deeper or brighter"))
+        #expect(PitchEditorGestureRouter.commandDraws(in: .voice),
+                "⌘ no longer draws in Voice: re-read what a preset erases and fix this card and this test")
+        // C5b-4b — drawing is a ⌘ MODIFIER, not a palette slot, so the list above
+        // cannot see it. Pin it here: while ⌘ draws, the card must name the line.
+        #expect(PitchEditorGestureRouter.commandDraws(in: .pointer),
+                "⌘ no longer draws in Move: re-read what a preset erases and fix this card and this test")
+        #expect(PitchPresetReplaceCopy.handEdits.contains("pitch line you drew"))
+    }
+
+    // MARK: - W7-NTU (W7-D2's item 3): the card when only a SETTING changed
+
+    /// A set with the notes of `presetOutput()` and the three settings spelled
+    /// out, stamped or not.
+    private static func settings(formant: Double?, consonants: PitchEditSet.ConsonantProtection,
+                                 slope: Double) -> PitchEditSet {
+        var set = presetOutput()
+        set.formantCorrection = formant
+        set.consonantProtection = consonants
+        set.transitionSlopeCentsPerSecond = slope
+        return set
+    }
+
+    /// Planted and seen red (W7-NTU P-card-keep): a kept voice size read as
+    /// "changes to 100%".
+    @Test("W7-D2 item 3 — what the card says about each SETTING, read from the set at the click: nothing at the preset's own values; a kept pick is said to stay; Slides back to Smooth; an old vocal's three all change")
+    func replaceCardSettingsSentences() {
+        let smooth = PitchEditSet.defaultTransitionSlope
+        func sentence(_ set: PitchEditSet) -> String {
+            PitchPresetReplaceCopy.settingsSentence(PitchPresetReplaceSettings(current: set))
+        }
+        // A preset's own values: nothing to say.
+        #expect(sentence(Self.settings(formant: 1, consonants: .on, slope: smooth)) == "")
+        #expect(PitchPresetReplaceSettings(current: nil) == .none)
+        // Each kept pick, alone and together.
+        #expect(sentence(Self.settings(formant: 0.6, consonants: .on, slope: smooth))
+                == "“Keep voice size” stays as it is.")
+        #expect(sentence(Self.settings(formant: 1, consonants: .offByChoice, slope: smooth))
+                == "“Consonants” stays as it is.")
+        #expect(sentence(Self.settings(formant: 0, consonants: .offByChoice, slope: smooth))
+                == "“Keep voice size” and “Consonants” stay as they are.")
+        // A Slides pick is not carried.
+        #expect(sentence(Self.settings(formant: 1, consonants: .on,
+                                       slope: PitchEditorSlideStep.quick.centsPerSecond))
+                == "“Slides” changes to Smooth.")
+        #expect(sentence(Self.settings(formant: 0.6, consonants: .offByChoice,
+                                       slope: PitchEditorSlideStep.slow.centsPerSecond))
+                == "“Keep voice size” and “Consonants” stay as they are. “Slides” changes to Smooth.")
+        // A vocal tuned before natural tuning: the preset seeds all three.
+        #expect(sentence(Self.settings(formant: nil, consonants: .offByDefault, slope: 0))
+                == "“Keep voice size” changes to 100%, “Consonants” to ON and “Slides” to Smooth.")
+        // …and the card carries the sentence after its note list, and no jargon.
+        let copy = PitchPresetReplaceCopy(PitchPresetReplaceRequest(
+            clipID: UUID(), clipName: "Lead", preset: .natural,
+            settings: PitchPresetReplaceSettings(current: Self.settings(
+                formant: 0.6, consonants: .on, slope: PitchEditorSlideStep.quick.centsPerSecond))))
+        #expect(copy.body.hasSuffix("any pitch line you drew. “Keep voice size” stays as it is. "
+                                    + "“Slides” changes to Smooth."))
+        for word in ["timing", "shape", "vibrato", "segment", "cents", "preset", "formant"] {
+            #expect(!copy.body.lowercased().contains(word), "the card says '\(word)'")
+        }
+    }
+
+    /// ⚠️ TRIPWIRE for "“Keep voice size” stays as it is": true only while no
+    /// preset a person can click names a voice size of its own (§1(e): a named
+    /// one beats the carried amount).
+    @Test("W7-D2 item 3 tripwire: no preset a person can click names a voice size of its own, so a kept one stays")
+    func noOfferedPresetNamesAVoiceSize() {
+        for preset in PitchCorrectionPreset.offeredInUI {
+            #expect(preset.options().formantCorrection == nil,
+                    "\(preset.displayName) now names a voice size: the card's \"stays as it is\" is false for it")
+        }
+    }
+
+    /// The stub the store's detection returns: two voiced runs, 225 Hz and
+    /// 250 Hz (`ClipRenderSignatureTests.twoNotesOffPitch`, copied).
+    private static func twoNotesOffPitch() -> PitchDetectionResult {
+        var frames: [ClipPitchFrame] = []
+        for i in 0..<4 {
+            frames.append(ClipPitchFrame(timeSeconds: Double(i) * 0.016, frequencyHz: 225.0,
+                                         confidence: 0.95, levelDbfs: -12, absence: nil))
+        }
+        frames.append(ClipPitchFrame(timeSeconds: 0.064, frequencyHz: nil, confidence: 0.1,
+                                     levelDbfs: -70, absence: .belowConfidence))
+        for i in 0..<4 {
+            frames.append(ClipPitchFrame(timeSeconds: 0.08 + Double(i) * 0.016, frequencyHz: 250.0,
+                                         confidence: 0.95, levelDbfs: -12, absence: nil))
+        }
+        let voiced = frames.filter { $0.frequencyHz != nil }.count
+        return PitchDetectionResult(
+            frames: frames, frameCount: frames.count,
+            voicedFrameCount: voiced,
+            voicedFraction: Double(voiced) / Double(frames.count),
+            frameRateHz: 62.5, analysisSampleRateHz: 16_000, sourceSampleRateHz: 44_100,
+            windowStartSeconds: 0, windowDurationSeconds: 0.15,
+            confidenceThreshold: 0.9, silenceFloorDbfs: -75,
+            minFrequencyHz: 46.875, maxFrequencyHz: 2_093.75)
+    }
+
+    /// Planted and seen red (W7-NTU P-card-store): the card's Slides face read
+    /// from the CURRENT smoothness ("Quick") instead of the seed's.
+    @Test("⭐ W7-D2 item 3 — through the REAL store: settings changed after a preset make the card ask, its words stay true, and the preset then does exactly what the card said; a note made deeper does not survive it")
+    @MainActor
+    func replaceCardSettingsMatchTheStore() async throws {
+        // A REAL file: the preset's detection checks `fileExists` first.
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("w7ntu-card-\(UUID().uuidString).wav")
+        try Data([0x00]).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let clip = Clip(name: "Lead", startBeat: 0, lengthBeats: 8, audioFileURL: url)
+        let store = ProjectStore(tracks: [Track(name: "Vocals", kind: .audio, clips: [clip])])
+        let engine = TuneDoorFakeDetectEngine(stubResult: Self.twoNotesOffPitch())
+        store.engine = engine
+        func stored() throws -> PitchEditSet { try #require(store.tracks[0].clips[0].pitchEdits) }
+
+        // 1. A preset's own output: no card (the comparison workflow).
+        _ = try await store.autoCorrectClipPitch(clipId: clip.id,
+                                                 options: PitchCorrectionPreset.natural.options())
+        let gate = PitchPresetReplaceGate()
+        #expect(gate.request(.tight, clipID: clip.id, clipName: "Lead", current: try stored()) == .applyNow)
+
+        // 2. Only the SETTINGS change: no note is touched.
+        let notes = try stored().segments
+        _ = try store.setClipFormantCorrection(clipId: clip.id, amount: 0.6)
+        _ = try store.setClipConsonantProtection(clipId: clip.id, enabled: false)
+        _ = try store.setClipPitchTransitionSmoothness(
+            clipId: clip.id, centsPerSecond: PitchEditorSlideStep.quick.centsPerSecond)
+        #expect(try stored().segments == notes, "a setting moved a note")
+
+        // 3. The card asks (W7-D2's consequence), and every word is true.
+        #expect(gate.request(.natural, clipID: clip.id, clipName: "Lead", current: try stored()) == .askFirst)
+        let request = try #require(gate.pending)
+        #expect(request.settings == PitchPresetReplaceSettings(
+            kept: [.voiceSize, .consonants],
+            changed: [PitchPresetReplaceSettings.Change(row: .slides, to: "Smooth")]))
+        let copy = PitchPresetReplaceCopy(request)
+        #expect(copy.body.contains("including any note you moved or split by hand"))
+        #expect(copy.body.hasSuffix("“Keep voice size” and “Consonants” stay as they are. "
+                                    + "“Slides” changes to Smooth."))
+
+        // 4. "Replace my edits": the REAL preset runs, and the store holds what
+        // the card said.
+        let held = try #require(gate.confirm())
+        _ = try await store.autoCorrectClipPitch(clipId: held.clipID, options: held.preset.options())
+        let after = try stored()
+        #expect(after.formantCorrection == 0.6, "“Keep voice size” did not stay as it was")
+        #expect(after.consonantProtection == .offByChoice, "“Consonants” did not stay as it was")
+        let landed = try #require(PitchEditorSlideStep.step(atCentsPerSecond: after.transitionSlopeCentsPerSecond),
+                                  "the preset left a smoothness that is no step")
+        #expect(request.settings.changed.first { $0.row == .slides }?.to == landed.label,
+                "the card said Slides lands on one step and the store landed on \(landed.label)")
+        #expect(!after.hasHandEditsSinceAutoCorrect, "the preset's output reads as hand-edited")
+
+        // 5. The list's new item is a real loss: a note made deeper does not
+        // survive a preset (the new set's notes are new).
+        // A NOTE (a sound has no Voice: the store refuses it).
+        let noteID = try #require(after.segments.first { $0.origin != .unpitched }).id
+        _ = try store.setClipNoteFormant(clipId: clip.id, segmentIds: [noteID], semitones: -2)
+        #expect(try stored().segments.first { $0.id == noteID }?.formantOffsetSemitones == -2)
+        #expect(gate.request(.natural, clipID: clip.id, clipName: "Lead", current: try stored()) == .askFirst)
+        let again = try #require(gate.confirm())
+        _ = try await store.autoCorrectClipPitch(clipId: again.clipID, options: again.preset.options())
+        let voices = try stored().segments.map(\.formantOffsetSemitones)
+        #expect(!voices.isEmpty)
+        #expect(voices.allSatisfy { $0 == 0 }, "a note's Voice survived the preset: the card names a loss that is not one")
+        #expect(engine.detectCalls == 3)
     }
 
     /// ⭐ THE PANE SHIPPED WITH NO WAY IN, AND THAT IS WHY THIS TEST EXISTS.

@@ -67,12 +67,19 @@ struct StepSequencerBand: View {
         var fills: [StepCellFill]
         var rowHeight: CGFloat
         var stepWidth: CGFloat
+        // m23-ap I5-F4 — where the drawn columns sit on the song's grid.
+        var phaseBeats: Double
+        var firstStepSongBeat: Double
+        var barMarks: [StepBarMark]
     }
 
     private var drawnState: DrawnState {
         DrawnState(lanes: geometry.lanes, stepCount: geometry.stepCount,
                    stepBeats: geometry.stepBeats, fills: fills,
-                   rowHeight: geometry.rowHeight, stepWidth: geometry.stepWidth)
+                   rowHeight: geometry.rowHeight, stepWidth: geometry.stepWidth,
+                   phaseBeats: geometry.phaseBeats,
+                   firstStepSongBeat: geometry.firstStepSongBeat,
+                   barMarks: geometry.barMarks)
     }
 
     /// Drawn width: content, extended to the viewport at wide windows (m18-f,
@@ -108,6 +115,7 @@ struct StepSequencerBand: View {
                 laneGutter
                 ScrollView(.horizontal, showsIndicators: true) {
                     StepGridCanvas(geometry: geometry, fills: fills, noteColor: noteColor)
+                        .equatable()
                         .frame(width: drawnWidth, height: geometry.contentHeight)
                         .overlay(alignment: .topLeading) { playhead }
                         .background { scrollReader }
@@ -123,7 +131,10 @@ struct StepSequencerBand: View {
                                 token: reportToken,
                                 lanes: drawn.lanes, stepCount: drawn.stepCount,
                                 stepBeats: drawn.stepBeats, fills: drawn.fills,
-                                rowHeight: drawn.rowHeight, stepWidth: drawn.stepWidth)
+                                rowHeight: drawn.rowHeight, stepWidth: drawn.stepWidth,
+                                phaseBeats: drawn.phaseBeats,
+                                firstStepSongBeat: drawn.firstStepSongBeat,
+                                barMarks: drawn.barMarks)
                         }
                         .onDisappear { bridge.reportNoGrid(from: reportToken) }
                 }
@@ -181,18 +192,22 @@ struct StepSequencerBand: View {
     /// a position (cyan in this pane is the transport playhead: the m23-t
     /// operand-vs-position ruling, applied to the sibling readout one file
     /// over).
+    ///
+    /// m23-ap I5-F4: the SONG's bars (`geometry.barMarks`) — a clip on bar 3
+    /// reads 3, as the roll's ruler and the transport do — over the columns
+    /// the grid emphasizes, from the one `isBarStart` predicate.
     private var stepRuler: some View {
         HStack(spacing: 0) {
             Color.clear.frame(width: StepSequencerGeometry.laneGutterWidth)
             ZStack(alignment: .topLeading) {
-                ForEach(barStartSteps, id: \.self) { step in
-                    Text("\(geometry.barNumber(forStep: step))")
+                ForEach(geometry.barMarks, id: \.step) { mark in
+                    Text("\(mark.bar)")
                         .font(.system(size: 9, weight: .medium, design: .monospaced))
                         .foregroundStyle(DAWTheme.textDim)
                         .frame(width: geometry.stepWidth, height: Self.rulerHeight,
                                alignment: .leading)
                         .padding(.leading, 3)
-                        .offset(x: geometry.x(forStep: step) - scrollX)
+                        .offset(x: geometry.x(forStep: mark.step) - scrollX)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -204,11 +219,6 @@ struct StepSequencerBand: View {
             Rectangle().fill(DAWTheme.hairline).frame(height: 0.5)
         }
         .allowsHitTesting(false)
-    }
-
-    private var barStartSteps: [Int] {
-        guard geometry.stepsPerBar > 0 else { return [] }
-        return Swift.stride(from: 0, to: geometry.stepCount, by: geometry.stepsPerBar).map { $0 }
     }
 
     // MARK: - Playhead
@@ -269,10 +279,21 @@ struct StepSequencerBand: View {
 /// so SwiftUI skips it and the draw closure never re-runs on playback — only the
 /// playhead overlay's offset moves. No allocation per frame, because there are
 /// no frames: redraw is per interaction.
-private struct StepGridCanvas: View {
+///
+/// m23-ap I5-F4: `Equatable` and mounted `.equatable()`, the `PianoRollGrid`
+/// fix from I5-F2 for the same reason — the geometry now carries the song's
+/// `MeterMap`, whose arrays are rebuilt on every `transport.meterMap` read, and
+/// the parent rebuilds `lanes` and `fills` on every evaluation too. Equality is
+/// by VALUE (`MeterMap` compares its changes), so a tick that changes nothing
+/// the grid draws cannot redraw it.
+private struct StepGridCanvas: View, Equatable {
     var geometry: StepSequencerGeometry
     var fills: [StepCellFill]
     var noteColor: Color
+
+    nonisolated static func == (lhs: StepGridCanvas, rhs: StepGridCanvas) -> Bool {
+        lhs.geometry == rhs.geometry && lhs.fills == rhs.fills && lhs.noteColor == rhs.noteColor
+    }
 
     /// A value snapshot for the `@Sendable` renderer (CANVAS CONTRACT, m16-a):
     /// value captures only, computed before the closure.
@@ -334,8 +355,22 @@ private struct StepGridCanvas: View {
     /// Everything past the clip end is LATENT: the same 0.28 shade + 1 pt
     /// `gridEmphasis` boundary hairline the roll's three bands draw (m19-g), at
     /// the same meaning — a box there is store-legal and never sounds.
+    ///
+    /// m23-ap I5-F4: an off-grid clip's column 0 starts on the song line BEFORE
+    /// the clip's first beat, so the part of it left of `clipStartX` is outside
+    /// the clip too and takes the same shade and boundary hairline. Nothing is
+    /// drawn there for a clip that starts on a line (`clipStartX` is 0).
     private nonisolated static func drawOutOfClipShade(_ context: inout GraphicsContext,
                                                        size: CGSize, s: Snapshot) {
+        let startX = min(s.geometry.clipStartX, size.width)
+        if startX > 0 {
+            context.fill(
+                Path(CGRect(x: 0, y: 0, width: startX, height: size.height)),
+                with: .color(Color.black.opacity(0.28)))
+            context.fill(
+                Path(CGRect(x: startX - 0.5, y: 0, width: 1, height: size.height)),
+                with: .color(DAWTheme.gridEmphasis))
+        }
         let clipX = s.geometry.clipEndX
         guard clipX < size.width else { return }
         context.fill(

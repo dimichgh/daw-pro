@@ -307,6 +307,31 @@ struct FollowPlayheadTests {
                              currentOffset: 4200) != nil)
     }
 
+    /// m23-ap I5 — the pitch editor passes `isEnabled: false` while a PINCH is
+    /// live (`PitchEditorView.followDrives`), because the pinch's re-pin owns the
+    /// scroll for the gesture's life (design risk 9). Most pinch landings change
+    /// the content width and re-baseline anyway; the one that does not — a
+    /// landing at an unchanged scale, the m25-b-3 residual shape below — is what
+    /// this pins, with the SAME landing under a driving follow as the control.
+    @Test("m23-ap I5: a same-geometry landing while a PINCH owns the scroll does not suspend; the same landing with follow driving does")
+    func aPinchOwningTheScrollNeverSuspends() {
+        func landed(followDriving: Bool) -> FollowPlayheadModel {
+            let model = FollowPlayheadModel()
+            _ = model.target(isEnabled: true, isPlaying: true, playheadX: 970,
+                             viewportWidth: viewport, contentWidth: content, currentOffset: 0)
+            model.reportOffset(850, isEnabled: true, isPlaying: true,
+                               contentWidth: content, viewportWidth: viewport)
+            model.reportOffset(1300, isEnabled: followDriving, isPlaying: true,
+                               contentWidth: content, viewportWidth: viewport)
+            return model
+        }
+        let pinching = landed(followDriving: false)
+        #expect(pinching.isSuspended == false, "the pinch's own scroll stood follow down")
+        #expect(pinching.expectedOffset == 1300, "the baseline must move with the pinch")
+        #expect(landed(followDriving: true).isSuspended,
+                "control — with follow driving, the same landing IS a manual scroll")
+    }
+
     @Test("scroller rounding within tolerance is not a manual scroll")
     func toleranceAbsorbsRounding() {
         let model = FollowPlayheadModel()

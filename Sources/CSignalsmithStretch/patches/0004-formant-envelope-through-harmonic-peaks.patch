@@ -1,0 +1,155 @@
+DAW Pro local patch 0004 against signalsmith-stretch v1.3.2 (57b93f4e9206a089a45387eaa39bdc9f310d3308) + patches 0001, 0002, 0003
+
+Formant envelope through the harmonic peaks, when the caller gives the
+fundamental (setFormantBase(f), f > 0).
+
+With formant compensation on, updateFormants() builds each block's spectral
+envelope by spreading every band's energy outwards with a per-band decay of
+1 - 1/(f/2 + 1) (f = the harmonic spacing in bands), then shrinking it back
+with the inverse. Over one spacing the spread falls about e^-2 (-8.7 dB), so
+between two strong harmonics the envelope sags about 4.3 dB, and a harmonic
+more than about 8.7 dB below a neighbour reads the neighbour's skirt instead
+of its own level. The shrink pass is a no-op on a spread array (measured:
+deleting it changes the output by float rounding only). The compensation
+divides the target envelope by this one, so the output harmonics land off
+the input's envelope: at 220 Hz -5 st up to +6.3/-7.1 dB (RMS 3.02 dB over
+250-2500 Hz, upstream's own API). With the input's TRUE envelope substituted
+for the estimate and nothing else changed: 0.06 dB. The estimate is the
+error, not the compensation arithmetic. In DAW Pro this was natural tuning's
+c = 1 over-correction on down-shifts (220 Hz -5 st read +63.2 c against a
+50 c bound).
+
+The patch replaces both passes, when a base is set and the spacing is above
+1.5 bands, with an envelope through the harmonic peaks. A band is a peak when
+no strictly larger band lies within half a harmonic spacing on either side,
+and it is strictly larger than its left neighbour. Consecutive peaks are
+joined by straight lines in log energy, and the outermost peaks are held
+outwards. freqToBand() subtracts half a band, so the spacing is
+freqEstimate + 0.5 bands. The nearest strictly larger band on each side
+comes from a monotonic stack, so the pass is O(bands) for any base. The
+buffers are sized in configure(), and nothing is allocated per block.
+
+WITH NO BASE, UPSTREAM'S CODE RUNS UNCHANGED (css_set_formant_preserve, the
+clip flag). Upstream's own estimate returns 0 or a multiple of f0 on steady
+vowels (147 Hz: twice the spacing; 196, 294, 330, 440 Hz: 0). The new
+envelope needs the true spacing: with an octave-high estimate it joins only
+every other harmonic.
+
+Measured (DAW Pro's render loop and meters, ported and matched line for line
+against a real NT-E1 test log; 72 cells, 110-440 Hz x +-100..700 c, c = 1):
+- per-harmonic level error vs the ideal (RMS, 250-2500 Hz): 3.94 -> 2.63 dB
+  mean, better in 63/72 cells, worse by > 1 dB in none;
+- the cepstral envelope meter: 51 -> 69 of 72 cells within +-50 c;
+  220 Hz -5 st 63.2 -> 16.5 c;
+- 2.5-5 kHz (partials 55-85 dB below the strongest; the render floor
+  dominates): 5.49 -> 4.39 dB mean, worse by > 1 dB in 6/72 cells;
+- byte-identical to 0001-0003: every render with no base (flag on: 36/36
+  dumped cells, and every flag-on value of the 72-cell map), the formant
+  stage withheld (36/36), and an engaged render at 0 st (6/6 f0 from 80 to 440 Hz; -1 c differs).
+  NOT byte-identical: c = 0 (an engaged amount whose formant curve follows
+  the pitch) differs at float rounding, max 2.2e-6 (<= -111 dB re peak, 7
+  cells); it is engaged, so formantRenderVersion re-keys it anyway;
+- hostile input (silence, a 1e-20 signal, a sine, noise, an impulse, a
+  full-scale square; bases 0.5x/2x/50 Hz/20 kHz): no NaN, Inf or subnormal
+  output, and silence stays silence;
+- a wrong base: 1.5x reads as 1x; 0.75x holds on average but 330 Hz
+  degrades; 0.5x and 2x break it (2x breaks upstream too). A window of 0.6
+  spacings (not shipped) holds at 0.75x as well, but was not measured on
+  sung vibrato;
+- cost: an engaged render got CHEAPER: -6.7 % CPU at -O2 (-1.4 % at the test
+  build's -O0); the formant stage alone -23 %. Medians of 9 interleaved
+  pairs of 60 s renders, clock() CPU time, under timing.lock with both heavy
+  slots free (load average 8-10 from other work); at -O2 no patched sample
+  was slower than any shipped one (at -O0 the ranges overlap);
+THIS PATCH CHANGES THE BYTES OF EVERY RENDER WITH AN EXPLICIT FORMANT BASE
+(every engaged natural-tuning render): the render cache must re-key them
+(PitchEditSet.formantRenderVersion 2 -> 3, digest slot 7). Renders with no
+base keep their bytes and their keys.
+
+Filed upstream: not yet (draft report ready; like #31-#33, only on the
+user's word).
+
+Apply (from Sources/CSignalsmithStretch), after 0001, 0002 and 0003:
+    patch -p1 < patches/0004-formant-envelope-through-harmonic-peaks.patch
+
+--- a/vendor/signalsmith-stretch/signalsmith-stretch.h
++++ b/vendor/signalsmith-stretch/signalsmith-stretch.h
+@@ -88,6 +88,9 @@
+ 
+ 		blockProcess = {};
+ 		formantMetric.resize(bands + 2);
++		formantLogEnvelope.resize(bands + 2);
++		formantStack.resize(bands + 2);
++		formantMark.resize(bands + 2);
+ 
+ 		tmpProcessBuffer.resize(blockSamples + intervalSamples);
+ 		tmpPreRollBuffer.resize(outputLatency()*channels);
+@@ -1027,8 +1030,55 @@
+ 	
+ 	Sample freqEstimate;
+ 	
+-	std::vector<Sample> formantMetric;
++	std::vector<Sample> formantMetric, formantLogEnvelope;
++	std::vector<int> formantStack, formantMark;
+ 	Sample formantBaseFreq = 0;
++	// Spectral envelope through the harmonic peaks, from `formantMetric` (energy per band) in place.
++	// DAW PRO LOCAL PATCH 0004 (formant envelope through the harmonic peaks, explicit base only) -- see VENDORED.md.
++	// A bin is a peak when no strictly larger bin lies within half a harmonic spacing on either side, and it is
++	// strictly larger than its left neighbour. (`freqEstimate` comes from freqToBand(), which subtracts half a bin, so
++	// the spacing is `freqEstimate + 0.5` bins.) Consecutive peaks are joined by straight lines in log-energy, and the
++	// first/last peak's value is held outwards. A weak harmonic next to a strong one keeps its own level, and the
++	// envelope does not sag between two strong harmonics, so the compensation reads the envelope rather than a
++	// neighbour's decay. The nearest strictly larger bin on each side comes from a monotonic stack: O(bands) for any
++	// base. It needs a trustworthy f0 (an estimate an octave high joins only every other harmonic), so it is used only
++	// when the caller provides one.
++	void formantEnvelopeThroughPeaks() {
++		int halfSpacing = int(std::min(Sample(bands), Sample(0.5)*(freqEstimate + Sample(0.5))));
++		int *stack = formantStack.data(), *mark = formantMark.data();
++		int depth = 0;
++		for (int b = 0; b < bands; ++b) { // mark[b] = nearest strictly larger bin on the left (none: far away)
++			while (depth > 0 && formantMetric[stack[depth - 1]] <= formantMetric[b]) --depth;
++			mark[b] = (depth > 0) ? stack[depth - 1] : -bands - 1;
++			stack[depth++] = b;
++		}
++		depth = 0;
++		for (int b = bands - 1; b >= 0; --b) { // ... on the right; then mark[b] = 1 for a peak, else 0
++			while (depth > 0 && formantMetric[stack[depth - 1]] <= formantMetric[b]) --depth;
++			int rightLarger = (depth > 0) ? stack[depth - 1] : 2*bands + 1;
++			stack[depth++] = b;
++			bool peak = formantMetric[b] > 0 && b - mark[b] > halfSpacing && rightLarger - b > halfSpacing
++				&& (b == 0 || formantMetric[b] > formantMetric[b - 1]);
++			mark[b] = peak ? 1 : 0;
++		}
++		int prevPeak = -1;
++		Sample prevLog = 0;
++		for (int b = 0; b < bands; ++b) {
++			if (!mark[b]) continue;
++			Sample logE = std::log(formantMetric[b]);
++			if (prevPeak < 0) {
++				for (int i = 0; i < b; ++i) formantLogEnvelope[i] = logE;
++			} else {
++				Sample invSpan = Sample(1)/Sample(b - prevPeak);
++				for (int i = prevPeak; i < b; ++i) formantLogEnvelope[i] = prevLog + (logE - prevLog)*Sample(i - prevPeak)*invSpan;
++			}
++			prevPeak = b;
++			prevLog = logE;
++		}
++		if (prevPeak < 0) return; // no peak at all: leave the energy as it is
++		for (int i = prevPeak; i < bands; ++i) formantLogEnvelope[i] = prevLog;
++		for (int i = 0; i < bands; ++i) formantMetric[i] = std::exp(formantLogEnvelope[i]);
++	}
+ 	void updateFormants(size_t step) {
+ 		if (step-- == 0) {
+ 			for (auto &e : formantMetric) e = 0;
+@@ -1042,6 +1092,11 @@
+ 			freqEstimate = freqToBand(formantBaseFreq);
+ 			if (formantBaseFreq <= 0) freqEstimate = estimateFrequency();
+ 		} else if (step-- == 0) {
++			if (formantBaseFreq > 0 && freqEstimate > Sample(1.5)) {
++				// the caller gave f0: the envelope through the harmonic peaks (see formantEnvelopeThroughPeaks())
++				formantEnvelopeThroughPeaks();
++				return;
++			}
+ 			Sample decay = 1 - 1/(freqEstimate*Sample(0.5) + 1);
+ 			Sample e = 0;
+ 			for (size_t repeat = 0; repeat < 2; ++repeat) {

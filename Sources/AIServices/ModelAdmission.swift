@@ -56,13 +56,21 @@ public enum ModelAdmission {
         /// guard in the feature — unloading a model mid-generation would be far
         /// worse than the memory it reclaims.
         public var activeJobs: Int
+        /// **ADDITIVE, item p2-sing-c — defaults `false`.** When true, THIS resident is evicted
+        /// even while `activeJobs > 0` (design §2.7, R3) — the one exception to F8's absolute
+        /// busy-job veto, carried here from `ModelDescriptor.yieldsWhenBusy` so the pure planner
+        /// never has to reach for a registry. `false` (every model but SoulX today) reproduces
+        /// exactly the pre-existing behaviour: a busy resident is skipped and reported
+        /// `protectedByJobs`.
+        public var yieldsWhenBusy: Bool
         public var admittedAt: Date
         public var lastJobEndedAt: Date?
 
         public init(
             id: ModelID, displayName: String, holdBytes: UInt64,
             holdConfidence: HoldRequirement.Confidence = .estimated, isEvictable: Bool = true,
-            activeJobs: Int = 0, admittedAt: Date = Date(), lastJobEndedAt: Date? = nil
+            activeJobs: Int = 0, yieldsWhenBusy: Bool = false, admittedAt: Date = Date(),
+            lastJobEndedAt: Date? = nil
         ) {
             self.id = id
             self.displayName = displayName
@@ -70,6 +78,7 @@ public enum ModelAdmission {
             self.holdConfidence = holdConfidence
             self.isEvictable = isEvictable
             self.activeJobs = activeJobs
+            self.yieldsWhenBusy = yieldsWhenBusy
             self.admittedAt = admittedAt
             self.lastJobEndedAt = lastJobEndedAt
         }
@@ -191,6 +200,14 @@ public enum ModelAdmission {
     /// left. That is the user's *"let it fail if this happens"* — and it is
     /// strictly better than the alternative, which is unloading a model in the
     /// middle of the user's render.
+    ///
+    /// ⚠️ **item p2-sing-c: `yieldsWhenBusy` is the ONE exception to the busy-job veto above.**
+    /// A resident with `activeJobs > 0` is normally untouchable (F8) — but a resident that ALSO
+    /// carries `yieldsWhenBusy == true` is evicted anyway (design §2.7, R3), so it never stays
+    /// `protectedByJobs`. Every resident with the (default) `yieldsWhenBusy == false` is
+    /// completely unaffected by this clause: the busy-veto behaves exactly as it did before this
+    /// field existed. This is the pure-function half of "SoulX always gives way" — see
+    /// `ModelRegistry.soulxSinger` for the one descriptor that ships the flag `true`.
     public static func resolve(_ facts: Facts) -> Plan {
         if let inFlight = facts.inFlight {
             let seconds = max(0, Int(facts.now.timeIntervalSince(inFlight.since).rounded()))
@@ -210,8 +227,8 @@ public enum ModelAdmission {
                 ? first.id.rawValue < second.id.rawValue
                 : first.holdBytes > second.holdBytes
         }
-        let evicting = others.filter { $0.activeJobs == 0 }.sorted(by: ordering)
-        let blocked = others.filter { $0.activeJobs > 0 }.sorted(by: ordering)
+        let evicting = others.filter { $0.activeJobs == 0 || $0.yieldsWhenBusy }.sorted(by: ordering)
+        let blocked = others.filter { $0.activeJobs > 0 && !$0.yieldsWhenBusy }.sorted(by: ordering)
 
         return .admit(
             evicting: evicting.map(Self.option(for:)),

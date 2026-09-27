@@ -414,6 +414,83 @@ public struct PitchPlayedLine: Sendable, Equatable {
         }
     }
 
+    // MARK: - The played pitch at any source second (m23-ap C5b-4a)
+
+    /// What the render plays at SOURCE second `seconds`, fractional MIDI, or
+    /// `nil` where the line has no pitch. The pitch brush reads it as the
+    /// PRE-stroke played line (freehand design §5.5's `played_i`), so a
+    /// drawn line lands where the pointer was, whatever else the note carries.
+    ///
+    /// ⭐ **THE SUNG HALF IS INTERPOLATED, THE CURVE IS EVALUATED.** Inside a
+    /// run, `sungMidi` is interpolated linearly between the two points that
+    /// bracket `seconds`, and `curve.semitones(atSourceSecond: seconds)` is
+    /// ADDED. Interpolating `playedMidi` instead would smear the curve's own
+    /// structure (a drawn shape on its 10 ms grid) across the 16 ms between
+    /// frame centres. At a point's own `sourceSeconds` this is that point's
+    /// `playedMidi` bit for bit: the same expression `sungRuns` builds it with.
+    ///
+    /// ⛔ **NIL ACROSS HOLES, NEVER A BRIDGE.** The line exists from a run's
+    /// first point to its last, inclusive, exactly as it is drawn. Between
+    /// runs (an unvoiced gap, or a cleared note, I7b-2) and outside all of
+    /// them there is no sung pitch, and none is invented: the hole rule
+    /// (`PitchAutoCorrect.voicedRuns`).
+    ///
+    /// Relies on `runs` in time order, each run ascending and no two
+    /// overlapping, which is what `make` builds. A hand-built line that breaks
+    /// that reads a nil or a neighbour's value, never a crash.
+    public func playedMidi(atSourceSecond seconds: Double) -> Double? {
+        guard seconds.isFinite, let sung = sungMidi(atSourceSecond: seconds) else { return nil }
+        return sung + curve.semitones(atSourceSecond: seconds)
+    }
+
+    /// `playedMidi(atSourceSecond:)` inside one note, with U-B's fallback for
+    /// a SOUND: where the line has no pitch and `note` is a sound
+    /// (`.unpitched`, not cleared), the note's centre — its borrowed drawing
+    /// anchor, `detectedHz` (unpitched-notes design §1.5) — plus the curve,
+    /// which is the row the editor draws a sound on. `nil` outside the note,
+    /// and for a SUNG note in a hole: the hole rule is not waived for notes.
+    ///
+    /// ⚠️ **NOT ON THE BRUSH'S PATH TODAY.** The store refuses drawing on
+    /// sounds (C5b-3a's sound ruling, `NoteShapeSentences.soundHasNoPitchLine`),
+    /// so the brush treats sounds as gaps and never asks this. It is the one
+    /// reading for placing anything relative to a sound's played pitch, and
+    /// the brush's reading if that ruling ever flips.
+    public func playedMidi(atSourceSecond seconds: Double, on note: NoteSegment) -> Double? {
+        guard seconds.isFinite, seconds >= note.startSeconds, seconds < note.endSeconds else { return nil }
+        if let played = playedMidi(atSourceSecond: seconds) { return played }
+        guard note.origin == .unpitched, !note.isCleared, note.detectedHz > 0 else { return nil }
+        return PitchCorrectionMath.midi(fromHz: note.detectedHz) + curve.semitones(atSourceSecond: seconds)
+    }
+
+    /// The SUNG line at `s`: interpolated inside the run that holds it, nil
+    /// outside every run. Two binary searches (runs, then points).
+    private func sungMidi(atSourceSecond s: Double) -> Double? {
+        // The last run whose FIRST point is at or before `s`.
+        var low = 0
+        var high = runs.count
+        while low < high {
+            let mid = (low + high) / 2
+            if let first = runs[mid].first, first.sourceSeconds <= s { low = mid + 1 } else { high = mid }
+        }
+        guard low > 0 else { return nil }
+        let run = runs[low - 1]
+        guard let last = run.last, s <= last.sourceSeconds else { return nil }
+        // The first point at or after `s`; it exists, because `s <= last`.
+        var lower = 0
+        var upper = run.count
+        while lower < upper {
+            let mid = (lower + upper) / 2
+            if run[mid].sourceSeconds < s { lower = mid + 1 } else { upper = mid }
+        }
+        let after = run[lower]
+        guard lower > 0, after.sourceSeconds != s else { return after.sungMidi }
+        let before = run[lower - 1]
+        let width = after.sourceSeconds - before.sourceSeconds
+        guard width > 0 else { return after.sungMidi }
+        let fraction = (s - before.sourceSeconds) / width
+        return before.sungMidi + (after.sungMidi - before.sungMidi) * fraction
+    }
+
     // MARK: - The one-line door for the wire verb (C-0c)
 
     /// The clip's window in its SOURCE file, `[startOffsetSeconds,

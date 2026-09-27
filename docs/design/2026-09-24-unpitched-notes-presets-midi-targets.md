@@ -2,6 +2,8 @@
 
 > **Amended 2026-09-24 by `2026-09-24-pitch-editor-interaction-batch.md` §17:** silencing a note is `isCleared` (one verb, one menu); per-note level is `amplitudeDb`, rendered, never silence. Passages below are updated to match.
 
+> **Amended 2026-09-25 by `docs/design/2026-09-25-natural-tuning.md` (natural tuning, the user's MUST).** Where this document and that one disagree, that one wins. Amended sections here: §1.4 (U2, `.transition` stamping enables R14 preset slides; now required, no longer "can wait"), §1.6 (U4, consonantRegions() sync with U-A's entersPitchCurve), §1.7 (U5, R21 overrides U-F2 default—breath/s user drags still move).
+
 Status: DESIGN ONLY, no code. Author: daw-architect ("architect B"), 2026-09-24.
 
 Tags: [READ] = read at the cited `file:line` on 2026-09-24; [MEASURED] = measured, by whom stated;
@@ -35,7 +37,7 @@ entitlements, AUv3 or signing.
 | U2 | `NoteSegment` gains one additive field, `origin: .detected / .transition / .unpitched`. Required: a borrowed pitch draws exactly like a detected one, and `detectedHz: 0` draws at A4. It also settles p2-seg §10 item 9 (mark transitions). | 1.4 |
 | U3 | An unpitched sound borrows the pitch of the NEARER neighbouring note; a tie (it touches both) goes to the following note, the user's rule. It is a **drawing anchor**, not a pitch estimate, and no neighbour rule fixes a missed sung note (U-F3). | 1.5 |
 | U4 | Both note-table builders add unpitched segments after S2's splitter, always as IDENTITY under every preset and shape. The curve skips an untouched one, so every existing render stays byte-identical. Stored tables change only by an explicit pass or merge. | 1.6 |
-| U5 | Moving one applies its constant offset: it DOES pitch-shift a breath or an "s" (Melodyne never does). v1 says so on screen; "never transpose unpitched sounds" is follow-up U-F2. | 1.7 |
+| U5 | Moving one applies its constant offset: it DOES pitch-shift a breath or an "s" (Melodyne never does). v1 says so on screen; "never transpose unpitched sounds" is follow-up U-F2. **R21 overrides: U5 stays.** | 1.7 |
 | U6 | Silencing a note is `NoteSegment.isCleared`, set through I7b's menu and one verb `clip.setNoteCleared`. Restore un-clears it. Per-note level is `amplitudeDb`, rendered in the offline job through one envelope mask; −72 dB is a level, never silence. A level-only set skips the stretcher (interaction-batch §17). | 1.8 |
 | P1 | The gentle presets sound alike because they only move note CENTRES by 15–31 c RMS, under ~55 c of movement they leave alone, and the pull axis is already at its ceiling. The listening set varies ONE axis of Natural: how much of the singer's own wobble it keeps (100 / 60 / 30 / 0 %). | 2.1–2.2 |
 | P2 | Seven pre-registered checks, including a bit-exact anchor, a plant, physics that must fall with the axis, an audibility bound and true peak ≤ −1 dBTP. | 2.3 |
@@ -172,6 +174,8 @@ bump and a contour re-key), so it is follow-up **U-F1**. **v1 changes nothing in
 
 ### §1.4 The model: `NoteSegment.origin` (U2)
 
+> **Amended (natural tuning, R14 / §4):** The `.transition` stamping (below) is now required as an enabler for natural-tuning §4 preset slides, no longer "can wait". R29 :1827 clarifies that `partKinds` is transient (from the splitter's detected kinds), while `origin` is stored.
+
 ```swift
 public enum NoteOrigin: String, Codable, Sendable, CaseIterable { case detected, transition, unpitched }
 public let origin: NoteOrigin      // a detection fact, like `detectedHz`: no edit changes it
@@ -197,7 +201,7 @@ public let origin: NoteOrigin      // a detection fact, like `detectedHz`: no ed
   singer. A borrowed Hz plus the marker degrades to a plain, silent note in the right place. A
   separate `anchorHz` field loses too: two pitch fields, and every reader must pick one.
 - **It settles p2-seg §10 item 9.** The builders stamp `.transition` on transition parts; the user
-  has now heard (a-T) and picked it, which was that item's precondition. How a slide is drawn is
+  has now heard (a-T) and picked it, which was that item's precondition. This stamping enables natural-tuning §4 preset slides (R14). How a slide is drawn is
   decided at U-E's looked-at gate. ⚠ S2 tests that build transition segments by hand gain
   `origin: .transition` (F-S2).
 
@@ -228,6 +232,8 @@ sounds have evidence).
   part of it [INFERRED].
 
 ### §1.6 The two builders, p2-seg, and render neutrality (U4)
+
+> **Amended (natural tuning, risk §2j item 2):** This section's risk about detector changes and `.unpitched` segments is addressed: the U-A plan must pin `consonantRegions()` against `entersPitchCurve` (the two predicates that define a pitch edit's extent) the day U-A lands, ensuring one voice in all lane work.
 
 **Wiring.** Both builders, `PitchAutoCorrect.editSet(contour:)` and `PitchNoteTable.detected(from:)`,
 call the finder right after `PitchNoteSplitter.parts`. They add one `.unpitched` segment per sound,
@@ -260,6 +266,8 @@ A fresh editor seed shows the sounds. An editor opened on an older table offers 
 pitch" (U-E).
 
 ### §1.7 What moving one does to its sound (U5)
+
+> **Amended (natural tuning, R21):** U5 STAYS. R21 overrides the U-F2 default ("an unpitched move renders as nothing"): the MUST is that moving the NOTE never moves the "St" (natural-tuning §2 decision :345); it does not say a blob the user drags must stay put. `consonantRegions()` = complement of PITCHED segments OR `pitchOffsetCents != 0`: untouched `.unpitched` plays dry, deliberately moved renders moved. Gate G-C13 (after U-A lands).
 
 - **Moving a sound transposes noise.** Its `pitchOffsetCents` reaches the curve, and the stretcher
   shifts the breath or consonant by that interval. With `formantPreserve` off (the default), up

@@ -4,13 +4,16 @@ import Testing
 @testable import DAWCore
 @testable import DAWEngine
 
-/// m23-ap C5a-0b — **THE WOBBLE ESTIMATOR THROUGH THE REAL DETECTOR: THE
-/// PRODUCT CHAIN'S OWN BOUNDS** (design
+/// m23-ap C5a-0b / C5a-0c — **THE WOBBLE ESTIMATOR THROUGH THE REAL DETECTOR:
+/// THE PRODUCT CHAIN'S OWN BOUNDS** (design
 /// `docs/design/2026-09-24-pitch-editor-vibrato-handle.md` §18.1.2, §18.1.4,
 /// §18.1.6, §18.2; §15 T6). Env-gated, the `ContourShapingSweepTests` pattern:
 ///
 ///     WOBBLE_DETECTOR=1 ./scripts/test.sh --filter PitchWobbleDetectorTests
 ///     WOBBLE_VOCAL=/path/to/dry.wav ./scripts/test.sh --filter PitchWobbleDetectorTests
+///
+/// ONE test is NOT gated and runs in every suite run: C5a-0c's
+/// `anchorLagIsNilWhereUnmeasured` (a table check, no detector).
 ///
 /// Every tone is written to disk and put through THE seam
 /// (`PitchContourCache.renderContour`, product detector, committed to and read
@@ -44,7 +47,27 @@ import Testing
 ///    the true one by +8.3…+13.6 ms at 82.4 Hz, +11.1…+12.4 at 110 Hz and
 ///    +3.5…+8.1 at 146.8 Hz (signed), against −1.6 / −2.0 ms at mid pitch:
 ///    the frame-centre offset is right at mid pitch only. At 5.5 Hz, 12 ms is
-///    24° of phase — the jump a handoff exists to avoid (C5a-1 / C5a-4).
+///    24° of phase. C5a-0c measures it per block (below) and ships it as
+///    `PitchWobbleEstimate.anchorLagSeconds(pitchHz:)` — read that function's
+///    ⚠️ before subtracting it anywhere: the render flattens against the
+///    DETECTED contour, so whether the handoff should subtract it is NOT
+///    settled.
+///
+/// **MEASURED 2026-09-25 (C5a-0c), the signed anchor lag** (read − true,
+/// positive = late; the grids above, no new detections):
+///  * 146.8 Hz +3.48…+8.10 ms, median +6.73 → **+6.7 ms, HELD**: taken out,
+///    the block's p95 falls 8.01 → 2.75 ms, and its inferred edges' too
+///    (127.1 Hz, median +9.57: 10.42 → 3.72; 179.7 Hz, +7.11: 8.31 → 1.65).
+///  * mid −4.79…+3.47 ms, median −1.56 → **`nil`, STOPPED**: its pitches read
+///    +0.93 (220 Hz), −1.04 (247), −3.38 (330), and at its inferred lower
+///    edge, 179.7 Hz (+7.11), its median makes the anchor WORSE (p95 8.31 →
+///    9.88 ms). Pinned in `theAnchorLagEdges`, like 82.4/110 Hz's response.
+///  * 82.4 Hz +8.34…+13.64 (median +11.74), 110 Hz +11.05…+12.42 (+11.52),
+///    380.8 Hz −6.37…−1.02 (−3.04): recorded, not in the table (no response,
+///    or outside every block). Data for C5a-F8.
+///  * The lag moves with DEPTH (±80 c reads 1.5–2.7 ms later than ±40 c at
+///    82.4 Hz, 146.8 Hz and mid; NOT at 110 Hz, 0.3–0.8 ms earlier) and, at
+///    mid, with RATE (−2.59 ms at 4.5 Hz → −0.07 at 7.5 Hz).
 ///
 /// **PLANTED DEFECTS**, each applied in an ISOLATED COPY of the tree, seen
 /// red, and reverted (C5a-0b, 2026-09-24):
@@ -66,6 +89,17 @@ import Testing
 ///    wobble, exactly §18.1.4's prediction) and the 110 Hz sweep (5 offsets).
 ///  * `response` returning 1.0 → the calibration (|1.0 − 0.8775| = 0.12) and
 ///    the low block's stopped-pitch pins.
+///
+/// **PLANTED DEFECTS, C5a-0c** (2026-09-25, in the 813c415 worktree, each
+/// reverted and `cmp`-checked against the pristine file):
+///  * 146.8 Hz's lag set to 0 → the block (|0 − 6.73| > 0.5 ms; 8.01 ≮ 8.01;
+///    8.01 > 5) and both its edges (10.42 ≮ 10.42, > 5 at 127.1 Hz; 8.31 ≮
+///    8.31, > 5 at 179.7 Hz): 7 issues. The ungated test stays green (a 0 is
+///    still a lag) — the gated tests are what see a WRONG value.
+///  * a lag handed out at 110 Hz (+11.5 ms, where there is no response) →
+///    the ungated sweep (95.2 Hz up: "lag, no response") and its 110 Hz pin,
+///    the block test ("hands out no lag"), and the edge test (a lag with no
+///    bound): 4 issues.
 ///
 /// Deliberately NOT `@MainActor` (`MainActorOccupancySiteTests` Leg C is at
 /// its cap): `detectWholeFile` is synchronous and the estimator is pure.
@@ -241,10 +275,13 @@ struct PitchWobbleDetectorTests {
         /// note under the report floor still has one); `nil` with no analysis.
         var share: Double? { detected.analysis.map { $0.depthCents / depth } }
         var rateError: Double? { detected.analysis.map { abs($0.rateHz - rate) } }
-        var anchorError: Double? {
+        var anchorError: Double? { signedAnchorError.map(abs) }
+        /// C5a-0c: the read anchor MINUS the tone's own rising crossing
+        /// nearest it, seconds — positive when the product reads LATE.
+        var signedAnchorError: Double? {
             detected.analysis.map { a in
-                abs(a.anchorSeconds - PitchWobbleDetectorTests.truthCrossing(near: a.anchorSeconds,
-                                                                             rateHz: rate, phase: phase))
+                a.anchorSeconds - PitchWobbleDetectorTests.truthCrossing(near: a.anchorSeconds,
+                                                                         rateHz: rate, phase: phase)
             }
         }
         var readsAWobble: Bool { if case .wobble = detected.reading { return true }; return false }
@@ -646,6 +683,43 @@ struct PitchWobbleDetectorTests {
         }
     }
 
+    /// Every edge of a block that returns a share, low to high.
+    static var heldEdges: [Double] {
+        let held = PitchWobbleEstimate.responseBlocks.filter { $0.medianShare != nil }
+        return Set(held.flatMap { [$0.coversHz.lowerBound, $0.coversHz.upperBound] }).sorted()
+    }
+
+    /// The low block's grid at every `heldEdges` pitch — both voice-like
+    /// spectra × 4 rates × ±40/±80 c × 1.0/2.0 s, one seeded phase each —
+    /// measured once per run and shared by `theResponseEdgesHold` (the share)
+    /// and `theAnchorLagEdges` (C5a-0c, the lag). Same seed and loop order as
+    /// the per-test loop it replaced, so the same phases and detections.
+    static let edgeGrid: Grid = {
+        var lcg = LCG(state: 0xED6E)
+        var notes: [GridNote] = []
+        do {
+            for hz in heldEdges {
+                for spectrum in [Spectrum.eight, .voiceLike] {
+                    for rate in [4.5, 5.5, 6.5, 7.5] {
+                        for depth in [40.0, 80.0] {
+                            for seconds in [1.0, 2.0] {
+                                let phase = 2 * .pi * lcg.unit()
+                                let detected = try detect(baseHz: hz, rateHz: rate, depthCents: depth, phase: phase,
+                                                          seconds: seconds, spectrum: spectrum)
+                                notes.append(GridNote(name: "edge \(f(hz, 2)) Hz", hz: hz, spectrum: spectrum,
+                                                      rate: rate, depth: depth, seconds: seconds, phase: phase,
+                                                      detected: detected))
+                            }
+                        }
+                    }
+                }
+            }
+        } catch {
+            return Grid(notes: notes, failure: "\(error)")
+        }
+        return Grid(notes: notes, failure: nil)
+    }()
+
     /// NOT in §18.4 — added by C5a-0b because `response` makes a claim across
     /// each block's whole band, and WHERE a block applies is [INFERRED]
     /// (nearest measured pitch; `PitchWobbleEstimate.responseBlocks`). The
@@ -665,24 +739,13 @@ struct PitchWobbleDetectorTests {
     func theResponseEdgesHold() throws {
         let held = PitchWobbleEstimate.responseBlocks.filter { $0.medianShare != nil }
         #expect(!held.isEmpty)
-        let edges = Set(held.flatMap { [$0.coversHz.lowerBound, $0.coversHz.upperBound] }).sorted()
-        var lcg = LCG(state: 0xED6E)
-        for hz in edges {
-            var shares: [Double] = []
-            var unanalysed = 0
-            for spectrum in [Spectrum.eight, .voiceLike] {
-                for rate in [4.5, 5.5, 6.5, 7.5] {
-                    for depth in [40.0, 80.0] {
-                        for seconds in [1.0, 2.0] {
-                            let phase = 2 * .pi * lcg.unit()
-                            let d = try Self.detect(baseHz: hz, rateHz: rate, depthCents: depth, phase: phase,
-                                                    seconds: seconds, spectrum: spectrum)
-                            guard let a = d.analysis else { unanalysed += 1; continue }
-                            shares.append(a.depthCents / depth)
-                        }
-                    }
-                }
-            }
+        let grid = Self.edgeGrid
+        #expect(grid.failure == nil, "the edge grid did not finish: \(grid.failure ?? "")")
+        #expect(grid.notes.count == 32 * Self.heldEdges.count, "\(grid.notes.count) edge notes measured")
+        for hz in Self.heldEdges {
+            let notes = grid.notes.filter { $0.hz == hz }
+            let shares = notes.compactMap(\.share)
+            let unanalysed = notes.filter { $0.share == nil }.count
             let neighbours = held.filter { $0.coversHz.lowerBound == hz || $0.coversHz.upperBound == hz }
                 .map { "\($0.name) \($0.medianShare.map { Self.f($0, 2) } ?? "nil")" }
             Self.say("edge \(Self.f(hz, 2)) Hz: share \(Self.f(shares.min() ?? .nan, 3))…\(Self.f(shares.max() ?? .nan, 3)) "
@@ -690,6 +753,193 @@ struct PitchWobbleDetectorTests {
             #expect(unanalysed == 0, "edge \(hz) Hz: \(unanalysed) notes had no analysis")
             #expect(shares.allSatisfy { $0 >= 0.5 && $0 <= 1.1 },
                     "edge \(hz) Hz: share \(shares.min() ?? .nan)…\(shares.max() ?? .nan) leaves [0.5, 1.1]")
+        }
+    }
+
+    // MARK: - C5a-0c: the anchor lag
+
+    /// The blocks the lag is measured over: exactly the note sets
+    /// `responseIsTheMeasuredMedian` calibrates on (the mid grid's ±40/±80 c
+    /// notes — a ±20 c fit's anchor is noise — and the low grid per pitch).
+    static func lagBlocks() -> [(name: String, pitches: [Double], notes: [GridNote])] {
+        var blocks: [(name: String, pitches: [Double], notes: [GridNote])] = [
+            ("mid 220–330 Hz", [220.0, 246.94, 329.63], midGrid.notes.filter { $0.depth >= 40 }),
+        ]
+        for (name, hz) in lowPitches { blocks.append((name, [hz], lowGrid.notes.filter { $0.hz == hz })) }
+        return blocks
+    }
+
+    /// "median m (min…max) ms, n N" over the notes' signed anchor errors.
+    static func lagSummary(_ notes: [GridNote]) -> String {
+        let ms = notes.compactMap(\.signedAnchorError).map { $0 * 1000 }
+        return "median \(f(median(ms), 2)) (\(f(ms.min() ?? .nan, 2))…\(f(ms.max() ?? .nan, 2))) ms, n \(ms.count)"
+    }
+
+    /// C5a-0c's outcome per block. `correctedP95Ms` — the bound on what is
+    /// left of `|anchor − lag − truth|` once the block's lag is taken out,
+    /// over the block AND its edges — where the lag HOLDS; `nil` where the
+    /// block hands out no lag (no response, or the stop fired).
+    ///
+    /// MEASURED 2026-09-25 (C5a-0c), `LAG BLOCK` / `LAG EDGE` lines, 146.8 Hz's
+    /// +6.7 ms taken out: the block 8.01 → 2.75 ms, its edges 127.1 Hz
+    /// 10.42 → 3.72 and 179.7 Hz 8.31 → 1.65. Bound by the suite's anchor
+    /// arithmetic on the worst of the three: 3.72 × 1.25, rounded up to a
+    /// whole ms = 5.
+    static let lagBounds: [(block: String, correctedP95Ms: Double?)] = [
+        ("mid 220–330 Hz", nil),
+        ("82.4 Hz", nil),
+        ("110.0 Hz", nil),
+        ("146.8 Hz", 5),
+    ]
+
+    /// C5a-0c: where a block's lag HOLDS (`lagBounds`), `anchorLagSeconds`
+    /// must be the MEDIAN signed lag this suite measures there, to within
+    /// 0.5 ms, and taking it out must leave the anchor CLOSER to the truth
+    /// than leaving it in (corrected p95 below the raw p95, and under the
+    /// bound). Everywhere else it must be `nil`: no response (82.4, 110 Hz —
+    /// not measured), or the stop fired (mid: `theAnchorLagEdges` pins why).
+    /// Every block's signed anchors are logged either way, as data for
+    /// C5a-F8. Plant: the 146.8 Hz lag set to 0.
+    @Test("C5a-0c anchorLagSeconds(pitchHz:) is the median lag the product reads in each allowed block",
+          .enabled(if: detectorEnabled))
+    func anchorLagIsTheMeasuredMedian() throws {
+        #expect(Self.midGrid.failure == nil && Self.lowGrid.failure == nil)
+        for block in Self.lagBlocks() {
+            let signed = block.notes.compactMap(\.signedAnchorError).map { $0 * 1000 }
+            let median = Self.median(signed)
+            let raw = Self.p95(signed.map(abs))
+            for hz in block.pitches where block.pitches.count > 1 {
+                Self.say("lag \(block.name) at \(hz) Hz: \(Self.lagSummary(block.notes.filter { $0.hz == hz }))")
+            }
+            for rate in [4.5, 5.5, 6.5, 7.5] {
+                Self.say("lag \(block.name) \(rate) Hz: \(Self.lagSummary(block.notes.filter { $0.rate == rate }))")
+            }
+            for spectrum in Set(block.notes.map(\.spectrum)).sorted(by: { $0.rawValue < $1.rawValue }) {
+                for depth in [40.0, 80.0] {
+                    for seconds in Set(block.notes.map(\.seconds)).sorted() {
+                        let cell = block.notes.filter { $0.spectrum == spectrum && $0.depth == depth && $0.seconds == seconds }
+                        Self.say("lag \(block.name) \(spectrum.rawValue) ±\(Int(depth)) c \(seconds) s: \(Self.lagSummary(cell))")
+                    }
+                }
+            }
+            let response = PitchWobbleEstimate.response(pitchHz: block.pitches[0])
+            let lag = PitchWobbleEstimate.anchorLagSeconds(pitchHz: block.pitches[0])
+            let corrected = lag.map { l in Self.p95(signed.map { abs($0 - l * 1000) }) }
+            Self.say("LAG BLOCK \(block.name): \(Self.lagSummary(block.notes)); raw |error| p95 \(Self.f(raw, 2)) ms; "
+                + "table lag \(lag.map { Self.f($0 * 1000, 2) } ?? "nil") ms; corrected |error| p95 "
+                + "\(corrected.map { Self.f($0, 2) } ?? "–") ms; response \(response.map { Self.f($0, 2) } ?? "nil")")
+            let outcome = try #require(Self.lagBounds.first { $0.block == block.name }, "\(block.name): no outcome")
+            for hz in block.pitches {
+                let blockLag = PitchWobbleEstimate.anchorLagSeconds(pitchHz: hz)
+                guard let bound = outcome.correctedP95Ms else {
+                    // No response (not measured), or the stop fired (mid): no lag.
+                    #expect(blockLag == nil, "\(block.name) at \(hz) Hz: this block hands out no lag")
+                    continue
+                }
+                let lagMs = try #require(blockLag, "\(block.name) at \(hz) Hz: the lag holds, but none is returned") * 1000
+                let fixed = Self.p95(signed.map { abs($0 - lagMs) })
+                #expect(PitchWobbleEstimate.response(pitchHz: hz) != nil, "\(block.name) at \(hz) Hz: a lag with no response")
+                #expect(signed.count == block.notes.count, "\(block.name): \(block.notes.count - signed.count) notes unanalysed")
+                #expect(abs(lagMs - median) <= 0.5, "\(block.name) at \(hz) Hz: table lag \(lagMs) ms, measured median \(median) ms")
+                #expect(fixed < raw, "\(block.name) at \(hz) Hz: taking the lag out leaves p95 \(fixed) ms, leaving it in \(raw) ms")
+                #expect(fixed <= bound, "\(block.name) at \(hz) Hz: corrected p95 \(fixed) ms > \(bound)")
+            }
+        }
+    }
+
+    /// C5a-0c: WHERE a block's lag applies is `response`'s [INFERRED] band.
+    /// At each edge of a block that hands out a lag (146.8 Hz's: 127.1 and
+    /// 179.7 Hz), taking that lag out must still bring the anchor closer to
+    /// the truth, under the block's bound. And the mid block's STOP is pinned
+    /// here, the way `theLowPitchBlock` pins 82.4/110 Hz: at its lower edge
+    /// (179.7 Hz) its own measured median moves the anchor FURTHER from the
+    /// truth. If an improved detector makes that stop being true, this turns
+    /// red and the mid block's lag gets re-derived rather than staying `nil`.
+    @Test("C5a-0c the lag's inferred edges: 146.8 Hz's lag still helps there, and mid's stop is pinned",
+          .enabled(if: detectorEnabled))
+    func theAnchorLagEdges() throws {
+        let grid = Self.edgeGrid
+        #expect(grid.failure == nil, "the edge grid did not finish: \(grid.failure ?? "")")
+        var gated = 0
+        for hz in Self.heldEdges {
+            let notes = grid.notes.filter { $0.hz == hz }
+            let signed = notes.compactMap(\.signedAnchorError).map { $0 * 1000 }
+            let raw = Self.p95(signed.map(abs))
+            // The lag each side of the edge would hand out: the block the edge
+            // opens (`lowerBound == hz`) and the one it closes.
+            let sides = PitchWobbleEstimate.responseBlocks.filter {
+                $0.coversHz.lowerBound == hz || $0.coversHz.upperBound == hz
+            }
+            let applied = PitchWobbleEstimate.anchorLagSeconds(pitchHz: hz).map { $0 * 1000 }
+            var line = "LAG EDGE \(Self.f(hz, 2)) Hz: \(Self.lagSummary(notes)); raw |error| p95 \(Self.f(raw, 2)) ms; "
+                + "applied lag \(applied.map { Self.f($0, 2) } ?? "nil") ms"
+            for side in sides {
+                guard let l = side.medianLagSeconds.map({ $0 * 1000 }) else { line += "; \(side.name) nil"; continue }
+                line += "; with \(side.name)'s \(Self.f(l, 2)) ms → p95 \(Self.f(Self.p95(signed.map { abs($0 - l) }), 2)) ms"
+            }
+            Self.say(line)
+            for rate in [4.5, 5.5, 6.5, 7.5] {
+                Self.say("lag edge \(Self.f(hz, 2)) Hz \(rate) Hz: \(Self.lagSummary(notes.filter { $0.rate == rate }))")
+            }
+            for side in sides {
+                guard let lag = side.medianLagSeconds.map({ $0 * 1000 }) else { continue }
+                let bound = try #require(Self.lagBounds.first { $0.block == side.name }?.correctedP95Ms,
+                                         "\(side.name) hands out a lag, but has no bound")
+                let fixed = Self.p95(signed.map { abs($0 - lag) })
+                #expect(signed.count == notes.count, "edge \(hz) Hz: \(notes.count - signed.count) notes unanalysed")
+                #expect(fixed < raw, "edge \(hz) Hz: \(side.name)'s lag leaves p95 \(fixed) ms, none \(raw) ms")
+                #expect(fixed <= bound, "edge \(hz) Hz: \(side.name)'s lag leaves p95 \(fixed) ms > \(bound)")
+                gated += 1
+            }
+        }
+        #expect(gated == 2, "\(gated) edges of a lagged block checked (146.8 Hz has two)")
+
+        // THE MID STOP, pinned: mid's own measured median, at mid's lower edge.
+        let midMedian = Self.median(Self.midGrid.notes.filter { $0.depth >= 40 }
+            .compactMap(\.signedAnchorError).map { $0 * 1000 })
+        let lower = try #require(PitchWobbleEstimate.responseBlocks.first { $0.name == "mid 220–330 Hz" }?
+            .coversHz.lowerBound)
+        let edge = grid.notes.filter { $0.hz == lower }.compactMap(\.signedAnchorError).map { $0 * 1000 }
+        let raw = Self.p95(edge.map(abs))
+        let withMid = Self.p95(edge.map { abs($0 - midMedian) })
+        Self.say("MID STOP: mid's measured median \(Self.f(midMedian, 2)) ms, at its lower edge \(Self.f(lower, 2)) Hz: "
+            + "p95 \(Self.f(withMid, 2)) ms taken out, \(Self.f(raw, 2)) ms left in")
+        #expect(edge.count == 32, "\(edge.count) notes at mid's lower edge")
+        #expect(withMid > raw, "mid's lag now HOLDS at its lower edge (\(withMid) ≤ \(raw) ms): re-derive the mid block's lag")
+    }
+
+    /// C5a-0c, UNGATED — runs in every suite run, no detector: NEVER a lag
+    /// where there is no `response` (the handoff is refused there, and the
+    /// lag was not measured), and wherever a lag exists it is a few
+    /// milliseconds, not a fraction of a wobble's period. Swept in 5 c steps
+    /// over 30–2000 Hz. Pinned by pitch: only the 146.8 Hz block has one
+    /// (mid's stop is `theAnchorLagEdges`'). Plant: give the 110 Hz block a
+    /// lag — the sweep and the pin turn red there.
+    @Test("C5a-0c anchorLagSeconds is nil wherever response is nil, and only 146.8 Hz's block has one")
+    func anchorLagIsNilWhereUnmeasured() {
+        var withLag = 0
+        var unmeasured: [String] = []
+        var hz = 30.0
+        while hz <= 2000 {
+            let lag = PitchWobbleEstimate.anchorLagSeconds(pitchHz: hz)
+            if let lag {
+                withLag += 1
+                #expect(lag.isFinite && abs(lag) < 0.02, "\(hz) Hz: lag \(lag) s")
+                if PitchWobbleEstimate.response(pitchHz: hz) == nil {
+                    unmeasured.append("\(Self.f(hz, 2)) Hz: lag \(Self.f(lag * 1000, 2)) ms, no response")
+                }
+            }
+            hz *= pow(2, 5.0 / 1200)
+        }
+        #expect(unmeasured.isEmpty, "\(unmeasured.count) pitches: \(unmeasured.prefix(3))")
+        // Positive control: the sweep reaches the block that DOES have a lag.
+        #expect(withLag > 0, "no pitch in 30–2000 Hz has a lag")
+        for hz in [82.4, 110.0, 220.0, 246.94, 329.63] {
+            #expect(PitchWobbleEstimate.anchorLagSeconds(pitchHz: hz) == nil, "\(hz) Hz: no lag is handed out here")
+        }
+        #expect(PitchWobbleEstimate.anchorLagSeconds(pitchHz: 146.8) != nil, "146.8 Hz: measured and held, but no lag")
+        for bad in [0.0, -146.8, .nan, .infinity] {
+            #expect(PitchWobbleEstimate.anchorLagSeconds(pitchHz: bad) == nil, "\(bad)")
         }
     }
 

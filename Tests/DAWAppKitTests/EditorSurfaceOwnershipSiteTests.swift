@@ -130,6 +130,11 @@ struct EditorSurfaceOwnershipSiteTests {
         // `rowZoom*` trio is absent from here only because it predates the
         // list, which is a gap worth knowing about rather than a precedent.
         "pitchEditorRowZoomIn", "pitchEditorRowZoomOut", "pitchEditorRowZoomReset",
+        // ⭐ m23-ap I2 — THE PINCH'S ENTRY POINT. A new DRIVER of the same slot
+        // is a new entry point under the same law: the gesture engages before
+        // it asks, and the entry point never does. Written out for the reason
+        // every line above is.
+        "setPitchEditorTimeScale",
     ]
 
     // MARK: - F1: the router may never read SwiftUI focus again

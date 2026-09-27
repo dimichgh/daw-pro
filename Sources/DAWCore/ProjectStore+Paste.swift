@@ -313,9 +313,10 @@ extension ProjectStore {
         let ordered = MIDINote.canonicallyOrdered(reclamped)
 
         // Decide the grow BEFORE the edit opens — `ClipAutoExtend` is pure, and
-        // the meter is sampled at the clip's start exactly as `setClipNotes`
-        // and the piano roll's own bar lines sample it, so the new end lands on
-        // a line the user can already see.
+        // it gets the clip's place in the SONG exactly as `setClipNotes` hands
+        // it over, so the new end lands on the next bar line the piano roll
+        // draws: the song's, not one counted from the clip's first beat
+        // (m23-ap AX).
         let clip = tracks[t].clips[c]
         // m25-a-2 — the SAME outcome shape as `setClipNotes`, and `?? .notNeeded`
         // for the same reason: an empty/unmatched `extendToCover` is the ordinary
@@ -328,7 +329,8 @@ extension ProjectStore {
                     currentLengthBeats: clip.lengthBeats,
                     coveringOnsetBeat: span.onsetBeat,
                     coveringEndBeat: span.endBeat,
-                    beatsPerBar: transport.meterMap.beatsPerBar(atBeat: clip.startBeat),
+                    clipStartBeat: clip.startBeat,
+                    meterMap: transport.meterMap,
                     maxLengthBeats: trailingHeadroom(trackIndex: t, clipIndex: c))
             } ?? .notNeeded
         lastAutoExtendOutcome = outcome

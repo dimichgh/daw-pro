@@ -374,4 +374,176 @@ struct DrumKitCommandTests {
             "value": .number(0.5), "bogus": .number(1),
         ])) != nil)
     }
+
+    // MARK: - TPL-0: the note layout (m39-tpl-0)
+
+    /// ⭐ PLANT 3 REDDENS HERE. `noteLayout` is the one kit-level key whose
+    /// value is a WORD; matched after the kit-level number branch, "gm" is
+    /// refused as "must be a number".
+    @Test("TPL-0: drumKit.noteLayout is accepted, overlays, and the echo uses the layout's notes")
+    func noteLayoutIsAcceptedBeforeTheKitLevelNumberBranch() async throws {
+        let (router, store) = makeRouter()
+        let id = try drumTrack(router, store)
+        _ = try payload(await call(router, "track.setInstrument", [
+            "trackId": .string(id.uuidString),
+            "drumKit": .object(["kick": .object(["decay": .number(1.1)])]),
+        ]))
+        let response = await call(router, "track.setInstrument", [
+            "trackId": .string(id.uuidString),
+            "drumKit": .object(["noteLayout": .string("gm")]),
+        ])
+        #expect(response.ok, "gm was refused: \(response.error ?? "nil")")
+        let kit = try #require(store.tracks.first { $0.id == id }?.instrument?.drumKit)
+        #expect(kit.noteLayout == .gm)
+        // An OVERLAY: the edit made before it survives.
+        #expect(kit.kick.decay == 1.1)
+        let echo = try #require(try payload(response)["drumKit"])
+        #expect(echo["noteLayout"]?.stringValue == "gm")
+        // Each voice's echoed `note` is the LOWEST note that plays it in gm.
+        #expect(echo["kick"]?["note"]?.doubleValue == 35)
+        #expect(echo["rim"]?["note"]?.doubleValue == 37)
+        #expect(echo["snare"]?["note"]?.doubleValue == 38)
+        #expect(echo["clap"]?["note"]?.doubleValue == 39)
+        #expect(echo["closedHat"]?["note"]?.doubleValue == 42)
+
+        // Back to pads, together with a sound setting in the same object.
+        _ = try payload(await call(router, "track.setInstrument", [
+            "trackId": .string(id.uuidString),
+            "drumKit": .object([
+                "noteLayout": .string("pads"), "snare": .object(["tune": .number(210)]),
+            ]),
+        ]))
+        let back = try #require(store.tracks.first { $0.id == id }?.instrument?.drumKit)
+        #expect(back.noteLayout == .pads)
+        #expect(back.snare.tune == 210)
+        #expect(back.kick.decay == 1.1)
+    }
+
+    /// The additive contract: a pads kit's echo has no `noteLayout` key and
+    /// the pad notes, exactly as before TPL-0.
+    @Test("TPL-0: a pads kit's echo is unchanged")
+    func padsEchoIsUnchanged() async throws {
+        let (router, store) = makeRouter()
+        let id = try drumTrack(router, store)
+        let response = try payload(await call(router, "track.setInstrument", [
+            "trackId": .string(id.uuidString),
+            "drumKit": .object(["snare": .object(["tune": .number(210)])]),
+        ]))
+        let echo = try #require(response["drumKit"])
+        #expect(echo["noteLayout"] == nil, "a pads kit grew a noteLayout key on the wire")
+        for voice in DrumVoice.allCases {
+            let note = echo[voice.rawValue]?["note"]?.doubleValue
+            #expect(note == Double(voice.note), "\(voice): note \(String(describing: note))")
+        }
+    }
+
+    @Test("TPL-0: a bad noteLayout is refused naming both layouts, and changes nothing")
+    func badNoteLayoutIsRefused() async throws {
+        let (router, store) = makeRouter()
+        let id = try drumTrack(router, store)
+        _ = try store.setInstrument(id: id, drumParam: (name: "kick.decay", value: 1.1))
+        let before = store.tracks.first { $0.id == id }?.instrument?.drumKit
+        let bad: [JSONValue] = [.string("GM"), .string("general"), .string(""), .number(1), .null]
+        for value in bad {
+            let response = await call(router, "track.setInstrument", [
+                "trackId": .string(id.uuidString),
+                "drumKit": .object(["noteLayout": value]),
+            ])
+            let message = try #require(errorText(response), "\(value) was accepted")
+            #expect(message.contains("\"pads\"") && message.contains("\"gm\""),
+                    "the refusal of \(value) did not name both layouts: \(message)")
+            #expect(message.contains("must be a number") == false,
+                    "noteLayout fell through to the kit-level number branch: \(message)")
+            let after = store.tracks.first { $0.id == id }?.instrument?.drumKit
+            #expect(after == before, "a refused noteLayout (\(value)) still mutated the kit")
+        }
+    }
+
+    @Test("TPL-0: describeDrumKit reports the layout, which notes play which voice, and the silent GM notes")
+    func describeReportsTheLayout() async throws {
+        let (router, store) = makeRouter()
+        let id = try drumTrack(router, store)
+        let pads = try payload(await call(router, "instrument.describeDrumKit", [
+            "trackId": .string(id.uuidString),
+        ]))
+        #expect(pads["noteLayout"]?.stringValue == "pads")
+        #expect(pads["noteLayoutMeaning"]?.stringValue?.isEmpty == false)
+        for voice in DrumVoice.allCases {
+            let notes = pads["voiceNotes"]?[voice.rawValue]?.arrayValue?.compactMap { $0.doubleValue }
+            #expect(notes == [Double(voice.note)], "pads \(voice): \(String(describing: notes))")
+        }
+        let padsSilent = pads["silentGMNotes"]?.arrayValue?.compactMap { $0.doubleValue } ?? []
+        #expect(padsSilent == [35] + (44...81).map { Double($0) })
+
+        var gmKit = DrumKitParams()
+        gmKit.noteLayout = .gm
+        _ = try store.setInstrument(id: id, drumKit: gmKit)
+        let gm = try payload(await call(router, "instrument.describeDrumKit", [
+            "trackId": .string(id.uuidString),
+        ]))
+        #expect(gm["noteLayout"]?.stringValue == "gm")
+        // §3.3's gm column, BY HAND.
+        let expected: [String: [Double]] = [
+            "kick": [35, 36], "snare": [38, 40], "closedHat": [42, 44], "openHat": [46],
+            "clap": [39], "tom": [41, 43, 45, 47, 48, 50], "rim": [37],
+            "cymbal": [49, 51, 52, 53, 55, 57, 59],
+        ]
+        for (voice, want) in expected {
+            let got = gm["voiceNotes"]?[voice]?.arrayValue?.compactMap { $0.doubleValue }
+            #expect(got == want, "gm \(voice): \(String(describing: got))")
+        }
+        let gmSilent = gm["silentGMNotes"]?.arrayValue?.compactMap { $0.doubleValue } ?? []
+        #expect(gmSilent == [54, 56, 58] + (60...81).map { Double($0) })
+        // Each voice's `note` is the lowest note in THIS layout.
+        #expect(gm["voices"]?["snare"]?["note"]?.doubleValue == 38)
+        #expect(gm["voices"]?["kick"]?["note"]?.doubleValue == 35)
+    }
+
+    @Test("TPL-0: setDrumParam refuses noteLayout and points at track.setInstrument")
+    func setDrumParamRefusesNoteLayout() async throws {
+        let (router, store) = makeRouter()
+        let id = try drumTrack(router, store)
+        for name in ["noteLayout", "kit.noteLayout"] {
+            for value: JSONValue in [.string("gm"), .number(1)] {
+                let response = await call(router, "instrument.setDrumParam", [
+                    "trackId": .string(id.uuidString), "name": .string(name), "value": value,
+                ])
+                let message = try #require(errorText(response), "\(name) = \(value) was accepted")
+                #expect(message.contains("track.setInstrument"), "\(name): \(message)")
+            }
+        }
+        let layout = store.tracks.first { $0.id == id }?.instrument?.resolvedDrumKit.noteLayout
+        #expect(layout == .pads)
+    }
+
+    /// ⭐ PLANT 2 REDDENS HERE: a preset changes how the drums SOUND, never
+    /// which note plays which drum.
+    @Test("TPL-0: loadDrumPreset keeps the kit's noteLayout, for every preset")
+    func loadDrumPresetKeepsTheLayout() async throws {
+        let (router, store) = makeRouter()
+        let id = try drumTrack(router, store)
+        for preset in DrumKitParams.presets {
+            var gmKit = DrumKitParams()
+            gmKit.noteLayout = .gm
+            _ = try store.setInstrument(id: id, drumKit: gmKit)
+            let response = try payload(await call(router, "instrument.loadDrumPreset", [
+                "trackId": .string(id.uuidString), "name": .string(preset.name),
+            ]))
+            let stored = try #require(store.tracks.first { $0.id == id }?.instrument?.drumKit)
+            #expect(stored.noteLayout == .gm, "\(preset.name) reset the layout to pads")
+            #expect(response["noteLayout"]?.stringValue == "gm", "\(preset.name)'s response")
+            // Everything else IS the preset: the load stayed wholesale.
+            var want = preset.params
+            want.noteLayout = .gm
+            #expect(stored == want, "\(preset.name): the kit is not the preset plus the layout")
+        }
+        // Control: a pads kit stays pads, and says so.
+        _ = try store.setInstrument(id: id, drumKit: DrumKitParams())
+        let padsResponse = try payload(await call(router, "instrument.loadDrumPreset", [
+            "trackId": .string(id.uuidString), "name": .string("909"),
+        ]))
+        #expect(padsResponse["noteLayout"]?.stringValue == "pads")
+        #expect(store.tracks.first { $0.id == id }?.instrument?.drumKit
+            == DrumKitParams.preset(named: "909")?.params)
+    }
 }

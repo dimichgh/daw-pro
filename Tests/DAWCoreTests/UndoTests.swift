@@ -280,6 +280,153 @@ struct UndoRoundTripTests {
         try store.redo()
         #expect(store.tracks[0].clips.count == 1)
     }
+
+    // MARK: - project.transpose (p2-sing-k, lane W7-PK)
+    //
+    // The store door over the pure planner (`ProjectTranspose.plan`, pinned in
+    // the nonisolated `ProjectTransposeTests`): one undo step, one engine call,
+    // and nothing at all for a preview, a zero move or a refusal. Appended to
+    // this suite rather than a new one because of the @MainActor suite cap.
+
+    /// Keys (moves), a tuned vocal (its shift moves, its tuning is kept) and a
+    /// drum machine (skipped). `highNote` lets a leg push a note to the edge.
+    private func transposeFixture(highNote: Int = 67) -> (store: ProjectStore, engine: FakeEngine) {
+        let keys = Track(name: "Keys", kind: .instrument, clips: [
+            Clip(name: "Chords", startBeat: 0, lengthBeats: 4, notes: [
+                MIDINote(pitch: 60, startBeat: 0), MIDINote(pitch: 64, startBeat: 0),
+                MIDINote(pitch: highNote, startBeat: 1),
+            ]),
+        ])
+        let verse = Clip(name: "Verse", startBeat: 0, lengthBeats: 4,
+                         audioFileURL: URL(fileURLWithPath: "/tmp/w7-pk-verse.wav"),
+                         pitchShiftSemitones: -1,
+                         pitchEdits: PitchEditSet(analysisVersion: 1, segments: [
+                             NoteSegment(startSeconds: 0.2, endSeconds: 1, detectedHz: 220,
+                                         detectedConfidence: 0.9, pitchOffsetCents: 25),
+                         ]))
+        let vocals = Track(name: "Vocals", kind: .audio, clips: [verse])
+        let drums = Track(name: "808", kind: .instrument, clips: [
+            Clip(name: "Beat", startBeat: 0, lengthBeats: 4, notes: [MIDINote(pitch: 36, startBeat: 0)]),
+        ], instrument: InstrumentDescriptor(kind: .drumSynth))
+        let engine = FakeEngine()
+        let store = ProjectStore(tracks: [keys, vocals, drums])
+        store.engine = engine
+        return (store, engine)
+    }
+
+    /// The project as sorted-key JSON, with the three session fields an undo
+    /// legitimately moves (the dirty flag and the two labels) held fixed, so
+    /// what is compared is the song.
+    private func songJSON(_ store: ProjectStore) throws -> Data {
+        var snapshot = store.snapshot()
+        snapshot.isDirty = false
+        snapshot.undoLabel = nil
+        snapshot.redoLabel = nil
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return try encoder.encode(snapshot)
+    }
+
+    private func trackChanges(_ engine: FakeEngine) -> Int {
+        engine.calls.filter { if case .tracksDidChange = $0 { return true } else { return false } }.count
+    }
+
+    @Test("transposeProject: ONE undo step and one engine call; undo restores the song exactly")
+    func transposeProjectIsOneUndoStep() throws {
+        let (store, engine) = transposeFixture()
+        let before = try songJSON(store)
+        let beforeTracks = store.tracks
+        engine.clearCalls()
+
+        let report = try store.transposeProject(semitones: 3)
+        #expect(report.applied)
+        #expect(trackChanges(engine) == 1)
+        #expect(store.journal.undoStack.count == 1)
+        #expect(store.undoLabel == "Move Song Up 3 Semitones")
+        #expect(store.tracks[0].clips[0].notes?.map(\.pitch) == [63, 67, 70])
+        #expect(store.tracks[1].clips[0].pitchShiftSemitones == 2)
+        #expect(store.tracks[1].clips[0].pitchEdits == beforeTracks[1].clips[0].pitchEdits)
+        #expect(store.tracks[2] == beforeTracks[2])
+        #expect(store.isDirty)
+        let after = store.tracks
+
+        try store.undo()
+        #expect(store.tracks == beforeTracks)
+        #expect(try songJSON(store) == before)
+        #expect(!store.canUndo)
+        try store.redo()
+        #expect(store.tracks == after)
+    }
+
+    @Test("transposeProject dryRun: the whole store snapshot is unchanged, nothing journaled, no engine call")
+    func transposeDryRunChangesNothing() throws {
+        let (store, engine) = transposeFixture()
+        engine.clearCalls()
+        let before = store.snapshot()
+        let preview = try store.transposeProject(semitones: 3, dryRun: true)
+        #expect(store.snapshot() == before)
+        #expect(engine.calls.isEmpty)
+        #expect(!store.canUndo)
+        #expect(!store.isDirty)
+        #expect(preview.dryRun && !preview.applied)
+        #expect(preview.notesMoved == 3 && preview.audioClipsShifted == 1)
+
+        // The preview is the plan the real call carries out, word for word
+        // apart from its tense and flags.
+        let applied = try store.transposeProject(semitones: 3)
+        var asApplied = preview
+        asApplied.dryRun = false
+        asApplied.applied = true
+        asApplied.summary = applied.summary
+        #expect(asApplied == applied)
+    }
+
+    @Test("transposeProject by 0: no journal entry, no dirty mark, no engine call")
+    func transposeByZeroIsANoOp() throws {
+        let (store, engine) = transposeFixture()
+        engine.clearCalls()
+        let before = store.snapshot()
+        let report = try store.transposeProject(semitones: 0)
+        #expect(!report.applied)
+        #expect(store.snapshot() == before)
+        #expect(engine.calls.isEmpty)
+        #expect(store.journal.undoStack.isEmpty)
+    }
+
+    @Test("transposeProject refusals write nothing: a note past MIDI 127, an unknown exclude id, an open looper")
+    func transposeRefusalsWriteNothing() throws {
+        let (store, engine) = transposeFixture(highNote: 126)
+        engine.clearCalls()
+        let before = store.snapshot()
+
+        let note = #expect(throws: TransposeRefusal.self) { try store.transposeProject(semitones: 3) }
+        #expect(note?.code == .transposeNoteOutOfRange)
+        #expect(throws: ProjectError.self) {
+            try store.transposeProject(semitones: 1, excludeTrackIds: [UUID()])
+        }
+
+        let keys = store.tracks[0].id
+        store.loopDeck = LoopDeck(originBeat: 0, cycleBeats: 4, beatsPerBar: 4, lengthMode: .fixedBars,
+                                  layers: [LoopLayer(trackID: keys, ordinal: 1)])
+        let looper = #expect(throws: TransposeRefusal.self) { try store.transposeProject(semitones: 1) }
+        #expect(looper?.code == .transposeLooperOpen)
+        // A pass still in flight on the keys (its layer not created yet) counts too.
+        store.loopDeck = LoopDeck(originBeat: 0, cycleBeats: 4, beatsPerBar: 4, lengthMode: .fixedBars,
+                                  pending: LoopPendingLayer(trackID: keys, layerID: UUID(), mode: .overdub,
+                                                            launchBeat: 0, armBeat: 0, phase: .queued,
+                                                            definesLength: false, isNewLayer: true))
+        let pending = #expect(throws: TransposeRefusal.self) { try store.transposeProject(semitones: 1) }
+        #expect(pending?.code == .transposeLooperOpen)
+
+        #expect(store.snapshot() == before)
+        #expect(engine.calls.isEmpty)
+        #expect(store.journal.undoStack.isEmpty)
+
+        // A layer on the DRUM track does not block: its notes do not move.
+        store.loopDeck = LoopDeck(originBeat: 0, cycleBeats: 4, beatsPerBar: 4, lengthMode: .fixedBars,
+                                  layers: [LoopLayer(trackID: store.tracks[2].id, ordinal: 1)])
+        #expect(try store.transposeProject(semitones: 1).applied)
+    }
 }
 
 @MainActor

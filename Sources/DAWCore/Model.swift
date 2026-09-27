@@ -721,6 +721,34 @@ public struct Clip: Identifiable, Codable, Sendable, Equatable {
     /// tuning reaches the comped result via the carry above rather than via a
     /// field list of its own.
     public var pitchEdits: PitchEditSet?
+    /// Lyrics typed for this clip's melody (p2-sing-d1, design
+    /// `docs/design/2026-09-27-p2-sing-integration.md` §3.1): the TEXT only.
+    /// Which word sings which note is derived from the current notes every
+    /// time (`LyricNoteAssigner`) and never stored, so a note edit cannot
+    /// leave a stale word-to-note record behind. `nil` == ABSENT == today's
+    /// behaviour EXACTLY; omitted from Codable when nil, so a clip without
+    /// lyrics encodes byte-identically to a pre-lyrics build
+    /// (`ClipLyricsCodableTests` pins the bytes). MIDI clips only: `init`
+    /// drops lyrics from a non-MIDI clip and normalises blank text to nil
+    /// (`ClipLyrics.normalized`), so "no lyrics" is one state. NOT render
+    /// material: nothing that keys or schedules a render reads it.
+    ///
+    /// In `Equatable` ON PURPOSE: `ProjectStore.performEdit` journals an edit
+    /// only when `captureEditState()` changes, so a lyrics-only edit must make
+    /// the clip unequal or it could never be undone.
+    ///
+    /// CARRIED everywhere a clip is saved or rebuilt (p2-sing-d1b), the m12-f
+    /// MIRROR-DTO lesson applied: `ClipDocument` (init, encode, decode, and
+    /// BOTH reconstructions, `ProjectDocument.runtimeState` and
+    /// `TakeGroupDocument.takeGroup`), and every rebuild site listed under
+    /// `pitchEdits`. Unlike `pitchEdits` the carry is not always verbatim: a
+    /// trim, duplicate or paste keeps the text exactly, while a split (and
+    /// the straddling clip of `insertBars` / `deleteBars`, and a comp member)
+    /// takes the words that start on its own notes
+    /// (`ClipLyrics.WordPlacement`), so no word is sung twice.
+    /// `ClipLyricsPersistenceTests`, `ClipLyricsRebuildTests` and
+    /// `ProjectStoreClipEditTests` pin every site.
+    public var lyrics: ClipLyrics?
 
     /// Per-clip gain bounds: a generous studio range, matching the fader's
     /// mental model (a clip can be pulled 72 dB down toward silence or pushed
@@ -847,7 +875,8 @@ public struct Clip: Identifiable, Codable, Sendable, Equatable {
         gainEnvelope: [ClipGainPoint] = [],
         controllerLanes: [MIDIControllerLane] = [],
         takeGroupID: UUID? = nil,
-        pitchEdits: PitchEditSet? = nil
+        pitchEdits: PitchEditSet? = nil,
+        lyrics: ClipLyrics? = nil
     ) {
         self.id = id
         self.name = name
@@ -882,6 +911,10 @@ public struct Clip: Identifiable, Codable, Sendable, Equatable {
         // the omit-when-default encoder and break Equatable across a save. The
         // set heals its own segments in `PitchEditSet.init`.
         self.pitchEdits = (pitchEdits?.isEmpty ?? true) ? nil : pitchEdits
+        // Lyrics (p2-sing-d1) belong to a melody: a non-MIDI clip drops them
+        // (the notes-wins cousin, like `controllerLanes`), and blank text is
+        // nil, so "no lyrics" has one spelling and survives a save unchanged.
+        self.lyrics = notes == nil ? nil : ClipLyrics.normalized(lyrics)
     }
 
     /// Linear playback gain at `beat` (measured from the clip start): the static
@@ -1079,6 +1112,7 @@ public struct Clip: Identifiable, Codable, Sendable, Equatable {
         case startOffsetSeconds, gainDb, fadeInBeats, fadeOutBeats, fadeInCurve, fadeOutCurve
         case stretchRatio, pitchShiftSemitones, formantPreserve, gainEnvelope, controllerLanes, takeGroupID
         case pitchEdits
+        case lyrics
     }
 
     /// Decoding routes through the clamping `init`; every edit field tolerates
@@ -1108,7 +1142,8 @@ public struct Clip: Identifiable, Codable, Sendable, Equatable {
             gainEnvelope: try c.decodeIfPresent([ClipGainPoint].self, forKey: .gainEnvelope) ?? [],
             controllerLanes: try c.decodeIfPresent([MIDIControllerLane].self, forKey: .controllerLanes) ?? [],
             takeGroupID: try c.decodeIfPresent(UUID.self, forKey: .takeGroupID),
-            pitchEdits: try c.decodeIfPresent(PitchEditSet.self, forKey: .pitchEdits)
+            pitchEdits: try c.decodeIfPresent(PitchEditSet.self, forKey: .pitchEdits),
+            lyrics: try c.decodeIfPresent(ClipLyrics.self, forKey: .lyrics)
         )
     }
 
@@ -1149,6 +1184,9 @@ public struct Clip: Identifiable, Codable, Sendable, Equatable {
         // `encodeIfPresent` and not a second emptiness test that could disagree
         // with the first.
         try c.encodeIfPresent(pitchEdits, forKey: .pitchEdits)
+        // Lyrics (p2-sing-d1): written ONLY when present, so a clip without
+        // them carries no new key (byte-identical to a pre-lyrics save).
+        try c.encodeIfPresent(lyrics, forKey: .lyrics)
     }
 }
 
@@ -1436,6 +1474,12 @@ public struct Track: Identifiable, Codable, Sendable, Equatable {
     /// a converted track is a plain audio track.
     public var voiceProvenance: VoiceProvenance?
 
+    /// How this track was SUNG, when a sing job made it (p2-sing-d2, design
+    /// §3.9). nil on every other track. A FACT, not a binding — see
+    /// `SungVocalProvenance`: playback, rendering, every clip edit and
+    /// `project.transpose` ignore it, and nothing may rewrite it.
+    public var sungVocalProvenance: SungVocalProvenance?
+
     /// Whether this track can be written out as a Standard MIDI File (m23-m3b).
     ///
     /// **The ONE home for MIDI-export eligibility.** Three places ask this same
@@ -1570,6 +1614,7 @@ public struct Track: Identifiable, Codable, Sendable, Equatable {
         automation: [AutomationLane] = [],
         takeGroups: [TakeGroup] = [],
         voiceProvenance: VoiceProvenance? = nil,
+        sungVocalProvenance: SungVocalProvenance? = nil,
         modulationSources: [ModulationSource] = [],
         modulationRoutes: [ModulationRoute] = []
     ) {
@@ -1590,6 +1635,7 @@ public struct Track: Identifiable, Codable, Sendable, Equatable {
         self.automation = automation
         self.takeGroups = takeGroups
         self.voiceProvenance = voiceProvenance
+        self.sungVocalProvenance = sungVocalProvenance
         self.modulationSources = Array(modulationSources.prefix(ModulationLimits.maxSources))
         self.modulationRoutes = Array(modulationRoutes.prefix(ModulationLimits.maxRoutes))
     }
@@ -1601,6 +1647,8 @@ public struct Track: Identifiable, Codable, Sendable, Equatable {
         case sends, effects, automation, takeGroups
         // m24-n. Same key on the wire, in the snapshot and on disk.
         case voiceProvenance
+        // p2-sing-d2. Omitted when nil (the voiceProvenance rule).
+        case sungVocalProvenance
         // m39-e. Omitted when empty (the takeGroups rule) — see `encode`.
         case modulationSources, modulationRoutes
     }
@@ -1629,6 +1677,9 @@ public struct Track: Identifiable, Codable, Sendable, Equatable {
             // Additive optional (m24-n): a pre-provenance payload has no key.
             voiceProvenance: try c.decodeIfPresent(
                 VoiceProvenance.self, forKey: .voiceProvenance),
+            // Additive optional (p2-sing-d2): a pre-sing payload has no key.
+            sungVocalProvenance: try c.decodeIfPresent(
+                SungVocalProvenance.self, forKey: .sungVocalProvenance),
             // Additive (m39-e): a pre-modulation payload has neither key.
             modulationSources: try c.decodeIfPresent(
                 [ModulationSource].self, forKey: .modulationSources) ?? [],
@@ -1667,6 +1718,9 @@ public struct Track: Identifiable, Codable, Sendable, Equatable {
         // and wire payload for a track that was never voice-converted stays
         // byte-identical to its pre-m24-n shape.
         try c.encodeIfPresent(voiceProvenance, forKey: .voiceProvenance)
+        // p2-sing-d2: omitted when nil, so a track no sing job made encodes
+        // byte-identically to its pre-sing shape.
+        try c.encodeIfPresent(sungVocalProvenance, forKey: .sungVocalProvenance)
         // m39-e — the takeGroups rule again, and here it is load-bearing for
         // the milestone's headline gate: a project with no modulation must
         // encode, decode and RENDER byte-identically to its pre-m39-e shape.

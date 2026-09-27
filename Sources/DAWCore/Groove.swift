@@ -50,7 +50,7 @@ public struct GrooveTemplate: Identifiable, Codable, Sendable, Equatable {
         self.gridBeats = grid
         let cycle = cycleBeats > 0 ? cycleBeats : grid
         self.cycleBeats = cycle
-        let count = max(1, Int((cycle / grid).rounded()))
+        let count = Self.foldCount(cycle: cycle, grid: grid)
         let bound = grid / 2
         var normalized = [Double](repeating: 0, count: count)
         for i in 0..<min(count, offsets.count) {
@@ -82,18 +82,44 @@ public struct GrooveTemplate: Identifiable, Codable, Sendable, Equatable {
                                cycleBeats: Double, name: String) -> GrooveTemplate {
         let grid = gridBeats > 0 ? gridBeats : 0.0001
         let cycle = cycleBeats > 0 ? cycleBeats : grid
-        let count = max(1, Int((cycle / grid).rounded()))
+        let count = foldCount(cycle: cycle, grid: grid)
         var sums = [Double](repeating: 0, count: count)
         var hits = [Int](repeating: 0, count: count)
         for onset in onsets {
-            let slot = Int((onset / grid).rounded())
-            let folded = ((slot % count) + count) % count
-            let deviation = onset - Double(slot) * grid
+            // TOTAL (m23-ap I5-F4 round 4): the slot stays a Double. `Int(_:)`
+            // trapped here on an onset that is not finite, and on one 2^63 or
+            // more slots out (~2.4e18 beats at 1/16). An integer-valued Double
+            // folds EXACTLY (`truncatingRemainder` is exact, and every slot below
+            // 2^63 converts to Int and back unchanged), so every onset that
+            // worked before lands in the same slot with the same deviation, bit
+            // for bit. An onset with no finite slot is left out.
+            let slot = (onset / grid).rounded()
+            guard slot.isFinite else { continue }
+            var fold = slot.truncatingRemainder(dividingBy: Double(count))
+            if fold < 0 { fold += Double(count) }
+            let folded = Int(fold)
+            let deviation = onset - slot * grid
             sums[folded] += deviation
             hits[folded] += 1
         }
         let offsets = (0..<count).map { hits[$0] > 0 ? sums[$0] / Double(hits[$0]) : 0 }
         return GrooveTemplate(name: name, gridBeats: grid, cycleBeats: cycle, offsets: offsets)
+    }
+
+    /// The fold length, `max(1, round(cycle / grid))`, capped at
+    /// `QuantizeLimits.maximumGrooveSlots` BEFORE the `Int` conversion (m23-ap
+    /// I5-F4 round 4). `Int(_:)` trapped on an infinite or not-a-number ratio
+    /// and on one of 2^63 or more, and a count in the billions allocated
+    /// gigabytes. Every ratio up to 65536 gets exactly the count it got before;
+    /// the cap changes only a larger one, which no app path builds (the store
+    /// has refused a cycle of more than 65536 slots since round 3, and a
+    /// built-in has 2).
+    private static func foldCount(cycle: Double, grid: Double) -> Int {
+        let ratio = (cycle / grid).rounded()
+        guard ratio < Double(QuantizeLimits.maximumGrooveSlots) else {
+            return QuantizeLimits.maximumGrooveSlots
+        }
+        return max(1, Int(ratio))
     }
 
     // MARK: - Built-ins (MPC swing presets)

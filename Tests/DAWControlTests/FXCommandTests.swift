@@ -1431,18 +1431,15 @@ struct FXCommandTests {
         #expect(params[3]["curve"]?.stringValue == "linear")
         #expect(params[3]["min"]?.doubleValue == -0.95)
         #expect(params[3]["max"]?.doubleValue == 0.95)
-        // ⚠️ NOT ASSERTED HERE, AND THE ABSENCE IS THE FINDING: every flanger
+        // ⭐ m39-f-3 FIXED the gap this comment used to document: every flanger
         // param is `modulatable: .yes` in `EffectParamSpec` (pinned by
-        // `ModulationTests.flangerVerdictsMatch`), but `fx.describe` does NOT
-        // put `modulatable` on the wire for ANY kind — the param object above
-        // carries name/min/max/default/unit/curve/note and nothing else. That
-        // is a pre-existing, separately-filed gap (`mod.describeKinds` claims
-        // the verdict exists while `fx.describe` omits it), not something
-        // m39-j introduced, and it is deliberately not widened here because
-        // adding the key changes the wire shape for all fourteen kinds at
-        // once. This comment exists so the next reader does not mistake the
-        // missing assertion for a missing verdict.
-        #expect(params.allSatisfy { $0["modulatable"] == nil })
+        // `ModulationTests.flangerVerdictsMatch`), and `fx.describe` now puts
+        // that verdict on the wire for every kind — this was the pre-existing,
+        // separately-filed gap `mod.describeKinds` had claimed fixed while
+        // `fx.describe` still omitted it. The behavioural pin (the wire verdict
+        // equals what a real `mod.addRoute` does) lives in
+        // `DescribeVerdictsCommandTests`, not repeated per-kind here.
+        #expect(params.allSatisfy { $0["modulatable"]?.stringValue == "yes" })
 
         // ⛔ The §6.3.2 decision, in the note a novice actually reads.
         let depthNote = try #require(params[1]["note"]?.stringValue)
@@ -1923,13 +1920,11 @@ struct FXCommandTests {
         // `position` crosses zero, so `.logarithmic` is structurally invalid on
         // it and the taper MUST read linear — the log-ness lives in the note.
         #expect(params[0]["curve"]?.stringValue == "linear")
-        // ⚠️ `modulatable` is NOT on `fx.describe`'s per-param object today —
-        // verified here rather than assumed, because the first draft of this
-        // test asserted it and failed. The verdicts live in `EffectParamSpec`
-        // and are pinned by `ModulationTests.djFilterVerdictsMatch`; surfacing
-        // them on this verb is a separate, additive decision and is NOT part
-        // of m39-i.
-        #expect(params[0]["modulatable"] == nil)
+        // m39-f-3: `modulatable` IS on `fx.describe`'s per-param object now.
+        // `position`'s verdict lives in `EffectParamSpec` and is pinned by
+        // `ModulationTests.djFilterVerdictsMatch`; this just confirms the same
+        // fact reaches the wire.
+        #expect(params[0]["modulatable"]?.stringValue == "yes")
         let positionNote = try #require(params[0]["note"]?.stringValue)
         #expect(positionNote.contains("high-pass"))
         #expect(positionNote.contains("low-pass"))

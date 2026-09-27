@@ -1681,6 +1681,25 @@ struct CommandRouterTests {
             // error. allCommands order still does not matter.
             "clip.auditionNote": ["clipId": .string(playedPitchClipID),
                                   "segmentIds": .array([.string(playedPitchSegmentID.uuidString)])],
+            // C5a-3/NT-L3: the two vibrato writers are DRIVEN, not excluded,
+            // the clip.setNoteCleared/setNoteGain/setNotePitches/auditionNote
+            // precedent immediately above — same setup clip, same stored
+            // one-note table. Neither writer reads `isCleared` (grepped:
+            // NoteVibratoLimits.swift and setClipNotesVibrato's body have no
+            // such check), only that the segment's `origin` is not
+            // `.unpitched` — still `.detected` here, per the NT-W comment
+            // below. `clip.setNoteVibratos` re-sends the same field on the
+            // same note right after `clip.setNoteVibrato` (allCommands order:
+            // vibrato immediately before vibratos) — a second absolute write
+            // of the same value, not a conflict.
+            "clip.setNoteVibrato": ["clipId": .string(playedPitchClipID),
+                                    "segmentId": .string(playedPitchSegmentID.uuidString),
+                                    "vibratoDepthCents": .number(20)],
+            "clip.setNoteVibratos": ["clipId": .string(playedPitchClipID),
+                                     "notes": .array([.object([
+                                         "segmentId": .string(playedPitchSegmentID.uuidString),
+                                         "vibratoDepthCents": .number(20),
+                                     ])])],
             // m22-g P2: OFF is the idempotent never-refusing side of the A/B
             // monitor (design §5.6) — a legitimate headless route.
             "reference.setMonitor": ["on": .bool(false)],
@@ -1913,6 +1932,63 @@ struct CommandRouterTests {
             // (no params) also stays IN the loop — a scan never errors.
             // instrument.importSoundBank is excluded above (real-FS copy).
             "instrument.listSoundBankPrograms": ["source": .string("gm")],
+            // NT-W (natural tuning §1(e)/§4.e): five of the six new verbs are
+            // DRIVEN, not excluded, the clip.setNoteCleared/setNoteGain/
+            // setNotePitches/auditionNote precedent immediately above — same
+            // setup clip, same stored one-note table. None of the five reads
+            // or depends on the note's `cleared`/`amplitudeDb`/
+            // `pitchOffsetCents` (each earlier verb in this same loop may
+            // already have set those), only on `origin` (still `.detected`)
+            // and/or the set existing at all — so allCommands order still
+            // does not matter. clip.setNoteTransition is the sixth, excluded
+            // above (needs a NEXT note this one-note fixture cannot supply).
+            "clip.setNoteFormant": ["clipId": .string(playedPitchClipID),
+                                    "segmentIds": .array([.string(playedPitchSegmentID.uuidString)]),
+                                    "formantSemitones": .number(0)],
+            "clip.setFormantCorrection": ["clipId": .string(playedPitchClipID), "amount": .number(1)],
+            "clip.setPitchTransitionSmoothness": ["clipId": .string(playedPitchClipID),
+                                                  "centsPerSecond": .number(3000)],
+            // amount MUST be 0: this note meets no curve neighbour on either
+            // side (a one-note table), so any amount above 0 refuses in
+            // words (PitchTransitionSentences.nothingToFollow) — 0 is always
+            // allowed, the verb's own documented exception.
+            "clip.setNoteGlideFollow": ["clipId": .string(playedPitchClipID),
+                                        "noteId": .string(playedPitchSegmentID.uuidString),
+                                        "amount": .number(0)],
+            // NT-W over NT-C C2: needs only pitchEdits != nil, which the
+            // shared seed provides regardless of anything an earlier verb in
+            // this loop did to the one note it carries. NT-E2 has since
+            // landed — the render mix is live; this call still just routes.
+            "clip.setConsonantProtection": ["clipId": .string(playedPitchClipID), "enabled": .bool(true)],
+            // C5b-3b: clip.setNoteShape is DRIVEN, not excluded — the same
+            // shared one-note table as the five verbs above. Unlike
+            // clip.setNoteTransition (excluded, five verbs above: needs a
+            // NEXT note this one-note fixture cannot supply), a drawn shape
+            // needs nothing from a neighbour, only points inside the note's
+            // own [0, 1) span, so allCommands order still does not matter.
+            "clip.setNoteShape": ["clipId": .string(playedPitchClipID),
+                                  "noteId": .string(playedPitchSegmentID.uuidString),
+                                  "points": .array([.object(["seconds": .number(0.2), "cents": .number(10)])])],
+            // W7-WIRE2: clip.setNoteShapes is DRIVEN, not excluded — the
+            // clip.setNoteShape entry above, wrapped in a single-item
+            // `notes` array (the batch verb's own shape). Same shared
+            // one-note table, same reasoning: allCommands order does not
+            // matter.
+            "clip.setNoteShapes": ["clipId": .string(playedPitchClipID),
+                                   "notes": .array([.object([
+                                       "noteId": .string(playedPitchSegmentID.uuidString),
+                                       "points": .array([.object(["seconds": .number(0.2), "cents": .number(10)])]),
+                                   ])])],
+            // X4: clip.upgradeNaturalTuning is DRIVEN, not excluded — needs
+            // only pitchEdits != nil, the same shared one-note table every
+            // other natural-tuning verb above already needs. By the time the
+            // loop reaches this entry, clip.setFormantCorrection above has
+            // already set formantCorrection to a real number, so the table
+            // is ALREADY at (or past) the seed values and this call is
+            // exercised as its own documented NO-OP path — `response.ok`
+            // still requires success, so that path routes too, allCommands
+            // order does not matter either way.
+            "clip.upgradeNaturalTuning": ["clipId": .string(playedPitchClipID)],
         ]
         for command in CommandRouter.allCommands {
             // track.remove deletes the shared track; the project.* routes need
@@ -2513,6 +2589,39 @@ struct CommandRouterTests {
                 // function with no network, by SoundBankDownloadCommandTests.
                 "instrument.downloadSoundBank",
                 "instrument.cancelSoundBankDownload",
+                // NT-W (natural tuning §4.e): clip.setNoteTransition is
+                // excluded, not driven — the shared `playedPitchSegmentID`
+                // fixture five verbs above is a ONE-note table, and this
+                // verb's own rule (`PitchEditSet.applyingNoteTransition`,
+                // `PitchTransitionSentences.lastNoteHasNoSlide`) is that the
+                // LAST sung note has no next note to slide into. Extending
+                // the shared fixture to two notes would be the wrong fix:
+                // clip.getPlayedPitch/setNoteCleared/setNoteGain/
+                // setNotePitches/auditionNote all drive against it and may
+                // assume a single note. So the refusal here IS the verb
+                // working, the instrument.cancelSoundBankDownload precedent
+                // immediately above. Proven on a real three-note fixture
+                // (soft/gap/last joins) by PitchCorrectionCommandTests'
+                // setNoteTransition* tests.
+                "clip.setNoteTransition",
+                // UB-2: clip.findUnpitchedSounds is excluded, not driven —
+                // unlike clip.setNoteVibrato/setNoteVibratos above (same
+                // per-note door, same shared fixture), this verb calls
+                // `detectClipPitch` (`ProjectStore+PitchCorrection.swift`) to
+                // measure the clip's OWN noise floor from real audio frames.
+                // The shared fixture's clip was added over
+                // `/tmp/PlayedPitchFixture.wav`, a path that does not exist
+                // on disk (confirmed: `ls` finds nothing there) — every OTHER
+                // verb driven against it only ever reads the STORED note
+                // table, never audio content, so the missing file never
+                // matters until this one tries to decode it. This router
+                // also carries no `FakePitchDetectionEngine` (unlike
+                // PitchCorrectionCommandTests's `makeRouter`), so there is no
+                // safe stub to detect through either. Proven end to end,
+                // against a real (if minimal) audio file and a
+                // FakePitchDetectionEngine stub, by
+                // PitchCorrectionCommandTests' findUnpitchedSounds* tests.
+                "clip.findUnpitchedSounds",
                 // M35 — the five `view.*` verbs (the fifth, `view.openPitchEditor`,
                 // landed at the m23-ap Phase 2 p2-c pitch-editor command-surface
                 // door). Excluded because THIS ROUTER IS HEADLESS BY CONSTRUCTION

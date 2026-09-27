@@ -657,3 +657,39 @@ test("all three sampler tools have a non-empty title and pass the beginner-reada
     assert.ok((tool.description as string).trim().length >= 40, `${name}'s description clears the length bar`);
   }
 });
+
+// ---------------------------------------------------------------------------
+// W7-SMP — the setter warns when the global it wrote is inert
+// ---------------------------------------------------------------------------
+
+test("W7-SMP: instrument_set_sampler_param's description says the reply WARNS when every zone overrides the global", () => {
+  const tool = tools.find((t) => t.name === "instrument_set_sampler_param");
+  assert.ok(tool, "instrument_set_sampler_param is registered");
+  const description = tool.description as string;
+  assert.match(description, /every zone sets its own value/, "names the cause");
+  assert.match(description, /still stored/, "says the write itself still lands");
+  assert.match(description, /`warnings`/, "names the reply key an agent must read");
+  assert.match(description, /effectiveGlobals/, "names where the per-zone fix is spelled out");
+});
+
+test("W7-SMP: instrument_set_sampler_param hands the app's `warnings` and `effectiveGlobals` back verbatim", async () => {
+  const trackId = randomUUID();
+  const warning =
+    "release: the stored global (3.4465) is NOT what you'll hear — every zone overrides it; " +
+    "the engine actually applies 0.5. See effectiveGlobals.release.";
+  queuedResult = {
+    kind: "sampler",
+    sampler: { oneShot: false, attack: 0.001, release: 3.4465, gain: 0.8, zones: [] },
+    warnings: [warning],
+    effectiveGlobals: { release: { global: 3.4465, globalIsInert: true, effectiveValues: [0.5] } },
+  };
+  const result = (await client.callTool({
+    name: "instrument_set_sampler_param",
+    arguments: { trackId, param: "release", value: 3.4465 },
+  })) as any;
+  assert.ok(!result.isError, JSON.stringify(result));
+  const body = parseJSON(result);
+  assert.deepEqual(body.warnings, [warning]);
+  assert.equal(body.effectiveGlobals.release.globalIsInert, true);
+  assert.deepEqual(calls[0]!.params, { trackId, sampler: { release: 3.4465 } });
+});

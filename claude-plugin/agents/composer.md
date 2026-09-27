@@ -14,6 +14,7 @@ tools: >-
   mcp__plugin_daw-pro-music-team_daw-pro__track_add,
   mcp__plugin_daw-pro-music-team_daw-pro__track_rename,
   mcp__plugin_daw-pro-music-team_daw-pro__track_remove,
+  mcp__plugin_daw-pro-music-team_daw-pro__instrument_describe_drum_kit,
   mcp__plugin_daw-pro-music-team_daw-pro__clip_add_midi,
   mcp__plugin_daw-pro-music-team_daw-pro__clip_get_notes,
   mcp__plugin_daw-pro-music-team_daw-pro__clip_set_notes,
@@ -28,6 +29,18 @@ tools: >-
   mcp__plugin_daw-pro-music-team_daw-pro__clip_set_note_gain,
   mcp__plugin_daw-pro-music-team_daw-pro__clip_set_note_pitches,
   mcp__plugin_daw-pro-music-team_daw-pro__clip_audition_note,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_find_unpitched_sounds,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_set_note_vibrato,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_set_note_vibratos,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_set_note_formant,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_set_formant_correction,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_set_note_transition,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_set_pitch_transition_smoothness,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_set_note_glide_follow,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_set_consonant_protection,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_set_note_shape,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_set_note_shapes,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_upgrade_natural_tuning,
   mcp__plugin_daw-pro-music-team_daw-pro__marker_list,
   mcp__plugin_daw-pro-music-team_daw-pro__clip_add_audio,
   mcp__plugin_daw-pro-music-team_daw-pro__clip_set_controller_lane,
@@ -111,6 +124,18 @@ before then). So:
   in the way. Omit `atBeat` to append after everything on the track (never
   refused); pass `overwrite: true` only when you mean to replace, and read the
   `removedClipIDs`/`trimmedClipIDs` it returns.
+- **Drum notes on the built-in drum machine: read which note plays which drum
+  FIRST.** Before you write notes on a `drumSynth` track, call
+  `instrument_describe_drum_kit` and read `voiceNotes`: for THIS kit it lists
+  exactly which MIDI notes play each drum. The kit has two layouts
+  (`noteLayout` in the same response). In `pads`, the default, notes 36-43
+  play kick, snare, closed hat, open hat, clap, tom, rim and cymbal in that
+  order; in `gm` it plays General MIDI drum notes, where 38 is the snare. A
+  beat written from General MIDI numbers on a `pads` kit plays the WRONG
+  drums with no error, and a note listed in `silentGMNotes` plays nothing.
+  Write the notes `voiceNotes` gives you. You cannot change the layout:
+  that is the sound designer's call, so if the layout does not fit the part,
+  say so in your handoff.
 - **Edit notes: READ, then whole-array replace.** `clip_get_notes` reads ONE
   clip's notes (with their ids, optionally narrowed by `fromBeat`/`toBeat` —
   clip-relative, half-open — and `pitchMin`/`pitchMax`, inclusive); it is

@@ -327,14 +327,15 @@ struct NoteSplitListeningTests {
     /// Pass 2 proves the mirror on all 42 runs before it is used for a single
     /// held part.
     static func policySegment(start: Double, end: Double, hz: Double, confidence: Double,
-                              options: PitchAutoCorrectOptions) -> NoteSegment {
+                              options: PitchAutoCorrectOptions,
+                              origin: NoteOrigin = .detected) -> NoteSegment {
         let shapeScale = options.preserveVibrato ? 1 : (1 - options.strength)
         let detectedMidi = PitchCorrectionMath.midi(fromHz: hz)
         let targetMidi = options.scale.nearestAllowedMidi(to: detectedMidi)
         let offset = options.strength * (targetMidi - detectedMidi) * 100
         return NoteSegment(startSeconds: start, endSeconds: end, detectedHz: hz,
                            detectedConfidence: confidence, pitchOffsetCents: offset,
-                           driftScale: shapeScale, vibratoScale: shapeScale)
+                           driftScale: shapeScale, vibratoScale: shapeScale, origin: origin)
     }
 
     /// Every stored field of two segments except `id`, compared through
@@ -360,6 +361,17 @@ struct NoteSplitListeningTests {
     /// whatever `transition` writes for each `.transition` part. Parts abut
     /// exactly (`Take.partBounds`), so `PitchEditSet.canonical` moves nothing,
     /// which is asserted.
+    ///
+    /// UA-2 (unpitched-notes design §1.4, F-S2): every `transition` closure
+    /// below stamps `origin: .transition`, because the product's builders now
+    /// stamp each segment made from a `.transition` part that way. L's closures
+    /// predate the field. Without the stamp, pass 3's field-by-field comparison
+    /// would report `origin: transition vs detected` on every slide, a
+    /// difference in bookkeeping and not in audio. No render reads `origin` for
+    /// a slide (`entersPitchCurve` and the formant base admit `.transition` as
+    /// they admit `.detected`; `PitchCurveRenderSlideOriginTests` proves the
+    /// bytes), so L's WAVs are unchanged. Held parts and unsplit runs stay
+    /// `.detected`.
     @MainActor
     static func buildSplit(_ take: Take, base: PitchEditSet, options: PitchAutoCorrectOptions,
                            roles: inout [UUID: String],
@@ -490,15 +502,16 @@ struct NoteSplitListeningTests {
             return [NoteSegment(startSeconds: s, endSeconds: e, detectedHz: hz[i][k],
                                 detectedConfidence: conf[i][k],
                                 pitchOffsetCents: ht.strength * (target - detected) * 100,
-                                driftScale: 0, vibratoScale: 0)]
+                                driftScale: 0, vibratoScale: 0, origin: .transition)]
         }
         // (a-T) Slide kept, note locked: the transition is an IDENTITY segment.
         let slideKept = try Self.buildSplit(take, base: today, options: ht, roles: &roles) { i, k, s, e in
-            [NoteSegment(startSeconds: s, endSeconds: e, detectedHz: hz[i][k], detectedConfidence: conf[i][k])]
+            [NoteSegment(startSeconds: s, endSeconds: e, detectedHz: hz[i][k], detectedConfidence: conf[i][k], origin: .transition)]
         }
         // (a-N) In-between note: the transition gets today's Hard Tune for its OWN median.
         let inBetween = try Self.buildSplit(take, base: today, options: ht, roles: &roles) { i, k, s, e in
-            [Self.policySegment(start: s, end: e, hz: hz[i][k], confidence: conf[i][k], options: ht)]
+            [Self.policySegment(start: s, end: e, hz: hz[i][k], confidence: conf[i][k], options: ht,
+                                origin: .transition)]
         }
         // (b) Robot staircase PROTOTYPE: one Hard-Tuned sub-segment per stretch
         // of consecutive frames that share a chromatic nearest note.
@@ -524,7 +537,8 @@ struct NoteSplitListeningTests {
                 out.append(NoteSegment(startSeconds: start, endSeconds: end, detectedHz: groupHz,
                                        detectedConfidence: groupConf,
                                        pitchOffsetCents: ht.strength * (notes[g] - detected) * 100,
-                                       driftScale: 1 - ht.strength, vibratoScale: 1 - ht.strength))
+                                       driftScale: 1 - ht.strength, vibratoScale: 1 - ht.strength,
+                                       origin: .transition))
                 stairs.append(["run": i, "part": k, "start": start, "end": end, "frames": h - g,
                                "noteMidi": notes[g], "detectedMidi": detected])
                 g = h
@@ -534,7 +548,7 @@ struct NoteSplitListeningTests {
         // Natural with the split: held parts get Natural's constant for their own
         // median; transitions are identity; unsplit runs are Natural today's.
         let naturalAfter = try Self.buildSplit(take, base: naturalBefore, options: nat, roles: &roles) { i, k, s, e in
-            [NoteSegment(startSeconds: s, endSeconds: e, detectedHz: hz[i][k], detectedConfidence: conf[i][k])]
+            [NoteSegment(startSeconds: s, endSeconds: e, detectedHz: hz[i][k], detectedConfidence: conf[i][k], origin: .transition)]
         }
         // THE PLANT (isolated copy): (a-T) with +50 c on unsplit run 3 — the
         // longest run before the first split run (run 5, 3.536 s).
@@ -918,16 +932,17 @@ struct NoteSplitListeningTests {
             return [NoteSegment(startSeconds: s, endSeconds: e, detectedHz: hz[i][k],
                                 detectedConfidence: conf[i][k],
                                 pitchOffsetCents: ht.strength * (target - detected) * 100,
-                                driftScale: 0, vibratoScale: 0)]
+                                driftScale: 0, vibratoScale: 0, origin: .transition)]
         }
         let lSlideKept = try Self.buildSplit(take, base: today, options: ht, roles: &roles) { i, k, s, e in
-            [NoteSegment(startSeconds: s, endSeconds: e, detectedHz: hz[i][k], detectedConfidence: conf[i][k])]
+            [NoteSegment(startSeconds: s, endSeconds: e, detectedHz: hz[i][k], detectedConfidence: conf[i][k], origin: .transition)]
         }
         let lInBetween = try Self.buildSplit(take, base: today, options: ht, roles: &roles) { i, k, s, e in
-            [Self.policySegment(start: s, end: e, hz: hz[i][k], confidence: conf[i][k], options: ht)]
+            [Self.policySegment(start: s, end: e, hz: hz[i][k], confidence: conf[i][k], options: ht,
+                                origin: .transition)]
         }
         let lNaturalAfter = try Self.buildSplit(take, base: naturalBefore, options: nat, roles: &roles) { i, k, s, e in
-            [NoteSegment(startSeconds: s, endSeconds: e, detectedHz: hz[i][k], detectedConfidence: conf[i][k])]
+            [NoteSegment(startSeconds: s, endSeconds: e, detectedHz: hz[i][k], detectedConfidence: conf[i][k], origin: .transition)]
         }
         let lSets: [String: PitchEditSet] = ["c": today, "d": lStraight, "aT": lSlideKept,
                                              "aN": lInBetween, "natAfter": lNaturalAfter]

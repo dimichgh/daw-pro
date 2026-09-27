@@ -301,4 +301,21 @@ struct PasteAutoExtendTests {
         #expect(out.lengthBeats == 6)                  // 2 bars of 3, not 8
         #expect(isAudible(pasted[0], in: out))
     }
+
+    // MARK: - m23-ap AX — the SONG's bar line
+
+    /// Paste runs the same rule as a note edit: a clip at song beat 2 in 4/4
+    /// grows to local 6 (song 8, a line the roll draws), not local 8 (song 10).
+    @Test("m23-ap AX — a paste past an OFF-bar clip's end grows it to the SONG's next bar line")
+    func offBarPasteGrowsToTheSongsBarLine() throws {
+        let (store, _, clip) = try midiClip(atBeat: 2)
+        let pasted = [MIDINote(pitch: 64, startBeat: 5, lengthBeats: 0.5)]   // song 7…7.5
+        let out = try store.pasteNotes(clipID: clip.id,
+                                       notes: (clip.notes ?? []) + pasted,
+                                       extendToCover: Set(pasted.map(\.id)))
+        #expect(out.lengthBeats == 6)
+        #expect(isAudible(pasted[0], in: out))
+        #expect(store.lastAutoExtendOutcome == .grew(6))
+        #expect(store.undoHistory().undo.first == "Paste Notes & Extend Clip")
+    }
 }

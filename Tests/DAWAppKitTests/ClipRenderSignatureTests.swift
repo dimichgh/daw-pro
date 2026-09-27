@@ -247,8 +247,11 @@ struct ClipRenderSignatureTests {
         // `PitchEditSetDigest.hex` hashes BIT PATTERNS, so -0.0 cents re-keys
         // the render (new audio file, clip silent while it renders) although
         // `==` calls the two sets equal. The note is untouched (+0.0) and the
-        // set still bends the curve through the middle note.
-        let set = tunedSet()
+        // set still bends the curve through the middle note. The set is
+        // already on natural tuning: `tunedSet()` alone predates it, and a
+        // hand edit on such a vocal updates the whole set (D4-1 (b), the
+        // user's ruling of 2026-09-26), which `==` would rightly see.
+        let set = tunedSet().upgradedToNaturalTuning()
         let clip = vocal(pitchEdits: set)
         let (store, _) = makeStore(clip)
         let before = signature(store)
@@ -272,10 +275,15 @@ struct ClipRenderSignatureTests {
                             vibratoRateHz: 5.5, vibratoDepthCents: 20, vibratoOnsetSeconds: 0.1,
                             formantOffsetSemitones: 1,
                             timeStartDeltaSeconds: 0.01, timeEndDeltaSeconds: -0.01,
-                            amplitudeDb: -3)
-        // The three `let` fields can only differ in a rebuilt note.
+                            amplitudeDb: -3,
+                            // C5b-1: a drawn shape, so its two fields are
+                            // render material (digest slot 4) and each row
+                            // below moves a shape that is really there.
+                            shapeStartIndex: 60, shapeTenthsOfCents: [0, 100, 200, 100, 0])
+        // The four `let` fields can only differ in a rebuilt note.
         func rebuilt(id: UUID? = nil, detectedHz: Double? = nil,
-                     detectedConfidence: Double? = nil) -> NoteSegment {
+                     detectedConfidence: Double? = nil,
+                     origin: NoteOrigin? = nil) -> NoteSegment {
             NoteSegment(id: id ?? n.id, startSeconds: n.startSeconds, endSeconds: n.endSeconds,
                         detectedHz: detectedHz ?? n.detectedHz,
                         detectedConfidence: detectedConfidence ?? n.detectedConfidence,
@@ -283,14 +291,23 @@ struct ClipRenderSignatureTests {
                         vibratoScale: n.vibratoScale, vibratoRateHz: n.vibratoRateHz,
                         vibratoDepthCents: n.vibratoDepthCents,
                         vibratoOnsetSeconds: n.vibratoOnsetSeconds,
+                        vibratoPhaseAnchorSeconds: n.vibratoPhaseAnchorSeconds,
                         formantOffsetSemitones: n.formantOffsetSemitones,
                         timeStartDeltaSeconds: n.timeStartDeltaSeconds,
-                        timeEndDeltaSeconds: n.timeEndDeltaSeconds, amplitudeDb: n.amplitudeDb)
+                        timeEndDeltaSeconds: n.timeEndDeltaSeconds, amplitudeDb: n.amplitudeDb,
+                        shapeStartIndex: n.shapeStartIndex,
+                        shapeTenthsOfCents: n.shapeTenthsOfCents,
+                        origin: origin ?? n.origin)
         }
         var variants: [(field: String, note: NoteSegment)] = [
             ("id", rebuilt(id: UUID())),
             ("detectedHz", rebuilt(detectedHz: 247.5)),
             ("detectedConfidence", rebuilt(detectedConfidence: 0.9)),
+            // U-A: the one-byte enum after `isCleared`. `n` carries a pitch
+            // edit, so it is not identity either way, and the digest's origin
+            // block (slot 6) is what re-keys it; the byte comparison sees the
+            // field because it sits inside `size`.
+            ("origin", rebuilt(origin: .unpitched)),
         ]
         let nudges: [(String, WritableKeyPath<NoteSegment, Double>, Double)] = [
             ("startSeconds", \.startSeconds, 0.52),
@@ -301,10 +318,18 @@ struct ClipRenderSignatureTests {
             ("vibratoRateHz", \.vibratoRateHz, 6),
             ("vibratoDepthCents", \.vibratoDepthCents, 25),
             ("vibratoOnsetSeconds", \.vibratoOnsetSeconds, 0.2),
+            // C5a-1: a Double declared before `isCleared`, so the byte
+            // comparison sees it; `n` has a depth, so the digest's anchor block
+            // (slot 2) re-keys it too.
+            ("vibratoPhaseAnchorSeconds", \.vibratoPhaseAnchorSeconds, 0.75),
             ("formantOffsetSemitones", \.formantOffsetSemitones, 2),
             ("timeStartDeltaSeconds", \.timeStartDeltaSeconds, 0.02),
             ("timeEndDeltaSeconds", \.timeEndDeltaSeconds, -0.02),
             ("amplitudeDb", \.amplitudeDb, -6),
+            // Natural tuning §4 (NT-C C0): two Doubles before `isCleared`,
+            // so the byte comparison already sees them; these rows PROVE it.
+            ("transitionOutMs", \.transitionOutMs, 120),
+            ("glideFollow", \.glideFollow, 1),
         ]
         for (field, path, value) in nudges {
             var changed = n
@@ -316,6 +341,16 @@ struct ClipRenderSignatureTests {
         var cleared = n
         cleared.isCleared = true
         variants.append(("isCleared", cleared))
+        // C5b-1: the drawn shape's two fields. The start index is plain data
+        // inside `size`; the samples are a REFERENCE, so this row changes ONE
+        // interior sample at the SAME count, which only the contents compare
+        // in `bitIdentical` can see (the pointer bytes are skipped).
+        var movedShape = n
+        movedShape.shapeStartIndex = 61
+        variants.append(("shapeStartIndex", movedShape))
+        var redrawn = n
+        redrawn.shapeTenthsOfCents[2] = 201
+        variants.append(("shapeTenthsOfCents", redrawn))
         // Keeps this test's name true: a field added to `NoteSegment` is
         // compared by construction (the signature compares a note's bytes),
         // but this list has to grow by one line to PROVE it.
@@ -333,7 +368,7 @@ struct ClipRenderSignatureTests {
         }
     }
 
-    @Test("exact: a note's first size bytes are exactly its fields (a UUID, Doubles, one trailing Bool)")
+    @Test("exact: a note's first size bytes are exactly its fields (a UUID, Doubles, the shape's Int and array, a Bool and a one-byte origin at the tail)")
     func noteBytesAreExactlyItsFields() {
         // The premise of `ClipRenderSignature.Tuning.bitIdentical`, stated in
         // the type's doc. Until I7a a note was a UUID followed by Doubles, with
@@ -342,15 +377,61 @@ struct ClipRenderSignatureTests {
         // "padding only at the TAIL": the comparison reads `size` bytes per
         // note, which are exactly the fields. A field that put padding INSIDE
         // the note, or a reference, would break that, and this test says so.
+        //
+        // U-A MOVED THIS PIN ON PURPOSE: `origin` is a one-byte enum declared
+        // after `isCleared`, so the note is a UUID, the Doubles, then TWO
+        // one-byte fields (129 → 130 bytes, stride still 136). The formula
+        // gains one `NoteOrigin` and loses one Double; `isCleared` moves from
+        // the last byte to the one before it, and `origin` is the last. Both
+        // one-byte fields are asserted by OFFSET, so a field declared between
+        // them, or a one-byte field slipped before a Double, fails here.
+        //
+        // Since then two natural-tuning Doubles (NT-C C0) and the wobble's
+        // phase anchor (C5a-1) joined the Doubles before `isCleared`; the
+        // formula counts fields, so it did not move. MEASURED 2026-09-25 by
+        // the T12 log in `NoteVibratoGeneratorTests`: 19 fields, 146 bytes,
+        // stride 152 before the anchor; 20 fields, 154 bytes, stride 160
+        // after it (the anchor is one more Double, so +8 each).
+        //
+        // ⛔ C5b-1 REWROTE THIS PIN, BECAUSE THE OLD FORMULA WOULD HAVE PASSED
+        // FOR THE WRONG REASON. It counted every field but three as a Double.
+        // The drawn shape added an `Int` and an `[Int16]`, both 8 bytes, so
+        // `(fields - 3) × 8` still matched the size NUMERICALLY while two of
+        // those "Doubles" were an integer and a POINTER. The pin now counts
+        // the Doubles BY TYPE (`Mirror`), names the two shape fields by
+        // offset, and asserts the array is one reference wide, the premise of
+        // `Tuning.shapePointerBytes` (whose 8 bytes the comparison skips).
         let note = tunedSet().segments[0]
-        let fields = Mirror(reflecting: note).children.count
+        let children = Array(Mirror(reflecting: note).children)
+        let doubles = children.filter { $0.value is Double }.count
+        #expect(doubles == children.count - 5,
+                "every field but id, the shape's two, isCleared and origin must be a Double")
+        #expect(MemoryLayout<NoteOrigin>.size == 1,
+                "NoteOrigin is no longer one byte — revisit the byte comparison")
+        #expect(MemoryLayout<[Int16]>.size == MemoryLayout<Int>.size,
+                "an array is no longer ONE reference — revisit Tuning.shapePointerBytes")
         #expect(MemoryLayout<NoteSegment>.size
-                    == MemoryLayout<UUID>.size + (fields - 2) * MemoryLayout<Double>.size
-                        + MemoryLayout<Bool>.size,
-                "NoteSegment is no longer a UUID, Doubles and one trailing Bool — revisit the byte comparison")
+                    == MemoryLayout<UUID>.size + doubles * MemoryLayout<Double>.size
+                        + MemoryLayout<Int>.size + MemoryLayout<[Int16]>.size
+                        + MemoryLayout<Bool>.size + MemoryLayout<NoteOrigin>.size,
+                "NoteSegment is no longer a UUID, Doubles, the shape's Int and array, one Bool and one origin byte — revisit the byte comparison")
+        let shapeOffset = MemoryLayout<NoteSegment>.offset(of: \NoteSegment.shapeTenthsOfCents)
+        #expect(shapeOffset == MemoryLayout<NoteSegment>.size - MemoryLayout<Bool>.size
+                    - MemoryLayout<NoteOrigin>.size - MemoryLayout<[Int16]>.size,
+                "the shape's array is no longer right before isCleared")
+        #expect(MemoryLayout<NoteSegment>.offset(of: \NoteSegment.shapeStartIndex)
+                    == shapeOffset.map { $0 - MemoryLayout<Int>.size },
+                "the shape's start index is no longer right before its array")
+        #expect(ClipRenderSignature.Tuning.shapePointerBytes
+                    == shapeOffset.map { $0..<($0 + MemoryLayout<[Int16]>.size) },
+                "the comparison skips the wrong 8 bytes")
         #expect(MemoryLayout<NoteSegment>.offset(of: \NoteSegment.isCleared)
-                    == MemoryLayout<NoteSegment>.size - MemoryLayout<Bool>.size,
-                "isCleared is no longer the last byte, so padding may sit INSIDE a note")
+                    == MemoryLayout<NoteSegment>.size - MemoryLayout<Bool>.size
+                        - MemoryLayout<NoteOrigin>.size,
+                "isCleared is no longer the byte before origin, so padding may sit INSIDE a note")
+        #expect(MemoryLayout<NoteSegment>.offset(of: \NoteSegment.origin)
+                    == MemoryLayout<NoteSegment>.size - MemoryLayout<NoteOrigin>.size,
+                "origin is no longer the last byte, so padding may sit INSIDE a note")
         #expect(MemoryLayout<NoteSegment>.stride > MemoryLayout<NoteSegment>.size,
                 "precondition for the padding test below: there IS tail padding to be wrong about")
     }
@@ -377,6 +458,38 @@ struct ClipRenderSignatureTests {
         var changed = notes
         changed[1].isCleared = true
         #expect(!ClipRenderSignature.Tuning.bitIdentical(padded, changed))
+    }
+
+    /// ⭐ C5b-1: the drawn shape is compared by CONTENTS, never by pointer.
+    /// Two tables holding the same drawing in DIFFERENT storage (what a
+    /// decode or an undo hands back) must compare equal, or every such
+    /// rebuild would start a spare render poll; and the same drawing with one
+    /// sample changed, at the same count, must compare unequal. The first leg
+    /// is the one a pointer compare fails; the second is the one skipping the
+    /// pointer WITHOUT a contents compare fails.
+    @Test("exact: a drawn shape compares by its samples, not by where they are stored")
+    func drawnShapeComparesByContents() throws {
+        var shaped = tunedSet()
+        shaped.segments[1].shapeStartIndex = 60
+        shaped.segments[1].shapeTenthsOfCents = [0, 150, 300, 150, 0]
+        let notes = shaped.segments
+        var copy = notes
+        copy[1].shapeTenthsOfCents = notes[1].shapeTenthsOfCents.map { $0 }
+        let a = notes[1].shapeTenthsOfCents.withUnsafeBufferPointer { $0.baseAddress }
+        let b = copy[1].shapeTenthsOfCents.withUnsafeBufferPointer { $0.baseAddress }
+        try #require(a != b, "precondition: the two drawings must live in different storage")
+        #expect(copy == notes)
+        #expect(ClipRenderSignature.Tuning.bitIdentical(notes, copy),
+                "the same drawing in different storage compared unequal: pointers were compared")
+        let base = [Track(name: "Vocals", kind: .audio, clips: [vocal(pitchEdits: shaped)])]
+        var rebuilt = base
+        rebuilt[0].clips[0].pitchEdits?.segments = copy
+        #expect(ClipRenderSignature(tracks: rebuilt) == ClipRenderSignature(tracks: base),
+                "a rebuilt copy of the same drawing started a spare render poll")
+        var redrawn = copy
+        redrawn[1].shapeTenthsOfCents[2] = 301
+        #expect(!ClipRenderSignature.Tuning.bitIdentical(notes, redrawn),
+                "one redrawn sample at the same count compared equal: the samples were not compared")
     }
 
     @Test("exact: changing the retune speed or the analysis version changes the signature")

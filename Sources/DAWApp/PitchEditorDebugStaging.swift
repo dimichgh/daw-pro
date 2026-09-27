@@ -105,21 +105,78 @@ import Foundation
 //                                ROUTES the press (the echo's `press.kind`)
 //   {act:"drag", x, y, chord?}   a later tick of the staged press
 //   {act:"release", x, y, chord?} mouse up (the echo's `lastRelease`)
-//   {act:"tool", tool}           a palette slot: "pointer"/"move" or
-//                                "scissors"/"split"
+//   {act:"tool", tool}           a palette slot: "pointer"/"move",
+//                                "scissors"/"split" or "wobble" (C5a-4b)
 //   {act:"scroll", x?, y?}       the pane's scroll WRITERS (clamped)
 //   {act:"escape"}               the pane's Escape path, no keystroke
 //   {act:"selectAll"}            I4 — Edit ▸ Select All's route into the pane
 //                                (the bridge nonce ⌘A pulls), no keystroke
 //   {act:"clearSelection"}       I4 — clear the pane's note selection
 //   {act:"noteMenu", action, x?, y?}
-//                                I7b — choose "clear" or "restore" from the
+//                                I7b — choose "clear" or "restore" (C5a-4b:
+//                                or "resetWobble", "Back to how you sang it";
+//                                C5b-4b: or "resetShape", "Reset drawn shape") from the
 //                                right-click menu: the menu's OWN function
 //                                (`runNoteMenu`), with the right-click's point
 //                                when x/y are given (an unselected note there
 //                                is selected first) and the selection as it
 //                                stands when they are not. A synthetic event
 //                                cannot open a context menu (m23-g1).
+//   {act:"pinch", x, y, magnification}
+//                                I2 — one tick of a pinch: (x, y) is where it
+//                                STARTED (content space; a real gesture's start
+//                                is fixed for its life, so every tick of one
+//                                pinch sends the same point — a different x
+//                                mid-pinch is refused) and `magnification` the
+//                                CUMULATIVE ratio since it started (1 = the
+//                                start scale). The first tick captures the
+//                                anchor. Refused mid-press (the pane ignores a
+//                                pinch then) and for a ratio that is not finite
+//                                and > 0. After a scale change it also waits
+//                                (bounded) for the re-pin's scroll to LAND: the
+//                                first report after a scale change is the
+//                                geometry's, taken before the scroll moved.
+//   {act:"pinchEnd"}             I2 — the pinch ended; refused with none live.
+//   {act:"findSounds"}           UE-1 — the header's "Find sounds with no pitch"
+//                                button's own function; refused mid-press and
+//                                while the header does not offer it.
+//   {act:"ruler", x, option?}    I5 — one tick of the TIME RULER (click jumps,
+//                                drag scrubs: a scrub is several ticks). x is
+//                                RULER-LOCAL — the viewport's space, 0 = the
+//                                ruler's left edge whatever the scroll — so the
+//                                tick adds the scroll offset where a real one
+//                                does (`PitchEditorView.rulerTick`); `option`
+//                                bypasses the snap. Refused mid-press. The
+//                                model seeks; nothing here touches the store.
+//   {act:"keys", command?}       C5b-4b — keys held with the button UP, as the
+//                                pane's `.flagsChanged` monitor writes them
+//                                (`commandHeld`): ⌘ over a note shows the
+//                                brush band and the brush's help, ⌘ over empty
+//                                surface the playhead's ghost. Holds until the
+//                                next `keys`, a real key change, or `hoverEnd`.
+//                                A STROKE is a staged press with command:true,
+//                                drags past the slop, and a release — I0's three
+//                                steps; the echo's `brush` block reports it.
+//
+// I5-F1 — `playhead` also carries `transportReadout` (the transport's
+// bar.beat as drawn) and `ruler {numbering: "song", labels: [{x, text, isBar}]}`,
+// the ruler's labelled ticks in content space (`PitchEditorSongRuler`).
+// p2-ren B″(c) — `chrome.renderCaption` is the "Preview" caption as drawn.
+//
+// I5 — `playhead {positionBeats, x, screenX, insideClip, rulerScrollX,
+// placementCount, lastPlacementBeat, follow {enabled, suspended}}`: the
+// TRANSPORT's position (what the store did) placed through the pane's own
+// geometry (`x` content space, `screenX` = x − rulerScrollX, where
+// `rulerScrollX` is the offset the scroller can SHOW —
+// `PitchEditorViewport.shownOffsetX`, the one the ruler draws with),
+// beside what the model last ASKED (`lastPlacementBeat`, one count per
+// placement). A seek that quietly failed shows as the two disagreeing, and a
+// gate should still read the position back over `transport.*` itself.
+//
+// I2 — `pinch {live, ppb, offset, screenX}` is the live pinch's anchor as the
+// pane holds it (`PitchEditorSurfaceReport.pinchAnchor`): identical on every
+// tick of one pinch, all null once it ended. `zoom.hintText` is the pinch help
+// the zoom cluster DREW (ledger), "" before it drew.
 //
 // I7b — each `notesAsDrawn` entry carries the note's `cleared` flag, its
 // `levelDb` and the `levelReadout` the surface draws for it (null for none),
@@ -127,6 +184,17 @@ import Foundation
 // `{action, title, enabled}` as the pane would build them at its hover point;
 // `notes` (the STORE) carries `cleared` and `amplitudeDb` too, so the two
 // instruments can be compared. The refusal line is `interaction.refusalText`.
+//
+// UE-1 (sounds with no pitch) — each `notesAsDrawn` entry carries `origin`
+// (`detected` / `transition` / `unpitched`, the model's blob) and
+// `soundReadout` (§1.7's sentence for a sound, null for a note); each `notes`
+// entry carries the STORE's `origin` beside it. `findSounds {label, offered,
+// running, lineKind, lineText}` is the header's "Find sounds with no pitch" as
+// the model holds it, and `{act:"findSounds"}` presses it through the button's
+// own function (refused mid-press and when not offered). Its answer is
+// asynchronous (the pitch is read first): poll the echo for `running` false.
+// UE-2 — each `notesAsDrawn` entry also carries `look` (`note` / `sound` /
+// `cleared`, `NoteBlob.look`): the look the surface's Canvas switches on.
 //
 // I4 — `selection {ids, count, token, summary}` is the MODEL's selection as the
 // pane reported it (`PitchEditorSelectionReport`, never re-derived here), and
@@ -146,6 +214,17 @@ import Foundation
 // m23-ap I6c: `pitchWindow {low, high, rows, fittedLow, fittedHigh, rowHeight,
 // availableHeight}` is the pitch window the pane LAID OUT (the notes' window
 // filled to the pane), from its model, the same way.
+//
+// m23-ap I6b: `autoscroll {armed, grownRows, lastSide, dragRect}` is the edge
+// autoscroll as the pane holds it (`PitchEditorSurfaceReport.autoscroll`):
+// `armed` is the held-pointer clock, which only a LIVE pointer starts — a staged
+// step ALWAYS reads false (a gate's control leg); `grownRows` the rows the
+// window grew by in the press in flight or the last one; `lastSide` "top" /
+// "bottom" / "left" / "right" or null; `dragRect {x, y, width, height}` the
+// dragged note as the drag overlay draws it (content space), null with no drag.
+// Staged drags DO reach growth and scroll (the per-event edge step lives in the
+// drag funnel), at a `dt` capped per step (`PitchEditorModel
+// .maxEdgeStepSeconds`), so N staged ticks grow a monotone, not an exact, count.
 //
 // ═══════════════════════════════════════════════════════════════════════════
 // m23-ap I1 UI HOOKS — HEARING THE NOTE: `audition`, AND ONE KNOB
@@ -190,7 +269,8 @@ extension AppModel {
             throw DebugError(
                 "debug.pitchEditor '\(stray)' needs an 'act' — {} alone is the read-only echo; "
                 + "acts: hover, hoverEnd, press, drag, release, tool, scroll, escape, "
-                + "selectAll, clearSelection, noteMenu, auditionSpanRender")
+                + "selectAll, clearSelection, noteMenu, pinch, pinchEnd, ruler, findSounds, keys, "
+                + "singer, auditionSpanRender")
         }
         var echo = pitchEditorEcho()
         if case .object(var fields) = echo, let stage {
@@ -221,7 +301,8 @@ extension AppModel {
     /// until the pane has applied it — then what it drew, on a second clock.
     private func stagePitchEditorStep(act: String, params: [String: JSONValue]) throws -> JSONValue {
         let allowed: Set<String> = ["act", "x", "y", "shift", "command", "option", "tool",
-                                    "action"]
+                                    "action", "magnification", "control", "fraction", "step",
+                                    "clicks"]
         if let unknown = params.keys.sorted().first(where: { !allowed.contains($0) }) {
             throw DebugError("debug.pitchEditor: unknown key '\(unknown)' (allowed: "
                              + allowed.sorted().joined(separator: ", ") + ")")
@@ -232,9 +313,25 @@ extension AppModel {
                 + "(a staged step with no pane would succeed at nothing)")
         }
         let bridge = pitchEditorInteraction
+        // W7-NTU U3 — `clicks`: the click count a RELEASE carries (2 = the second
+        // click of a double-click: the Voice tool's reset). A whole number from
+        // 1 to 3, else refused: a typo that read as 1 would stage a single
+        // click and report the double-click as "applied".
+        var clicks = 1
+        if let raw = params["clicks"] {
+            guard act == "release" else {
+                throw DebugError("'clicks' rides a release only ({act:\"release\", x, y, clicks: 2} is "
+                                 + "the second click of a double-click)")
+            }
+            guard let value = raw.doubleValue, value.rounded() == value, (1...3).contains(value) else {
+                throw DebugError("'clicks' must be a whole number from 1 to 3")
+            }
+            clicks = Int(value)
+        }
         let chord = PitchEditorChord(shift: params["shift"]?.boolValue == true,
                                      command: params["command"]?.boolValue == true,
-                                     option: params["option"]?.boolValue == true)
+                                     option: params["option"]?.boolValue == true,
+                                     clickCount: clicks)
         func point() throws -> CGPoint {
             guard let x = params["x"]?.doubleValue, let y = params["y"]?.doubleValue,
                   x.isFinite, y.isFinite else {
@@ -272,7 +369,8 @@ extension AppModel {
             let raw = params["tool"]?.stringValue?.lowercased() ?? ""
             guard let tool = PitchEditorTool(rawValue: raw)
                     ?? PitchEditorTool.allCases.first(where: { $0.label.lowercased() == raw }) else {
-                throw DebugError("act \"tool\" needs tool: \"pointer\" (Move) or \"scissors\" (Split)")
+                throw DebugError("act \"tool\" needs tool: \"pointer\" (Move), \"scissors\" (Split), "
+                                 + "\"wobble\" (Wobble) or \"voice\" (Voice)")
             }
             step = .tool(tool)
         case "scroll":
@@ -319,7 +417,9 @@ extension AppModel {
             }
             let raw = params["action"]?.stringValue ?? ""
             guard let action = PitchEditorNoteMenu.Action(rawValue: raw) else {
-                throw DebugError("act \"noteMenu\" needs action: \"clear\" or \"restore\"")
+                throw DebugError("act \"noteMenu\" needs action: \"clear\", \"restore\", "
+                                 + "\"resetWobble\", \"resetShape\", \"voiceDeeper\", "
+                                 + "\"voiceBrighter\" or \"voiceAsSung\"")
             }
             let hasX = params["x"] != nil
             let hasY = params["y"] != nil
@@ -328,10 +428,121 @@ extension AppModel {
                                  + "from `notesAsDrawn`) or neither (the selection as it stands)")
             }
             step = .noteMenu(action, hasX ? try point() : nil)
+        case "pinch":
+            // I2 — refused mid-press like `tool`: the pane ignores a pinch while
+            // a press, a note drag or a band is live, so a staged tick there
+            // would be a request that silently succeeds at nothing.
+            guard !inFlight else {
+                throw DebugError("a press is in flight — release it before pinching (the note "
+                                 + "editor ignores a pinch while a press, drag or band is live)")
+            }
+            guard let ratio = params["magnification"]?.doubleValue, ratio.isFinite, ratio > 0 else {
+                throw DebugError(
+                    "act \"pinch\" needs magnification: a finite ratio > 0, CUMULATIVE since the "
+                    + "pinch began (1 = the start scale, 2 = twice as wide, 0.5 = half)")
+            }
+            let start = try point()
+            // One pinch has one start. The pane reads (x, y) on the first tick
+            // only, so a different x on a later tick would be silently ignored:
+            // refuse it instead. The live anchor's start is its offset plus its
+            // screen x (`PitchEditorViewport.pinchAnchor`).
+            if let live = bridge.surface.pinchAnchor, abs((live.offset + live.screenX) - start.x) > 0.5 {
+                throw DebugError(
+                    "a pinch is live, started at content x \(Double(live.offset + live.screenX)) — "
+                    + "every tick of one pinch sends its START point; send {act:\"pinchEnd\"} "
+                    + "before pinching somewhere else")
+            }
+            step = .pinch(start, CGFloat(ratio))
+        case "pinchEnd":
+            guard bridge.surface.pinchAnchor != nil else {
+                throw DebugError("no pinch is live — send {act:\"pinch\", x, y, magnification} "
+                                 + "first (an unbalanced gesture would succeed at nothing)")
+            }
+            step = .pinchEnd
+        case "ruler":
+            // I5 — no hand clicks the ruler with the button held on the surface.
+            guard !inFlight else {
+                throw DebugError("a press is in flight — release it before using the time ruler")
+            }
+            guard params["y"] == nil else {
+                throw DebugError("act \"ruler\" takes x only — the ruler is one row, its y means nothing")
+            }
+            guard let x = params["x"]?.doubleValue, x.isFinite else {
+                throw DebugError(
+                    "act \"ruler\" needs x: RULER-LOCAL (0 = the ruler's left edge, whatever the "
+                    + "scroll) — the tick adds the scroll offset itself, as a real one does")
+            }
+            step = .ruler(x: CGFloat(x), chord)
+        case "keys":
+            // C5b-4b — the chord held with the button up: what the pane's flags
+            // monitor would write. Allowed mid-press too (a real key can change
+            // then; the press kind was decided at the press and does not).
+            step = .keys(chord)
+        case "singer":
+            // W7-NTU U1 — a control of the header group "Sound like the
+            // singer", pressed through its OWN callback (`runSinger`). Refused
+            // mid-press (no hand reaches the header with the button held on
+            // the surface) and while the group is not drawn: a staged press of
+            // a control nobody can see would photograph a door no one walks
+            // through. Read what it did from the echo's `singer` block and the
+            // store's `clip.getPitchEdits`.
+            guard !inFlight else {
+                throw DebugError("a press is in flight — release it before using the header's "
+                                 + "\"Sound like the singer\" controls")
+            }
+            guard pitchEditorChrome.singerGroup != nil else {
+                throw DebugError("the \"Sound like the singer\" group is not drawn (the editor "
+                                 + "shows it once the clip has notes)")
+            }
+            let control = params["control"]?.stringValue ?? ""
+            let singerAct: PitchEditorSingerAct
+            switch control {
+            case "voiceTrack":
+                guard let fraction = params["fraction"]?.doubleValue, fraction.isFinite else {
+                    throw DebugError("control \"voiceTrack\" needs fraction: where on the Keep "
+                                     + "voice size track, 0 (left end) to 1 (right end); option: "
+                                     + "true for the fine drag")
+                }
+                singerAct = .voiceTrack(fraction: fraction, fine: chord.option)
+            case "voiceRelease":
+                singerAct = .voiceRelease
+            case "update":
+                singerAct = .update
+            case "consonants":
+                singerAct = .consonants
+            case "slides":
+                let raw = params["step"]?.stringValue?.lowercased() ?? ""
+                guard let slide = PitchEditorSlideStep(rawValue: raw) else {
+                    throw DebugError("control \"slides\" needs step: \"snappy\", \"quick\", "
+                                     + "\"smooth\" or \"slow\"")
+                }
+                singerAct = .slides(slide)
+            default:
+                throw DebugError("act \"singer\" needs control: \"voiceTrack\" (with fraction), "
+                                 + "\"voiceRelease\", \"update\", \"consonants\" or \"slides\" "
+                                 + "(with step)")
+            }
+            step = .singer(singerAct)
+        case "findSounds":
+            // UE-1 — the header's "Find sounds with no pitch" button. Refused
+            // mid-press (no hand reaches the header with the button held on the
+            // surface), and refused when the header does not OFFER it: a staged
+            // press of a button nobody can see would photograph a door no
+            // person walks through. The answer lands asynchronously; read it
+            // from `findSounds.lineKind` / `lineText` on a later echo.
+            guard !inFlight else {
+                throw DebugError("a press is in flight — release it before pressing Find sounds")
+            }
+            guard bridge.surface.findSounds.offered else {
+                throw DebugError("the note editor is not offering Find sounds (it is offered only "
+                                 + "for a STORED note table with no sound in it; see `findSounds.offered`)")
+            }
+            step = .findSounds
         default:
             throw DebugError(
                 "unknown act \"\(act)\" — expected hover, hoverEnd, press, drag, release, tool, "
-                + "scroll, escape, selectAll, clearSelection or noteMenu")
+                + "scroll, escape, selectAll, clearSelection, noteMenu, pinch, pinchEnd, ruler, "
+                + "findSounds, keys or singer")
         }
         // The pane exists only in the arrange workspace (`debug.pianoRollMarquee`
         // puts the workspace right the same way; it never opens an editor).
@@ -339,6 +550,8 @@ extension AppModel {
         let ackBefore = bridge.stageAckSeq
         let cutTicksBefore = pitchEditorChrome.cutLineTicks
         let interactionTicksBefore = pitchEditorChrome.interactionTicks
+        let ppbBefore = panelLayout.pitchEditorPPB
+        let offsetXBefore = bridge.surface.viewport.offset.x
         bridge.stage(step)
         // FIRST CLOCK — the pane applied the step (it acknowledges after running
         // it). Without this the echo answers with the PREVIOUS step's state.
@@ -356,6 +569,18 @@ extension AppModel {
         // palette's readout from `.onChange(of: model.drag)`, a scroll's landing
         // through the readers. Stop on the first of them to move; bounded, because
         // a step that changes none of them (a second identical hover) moves none.
+        // I5 — a ruler tick moves none of these (the playhead follows the
+        // transport, which the seek moved inside the tick), so it pays this
+        // wait's whole bound — DELIBERATELY. MEASURED 2026-09-25 on staging:
+        // with this wait skipped for ruler ticks, back-to-back ticks answered
+        // 7–11 ms apart and about 1 in 30 was never applied (its placement count
+        // unchanged after the 1 s window above; the gate's 5-tick scrub lost its
+        // 5th in two runs). With it: 0 of 90, ~316 ms each. Scroll acts, which
+        // keep it and end it early on a landing, dropped 0 of 120. That the
+        // pane's `onChange(of: stageNonce)` did not fire for a step staged within
+        // a frame of the last one is an INFERENCE, not a measurement. A real
+        // drag never comes this way — the ruler's `DragGesture` calls
+        // `rulerTick` directly — so the cost is the staged path's alone.
         let surfaceSeqAtAck = bridge.surfaceSeq
         let drawDeadline = Date().addingTimeInterval(0.3)
         while pitchEditorChrome.cutLineTicks == cutTicksBefore,
@@ -364,11 +589,31 @@ extension AppModel {
               Date() < drawDeadline {
             RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.005))
         }
-        return .object([
+        var result: [String: JSONValue] = [
             "act": .string(step.key),
             "applied": .bool(true),
             "ackSeq": .number(Double(bridge.stageAckSeq)),
-        ])
+        ]
+        // I2 — A PINCH'S SCROLL LANDS LATER STILL. The first report after a
+        // scale change is the GEOMETRY's (`.onChange(of: model.geometry)`),
+        // taken before the re-pin's `scrollTo` lands through the readers, so an
+        // echo read there shows the new scale with the OLD offset: a pointer
+        // that "moved" when it did not. Wait (bounded) for the measured offset
+        // to move, unless the scale did not change (a clamped tick at either
+        // end of the ladder re-pins nothing). A re-pin that asks for the offset
+        // already standing also waits the bound out, and `offsetMoved` says so.
+        if case .pinch = step {
+            let scaleChanged = panelLayout.pitchEditorPPB != ppbBefore
+            if scaleChanged {
+                let landDeadline = Date().addingTimeInterval(0.5)
+                while bridge.surface.viewport.offset.x == offsetXBefore, Date() < landDeadline {
+                    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.005))
+                }
+            }
+            result["scaleChanged"] = .bool(scaleChanged)
+            result["offsetMoved"] = .bool(bridge.surface.viewport.offset.x != offsetXBefore)
+        }
+        return .object(result)
     }
 
     /// The echo itself — read-only, the same keys whether or not a pane is open.
@@ -398,7 +643,16 @@ extension AppModel {
                 "selection": Self.pitchEditorSelectionJSON(pitchEditorInteraction.surface.selection),
                 "band": Self.pitchEditorBandJSON(pitchEditorInteraction.surface.band),
                 "noteMenu": Self.pitchEditorNoteMenuJSON(pitchEditorInteraction.surface.noteMenu),
+                "pinch": Self.pitchEditorPinchJSON(pitchEditorInteraction.surface.pinchAnchor),
+                "autoscroll": Self.pitchEditorAutoScrollJSON(pitchEditorInteraction.surface.autoscroll),
+                "playhead": pitchEditorPlayheadJSON(),
                 "audition": pitchEditorAuditionJSON(),
+                "findSounds": Self.pitchEditorFindSoundsJSON(pitchEditorInteraction.surface.findSounds),
+                "renderPoll": pitchEditorRenderPollJSON(),
+                "wobble": Self.pitchEditorWobbleJSON(pitchEditorChrome, open: false),
+                "brush": Self.pitchEditorBrushJSON(pitchEditorChrome),
+                "singer": Self.pitchEditorSingerJSON(pitchEditorChrome),
+                "voice": Self.pitchEditorVoiceJSON(pitchEditorChrome),
             ])
         }
         let trackID = store.tracks.first(where: { track in
@@ -439,7 +693,386 @@ extension AppModel {
             "selection": Self.pitchEditorSelectionJSON(pitchEditorInteraction.surface.selection),
             "band": Self.pitchEditorBandJSON(pitchEditorInteraction.surface.band),
             "noteMenu": Self.pitchEditorNoteMenuJSON(pitchEditorInteraction.surface.noteMenu),
+            "pinch": Self.pitchEditorPinchJSON(pitchEditorInteraction.surface.pinchAnchor),
+            "autoscroll": Self.pitchEditorAutoScrollJSON(pitchEditorInteraction.surface.autoscroll),
+            "playhead": pitchEditorPlayheadJSON(),
             "audition": pitchEditorAuditionJSON(),
+            "findSounds": Self.pitchEditorFindSoundsJSON(pitchEditorInteraction.surface.findSounds),
+            "renderPoll": pitchEditorRenderPollJSON(),
+            "wobble": Self.pitchEditorWobbleJSON(pitchEditorChrome, open: true),
+            "brush": Self.pitchEditorBrushJSON(pitchEditorChrome),
+            "singer": Self.pitchEditorSingerJSON(pitchEditorChrome),
+            "voice": Self.pitchEditorVoiceJSON(pitchEditorChrome),
+        ])
+    }
+
+    /// W7-NTU U3 — THE VOICE TOOL (natural tuning §1(f) items 2-3). Every value
+    /// is what the pane DREW or held when it last reported
+    /// (`PitchEditorChromeLedger.recordVoice`), never re-derived here:
+    ///
+    /// - `marks`: each note's Voice as the surface drew it, in blob order —
+    ///   `{segmentId, semitones, chip, offsetFraction, live, blobRect}` — and
+    ///   `[]` in any other tool or with every note as sung. The STORE's own
+    ///   value per note is `notes[].formantOffsetSemitones`: two instruments.
+    /// - `draft`: the press in flight — `{segmentId, baseline, semitones,
+    ///   dragging, fine, tooShort, commitValue}` (`commitValue` null for a
+    ///   release that would write nothing) — or null.
+    /// - `readout`: the palette's Voice line, verbatim ("" with none).
+    static func pitchEditorVoiceJSON(_ chrome: PitchEditorChromeLedger) -> JSONValue {
+        let draft: JSONValue = chrome.voiceDraft.map { draft in
+            .object([
+                "segmentId": .string(draft.segmentID.uuidString),
+                "baseline": .number(draft.baseline),
+                "semitones": .number(draft.semitones),
+                "dragging": .bool(draft.isDragging),
+                "fine": .bool(draft.fine),
+                "tooShort": .bool(draft.isTooShort),
+                "commitValue": draft.commitValue.map { .number($0) } ?? .null,
+            ])
+        } ?? .null
+        return .object([
+            "marks": .array(chrome.voiceMarks.map { mark in
+                .object([
+                    "segmentId": .string(mark.segmentID.uuidString),
+                    "semitones": .number(mark.semitones),
+                    "chip": .string(mark.chip),
+                    "offsetFraction": .number(mark.offsetFraction),
+                    "live": .bool(mark.isLive),
+                    "blobRect": .object([
+                        "x": .number(Double(mark.blobRect.minX)),
+                        "y": .number(Double(mark.blobRect.minY)),
+                        "width": .number(Double(mark.blobRect.width)),
+                        "height": .number(Double(mark.blobRect.height)),
+                    ]),
+                ])
+            }),
+            "draft": draft,
+            "readout": .string(chrome.voiceReadoutText),
+            "ticks": .number(Double(chrome.voiceTicks)),
+        ])
+    }
+
+    /// W7-NTU U1 — THE HEADER GROUP "SOUND LIKE THE SINGER" (natural tuning
+    /// X9). Every value is what the header DREW or where its layout PUT it
+    /// when it last reported (`PitchEditorChromeLedger.recordSingerGroup`,
+    /// `recordSingerFrame`, `recordPresetsFrame`), never re-derived here:
+    ///
+    /// - `drawn`: a group is on screen (false while there are no notes).
+    /// - `placement`: `beside` / `below`, READ OFF the two measured frames
+    ///   (the group's top above the chips' bottom = on their row), "" when
+    ///   either frame is missing; `frame` / `presetsFrame`: `{x, y, width,
+    ///   height}` in window points.
+    /// - `voice`: `{amount, readout, needsUpdate, dragging, line, help}` —
+    ///   `amount` null = no setting drawn (a vocal that needs the update).
+    /// - `consonants`: `{on, paused, face, line}` — `paused` is the rule's
+    ///   reason string (`ConsonantMixInactiveReason`) or null.
+    /// - `slides`: `{face, selected, steps, line}` — `face` `step` /
+    ///   `oldTuning` / `custom`; `selected` the lit step's key or null.
+    static func pitchEditorSingerJSON(_ chrome: PitchEditorChromeLedger) -> JSONValue {
+        func rect(_ r: CGRect?) -> JSONValue {
+            guard let r else { return .null }
+            return .object([
+                "x": .number(Double(r.minX)), "y": .number(Double(r.minY)),
+                "width": .number(Double(r.width)), "height": .number(Double(r.height)),
+            ])
+        }
+        var placement = ""
+        if let group = chrome.singerFrame, let presets = chrome.presetsFrame {
+            placement = group.minY < presets.maxY - 1 ? "beside" : "below"
+        }
+        guard let group = chrome.singerGroup else {
+            return .object([
+                "drawn": .bool(false),
+                "placement": .string(placement),
+                "frame": rect(chrome.singerFrame),
+                "presetsFrame": rect(chrome.presetsFrame),
+                "ticks": .number(Double(chrome.singerTicks)),
+            ])
+        }
+        return .object([
+            "drawn": .bool(true),
+            "placement": .string(placement),
+            "frame": rect(chrome.singerFrame),
+            "presetsFrame": rect(chrome.presetsFrame),
+            "title": .string(group.title),
+            "voice": .object([
+                "amount": group.voice.amount.map { .number($0) } ?? .null,
+                "readout": .string(group.voice.readout),
+                "needsUpdate": .bool(group.voice.needsUpdate),
+                "dragging": .bool(group.voice.isDragging),
+                "line": .string(group.voice.line),
+                "help": .string(group.voice.help),
+            ]),
+            "consonants": .object([
+                "on": .bool(group.consonants.isOn),
+                "paused": group.consonants.pausedReason.map { .string($0.rawValue) } ?? .null,
+                "face": .string(group.consonants.face),
+                "line": .string(group.consonants.line),
+            ]),
+            "slides": .object([
+                "face": .string(group.slides.face.rawValue),
+                "selected": group.slides.selected.map { .string($0.rawValue) } ?? .null,
+                "steps": .array(PitchEditorSlideStep.allCases.map { .string($0.label) }),
+                "line": .string(group.slides.line),
+            ]),
+            "ticks": .number(Double(chrome.singerTicks)),
+        ])
+    }
+
+    /// m23-ap C5b-4b — THE FREEHAND BRUSH (design 2026-09-24
+    /// timing-and-freehand §5.5). Every value is what the pane DREW or held
+    /// when it last reported (`PitchEditorChromeLedger.recordBrush`), never
+    /// re-derived here:
+    ///
+    /// - `commandHeld`: ⌘ as the pane held it (its flags monitor, or a staged
+    ///   `keys` step).
+    /// - `band`: the band the surface drew — `{x, width, centreX, centreY,
+    ///   stroking, refused, refusal}`, content space — or null.
+    /// - `stroking` / `pressedNoteId`: the stroke in flight, or false / null.
+    /// - `readout`: the stroke's SF Mono line, verbatim ("" with none).
+    /// - `maxExcursionCents`: the readout's number before its 5-cent rounding.
+    /// - `draft`: what the release would store NOW, one entry per note, in the
+    ///   SAME shape `clip.getPitchEdits` echoes a stored drawing
+    ///   (`{segmentId, startSeconds, stepSeconds: 0.01, cents}`), sorted by
+    ///   `segmentId`. `[]` with no stroke, or one that changes nothing yet. A
+    ///   gate compares it with the read-back after the release: the draft is
+    ///   the stored set.
+    static func pitchEditorBrushJSON(_ chrome: PitchEditorChromeLedger) -> JSONValue {
+        let draft = chrome.brushDraft
+        let bandJSON: JSONValue = chrome.brushBand.map { band in
+            .object([
+                "x": .number(Double(band.rect.minX)),
+                "width": .number(Double(band.rect.width)),
+                "centreX": .number(Double(band.point.x)),
+                "centreY": .number(Double(band.point.y)),
+                "stroking": .bool(band.isStroking),
+                "refused": .bool(band.refusal != nil),
+                "refusal": band.refusal.map { .string($0) } ?? .null,
+            ])
+        } ?? .null
+        let drafted: [JSONValue] = (draft?.touchedNoteIDs ?? []).compactMap { id in
+            guard let samples = draft?.shapes[id] else { return nil }
+            return .object([
+                "segmentId": .string(id.uuidString),
+                "startSeconds": .number(NoteShapeSamples.seconds(atGridIndex: samples.startIndex)),
+                "stepSeconds": .number(0.01),
+                "cents": .array(samples.tenthsOfCents.map { .number(Double($0) / 10) }),
+            ])
+        }
+        return .object([
+            "commandHeld": .bool(chrome.commandHeld),
+            "band": bandJSON,
+            "stroking": .bool(draft != nil),
+            "pressedNoteId": draft.map { .string($0.pressedNoteID.uuidString) } ?? .null,
+            "readout": .string(draft?.readout ?? ""),
+            "maxExcursionCents": draft.map { .number($0.stroke.maxExcursionCents) } ?? .null,
+            "draft": .array(drafted),
+            "ticks": .number(Double(chrome.brushTicks)),
+        ])
+    }
+
+    /// m23-ap C5a-4b — THE WOBBLE TOOL (vibrato-handle design §12.5, plus the
+    /// dot's `door`, unpitched design §4). Every value is what the pane DREW or
+    /// held when it last reported (`PitchEditorChromeLedger.recordWobble`),
+    /// never re-derived here:
+    ///
+    /// - `engaged`: the palette's slot is the Wobble tool.
+    /// - `layout`: `PitchWobbleGesture.layout` (the shipped one-knob layout).
+    /// - `door` / `branch` / `phase` / `handedOff` / `dragging` / `fine` /
+    ///   `speedTravel` / `widthTravel` / `draft` (the six fields a release would
+    ///   store) — the press in flight, all null without one.
+    /// - `readout` / `readoutIsWarning`: the palette's SF Mono slot, verbatim.
+    /// - `dot`: the dot the surface drew and its drawn tip, verbatim.
+    /// - `perNote`: the estimator's SUNG and PLAYED readings of every drawn
+    ///   note, asked of the open pane now (`[]` with none open).
+    static func pitchEditorWobbleJSON(_ chrome: PitchEditorChromeLedger, open: Bool) -> JSONValue {
+        let draft = chrome.wobbleDraft
+        let session = draft?.session
+        func number(_ value: Double?) -> JSONValue { value.map { .number($0) } ?? .null }
+        let branch: JSONValue
+        switch session?.start {
+        case .own?: branch = .string("own")
+        case .made(let fromNothing)?: branch = .string(fromNothing ? "madeFromNothing" : "made")
+        case .refused?: branch = .string("refused")
+        case nil: branch = .null
+        }
+        let draftJSON: JSONValue = draft.map { draft in
+            let edit = draft.edit
+            return .object([
+                "vibratoRateHz": number(edit.vibratoRateHz),
+                "vibratoDepthCents": number(edit.vibratoDepthCents),
+                "vibratoOnsetSeconds": number(edit.vibratoOnsetSeconds),
+                "vibratoPhaseAnchorSeconds": number(edit.vibratoPhaseAnchorSeconds),
+                "vibratoScale": number(edit.vibratoScale),
+                "driftScale": number(edit.driftScale),
+            ])
+        } ?? .null
+        let dotJSON: JSONValue = chrome.wobbleDot.map { dot in
+            .object([
+                "visible": .bool(true),
+                "noteId": .string(dot.segmentID.uuidString),
+                "x": .number(Double(dot.centre.x)),
+                "y": .number(Double(dot.centre.y)),
+                "tip": .string(dot.tip.text),
+                "tipIsWarning": .bool(dot.tip.isWarning),
+                "reason": .string(dot.reason.rawValue),
+            ])
+        } ?? .object([
+            "visible": .bool(false), "noteId": .null, "x": .null, "y": .null,
+            "tip": .null, "tipIsWarning": .null, "reason": .null,
+        ])
+        let perNote: [JSONValue] = open
+            ? (chrome.wobbleReadingsProvider?() ?? []).map { readings in
+                .object([
+                    "id": .string(readings.segmentID.uuidString),
+                    "sung": readings.sung.map(Self.pitchWobbleReadingJSON) ?? .null,
+                    "played": Self.pitchWobbleReadingJSON(readings.played),
+                ])
+            }
+            : []
+        return .object([
+            "engaged": .bool(chrome.toolKey == PitchEditorTool.wobble.rawValue),
+            "layout": .string(PitchWobbleGesture.layout.rawValue),
+            "door": draft.map { .string($0.door.rawValue) } ?? .null,
+            "noteId": draft.map { .string($0.segmentID.uuidString) } ?? .null,
+            "branch": branch,
+            "phase": session.map { .string($0.phase.rawValue) } ?? .null,
+            "handedOff": session.map { .bool($0.phase == .handedOff) } ?? .null,
+            "dragging": draft.map { .bool($0.isDragging) } ?? .null,
+            "fine": draft.map { .bool($0.fine) } ?? .null,
+            "speedTravel": draft.map { .number($0.travel.speed) } ?? .null,
+            "widthTravel": draft.map { .number($0.travel.width) } ?? .null,
+            "draft": draftJSON,
+            "readout": .string(chrome.wobbleReadoutText),
+            "readoutIsWarning": .bool(chrome.wobbleReadoutIsWarning),
+            "dot": dotJSON,
+            "perNote": .array(perNote),
+            "ticks": .number(Double(chrome.wobbleTicks)),
+        ])
+    }
+
+    /// One `PitchWobbleReading`: `{state, rateHz, depthCents, anchorSeconds,
+    /// fit, shortfall}`, the numbers null off `wobble`.
+    static func pitchWobbleReadingJSON(_ reading: PitchWobbleReading) -> JSONValue {
+        switch reading {
+        case .wobble(let rateHz, let depthCents, let anchorSeconds, let fit):
+            return .object([
+                "state": .string("wobble"), "rateHz": .number(rateHz),
+                "depthCents": .number(depthCents), "anchorSeconds": .number(anchorSeconds),
+                "fit": .number(fit), "shortfall": .null,
+            ])
+        case .noWobble:
+            return .object([
+                "state": .string("noWobble"), "rateHz": .null, "depthCents": .null,
+                "anchorSeconds": .null, "fit": .null, "shortfall": .null,
+            ])
+        case .unmeasurable(let shortfall):
+            return .object([
+                "state": .string("unmeasurable"), "rateHz": .null, "depthCents": .null,
+                "anchorSeconds": .null, "fit": .null, "shortfall": .string(shortfall.rawValue),
+            ])
+        }
+    }
+
+    /// p2-ren Stage B″(c) — the app's render poll as it stands: the clip it last
+    /// read, what that clip was PLAYING (`exact`/`preview`/`previous`/`silent`,
+    /// null when the engine could not say or no poll runs), how many times it
+    /// WROTE (one per change), and how many times the pane's body has been
+    /// evaluated (`chrome.bodyEvaluations`, for a re-render rate).
+    private func pitchEditorRenderPollJSON() -> JSONValue {
+        let poll = pitchEditorRenderPoll
+        return .object([
+            "clipId": poll.map { JSONValue.string($0.clipID.uuidString) } ?? .null,
+            "audible": poll?.audible.map { JSONValue.string($0.rawValue) } ?? .null,
+            "writes": .number(Double(pitchEditorRenderPollWrites)),
+            "bodyEvaluations": .number(Double(pitchEditorChrome.bodyEvaluations)),
+        ])
+    }
+
+    /// I5 — the transport's position placed through the pane's OWN geometry (the
+    /// surface report's, the one beat→x mapping the playhead is drawn with), beside
+    /// what the model last asked for. `x`/`screenX`/`insideClip` are null until a
+    /// pane has reported.
+    private func pitchEditorPlayheadJSON() -> JSONValue {
+        let surface = pitchEditorInteraction.surface
+        let position = store.transport.positionBeats
+        var fields: [String: JSONValue] = [
+            "positionBeats": .number(position),
+            "placementCount": .number(Double(surface.placementCount)),
+            "lastPlacementBeat": surface.lastPlacementBeat.map { JSONValue.number($0) } ?? .null,
+            "x": .null, "screenX": .null, "insideClip": .null,
+            // The offset the time ruler draws with and its ticks add
+            // (`PitchEditorViewport.shownOffsetX`) — beside `viewport.offsetX`,
+            // which is what the reader MEASURED; they differ exactly when the
+            // reader holds a position the scroller cannot show.
+            "rulerScrollX": .number(Double(surface.viewport.shownOffsetX)),
+            // The ONE persisted flag, and THIS pane's runtime (`debug.followPlayhead`
+            // carries the rest of it under its `pitchEditor` surface).
+            "follow": .object([
+                "enabled": .bool(panelLayout.followPlayhead),
+                "suspended": .bool(pitchEditorFollow.isSuspended),
+            ]),
+        ]
+        // I5-F1 — the transport's bar.beat exactly as `TransportBar` draws it
+        // (`barsBeatsDisplay` is not on the wire otherwise), for the ruler legs
+        // to compare against.
+        fields["transportReadout"] = .string(store.transport.barsBeatsDisplay)
+        fields["ruler"] = .null
+        if let geometry = surface.geometry {
+            let x = geometry.x(forProjectBeat: position)
+            fields["x"] = .number(Double(x))
+            fields["screenX"] = .number(Double(x - surface.viewport.shownOffsetX))
+            fields["insideClip"] = .bool(geometry.isInsideClip(projectBeat: position))
+            // I5-F1 — the ruler's LABELLED ticks, from the SAME function and the
+            // same inputs the band is handed (`PitchEditorSongRuler.ticks` over
+            // the pane's geometry and `transport.meterMap`; the site test pins
+            // the band's `songMeter: meterMap`). ⚠️ A re-derivation by the same
+            // function, not a reading of the pixels: a capture is what shows
+            // the band drew them.
+            let labels = PitchEditorSongRuler.ticks(
+                clipStartBeat: geometry.startBeat, lengthBeats: geometry.lengthBeats,
+                pixelsPerBeat: geometry.pixelsPerBeat, meterMap: store.transport.meterMap)
+                .compactMap { tick -> JSONValue? in
+                    guard let text = tick.label else { return nil }
+                    return .object(["x": .number(Double(tick.x)), "text": .string(text),
+                                    "isBar": .bool(tick.isBar)])
+                }
+            fields["ruler"] = .object(["numbering": .string("song"), "labels": .array(labels)])
+        }
+        return .object(fields)
+    }
+
+    /// I2 — the live pinch's anchor as the pane holds it (`PitchEditorSurface
+    /// Report.pinchAnchor`, the very value its re-pin is handed): `live`, and the
+    /// scale, offset and screen x it was captured at, all null when none is live.
+    /// Identical across one pinch's ticks is "captured once", seen from outside.
+    /// I6b — the edge autoscroll as the pane reported it
+    /// (`PitchEditorSurfaceReport.autoscroll`), verbatim; see the banner.
+    private static func pitchEditorAutoScrollJSON(_ report: PitchEditorAutoScrollReport) -> JSONValue {
+        .object([
+            "armed": .bool(report.armed),
+            "grownRows": .number(Double(report.grownRows)),
+            "lastSide": report.lastSide.map { JSONValue.string($0.rawValue) } ?? .null,
+            "dragRect": report.dragRect.map { rect in
+                JSONValue.object([
+                    "x": .number(Double(rect.minX)),
+                    "y": .number(Double(rect.minY)),
+                    "width": .number(Double(rect.width)),
+                    "height": .number(Double(rect.height)),
+                ])
+            } ?? .null,
+        ])
+    }
+
+    private static func pitchEditorPinchJSON(_ anchor: PitchEditorZoomAnchor?) -> JSONValue {
+        guard let anchor else {
+            return .object(["live": .bool(false), "ppb": .null, "offset": .null, "screenX": .null])
+        }
+        return .object([
+            "live": .bool(true),
+            "ppb": .number(Double(anchor.ppb)),
+            "offset": .number(Double(anchor.offset)),
+            "screenX": .number(Double(anchor.screenX)),
         ])
     }
 
@@ -588,8 +1221,30 @@ extension AppModel {
                 "cleared": .bool(note.cleared),
                 "levelDb": .number(note.levelDb),
                 "levelReadout": note.levelReadout.map { JSONValue.string($0) } ?? .null,
+                // UE-1 — the blob's ORIGIN (`unpitched` = a sound with no pitch)
+                // and the sentence a sound prints instead of cents (null for a
+                // note), from the pane's MODEL.
+                "origin": .string(note.origin),
+                "soundReadout": note.soundReadout.map { JSONValue.string($0) } ?? .null,
+                // UE-2 — the LOOK the Canvas was handed (`NoteBlob.look`:
+                // `note` / `sound` / `cleared`), from the same blob.
+                "look": .string(note.look),
             ])
         })
+    }
+
+    /// UE-1 — "Find sounds with no pitch" as the pane holds it: `offered` (the
+    /// header shows the button), `running` (a press waits for its answer), and
+    /// the line it drew, `lineKind` (`working` / `done` / `shortfall`) and
+    /// `lineText`, both "" before any press. From the model, never re-derived.
+    private static func pitchEditorFindSoundsJSON(_ report: PitchEditorFindSoundsReport) -> JSONValue {
+        .object([
+            "label": .string(PitchEditorFindSounds.label),
+            "offered": .bool(report.offered),
+            "running": .bool(report.line?.kind == .working),
+            "lineKind": .string(report.line?.kind.rawValue ?? ""),
+            "lineText": .string(report.line?.text ?? ""),
+        ])
     }
 
     /// I0 — the press in flight: the kind the router decided at its first tick
@@ -599,7 +1254,7 @@ extension AppModel {
         guard let press else {
             return .object([
                 "inFlight": .bool(false), "kind": .null, "noteId": .null,
-                "originX": .null, "originY": .null, "promoted": .null,
+                "originX": .null, "originY": .null, "promoted": .null, "door": .null,
             ])
         }
         return .object([
@@ -609,6 +1264,8 @@ extension AppModel {
             "originX": .number(Double(press.origin.x)),
             "originY": .number(Double(press.origin.y)),
             "promoted": .bool(press.isPromoted),
+            // C5a-4b — a Wobble-tool press's door ("dot" | "drag"), null otherwise.
+            "door": press.kind.wobbleDoor.map { JSONValue.string($0.rawValue) } ?? .null,
         ])
     }
 
@@ -639,6 +1296,24 @@ extension AppModel {
             }
         case .endBand, .nothing:
             break
+        case .endWobble(let id):
+            // C5a-4b — a wobble drag that travelled (its commit, if any, is
+            // `interaction.commitCount` and the store's own read-back).
+            fields["noteId"] = .string(id.uuidString)
+        case .wobbleStep(let id, let bigger):
+            // C5a-4b — a click on the Wobble tool's dot: one step.
+            fields["noteId"] = .string(id.uuidString)
+            fields["bigger"] = .bool(bigger)
+        case .endBrush(let id):
+            // C5b-4b — a brush stroke that travelled, begun on this note (its
+            // commit, if any, is `interaction.commitCount` and the store's own
+            // read-back).
+            fields["noteId"] = .string(id.uuidString)
+        case .endFormantDrag(let id), .formantReset(let id):
+            // W7-NTU U3 — a Voice drag that travelled, or a double-click that
+            // put the note back as sung (its commit, if any, is
+            // `interaction.commitCount` and the store's own read-back).
+            fields["noteId"] = .string(id.uuidString)
         }
         return .object(fields)
     }
@@ -708,11 +1383,13 @@ extension AppModel {
     /// what exists to be seen). `PitchEditorView` constructs its model from
     /// exactly these two properties (`layout.pitchEditorPPB`/
     /// `layout.pitchEditorRowHeight`), so this is the value the view draws
-    /// at, not a second guess at it.
+    /// at, not a second guess at it. I2 — `hintText` is the pinch help the zoom
+    /// cluster DREW (the ledger's `zoomHintText`), "" before it drew.
     private static func pitchEditorZoomJSON(_ model: AppModel) -> JSONValue {
         .object([
             "pixelsPerBeat": .number(Double(model.panelLayout.pitchEditorPPB)),
             "rowHeight": .number(Double(model.panelLayout.pitchEditorRowHeight)),
+            "hintText": .string(model.pitchEditorChrome.zoomHintText),
         ])
     }
 
@@ -746,6 +1423,11 @@ extension AppModel {
             // (the model's): two instruments that must agree.
             "cleared": .bool(segment.isCleared),
             "amplitudeDb": .number(segment.amplitudeDb),
+            // UE-1 — the STORE's origin, beside `notesAsDrawn`'s (the model's).
+            "origin": .string(segment.origin.rawValue),
+            // W7-NTU U3 — the STORE's Voice, beside `voice.marks` (the drawn
+            // one): two instruments that must agree.
+            "formantOffsetSemitones": .number(segment.formantOffsetSemitones),
         ])
     }
 
@@ -789,6 +1471,9 @@ extension AppModel {
             "notesEdited": .bool(chrome.notesEdited),
             "clipBadgeText": .string(chrome.clipBadgeText),
             "ticks": .number(Double(chrome.ticks)),
+            // p2-ren Stage B″(c): the "Preview" caption the state row DREW
+            // ("" while the clip plays its exact render), from the ledger.
+            "renderCaption": .string(chrome.renderCaptionText),
         ])
     }
 

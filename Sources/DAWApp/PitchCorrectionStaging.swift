@@ -160,11 +160,14 @@ extension AppModel {
     /// is what proves it — a source-shape gate over a `DragGesture` closure
     /// could not. Per-tick writes would re-key `ClipKey.pitchEditSetHash` at
     /// pointer rate and the offline render would never be ready. Since p2-ren
-    /// Stage A a clip whose render is pending after a note edit plays its
-    /// PREVIOUS version (`StretchResolution.bridge`), so the vocal would sound
-    /// stale for the whole drag, the edit never heard in context; silence
-    /// (`StretchResolution.pending`) is left for a stretch change or a failed
-    /// render.
+    /// Stages A and B a clip whose render is pending after a note edit plays a
+    /// PREVIEW when one can be built (Stage B's provisional splice,
+    /// `renderAudible == .preview`), else its PREVIOUS version (Stage A's
+    /// `StretchResolution.bridge`, `.previous`). Per-tick commits would cancel
+    /// each preview build before it landed (the provisional slot is latest-wins),
+    /// so the vocal would sound stale for the whole drag, the edit never heard in
+    /// context; silence (`StretchResolution.pending`) is left for a stretch
+    /// change or a failed render.
     ///
     /// ⛔⛔ **THE WRITE IS READ BACK, AND THAT IS NOT BELT-AND-BRACES.** "The
     /// call returned" is this tree's characteristic failure shape — an operation
@@ -249,6 +252,57 @@ extension AppModel {
                     presentArrangeSplitRefusal(PitchNoteEditDidNotTake(), clipID: clipID)
                     return
                 }
+            case .noteVibrato, .noteVibratoReset:
+                // m23-ap C5a-4b — the Wobble tool's writes (a drag, a dot click,
+                // "Back to how you sang it") and their independent read-back
+                // (design §10), in ONE DAWAppKit function the tests call too
+                // (`PitchEditorWobbleWrite`): a single note under
+                // `PitchCorrectionUndoKey.vibrato`, so dot clicks on one note
+                // inside 800 ms are one undo step (T-dot-4).
+                guard try PitchEditorWobbleWrite.commit(commit.kind, clipID: clipID,
+                                                        seedIfAbsent: commit.seedIfAbsent,
+                                                        to: store) == true else {
+                    presentArrangeSplitRefusal(PitchNoteEditDidNotTake(), clipID: clipID)
+                    return
+                }
+            case .noteShapes:
+                // m23-ap C5b-4b — the freehand brush's stroke, or the note
+                // menu's "Reset drawn shape": ONE store call for every note it
+                // names (ONE undo step) and the independent read-back, in ONE
+                // DAWAppKit function the tests call too (`PitchEditorShapeWrite`).
+                // A sound is refused by the store, in its words, and SHOWN below.
+                guard try PitchEditorShapeWrite.commit(commit.kind, clipID: clipID,
+                                                       seedIfAbsent: commit.seedIfAbsent,
+                                                       to: store) == true else {
+                    presentArrangeSplitRefusal(PitchNoteEditDidNotTake(), clipID: clipID)
+                    return
+                }
+            case .voiceSize, .naturalTuningUpdate, .consonants, .slideSmoothness:
+                // W7-NTU U1 — the header group "Sound like the singer": ONE
+                // store call per gesture (the slider on release, a switch or a
+                // step on its click) and the independent read-back, in ONE
+                // DAWAppKit function the tests call too
+                // (`PitchEditorSingerWrite`). A refusal is the store's, SHOWN
+                // below; a write that did not take says so.
+                guard try PitchEditorSingerWrite.commit(commit.kind, clipID: clipID,
+                                                        seedIfAbsent: commit.seedIfAbsent,
+                                                        to: store) == true else {
+                    presentArrangeSplitRefusal(PitchSettingDidNotTake(), clipID: clipID)
+                    return
+                }
+            case .noteFormant:
+                // W7-NTU U3 — the Voice tool's writes (a drag, a double-click,
+                // the note menu's Voice row): ONE store call for every note it
+                // names (one "Set Note Voice" undo step) and the independent
+                // read-back, in ONE DAWAppKit function the tests call too
+                // (`PitchEditorVoiceWrite`). A sound is refused by the store, in
+                // its words, and SHOWN below; a write that did not take says so.
+                guard try PitchEditorVoiceWrite.commit(commit.kind, clipID: clipID,
+                                                       seedIfAbsent: commit.seedIfAbsent,
+                                                       to: store) == true else {
+                    presentArrangeSplitRefusal(PitchNoteEditDidNotTake(), clipID: clipID)
+                    return
+                }
             }
             // ⭐ m23-ap I1 UI hooks — THE RELEASE IS HEARD, AFTER THE ONE COMMIT
             // LANDED. Reached only when the write was read back: every arm above
@@ -303,6 +357,32 @@ extension AppModel {
             _ = try store.clearClipPitchEdits(clipId: clipID)
         } catch {
             presentArrangeSplitRefusal(error, clipID: clipID)
+        }
+    }
+
+    /// UE-1 — the note editor's **Find sounds with no pitch** fired
+    /// (`PitchEditorView.runFindSounds`, after the pane's model agreed to run).
+    ///
+    /// ⭐ **THE SAME STORE METHOD THE WIRE CALLS** — `clip.findUnpitchedSounds`
+    /// (UB-2) and this door both reach `ProjectStore.findUnpitchedSounds` with
+    /// its default margin, so this door resolves no policy of its own. The
+    /// store makes it ONE undo step ("Find Sounds"), fills only uncovered time
+    /// and never moves a note (U-B); the merged table reaches the pane through
+    /// `clip.pitchEdits` like every other write.
+    ///
+    /// ⛔ **A REFUSAL IS SHOWN, NEVER SWALLOWED, AND SO IS FINDING NOTHING.**
+    /// A thrown refusal (a comp member, a clip deleted or a file gone while the
+    /// pitch was read) comes back verbatim as `.refused`; a guard that declined
+    /// (`notEnoughQuiet`, `tooNoisy`, `noNotes`) or nothing audible to add comes
+    /// back as `.finished`, and the pane's line says which in a person's words
+    /// (`PitchEditorFindSounds.line`). The answer goes to the PANE's line, not
+    /// the arrange's bubble: the person pressed a button on the pane, and a
+    /// maximized pane hides the arrange.
+    func findUnpitchedSoundsFromEditor(clipID: UUID) async -> PitchEditorFindSoundsOutcome {
+        do {
+            return PitchEditorFindSoundsOutcome(try await store.findUnpitchedSounds(clipId: clipID))
+        } catch {
+            return .refused(error.localizedDescription)
         }
     }
 
@@ -424,6 +504,14 @@ private struct PitchTuningFoundNothing: LocalizedError {
 /// and a user who watches a blob spring back with no explanation. If it ever
 /// fires, the sentence a person needs is "your change did not stick", not a
 /// stack frame.
+/// W7-NTU U1 — the header group's read-back failed: the store accepted a
+/// "Sound like the singer" change and the clip does not carry it. The note-edit
+/// sentence below would name a note that never moved, so this one names the
+/// setting. Its words live in `PitchEditorFormantCopy` with the group's others.
+private struct PitchSettingDidNotTake: LocalizedError {
+    var errorDescription: String? { PitchEditorFormantCopy.settingDidNotTake }
+}
+
 private struct PitchNoteEditDidNotTake: LocalizedError {
     var errorDescription: String? {
         "That change did not stick. The note is back where it was — nothing else "

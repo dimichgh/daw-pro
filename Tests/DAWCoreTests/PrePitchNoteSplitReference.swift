@@ -193,18 +193,40 @@ enum PrePitchNoteSplitReference {
                 if !same { failures.append("UNIT: part \(i) \(part) is not run \(i) \(run)") }
             }
         }
+        // U-A (unpitched-notes design §1.6): the product now ALSO carries one
+        // identity `.unpitched` segment per SOUND between its notes, which this
+        // frozen oracle predates. The §5.2 legs are about NOTES, so the product's
+        // sounds are set aside before comparing; the oracle itself is untouched.
+        // Sounds sit only in gaps, so a sound that displaced or cut a note would
+        // still show here as a note that differs.
+        //
+        // UA-2: a sung slide (`.transition`) is a NOTE, so it is KEPT, and its
+        // origin is compared like every other field. That is on purpose. Every
+        // fixture these legs pass is one `.held` part per run, and there the
+        // product writes `.detected` exactly as the oracle does. So a
+        // `.transition` in a passing fixture's product is itself a difference
+        // to report, never one to hide. The switch is exhaustive, so a fourth
+        // origin must choose a side here.
+        func notesOnly(_ set: PitchEditSet) -> PitchEditSet {
+            set.withSegments(set.segments.filter { segment in
+                switch segment.origin {
+                case .detected, .transition: return true
+                case .unpitched: return false
+                }
+            })
+        }
         for (label, options) in optionSweep {
             let reference = editSet(contour: frames, frameRateHz: frameRateHz, options: options)
             for shape in PitchSlideShape.allCases {
                 let product = PitchAutoCorrect.editSet(contour: frames, frameRateHz: frameRateHz,
                                                        options: options, slideShape: shape)
-                if let difference = firstDifference(product, reference) {
+                if let difference = firstDifference(notesOnly(product), reference) {
                     failures.append("EDIT SET (\(label), \(shape.rawValue)): \(difference)")
                 }
             }
         }
         let wrapped = result(frames, frameRateHz: frameRateHz)
-        if let difference = firstDifference(PitchNoteTable.detected(from: wrapped),
+        if let difference = firstDifference(notesOnly(PitchNoteTable.detected(from: wrapped)),
                                             detectedTable(from: wrapped)) {
             failures.append("NOTE TABLE: \(difference)")
         }

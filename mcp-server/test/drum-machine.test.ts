@@ -523,3 +523,76 @@ test("instrument_load_drum_preset forwards no kind param — the wire verb never
   assert.deepEqual(calls[0]!.params, { trackId, name: "trap" });
   assert.ok(!("kind" in calls[0]!.params), "loadDrumPreset must not smuggle a kind onto the wire");
 });
+
+// ---------------------------------------------------------------------------
+// TPL-0 (m39-tpl-0): drumKit.noteLayout — which MIDI notes play which drum.
+// A structural, additive key on the nested `.strict()` drumKit object (the
+// m30-c law: a typo'd key is refused here and never reaches the bridge).
+// ---------------------------------------------------------------------------
+
+test("drumKit.noteLayout forwards `gm` and `pads` verbatim under the drumKit key", async () => {
+  for (const layout of ["gm", "pads"]) {
+    calls = [];
+    const trackId = randomUUID();
+    queuedResult = { trackId, kind: "drumSynth" };
+    const result = (await client.callTool({
+      name: "track_set_instrument",
+      arguments: { trackId, drumKit: { noteLayout: layout, kick: { decay: 0.9 } } },
+    })) as any;
+    assert.ok(!result.isError, JSON.stringify(result));
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]!.command, "track.setInstrument");
+    assert.deepEqual(calls[0]!.params["drumKit"], { noteLayout: layout, kick: { decay: 0.9 } });
+  }
+});
+
+test("drumKit.noteLayout refuses anything but `pads`/`gm` at the MCP boundary (never reaches the bridge)", async () => {
+  for (const bad of ["GM", "general", "", 1, null, true]) {
+    calls = [];
+    const result = (await client.callTool({
+      name: "track_set_instrument",
+      arguments: { trackId: randomUUID(), drumKit: { noteLayout: bad } },
+    })) as any;
+    assert.ok(result.isError, `noteLayout ${JSON.stringify(bad)} was accepted`);
+    assert.equal(calls.length, 0, `noteLayout ${JSON.stringify(bad)} reached the bridge`);
+  }
+});
+
+test("drumKit's strict schema refuses a typo'd noteLayout key (m30-c: nested .strict())", async () => {
+  for (const typo of ["notelayout", "noteLayouts", "layout", "note_layout"]) {
+    calls = [];
+    const result = (await client.callTool({
+      name: "track_set_instrument",
+      arguments: { trackId: randomUUID(), drumKit: { [typo]: "gm" } },
+    })) as any;
+    assert.ok(result.isError, `the typo ${typo} was accepted`);
+    assert.equal(calls.length, 0, `the typo ${typo} reached the bridge`);
+  }
+});
+
+test("drumKit's noteLayout schema is exactly the enum [pads, gm] and teaches voiceNotes", () => {
+  const tool = tools.find((t) => t.name === "track_set_instrument");
+  assert.ok(tool);
+  const noteLayout = (tool.inputSchema as any).properties?.drumKit?.properties?.noteLayout;
+  assert.ok(noteLayout, "drumKit exposes noteLayout");
+  assert.deepEqual([...(noteLayout.enum ?? [])].sort(), ["gm", "pads"]);
+  const description = (noteLayout.description ?? "") as string;
+  assert.match(description, /voiceNotes/);
+  assert.match(description, /WRONG DRUMS/);
+  assert.match(description, /REFUSES/);
+  assert.match(description, /KEEPS/);
+});
+
+test("the drum tools' descriptions carry the note-layout facts", () => {
+  const describe = tools.find((t) => t.name === "instrument_describe_drum_kit");
+  const setParam = tools.find((t) => t.name === "instrument_set_drum_param");
+  const loadPreset = tools.find((t) => t.name === "instrument_load_drum_preset");
+  assert.ok(describe && setParam && loadPreset);
+  const describeText = (describe.description ?? "") as string;
+  assert.match(describeText, /voiceNotes/);
+  assert.match(describeText, /silentGMNotes/);
+  assert.match(describeText, /noteLayout/);
+  assert.match(describeText, /READ `voiceNotes` BEFORE WRITING DRUM NOTES/);
+  assert.match((setParam.description ?? "") as string, /noteLayout[\s\S]{0,200}REFUSED/);
+  assert.match((loadPreset.description ?? "") as string, /KEEPS the kit's `noteLayout`/);
+});

@@ -1,5 +1,7 @@
 # Pitch editor: the per-note wobble handle (C5a)
 
+> **Amended 2026-09-25 by `docs/design/2026-09-25-natural-tuning.md` (natural tuning, the user's MUST).** Where this document and that one disagree, that one wins. Amended sections here: §5.2 (coupling/decoupling, Drift tool, batch setter, double-click "Steady"), §5.3 (separator v2, "Remove wobble and drift" label).
+
 Design and implementation plan, 2026-09-24, daw-architect.
 
 **Status: DESIGN. Nothing in this document is shipped.** It extends
@@ -130,6 +132,20 @@ Line numbers are approximate (section 0). Cite by the symbol.
     3.7 Hz and 7.4 Hz, not at 4 Hz and 8 Hz, and the edge clamp changes the response
     near a note's ends.
   - That matches the doc's 121 %.
+- ⚠️ **Since W7-C3 (2026-09-27, natural tuning §3b): this v1 arithmetic now applies ONLY
+  to equal-scale notes (Hard Tune and any preset with `driftScale == vibratoScale`).**
+  `vibratoScale: 0` alone (unequal scale, the case this section is ABOUT) now takes a
+  DIFFERENT kernel: a triangular window, L = `separatedDriftWindowSeconds` = 0.16 s,
+  `separatedDriftEdge = .truncate` (`PitchCorrection.swift`, `separatedShapingVersion`).
+  Its response at 5.5 Hz is close to 0 (H ≈ +0.001) rather than v1's −0.215, so the
+  predicted "vibrato" part is ≈ 1.0 × (not 1.215 ×) and `vibratoScale: 0` alone no longer
+  over-corrects by the mechanism above. MEASURED through the product render (W7-STX,
+  2026-09-27, `Tests/DAWEngineTests/ContourToRenderTests.swift` `oneNoteVibratoScaleZero`
+  + `ContourShapingSweepTests` under `CONTOUR_SWEEP=1`, same run, no formant base on either
+  render): within-note wander cut 44 % at B3 and 48–51 % at A3, against 48–58 % under v1 on
+  2026-09-24 (which no longer reproduces even under v1 on today's tree: the RENDER changed
+  independently of the separator, per W7-C3's `shapingVersion` doc). See
+  `docs/ROADMAP.md` "W7-C3: drift/wobble separator v2 DONE".
 - Two design texts still say flatten is `vibratoScale: 0` alone: the `NoteSegment`
   generator banner ("the flat half drives `vibratoScale` 1 → 0", ~347-352) and the 09-24
   doc (~1256). D5 supersedes both. Correcting the banner comment is part of item C5a-2.
@@ -448,6 +464,8 @@ gesture is the one-way **handoff** from your wobble to a new one (section 6).
 
 ### 5.2 Your wobble: the keep lever
 
+> **Amended (natural tuning, §3):** A new **Drift tool** (C5a-5, beside Wobble) decouples the keep lever: if G3 passes, Wobble writes `vibratoScale` only, Drift writes `driftScale` only, so the coupling `min(driftAtMouseDown, k)` below no longer applies; if G3 fails, `driftScale = d0·k/k0` stays (line :463 rule). Multi-selection via batch `setClipNotesVibrato` (:775): single setter becomes one-item call. Double-click toggles between as-sung (1) and the same "Steady" target as the "Steady drift" menu row (0 until L3, then the user's pick per R24). Short notes (:1743 R18). Risk (:1836 R30). Note: natural-tuning §3 calls this tool C5a-5, so the build schedule (2026-09-25) renames this design's own looked-at gate to **C5a-G** to avoid the clash.
+
 - **Width travel moves the keep factor** `k = vibratoScale`, from its value at mouse-down.
   > ⚠ Amended by §18.3 (Defect 2): k > 1 needs a `.wobble` reading, or a fitted depth ≥ `reportFloorCents`.
   It is clamped to **[0, 2]** and quantised to steps of 0.05.
@@ -472,6 +490,8 @@ gesture is the one-way **handoff** from your wobble to a new one (section 6).
 
 ### 5.3 Why flat writes both scales (D5)
 
+> **Amended (natural tuning, §3):** C5a-F2 (a separator v2 with no inversion) is promoted into §3 as the prerequisite for the Drift tool. Natural-tuning §3 decides (per R24): if G3 passes, flat is an explicit action "Flatten note" / "Remove wobble and drift" (R26 :1802) writing both to 0; if G3 fails, the fallback rule (:764-766) applies. The "inverted 17–22 %" reason here (D5) is exactly what v2 removes, and G3 must show it removed.
+
 `vibratoScale = 0` alone keeps an inverted 17–22 % of a 4.5–6 Hz wobble. That figure is
 the model's own statement and the boxcar arithmetic agrees (V3). With both scales at 0,
 the shaping term is `−(drift + vibrato) = −(the whole deviation from the note's detected
@@ -482,9 +502,7 @@ composition, which the render has already been measured delivering.
 **The honest consequence, stated rather than hidden:** pulling a note flat also
 straightens the slide into and out of it. Keeping the slides while removing the wobble
 needs a separator that does not leak, which means a `PitchRenderContour.shapingVersion`
-bump and its own measurement. That is follow-up **C5a-F2**. Section 17 says this to the
-user plainly rather than asking about it, because the alternative cannot be built cleanly
-today.
+bump and its own measurement. That is follow-up **C5a-F2**, now part of the §3 prerequisite.
 
 **Flat is flat in the picture, not in the audio.** The render leaves some wander: Hard
 Tune cut it by 48–58 % at A3 and B3, and *"most of what is left in every case is the
@@ -1181,6 +1199,11 @@ is shared (7.2).
 from 0 over the time that remains. The parent would instead have continued from
 `smoothstep((cut − start) / onset)`, so the dip is bounded by that level.
 - This is stated, and tested as a bound (T8). It is not claimed away.
+- ⚠️ **Corrected 2026-09-25 (C5a-2, MEASURED through `PitchCorrectionCurve`): that bound is too tight.** The right half's
+  fade starts FLAT (smoothstep's zero slope) while the parent's is already rising, so the gap WIDENS for a moment after
+  the cut. For a cut at 1.1 s in T8's fixture, the stated bound is 0.352 × depth and the measured dip is 0.422 × depth.
+  T8 therefore asserts what holds: the right half never ADDS wobble, the dip stays under 0.45 × depth, and the curves
+  match exactly once the parent's fade is done.
 - Representing the fade exactly would need a second stored anchor for the envelope. That
   cost is not worth paying for a cut made within the first quarter-second of a note.
 
@@ -1445,7 +1468,7 @@ anchor is inert at depth 0 (7.4).
 | **T13** | `undoIsOneStepAndResetIsItsOwn`, `PitchNoteVibratoTests.swift` | Two gesture commits on the same note within 800 ms make one undo entry. Commits on different notes make two. A commit then a reset within 800 ms make two. | The reset uses the `.vibrato` key: it merges into the drag before it. |
 | **T14** | `handoffMatchesWhatWasOnScreen`, `PitchWobbleGestureTests.swift` | Fixture: a jitter-free 5.5 Hz ±40 c sung wobble, whose note centre is chosen so that an anchor-0 sine would be in **opposite** phase there. Crossing the dead zone must give pre- and post-handoff readings that agree: rate within 0.2 Hz, width within 10 c, anchor within 5 ms. The RMS difference between the two drawn lines inside the note is at most 10 c. | Anchor forced to 0: the anchors differ by about half a period (91 ms), and the RMS difference is about 56 c. |
 | **T15** | `gatedWhileEstimating`, `PitchWobbleGestureTests.swift` | With basis `.estimate`: a press on your wobble is refused with the caption; a new-wobble note with both scales at 1 is allowed; one with scales at 0 is refused. An `.unmeasurable` wobble refuses the handoff with the 6.2 step-5 sentence. | The gate removed: the own-branch press starts a drag. |
-| **T16** | `readoutNeverOverclaims`, `PitchWobbleGestureTests.swift` | Your wobble at keep 2 on the 5.5 Hz ±40 c fixture prints exactly the estimator's reading of the draft line, rounded to 5, and that reading must differ from `k × D` = 80. Expect about 90, since 2.215 × 40 = 88.6; the assertion is the equality and the inequality, not the literal 90, which sits close to a rounding boundary. A new wobble on a ratio-1.25 clip prints the heard 6.2, not the stored 7.75. `.noWobble` prints no cents number. No readout prints a percentage or "0 cents". Heard above 8 after a ratio change prints the red sentence. | (i) Width computed as `k × D`: it prints 80. (ii) The stored rate printed: 7.8. |
+| **T16** | `readoutNeverOverclaims`, `PitchWobbleGestureTests.swift` | Your wobble at keep 2 on the 5.5 Hz ±40 c fixture prints exactly the estimator's reading of the draft line, rounded to 5. **v1, until 2026-09-27:** that reading had to differ from `k × D` = 80 — expect about 90, since 2.215 × 40 = 88.6 (the assertion was the equality and the inequality, not the literal 90, which sat close to a rounding boundary). **v2 since 2026-09-27 (W7-C3, natural tuning §3b):** an unequal-scale note takes the triangular kernel (L 0.16 s), whose response at 5.5 Hz is H ≈ +0.001, so keep 2 now reads ≈ 2.00 × D ≈ 80 = `k × D` — AT 5.5 Hz THE TWO NO LONGER TELL APART. The test was re-derived (not just re-numbered; READ, `PitchWobbleGestureTests.swift`'s own doc, lines 942-972, W7-C3, 2026-09-27) to assert against the separator's own prediction and to catch the `k × D` plant at 4 Hz instead, where the v2 kernel still acts (H ≈ 0.13): keep 2 reads ≈ 74.6 c → "75", the plant prints "80". See `docs/ROADMAP.md` "W7-C3: drift/wobble separator v2 DONE". A new wobble on a ratio-1.25 clip prints the heard 6.2, not the stored 7.75. `.noWobble` prints no cents number. No readout prints a percentage or "0 cents". Heard above 8 after a ratio change prints the red sentence. | (i) Width computed as `k × D`: it prints 80. (ii) The stored rate printed: 7.8. |
 | **T17** | `Tests/DAWControlTests/PitchNoteVibratoCommandTests.swift` (new), plus `mcp-server/test/pitch-correction.test.ts` | An unknown key is refused. `reset` alone works; `reset` with a field is refused. A clamp is echoed with `clamped` and a `note`. `heardRateHz` equals stored ÷ ratio. `clip.getPitchEdits` has the anchor and `heardVibratoRateHz` on every segment. `clip.getPlayedPitch`'s wobble readings equal `PitchWobbleEstimate` run on the same inputs in process. | (i) An unknown key is accepted. (ii) `clamped` is omitted on a clamp. (iii) `clip.getPitchEdits` echoes the stored rate as heard on a ratio-2 clip. (iv) Depth sent alone on a note whose rate is 0 returns no `note`: the silent success goes unreported. |
 | **T18** | Looked-at gate (C5a-4), staging only | Three captures, each described in words: a sung note hovered in the Wobble tool (knob and "Your wobble: about …"); a new wobble mid-drag (knob, the draft line, the readout); a note pulled flat ("smoothed flat", a straight line inside the blob). | none; a person looks. |
 | **T19** | `wideningLeavesTheSlidesAlone`, `PitchWobbleGestureTests.swift` | Keep 1 → 1.5: drift stays 1. Keep 1 → 0.5: drift 0.5. Starting from a preset's 0.3/0.3 and widening to 0.8: drift stays 0.3. | Drift coupled in both directions: the widening leg goes red. |
@@ -2116,3 +2139,60 @@ with the pre-edit copy printing 4 as the control; the response table as quoted b
     about −2 ms mid-pitch. At 5.5 Hz, 12 ms is ~24° of phase, the jump the handoff exists to
     avoid. This is for **C5a-1 / C5a-4** to account for. Fixing it in the estimator would change
     the analysis version, which is a separate item.
+
+### 18.8 C5a-4a's outcome (2026-09-25): the handoff seeds the wobble AS READ; the low-note refusal is gone
+
+C5a-4a built the headless gesture (`Sources/DAWAppKit/PitchWobbleGesture.swift`, tests in
+`PitchWobbleGestureTests.swift`). The lane ran 23/23 tests with 28 plants, each RED.
+§18.7 is superseded for the handoff seed.
+
+- **Why "as read" is the only continuous seed.** The render replaces the singer's wobble as
+  `− detected(t) + generated(t)`.
+  - At keep 1 the voice is heard as `true(t)`.
+  - At the crossing tick (scales 0 plus the new sine G) it is heard as
+    `true(t) − detected(t) + G(t)`.
+  - The jump is therefore `G − detected`. It is zero only when G is the sine fitted to the PLAYED line,
+    at its READ depth and READ anchor.
+  - The played line is `detected + curve`, so the drawn jump equals the audio jump.
+  - §18.2's depth ÷ response and the lag correction both steer G toward the TRUE voice. That is the wrong
+    target: each adds a jump.
+
+  Measured by the lane at 146.8 Hz (response 0.83, lag +6.7 ms), on a 5.5 Hz ±40 c wobble:
+
+  | Seed | Jump |
+  |---|---|
+  | as read (shipped default, `.asRead`) | 0.00 c RMS |
+  | lag subtracted | 6.55 c RMS |
+  | depth ÷ 0.83 | 7.05 c RMS |
+  | both (§18.2 as written, `.calibrated`) | 10.20 c RMS |
+
+- **§15 T14's tolerances could not see this.** The calibration alone passes every design leg. T14 now has a
+  tight leg: width within 3 c, anchor within 2 ms, RMS within 2 c.
+- **Consequence: the refusal where `response` is nil is gone.** It existed only for the calibration. So
+  §18.7's "the handoff is refused for all six of this singer's real wobbles" NO LONGER HOLDS: T23 hands off
+  at 110 Hz.
+  - What remains at low pitch after a speed change is `(1 − r)` of the singer's own wobble at its old rate.
+  - The two-step route (smooth flat, then add) leaves the same residual, so the refusal bought nothing
+    audible.
+  - **C5a-L2 regains a point:** listen for that low-pitch residual.
+- **The switches** are `PitchWobbleGesture.handoffSeed` (`.asRead` / `.calibrated`) and
+  `PitchWobbleGesture.coupling` (`.proportional`, the default until G3's non-inverting separator exists; or
+  `.decoupled`).
+  - Under `.proportional`: drift = `d0 · k / k0` on the way down, it stays at d0 on the way up, and it is
+    untouched when k0 = 0.
+  - §5.2's `min(d0, k)` is retired: with drift 1 under keep 0.5, it jumps with zero travel.
+- **Design errors found by the lane (NOT fixed in code):**
+  - **§6.2 step 4 with the 20 c floor.**
+    - The problem: a `.noWobble` handoff from a draft that isn't flat zeroes both scales. A ±40 c wobble reads
+      `.noWobble` near keep 0.45, so that tick drops up to about 20 c of drawn and heard wobble.
+    - Filed as **C5a-F9**; it needs a design fix before C5a-4b ships the drag.
+  - **§9.2's "smoothed flat when the played reading is `.noWobble`"** is false for the same reason. The
+    readout says "narrower" or "wider" unless keep is 0.
+  - **T20 contradicts T10:** a handoff at depth 0 plays like the stored note. T10 wins: a release at width 0
+    commits nothing.
+  - **Slop:** the dot's "release within 3 pt" is replaced by the router's 4 pt slop (one home).
+  - **§6.2 step 6's `(|speed| − 16)·gain`** is replaced by travel measured from the crossing tick, so the value
+    neither jumps there nor when ⌥ toggles.
+  - **D14's onset** is superseded by the user's `wobble-onset: same`: onset 0.
+- **Worth a look in C5a-4b's looked-at gate:** after a handoff on a low note, "New wobble: … 40 cents each
+  way (replaces your own)" prints the READ depth, which invites reading it as the singer's own.

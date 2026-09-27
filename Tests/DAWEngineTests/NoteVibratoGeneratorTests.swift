@@ -99,10 +99,19 @@ struct NoteVibratoGeneratorTests {
         "ec8e1bd8e04e4d8a6861e27ed620ff5772422fee40b8c6fd886e9e712ca77f6a"
     static let goldenDigestShaping =
         "1102f9a9e5bc74e92a449ed9a4a9ee28fe93915fd7e43922ce38bc2318c84a8a"
+    //
+    // ⚠️ THE TWO RENDER GOLDENS WERE RE-PINNED TWICE on 2026-09-25, and that
+    // does not falsify the banner: each change under them is the vendored
+    // TRANSPOSER, not the curve — p2-acc (VENDORED.md patch 0001, the
+    // fractional-bin phase read), then p2-acc-3 (patches 0002 peak position +
+    // flat lobe map, 0003 exact previous hop). The edit-set digests above and
+    // the curve samples below did not move. Chain pristine → 0001 → 0002/0003:
+    // offset 7a2a181e… → afe83f96… → c193adae…,
+    // shaping 3493573a… → 98636380… → da7078cf….
     static let goldenRenderOffset =
-        "7a2a181ea40398a5373f250eb3abbc6991ecec2d6bda2385372a34a412c3839b"
+        "c193adae511145da424f0a70032c7561e264494104a568ac88714348b68e4ae9"
     static let goldenRenderShaping =
-        "3493573ab3845c0477f58cf4ccb4008d6c4b8804e6d7c7f507dc373f1a00497b"
+        "da7078cfcbebd589c7c27e87994bacebf5269565460e5c02e9b10dfe871b8bb7"
     /// The curve at six source seconds, captured on the same pre-feature tree.
     /// The render SHA says "something changed"; these say WHERE.
     static let goldenCurveSamples: [(Double, Double)] = [
@@ -205,6 +214,112 @@ struct NoteVibratoGeneratorTests {
             != after.semitones(atSourceSecond: 0.7))
     }
 
+    // ── T12 (vibrato-handle design §7.1, §15): THE PHASE ANCHOR AT 0 IS TODAY ──
+    //
+    // ⚠️ **WHY THIS IS NOT THE FOUR GOLDENS ABOVE.** The design names §A's
+    // goldens as T12's witness, but both of their sets carry NO generator, so
+    // neither of T12's planted defects (the anchor hashed inside the generator
+    // block; the default anchor read as the note's start) can move them. The
+    // witness has to carry a generator. So T12 pins:
+    //  * the generator set's DIGEST and ratio-1 RENDER, which are
+    //    `PitchCurveRenderTests`' C2-1 captures (2026-09-24, before the anchor
+    //    existed), restated here against the same set;
+    //  * the CURVE of that set, untimed and retimed, hashed over a dense grid.
+    //    Captured 2026-09-25 on this worktree BEFORE `vibratoPhaseAnchorSeconds`
+    //    existed (C5a-1's first run, Sources untouched), and reproduced on a
+    //    second pre-edit run. The retimed one is the edited-time branch
+    //    (`W(anchor)`, design §7.6), which no render golden reaches until C2-3.
+
+    /// `legacyOffsetSet` with a generator (and an onset) on its first note:
+    /// value for value `PitchCurveRenderTests.c21Set("generator")`.
+    static func legacyGeneratorSet() -> PitchEditSet {
+        var set = legacyOffsetSet()
+        set.segments[0].vibratoRateHz = 5.5
+        set.segments[0].vibratoDepthCents = 40
+        set.segments[0].vibratoOnsetSeconds = 0.2
+        return set
+    }
+
+    /// The same generator with its note RETIMED (end edge +0.1 s), so the
+    /// generator runs in edited time, and a plain second note well clear of it.
+    static func retimedGeneratorSet() -> PitchEditSet {
+        PitchEditSet(
+            analysisVersion: 1,
+            segments: [
+                NoteSegment(id: idA, startSeconds: 0.25, endSeconds: 1.25,
+                            detectedHz: 220, detectedConfidence: 0.9,
+                            pitchOffsetCents: -37.5,
+                            vibratoRateHz: 5.5, vibratoDepthCents: 40,
+                            vibratoOnsetSeconds: 0.2, timeEndDeltaSeconds: 0.1),
+                NoteSegment(id: idB, startSeconds: 1.5, endSeconds: 1.9,
+                            detectedHz: 233.08, detectedConfidence: 0.81,
+                            pitchOffsetCents: 22.0),
+            ],
+            retuneMs: 45)
+    }
+
+    /// SHA256 over the curve's bit patterns at every millisecond of 0…2.5 s.
+    static func curveDigest(_ curve: PitchCorrectionCurve) -> String {
+        var bytes: [UInt8] = []
+        bytes.reserveCapacity(2501 * 8)
+        for step in 0...2500 {
+            let value = curve.semitones(atSourceSecond: Double(step) / 1000)
+            withUnsafeBytes(of: value.bitPattern.littleEndian) { bytes.append(contentsOf: $0) }
+        }
+        var hasher = SHA256()
+        hasher.update(data: Data(bytes))
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    static let goldenCurveGenerator =
+        "13b3fb13fa3116a887cd69a467df6d686cd90040441c183ec3df24ff0d82075c"
+    static let goldenCurveGeneratorRetimed =
+        "3f2ea06995615c04000366b0ad190071f3abad3ff33edbcbb67372a2485d70d3"
+
+    /// ⭐⭐ T12. A set whose anchors are all 0 (every set saved before the
+    /// field, and every set since that never used it) digests, renders and
+    /// evaluates EXACTLY as it did before the field existed.
+    @Test("§A T12 — a generator with the phase anchor at 0 is today, bit for bit")
+    func anchorZeroIsTodayBitForBit() throws {
+        let generator = Self.legacyGeneratorSet()
+        #expect(generator == PitchCurveRenderTests.c21Set("generator"),
+                "precondition: this is the set the C2-1 goldens were captured on")
+        let retimed = Self.retimedGeneratorSet()
+        // Precondition: every anchor here is the default, set by NOBODY.
+        #expect((generator.segments + retimed.segments)
+            .allSatisfy { $0.vibratoPhaseAnchorSeconds.bitPattern == (0.0).bitPattern })
+        let warp = try #require(PitchTimeWarp.make(editSet: retimed, sourceDurationSeconds: 2.5),
+                                "precondition: the retimed set must build a W")
+        let untimedCurve = Self.curveDigest(PitchCorrectionCurve.make(editSet: generator))
+        let retimedCurve = Self.curveDigest(PitchCorrectionCurve.make(editSet: retimed,
+                                                                      timeWarp: warp))
+        let digest = PitchEditSetDigest.hex(generator)
+        let render = Self.renderDigest(try Self.renderThroughShippingPath(generator))
+        Self.log("A", "T12 capture: digest \(digest); render \(render); curve \(untimedCurve); "
+            + "retimed curve \(retimedCurve); NoteSegment size "
+            + "\(MemoryLayout<NoteSegment>.size) stride \(MemoryLayout<NoteSegment>.stride), "
+            + "\(Mirror(reflecting: generator.segments[0]).children.count) stored fields")
+
+        // (i) the digest: the anchor block is gated, and absent at anchor 0.
+        #expect(digest == PitchCurveRenderTests.c21LegacyDigestGoldens[2].hex,
+                """
+                the digest of a generator set whose anchor is 0 MOVED (\(digest)). \
+                The anchor must be hashed in its OWN block (slot 2), emitted only when \
+                a generated wobble has an anchor, never inside the generator block.
+                """)
+        // (ii) the render and the curve: `t − 0.0 == t`, so the phase is today's.
+        #expect(render == PitchCurveRenderTests.c21GeneratorRenderGolden,
+                """
+                a generator set whose anchor is 0 no longer renders its pre-anchor \
+                bytes (\(render)). The default anchor must be 0 (source second zero), \
+                never the note's start.
+                """)
+        #expect(untimedCurve == Self.goldenCurveGenerator,
+                "the untimed generator curve moved at anchor 0 (\(untimedCurve))")
+        #expect(retimedCurve == Self.goldenCurveGeneratorRetimed,
+                "the RETIMED generator curve moved at anchor 0 (\(retimedCurve)): W(0) must stay 0")
+    }
+
     /// The persistence half of "byte-identical on LOAD": a payload written
     /// before the three keys existed decodes to an inert generator, and
     /// re-encoding it does not grow the keys.
@@ -221,9 +336,12 @@ struct NoteVibratoGeneratorTests {
         #expect(segment.vibratoRateHz == 0)
         #expect(segment.vibratoDepthCents == 0)
         #expect(segment.vibratoOnsetSeconds == 0)
+        #expect(segment.vibratoPhaseAnchorSeconds == 0)  // C5a-1: absent is today's phase
 
+        let keys = ["vibratoRateHz", "vibratoDepthCents", "vibratoOnsetSeconds",
+                    "vibratoPhaseAnchorSeconds"]
         let reencoded = String(decoding: try JSONEncoder().encode(decoded), as: UTF8.self)
-        for key in ["vibratoRateHz", "vibratoDepthCents", "vibratoOnsetSeconds"] {
+        for key in keys {
             #expect(!reencoded.contains(key),
                     """
                     re-saving a pre-generator project grew the key \(key). \
@@ -236,14 +354,16 @@ struct NoteVibratoGeneratorTests {
         active.segments[0].vibratoRateHz = 5.5
         active.segments[0].vibratoDepthCents = 93
         active.segments[0].vibratoOnsetSeconds = 0.2
+        active.segments[0].vibratoPhaseAnchorSeconds = 0.75
         let activeJSON = String(decoding: try JSONEncoder().encode(active), as: UTF8.self)
-        for key in ["vibratoRateHz", "vibratoDepthCents", "vibratoOnsetSeconds"] {
+        for key in keys {
             #expect(activeJSON.contains(key))
         }
         // And a full round trip preserves them, including through the digest.
         let reloaded = try JSONDecoder().decode(
             PitchEditSet.self, from: Data(activeJSON.utf8))
         #expect(reloaded.segments[0].vibratoDepthCents == 93)
+        #expect(reloaded.segments[0].vibratoPhaseAnchorSeconds == 0.75)
         #expect(PitchEditSetDigest.hex(reloaded) == PitchEditSetDigest.hex(active))
     }
 
@@ -286,11 +406,45 @@ struct NoteVibratoGeneratorTests {
             #expect(none.semitones(atSourceSecond: t).bitPattern
                 == rated.semitones(atSourceSecond: t).bitPattern)
         }
+
+        // C5a-1: the phase anchor is the third field of this kind. Alone (even
+        // beside a rate) it is inert and identity, but it IS a stored edit.
+        let anchorOnly = segment { $0.vibratoPhaseAnchorSeconds = 12.3 }
+        let anchorAndRate = segment {
+            $0.vibratoPhaseAnchorSeconds = 12.3
+            $0.vibratoRateHz = 5.5
+        }
+        for inert in [anchorOnly, anchorAndRate] {
+            #expect(inert.isIdentity)
+            #expect(inert.isPitchIdentity)
+            #expect(!inert.hasGeneratedVibrato)
+            #expect(inert.isEdited, "a stored anchor is an edit the spy must see")
+            #expect(PitchEditSetDigest.hex(PitchEditSet(segments: [inert])).isEmpty)
+            #expect(!Clip(name: "c", pitchEdits: PitchEditSet(segments: [inert])).hasPitchEdits)
+            let anchored = PitchCorrectionCurve.make(editSet: PitchEditSet(segments: [inert]))
+            for step in 0...200 {
+                let t = Double(step) / 200
+                #expect(none.semitones(atSourceSecond: t).bitPattern
+                    == anchored.semitones(atSourceSecond: t).bitPattern)
+            }
+        }
+        // ⭐ CONTROL: the untouched note is NOT edited, so `isEdited` above
+        // measured the anchor and not a predicate that is always true.
+        #expect(!segment { _ in }.isEdited)
+        // And WITH a depth the anchor is not inert: the curve moves.
+        let deep = segment { $0.vibratoDepthCents = 25; $0.vibratoRateHz = 5.5 }
+        var deepAnchored = deep
+        deepAnchored.vibratoPhaseAnchorSeconds = 0.05
+        let deepCurve = PitchCorrectionCurve.make(editSet: PitchEditSet(segments: [deep]))
+        let deepAnchoredCurve = PitchCorrectionCurve.make(
+            editSet: PitchEditSet(segments: [deepAnchored]))
+        #expect(deepCurve.semitones(atSourceSecond: 0.5)
+            != deepAnchoredCurve.semitones(atSourceSecond: 0.5))
     }
 
     /// Damaged input degrades to INERT, never to a wobble nobody asked for.
     @Test("§A non-finite and out-of-range generator values heal to inert or to the clamp")
-    func generatorSanitises() {
+    func generatorSanitises() throws {
         let poisoned = NoteSegment(
             startSeconds: 0, endSeconds: 1, detectedHz: 440, detectedConfidence: 0.9,
             vibratoRateHz: .nan, vibratoDepthCents: .infinity,
@@ -306,6 +460,38 @@ struct NoteVibratoGeneratorTests {
         #expect(clamped.vibratoRateHz == NoteSegment.vibratoRateHzRange.upperBound)
         #expect(clamped.vibratoDepthCents == 0)
         #expect(clamped.vibratoOnsetSeconds == NoteSegment.vibratoOnsetSecondsRange.upperBound)
+
+        // C5a-1: a damaged anchor reverts to 0 (today's phase, never one
+        // nobody set), and an out-of-range one is clamped to −1…86 400.
+        for bad in [Double.nan, .infinity, -.infinity] {
+            let healed = NoteSegment(startSeconds: 0, endSeconds: 1, detectedHz: 440,
+                                     detectedConfidence: 0.9, vibratoRateHz: 5.5,
+                                     vibratoDepthCents: 40, vibratoPhaseAnchorSeconds: bad)
+            #expect(healed.vibratoPhaseAnchorSeconds == 0, "anchor \(bad) did not heal to 0")
+        }
+        for (asked, stored) in [(1e9, 86_400.0), (-5, -1), (86_400, 86_400), (-1, -1), (0.4, 0.4)] {
+            let note = NoteSegment(startSeconds: 0, endSeconds: 1, detectedHz: 440,
+                                   detectedConfidence: 0.9, vibratoPhaseAnchorSeconds: asked)
+            #expect(note.vibratoPhaseAnchorSeconds == stored,
+                    "anchor \(asked) stored \(note.vibratoPhaseAnchorSeconds), not \(stored)")
+        }
+        #expect(NoteSegment.vibratoPhaseAnchorSecondsRange == -1...86_400)
+        // A decoded payload heals through the same `init`.
+        let hostile = try JSONDecoder().decode(NoteSegment.self, from: Data("""
+            {"id":"\(Self.idA.uuidString)","startSeconds":0,"endSeconds":1,"detectedHz":440,\
+            "detectedConfidence":0.9,"vibratoPhaseAnchorSeconds":1e12}
+            """.utf8))
+        #expect(hostile.vibratoPhaseAnchorSeconds == 86_400)
+        // Both extremes of the range still evaluate finite, deep inside a note.
+        for anchor in [-1.0, 86_400] {
+            let far = PitchCorrectionCurve.make(editSet: PitchEditSet(segments: [
+                NoteSegment(startSeconds: 0, endSeconds: 1, detectedHz: 440,
+                            detectedConfidence: 1, vibratoRateHz: 8,
+                            vibratoDepthCents: 200, vibratoPhaseAnchorSeconds: anchor)]))
+            for step in 0...200 {
+                #expect(far.semitones(atSourceSecond: Double(step) / 200).isFinite)
+            }
+        }
 
         // A NaN must never reach the curve, whatever the caller does.
         let curve = PitchCorrectionCurve.make(editSet: PitchEditSet(segments: [
@@ -376,6 +562,40 @@ struct NoteVibratoGeneratorTests {
                 a quarter-period offset moved it by only \(shiftedWorst * 100) \
                 cents, so the pass above is meaningless.
                 """)
+
+        // C5a-1: a STORED anchor keeps the guarantee. Both halves carry the
+        // parent's anchor (a split copies it through `reidentified`'s Codable
+        // round trip), so they share one phase, anchored mid-note rather than
+        // at source zero. 1.7 s is not a whole number of periods from 0.
+        func anchored(_ start: Double, _ end: Double) -> NoteSegment {
+            var n = note(start, end)
+            n.vibratoPhaseAnchorSeconds = 1.7
+            return n
+        }
+        let wholeAnchored = PitchCorrectionCurve.make(editSet: set([anchored(1.0, 3.0)]))
+        let splitAnchored = PitchCorrectionCurve.make(
+            editSet: set([anchored(1.0, 2.0), anchored(2.0, 3.0)]))
+        var worstAnchored = 0.0
+        var movedByAnchor = 0.0
+        var probes: [Double] = []
+        for step in 0...400 {
+            let fraction = Double(step) / 400 * 0.75
+            probes.append(1.1 + fraction)   // inside half 1
+            probes.append(2.15 + fraction)  // inside half 2
+        }
+        for t in probes {
+            worstAnchored = max(worstAnchored, abs(wholeAnchored.semitones(atSourceSecond: t)
+                - splitAnchored.semitones(atSourceSecond: t)))
+            movedByAnchor = max(movedByAnchor, abs(wholeAnchored.semitones(atSourceSecond: t)
+                - whole.semitones(atSourceSecond: t)))
+        }
+        Self.log("A", "anchored at 1.7 s: split vs whole worst \(worstAnchored * 100) c; "
+            + "the anchor itself moved the curve by up to \(movedByAnchor * 100) c")
+        #expect(worstAnchored < 1e-12,
+                "an anchored wobble split in two changed by \(worstAnchored * 100) cents")
+        // ⭐ CONTROL: the anchor really is in effect here, so the pass above
+        // is about the anchored phase and not a copy of the anchor-0 legs.
+        #expect(movedByAnchor > 0.5)
     }
 
     /// The onset envelope: a fade that actually fades, measured on the curve.

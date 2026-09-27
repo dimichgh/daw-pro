@@ -36,6 +36,10 @@ extension ProjectStore {
             tempoMap: transport.tempoMap, masterVolume: masterVolume,
             masterEffects: masterEffects,
             masterAutomation: masterAutomation,
+            // m39-e-2: master modulation rides the class too — a master
+            // tremolo is part of the measured program.
+            masterModulationSources: masterModulationSources,
+            masterModulationRoutes: masterModulationRoutes,
             fromBeat: startBeat, durationSeconds: duration,
             forcedCompensationTargets: nil
         )
@@ -117,6 +121,10 @@ extension ProjectStore {
             tracks: exclusion.tracks, tempoMap: transport.tempoMap, masterVolume: masterVolume,
             masterEffects: masterEffects,
             masterAutomation: masterAutomation,
+            // m39-e-2: and the master strip's modulation — the deliverable is
+            // what the user hears, and they hear a master LFO or macro.
+            masterModulationSources: masterModulationSources,
+            masterModulationRoutes: masterModulationRoutes,
             fromBeat: startBeat, durationSeconds: duration,
             forcedCompensationTargets: nil
         )
@@ -230,7 +238,8 @@ extension ProjectStore {
     /// - `includeMasteredMixdown` (m23-m1) adds a "00 Mastered Mix.wav" SIBLING
     ///   — the real mastered mix, rendered exactly the way `render.bounce`
     ///   renders (full session, real master chain, real master automation lane,
-    ///   real master volume), optionally normalized via `masteredLufsTarget` /
+    ///   real master modulation, real master volume), optionally normalized via
+    ///   `masteredLufsTarget` /
     ///   `masteredTruePeakCeilingDb` through the SAME gain-only policy
     ///   (`deliveryNormalized`). It is a sibling, NEVER a transformation of the
     ///   stems: for a nonlinear master chain `M`, `Σᵢ M(sᵢ) ≠ M(Σᵢ sᵢ)`
@@ -297,6 +306,10 @@ extension ProjectStore {
                 tempoMap: transport.tempoMap, masterVolume: masterVolume,
                 masterEffects: [],
                 masterAutomation: [],
+                // m39-e-2: master modulation is master performance too —
+                // excluded for the lane's reason.
+                masterModulationSources: [],
+                masterModulationRoutes: [],
                 fromBeat: startBeat, durationSeconds: duration,
                 forcedCompensationTargets: targets
             )
@@ -323,6 +336,8 @@ extension ProjectStore {
                 tracks: liveTracks, tempoMap: transport.tempoMap, masterVolume: masterVolume,
                 masterEffects: [],
                 masterAutomation: [],
+                masterModulationSources: [],  // m39-e-2: STEM class, like the lane
+                masterModulationRoutes: [],
                 fromBeat: startBeat, durationSeconds: duration,
                 forcedCompensationTargets: targets
             )
@@ -354,6 +369,8 @@ extension ProjectStore {
                 tracks: liveTracks, tempoMap: transport.tempoMap, masterVolume: masterVolume,
                 masterEffects: masterEffects,
                 masterAutomation: masterAutomation,
+                masterModulationSources: masterModulationSources,  // m39-e-2
+                masterModulationRoutes: masterModulationRoutes,
                 fromBeat: startBeat, durationSeconds: duration,
                 forcedCompensationTargets: targets
             )

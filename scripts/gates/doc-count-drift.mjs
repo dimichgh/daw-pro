@@ -76,7 +76,20 @@ const COMMANDS_SWIFT = resolve(REPO, "Sources/DAWControl/Commands.swift");
 
 /** Strip `//` line comments, line by line. NOT a block-comment parser: the
  *  array body uses `//` only, and a naive whole-file regex would eat `://`
- *  inside string literals such as URLs. */
+ *  inside string literals such as URLs.
+ *  ⚠️ ZP (2026-09-25): `Tests/DAWControlTests/ZeroParamVerbRejectionTests.swift`
+ *  ports this exact function (`stripLineComments`, same split-cut-first-`//`
+ *  rule) before its own two source scrapes. Keep both in sync — the whole
+ *  point is that the two instruments never disagree on what counts as a
+ *  comment again.
+ *  GAP 2 (ZP-2, tracked, deliberately NOT fixed): the line above warns
+ *  against a naive WHOLE-FILE regex eating a URL's `//` — a different risk
+ *  from the one this line-by-line version still carries. This function is
+ *  NOT string-literal-aware either: a `//` inside a same-line quoted string
+ *  (e.g. a URL) is still cut as if it started a comment. Shared by both
+ *  implementations, harmless today (no `rejectUnknownKeys` call site in
+ *  Commands.swift contains such a literal), and out of scope for the ZP
+ *  items that touched this file. */
 const stripLineComments = (text) =>
   text.split("\n").map((l) => l.replace(/\/\/.*$/, "")).join("\n");
 

@@ -428,12 +428,34 @@ struct PitchCurveRenderTests {
             // it had before these existed. The exception that buys is pinned
             // by `generatorFieldsRekeyOnlyWhenTheyCanBeHeard` below.
             "vibratoRateHz", "vibratoDepthCents", "vibratoOnsetSeconds",
+            // m23-ap C5a-1 — the phase anchor. Hashed in its OWN block
+            // (slot 2), gated on a generated wobble carrying an anchor, so
+            // like rate and onset it is inert, and deliberately NOT a
+            // mutation row below: `base()` has no depth, the block is gated
+            // off, and that row would fail on purpose. Both halves are
+            // pinned by `digestSeesTheAnchor`.
+            "vibratoPhaseAnchorSeconds",
             "formantOffsetSemitones", "timeStartDeltaSeconds",
             "timeEndDeltaSeconds", "amplitudeDb",
+            // Natural tuning §4 (NT-C C0 named them, R28; NT-C C4 hashes them
+            // in slot 9, gated on `usesSoftJoins`). A COVERAGE pin since C4:
+            // the two mutation rows below must move the digest.
+            "transitionOutMs", "glideFollow",
+            // C5b-1: the drawn shape, hashed ONLY in its own block (slot 4),
+            // gated on `hasShape`. A COVERAGE pin: the shaped-base rows after
+            // the loop move each field on a note that CARRIES a shape, and
+            // `NoteShapeRenderTests.digestCoversEveryShapeSample` moves every
+            // sample position.
+            "shapeStartIndex", "shapeTenthsOfCents",
             // I7a: hashed in the LEVEL block (slot 5), not inline, so a set
             // with no cleared note keeps the bytes it had before the flag
             // existed. The mutation row below proves the block carries it.
             "isCleared",
+            // U-A: hashed in the ORIGIN block (slot 6), not inline, so a set
+            // with no sound and no slide keeps the bytes it had before the
+            // field existed. A `let`: the rebuild row below proves the block
+            // carries it.
+            "origin",
         ]
         #expect(Set(fields) == Set(covered),
                 """
@@ -462,6 +484,11 @@ struct PitchCurveRenderTests {
             // I7a: the base note carries a pitch edit, so it is not identity
             // either way, and ONLY the level block can make this re-key.
             { s in s.isCleared = true },
+            // NT-C C4: the base set has slope 0, so ONLY the transition
+            // block (slot 9, gated on `usesSoftJoins` — on a slope-0 set that
+            // is "some note `hasTransitionEdits`") can re-key these.
+            { s in s.transitionOutMs = 120 },
+            { s in s.glideFollow = 1 },
         ] {
             var segment = base()
             change(&segment)
@@ -477,16 +504,43 @@ struct PitchCurveRenderTests {
         mutated.append(NoteSegment(id: id, startSeconds: 1, endSeconds: 2,
                                    detectedHz: 220, detectedConfidence: 0.6,
                                    pitchOffsetCents: 10))
+        // U-A: `origin` is a `let` too. The base note is moved (+10 c), so it
+        // is not identity as either origin, and ONLY the origin block can
+        // make this re-key.
+        mutated.append(NoteSegment(id: id, startSeconds: 1, endSeconds: 2,
+                                   detectedHz: 220, detectedConfidence: 0.5,
+                                   pitchOffsetCents: 10, origin: .unpitched))
         for segment in mutated {
             let digest = PitchEditSetDigest.hex(PitchEditSet(segments: [segment]))
             #expect(digest != reference,
                     "a field change left the digest unchanged: \(segment)")
         }
+        // C5b-1: the two shape fields, each moved on a base that CARRIES a
+        // shape (on a shape-free note the block is gated off, and a start
+        // index there would re-key for the wrong reason, or not at all).
+        var shaped = base()
+        shaped.shapeStartIndex = 120
+        shaped.shapeTenthsOfCents = [0, 50, 0]
+        let shapedReference = PitchEditSetDigest.hex(PitchEditSet(segments: [shaped]))
+        #expect(shapedReference != reference, "adding a drawn shape left the digest unchanged")
+        var movedShape = shaped
+        movedShape.shapeStartIndex = 121
+        #expect(PitchEditSetDigest.hex(PitchEditSet(segments: [movedShape])) != shapedReference,
+                "moving a drawn shape by one grid step left the digest unchanged")
+        var redrawn = shaped
+        redrawn.shapeTenthsOfCents = [0, 51, 0]
+        #expect(PitchEditSetDigest.hex(PitchEditSet(segments: [redrawn])) != shapedReference,
+                "redrawing one sample left the digest unchanged")
         // Set-level fields.
         #expect(PitchEditSetDigest.hex(
             PitchEditSet(segments: [base()], retuneMs: 80)) != reference)
         #expect(PitchEditSetDigest.hex(
             PitchEditSet(analysisVersion: 2, segments: [base()])) != reference)
+        // Natural tuning §2 (NT-C C2): the consonant flag, hashed in slot 8.
+        // The base note is moved (+10 c), so the set bends and ONLY the
+        // consonant block can make this re-key.
+        #expect(PitchEditSetDigest.hex(
+            PitchEditSet(segments: [base()], keepsConsonantsUntuned: true)) != reference)
         // Determinism: the same set, built twice, and after a Codable round
         // trip (the shape a reopened project actually arrives in).
         #expect(PitchEditSetDigest.hex(PitchEditSet(segments: [base()])) == reference)
@@ -542,6 +596,82 @@ struct PitchCurveRenderTests {
                 unchanged — the suffix block is not covering \
                 `vibratoOnsetSeconds`.
                 """)
+    }
+
+    /// ⭐⭐ **THE PHASE ANCHOR (m23-ap C5a-1, vibrato-handle design §7.4/§7.5):
+    /// it re-keys exactly the sets whose sound it changes, in its own block, in
+    /// slot 2.** Five legs:
+    ///  1. with a generated wobble, the anchor's VALUE re-keys (not merely its
+    ///     presence);
+    ///  2. on a note with no generator it is inert, and does NOT re-key;
+    ///  3. the every-segment rule: once any wobble carries an anchor, an inert
+    ///     NEIGHBOUR's anchor re-keys too (the one cost design §7.5 accepts);
+    ///  4. the bytes are EXACTLY the pre-anchor material plus one block
+    ///     (marker, count, every anchor), and on a retimed set the block sits
+    ///     BEFORE the time-warp block (slot order), against the independent
+    ///     restatement `c21PreC2Material`, itself proven on captured hexes;
+    ///  5. an anchor of 0 or −0.0 emits nothing: the pre-anchor bytes.
+    /// Planted, red: the block removed (leg 1); gated on the anchor alone
+    /// (leg 2).
+    @Test("(7) C5a-1: the phase anchor re-keys only a wobble it moves, in its own slot-2 block")
+    func digestSeesTheAnchor() {
+        let idA = UUID(uuidString: "A0000000-0000-4000-8000-00000000C5A1")!
+        let idB = UUID(uuidString: "B0000000-0000-4000-8000-00000000C5A1")!
+        func note(_ id: UUID, _ start: Double, depth: Double, anchor: Double,
+                  endDelta: Double = 0) -> NoteSegment {
+            NoteSegment(id: id, startSeconds: start, endSeconds: start + 1, detectedHz: 220,
+                        detectedConfidence: 0.9, pitchOffsetCents: 10,
+                        vibratoRateHz: 5.5, vibratoDepthCents: depth,
+                        vibratoPhaseAnchorSeconds: anchor, timeEndDeltaSeconds: endDelta)
+        }
+        func hex(_ segments: [NoteSegment]) -> String {
+            PitchEditSetDigest.hex(PitchEditSet(segments: segments, retuneMs: 30))
+        }
+        // (1) With a wobble: the value re-keys.
+        let wobble0 = hex([note(idA, 1, depth: 40, anchor: 0)])
+        let wobbleA = hex([note(idA, 1, depth: 40, anchor: 1.5)])
+        #expect(!wobble0.isEmpty)
+        #expect(wobbleA != wobble0,
+                "an anchor on a wobbling note left the key unchanged: stale audio at the old phase")
+        #expect(hex([note(idA, 1, depth: 40, anchor: 1.51)]) != wobbleA,
+                "a second anchor value hashed like the first: the block carries presence, not value")
+        // (2) No wobble: inert, same key.
+        #expect(hex([note(idA, 1, depth: 0, anchor: 1.5)]) == hex([note(idA, 1, depth: 0, anchor: 0)]),
+                "an anchor on a note with no wobble re-keyed a render it cannot change")
+        // (3) The every-segment rule.
+        let withNeighbour = hex([note(idA, 1, depth: 40, anchor: 1.5), note(idB, 3, depth: 0, anchor: 0)])
+        #expect(hex([note(idA, 1, depth: 40, anchor: 1.5), note(idB, 3, depth: 0, anchor: 3.2)])
+                != withNeighbour,
+                "the anchor block covers only the wobbling notes, not EVERY segment (design §7.5)")
+        // (4) Exactly one block, in slot 2, before the time-warp block.
+        #expect(PitchEditSetDigest.anchorSuffixMarker == 0x4131_4E43_484F_5201)
+        func anchorBlock(_ set: PitchEditSet) -> [UInt8] {
+            var bytes: [UInt8] = []
+            func put(_ value: UInt64) {
+                withUnsafeBytes(of: value.littleEndian) { bytes.append(contentsOf: $0) }
+            }
+            put(0x4131_4E43_484F_5201)
+            put(UInt64(bitPattern: Int64(set.segments.count)))
+            for s in set.segments { put(s.vibratoPhaseAnchorSeconds.bitPattern) }
+            return bytes
+        }
+        let anchored = PitchEditSet(segments: [note(idA, 1, depth: 40, anchor: 1.5),
+                                               note(idB, 3, depth: 0, anchor: 3.2)], retuneMs: 30)
+        #expect(PitchEditSetDigest.hex(anchored)
+                == Self.c21SHA(Self.c21PreC2Material(anchored) + anchorBlock(anchored)))
+        let retimed = PitchEditSet(segments: [note(idA, 1, depth: 40, anchor: 1.5, endDelta: 0.1),
+                                              note(idB, 3, depth: 0, anchor: 0)], retuneMs: 30)
+        #expect(retimed.hasTimeEdits)
+        #expect(PitchEditSetDigest.hex(retimed)
+                == Self.c21SHA(Self.c21PreC2Material(retimed) + anchorBlock(retimed)
+                               + Self.c21WarpBlock()),
+                "the anchor block is not in slot 2 (after the generator block, before the time warp)")
+        // (5) 0 and −0.0 emit nothing.
+        for zero in [0.0, -0.0] {
+            let set = PitchEditSet(segments: [note(idA, 1, depth: 40, anchor: zero)], retuneMs: 30)
+            #expect(PitchEditSetDigest.hex(set) == Self.c21SHA(Self.c21PreC2Material(set)),
+                    "anchor \(zero) emitted an anchor block")
+        }
     }
 
     @Test("(7) determinism survives a save/reopen round trip")
@@ -886,16 +1016,37 @@ struct PitchCurveRenderTests {
             compensation: OfflineStretcher.curveLatencyCompensation(sampleRate: sr))[0]
     }
 
+    /// The "generator" set's ratio-1 render, captured pre-C2. ONE home, because
+    /// `NoteVibratoGeneratorTests.anchorZeroIsTodayBitForBit` (C5a-1's T12)
+    /// pins the same bytes: a change that moves the audio (the transposer fix)
+    /// re-pins it here once, and T12 then keeps testing the anchor alone.
+    /// ⚠️ RE-PINNED TWICE on 2026-09-25, both times by the vendored
+    /// transposer (see `c21UntimedRendersAreByteIdentical`), never by C2:
+    /// pristine f6b1edfc… → p2-acc (patch 0001) c7eaddc1… → p2-acc-3
+    /// (patches 0002+0003) 538abd33….
+    static let c21GeneratorRenderGolden =
+        "538abd3345aa7d45c335fc74baa7a99b1f92db473413ef6ad417aaee8485cca2"
+
     /// ⭐ TIMING IS INVISIBLE UNTIL IT IS USED. An untimed set renders the
     /// bytes it rendered before C2 existed, at two ratios, with a generator
     /// among them. That generator is what C2-1's edited-time branch sits on.
     @Test("(8) C2-1: untimed sets render byte-identically to pre-C2")
     func c21UntimedRendersAreByteIdentical() throws {
+        // ⚠️ RE-PINNED TWICE on 2026-09-25, NOT by any C2 change: each time the
+        // vendored transposer changed, which moves every transposed render.
+        // Chain pristine → p2-acc (VENDORED.md patch 0001, the fractional-bin
+        // phase read) → p2-acc-3 (patches 0002 peak position + flat lobe map,
+        // 0003 exact previous hop):
+        //   offset        7a2a181e… → afe83f96… → c193adae…
+        //   shaping       3493573a… → 98636380… → da7078cf…
+        //   generator@1   f6b1edfc… → c7eaddc1… → 538abd33…
+        //   generator@1.5 a807f0c9… → 8910312f… → 8c118bc7…
+        // Untimed sets still render exactly what they rendered before C2.
         let goldens: [(set: String, ratio: Double, frames: Int, hex: String)] = [
-            ("offset", 1, 96_000, "7a2a181ea40398a5373f250eb3abbc6991ecec2d6bda2385372a34a412c3839b"),
-            ("shaping", 1, 96_000, "3493573ab3845c0477f58cf4ccb4008d6c4b8804e6d7c7f507dc373f1a00497b"),
-            ("generator", 1, 96_000, "f6b1edfc31bdc207d50871d8799c143844bac46b7b211f7df71237e4f91bccff"),
-            ("generator", 1.5, 144_000, "a807f0c9e2c9fd99029e9b392e8c3c06753badf9ff7395b22667d3f56c2ab3af"),
+            ("offset", 1, 96_000, "c193adae511145da424f0a70032c7561e264494104a568ac88714348b68e4ae9"),
+            ("shaping", 1, 96_000, "da7078cfcbebd589c7c27e87994bacebf5269565460e5c02e9b10dfe871b8bb7"),
+            ("generator", 1, 96_000, Self.c21GeneratorRenderGolden),
+            ("generator", 1.5, 144_000, "8c118bc7eefd65c348b9b204aad6ff1237cfead90d34d1aa3706b6ed4b626cd7"),
         ]
         for golden in goldens {
             let set = Self.c21Set(golden.set)
@@ -917,10 +1068,20 @@ struct PitchCurveRenderTests {
     /// catches up in C2-3.
     @Test("(8) C2-1 only: sets carrying deltas still render their pre-C2 bytes (C2-3 must move these)")
     func c21TimedRendersUnchangedUntilC23() throws {
+        // ⚠️ The two `delta` literals were RE-PINNED TWICE on 2026-09-25, both
+        // times by the vendored transposer — NOT by C2-3. Chain pristine →
+        // p2-acc (VENDORED.md patch 0001) → p2-acc-3 (patches 0002+0003):
+        //   delta@1   aa608771… → 7bfa528e… → 3e66c227…
+        //   delta@1.5 895d2ca7… → 4c7fca4a… → f914ff4a…
+        // C2-1 still renders these sets with their deltas IGNORED, so **C2-3
+        // must STILL move both again**; that move remains its evidence.
+        // `timingOnly` (0 st at every hop, ratio exactly 1) moved for neither:
+        // 0001 cannot reach an integer-bin read, 0002 runs only on mapped
+        // frequencies, and ratio 1 is outside 0003's near-unity window.
         let goldens: [(set: String, ratio: Double, frames: Int, hex: String)] = [
-            ("delta", 1, 96_000, "aa608771f0de1c5467f50bd8a99b21f7902fb910f9f444fec12a8f875db8b691"),
+            ("delta", 1, 96_000, "3e66c227438395a935b0e98458c0f09fe8268cc19451434d37bf4acbaa7c9e01"),
             ("timingOnly", 1, 96_000, "80be09798fdff09b9156e8bb2de7820205c8b61b6f9d350b37f53c8d341f43d5"),
-            ("delta", 1.5, 144_000, "895d2ca7af892e641126301a7b479d72ab5ded08ee21280693e6ab106622afd9"),
+            ("delta", 1.5, 144_000, "f914ff4aa39ea46aedeb333d82c0285f03ed12c03376ed5d1691bcfe1e4709d3"),
         ]
         for golden in goldens {
             let set = Self.c21Set(golden.set)
@@ -1131,5 +1292,226 @@ struct PitchCurveRenderTests {
         var restored = cleared
         restored.segments[0].isCleared = false
         #expect(PitchEditSetDigest.hex(restored) == Self.c21LegacyDigestGoldens[0].hex)
+    }
+
+    // MARK: - (10) U-A: sounds with no detected pitch — G-C13 and digest slot (6)
+
+    /// The block U-A appends (unpitched-notes design §1.4), restated
+    /// independently: the marker (a literal here, because changing it would
+    /// silently re-key every set carrying a sound or a slide), the note count,
+    /// then ONE BYTE PER NOTE by an explicit mapping, never a case's position.
+    static func uaOriginBlock(_ set: PitchEditSet) -> [UInt8] {
+        var bytes: [UInt8] = []
+        withUnsafeBytes(of: UInt64(0x4F31_5249_4749_4E01).littleEndian) {
+            bytes.append(contentsOf: $0)
+        }
+        withUnsafeBytes(of: UInt64(bitPattern: Int64(set.segments.count)).littleEndian) {
+            bytes.append(contentsOf: $0)
+        }
+        for segment in set.segments {
+            switch segment.origin {
+            case .detected: bytes.append(0)
+            case .transition: bytes.append(1)
+            case .unpitched: bytes.append(2)
+            }
+        }
+        return bytes
+    }
+
+    static let uaIdSoundShort = UUID(uuidString: "A0000000-0000-4000-8000-0000000000C1")!
+    static let uaIdSoundLong = UUID(uuidString: "A0000000-0000-4000-8000-0000000000C2")!
+
+    /// The G-C13 fixture. Two corrected notes under a SLOW ramp (110 ms), and
+    /// two sounds:
+    ///  * a SHORT one (64 ms) abutting note A's end. Its own half-ramp is
+    ///    32 ms against A's 55 ms, so if it joined the gate sum it would be
+    ///    normalised against A and trim A's correction near their shared
+    ///    edge (design §1.6's example). That is what makes the bit-exact leg
+    ///    able to fail;
+    ///  * a LONG one (0.5 s) alone in a gap, long enough for the tone tracker
+    ///    to read the pitch a move gives it.
+    static func uaSet(soundOffsetCents: Double? = 0) -> PitchEditSet {
+        var segments = [
+            NoteSegment(id: c21IdA, startSeconds: 0.20, endSeconds: 0.90,
+                        detectedHz: 220, detectedConfidence: 0.9, pitchOffsetCents: 100),
+            NoteSegment(id: c21IdB, startSeconds: 1.00, endSeconds: 1.25,
+                        detectedHz: 220, detectedConfidence: 0.9, pitchOffsetCents: -50),
+        ]
+        if let soundOffsetCents {
+            segments.append(NoteSegment(id: uaIdSoundShort, startSeconds: 0.90,
+                                        endSeconds: 0.964, detectedHz: 220,
+                                        detectedConfidence: 0.4, origin: .unpitched))
+            segments.append(NoteSegment(id: uaIdSoundLong, startSeconds: 1.30,
+                                        endSeconds: 1.80, detectedHz: 220,
+                                        detectedConfidence: 0.4,
+                                        pitchOffsetCents: soundOffsetCents,
+                                        origin: .unpitched))
+        }
+        return PitchEditSet(analysisVersion: 1, segments: segments, retuneMs: 110)
+    }
+
+    /// ⭐ **G-C13 (natural-tuning design R21): AN UNTOUCHED SOUND IS DRY, A
+    /// MOVED ONE IS NOT.** Two halves, each able to fail:
+    ///  * the table WITH two untouched sounds renders BIT-EXACT to the same
+    ///    table without them (and builds an equal curve). Planted: letting an
+    ///    untouched sound into the curve fails this through the short sound's
+    ///    normalisation against note A;
+    ///  * the long sound moved +300 c renders AT +300 c inside its span, and
+    ///    note A outside it is where it was. Planted: a predicate that ignores
+    ///    the offset renders the moved sound dry and fails the physics.
+    /// The physics is the tone tracker's reading of WHERE the pitch is, never
+    /// "the bytes differ".
+    @Test("(10) U-A G-C13: untouched sounds render bit-exact to no sounds; a sound moved +300 c renders at +300 c")
+    func uaUntouchedSoundsAreDryAndAMovedOneIsNot() throws {
+        let without = Self.uaSet(soundOffsetCents: nil)
+        let untouched = Self.uaSet(soundOffsetCents: 0)
+        let moved = Self.uaSet(soundOffsetCents: 300)
+        #expect(untouched.segments.count == 4, "positive control: the sounds are in the set")
+        #expect(untouched.segments.filter { $0.origin == .unpitched }.count == 2)
+        #expect(untouched.segments.filter(\.entersPitchCurve).count == 2)
+        #expect(moved.segments.filter(\.entersPitchCurve).count == 3)
+
+        // The curve: equal as a value (spans, unresolved ids, warp), and no
+        // unresolved id names a sound.
+        let curveWithout = PitchCorrectionCurve.make(editSet: without)
+        let curveUntouched = PitchCorrectionCurve.make(editSet: untouched)
+        #expect(curveUntouched == curveWithout,
+                "an untouched sound changed the curve: it joined the gate sum")
+        #expect(curveUntouched.unresolvedShapingSegmentIDs.isEmpty)
+
+        // Bit-exact, through the shipping plan and the stretcher.
+        let renderWithout = try Self.c21Render(without, ratio: 1)
+        let renderUntouched = try Self.c21Render(untouched, ratio: 1)
+        #expect(renderWithout.count == 96_000)
+        #expect(renderUntouched.map(\.bitPattern) == renderWithout.map(\.bitPattern),
+                "a table with untouched sounds did not render bit-exact to the same table without them")
+
+        // Moved: the physics.
+        let renderMoved = try Self.c21Render(moved, ratio: 1)
+        let sr = 48_000.0
+        let trackMoved = M23QToneTracker.track(renderMoved, sampleRate: sr)
+        let trackWithout = M23QToneTracker.track(renderWithout, sampleRate: sr)
+        let insideSound: Range<Double> = (1.40 * sr)..<(1.70 * sr)
+        let insideNoteA: Range<Double> = (0.35 * sr)..<(0.75 * sr)
+        let movedHz = try #require(M23QToneTracker.medianHz(trackMoved, centreIn: insideSound))
+        let dryHz = try #require(M23QToneTracker.medianHz(trackWithout, centreIn: insideSound))
+        let noteAMoved = try #require(M23QToneTracker.medianHz(trackMoved, centreIn: insideNoteA))
+        let noteAWithout = try #require(M23QToneTracker.medianHz(trackWithout, centreIn: insideNoteA))
+        let movedCents = 1200 * log2(movedHz / 220)
+        let dryCents = 1200 * log2(dryHz / 220)
+        let noteACents = 1200 * log2(noteAMoved / noteAWithout)
+        // The INSTRUMENT'S control: the same tracker, over the same window, on
+        // PURE tones at +100 c and +300 c, reads them within a cent (measured
+        // 99.999 c). So the readings below are the render's, not the tracker's.
+        func pureCents(_ cents: Double, in window: Range<Double>) throws -> Double {
+            let tone = M23QSignal.sine(hz: 220 * pow(2, cents / 1200), frames: 96_000,
+                                       sampleRate: sr, amplitude: 0.8)
+            let hz = try #require(M23QToneTracker.medianHz(
+                M23QToneTracker.track(tone, sampleRate: sr), centreIn: window))
+            return 1200 * log2(hz / 220)
+        }
+        let pure100 = try pureCents(100, in: insideNoteA)
+        let pure300 = try pureCents(300, in: insideSound)
+        let noteAReads = 1200 * log2(noteAWithout / 220)
+        Self.log("10", "G-C13: sound span reads \(movedCents) c moved, \(dryCents) c untouched; "
+            + "note A moved by \(noteACents) c between the two renders; note A (+100 c asked) "
+            + "reads \(noteAReads) c; pure tones read \(pure100) c / \(pure300) c")
+        #expect(abs(pure100 - 100) < 1 && abs(pure300 - 300) < 1,
+                "the tracker misreads a pure tone (\(pure100) / \(pure300)): nothing below is evidence")
+        // The window is on the corrected note: it reads MOVED, not dry.
+        // Pinned to +100 since p2-acc (2026-09-25). Before, this chain played
+        // note A's +100 c at +109.7 c on this pure 220 Hz sine (the moved
+        // sound's +300 at +301.5): the vendored transposer's fractional-bin
+        // phase read, fixed by VENDORED.md patch 0001. Measured after: +99.88 c.
+        #expect(noteAReads > 50, "control: the note A window reads dry (\(noteAReads) c)")
+        #expect(abs(noteAReads - 100) < 0.5,
+                "note A asked +100 c and reads \(noteAReads) c: the transposer is off again")
+        #expect(abs(dryCents) < 5, "the untouched sound's span is not dry: \(dryCents) c")
+        #expect(abs(movedCents - 300) < 5,
+                "a sound moved +300 c renders at \(movedCents) c: the move did not reach the render")
+        #expect(abs(noteACents) < 1, "moving the sound moved note A by \(noteACents) c")
+    }
+
+    /// ⭐ SLOT (6), THE ORIGIN BLOCK. Every set with no sound and no slide
+    /// keeps its bytes (the legacy goldens, unmoved). A set that has one
+    /// re-keys by EXACTLY the block, in slot 6, after the level block. That
+    /// is proven against the independent restatement, which is itself proven
+    /// against the captured goldens first. Planted: gating the block on
+    /// `true` moves every legacy golden.
+    @Test("(10) U-A: a set with a sound re-keys by exactly the origin block, in slot 6, and every other set keeps its bytes")
+    func uaOriginBlockRekeysByExactlyTheBlock() {
+        for golden in Self.c21LegacyDigestGoldens + Self.c21PreC2TimedHex {
+            #expect(Self.c21SHA(Self.c21PreC2Material(Self.c21Set(golden.set))) == golden.hex,
+                    "the test's own layout restatement does not reproduce '\(golden.set)'")
+        }
+        #expect(PitchEditSetDigest.originSuffixMarker == 0x4F31_5249_4749_4E01)
+        #expect(NoteOrigin.allCases.map(PitchEditSetDigest.originByte) == [0, 1, 2])
+
+        // No sound, no slide: no block, the legacy bytes.
+        for golden in Self.c21LegacyDigestGoldens {
+            let set = Self.c21Set(golden.set)
+            #expect(set.segments.allSatisfy { $0.origin == .detected })
+            #expect(PitchEditSetDigest.hex(set) == golden.hex)
+        }
+
+        // An untouched sound added to an EDITED set: the inline section gains
+        // the segment and the block marks it, nothing else.
+        let offset = Self.c21Set("offset")
+        let withSound = PitchEditSet(
+            analysisVersion: offset.analysisVersion,
+            segments: offset.segments + [NoteSegment(
+                id: Self.uaIdSoundLong, startSeconds: 1.9, endSeconds: 2.0, detectedHz: 233.08,
+                detectedConfidence: 0.5, origin: .unpitched)],
+            retuneMs: offset.retuneMs)
+        #expect(withSound.segments.count == 3)
+        let withSoundHex = PitchEditSetDigest.hex(withSound)
+        #expect(withSoundHex == Self.c21SHA(Self.c21PreC2Material(withSound)
+                                            + Self.uaOriginBlock(withSound)),
+                "a set with a sound re-keyed, but not by exactly the origin block")
+        // The same segment as a DETECTED note keys differently: the block is
+        // what tells the two apart (they render differently once moved).
+        var asNote = withSound
+        asNote.segments[2] = NoteSegment(id: Self.uaIdSoundLong, startSeconds: 1.9,
+                                         endSeconds: 2.0, detectedHz: 233.08,
+                                         detectedConfidence: 0.5)
+        #expect(PitchEditSetDigest.hex(asNote) == Self.c21SHA(Self.c21PreC2Material(asNote)))
+        #expect(PitchEditSetDigest.hex(asNote) != withSoundHex)
+        // A slide keys differently from a sound: its own byte.
+        var asSlide = withSound
+        asSlide.segments[2] = NoteSegment(id: Self.uaIdSoundLong, startSeconds: 1.9,
+                                          endSeconds: 2.0, detectedHz: 233.08,
+                                          detectedConfidence: 0.5, origin: .transition)
+        #expect(Set([PitchEditSetDigest.hex(asSlide), withSoundHex,
+                     PitchEditSetDigest.hex(asNote)]).count == 3)
+
+        // ORDER: generator (inside the material), time warp (3), level (5),
+        // origin (6).
+        var everything = Self.c21Set("generator")
+        everything.segments[1].timeStartDeltaSeconds = 0.02
+        everything.segments[0].isCleared = true
+        everything = everything.withSegments(everything.segments + [NoteSegment(
+            id: Self.uaIdSoundShort, startSeconds: 1.9, endSeconds: 1.97, detectedHz: 233.08,
+            detectedConfidence: 0.5, origin: .unpitched)])
+        #expect(everything.segments.count == 3)
+        #expect(PitchEditSetDigest.hex(everything)
+                == Self.c21SHA(Self.c21PreC2Material(everything) + Self.c21WarpBlock()
+                               + Self.i7aLevelBlock(everything) + Self.uaOriginBlock(everything)),
+                "the origin block is not in slot 6, after the level block")
+
+        // IDENTITY: detected notes plus an untouched sound bend nothing, so
+        // they digest to "" and keep the identity bypass.
+        let detectedPlusSound = PitchEditSet(segments: [
+            NoteSegment(id: Self.c21IdA, startSeconds: 0, endSeconds: 1, detectedHz: 220,
+                        detectedConfidence: 0.9),
+            NoteSegment(id: Self.uaIdSoundShort, startSeconds: 1, endSeconds: 1.1,
+                        detectedHz: 220, detectedConfidence: 0.4, origin: .unpitched),
+        ])
+        #expect(detectedPlusSound.isIdentity)
+        #expect(PitchEditSetDigest.hex(detectedPlusSound).isEmpty)
+        // …and the sound MOVED is a real edit: it digests, with the block.
+        var movedSound = detectedPlusSound
+        movedSound.segments[1].pitchOffsetCents = 300
+        #expect(PitchEditSetDigest.hex(movedSound)
+                == Self.c21SHA(Self.c21PreC2Material(movedSound) + Self.uaOriginBlock(movedSound)))
     }
 }

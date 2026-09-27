@@ -319,6 +319,42 @@ public enum OfflineStretcher {
         }
     }
 
+    /// **Natural tuning §1(b): THE PER-HOP FORMANT CURVE**, the second thing
+    /// the curve loop hands the stretcher once per chunk, beside the transpose.
+    /// Built by `StretchCurvePlan.formantCurve(formantPreserve:)` and ONLY for
+    /// a set that `engagesFormantCurve`; `nil` everywhere else, and `nil` IS
+    /// TODAY'S LOOP, byte for byte.
+    ///
+    /// ONE optional carrying BOTH closures, rather than the design's two
+    /// optional closures: a render that set the shift and left the base to
+    /// signalsmith's estimator (or the reverse) is a state this type cannot
+    /// represent.
+    ///
+    /// Both closures are asked for WHOLE-FILE delivered output frames at
+    /// `curveLookupFrame` (the transpose's own lookup, so a formant change
+    /// lands with the pitch change it belongs to), may be asked past the end
+    /// of the render, and must be TOTAL: a non-finite shift or a base ≤ 0
+    /// would reach the shim. The plan's closures are (the DAWCore evaluators
+    /// return the clip term and a ≥ 50 Hz floor).
+    struct FormantCurve {
+        /// Formant shift in semitones RELATIVE TO THE SOURCE ENVELOPE (the
+        /// shim's `compensatePitch = true`): 0 keeps the singer's envelope.
+        let semitonesAtOutputFrame: (Int) -> Double
+        /// The f0 hint in Hz. Never ≤ 0: 0 would hand signalsmith its own
+        /// estimator, whose cross-block IIR a window render cannot reproduce.
+        let baseHzAtOutputFrame: (Int) -> Double
+    }
+
+    /// Hands the stretcher both formant values for the chunk whose curve
+    /// lookup frame is `lookupFrame`. The ONE place the engaged branch talks
+    /// to the shim, for the pre-roll and for every chunk alike.
+    private static func applyFormant(_ formant: FormantCurve, to handle: OpaquePointer,
+                                     lookupFrame: Int) {
+        css_set_formant_semitones(
+            handle, Float(formant.semitonesAtOutputFrame(lookupFrame)), true)
+        css_set_formant_base_hz(handle, Float(formant.baseHzAtOutputFrame(lookupFrame)))
+    }
+
     /// The step value of a transpose curve at an output frame. Sample-and-hold:
     /// the value in effect at `frame` is the last breakpoint at or before it,
     /// and the first breakpoint's value extends backwards to output frame 0.
@@ -409,19 +445,26 @@ public enum OfflineStretcher {
     /// may be past the end of the render (that is what the lookahead IS) and
     /// must be total: it is sampled, never interpolated, and a non-finite
     /// return would reach `css_set_transpose_semitones`.
+    ///
+    /// Natural tuning §1(b): `formant` is the per-hop formant curve
+    /// (`FormantCurve`), `nil` by default and for every legacy set, and then
+    /// the loop is today's, byte for byte. When it is non-nil,
+    /// `formantPreserve` is NOT sent to the stretcher: the curve already
+    /// carries the clip's flag (the plan builds it with the flag).
     static func stretchTransposeCurve(
         input: [[Float]],
         sampleRate: Double,
         ratio: Double,
         semitonesAtOutputFrame: (Int) -> Double,
         formantPreserve: Bool,
+        formant: FormantCurve? = nil,
         compensation: CurveLatencyCompensation = .none,
         isCancelled: () -> Bool = { false }
     ) throws -> [[Float]] {
         try curveLoop(.whole(input), sampleRate: sampleRate, ratio: ratio,
                       semitonesAtOutputFrame: semitonesAtOutputFrame,
-                      formantPreserve: formantPreserve, compensation: compensation,
-                      isCancelled: isCancelled).planar
+                      formantPreserve: formantPreserve, formant: formant,
+                      compensation: compensation, isCancelled: isCancelled).planar
     }
 
     /// **I1-F1: THE SECOND ENTRY into the curve loop below**: one WINDOW of
@@ -429,20 +472,22 @@ public enum OfflineStretcher {
     /// `semitonesAtOutputFrame` is asked for WHOLE-FILE output frames, exactly
     /// as the whole-file render asks it (the window's frames ARE whole-file
     /// frames), so a caller hands both entries the same closure. Not a copy of
-    /// the loop: see `StretchWindow`.
+    /// the loop: see `StretchWindow`. `formant` likewise: the SAME curve as the
+    /// whole-file render's, asked for whole-file frames.
     static func stretchTransposeCurve(
         window: StretchWindow,
         sampleRate: Double,
         ratio: Double,
         semitonesAtOutputFrame: (Int) -> Double,
         formantPreserve: Bool,
+        formant: FormantCurve? = nil,
         compensation: CurveLatencyCompensation = .none,
         isCancelled: () -> Bool = { false }
     ) throws -> StretchWindowOutput {
         try curveLoop(.window(window), sampleRate: sampleRate, ratio: ratio,
                       semitonesAtOutputFrame: semitonesAtOutputFrame,
-                      formantPreserve: formantPreserve, compensation: compensation,
-                      isCancelled: isCancelled)
+                      formantPreserve: formantPreserve, formant: formant,
+                      compensation: compensation, isCancelled: isCancelled)
     }
 
     /// THE time-varying-transpose loop, for both entries.
@@ -452,6 +497,7 @@ public enum OfflineStretcher {
         ratio: Double,
         semitonesAtOutputFrame: (Int) -> Double,
         formantPreserve: Bool,
+        formant: FormantCurve?,
         compensation: CurveLatencyCompensation,
         isCancelled: () -> Bool
     ) throws -> StretchWindowOutput {
@@ -519,7 +565,18 @@ public enum OfflineStretcher {
                 outputFrame: span.startOutputFrame, compensation: compensation,
                 intervalSamples: interval))),
             tonalityLimitHz)
-        css_set_formant_preserve(handle, formantPreserve)
+        if let formant {
+            // Natural tuning §1(b), the ENGAGED branch: the formant curve, and
+            // NEVER `css_set_formant_preserve` (its base 0 is the estimator).
+            // The pre-roll runs at the FIRST chunk's values, the transpose's
+            // continuity rule above, at the transpose's own lookup frame.
+            applyFormant(formant, to: handle, lookupFrame: curveLookupFrame(
+                outputFrame: span.startOutputFrame, compensation: compensation,
+                intervalSamples: interval))
+        } else {
+            // nil: today's call, unchanged (a legacy set, the clip's flag).
+            css_set_formant_preserve(handle, formantPreserve)
+        }
 
         let io = try StretchBuffers(source: source, channels: channels, schedule: schedule,
                                     span: span)
@@ -544,6 +601,14 @@ public enum OfflineStretcher {
                     outputFrame: outDone, compensation: compensation,
                     intervalSamples: interval))),
                 tonalityLimitHz)
+            if let formant {
+                // Beside the transpose, at the SAME lookup frame: both are
+                // consumed by the same block process (`splitComputation` is
+                // false in `presetDefault`), so they land together (§1 G4).
+                applyFormant(formant, to: handle, lookupFrame: curveLookupFrame(
+                    outputFrame: outDone, compensation: compensation,
+                    intervalSamples: interval))
+            }
             io.withInPointers(atSourceFrame: schedule.seekLength + inDone) { inPtrs in
                 io.withOutPointers(atOutputFrame: outDone) { outPtrs in
                     css_process(

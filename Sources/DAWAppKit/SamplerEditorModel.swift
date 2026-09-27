@@ -636,6 +636,88 @@ public final class SamplerEditorModel {
         return readout(value: seconds, spec: glideSpec)
     }
 
+    // MARK: - GLOBALS EVERY ZONE OVERRIDES (W7-SMP — the sax-team ② card half)
+
+    /// The sampler GLOBALS a zone can override, by field name. Taken from the
+    /// ENGINE's precedence, not from the field names: `SamplerInstrument`
+    /// resolves a zone's own `attack`/`decay`/`sustain`/`release` first and
+    /// falls back to the LIVE global only through its `-1` sentinel, and it
+    /// reads a zone's own `oneShot` (−1/0/1) before the global at note-off.
+    /// Nothing else qualifies: a zone's `gain` MULTIPLIES the global rather
+    /// than replacing it, and bend range, voice mode, glide, pedal hold and the
+    /// expression fields have no per-zone counterpart at all.
+    public static let zoneOverridableGlobals = ["attack", "decay", "sustain", "release", "oneShot"]
+
+    /// ⛔ THE SAME VERDICT `instrument.describeSampler` PUBLISHES. True when a
+    /// global is STORED BUT NEVER HEARD: zones exist and every one of them sets
+    /// its own value, so the engine never reads this one. Read straight off
+    /// DAWCore's `SamplerGlobalUse`/`SamplerOneShotUse` — the fold the wire
+    /// shapes into `effectiveGlobals.<name>.globalIsInert` — and never
+    /// re-derived here, so the card cannot reach a different verdict than an
+    /// agent reading the wire (the `glideIsEffective` rule, one field over).
+    ///
+    /// Field report 2026-08-20: a global Release of 3.4465 s on an imported
+    /// library whose every zone released in 0.5 s. The describe verb learned to
+    /// say so that day; this card went on drawing a live-looking knob that did
+    /// nothing when turned.
+    ///
+    /// False for every name outside `zoneOverridableGlobals` (`gain` included:
+    /// the zones scale it, they never replace it), and false for a sampler with
+    /// NO zones — that one is silent for a reason that has nothing to do with
+    /// this control, and calling it inert would point at the wrong repair.
+    public static func globalIsInert(_ name: String, in params: SamplerParams) -> Bool {
+        switch name {
+        case "attack": return SamplerGlobalUse.attack(of: params).globalIsInert
+        case "decay": return SamplerGlobalUse.decay(of: params).globalIsInert
+        case "sustain": return SamplerGlobalUse.sustain(of: params).globalIsInert
+        case "release": return SamplerGlobalUse.release(of: params).globalIsInert
+        case "oneShot": return SamplerOneShotUse.oneShot(of: params).globalIsInert
+        default: return false
+        }
+    }
+
+    /// The live verdict for one global — the card's dim-the-control trigger.
+    ///
+    /// ⚠️ INERT ⇒ DIM, BUT STILL LIVE, exactly as for glide: an edit still
+    /// writes the global (the wire stores it too, and its reply warns), because
+    /// a later zone edit can make that global heard again.
+    public func globalIsInert(_ name: String) -> Bool {
+        Self.globalIsInert(name, in: params)
+    }
+
+    /// The labels of the inert globals this card DRAWS, in the card's own order
+    /// (the knob row, then One Shot) — the words printed on the controls a
+    /// person can see. Global `decay`/`sustain` have no control on this card,
+    /// so they never appear here, even when inert.
+    public var inertGlobalLabels: [String] {
+        var labels = Self.specs.filter { globalIsInert($0.name) }.map(\.label)
+        if globalIsInert(Self.oneShotSpec.name) { labels.append(Self.oneShotSpec.label) }
+        return labels
+    }
+
+    /// The amber line under the GLOBALS row, or nil when nothing drawn is inert.
+    public var inertGlobalsNote: String? { Self.inertGlobalsNote(labels: inertGlobalLabels) }
+
+    /// ⚠️ ONE LINE, ≤ 51 CHARACTERS, IN THE WORST CASE — `glideInertNote`'s
+    /// measured budget, for its reason: this line sits in the card's FIXED
+    /// chrome, where a second wrapped line costs a zone row. The string that
+    /// must fit is the LONGEST this card can show — Attack, Release and One
+    /// Shot together, which one imported drum kit can author on every zone —
+    /// so the line carries only the dimmed controls' names, the FAULT ("do
+    /// nothing") and the cause ("set per zone"). The repair lives in each
+    /// control's tooltip, which costs no pixels (the glide precedent).
+    ///
+    /// Says "zone", not "sound": ZONES is the word printed on this card, and a
+    /// note must name what the reader can see (Rule 6, the glide note's rule).
+    public static func inertGlobalsNote(labels: [String]) -> String? {
+        switch labels.count {
+        case 0: return nil
+        case 1: return "\(labels[0]) does nothing: set per zone."
+        case 2: return "\(labels[0]) and \(labels[1]) do nothing: set per zone."
+        default: return labels.joined(separator: ", ") + " do nothing: set per zone."
+        }
+    }
+
     // MARK: - Selection
 
     /// Selects a zone by its own id (nil deselects). An id that is not in the

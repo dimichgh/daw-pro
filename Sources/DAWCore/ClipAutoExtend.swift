@@ -13,6 +13,27 @@ import Foundation
 /// The user ruled on 2026-08-13 (*"extend in both as you suggested"*) that BOTH
 /// paths auto-extend. Clamping/refusing the note was explicitly rejected.
 ///
+/// ## Where the grown end lands: the SONG's next bar line (m23-ap AX)
+///
+/// The clip grows to the next bar line at or after the covering note's end,
+/// and since m23-ap I5-F2 the bar lines the piano roll draws are the SONG's
+/// (`PianoRollSongGrid.forEachLine`, counted from song beat 0 through the meter
+/// map), not bars counted from the clip's first beat. So the store's three
+/// callers (`setClipNotes`, `pasteNotes`, `repeatNotes`) hand over the clip's
+/// place in the song, `outcome(…clipStartBeat:meterMap:…)`, and a clip that
+/// starts at song beat 2.5 in 4/4 grows to end at song beat 4, 8, 12… — lines
+/// on screen — instead of at 6.5 or 10.5, between them.
+///
+///  - ⭐ **A clip that starts ON a song bar line is unchanged, bit for bit.**
+///    Its phase (`SongGridPhase`, the one definition of "on a line") is exactly
+///    0, and a 0 phase runs the clip-bar expression (`barSnappedLength`)
+///    itself. The edge auto-extend the user confirmed by hand (m25-f-3) is
+///    that case.
+///  - ⚠️ **A song whose meter CHANGES keeps the clip-bar rule** (`songBarPhase`
+///    says why). There the grown end can still land between the lines drawn.
+///  - The meter is still read at the clip's start. In a song with one meter
+///    that is the bar the roll draws.
+///
 /// ⚠️ **THIS DOES NOT MAKE OUT-OF-RANGE NOTES ILLEGAL.** The m18-f/m19-g
 /// "legal-but-latent" rule (`PianoRollModel.drawnWidth` / `playableEndBeat`)
 /// survives untouched: a note past the clip end is still store-legal, still
@@ -120,10 +141,12 @@ public enum ClipAutoExtend {
     ///   - coveringOnsetBeat: clip-local onset that must become audible.
     ///   - coveringEndBeat: clip-local end the clip should reach.
     ///   - beatsPerBar: the meter at the clip's start (`MeterMap.beatsPerBar`).
-    ///     The piano roll draws its bar emphasis at clip-local multiples of this
-    ///     (`PianoRollGrid.drawGridLines`, `b % beatsPerBar == 0` counted from
-    ///     clip-local 0), so a bar-snapped length lands the clip's end exactly
-    ///     on a line the user can already see.
+    ///     ⚠️ Bars are counted from the CLIP's first beat here. That is the
+    ///     roll's bar grid only for a clip that starts on a song bar line: the
+    ///     roll draws the SONG's bars since m23-ap I5-F2. So the store never
+    ///     calls this; it calls `outcome(…clipStartBeat:meterMap:…)` (m23-ap
+    ///     AX). This entry stays for callers that have no song placement, and
+    ///     it returns exactly the number it always returned.
     ///   - maxLengthBeats: the longest this clip may become without colliding
     ///     with the next clip on its track, or nil when nothing follows it.
     ///     ⚠️ **NOT OPTIONAL IN PRACTICE — see the doc on the store verb.**
@@ -237,6 +260,13 @@ public enum ClipAutoExtend {
     ///    sits far beyond it. Blaming that on "the note is exactly at the clip's
     ///    edge" would be flatly false, which is why the audibility refusal is
     ///    split by ceiling rather than reported as one thing.
+    ///
+    /// ## This entry counts bars from the CLIP's first beat (m23-ap AX)
+    ///
+    /// It is the song-grid rule for a clip at song beat 0, kept for callers
+    /// with no song placement. The store calls `outcome(…clipStartBeat:
+    /// meterMap:…)` below. Both run ONE body (`decide`); only the phase of the
+    /// bar grid differs, and here it is 0.
     public static func outcome(
         currentLengthBeats: Double,
         coveringOnsetBeat: Double,
@@ -244,11 +274,85 @@ public enum ClipAutoExtend {
         beatsPerBar: Int,
         maxLengthBeats: Double? = nil
     ) -> ExtendOutcome {
+        decide(currentLengthBeats: currentLengthBeats,
+               coveringOnsetBeat: coveringOnsetBeat,
+               coveringEndBeat: coveringEndBeat,
+               beatsPerBar: beatsPerBar,
+               barPhase: 0,
+               maxLengthBeats: maxLengthBeats)
+    }
+
+    /// **THE STORE'S ENTRY (m23-ap AX): the grown end lands on the SONG's next
+    /// bar line** — a line the piano roll draws — at or after the covering end.
+    ///
+    /// `clipStartBeat` is where the clip's first beat sits on the song timeline
+    /// and `meterMap` is the song's. The covering beats stay CLIP-LOCAL, and so
+    /// does the returned length.
+    ///
+    /// - The meter is read at the clip's start, as it always was.
+    /// - ⭐ A clip that starts on a song bar line has a phase of EXACTLY 0 and
+    ///   runs the clip-bar arithmetic bit for bit. The invariance table pins it
+    ///   against a frozen copy of the pre-AX rule.
+    /// - ⚠️ In a song whose meter changes the phase is 0 as well: the clip-bar
+    ///   rule, kept on purpose (`songBarPhase`).
+    /// - ⚠️ **Both ceilings are measured against THIS end.** A song-bar end can
+    ///   be up to a bar shorter or longer than the clip-bar one, and a neighbour
+    ///   sitting between the two must stop the grow, never be overlapped (the
+    ///   overlap resolver would TRIM it).
+    ///
+    /// `maxLengthBeats` has no default on this entry: every store caller has a
+    /// track to measure, and a forgotten ceiling would grow over a neighbour.
+    public static func outcome(
+        currentLengthBeats: Double,
+        coveringOnsetBeat: Double,
+        coveringEndBeat: Double,
+        clipStartBeat: Double,
+        meterMap: MeterMap,
+        maxLengthBeats: Double?
+    ) -> ExtendOutcome {
+        decide(currentLengthBeats: currentLengthBeats,
+               coveringOnsetBeat: coveringOnsetBeat,
+               coveringEndBeat: coveringEndBeat,
+               beatsPerBar: meterMap.beatsPerBar(atBeat: clipStartBeat),
+               barPhase: songBarPhase(clipStartBeat: clipStartBeat, meterMap: meterMap),
+               maxLengthBeats: maxLengthBeats)
+    }
+
+    /// How far the clip's first beat sits past the SONG bar line at or before
+    /// it, in beats: the phase of the bar grid the grow rounds on. Exactly 0
+    /// when the clip starts on a bar line, within `SongGridPhase`'s tolerance.
+    ///
+    /// ⚠️ **0 IN A SONG WHOSE METER CHANGES: THE CLIP-BAR RULE, KEPT ON
+    /// PURPOSE.** `SongGridPhase` phases a UNIFORM grid from song beat 0, and
+    /// the roll's bar lines are uniform only while the song has one meter.
+    /// After a change they are `MeterMap.beat(ofBar:)`'s. Worked case: 4/4,
+    /// then 3/4 from beat 8. A clip at beat 8 starts ON bar 3, yet `8 mod 3` is
+    /// 2, so a uniform phase would move a clip the user sees on a bar line. The
+    /// test is the roll's own: `PianoRollSongGrid.snapLocalBeat` takes a
+    /// different branch for `.bar` on exactly this condition.
+    static func songBarPhase(clipStartBeat: Double, meterMap: MeterMap) -> Double {
+        guard meterMap.changes.count <= 1 else { return 0 }
+        let bpb = Double(Swift.max(1, meterMap.beatsPerBar(atBeat: clipStartBeat)))
+        return SongGridPhase.phase(of: clipStartBeat, step: bpb)
+    }
+
+    /// The one body both `outcome` entries run: the m25-a / m25-a-2 rule, with
+    /// the bar grid's phase as the only new input.
+    private static func decide(
+        currentLengthBeats: Double,
+        coveringOnsetBeat: Double,
+        coveringEndBeat: Double,
+        beatsPerBar: Int,
+        barPhase: Double,
+        maxLengthBeats: Double?
+    ) -> ExtendOutcome {
         // 1. Already covered → not an extension, not an edit, and NOT A REFUSAL.
         guard coveringEndBeat > currentLengthBeats + epsilon else { return .notNeeded }
 
-        // 2. Next bar line at or after the covered end.
-        let barTarget = barSnappedLength(coveringEndBeat, beatsPerBar: beatsPerBar)
+        // 2. Next bar line at or after the covered end: the SONG's line on the
+        //    store's entry. Both ceilings below are measured against it.
+        let barTarget = songBarSnappedLength(coveringEndBeat, beatsPerBar: beatsPerBar,
+                                             barPhase: barPhase)
 
         // 3. Ceilings. Both are hard; either may break bar alignment. Kept as
         //    NAMED VALUES rather than folded straight into `target`, because the
@@ -289,15 +393,16 @@ public enum ClipAutoExtend {
     /// detail.** Fitting the clip to the note's exact end produces lengths like
     /// 6.25 or 9.0625 beats: every stray sixteenth the user places would leave
     /// the clip a shape no other part of this editor produces. Bars are the unit
-    /// the roll draws (`drawGridLines` emphasises `b % beatsPerBar == 0`), the
-    /// unit its own bar ops work in (`PianoRollBarOps`), and the unit the
-    /// default new clip already uses. Snapping up means the clip end lands on a
-    /// line already on screen, and it is generous in the right direction: the
-    /// note is comfortably inside the clip rather than flush against its edge,
-    /// which matters because the engine truncates a tail landing exactly at the
-    /// end. `fitClipToContent` deliberately keeps the OTHER rule (exact content
-    /// length) because that verb's contract is "match the content"; this one's
-    /// is "make room for it".
+    /// the roll draws (the SONG's bar lines since m23-ap I5-F2), the unit its
+    /// own bar ops work in (`PianoRollBarOps`), and the unit the default new
+    /// clip already uses. Snapping up means the clip end lands on a line already
+    /// on screen (this function, for a clip that starts on a song bar line;
+    /// `songBarSnappedLength` phases the grid for one that does not, m23-ap AX),
+    /// and it is generous in the right direction: the note is comfortably inside
+    /// the clip rather than flush against its edge, which matters because the
+    /// engine truncates a tail landing exactly at the end. `fitClipToContent`
+    /// deliberately keeps the OTHER rule (exact content length) because that
+    /// verb's contract is "match the content"; this one's is "make room for it".
     ///
     /// Meter-aware: 3 beats per bar in 3/4, 7 in 7/8.
     public static func barSnappedLength(_ endBeat: Double, beatsPerBar: Int) -> Double {
@@ -308,6 +413,30 @@ public enum ClipAutoExtend {
         // A float crumb below the true end would leave the note overhanging by a
         // hair — round up one more bar rather than ship a length that fails its
         // own purpose.
+        return snapped < endBeat - epsilon ? snapped + bpb : snapped
+    }
+
+    /// `endBeat` rounded UP to the next line of a bar grid whose lines sit at
+    /// clip-local `k · beatsPerBar − barPhase`: the SONG's bar lines, seen from
+    /// a clip whose first beat is `barPhase` past one (m23-ap AX).
+    ///
+    /// A `barPhase` of 0 CALLS `barSnappedLength(_:beatsPerBar:)` rather than
+    /// re-deriving it, and that call is the bit-identity for every on-bar clip.
+    /// Off the bar the arithmetic stays in small clip-local numbers,
+    /// `((end + phase) / bpb).rounded(.up) · bpb − phase`. It never computes
+    /// `nextBar(start + end) − start`, which loses the end's low bits at a late
+    /// start and can land a whole bar away.
+    ///
+    /// Same float-crumb guard as the clip-bar rule. An end at or before the
+    /// clip's first beat takes the first line after it, `bpb − phase` (the
+    /// clip-bar rule answers `bpb`). `outcome` never asks that: its covered end
+    /// is past the current length.
+    static func songBarSnappedLength(_ endBeat: Double, beatsPerBar: Int,
+                                     barPhase: Double) -> Double {
+        guard barPhase != 0 else { return barSnappedLength(endBeat, beatsPerBar: beatsPerBar) }
+        let bpb = Double(Swift.max(1, beatsPerBar))
+        guard endBeat > 0 else { return bpb - barPhase }
+        let snapped = ((endBeat + barPhase) / bpb).rounded(.up) * bpb - barPhase
         return snapped < endBeat - epsilon ? snapped + bpb : snapped
     }
 }

@@ -656,7 +656,12 @@ private func renderVariant(set: String, variant: [String: Any], outDir: URL) asy
                         "unknown drum preset '\(presetName)' — valid names: "
                         + DrumKitParams.presets.map(\.name).joined(separator: ", "))
                 }
-                _ = try store.setInstrument(id: presetTrackID, drumKit: drumPreset.params)
+                // m39-tpl-0: a preset changes how the drums SOUND, never which
+                // note plays which drum — the same one home the wire verb calls.
+                let presetCurrentKit = store.tracks.first(where: { $0.id == presetTrackID })?
+                    .instrument?.resolvedDrumKit ?? DrumKitParams()
+                _ = try store.setInstrument(id: presetTrackID,
+                                            drumKit: presetCurrentKit.applyingPreset(drumPreset))
                 narrate("  # drum kit: loaded preset '\(drumPreset.name)' "
                         + "(\(DrumKitParams.paramSpecs.count) parameters replaced)")
 

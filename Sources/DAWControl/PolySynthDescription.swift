@@ -32,15 +32,12 @@ enum PolySynthDescription {
     /// The parameter names in the order a human would want to read them
     /// (oscillator, envelope, filter, output, then the m39-g richness groups),
     /// published as `order` because a JSON object has none.
-    static let order: [String] = [
-        "waveform", "attack", "decay", "sustain", "release",
-        "cutoffHz", "resonance", "gain", "pedalHoldLimit",
-        "unisonVoices", "unisonDetuneCents", "unisonStereoSpread",
-        "subLevel", "subOctave", "subWaveform",
-        "noiseLevel", "noiseColor", "drift",
-        "resonanceBoost", "drive", "velocityToCutoff", "keyToCutoff",
-        "voiceJitter", "envelopeCurve",
-    ]
+    ///
+    /// ⭐ m39-tpl-1 MOVED THE LIST to DAWCore, verbatim and in this order, as
+    /// `PolySynthParams.settingNames`: a template is decoded in DAWCore, which
+    /// cannot see this module, and a second hand-typed list of 24 names is the
+    /// shape that drifts. This forwards, so the verb's reply is unchanged.
+    static let order: [String] = PolySynthParams.settingNames
 
     /// What each parameter MEANS, in one sentence a beginner can act on. Reused
     /// verbatim by `track.setInstrument`'s range errors — see the type note.

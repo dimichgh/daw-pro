@@ -17,8 +17,10 @@ import Testing
 // detector's OUTPUT — not audio, and no detector is invoked anywhere in this
 // file. There is no spectrum for a harmonic to be missing from. What the
 // detector's own accuracy costs this subsystem is recorded in the source file's
-// banner as a constraint on what may be PROMISED (±12.90 cents of bin floor,
-// +5.45 cents of transposer bias), not as something these tests can measure.
+// banner as a constraint on what may be PROMISED (±12.90 cents of bin floor;
+// the +5.45 cents of transposer bias it also cited was the vendored stretcher's
+// fractional-bin phase read, fixed by p2-acc on 2026-09-25 to within 0.5 c for
+// |shift| ≤ 3 st), not as something these tests can measure.
 // The contours below are deliberately vocal-SHAPED — sustained centres,
 // sinusoidal vibrato, unvoiced gaps between phrases — because that is what the
 // POLICY consumes.

@@ -148,12 +148,11 @@ public final class StretchRenderCache {
     /// * `resolved` — where the render lives when it got what it asked for:
     ///   for a set that shapes against the contour, the legacy fields plus
     ///   `contour:<contour key>`; otherwise identical to `legacy`.
-    /// * `legacy` — the key this cache derived before the contour reached the
-    ///   render, byte for byte. For a contour-needing set it holds the
-    ///   CONSTANT-OFFSET render, which is exactly what the pre-contour code
-    ///   rendered for that set — so every such entry already on a user's disk
-    ///   is not orphaned: it is this set's FALLBACK, reused verbatim when
-    ///   detection is unavailable.
+    /// * `legacy` — the key without `contour:`/`shaping:`. For a
+    ///   contour-needing set it holds the CONSTANT-OFFSET render: its
+    ///   FALLBACK, reused verbatim when detection is unavailable. Fallbacks
+    ///   rendered before p2-acc's `pv:` field were orphaned ON PURPOSE (the
+    ///   transposer that made them was sharp; see `transposeEngineVersion`).
     struct RenderKeys: Equatable, Sendable {
         let resolved: String
         let legacy: String
@@ -197,10 +196,96 @@ public final class StretchRenderCache {
     /// changes — stale-quality renders must not survive an upgrade (spec §3).
     nonisolated public static let stretchEngineVersion = 1
 
+    /// Vendored patch 0003 (exact previous hop) moves 0-st bytes only where
+    /// some hop's input interval is H±1, H = the stretcher's hop
+    /// (`css_interval_samples`: 1440 at 48 kHz, 1323 at 44.1 kHz). MEASURED:
+    /// |1 − ratio|·H ≤ 2.58 (constant loop, 60 s files, 44.1/48/88.2 kHz),
+    /// ≤ 2.00 (curve loop). The key cannot see the sample rate, so the band is
+    /// 5 %: it covers |1 − ratio|·H ≤ 6 (≥ 2.3× the measured maximum) for
+    /// every H ≥ 120, i.e. every source at ≥ 4 kHz
+    /// (`TransposeFractionalReadTests` G9 reads H and checks it). Strict `<`
+    /// on both sides; exactly 1 is identity (never rendered) or already keyed
+    /// by an edit set.
+    nonisolated static let nearUnityRatioBand = 0.05
+
+    /// The third term of the `pv:` predicate in `renderKeys`: a 0-st,
+    /// edit-free render at this ratio may run hops 0003 changed.
+    nonisolated static func phaseVocoderNearUnity(_ ratio: Double) -> Bool {
+        ratio != 1 && abs(ratio - 1) < nearUnityRatioBand
+    }
+
+    /// The PHASE-VOCODER version: keyed into transposing renders, edited
+    /// renders, and 0-st renders within ±5 % of ratio 1 — `renderKeys`
+    /// appends `pv:<this>` when `semitones != 0`, when the render carries any
+    /// pitch-edit set, or when `phaseVocoderNearUnity(ratio)`. Every other
+    /// 0-st, edit-free render (a plain time-stretch) keeps its key: versions
+    /// 2–4 provably leave its bytes unchanged (at 0 st every output bin reads
+    /// an integer input bin, where 0001 runs upstream's expression; 0002 runs
+    /// only when frequencies are mapped; 0003 changes a hop only when its
+    /// input interval is H±1, which happens only inside `nearUnityRatioBand`),
+    /// and a moved key would silence and re-render every stretched clip for
+    /// identical audio. Bump THIS, not `stretchEngineVersion`, for a
+    /// phase-vocoder change whose moved bytes this predicate PROVABLY covers;
+    /// if they reach past it, widen the predicate in the same change (0003
+    /// did). Every bump also re-keys the near-unity 0-st renders: a tiny set,
+    /// and harmless.
+    ///
+    /// * 1 — implicit: upstream signalsmith-stretch v1.3.2 as vendored, never
+    ///   written into a key (keys without `pv:` are version 1).
+    /// * 2 — p2-acc, 2026-09-25: the local patch re-referencing the fractional
+    ///   `prevInput` read (`Sources/CSignalsmithStretch/VENDORED.md`). Every
+    ///   non-integer spectral shift had landed up to ~1.4 Hz off (+9.69 c at
+    ///   +100 c on 220 Hz), so every cached transposed render is stale.
+    /// * 3 — p2-span, 2026-09-25: the pitch curve's span search
+    ///   (`PitchCorrectionCurve.firstSpanIndex` and the scan's early exit)
+    ///   skipped ramps that were still open next to a short note: for 220 ms,
+    ///   41 c per 100 c of move, in `PitchSpanSearchTests`' 500 ms-retune
+    ///   cases. Only a curve built from a pitch-edit set can move (an empty
+    ///   set has no spans), and that is inside the `pv:`-keyed class. A plain
+    ///   transpose re-keys too, for unchanged bytes.
+    /// * 4 — acc2, 2026-09-25: vendored patches 0002 (peak position + flat
+    ///   lobe map) and 0003 (exact previous hop); the key now also covers 0-st
+    ///   renders within ±5 % of ratio 1 (`nearUnityRatioBand`), whose bytes
+    ///   0003 moves. None of 2, 3 and 4 has shipped, so a user's tuned vocals
+    ///   re-render ONCE for the three together.
+    nonisolated public static let transposeEngineVersion = 4
+
+    /// Natural tuning §2 (NT-E2): the version of the ENGINE half of the
+    /// consonant mix, keyed into every render that runs it — `renderKeys`
+    /// appends `consonantMix:<this>` exactly when
+    /// `StretchCurvePlan.consonantMixActive(params)`, so no other render
+    /// moves. DAWCore's `PitchEditSet.consonantMaskVersion` (digest slot 8)
+    /// versions the weight `w`; this versions what only audio can decide: R1's
+    /// power-matched law, the correlation window it is measured over, its
+    /// clamp, the dry-copy and flush rules, and a window's widening to whole
+    /// fades (`StretchCurvePlan.applyConsonantMix`, `consonantMixWindow`).
+    /// Bump THIS for a change there, never `stretchEngineVersion`.
+    ///
+    /// * 1 — NT-E2, 2026-09-26: the first render that mixes. ⚠️ It is also
+    ///   the stale-key fix. Slot 8 landed (NT-C C2) BEFORE this mix, so a
+    ///   flag-on set rendered in between (any post-C2 build: staging shares
+    ///   `~/Library/Caches/DAWPro/StretchRenders` with the app) sits under a
+    ///   key that already names the consonant block and holds the UNMIXED
+    ///   audio. Without this field that key would serve it as the mix.
+    nonisolated public static let consonantMixVersion = 1
+
     /// Quiet period before a render job starts real work: a newer request for
     /// the same clip lands inside this window and cancels the older job, so a
     /// dragged stretch handle renders only the settled value.
     nonisolated static let debounceMilliseconds = 250
+
+    /// TEST SEAM: per-instance override of `debounceMilliseconds` above,
+    /// read into a local snapshot once per job at the moment it is created
+    /// (alongside `renderCacheDirectory`/`detector` below) — so changing
+    /// this AFTER a job has started never moves that job's own wait, only a
+    /// LATER job's. Production code never touches it; it exists so a test
+    /// can give one job a debounce long enough to be PROVABLY still asleep
+    /// through a coordination window (`StretchEngineTests
+    /// .latestWinsCancelsInFlight`, `.cancelledRenderKeepsTheBridge`), then
+    /// drop it back to the real default before starting a job it wants to
+    /// finish at production speed — or down to 0, to reach the render
+    /// almost at once (`.lateSupersessionCancelsAnActiveRender`).
+    var debounceMillisecondsForInstance = StretchRenderCache.debounceMilliseconds
 
     /// Where entries live. Injectable for tests; defaults to the per-user app
     /// cache dir (created lazily on the first render).
@@ -259,6 +344,18 @@ public final class StretchRenderCache {
     /// failure. Its fields are part of every contour-shaped render's key.
     let contourDetector: PitchContourCache.Detector
 
+    /// Natural tuning §3 (W7-C3): the drift/vibrato separator this cache's
+    /// renders shape unequal-scale notes with. `.production` everywhere but
+    /// G3 (`NaturalTuningDriftVibratoTests`), which injects its v1 negative
+    /// control, its sweep kernels and its negative-lobe plant through the
+    /// test initialiser: a per-instance constant, like `contourDetector`,
+    /// never a global switch (tests render in parallel). A non-production
+    /// separator adds its own field to the resolved key (`renderKeys`), so its
+    /// renders can never be served as production ones, even in a shared
+    /// directory. Whole-file renders only: span and provisional renders use
+    /// `.production`.
+    let shapingSeparator: PitchCorrectionCurve.Separator
+
     /// THIS SESSION'S FALLBACKS: resolved render key → the constant-offset
     /// render committed at its `legacy` key because the contour was
     /// unavailable. In memory ON PURPOSE:
@@ -279,13 +376,15 @@ public final class StretchRenderCache {
         self.init(directory: directory, contourDetector: .product)
     }
 
-    /// Test seam: inject the contour detector.
-    init(directory: URL?, contourDetector: PitchContourCache.Detector) {
+    /// Test seam: inject the contour detector (and, for G3, the separator).
+    init(directory: URL?, contourDetector: PitchContourCache.Detector,
+         shapingSeparator: PitchCorrectionCurve.Separator = .production) {
         self.directory = directory
             ?? FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
                 .appendingPathComponent("DAWPro", isDirectory: true)
                 .appendingPathComponent("StretchRenders", isDirectory: true)
         self.contourDetector = contourDetector
+        self.shapingSeparator = shapingSeparator
     }
 
     // MARK: - Status (pull-based, spec §5)
@@ -319,7 +418,8 @@ public final class StretchRenderCache {
         }
         guard !contourFallbacks.isEmpty,
               let keys = try? Self.renderKeys(source: source, params: params,
-                                              detector: contourDetector),
+                                              detector: contourDetector,
+                                              separator: shapingSeparator),
               !FileManager.default.fileExists(
                 atPath: directory.appendingPathComponent(keys.resolved + ".caf").path)
         else { return nil }
@@ -386,11 +486,14 @@ public final class StretchRenderCache {
 
     /// SHA256 over (standardized source path ‖ file size ‖ mtime ‖ ratio bit
     /// pattern ‖ semitones bit pattern ‖ formant flag ‖ engine version
-    /// [‖ `pitch:<edit digest>`] [‖ `contour:<contour key>`]); first 16 hex
+    /// [‖ `pitch:<edit digest>`] [‖ `pv:<transposeEngineVersion>`]
+    /// [‖ `consonantMix:<consonantMixVersion>`] [‖ `contour:<contour key>`]); first 16 hex
     /// chars = filename. See `RenderKeys` for which of the two keys a render
     /// commits under. Throws when the source file is unreadable.
     nonisolated static func renderKeys(source: URL, params: Params,
-                                       detector: PitchContourCache.Detector) throws -> RenderKeys {
+                                       detector: PitchContourCache.Detector,
+                                       separator: PitchCorrectionCurve.Separator = .production)
+        throws -> RenderKeys {
         var fields = try sourceIdentityFields(source: source)
         fields += [
             String(params.ratio.bitPattern),
@@ -405,6 +508,28 @@ public final class StretchRenderCache {
         // re-render every stretched clip in every project on this machine.
         if !params.pitchEditSetHash.isEmpty {
             fields.append("pitch:" + params.pitchEditSetHash)
+        }
+        // p2-acc — THE SAME RULE, FOR THE TRANSPOSER. Appended only to renders
+        // whose audio a phase-vocoder change can move (a transpose, any edit
+        // set — timing-only sets over-approximate and re-render once — or,
+        // since vendored patch 0003, a 0-st render within ±5 % of ratio 1),
+        // and BEFORE `legacy`, so a contour set's constant-offset fallback —
+        // sharp too — re-keys with it. A 0-st edit-free key outside ±5 % of
+        // ratio 1 is untouched: those bytes are proven unchanged
+        // (`TransposeFractionalReadTests` G1/G1+/G9).
+        if params.semitones != 0 || !params.pitchEditSetHash.isEmpty
+            || Self.phaseVocoderNearUnity(params.ratio) {
+            fields.append("pv:\(transposeEngineVersion)")
+        }
+        // Natural tuning §2 (NT-E2) — THE SAME RULE, FOR THE CONSONANT MIX.
+        // Appended only to renders that RUN the mix (`consonantMixActive`:
+        // the set keeps consonants untuned and bends something, the clip is
+        // ratio 1 and 0 st), so a flag-off set, and a flag-on set on a
+        // stretched or transposed clip (which renders today's bytes), keeps
+        // its key. BEFORE `legacy`: a contour set's constant-offset fallback
+        // runs the mix too. See `consonantMixVersion` for the stale-key reason.
+        if StretchCurvePlan.consonantMixActive(params) {
+            fields.append("consonantMix:\(consonantMixVersion)")
         }
         let legacy = keyDigest(fields)
         // contour-to-render — THE SAME RULE, ONE LEVEL DOWN. Appended only
@@ -422,9 +547,16 @@ public final class StretchRenderCache {
         }
         fields.append("contour:" + (try PitchContourCache.key(source: source, detector: detector)))
         // …and the version of the arithmetic that turns (edits, contour) into
-        // a curve, which neither key above can see — see
-        // `PitchRenderContour.shapingVersion`.
-        fields.append("shaping:\(PitchRenderContour.shapingVersion)")
+        // a curve, which neither key above can see. Natural tuning §3d (W7-C3):
+        // PER SET. 1 for equal-scale sets, whose arithmetic v2 left bit for bit
+        // (Hard Tune keeps its key); `separatedShapingVersion` for a set with an
+        // unequal-scale note (`PitchRenderContour.shapingVersion(for:)`).
+        fields.append("shaping:\(PitchRenderContour.shapingVersion(for: params.pitchEdits))")
+        // A TEST separator (G3's seam) is named in the key; production adds
+        // nothing, so every production key is exactly what it was.
+        if let tag = separator.renderKeyTag {
+            fields.append("separator:" + tag)
+        }
         return RenderKeys(resolved: keyDigest(fields), legacy: legacy)
     }
 
@@ -445,7 +577,8 @@ public final class StretchRenderCache {
     /// been asked for" are answered from the same string. Throws when the
     /// source file is unreadable (the stat in `sourceIdentityFields`).
     func keys(source: URL, params: Params) throws -> RenderKeys {
-        try Self.renderKeys(source: source, params: params, detector: contourDetector)
+        try Self.renderKeys(source: source, params: params, detector: contourDetector,
+                            separator: shapingSeparator)
     }
 
     /// The committed cache entry for (source, params), or nil when absent /
@@ -484,7 +617,8 @@ public final class StretchRenderCache {
         if params.isIdentity {
             return source
         }
-        let keys = try Self.renderKeys(source: source, params: params, detector: contourDetector)
+        let keys = try Self.renderKeys(source: source, params: params, detector: contourDetector,
+                                       separator: shapingSeparator)
         if let committed = committedURL(for: keys) {
             return committed
         }
@@ -505,13 +639,15 @@ public final class StretchRenderCache {
         let partial = directory.appendingPathComponent("\(key).partial-\(token.uuidString).caf")
         let renderCacheDirectory = directory
         let detector = contourDetector
+        let separator = shapingSeparator
+        let debounceMilliseconds = debounceMillisecondsForInstance
         statuses[clipID] = .rendering
         let task = Task { @MainActor [weak self] () throws -> URL in
             Self.jobPhaseForTesting?("job-start", Task.currentPriority)
             do {
                 // Debounce: cancellation during this sleep throws — the job
                 // dies before any file I/O happens.
-                try await Task.sleep(for: .milliseconds(Self.debounceMilliseconds))
+                try await Task.sleep(for: .milliseconds(debounceMilliseconds))
                 Self.jobPhaseForTesting?("debounce-end", Task.currentPriority)
                 self?.renderCount += 1
                 // The blocking render runs detached — fetches-or-detects the
@@ -525,6 +661,7 @@ public final class StretchRenderCache {
                             source: source, partial: partial, destination: destination,
                             fallbackDestination: fallbackDestination, params: params,
                             renderCacheDirectory: renderCacheDirectory, detector: detector,
+                            separator: separator,
                             isCancelled: { cancelled.withLock { $0 } })
                     }
                 }.value
@@ -615,6 +752,7 @@ public final class StretchRenderCache {
     nonisolated static func performRender(
         source: URL, partial: URL, destination: URL, fallbackDestination: URL,
         params: Params, renderCacheDirectory: URL, detector: PitchContourCache.Detector,
+        separator: PitchCorrectionCurve.Separator = .production,
         isCancelled: @Sendable () -> Bool
     ) throws -> RenderOutcome {
         defer { try? FileManager.default.removeItem(at: partial) }  // no-op after rename
@@ -659,7 +797,8 @@ public final class StretchRenderCache {
         // (2) THE ONE RENDER LOOP'S BODY, over the whole source.
         let stretched = try renderAudio(
             whole: &planar, window: nil, sampleRate: format.sampleRate, params: params,
-            curveContour: contour.curveContour, isCancelled: isCancelled).output.planar
+            curveContour: contour.curveContour, separator: separator,
+            isCancelled: isCancelled).output.planar
 
         let outFrames = stretched[0].count
         guard let outBuffer = AVAudioPCMBuffer(
@@ -677,10 +816,9 @@ public final class StretchRenderCache {
 
         // Float32 CAF at the source rate/channels (interleaved on disk, like
         // the WAV bounce path). Scoped so the file closes before the rename.
-        var settings: [String: Any] = format.settings
-        settings[AVLinearPCMIsNonInterleaved] = false
         do {
-            let writer = try AVAudioFile(forWriting: partial, settings: settings,
+            let writer = try AVAudioFile(forWriting: partial,
+                                         settings: renderFileSettings(sourceFormat: format),
                                          commonFormat: .pcmFormatFloat32, interleaved: false)
             try writer.write(from: outBuffer)
         }
@@ -697,6 +835,19 @@ public final class StretchRenderCache {
             return .fellBack(target, reason: fallbackReason)
         }
         return .rendered(target)
+    }
+
+    /// THE settings every render file is written with: the source's
+    /// processing format (deinterleaved Float32 at its rate and channel count),
+    /// interleaved on disk. One home since p2-ren Stage B, whose provisional
+    /// rewrite must produce the bytes `performRender` produces
+    /// (`ProvisionalRender.assemble`). Extracted verbatim: the render files'
+    /// BYTES were compared across the extraction (old inline form against
+    /// this one), and `wholeFileGoldenCapture`'s SAMPLE hashes too.
+    nonisolated static func renderFileSettings(sourceFormat format: AVAudioFormat) -> [String: Any] {
+        var settings: [String: Any] = format.settings
+        settings[AVLinearPCMIsNonInterleaved] = false
+        return settings
     }
 
     // MARK: - THE ONE RENDER LOOP'S BODY, and its second entry (I1-F1)
@@ -764,7 +915,8 @@ public final class StretchRenderCache {
     }
 
     /// **THE ONE RENDER LOOP'S BODY: the curve, the branch, the stretcher
-    /// configuration and the level mask**, for the whole source
+    /// configuration, the consonant mix (natural tuning §2, curve path only,
+    /// always BEFORE the level mask) and the level mask**, for the whole source
     /// (`performRender`, `window == nil`, reading `whole`) or for one WINDOW of
     /// the whole-file render (`renderSpan`, I1-F1). Extracted from
     /// `performRender` verbatim so the span render is a second ENTRY into it,
@@ -786,29 +938,50 @@ public final class StretchRenderCache {
     /// owner, so the mask pass never copies the take); pass `[]` with a window.
     nonisolated static func renderAudio(
         whole: inout [[Float]], window: StretchWindow?, sampleRate: Double, params: Params,
-        curveContour: PitchRenderContour?, isCancelled: () -> Bool
+        curveContour: PitchRenderContour?,
+        separator: PitchCorrectionCurve.Separator = .production,
+        isCancelled: () -> Bool
     ) throws -> (output: StretchWindowOutput, path: RenderPath) {
         let plan = StretchCurvePlan.make(
             editSet: params.pitchEdits,
             clipPitchShiftSemitones: params.semitones,
             sampleRate: sampleRate,
             ratio: params.ratio,
-            contour: curveContour)
+            contour: curveContour,
+            separator: separator)
         // I7a/U-C (interaction-batch design §10/§17): cleared notes and per-note
         // levels. `nil` when no note is cleared or levelled, and then nothing
         // below differs from the render this cache made before the mask existed.
         let levelEdits = params.pitchEdits.flatMap { $0.hasLevelEdits ? $0 : nil }
+        // Natural tuning §2 (NT-E2): the consonant regions the mix plays DRY,
+        // taken ONCE, or `[]` when the mix does not run. Gated on
+        // `consonantMixActive` (the set keeps consonants untuned and bends
+        // something; the clip is ratio 1 and 0 st), the ONE rule the key and
+        // the wire ask too. Such a set always makes a plan, so only the curve
+        // path below can see a region.
+        let consonantRegions = plan != nil && StretchCurvePlan.consonantMixActive(params)
+            ? params.pitchEdits?.consonantRegions() ?? [] : []
+        // A window that would cut a fade renders wide enough to hold it and is
+        // trimmed back to its own frames after the mix (`consonantMixWindow`).
+        var consonantTrim: Range<Int>?
         var rendered: StretchWindowOutput
         let path: RenderPath
         if let plan {
             path = .curve
             let semitones: (Int) -> Double = { plan.semitones(atOutputFrame: $0) }
             let compensation = OfflineStretcher.curveLatencyCompensation(sampleRate: sampleRate)
-            if let window {
+            if let requested = window {
+                let (window, trim) = try consonantMixWindow(
+                    requested, regions: consonantRegions, sampleRate: sampleRate,
+                    ratio: params.ratio)
+                consonantTrim = trim
                 rendered = try OfflineStretcher.stretchTransposeCurve(
                     window: window, sampleRate: sampleRate, ratio: params.ratio,
                     semitonesAtOutputFrame: semitones,
                     formantPreserve: params.formantPreserve,
+                    // Natural tuning §1(b): nil for a legacy set, and then
+                    // the loop is today's, byte for byte.
+                    formant: plan.formantCurve(formantPreserve: params.formantPreserve),
                     compensation: compensation, isCancelled: isCancelled)
             } else {
                 rendered = StretchWindowOutput(
@@ -816,6 +989,7 @@ public final class StretchRenderCache {
                         input: whole, sampleRate: sampleRate, ratio: params.ratio,
                         semitonesAtOutputFrame: semitones,
                         formantPreserve: params.formantPreserve,
+                        formant: plan.formantCurve(formantPreserve: params.formantPreserve),
                         compensation: compensation, isCancelled: isCancelled),
                     firstOutputFrame: 0)
             }
@@ -858,6 +1032,52 @@ public final class StretchRenderCache {
                     firstOutputFrame: 0)
             }
         }
+        // Natural tuning §2 (NT-E2): THE CONSONANT MIX, once, on the curve
+        // path, BEFORE the level mask (⛔ after it, a cleared breath inside a
+        // region would be mixed back in from the dry source). The dry audio
+        // is the source at the rendered frames (ratio 1: output frame f plays
+        // source frame f): `whole` on the whole-file entry (it survives the
+        // curve branch, which takes it by value), the window's own reader on
+        // the window entry, read only when a region reaches the frames.
+        if !consonantRegions.isEmpty, let count = rendered.planar.first?.count, count > 0 {
+            let first = rendered.firstOutputFrame
+            let dry: [[Float]]?
+            if let window {
+                let firstSecond = StretchCurvePlan.sourceSecond(
+                    forOutputFrame: first, ratio: params.ratio, sampleRate: sampleRate)
+                let endSecond = StretchCurvePlan.sourceSecond(
+                    forOutputFrame: first + count, ratio: params.ratio, sampleRate: sampleRate)
+                let reached = consonantRegions.contains {
+                    $0.startSeconds < endSecond && $0.endSeconds > firstSecond
+                }
+                guard first >= 0, first + count <= window.sourceFrames else {
+                    throw OfflineStretcherError.invalidInput(
+                        "consonant mix: frames \(first)..<\(first + count) are not inside the source")
+                }
+                if reached {
+                    dry = try window.readSource(first..<(first + count))
+                } else {
+                    dry = nil
+                }
+            } else {
+                dry = whole
+            }
+            if let dry {
+                try StretchCurvePlan.applyConsonantMix(
+                    consonantRegions, wet: &rendered.planar, dry: dry, sampleRate: sampleRate,
+                    ratio: params.ratio, outputFrameOffset: first, isCancelled: isCancelled)
+            }
+        }
+        if let trim = consonantTrim {
+            let lo = trim.lowerBound - rendered.firstOutputFrame
+            let hi = trim.upperBound - rendered.firstOutputFrame
+            guard lo >= 0, let count = rendered.planar.first?.count, hi <= count, hi > lo else {
+                throw OfflineStretcherError.invalidInput(
+                    "consonant mix: the widened window does not cover \(trim)")
+            }
+            rendered = StretchWindowOutput(planar: rendered.planar.map { Array($0[lo..<hi]) },
+                                           firstOutputFrame: trim.lowerBound)
+        }
         // The ONE mask, applied one way on every branch (design §17.5): each
         // delivered output frame times `PitchEditSet.gain(atSourceSecond:)`
         // at the source second the one mapping says it plays — for a window,
@@ -869,6 +1089,65 @@ public final class StretchRenderCache {
                 isCancelled: isCancelled)
         }
         return (rendered, path)
+    }
+
+    /// Natural tuning §2 (NT-E2): the window a curve render of `requested`
+    /// actually runs when the consonant mix follows it, and the frames to trim
+    /// back to afterwards (nil: run `requested` as it is).
+    ///
+    /// R1's correlation ρ is measured over a WHOLE fade. The loop delivers
+    /// whole-file frames `span.start ..< span.end` (a block boundary at or
+    /// before the requested start; post-roll 0), and a fade that one of those
+    /// two frames cuts would get gains from part of its frames: bytes the
+    /// whole-file render never makes, even with an untransposed history where
+    /// the wet audio agrees (gate G-C6). So each edge that falls strictly
+    /// inside a fade moves out to that fade's end, the span is re-derived
+    /// (the start snaps to its block boundary, which can reach another fade),
+    /// and that repeats until no edge cuts one. A fade is at most
+    /// `consonantFadeSeconds` long, so this costs at most one block per edge.
+    nonisolated static func consonantMixWindow(
+        _ requested: StretchWindow, regions: [PitchConsonantRegion], sampleRate: Double,
+        ratio: Double
+    ) throws -> (window: StretchWindow, trim: Range<Int>?) {
+        guard !regions.isEmpty else { return (requested, nil) }
+        let schedule = try OfflineStretcher.curveSchedule(
+            sourceFrames: requested.sourceFrames, channels: requested.channels,
+            sampleRate: sampleRate, ratio: ratio)
+        let original = schedule.span(startOutputFrame: requested.startOutputFrame,
+                                     endOutputFrame: requested.endOutputFrame)
+        func frame(_ second: Double) -> Int {
+            StretchCurvePlan.firstOutputFrame(atOrAfterSourceSecond: second,
+                                              frames: schedule.outputFrames, ratio: ratio,
+                                              sampleRate: sampleRate)
+        }
+        // Every fade's frames (a superset of its 0 < w < 1 frames).
+        var fades: [Range<Int>] = []
+        for region in regions {
+            let fade = region.fadeSeconds
+            guard fade > 0 else { continue }
+            if region.followsNote {
+                fades.append(frame(region.startSeconds)..<frame(region.startSeconds + fade))
+            }
+            if region.precedesNote, region.endSeconds.isFinite {
+                fades.append(frame(region.endSeconds - fade)..<frame(region.endSeconds))
+            }
+        }
+        var span = original
+        for _ in 0..<8 {
+            var start = span.startOutputFrame, end = span.endOutputFrame
+            for fade in fades {
+                if fade.lowerBound < start, start < fade.upperBound { start = fade.lowerBound }
+                if fade.lowerBound < end, end < fade.upperBound { end = fade.upperBound }
+            }
+            if start == span.startOutputFrame, end == span.endOutputFrame { break }
+            span = schedule.span(startOutputFrame: start, endOutputFrame: end)
+        }
+        guard span != original else { return (requested, nil) }
+        return (StretchWindow(channels: requested.channels, sourceFrames: requested.sourceFrames,
+                              startOutputFrame: span.startOutputFrame,
+                              endOutputFrame: span.endOutputFrame,
+                              readSource: requested.readSource),
+                original.startOutputFrame..<original.endOutputFrame)
     }
 
     /// **I1-F1's pick: how far before the first requested frame a span render
@@ -1133,5 +1412,27 @@ public final class StretchRenderCache {
             }
         }
         return planar
+    }
+}
+
+
+// MARK: - Natural tuning §3 (W7-C3): a test separator's key field
+
+extension PitchCorrectionCurve.Separator {
+    /// The `separator:` field a render with this separator adds to its
+    /// resolved key: `nil` for `.production` (production keys are unchanged),
+    /// a deterministic tag for every test value. Bit patterns, never
+    /// `description`, so two different kernels cannot print alike.
+    var renderKeyTag: String? {
+        switch self {
+        case .production:
+            return nil
+        case .v1Everywhere:
+            return "v1"
+        case .triangular(let windowSeconds, let edge):
+            return "triangular:\(windowSeconds.bitPattern):\(edge.rawValue)"
+        case .kernelTaps(let taps):
+            return "taps:" + taps.map { String($0.bitPattern) }.joined(separator: ",")
+        }
     }
 }

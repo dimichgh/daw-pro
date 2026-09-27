@@ -87,6 +87,30 @@ public struct PitchEditorViewport: Sendable, Equatable {
         return CGPoint(x: min(max(0, proposed.x.isFinite ? proposed.x : 0), limit.x),
                        y: min(max(0, proposed.y.isFinite ? proposed.y : 0), limit.y))
     }
+
+    /// m23-ap I5 — the horizontal offset the scroller can actually SHOW: the
+    /// measured `offset.x` pulled into `0 ... maxOffset.x`. The time ruler draws
+    /// with it and its ticks add it, so the ruler's numbers stay on the lines they
+    /// name.
+    ///
+    /// ⚠️ **THE MEASURED `offset.x` CAN BE A POSITION THE SCROLLER IS NOT AT.**
+    /// MEASURED 2026-09-25 (staging): scroll to 900 at 160 pt/beat, zoom out until
+    /// the whole clip fits (content 1083 pt in a 1364 pt box, so the only
+    /// position is 0), then zoom out AGAIN (TIME −): the horizontal reader reports
+    /// 900 and keeps reporting it, while the grid is drawn at 0. A `scrollTo`
+    /// issued while the content fits makes the reported frame revert to the
+    /// scroller's last real position — the family the m17-b durability note on
+    /// the horizontal writer describes. Before this clamp the ruler drew bar 8
+    /// over the clip's first bar and a click on it landed 28 beats late.
+    ///
+    /// Deliberately NOT applied inside the reader: `contentSize` arrives in its
+    /// own `onChange` and can be one pass stale during a zoom-in, so a clamp there
+    /// would cut a real offset down to the OLD content's limit — a silent wrong
+    /// pinch anchor (I2) in exchange for a visible ruler fix. The root, no
+    /// `scrollTo` while the new content fits, is BUILT (I0-F, W7-NTU:
+    /// `timeZoomOffset` returns nil there); this clamp stays as the net, because
+    /// the root's effect on the reader is proven only in a drawn window.
+    public var shownOffsetX: CGFloat { clamped(offset).x }
 }
 
 // MARK: - The zoom re-pin (I0, design §3 item 4)
@@ -101,7 +125,8 @@ public struct PitchEditorViewport: Sendable, Equatable {
 /// captured at the gesture's START — deriving it afresh per tick feeds the zoom's
 /// own not-yet-landed scroll back into it and the beat under the pointer wanders
 /// (`PianoRollView.ZoomAnchorBase`'s doc; the arrange's `PinchState`). I2 builds
-/// one from `MagnifyGesture.Value.startLocation` on its first tick.
+/// one from `MagnifyGesture.Value.startLocation` on its first tick
+/// (`PitchEditorViewport.pinchAnchor`, through `PitchEditorPinch.tick`).
 public struct PitchEditorZoomAnchor: Sendable, Equatable {
     /// The pixels-per-beat the anchor was measured at.
     public var ppb: CGFloat
@@ -167,20 +192,35 @@ extension PitchEditorViewport {
     /// offset the shorter content no longer has, and the anchor then gives way —
     /// the one case where it cannot hold, exactly as the floor at 0 is on the
     /// left.
+    ///
+    /// ⭐ **I0-F — `nil` WHEN THE NEW CONTENT FITS THE VIEWPORT.** There is then
+    /// ONE position (0) and nothing to re-pin, so the pane issues no `scrollTo`
+    /// at all. MEASURED 2026-09-25 (`shownOffsetX`'s note, and W6 I5-F1-F's run
+    /// B): a `scrollTo` issued while the content fits left SwiftUI's horizontal
+    /// reader reporting the scroller's last REAL position (900) at the second
+    /// zoom in 36 of 57 repetitions, while the grid drew at 0. The scroller
+    /// needs no write to get there: a clip view whose document is narrower
+    /// than itself has no other origin. What this rule proves headlessly is
+    /// only that the pane asks for no scroll; that the scroller then sits at 0
+    /// and the reader stays true across the second fit-zoom is a DRAWN-window
+    /// fact, and `shownOffsetX`'s clamp stays as the net under it.
     public func timeZoomOffset(geometry: PitchEditorGeometry, oldPPB: CGFloat, newPPB: CGFloat,
                                playheadProjectBeat: Double,
                                pointerAnchor: PitchEditorZoomAnchor? = nil) -> CGFloat? {
         guard abs(newPPB - oldPPB) > 0.0001, viewportSize.width > 0 else { return nil }
+        var atNew = geometry
+        atNew.pixelsPerBeat = newPPB
+        let limit = FollowPlayhead.maxOffset(contentWidth: atNew.contentWidth,
+                                             viewportWidth: viewportSize.width)
+        // I0-F: the new content fits — one position, no write (see above).
+        guard limit > 0 else { return nil }
         let anchor = pointerAnchor
             ?? timeZoomAnchor(geometry: geometry, oldPPB: oldPPB,
                               playheadProjectBeat: playheadProjectBeat)
         let raw = ArrangeZoom.offsetPreservingAnchor(
             oldPPB: anchor.ppb, newPPB: newPPB,
             oldOffset: anchor.offset, anchorScreenX: anchor.screenX)
-        var atNew = geometry
-        atNew.pixelsPerBeat = newPPB
-        return min(raw, FollowPlayhead.maxOffset(contentWidth: atNew.contentWidth,
-                                                 viewportWidth: viewportSize.width))
+        return min(raw, limit)
     }
 
     /// The vertical offset that keeps the pitch at the viewport's CENTRE ROW under
@@ -229,4 +269,78 @@ extension PitchEditorViewport {
         return min(raw, FollowPlayhead.maxOffset(contentWidth: atNew.contentHeight,
                                                  viewportWidth: viewportSize.height))
     }
+}
+
+// MARK: - The pinch (I2, design §5)
+
+extension PitchEditorViewport {
+
+    /// The anchor a pinch holds for its whole life, measured from the gesture's
+    /// `startLocation` at the scale and offset it started at.
+    ///
+    /// `startLocation` is a CONTENT-space point: the gesture hangs on the
+    /// surface inside the horizontal scroller, the space the drag and the hover
+    /// report in. Its viewport-local x is the screen position that must not
+    /// move — the roll's `startLocation.x - gridScrollX`, through `local(_:)`.
+    public func pinchAnchor(startLocation: CGPoint, ppb: CGFloat) -> PitchEditorZoomAnchor {
+        PitchEditorZoomAnchor(ppb: ppb, offset: offset.x, screenX: local(startLocation).x)
+    }
+}
+
+extension PitchEditorZoomAnchor {
+
+    /// The scale a pinch tick asks for: the GESTURE-START scale times the
+    /// gesture's magnification, on the pane's own ladder range.
+    ///
+    /// ⚠️ **MAGNIFICATION IS CUMULATIVE** — `MagnifyGesture` reports the ratio
+    /// since the gesture began, not since the last tick — so this multiplies the
+    /// anchor's `ppb`, never the slot's current value. Compounding from the
+    /// current value would square the zoom on the second tick and cube it on the
+    /// third. The `0.001` floor is the arrange's guard
+    /// (`ArrangeZoom.PinchState.zoomed`); a non-finite ratio asks for no change,
+    /// so the rule is total like `PitchEditorViewport.clamped`.
+    public func pinchedPPB(magnification: CGFloat) -> CGFloat {
+        guard magnification.isFinite else { return PianoRollZoom.clamp(ppb) }
+        return PianoRollZoom.clamp(ppb * max(magnification, 0.001))
+    }
+}
+
+/// One pinch tick, as a pure reducer: the view's whole `MagnifyGesture.onChanged`
+/// policy with the gesture and the scroll view taken out, so "captured ONCE" is a
+/// test rather than a comment.
+///
+/// ⭐ **THE OFFSET IS NOT HERE, AND THAT IS THE DESIGN.** A tick asks for a SCALE
+/// only. The pane's one re-pin funnel (the ppb slot's `onChange` →
+/// `timeZoomOffset(pointerAnchor:)`) turns the returned anchor into the offset, so
+/// a pinch and a zoom button share one writer of the scroll and no ordering
+/// question arises between two of them (`PianoRollView.gridPinch`'s rule).
+public enum PitchEditorPinch {
+
+    /// - Parameters:
+    ///   - anchor: the anchor this gesture already captured, or `nil` on its
+    ///     first tick. ⛔ **ONLY `nil` CAPTURES.** A live anchor is returned
+    ///     unchanged whatever the viewport and the scale are now — they are the
+    ///     pinch's OWN not-yet-landed output, and measuring from them is the drift
+    ///     the capture exists to prevent.
+    ///   - viewport: where the scrollers are looking now (read on capture only).
+    ///   - startLocation: the gesture's start point, content space (read on
+    ///     capture only — a real gesture's is fixed for its life anyway).
+    ///   - currentPPB: the slot's scale now (read on capture only).
+    ///   - magnification: the gesture's cumulative ratio.
+    public static func tick(anchor: PitchEditorZoomAnchor?, viewport: PitchEditorViewport,
+                            startLocation: CGPoint, currentPPB: CGFloat,
+                            magnification: CGFloat) -> (anchor: PitchEditorZoomAnchor, ppb: CGFloat) {
+        let captured = anchor ?? viewport.pinchAnchor(startLocation: startLocation, ppb: currentPPB)
+        return (captured, captured.pinchedPPB(magnification: magnification))
+    }
+}
+
+/// The zoom cluster's DRAWN help (design §5: "the zoom cluster reads 'Pinch to
+/// zoom time', drawn, never a tooltip"). One home, so the view draws it and the
+/// chrome ledger reports the very string drawn — a tooltip is invisible to
+/// `view.capture`, the `EQCurveEditor.help` lesson.
+public enum PitchEditorZoomHint {
+    /// Beside the TIME buttons. "time" because the pinch zooms that axis only;
+    /// PITCH stays on its buttons (design §13).
+    public static let pinchTime = "Pinch to zoom time"
 }

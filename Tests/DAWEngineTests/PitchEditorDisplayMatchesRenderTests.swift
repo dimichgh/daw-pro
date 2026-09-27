@@ -357,12 +357,21 @@ struct PitchEditorDisplayMatchesRenderTests {
             #expect(abs((p.playedMidi - p.sungMidi) - expected) < 1e-9,
                     "C: the 6 Hz ±40 c generator on +2 is 2 + 0.4·sin(2π·6·t)")
         }
-        // B: the sung ±40 c wobble is flattened. A 250 ms separator passes ~121 %
-        // of a 5.5 Hz wobble into "vibrato" (PitchRenderContour.shapingVersion's
-        // doc), so what is left is a small fraction of the sung swing — never
-        // the sung swing itself.
+        // B: the sung ±40 c wobble is flattened. vibratoScale 0 alone (driftScale
+        // 1) is an UNEQUAL-scale note, so since W7-C3 (2026-09-27) it takes the v2
+        // triangular separator (L 0.16 s truncate), not v1's 250 ms boxcar.
+        // v1, until 09-27: passed ~121 % of a 5.5 Hz wobble into "vibrato"
+        // (PitchRenderContour.shapingVersion's doc). v2, MEASURED here (W7-STX,
+        // 2026-09-27; this test renders no audio, curve only, so a formant base
+        // never applies): played swing is 18.3 % of the sung swing (see the
+        // [case-b] print above). Either way what is left is a small fraction of
+        // the sung swing — never the sung swing itself. See docs/ROADMAP.md
+        // "W7-C3: drift/wobble separator v2 DONE".
         let sungSwing = (b.map(\.sungMidi).max() ?? 0) - (b.map(\.sungMidi).min() ?? 0)
         let playedSwing = (b.map(\.playedMidi).max() ?? 0) - (b.map(\.playedMidi).min() ?? 0)
+        print("[case-b] vibratoScale 0 alone, driftScale 1 (unequal scale, v2 branch; curve-only, "
+            + "no audio render): sung swing \(sungSwing) st, played swing \(playedSwing) st, "
+            + "\((playedSwing / sungSwing) * 100)% of the sung swing remains")
         #expect(sungSwing > 0.7, "the fixture's B must actually wobble (±40 c)")
         #expect(playedSwing < 0.4 * sungSwing,
                 "B: vibratoScale 0 must flatten the drawn wobble (sung \(sungSwing) st, drawn \(playedSwing) st)")
@@ -641,5 +650,146 @@ struct PitchEditorDisplayMatchesRenderTests {
         })
         return FiveMinuteFixture(detection: detection, offsets: offsets, hardTune: hardTune,
                                  duration: Double(frames.count) * period)
+    }
+}
+
+// MARK: - m23-ap C5a-4b — T3: display = render for a WOBBLE-edited note, drag included
+
+/// Vibrato-handle design §15 T3. An extension of the C-0 suite (no new
+/// `@Suite`); the test is `@MainActor` on its own, as the suite's banner says.
+extension PitchEditorDisplayMatchesRenderTests {
+
+    /// D: a new wobble at HEARD 6.2 on the 1.25× clip (stored 7.75), ±40 c,
+    /// anchored at its centre, both scales 0. E: the singer's own wobble
+    /// widened to keep 1.6. F: flat (both scales 0).
+    static func wobbleNotes() -> Notes {
+        let table = PitchNoteTable.detected(from: wholeFile)
+        precondition(table.segments.count == 3, "the fixture must segment into three notes")
+        var d = table.segments[0]
+        d.vibratoRateHz = 6.2 * 1.25
+        d.vibratoDepthCents = 40
+        d.vibratoPhaseAnchorSeconds = (d.startSeconds + d.endSeconds) / 2
+        d.vibratoScale = 0
+        d.driftScale = 0
+        var e = table.segments[1]
+        e.vibratoScale = 1.6
+        e.driftScale = 1.6
+        var f = table.segments[2]
+        f.vibratoScale = 0
+        f.driftScale = 0
+        return Notes(a: d, b: e, c: f)
+    }
+
+    /// A model loaded the way the pane loads one, the seam answering
+    /// `.detected`, with the Wobble tool engaged.
+    @MainActor
+    static func wobbleModel(for clip: Clip) async -> PitchEditorModel {
+        let model = PitchEditorModel(clipID: clip.id,
+                                     geometry: PitchEditorGeometry(clip: clip, tempoMap: tempo))
+        model.apply(ClipPitchDetection(pitch: windowDetection, clipWindowDurationSeconds: 3.2,
+                                       stretchRatio: clip.stretchRatio,
+                                       pitchShiftSemitones: clip.pitchShiftSemitones))
+        model.syncStoredNoteTable(clip.pitchEdits)
+        await model.loadRenderContour(using: { _ in
+            PitchRenderInputs(contour: .detected(wholeFile), sourceDurationSeconds: 3.136)
+        })
+        model.tool = .wobble
+        return model
+    }
+
+    /// One Wobble-tool drag on `id`'s body, ticked the pane's way
+    /// (`trackPress` then `updateWobbleDrag`, per point), then released and
+    /// committed through the app's own write (`PitchEditorWobbleWrite`) into a
+    /// REAL store. Returns the draft line's curve AT THE LAST TICK, the session
+    /// phase there, and the clip as STORED after the release.
+    @MainActor
+    static func wobbleDrag(on id: UUID, in clip: Clip, by steps: [CGSize]) async throws
+    -> (draft: PitchCorrectionCurve?, phase: PitchWobbleSession.Phase?, stored: Clip) {
+        let store = ProjectStore(tracks: [Track(name: "Vocals", kind: .audio, clips: [clip])])
+        let model = await wobbleModel(for: clip)
+        var took: [Bool?] = []
+        model.onCommit = { commit in
+            took.append(try? PitchEditorWobbleWrite.commit(commit.kind, clipID: clip.id,
+                                                           seedIfAbsent: commit.seedIfAbsent, to: store))
+        }
+        let blob = try #require(model.blobs.first { $0.id == id })
+        let rect = model.rect(for: blob)
+        let start = CGPoint(x: rect.minX + 3, y: rect.midY)
+        #expect(PitchWobbleGesture.door(at: start, blobRect: rect) == .drag)
+        _ = model.trackPress(start: start, location: start, modifiers: .none)
+        #expect(model.wobble?.segmentID == id, "the press did not begin a wobble on the note")
+        var last = start
+        for step in steps {
+            last = CGPoint(x: start.x + step.width, y: start.y + step.height)
+            _ = model.trackPress(start: start, location: last, modifiers: .none)
+            model.updateWobbleDrag(translation: step, fine: false)
+        }
+        let draft = model.draftPlayedLine?.curve
+        let phase = model.wobble?.session.phase
+        let action = model.releasePress(start: start, location: last, modifiers: .none)
+        #expect(action == .endWobble(id))
+        _ = model.endWobbleDrag()
+        #expect(took == [true], "the drag did not commit exactly once, read back")
+        return (draft, phase, store.tracks[0].clips[0])
+    }
+
+    /// ⭐ T3. Planted and seen red, each separately, in
+    /// `PitchEditorModel.wobbleDraftEdit` (the draft's ONE edit):
+    ///  (i)  the draft writes the HEARD rate as stored (forgets × ratio) while
+    ///       the commit converts → red on D's drag at ratio 1.25;
+    ///  (ii) the draft omits the phase anchor while the commit sets it → red on
+    ///       E's drag, whose handoff SEEDS an anchor (D's made drag keeps its
+    ///       own, so (ii) is invisible there — which is why E's leg exists).
+    @Test("C5a-4b T3 — ⭐ display = render for wobble-edited notes (a new wobble at heard 6.2 on 1.25×, a widened own wobble, a flat note), and a wobble DRAG's draft line at its last tick is the render's curve of what the release STORED")
+    @MainActor
+    func displayIsTheRenderForAWobbleNote() async throws {
+        let notes = Self.wobbleNotes()
+        let clip = Self.clip(notes)
+        #expect(clip.stretchRatio == 1.25)
+        #expect(notes.a.vibratoRateHz == 7.75, "D's stored rate is heard 6.2 × 1.25")
+
+        // Leg 1 — at rest: the model's line IS the render's curve.
+        let model = await Self.wobbleModel(for: clip)
+        let render = try #require(Self.renderCurve(for: clip, seamAnswer: .detected(Self.wholeFile)))
+        #expect(model.playedLine.curve == render, "the model's line for wobble-edited notes is not the render's")
+        #expect(model.playedLine.basis == .render)
+        // THE PHYSICS, not just equality: D plays a wobble at HEARD 6.2, about
+        // ±40 c — the estimator over the drawn line, whose rate is per EDITED
+        // (source-axis) second, so heard is that ÷ the clip's ratio (V5).
+        if case .wobble(let rate, let depth, _, _) = PitchWobbleEstimate.played(notes.a, line: model.playedLine) {
+            let heard = rate / clip.stretchRatio
+            #expect(abs(heard - 6.2) < 0.3, "D reads heard \(heard)/s on the drawn line, not 6.2")
+            #expect(abs(depth - 40) < 10, "D reads ±\(depth) c on the drawn line, not ±40")
+        } else {
+            Issue.record("D's drawn line reads no wobble at all")
+        }
+        // POSITIVE CONTROL: the equality can fail — the same clip with D's
+        // rate written as heard (the (i) defect, at rest) is a different curve.
+        var heardAsStored = notes.a
+        heardAsStored.vibratoRateHz = 6.2
+        let wrong = Self.clip(Notes(a: heardAsStored, b: notes.b, c: notes.c))
+        #expect(Self.renderCurve(for: wrong, seamAnswer: .detected(Self.wholeFile)) != render)
+
+        // Leg 2 — D, a MADE wobble: 16 pt slower (heard 6.2 → 5.4) and 10 pt wider.
+        let d = try await Self.wobbleDrag(on: notes.a.id, in: clip,
+                                          by: [CGSize(width: -6, height: -4), CGSize(width: -16, height: -10)])
+        let dStored = try #require(d.stored.pitchEdits?.segments.first { $0.id == notes.a.id })
+        #expect(d.phase == .made)
+        #expect(abs(dStored.vibratoRateHz - 5.4 * 1.25) < 1e-9,
+                "D stored \(dStored.vibratoRateHz), not heard 5.4 × 1.25")
+        let dRender = try #require(Self.renderCurve(for: d.stored, seamAnswer: .detected(Self.wholeFile)))
+        #expect(d.draft == dRender, "D: the drag's last draft is not the render of what the release stored")
+        #expect(dRender != render, "D's drag changed nothing, so its equality proves nothing")
+
+        // Leg 3 — E, the singer's OWN wobble: 40 pt sideways hands it off to a
+        // new wobble, whose ANCHOR the handoff seeds.
+        let e = try await Self.wobbleDrag(on: notes.b.id, in: clip,
+                                          by: [CGSize(width: 10, height: 0), CGSize(width: 40, height: 0)])
+        let eStored = try #require(e.stored.pitchEdits?.segments.first { $0.id == notes.b.id })
+        #expect(e.phase == .handedOff, "E's drag never handed off, so the anchor leg tests nothing")
+        #expect(eStored.vibratoPhaseAnchorSeconds != notes.b.vibratoPhaseAnchorSeconds,
+                "the handoff stored no new anchor, so (ii) would be invisible")
+        let eRender = try #require(Self.renderCurve(for: e.stored, seamAnswer: .detected(Self.wholeFile)))
+        #expect(e.draft == eRender, "E: the drag's last draft is not the render of what the release stored")
     }
 }

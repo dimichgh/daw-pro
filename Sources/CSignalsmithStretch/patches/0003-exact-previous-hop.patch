@@ -1,0 +1,41 @@
+DAW Pro local patch 0003 against signalsmith-stretch v1.3.2 (57b93f4e9206a089a45387eaa39bdc9f310d3308) + patches 0001, 0002
+
+Exact previous hop: re-analyse the previous spectrum whenever the input
+interval differs from the synthesis hop H at all.
+
+Upstream kept the previous block's spectrum when |interval - H| <= 1 ("give or
+take 1 sample"), but the `rot` pass (and patch 0002's peak position) turn it
+by exactly H. On a hop whose interval is H-1 or H+1 the output therefore
+advanced at omega*(H+-1)/H: up to 1.2 c (48 kHz) / 1.3 c (44.1 kHz) on those
+hops, a measured mean of up to 0.93 c on a pure time-stretch, at 0 st too.
+Such hops occur only at ratios within about 2.6/H of 1 (measured: 2.58/H in
+the 4096-frame constant loop, 2.00/H in the per-hop curve loop), e.g. a
+64-beat clip stretched by one 1/16 step (1.0009766). Elsewhere upstream
+already re-analysed every hop, so bytes there are unchanged.
+
+Cost: one extra analysis FFT per channel on those hops only (+8.6 % at ratio
+1.0005, still below the cost of any ratio outside the window).
+THIS PATCH CHANGES 0-st BYTES at near-unity ratios: the render cache must
+re-key them (StretchRenderCache, `pv:` predicate).
+
+Conflicts textually with upstream PR #25 (open, 2026-09-25), which adds a line
+after the same statement. On a re-vendor, re-apply by hand: `> 1` becomes `!= 0`.
+
+Apply (from Sources/CSignalsmithStretch), after 0001 and 0002:
+    patch -p1 < patches/0003-exact-previous-hop.patch
+
+--- a/vendor/signalsmith-stretch/signalsmith-stretch.h	2026-09-25 20:42:45
++++ b/vendor/signalsmith-stretch/signalsmith-stretch.h	2026-09-25 20:42:45
+@@ -299,8 +299,10 @@
+ 				blockProcess.newSpectrum = didSeek || (inputInterval > 0);
+ 				blockProcess.mappedFrequencies = customFreqMap || freqMultiplier != 1;
+ 				if (blockProcess.newSpectrum) {
+-					// make sure the previous input is the correct distance in the past (give or take 1 sample)
+-					blockProcess.reanalysePrev = didSeek || std::abs(inputInterval - int(stft.defaultInterval())) > 1;
++					// make sure the previous input is EXACTLY one synthesis hop in the past: the `rot` pass (and the peak
++					// position) turn by defaultInterval(), so upstream's "give or take 1 sample" left up to ~1.3 c.
++					// DAW PRO LOCAL PATCH 0003 (exact hop) -- see VENDORED.md. Upstream tolerated |interval - H| <= 1.
++					blockProcess.reanalysePrev = didSeek || inputInterval != int(stft.defaultInterval());
+ 					if (blockProcess.reanalysePrev) blockProcess.steps += stft.analyseSteps() + 1;
+ 
+ 					// analyse a new input

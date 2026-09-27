@@ -34,6 +34,60 @@ import Foundation
 // `chokeGroup` therefore decodes to **nil, full stop**, and
 // `DrumKitTests.clearedChokeGroupSurvivesAReopen` pins it with a JSON fixture
 // that OMITS THE KEY. An initialiser default cannot pin that; only a fixture can.
+//
+// m39-tpl-0 — WHICH NOTE PLAYS WHICH DRUM is the kit's `noteLayout` (`pads`, the
+// default, or `gm`, the General MIDI drum map): a STRUCTURAL setting stored
+// inside the kit so it rides every path the kit already travels, including the
+// render instance's own copy. ONE HOME for the map: `DrumVoice.voice(forNote:
+// layout:)`. `docs/design/2026-09-27-multi-instrument-templates.md` §3.
+
+/// WHICH MIDI NOTE PLAYS WHICH DRUM (m39-tpl-0).
+///
+/// `pads` is the drum machine's own order: notes 36–43 play kick, snare,
+/// closed hat, open hat, clap, tom, rim and cymbal, one note each — the
+/// pad-grid base. `gm` is the General MIDI drum map, the layout every
+/// AI-written beat, imported MIDI file and step-sequenced drum clip speaks.
+/// On a `pads` kit a General MIDI beat plays the WRONG drums: GM 38 (snare) is
+/// our closed hat, GM 42 (closed hat) our rim, and GM 46/49/51 play nothing.
+///
+/// ⛔ STRUCTURAL, NOT A SOUND PARAMETER — the `chokeGroup` precedent. It is not
+/// one of the 75 names, so `instrument.setDrumParam` and modulation both refuse
+/// it, and a PRESET NEVER CHANGES IT (`DrumKitParams.applyingPreset(_:)`).
+public enum DrumNoteLayout: String, Sendable, Equatable, Codable, CaseIterable {
+    /// Notes 36–43 in voice order. What every kit saved before this setting
+    /// existed decodes to, bit for bit.
+    case pads
+    /// The General MIDI Level 1 drum map (`DrumVoice.voice(forNote:layout:)`).
+    case gm
+
+    /// The General MIDI Level 1 percussion keys: 35 (Acoustic Bass Drum) to 81
+    /// (Open Triangle). Computed, not a `static let`, so it is never a lazily
+    /// initialised global.
+    public static var generalMIDIPercussionNotes: ClosedRange<UInt8> { 35...81 }
+
+    /// The General MIDI drum notes that play NOTHING in this layout, ascending.
+    /// DERIVED from `DrumVoice.voice(forNote:layout:)`, never a second table.
+    /// Builds an array: never call it on the render thread.
+    public var silentGMNotes: [UInt8] {
+        Self.generalMIDIPercussionNotes.filter { DrumVoice.voice(forNote: $0, layout: self) == nil }
+    }
+
+    /// One beginner-readable sentence, for `instrument.describeDrumKit`. It
+    /// states the honest limits rather than leaving them to be discovered.
+    public var summary: String {
+        switch self {
+        case .pads:
+            return "Pad order: notes 36 to 43 play kick, snare, closed hat, open hat, clap, "
+                + "tom, rim and cymbal, one note each. A beat written for General MIDI plays "
+                + "the wrong drums in this layout."
+        case .gm:
+            return "General MIDI drum notes, so a beat written for General MIDI plays the "
+                + "right drums. All six tom notes play the one tom at one tuning, crashes and "
+                + "rides share the one cymbal, and the other General MIDI drum notes "
+                + "(tambourine, cowbell, congas and the rest) play nothing."
+        }
+    }
+}
 
 /// The eight fixed, named, monophonic one-shot voices. An enum of NAMES, not an
 /// index into anything — `rawValue` is the dotted scope and is persisted inside
@@ -71,17 +125,69 @@ public enum DrumVoice: String, Sendable, Equatable, Codable, CaseIterable {
         }
     }
 
-    /// The MIDI note that triggers this voice. 36–43, the MPC/Ableton Drum Rack
-    /// base (`PadGridGeometry.swift` lays C1 = 36 at the bottom-left square), so
-    /// the kit maps one-to-one onto the existing 4×4 pad grid when wave item (4)
-    /// extends it. GM percussion is deliberately NOT followed: GM scatters these
-    /// eight across 35–57, which would make the kit unplayable on a pad grid.
+    /// The MIDI note that triggers this voice in the `pads` layout. 36–43, the
+    /// MPC/Ableton Drum Rack base (`PadGridGeometry.swift` lays C1 = 36 at the
+    /// bottom-left square), so the kit maps one-to-one onto the existing 4×4 pad
+    /// grid when wave item (4) extends it. GM percussion scatters these eight
+    /// across 35–59, which is why it is the OTHER layout (`gm`) rather than
+    /// this one. In `gm` a voice answers several notes: `notes(in:)`.
     public var note: UInt8 { UInt8(36 + Int(slot)) }
 
-    /// The voice a MIDI note triggers, or nil when the note is outside 36…43.
+    /// The voice a MIDI note triggers in the `pads` layout, or nil outside
+    /// 36…43. Kept for its callers; it IS `voice(forNote:layout: .pads)`.
     public static func voice(forNote note: UInt8) -> DrumVoice? {
-        guard note >= 36, note <= 43 else { return nil }
-        return DrumVoice.allCases.first { $0.note == note }
+        voice(forNote: note, layout: .pads)
+    }
+
+    /// ⭐ THE ONE HOME for which note plays which drum, in both layouts. The
+    /// describe verb's `voiceNotes` and `silentGMNotes`, `notes(in:)` and the
+    /// render all read THIS, so none of them can disagree with what plays.
+    ///
+    /// ⛔ RENDER THREAD. `DrumSynthInstrument.handle` calls this at every
+    /// note-on, so it stays a plain `switch` of integer and enum comparisons:
+    /// no `static let` table, dictionary or array (a lazily initialised global
+    /// is allocated, behind `swift_once`, on its FIRST touch — which could be
+    /// the render thread), and no `allCases` scan. F-4, measured 2026-09-27
+    /// (`DrumNoteLayoutRenderTests`): the `allCases.first` scan this replaced
+    /// raised 20 malloc events a call in the debug test build; the shipped
+    /// release build had folded it into loads from a constant table. A
+    /// `switch` has no such dependence on the optimiser.
+    ///
+    /// The `gm` column is the design's table (§3.3), GM names in the comments.
+    public static func voice(forNote note: UInt8, layout: DrumNoteLayout) -> DrumVoice? {
+        switch layout {
+        case .pads:
+            switch note {
+            case 36: return .kick
+            case 37: return .snare
+            case 38: return .closedHat
+            case 39: return .openHat
+            case 40: return .clap
+            case 41: return .tom
+            case 42: return .rim
+            case 43: return .cymbal
+            default: return nil
+            }
+        case .gm:
+            switch note {
+            case 35, 36: return .kick                        // Acoustic Bass Drum, Bass Drum 1
+            case 37: return .rim                             // Side Stick
+            case 38, 40: return .snare                       // Acoustic Snare, Electric Snare
+            case 39: return .clap                            // Hand Clap
+            case 42, 44: return .closedHat                   // Closed Hi-Hat, Pedal Hi-Hat
+            case 46: return .openHat                         // Open Hi-Hat
+            case 41, 43, 45, 47, 48, 50: return .tom         // the six toms, one voice
+            case 49, 51, 52, 53, 55, 57, 59: return .cymbal  // crashes, rides, China, bell, splash
+            default: return nil
+            }
+        }
+    }
+
+    /// Every note that plays this voice in `layout`, ascending. DERIVED by
+    /// asking `voice(forNote:layout:)` about all 128 notes, so it cannot
+    /// disagree with the render. Builds an array: never on the render thread.
+    public func notes(in layout: DrumNoteLayout) -> [UInt8] {
+        (UInt8(0)...UInt8(127)).filter { Self.voice(forNote: $0, layout: layout) == self }
     }
 }
 
@@ -259,6 +365,33 @@ public struct DrumKitParams: Sendable, Equatable {
     /// Extra level (and half-share of tone shift) an accented hit receives.
     public var accentDepth: Double
 
+    /// m39-tpl-0 — the note layout. ⛔ STORED AS AN OPTIONAL, nil meaning
+    /// `.pads`, and NEVER stored as `.pads`: the setter of `noteLayout` writes
+    /// nil for it. Both halves are load-bearing:
+    ///   · SAVED BYTES. `encode` writes the key only when this is non-nil, so
+    ///     every kit saved before the layout existed, and every kit left at
+    ///     `pads`, saves exactly the bytes it saved before.
+    ///   · EQUALITY. Synthesised `==` compares this storage, so an explicit
+    ///     `.pads` and an absent layout are the same kit (they render the
+    ///     same), while a `.gm` kit differs from its `.pads` twin. That is what
+    ///     makes `DrumSynthInstrument.apply(params:)`'s `!=` dedupe PUBLISH a
+    ///     layout-only change instead of swallowing it.
+    private var noteLayoutStorage: DrumNoteLayout?
+
+    /// Which MIDI note plays which voice (`DrumVoice.voice(forNote:layout:)`).
+    /// Read on the render thread at note-on from the render's own copy of the
+    /// kit: a plain optional check, no allocation.
+    public var noteLayout: DrumNoteLayout {
+        get {
+            guard let stored = noteLayoutStorage else { return .pads }
+            return stored
+        }
+        set { noteLayoutStorage = newValue == .pads ? nil : newValue }
+    }
+
+    /// The wire and file key. ONE spelling, shared with `parseDrumKit`.
+    public static var noteLayoutKey: String { "noteLayout" }
+
     // MARK: - Ranges (ONE HOME; the wire, the UI and the spec table clamp here)
 
     public static let toneRange: ClosedRange<Double> = 0...1
@@ -371,7 +504,8 @@ public struct DrumKitParams: Sendable, Equatable {
                 rim: DrumVoiceParams = DrumKitParams.rimDefault,
                 cymbal: DrumVoiceParams = DrumKitParams.cymbalDefault,
                 gain: Double = 1.0, velocityToTone: Double = 0.4,
-                accentThreshold: Double = 100, accentDepth: Double = 0.25) {
+                accentThreshold: Double = 100, accentDepth: Double = 0.25,
+                noteLayout: DrumNoteLayout = .pads) {
         self.kick = kick
         self.snare = snare
         self.closedHat = closedHat
@@ -384,6 +518,7 @@ public struct DrumKitParams: Sendable, Equatable {
         self.velocityToTone = velocityToTone
         self.accentThreshold = accentThreshold
         self.accentDepth = accentDepth
+        self.noteLayoutStorage = noteLayout == .pads ? nil : noteLayout
     }
 
     // MARK: - Voice access by name (never by index)
@@ -777,6 +912,18 @@ extension DrumKitParams: Codable {
                 self[keyPath: spec.keyPath] = value
             }
         }
+        // m39-tpl-0 — the note layout. ABSENT (every kit saved before TPL-0,
+        // and every `pads` kit since) stays nil, which IS `.pads` — today's
+        // behaviour, bit for bit. An UNKNOWN string (a newer build's layout)
+        // also reads as `.pads` rather than failing the whole project open:
+        // an unknown instrument kind failing the open is the F-1 defect
+        // (`docs/design/2026-09-27-multi-instrument-templates.md` §16), and a
+        // layout must not copy it. A NON-STRING throws, like every other
+        // malformed field in this decoder.
+        if let raw = try container.decodeIfPresent(
+            String.self, forKey: NameKey(Self.noteLayoutKey)) {
+            noteLayout = DrumNoteLayout(rawValue: raw) ?? .pads
+        }
         clampAll()
     }
 
@@ -796,6 +943,10 @@ extension DrumKitParams: Codable {
             try container.encode(self[keyPath: spec.keyPath],
                                  forKey: NameKey(spec.leaf.rawValue))
         }
+        // Only when set, which means only `gm` (the storage is never `.pads`):
+        // a `pads` kit writes exactly the bytes it wrote before TPL-0.
+        try container.encodeIfPresent(noteLayoutStorage?.rawValue,
+                                      forKey: NameKey(Self.noteLayoutKey))
     }
 }
 
@@ -842,6 +993,28 @@ public extension DrumKitParams {
 
     static func preset(named name: String) -> DrumKitPreset? {
         presets.first { $0.name.caseInsensitiveCompare(name) == .orderedSame }
+    }
+
+    /// This kit with `preset`'s SOUND and this kit's NOTE LAYOUT (m39-tpl-0).
+    ///
+    /// ⭐ A PRESET CHANGES HOW THE DRUMS SOUND, NEVER WHICH KEY PLAYS WHICH
+    /// DRUM. Every factory preset carries the default layout, so replacing a
+    /// `gm` kit with `preset.params` wholesale would silently move every drum
+    /// back to the pad keys, and every General MIDI beat on the track would
+    /// play the wrong drums. ONE HOME: `instrument.loadDrumPreset` and
+    /// `DemoRender` both call this, and `matchingPreset` is defined through it.
+    func applyingPreset(_ preset: DrumKitPreset) -> DrumKitParams {
+        var result = preset.params
+        result.noteLayout = noteLayout
+        return result
+    }
+
+    /// The factory preset whose SOUND this kit is, whatever its note layout,
+    /// or nil for a custom kit. Defined as "loading this preset would change
+    /// nothing", so it ignores the layout by construction rather than by a
+    /// second, hand-written equality that could drift from `applyingPreset`.
+    var matchingPreset: DrumKitPreset? {
+        Self.presets.first { applyingPreset($0) == self }
     }
 
     /// 909: the same three blocks per voice, different numbers (design §2.1).

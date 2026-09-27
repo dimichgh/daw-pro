@@ -117,7 +117,26 @@ public enum SamplerCardLayout {
     /// particular changes what the GLIDE readout MEANS (a total slide time vs a
     /// rate per interval) rather than adding a value — so it wants the existing
     /// readout to say which, not a new cell beside it.
-    public static let chromeHeight: CGFloat = 324
+    ///
+    /// ⚠️⚠️ **W7-SMP (2026-09-27) ADDED A SECOND CONDITIONAL AMBER LINE, AND
+    /// THIS NUMBER IS DERIVED, NOT MEASURED.** `SamplerEditorModel.inertGlobalsNote`
+    /// ("Release does nothing: set per zone.") sits directly under the glide
+    /// warning, in the same fixed chrome, whenever every zone sets its own value
+    /// for a global the card draws. Both lines can show at once, so the tallest
+    /// state grew by one line. The +17 pt is m34-u's OWN measurement, not a font
+    /// sum: one 9 pt line drew 11 pt (the two-line glide draft measured 333.5
+    /// against 322.5) plus the GLOBALS stack's 6 pt spacing, over the measured
+    /// 322.5 → 339.5, kept a shade above as the rule for this constant says.
+    /// The line is held to ONE line in its worst case (≤ 51 characters, three
+    /// control names) so this stays one line's cost. Costs about half a zone
+    /// row at the default window with the inspector open; the ≥ 6-row pin at
+    /// 900 pt still holds (844 − 341 − 312 = 191 pt → 6 rows).
+    /// ⛔ STILL OWED: a probe re-measure with BOTH lines showing — a fixture
+    /// whose every zone sets `release`, plus a positive-control echo of the
+    /// inert globals from `debug.samplerEditor` (see the probe's `glideInert`
+    /// check). Until then this constant is an over-estimate by construction,
+    /// not by measurement.
+    public static let chromeHeight: CGFloat = 341
 
     /// The per-zone inspector's NATURAL height with a zone selected: its
     /// section label, three knob groups (PITCH / ENVELOPE / OUTPUT, each a

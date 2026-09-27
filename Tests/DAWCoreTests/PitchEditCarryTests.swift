@@ -92,7 +92,12 @@ private func plantedSet() -> PitchEditSet {
                         // at every carry site instead of being argued from the
                         // shape of the code.
                         vibratoRateHz: 5.5, vibratoDepthCents: 93,
-                        vibratoOnsetSeconds: 0.2),
+                        vibratoOnsetSeconds: 0.2,
+                        // m23-ap C5b-1: a drawn shape on SOURCE-grid indices
+                        // 115…119 (1.15…1.19 s). A rebasing carry would have
+                        // to move the INDEX too; every leg compares the set
+                        // with `==`, so the drawing is carried or they fail.
+                        shapeStartIndex: 115, shapeTenthsOfCents: [0, 120, 240, 120, 0]),
         ],
         retuneMs: 120)
 }
@@ -178,6 +183,11 @@ struct PitchEditCarryTests {
         #expect(second.pitchEdits?.segments[1].vibratoRateHz == 5.5)
         #expect(second.pitchEdits?.segments[1].vibratoDepthCents == 93)
         #expect(second.pitchEdits?.segments[1].vibratoOnsetSeconds == 0.2)
+        // C5b-1: the drawing rides along at its SOURCE-grid index, unmoved
+        // (a rebased half would read index 115 − 50 = 65).
+        #expect(second.pitchEdits?.segments[1].shapeStartIndex == 115)
+        #expect(second.pitchEdits?.segments[1].shapeTenthsOfCents == [0, 120, 240, 120, 0])
+        #expect(first.pitchEdits?.segments[1].shapeTenthsOfCents == [0, 120, 240, 120, 0])
 
         // And the stored clips agree with the returned values.
         #expect(store.tracks[0].clips[0].pitchEdits == planted)
@@ -387,6 +397,9 @@ struct PitchEditCarryTests {
             ClipDocument.self, from: JSONEncoder().encode(doc))
         #expect(rebuilt.pitchEdits == planted)
         #expect(rebuilt.pitchEdits?.segments[1].startSeconds == 1.10)
+        // C5b-1: the drawing survives the save → reopen round trip exactly.
+        #expect(rebuilt.pitchEdits?.segments[1].shapeStartIndex == 115)
+        #expect(rebuilt.pitchEdits?.segments[1].shapeTenthsOfCents == [0, 120, 240, 120, 0])
 
         // An EMPTY set must still write no key — a project with no tuning stays
         // byte-identical to one saved before this field existed.

@@ -22,6 +22,19 @@ import Testing
 /// 33–34 % at B3; Hard Tune's composition 48–58 % across all of them. The
 /// arithmetic alone leaves 2.6–8.2 cents in every case — the renderer's 30 ms
 /// hop is most of what remains.
+///
+/// Re-measured 2026-09-27 (W7-C3), one tree, before and after the drift/wobble
+/// separator v2 (natural tuning §3). The 09-24 render figures no longer
+/// reproduce even on v1: the render changed between the two dates, the
+/// arithmetic did not.
+///  * v1: vibratoScale-0-only cuts 46 / 31 / 41 % (3 notes, A3 / B3 / C4),
+///    26 % (3 s B3), 44 % (3 s A3+35c); Hard Tune 51 / 43 / 46, 39, 48 %;
+///    the arithmetic alone leaves 2.6–8.2 c.
+///  * v2 (vibratoScale 0 alone is an UNEQUAL-scale note, so it takes v2):
+///    51 / 45 / 46, 41, 48 %; Hard Tune IDENTICAL (equal scales keep v1); the
+///    arithmetic alone leaves 3.7–9.3 c. v1's 121 % over-correction had
+///    happened to cancel the detector's ~80 % under-read in the arithmetic;
+///    the render does better without it (why is not measured here).
 @Suite("contour-to-render — shaping sweep (measurement)", .serialized)
 struct ContourShapingSweepTests {
     static let enabled = ProcessInfo.processInfo.environment["CONTOUR_SWEEP"] != nil

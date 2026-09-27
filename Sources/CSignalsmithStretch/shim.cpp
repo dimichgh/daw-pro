@@ -51,6 +51,28 @@ void css_set_formant_preserve(css_stretch *s, bool preserve) {
     s->stretch.setFormantBase(0); // auto-detect fundamental
 }
 
+void css_set_formant_semitones(css_stretch *s, float semitones,
+                               bool compensatePitch) {
+    // setFormantSemitones -> setFormantFactor(2^(st/12), compensatePitch):
+    // multiplier, its inverse and the compensation flag, all re-read per block.
+    s->stretch.setFormantSemitones(semitones, compensatePitch);
+}
+
+void css_set_formant_base_hz(css_stretch *s, float hz) {
+    // Hz -> cycles/sample, mirroring the tonality-limit conversion above.
+    // R8 (natural-tuning design): signalsmith's freqToBand uses the MODIFIED
+    // STFT's `f*N - 0.5`, while its own estimator returns a harmonic SPACING,
+    // so an explicit base sits half a bin low (about -3.6 % at 110 Hz with
+    // N = 6144). Documented, not compensated: it is part of
+    // `PitchEditSet.formantRenderVersion` 1, and changing it needs a bump.
+    // Since vendored patch 0004 (formantRenderVersion 3) an explicit base
+    // selects the envelope through the harmonic peaks, which reads the
+    // spacing as `freqEstimate + 0.5` bins: the half bin is compensated
+    // THERE, and the value handed over here is unchanged. A base of 0 (the
+    // flag path above) still runs upstream's own estimator and envelope.
+    s->stretch.setFormantBase(hz > 0 ? hz / s->sampleRate : 0);
+}
+
 int css_input_latency(const css_stretch *s) {
     return s->stretch.inputLatency();
 }

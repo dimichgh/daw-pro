@@ -1,4 +1,5 @@
 import CoreGraphics
+import DAWCore
 import Foundation
 
 // m23-ap interaction batch, item I0 — THE PITCH EDITOR'S INTERACTION BRIDGE.
@@ -19,11 +20,14 @@ import Foundation
 // reader's write), with the chord passed EXPLICITLY because a synthesized step
 // carries no `NSEvent.modifierFlags` — the `PianoRollMarqueeStage` convention.
 //
-// ⚠️ **WHAT IS DELIBERATELY NOT HERE YET, AND WHERE IT GOES.** Design §3 also
-// lists a staged ruler x (I5). It has no consumer until I5 builds one, and a
-// nonce nothing consumes is a request that silently succeeds at nothing — the
-// one failure shape this tree keeps paying for. I5 adds a `.ruler(x:)` case to
-// `PitchEditorStagedStep`, a one-line extension of this file.
+// ⭐ **I5 (m23-ap) — THE STAGED RULER x.** Design §3 listed it; it waited for a
+// consumer, because a step nothing consumes is a request that silently succeeds
+// at nothing. `.ruler(x:_:)` is one tick of the pane's time ruler, handed to the
+// ruler's own tick function (`PitchEditorView.rulerTick`), and its x is
+// RULER-LOCAL — the viewport's space, because the ruler does not scroll — so a
+// staged tick goes through the ONE place the scroll offset is added, exactly as
+// a real one does. The surface report carries the geometry and the model's last
+// placement, so the echo can show what was asked beside what the transport did.
 //
 // ⭐ **I4 LANDED ITS THREE (m23-ap I4):** `clearSelectionNonce` and
 // `selectAllNonce` beside `escapeNonce` (each consumed by the pane's model the
@@ -37,23 +41,42 @@ import Foundation
 // step runs the right-click menu's own function (a synthetic event cannot open
 // a context menu — the m23-g1 law), and each drawn note reports its `cleared`
 // flag and `levelDb` beside its rect, read from the model.
+//
+// ⭐ **I2 (m23-ap):** a staged `.pinch` / `.pinchEnd` runs the pane's
+// `MagnifyGesture` callbacks' own two functions (no synthetic event reaches a
+// gesture, m23-g1 again), and the surface report carries the live pinch's
+// anchor (`pinchAnchor`) so "captured once" can be read from outside.
 
 /// The chord a pointer event carries, for the pitch editor.
 ///
 /// ⇧/⌘ are the house CLICK chord (`ArrangeClickModifiers`, decided at press by
 /// the router and at release by `PianoRollGridPress`); ⌥ is the Move tool's
-/// FREE-pitch key, read per tick (C1). Kept apart on purpose: the app's
+/// FREE-pitch key, read per tick (C1) — and, since I5, the playhead's SNAP
+/// BYPASS on the time ruler and on a ⌘-click on empty surface. The two never
+/// meet: neither placement moves a note, and no note drag places the playhead.
+/// Kept apart on purpose: the app's
 /// `ArrangeClickModifiers.from(_:)` deliberately never maps ⌥, and widening that
 /// shared type would change what ⌥-click means on the arrange.
+///
+/// W7-NTU U3 — `clickCount` is the event's own click count (1 for a click, 2
+/// for the second click of a double-click), read only at a RELEASE: the Voice
+/// tool's double-click puts a note back as sung. It is not a key, but it
+/// rides the same way for the same reason: a `DragGesture.Value` carries
+/// neither, so the live pane reads it from the event and a staged step passes
+/// it explicitly (`clicks`).
 public struct PitchEditorChord: Sendable, Equatable {
     public var shift: Bool
     public var command: Bool
     public var option: Bool
+    /// The click count at a release (W7-NTU U3); 1 on every other tick.
+    public var clickCount: Int
 
-    public init(shift: Bool = false, command: Bool = false, option: Bool = false) {
+    public init(shift: Bool = false, command: Bool = false, option: Bool = false,
+                clickCount: Int = 1) {
         self.shift = shift
         self.command = command
         self.option = option
+        self.clickCount = max(1, clickCount)
     }
 
     /// No keys held.
@@ -66,6 +89,24 @@ public struct PitchEditorChord: Sendable, Equatable {
         if command { mods.insert(.command) }
         return mods
     }
+}
+
+/// W7-NTU U1 — one control of the header group "Sound like the singer", as
+/// the debug tier presses it: the group view's OWN callbacks, run by the pane
+/// (`PitchEditorView.applyStagedStep`), because a synthetic event cannot
+/// press a SwiftUI control (m23-g1).
+public enum PitchEditorSingerAct: Sendable, Equatable {
+    /// A press or drag tick on the "Keep voice size" track, at `fraction` of
+    /// its width, ⌥ as `fine`.
+    case voiceTrack(fraction: Double, fine: Bool)
+    /// The track released.
+    case voiceRelease
+    /// The update line tapped.
+    case update
+    /// The Consonants switch clicked.
+    case consonants
+    /// A Slides step clicked.
+    case slides(PitchEditorSlideStep)
 }
 
 /// One DEBUG-TIER step staged into the open pane (`debug.pitchEditor {act:…}`).
@@ -97,6 +138,35 @@ public enum PitchEditorStagedStep: Sendable, Equatable {
     /// selection as it stands. The stand-in for a context menu no synthetic
     /// event can open (the m23-g1 law).
     case noteMenu(PitchEditorNoteMenu.Action, CGPoint?)
+    /// m23-ap I2 — one tick of a pinch: the gesture's START location (content
+    /// space, like every point here) and its CUMULATIVE magnification, handed
+    /// to the same function `MagnifyGesture.onChanged` calls. The only way to
+    /// drive the POINTER-anchored zoom in the live pane: `debug.panelLayout`
+    /// moves the same slot but anchors on the playhead or the centre.
+    case pinch(CGPoint, CGFloat)
+    /// m23-ap I2 — the pinch ended: `MagnifyGesture.onEnded`'s function.
+    case pinchEnd
+    /// m23-ap I5 — one tick of the TIME RULER at this x, RULER-LOCAL (the
+    /// viewport's space: x 0 is the ruler's left edge, whatever the scroll), with
+    /// the chord's ⌥ as the snap bypass. Handed to the ruler's own tick function,
+    /// so the scroll offset is added where a real tick adds it and nowhere else.
+    case ruler(x: CGFloat, PitchEditorChord)
+    /// UE-1 — the header's "Find sounds with no pitch" button was pressed:
+    /// its OWN function (`PitchEditorView.runFindSounds`). A synthetic event
+    /// cannot press a SwiftUI button (m23-g1), so the debug tier runs what the
+    /// button runs.
+    case findSounds
+    /// m23-ap C5b-4b — keys held with the button UP: what the pane's
+    /// `.flagsChanged` monitor writes (`PitchEditorView.commandHeld`, whose ⌘
+    /// shows the playhead's ghost over empty surface, I5, and the brush band
+    /// and help over a note, C5b-4b). A synthetic step carries no
+    /// `NSEvent.modifierFlags`, so without this a gate could not show either
+    /// affordance; the next real `.flagsChanged` or the pointer leaving the
+    /// surface replaces it, exactly as it replaces a real key's.
+    case keys(PitchEditorChord)
+    /// W7-NTU U1 — a control of the header group "Sound like the singer"
+    /// pressed: the group view's own callback (`PitchEditorSingerAct`).
+    case singer(PitchEditorSingerAct)
 
     /// Stable machine tag for the echo.
     public var key: String {
@@ -109,6 +179,12 @@ public enum PitchEditorStagedStep: Sendable, Equatable {
         case .tool: return "tool"
         case .scroll: return "scroll"
         case .noteMenu: return "noteMenu"
+        case .pinch: return "pinch"
+        case .pinchEnd: return "pinchEnd"
+        case .ruler: return "ruler"
+        case .findSounds: return "findSounds"
+        case .keys: return "keys"
+        case .singer: return "singer"
         }
     }
 }
@@ -126,14 +202,43 @@ public struct PitchEditorNoteRect: Sendable, Equatable {
     /// m23-ap I7b — the level readout the surface draws for it
     /// (`NoteBlob.levelReadout`), or `nil` when it draws none.
     public var levelReadout: String?
+    /// UE-1 — where the blob's segment came from (`NoteBlob.origin`, a
+    /// `NoteOrigin` raw value: `detected`, `transition` or `unpitched`), so a
+    /// staging gate can find the SOUNDS among the drawn notes.
+    public var origin: String
+    /// UE-1 — §1.7's sentence for a sound (`NoteBlob.soundReadout`), `nil` for
+    /// a note.
+    public var soundReadout: String?
+    /// UE-2 — the look the surface was handed for it (`NoteBlob.look`, a
+    /// `PitchEditorBlobLook` raw value: `note`, `sound` or `cleared`) — the
+    /// value the Canvas switches on, so a gate reads the look, not a guess.
+    public var look: String
 
     public init(id: UUID, rect: CGRect, cleared: Bool = false, levelDb: Double = 0,
-                levelReadout: String? = nil) {
+                levelReadout: String? = nil, origin: String = NoteOrigin.detected.rawValue,
+                soundReadout: String? = nil, look: String = PitchEditorBlobLook.note.rawValue) {
+        self.look = look
         self.id = id
         self.rect = rect
         self.cleared = cleared
         self.levelDb = levelDb
         self.levelReadout = levelReadout
+        self.origin = origin
+        self.soundReadout = soundReadout
+    }
+}
+
+/// UE-1 — "Find sounds with no pitch" as the pane holds it: whether the header
+/// OFFERS it (`PitchEditorModel.offersFindSounds`), and the line about the last
+/// press (`PitchEditorModel.findSoundsLine`), read from the model, never
+/// re-derived.
+public struct PitchEditorFindSoundsReport: Sendable, Equatable {
+    public var offered: Bool
+    public var line: PitchEditorFindSoundsLine?
+
+    public init(offered: Bool = false, line: PitchEditorFindSoundsLine? = nil) {
+        self.offered = offered
+        self.line = line
     }
 }
 
@@ -196,6 +301,32 @@ public struct PitchEditorWindowReport: Sendable, Equatable {
     }
 }
 
+/// m23-ap I6b — the edge autoscroll as the pane holds it: `debug.pitchEditor`'s
+/// `autoscroll` echo. From the pane's own state, never re-derived.
+public struct PitchEditorAutoScrollReport: Sendable, Equatable {
+    /// The held-pointer repeat clock is running. Only a LIVE pointer arms it,
+    /// so a staged step always reads `false` here: the echo's control leg.
+    public var armed: Bool
+    /// Rows the window grew by during the press in flight, or the last one
+    /// (`PitchEditorModel.edgeGrownRows`).
+    public var grownRows: Int
+    /// The edge the last edge step acted at, or `nil` (`PitchEditorModel.lastEdge`).
+    public var lastSide: PitchEditorEdge?
+    /// The dragged note's rect as the drag overlay draws it (the pressed note
+    /// at `targetMidi`, the overlay's own `geometry.rect(startSeconds:…)` call),
+    /// or `nil` with no drag: what "the note stays under the pointer" is read
+    /// from. Content space, like every rect here.
+    public var dragRect: CGRect?
+
+    public init(armed: Bool = false, grownRows: Int = 0, lastSide: PitchEditorEdge? = nil,
+                dragRect: CGRect? = nil) {
+        self.armed = armed
+        self.grownRows = grownRows
+        self.lastSide = lastSide
+        self.dragRect = dragRect
+    }
+}
+
 /// Everything the pane reports about its surface, for `debug.pitchEditor`.
 /// Ground truth from the view — never the seam's own input echoed back.
 public struct PitchEditorSurfaceReport: Sendable, Equatable {
@@ -219,6 +350,27 @@ public struct PitchEditorSurfaceReport: Sendable, Equatable {
     public var noteMenu: [PitchEditorNoteMenu.Item]
     /// I6c — the pitch window as laid out, or `nil` when no pane is reporting.
     public var pitchWindow: PitchEditorWindowReport?
+    /// I2 — the live pinch's anchor as the pane holds it (captured on the
+    /// pinch's first tick), or `nil` when no pinch is live. Identical across a
+    /// pinch's ticks is what "captured once" looks like from outside; non-nil
+    /// with no pinch under way is the stale anchor the pane's doc warns about.
+    public var pinchAnchor: PitchEditorZoomAnchor?
+    /// I5 — the geometry the pane draws with (the playhead's one beat→x
+    /// mapping, `PitchEditorGeometry.x(forProjectBeat:)`), so the echo places
+    /// the transport's position through it instead of re-deriving a scale.
+    /// `nil` when no pane is reporting.
+    public var geometry: PitchEditorGeometry?
+    /// I5 — how many playhead placements the pane's model has asked for
+    /// (`PitchEditorModel.placementCount`), and the project beat the last one
+    /// asked for (`nil` before any): what was ASKED, for the echo to set beside
+    /// the transport's position, which is what the store DID.
+    public var placementCount: Int
+    public var lastPlacementBeat: Double?
+    /// I6b — the edge autoscroll: the clock, the growth, the last edge, and
+    /// the dragged note's drawn rect.
+    public var autoscroll: PitchEditorAutoScrollReport
+    /// UE-1 — "Find sounds with no pitch": offered or not, and its line.
+    public var findSounds: PitchEditorFindSoundsReport = PitchEditorFindSoundsReport()
 
     public init(viewport: PitchEditorViewport = .unmeasured, noteRects: [PitchEditorNoteRect] = [],
                 press: PitchEditorPress? = nil, lastRelease: PitchEditorReleaseAction? = nil,
@@ -226,7 +378,14 @@ public struct PitchEditorSurfaceReport: Sendable, Equatable {
                 selection: PitchEditorSelectionReport = PitchEditorSelectionReport(),
                 band: PitchEditorBandReport? = nil,
                 noteMenu: [PitchEditorNoteMenu.Item] = [],
-                pitchWindow: PitchEditorWindowReport? = nil) {
+                pitchWindow: PitchEditorWindowReport? = nil,
+                pinchAnchor: PitchEditorZoomAnchor? = nil,
+                geometry: PitchEditorGeometry? = nil,
+                placementCount: Int = 0,
+                lastPlacementBeat: Double? = nil,
+                autoscroll: PitchEditorAutoScrollReport = PitchEditorAutoScrollReport(),
+                findSounds: PitchEditorFindSoundsReport = PitchEditorFindSoundsReport()) {
+        self.findSounds = findSounds
         self.viewport = viewport
         self.noteRects = noteRects
         self.press = press
@@ -236,6 +395,11 @@ public struct PitchEditorSurfaceReport: Sendable, Equatable {
         self.band = band
         self.noteMenu = noteMenu
         self.pitchWindow = pitchWindow
+        self.pinchAnchor = pinchAnchor
+        self.geometry = geometry
+        self.placementCount = placementCount
+        self.lastPlacementBeat = lastPlacementBeat
+        self.autoscroll = autoscroll
     }
 
     /// No pane is reporting.
@@ -263,6 +427,18 @@ public final class PitchEditorInteractionBridge {
     /// written on CHANGE only (`report(drawnNoteCount:)` compares first), so it
     /// moves when detection lands or the stored table changes, never per tick.
     public private(set) var drawnNoteCount = 0
+
+    /// UE-2 — REPORTED BY THE PANE: what KINDS its selection holds
+    /// (`PitchEditorModel.selectionKinds`) — the Edit menu Clear title's noun
+    /// (`DeleteMenuPolicy`'s `pitchEditorSelectionKinds`: "Clear Selected
+    /// Sounds"). Observable, because a `Commands` body must re-title the item;
+    /// written on CHANGE only, on a selection change, never per pointer tick.
+    public private(set) var selectionKinds: Set<PitchEditorNoteMenu.Kind> = []
+
+    /// UE-2 — each clip's last Find-sounds DECLINE, held HERE because this
+    /// bridge outlives the pane's `.id(clip.id)` rebuilds
+    /// (`PitchEditorFindSoundsMemory`). The pane's model is handed it once.
+    public let findSoundsMemory = PitchEditorFindSoundsMemory()
 
     /// The surface as the pane last reported it. `@ObservationIgnored`, the
     /// `PianoRollNoteSelectionBridge.surface` reason: it moves on every scroll
@@ -337,6 +513,13 @@ public final class PitchEditorInteractionBridge {
         self.drawnNoteCount = drawnNoteCount
     }
 
+    /// UE-2 — the selection's kinds. Writes only on a CHANGE, for the reason
+    /// above — Edit ▸ Delete's `Commands` body reads it.
+    public func report(selectionKinds: Set<PitchEditorNoteMenu.Kind>) {
+        guard self.selectionKinds != selectionKinds else { return }
+        self.selectionKinds = selectionKinds
+    }
+
     /// THE SURFACE, as drawn. `token` identifies the reporting pane INSTANCE.
     public func reportSurface(token: UUID, _ report: PitchEditorSurfaceReport) {
         surfaceReporter = token
@@ -360,6 +543,7 @@ public final class PitchEditorInteractionBridge {
         surface = .empty
         report(hasNoteSelection: false)
         report(drawnNoteCount: 0)
+        report(selectionKinds: [])
         surfaceSeq &+= 1
     }
 

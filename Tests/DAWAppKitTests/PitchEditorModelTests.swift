@@ -1544,16 +1544,19 @@ struct PitchEditorModelTests {
 
     @Test("the tool palette offers exactly the tools that work, and each says what it does")
     func paletteOffersOnlyWorkingTools() {
-        // ⚠️ TWO, not the reference app's nine (design §7.2): seven slots that
-        // do nothing when pressed is one fake affordance multiplied by seven.
-        #expect(PitchEditorTool.allCases.count == 2)
-        #expect(PitchEditorTool.allCases.map(\.rawValue) == ["pointer", "scissors"])
+        // ⚠️ FOUR, not the reference app's nine (design §7.2): slots that do
+        // nothing when pressed are one fake affordance multiplied. C5a-4b added
+        // Wobble and W7-NTU U3 added Voice — working tools — and NO Drift or
+        // Shape placeholder beside them.
+        #expect(PitchEditorTool.allCases.count == 4)
+        #expect(PitchEditorTool.allCases.map(\.rawValue) == ["pointer", "scissors", "wobble", "voice"])
         for tool in PitchEditorTool.allCases {
             #expect(!tool.label.isEmpty)
             #expect(tool.help.count > 20, "a tool's help must be a sentence, not a word")
             #expect(!tool.symbolName.isEmpty)
         }
         #expect(PitchEditorTool.pointer.help.contains("⌥"))
+        #expect(PitchEditorTool.voice.help.contains("⌥"))
     }
 
     // MARK: - I3 — the cut line (interaction batch §6)
@@ -2027,25 +2030,29 @@ struct PitchEditorModelTests {
         #expect(model.selectionSummary == nil)
     }
 
-    @Test("I4 — a click acts on the house click table: plain selects only, ⇧/⌘ toggle, plain on empty deselects, ⇧ and ⌘ on empty change nothing")
+    @Test("I4 — a click acts on the house click table: plain selects only, ⇧/⌘ toggle, plain on empty deselects, ⇧ on empty changes nothing, ⌘ on empty seeks once (I5) and keeps the selection")
     func clickActsOnTheHouseClickTable() {
         // (chord, target note by index — nil is empty surface, expected
         // selection by index) with B already selected. The literal column is
         // the brief's words; the table (`PianoRollGridPress.release`) is also
         // asserted as the answer, so neither can drift alone.
-        let rows: [(chord: ArrangeClickModifiers, target: Int?, expected: Set<Int>)] = [
-            (.none, 0, [0]),          // plain on A: A alone
-            (.none, 1, [1]),          // plain on the selected B: B alone
-            (.shift, 0, [0, 1]),      // ⇧ on A: added
-            (.command, 0, [0, 1]),    // ⌘ on A: added — ⇧ and ⌘ both mean toggle
-            (.shift, 1, []),          // ⇧ on B: taken out
-            (.command, 1, []),        // ⌘ on B: taken out
-            (.none, nil, []),         // plain on empty: deselect
-            (.shift, nil, [1]),       // ⇧ on empty: nothing
-            (.command, nil, [1]),     // ⌘ on empty: I5's seek seam — nothing yet
+        // I5 — the last column is how many seeks the click asked for: only ⌘ on
+        // empty places the playhead, and it still keeps the selection.
+        let rows: [(chord: ArrangeClickModifiers, target: Int?, expected: Set<Int>, seeks: Int)] = [
+            (.none, 0, [0], 0),          // plain on A: A alone
+            (.none, 1, [1], 0),          // plain on the selected B: B alone
+            (.shift, 0, [0, 1], 0),      // ⇧ on A: added
+            (.command, 0, [0, 1], 0),    // ⌘ on A: added — ⇧ and ⌘ both mean toggle
+            (.shift, 1, [], 0),          // ⇧ on B: taken out
+            (.command, 1, [], 0),        // ⌘ on B: taken out
+            (.none, nil, [], 0),         // plain on empty: deselect
+            (.shift, nil, [1], 0),       // ⇧ on empty: nothing
+            (.command, nil, [1], 1),     // ⌘ on empty: seeks (I5), selection kept
         ]
         for row in rows {
             let (model, sink, ids) = fourNotes()
+            var seeks: [Double] = []
+            model.onSeek = { seeks.append($0) }
             model.selectOnly(ids[1])
             let point = row.target.map { centre(of: model.blobs[$0], in: model) } ?? emptyPoint(model)
             let action = click(model, at: point, row.chord)
@@ -2055,7 +2062,185 @@ struct PitchEditorModelTests {
             #expect(model.selection == Set(row.expected.map { ids[$0] }), "\(label)")
             #expect(model.drag == nil, "\(label): a click began a drag")
             #expect(sink.commits.isEmpty, "\(label): a click committed")
+            #expect(seeks.count == row.seeks, "\(label): \(seeks.count) seeks, expected \(row.seeks)")
+            if row.seeks == 1 {
+                #expect(seeks.first == model.placementBeat(atContentX: point.x, snapBypassed: false),
+                        "\(label): the seek must carry the placement at the click's x")
+            }
         }
+    }
+
+    // MARK: - I5 — the playhead (interaction batch §8)
+
+    /// A clip that starts OFF the 1/16 grid (beat 3.1), 8 beats long, at 40 pt
+    /// per beat — a 1/16 (0.25 beat) is 10 pt, and a snap applied in PROJECT
+    /// space lands on a different line than one applied in clip-local space.
+    /// That is the whole reason for the 3.1: on a grid-aligned start the two
+    /// orders agree and the truth table below could not tell them apart.
+    /// (3.1 is also off a BAR line — the song's bar 2 starts 0.9 beats in.)
+    private func offGridPlacementModel(appSnap: ClipSnap = .beat) -> PitchEditorModel {
+        let tempo = try! TempoMap(segments: [.init(startBeat: 0, bpm: 120)])
+        let geometry = PitchEditorGeometry(sourceWindowStartSeconds: 0, sourceWindowSeconds: 4,
+                                           startBeat: 3.1, lengthBeats: 8, tempoMap: tempo,
+                                           pixelsPerBeat: 40)
+        let model = PitchEditorModel(clipID: UUID(), geometry: geometry)
+        model.appSnap = appSnap
+        return model
+    }
+
+    /// ⚠️⚠️ **RESTATED, NOT DELETED — I5-F1 (2026-09-25) MOVED THE SNAP TO THE
+    /// SONG'S GRID.** I5 pinned a CLIP-LOCAL 1/16 here, to match a ruler
+    /// numbered from the clip's first beat; that ruler named a different bar
+    /// from the transport for any vocal not starting on a bar line, and the
+    /// ruler now numbers the song's bars (`PitchEditorSongRuler`). Every row
+    /// that moved says what the clip-local snap gave, so the table still tells
+    /// the two apart — the 3.1 start is what makes them differ.
+    @Test("I5-F1 — placement truth table: snap on/off, ⌥, clamp to the clip, x 0 is the clip start, snapped on the SONG's 1/16 (never clip-local)")
+    func placementTruthTable() {
+        // (app snap, content x, ⌥, expected PROJECT beat). Hand-derived: project
+        // beat = 3.1 + x / 40; the grid is 0.25 SONG beats from beat 0; the clip
+        // spans [3.1, 11.1] and the clamp wins at its edges.
+        let rows: [(snap: ClipSnap, x: CGFloat, bypass: Bool, expected: Double, why: String)] = [
+            (.beat, 0, false, 3.1, "x 0: 3.1 snaps to 3.0, outside the clip, and clamps back to its start"),
+            (.beat, 0, true, 3.1, "x 0 is the clip's start, snap bypassed"),
+            (.beat, 57, false, 4.5, "4.525 → 4.5 on the song's 1/16 (the clip-local snap gave 4.6)"),
+            (.beat, 44, false, 4.25, "4.2 → 4.25, rounding up (the clip-local snap gave 4.1)"),
+            (.beat, 36, false, 4.0, "the song's bar 2 line, 0.9 beats in (the clip-local snap gave 4.1)"),
+            (.beat, 57, true, 4.525, "⌥: unsnapped"),
+            (.off, 57, false, 4.525, "app snap OFF: unsnapped"),
+            (.bar, 57, false, 4.5, "the app's DIVISION never follows: a bar snap still lands on 1/16"),
+            (.beat, 319, false, 11.0, "11.075 → 11.0, inside the clip (the clip-local snap gave 11.1)"),
+            (.beat, -40, false, 3.1, "left of the clip clamps to its start"),
+            (.beat, 1000, false, 11.1, "right of the clip clamps to its end"),
+            (.off, 1000, false, 11.1, "the clamp holds with snap off"),
+        ]
+        for row in rows {
+            let model = offGridPlacementModel(appSnap: row.snap)
+            let beat = model.placementBeat(atContentX: row.x, snapBypassed: row.bypass)
+            #expect(close(beat, row.expected, 1e-9), "\(row.why): got \(beat), expected \(row.expected)")
+        }
+    }
+
+    @Test("I5 — the placement grid: app snap OFF gives .off, every other app snap gives 1/16 — never the Simple .beat lock")
+    func placementSnapFollowsOnlyTheAppSnapsOff() {
+        #expect(PitchEditorModel.placementGrid == .sixteenth)
+        for app in ClipSnap.allCases {
+            let model = offGridPlacementModel(appSnap: app)
+            #expect(model.placementSnap == (app == .off ? .off : .sixteenth), "app snap \(app)")
+        }
+    }
+
+    @Test("I5 — seek spy: one seek per ruler tick carrying its placement; ⌘-click on empty seeks ONCE at the press START; nothing else seeks")
+    func seekSpyCountsEveryPlacement() {
+        let (model, sink, ids) = fourNotes()
+        var seeks: [Double] = []
+        model.onSeek = { seeks.append($0) }
+        // The ruler's ticks: one seek each, each carrying the placement.
+        let xs: [CGFloat] = [0, 37, 123.4]
+        for x in xs { model.placePlayhead(atContentX: x, snapBypassed: false) }
+        #expect(seeks == xs.map { model.placementBeat(atContentX: $0, snapBypassed: false) })
+        // A ⌘-click that SLIPPED inside the slop: still a click, and it seeks once,
+        // where the press BEGAN (the knife's rule).
+        seeks.removeAll()
+        let start = emptyPoint(model)
+        let slipped = CGPoint(x: start.x + 3, y: start.y)   // under the 4 pt slop
+        _ = model.trackPress(start: start, location: start, modifiers: .command)
+        let action = model.releasePress(start: start, location: slipped, modifiers: .command,
+                                        snapBypassed: true)
+        #expect(action == .click(.positionPlayhead))
+        #expect(seeks == [model.placementBeat(atContentX: start.x, snapBypassed: true)])
+        #expect(model.placementBeat(atContentX: start.x, snapBypassed: true)
+                != model.placementBeat(atContentX: slipped.x, snapBypassed: true),
+                "positive control — the slip moves the unsnapped placement, so the line above tells START from END")
+        // Nothing else seeks: plain and ⇧ on empty, ⌘ on a note, a travelled ⌘ band.
+        seeks.removeAll()
+        model.selectOnly(ids[0])
+        click(model, at: start)
+        #expect(model.selection.isEmpty, "plain on empty still deselects")
+        click(model, at: start, .shift)
+        click(model, at: centre(of: model.blobs[1], in: model), .command)
+        let far = CGPoint(x: start.x + 40, y: start.y)
+        _ = model.trackPress(start: start, location: start, modifiers: .command)
+        _ = model.trackPress(start: start, location: far, modifiers: .command)
+        #expect(model.releasePress(start: start, location: far, modifiers: .command) == .endBand)
+        #expect(seeks.isEmpty, "\(seeks.count) seek(s) from presses that must not seek")
+        #expect(sink.commits.isEmpty, "placing the playhead is never a note edit")
+    }
+
+    @Test("I5 — ⌘-click on a surface drawing NO notes does not seek (its press is inert); the ruler's path seeks in every state")
+    func commandClickOnAnInertSurfaceDoesNotSeek() {
+        let model = offGridPlacementModel()
+        var seeks: [Double] = []
+        model.onSeek = { seeks.append($0) }
+        #expect(!model.state.drawsNotes, "precondition — a model that never loaded draws no notes")
+        let point = CGPoint(x: 57, y: 20)
+        #expect(model.pressHit(at: point) == .inert)
+        #expect(click(model, at: point, .command) == .nothing)
+        #expect(seeks.isEmpty)
+        model.placePlayhead(atContentX: 57, snapBypassed: false)
+        // I5-F1: the song's 1/16 (4.525 → 4.5); the clip-local snap gave 4.6.
+        #expect(seeks.count == 1 && close(seeks[0], 4.5, 1e-9), "the ruler seeks here: \(seeks)")
+    }
+
+    @Test("I5-F1 — the ruler and the placement agree: a click on a song-bar tick lands the transport ON that bar (bar.beat \"n.1\"), and every snapped placement across the clip is on the song's 1/16 — never on the clip-local one")
+    func placementLandsOnTheRulersBars() {
+        let model = offGridPlacementModel()
+        let meter = MeterMap(constant: TimeSignature())
+        let ticks = PitchEditorSongRuler.ticks(clipStartBeat: model.geometry.startBeat,
+                                               lengthBeats: model.geometry.lengthBeats,
+                                               pixelsPerBeat: model.geometry.pixelsPerBeat,
+                                               meterMap: meter)
+        let bars = ticks.filter { $0.isBar && $0.label != nil }
+        #expect(bars.map(\.label) == ["2", "3"], "song bars 2 and 3 lie inside 3.1…11.1")
+        for tick in bars {
+            let placed = model.placementBeat(atContentX: tick.x, snapBypassed: false)
+            let transport = TransportState(positionBeats: placed)
+            #expect(transport.barsBeatsDisplay == "\(tick.label ?? "?").1",
+                    "a click on the \"\(tick.label ?? "?")\" tick placed the transport at \(transport.barsBeatsDisplay)")
+        }
+        var clipLocalHits = 0
+        for step in 1..<300 {
+            let x = CGFloat(step) * 1.05
+            let beat = model.placementBeat(atContentX: x, snapBypassed: false)
+            guard beat > 3.1 + 1e-9, beat < 11.1 - 1e-9 else { continue }   // the clamped edges
+            #expect(abs(beat / 0.25 - (beat / 0.25).rounded()) < 1e-9, "x \(x) → \(beat), off the song's 1/16")
+            if abs((beat - 3.1) / 0.25 - ((beat - 3.1) / 0.25).rounded()) < 1e-9 { clipLocalHits += 1 }
+        }
+        #expect(clipLocalHits == 0, "\(clipLocalHits) placement(s) landed on the clip-local grid")
+    }
+
+    @Test("I5 — the ⌘ affordance promises exactly what the click does: the bar over EMPTY surface with ⌘, never on a note, with ⇧, with the knife, or on an inert surface")
+    func theCommandAffordanceMatchesTheClick() {
+        let (model, _, _) = fourNotes()
+        let empty = emptyPoint(model)
+        let onNote = centre(of: model.blobs[1], in: model)
+        // Each promise is checked against what the click then DOES.
+        func clickSeeks(_ point: CGPoint, _ chord: ArrangeClickModifiers) -> Bool {
+            var seeks = 0
+            model.onSeek = { _ in seeks += 1 }
+            click(model, at: point, chord)
+            return seeks == 1
+        }
+        let rows: [(point: CGPoint, chord: ArrangeClickModifiers, promises: Bool, why: String)] = [
+            (empty, [.command], true, "⌘ on empty"),
+            (empty, [], false, "no chord on empty"),
+            (empty, [.shift], false, "⇧ on empty"),
+            (onNote, [.command], false, "⌘ on a note toggles it"),
+        ]
+        for row in rows {
+            #expect(model.placesPlayhead(at: row.point, modifiers: row.chord) == row.promises, "\(row.why)")
+            #expect(model.surfaceCursor(at: row.point, modifiers: row.chord)
+                    == (row.promises ? .verticalBar : nil), "\(row.why): cursor")
+            #expect(clickSeeks(row.point, row.chord) == row.promises, "\(row.why): the click disagrees")
+        }
+        // The knife is engaged: no promise, the crosshair stays.
+        model.tool = .scissors
+        #expect(!model.placesPlayhead(at: empty, modifiers: [.command]))
+        #expect(model.surfaceCursor(at: empty, modifiers: [.command]) == .crosshair)
+        // An inert surface promises nothing either.
+        let inert = offGridPlacementModel()
+        #expect(!inert.placesPlayhead(at: CGPoint(x: 57, y: 20), modifiers: [.command]))
+        #expect(inert.surfaceCursor(at: CGPoint(x: 57, y: 20), modifiers: [.command]) == nil)
     }
 
     @Test("I4 — ⭐ a band touches exactly the notes a click at its corner would hit, probed INSIDE the hit slop")
@@ -3373,6 +3558,1250 @@ struct PitchEditorModelTests {
         #expect(NoteBlob(startSeconds: 0, endSeconds: 1, detectedHz: 220, medianConfidence: 1,
                          frameCount: 10, offsetCents: 50).isPitchEdited)
     }
+
+    // MARK: - NT-U0 — the draft line's table CARRIES the set (natural tuning X2 rule 2)
+
+    /// The drag's DRAFT line is drawn through a copy of the note table. That copy
+    /// must carry every set-level field, or the line drawn during a drag differs
+    /// from what plays once NT-C C4's transitions read the slope.
+    ///
+    /// ⚠️ **THE TWO CONTROLS ARE WHAT MAKE THE RED MEAN SOMETHING.** Under the
+    /// planted legacy constructor (`PitchEditSet(analysisVersion:segments:
+    /// retuneMs:)`) the three natural-tuning fields go red while `retuneMs`,
+    /// `analysisVersion` and the dragged offset stay green, which shows the seam
+    /// reads the real rebuild and not the stored table.
+    @Test("NT-U0 — ⭐ the draft line's table CARRIES the formant amount, the consonant flag, the transition slope and the stamp, for a one-note drag and a group drag")
+    func draftLineCarriesTheSetLevelFields() {
+        let (model, _, ids) = fourNotes()
+        let seed = model.noteTable
+        // Every set-level field non-legacy, over the SEED's own segments so the
+        // ids are the drawn blobs'. Stored before the drag: table, then drag.
+        var stored = PitchEditSet(analysisVersion: seed.analysisVersion, segments: seed.segments,
+                                  retuneMs: 120, formantCorrection: 0.35,
+                                  keepsConsonantsUntuned: true, transitionSlopeCentsPerSecond: 2500)
+        stored.autoCorrectStamp = "nt-u0-stamp"
+        model.syncStoredNoteTable(stored)
+        // The fixture is what it says: the table the editor draws carries them.
+        #expect(model.noteTable == stored)
+        #expect(model.draftEditSet == nil, "no drag, no draft table")
+
+        func expectCarried(_ label: String) {
+            guard let draft = model.draftEditSet else {
+                Issue.record("\(label): no draft table was built")
+                return
+            }
+            #expect(draft.formantCorrection == 0.35, "\(label): formant amount dropped")
+            #expect(draft.keepsConsonantsUntuned, "\(label): consonant flag dropped")
+            #expect(draft.transitionSlopeCentsPerSecond == 2500, "\(label): transition slope dropped")
+            #expect(draft.autoCorrectStamp == "nt-u0-stamp", "\(label): stamp dropped")
+            // Controls: what the legacy constructor DID carry.
+            #expect(draft.retuneMs == 120, "\(label)")
+            #expect(draft.analysisVersion == seed.analysisVersion, "\(label)")
+        }
+
+        // One note: D (62) two rows up. The draft table holds the DRAFT offset.
+        #expect(model.beginPitchDrag(on: model.blobs[3]))
+        model.updatePitchDrag(translationHeight: -2 * model.geometry.rowHeight, free: false)
+        let offset = model.drag?.offsetCents ?? 0
+        #expect(offset != 0, "the drag moved nothing, so this reads the stored table")
+        #expect(model.draftEditSet?.segments.first { $0.id == ids[3] }?.pitchOffsetCents == offset)
+        expectCarried("one note")
+        model.cancelDrag()
+        #expect(model.draftEditSet == nil, "the draft table goes with the draft")
+
+        // A group: A and B, one row up.
+        model.selectOnly(ids[0])
+        model.toggle(ids[1])
+        #expect(model.beginSelectionPitchDrag(on: model.blobs[0]))
+        model.updatePitchDrag(translationHeight: -model.geometry.rowHeight, free: false)
+        #expect(model.drag?.members.count == 1)
+        expectCarried("group")
+        model.cancelDrag()
+    }
+
+    // MARK: - I6b S2 — the window grows under a drag at its edge (interaction batch §9)
+
+    @Test("I6b — grown(_:towards:by:) widens ONE end by whole rows, never narrows, and stops at 0 and 127")
+    func i6bGrownByHand() {
+        #expect(PitchEditorRange.grown(53...66, towards: .leading, by: 1) == 53...67, "leading is the TOP")
+        #expect(PitchEditorRange.grown(53...66, towards: .trailing, by: 2) == 51...66)
+        #expect(PitchEditorRange.grown(53...66, towards: .leading, by: 0) == 53...66)
+        #expect(PitchEditorRange.grown(53...66, towards: .trailing, by: -3) == 53...66)
+        #expect(PitchEditorRange.grown(120...125, towards: .leading, by: 5) == 120...127)
+        #expect(PitchEditorRange.grown(100...127, towards: .leading, by: 5) == 100...127)
+        #expect(PitchEditorRange.grown(2...20, towards: .trailing, by: 5) == 0...20)
+        #expect(PitchEditorRange.grown(0...20, towards: .trailing, by: 5) == 0...20)
+    }
+
+    @Test("I6b — growth is EARNED at 12 st/s × depth × dt with the remainder carried, reset per press, banks nothing at 0/127, and never happens without a drag or commits")
+    func i6bGrowthRateAndLimits() {
+        let (model, sink, _) = fourNotes()                          // 53…66
+        #expect(model.growPitchWindowForDrag(side: .leading, depthFraction: 1, dt: 1) == 0,
+                "no drag, no growth")
+        #expect(model.geometry.midiRange == 53...66)
+        #expect(model.beginPitchDrag(on: model.blobs[3]))
+        // 12 × 1 × 0.125 = 1.5 rows: one now, half a row carried; then 2.0.
+        #expect(model.growPitchWindowForDrag(side: .leading, depthFraction: 1, dt: 0.125) == 1)
+        #expect(model.geometry.midiRange == 53...67)
+        #expect(model.growPitchWindowForDrag(side: .leading, depthFraction: 1, dt: 0.125) == 2)
+        #expect(model.geometry.midiRange == 53...69)
+        // Half depth, half the rate: 0.75 of a row, none yet.
+        #expect(model.growPitchWindowForDrag(side: .trailing, depthFraction: 0.5, dt: 0.125) == 0)
+        #expect(model.drag?.topGrowthRows == 3 && model.drag?.bottomGrowthRows == 0)
+        for (depth, dt) in [(0, 1), (1, .nan), (1, -1), (.nan, 1)] as [(CGFloat, Double)] {
+            #expect(model.growPitchWindowForDrag(side: .leading, depthFraction: depth, dt: dt) == 0,
+                    "depth \(depth), dt \(dt)")
+        }
+        // A NEW press banks nothing from the last: the 0.75 carried would make
+        // this 0.375 a whole row.
+        model.cancelDrag()
+        #expect(model.beginPitchDrag(on: model.blobs[3]))
+        #expect(model.growPitchWindowForDrag(side: .trailing, depthFraction: 1, dt: 0.03125) == 0)
+        // To the top of MIDI: 120 rows asked, 58 left above 69.
+        #expect(model.growPitchWindowForDrag(side: .leading, depthFraction: 1, dt: 10) == 58)
+        #expect(model.geometry.midiRange == 53...127)
+        // A pause AT the limit banks nothing: 0.75 there, then 0.375 at the
+        // bottom, would otherwise add up to a row.
+        #expect(model.growPitchWindowForDrag(side: .leading, depthFraction: 1, dt: 0.0625) == 0)
+        #expect(model.growPitchWindowForDrag(side: .trailing, depthFraction: 1, dt: 0.03125) == 0)
+        // The bottom goes to 0 the same way, and stops.
+        #expect(model.growPitchWindowForDrag(side: .trailing, depthFraction: 1, dt: 10) == 53)
+        #expect(model.geometry.midiRange == 0...127)
+        #expect(model.growPitchWindowForDrag(side: .trailing, depthFraction: 1, dt: 10) == 0)
+        #expect(model.drag?.grownRows == 111)
+        model.cancelDrag()
+        #expect(sink.commits.isEmpty, "growth is layout, never a store write")
+    }
+
+    @Test("I6b — an edge step grows for the time since the press's last step, capped at three frames; its first step for the repeat's own interval")
+    func i6bEdgeStepSeconds() {
+        #expect(close(PitchEditorModel.edgeStepSeconds(sinceLastStep: nil), 0.016))
+        #expect(close(PitchEditorModel.edgeStepSeconds(sinceLastStep: .milliseconds(8)), 0.008))
+        #expect(PitchEditorModel.edgeStepSeconds(sinceLastStep: .seconds(2))
+                == PitchEditorModel.maxEdgeStepSeconds)
+        #expect(PitchEditorModel.maxEdgeStepSeconds == 0.05)
+        #expect(PitchEditorModel.edgeStepSeconds(sinceLastStep: .milliseconds(-5)) == 0)
+    }
+
+    /// ⭐ THE TOP-GROWTH HAZARD (survey I6b): rows are laid out down from the
+    /// window's top, so a row grown there moves every row while the press point
+    /// stays put. The pointer is HELD 5 pt under the viewport's top and every
+    /// tick rebuilds its content y from the OBSERVED offset (`EdgeAutoScroll
+    /// .tick`), under both answers to the INFERRED SwiftUI question: the offset
+    /// stays 0 (the content moves down under it), or the scroller anchors the
+    /// content (the offset grows by the rows). Either way the note must be the
+    /// pitch under the pointer, clamped and snapped as the drag always is.
+    @Test("I6b — ⭐ held at the TOP wall the window climbs and the dragged note stays the pitch UNDER THE POINTER, whether the offset holds at 0 or the scroller anchors; snapped and free")
+    func i6bTheNoteStaysUnderThePointerAsTheTopGrows() {
+        for free in [false, true] {
+            for anchors in [false, true] {
+                let label = "free \(free), anchors \(anchors)"
+                let (model, _, _) = fourNotes()                     // 53…66, 14 pt rows
+                let rh = model.geometry.rowHeight
+                let d = model.blobs[3]                              // D4, 62, centre y 63
+                let start = centre(of: d, in: model)
+                #expect(model.beginPitchDrag(on: d))
+                let local: CGFloat = 5
+                var offset: CGFloat = 0
+                func expected() -> Double {
+                    let under = model.geometry.midi(forY: local + offset)
+                    let window = model.geometry.midiRange
+                    return free
+                        ? min(max(under, window.lowerBound), window.upperBound)
+                        : min(max(under, window.lowerBound + 1), window.upperBound - 1).rounded()
+                }
+                model.updatePitchDrag(translationHeight: (local + offset) - start.y, free: free)
+                #expect(close(model.drag!.targetMidi, expected(), 1e-9), "\(label): before growth")
+                let screenY = model.geometry.y(forMidi: model.drag!.targetMidi) - offset
+                var total = 0
+                for tick in 1...5 {
+                    let rows = model.growPitchWindowForDrag(side: .leading, depthFraction: 1, dt: 0.125)
+                    #expect(rows >= 1, "\(label): tick \(tick) grew nothing")
+                    total += rows
+                    if anchors { offset += CGFloat(rows) * rh }
+                    model.updatePitchDrag(translationHeight: (local + offset) - start.y, free: free)
+                    #expect(close(model.drag!.targetMidi, expected(), 1e-9),
+                            "\(label): tick \(tick), note \(model.drag!.targetMidi) vs under the pointer \(expected())")
+                    if !anchors {
+                        // The survey's words: the note's SCREEN y stays under the pointer.
+                        #expect(close(model.geometry.y(forMidi: model.drag!.targetMidi) - offset, screenY),
+                                "\(label): tick \(tick)")
+                    }
+                }
+                #expect(model.geometry.midiRange == 53...Double(66 + total), "\(label)")
+                model.cancelDrag()
+            }
+        }
+    }
+
+    /// ⭐ S2's BIT-IDENTITY PROOF. The pre-I6b ⌥ arithmetic, FROZEN here (one
+    /// note, and the group's raw→delta step), against the live drag over a
+    /// sweep of translations, on `.bitPattern`, for the draft AND the commit.
+    /// ⌥ because a snapped drag lands on whole semitones × 100, where many wrong
+    /// formulas agree; a free drag carries every bit of the arithmetic.
+    @Test("I6b — ⭐ a drag that never grows is BIT-identical to the pre-I6b arithmetic: ⌥ free drags over a sweep, one note and a group, draft and commit, on .bitPattern; its release leaves the window alone")
+    func i6bANonGrowingDragIsBitIdentical() {
+        func frozenRaw(_ t: CGFloat, origin: Double, rowHeight: CGFloat) -> Double {
+            origin + -Double(t) / Double(max(1, rowHeight))
+        }
+        var sweep: [CGFloat] = [-0.0, 0, 1e-9, -1e-9, 0.3, -0.3, 7.25, -7.25, 13.99, -14, 20.123456789,
+                                -55.5, 100.7, -100.7, 333.3333, -333.3333, -1000, 1000]
+        sweep += stride(from: -300, through: 300, by: 0.37).map { CGFloat($0) }
+        let (model, sink, _) = fourNotes()
+        let rh = model.geometry.rowHeight
+        let window = model.geometry.midiRange
+        let d = model.blobs[3]
+        let shift = model.geometry.clipPitchShiftSemitones
+        let origin = PitchEditorGeometry.drawnMidi(centreMidi: d.centreMidi, offsetCents: d.offsetCents,
+                                                   clipPitchShiftSemitones: shift)
+        func frozenOne(_ t: CGFloat) -> Double {
+            let raw = frozenRaw(t, origin: origin, rowHeight: rh)
+            let landed = min(max(raw, window.lowerBound), window.upperBound)
+            return PitchEditorGeometry.storedOffsetCents(drawnMidi: landed, centreMidi: d.centreMidi,
+                                                         clipPitchShiftSemitones: shift)
+                .clamped(to: NoteSegment.pitchOffsetCentsRange)
+        }
+        #expect(model.beginPitchDrag(on: d))
+        var mismatches: [CGFloat] = []
+        for t in sweep {
+            model.updatePitchDrag(translationHeight: t, free: true)
+            if model.drag!.offsetCents.bitPattern != frozenOne(t).bitPattern { mismatches.append(t) }
+        }
+        #expect(mismatches.isEmpty, "one note, \(mismatches.count) of \(sweep.count) differ: \(mismatches.prefix(5))")
+        // The COMMIT carries the same bits, and the release leaves the window alone.
+        model.updatePitchDrag(translationHeight: -20.123456789, free: true)
+        _ = model.endPitchDrag()
+        guard case .notePitch(_, let cents)? = sink.commits.last?.kind else {
+            Issue.record("no one-note commit")
+            return
+        }
+        #expect(cents.bitPattern == frozenOne(-20.123456789).bitPattern)
+        #expect(model.geometry.midiRange == window, "an ungrown release moved the window")
+        i6bGroupBitIdentity(sweep: sweep)
+    }
+
+    /// The GROUP half of `i6bANonGrowingDragIsBitIdentical`: A pressed, D riding.
+    /// The frozen part is the translation → raw step; the delta bounds are the
+    /// model's own `groupDeltaBounds`, which I6b does not touch.
+    private func i6bGroupBitIdentity(sweep: [CGFloat]) {
+        let (model, sink, ids) = fourNotes()
+        let rh = model.geometry.rowHeight
+        let window = model.geometry.midiRange
+        let shift = model.geometry.clipPitchShiftSemitones
+        let a = model.blobs[0]
+        let d = model.blobs[3]
+        let origins = [a, d].map {
+            PitchEditorGeometry.drawnMidi(centreMidi: $0.centreMidi, offsetCents: $0.offsetCents,
+                                          clipPitchShiftSemitones: shift)
+        }
+        let baselines = [a.offsetCents, d.offsetCents]
+        let bounds = PitchEditorModel.groupDeltaBounds(origins: origins, baselines: baselines, window: window)
+        func frozen(_ t: CGFloat) -> (pressed: Double, member: Double) {
+            let raw = origins[0] + -Double(t) / Double(max(1, rh))
+            let delta = min(max(raw - origins[0], bounds.lowerBound), bounds.upperBound)
+            let pressed = delta == 0 ? baselines[0] : PitchEditorGeometry.storedOffsetCents(
+                drawnMidi: origins[0] + delta, centreMidi: a.centreMidi, clipPitchShiftSemitones: shift)
+                .clamped(to: NoteSegment.pitchOffsetCentsRange)
+            return (pressed, (baselines[1] + delta * 100).clamped(to: NoteSegment.pitchOffsetCentsRange))
+        }
+        model.selectOnly(ids[0])
+        model.toggle(ids[3])
+        #expect(model.beginSelectionPitchDrag(on: a))
+        var mismatches: [CGFloat] = []
+        for t in sweep {
+            model.updatePitchDrag(translationHeight: t, free: true)
+            let want = frozen(t)
+            if model.drag!.offsetCents.bitPattern != want.pressed.bitPattern
+                || model.drag!.members[0].offsetCents.bitPattern != want.member.bitPattern {
+                mismatches.append(t)
+            }
+        }
+        #expect(mismatches.isEmpty, "group, \(mismatches.count) of \(sweep.count) differ: \(mismatches.prefix(5))")
+        model.updatePitchDrag(translationHeight: -20.123456789, free: true)
+        _ = model.endPitchDrag()
+        guard case .notePitches(let offsets, _)? = sink.commits.last?.kind else {
+            Issue.record("no group commit")
+            return
+        }
+        let want = frozen(-20.123456789)
+        #expect(offsets.first { $0.segmentId == a.id }?.offsetCents.bitPattern == want.pressed.bitPattern)
+        #expect(offsets.first { $0.segmentId == d.id }?.offsetCents.bitPattern == want.member.bitPattern)
+        #expect(model.geometry.midiRange == window, "an ungrown group release moved the window")
+    }
+
+    @Test("I6b — a GROUP in a grown window is still clamped by its TIGHTEST note: D at the grown top, A at the grown bottom")
+    func i6bGroupGrowthKeepsTheTightestClamp() {
+        let (model, sink, ids) = fourNotes()                        // 53…66; A 57, D 62
+        model.selectOnly(ids[0])
+        model.toggle(ids[3])
+        #expect(model.beginSelectionPitchDrag(on: model.blobs[0]))  // A pressed, D rides
+        #expect(model.growPitchWindowForDrag(side: .leading, depthFraction: 1, dt: 0.25) == 3)
+        #expect(model.geometry.midiRange == 53...69)
+        model.updatePitchDrag(translationHeight: -1000, free: true)
+        // D has 69 − 62 = 7 of room above: the group moves 7, D on the grown top.
+        #expect(close(model.drag!.offsetCents, 700))
+        #expect(close(model.drag!.members[0].targetMidi(clipPitchShiftSemitones: 0), 69))
+        // 1.5 then 1.5 more: three rows at the bottom, 50…69.
+        #expect(model.growPitchWindowForDrag(side: .trailing, depthFraction: 1, dt: 0.125) == 1)
+        #expect(model.growPitchWindowForDrag(side: .trailing, depthFraction: 1, dt: 0.125) == 2)
+        #expect(model.geometry.midiRange == 50...69)
+        model.updatePitchDrag(translationHeight: 1000, free: true)
+        // A has 57 − 50 = 7 of room below: A on the grown bottom, D on 55.
+        #expect(close(model.drag!.offsetCents, -700))
+        #expect(close(model.drag!.members[0].targetMidi(clipPitchShiftSemitones: 0), 55))
+        model.cancelDrag()
+        #expect(sink.commits.isEmpty)
+    }
+
+    @Test("I6b — a relayout MID-DRAG (a restore) holds the draft's note on the window with its name row; with no drag the same restore gives the notes' own window")
+    func i6bARelayoutMidDragKeepsTheDraft() {
+        let (model, sink, _) = fourNotes()
+        model.setAvailableHeight(503)                               // 43…77
+        #expect(model.beginPitchDrag(on: model.blobs[3]))
+        model.updatePitchDrag(translationHeight: -400, free: true)
+        #expect(close(model.drag!.targetMidi, 77))
+        // RESTORE mid-drag: the fill alone is 53…66, which the draft (77) is not on.
+        model.setAvailableHeight(196)
+        #expect(model.geometry.midiRange == 53...78, "the draft was laid out off the window")
+        // CONTROL: the same restore with no drag in flight is the notes' own window.
+        model.cancelDrag()
+        model.setAvailableHeight(503)
+        model.setAvailableHeight(196)
+        #expect(model.geometry.midiRange == 53...66)
+        #expect(sink.commits.isEmpty)
+    }
+
+    @Test("I6b — released on a GROWN top row, the note keeps a row above it for its NAME, and the row survives the read-back and the next layout")
+    func i6bTheReleaseKeepsTheNamesRow() {
+        let (model, sink, _) = fourNotes()                          // 53…66
+        let d = model.blobs[3]
+        #expect(model.beginPitchDrag(on: d))
+        #expect(model.growPitchWindowForDrag(side: .leading, depthFraction: 1, dt: 0.25) == 3)
+        model.updatePitchDrag(translationHeight: -1000, free: true)
+        #expect(close(model.drag!.targetMidi, 69), "⌥ reaches the grown top row")
+        _ = model.endPitchDrag()
+        #expect(model.geometry.midiRange == 53...70, "no row above the note for its name")
+        guard case .notePitch(let id, let cents)? = sink.commits.last?.kind else {
+            Issue.record("no one-note commit")
+            return
+        }
+        #expect(id == d.id && close(cents, 700))
+        // The store reads it back, then the pane lays out again (a splitter nudge).
+        var segments = model.seedTable.segments
+        segments[segments.firstIndex { $0.id == d.id }!].pitchOffsetCents = 700
+        model.syncStoredNoteTable(PitchEditSet(segments: segments))
+        #expect(model.geometry.midiRange == 53...70)
+        model.setAvailableHeight(200)                               // 14 rows: the notes' own fit
+        #expect(model.geometry.midiRange == 53...70, "the next layout dropped the name row")
+        let rect = model.rect(for: model.blobs[3])
+        #expect(rect.minY >= model.geometry.rowHeight, "no row above D for its label: \(rect)")
+    }
+
+    // MARK: - I6b S3 — the one edge decision the view executes
+
+    @Test("I6b S3 — the ONE edge decision: an unpromoted press, a cancelled drag and a cut push nothing; a note drag scrolls y while there is room and GROWS at the wall (the bottom revealed against the NEW content), never x; a band scrolls x and y and never grows")
+    func i6bTheEdgeDecision() {
+        let (model, _, _) = fourNotes()                             // 53…66: 196 pt tall
+        let d = model.blobs[3]
+        let start = centre(of: d, in: model)
+        // DOCKED: the window fills the viewport on y (no room); x has room.
+        let docked = PitchEditorViewport(offset: .zero, viewportSize: CGSize(width: 400, height: 196),
+                                         contentSize: CGSize(width: 1000, height: 196))
+        let top = CGPoint(x: start.x, y: 2)                         // deep in the top band
+        _ = model.trackPress(start: start, location: start, modifiers: .none)
+        #expect(model.edgeStep(pointer: top, viewport: docked, dt: 1) == .none,
+                "an unpromoted press pushes nothing")
+        #expect(model.edgePushAxes.isEmpty, "the clock would arm on an unpromoted press")
+        _ = model.trackPress(start: start, location: top, modifiers: .none)
+        #expect(model.beginSelectionPitchDrag(on: d))
+        #expect(model.edgePushAxes == .vertical)
+        let grew = model.edgeStep(pointer: top, viewport: docked, dt: 0.25)
+        #expect(grew.grownRows >= 1 && grew.edge == .top)
+        #expect(grew.scrollY == nil && grew.scrollX == nil, "the top needs no write")
+        #expect(model.geometry.midiRange == 53...Double(66 + grew.grownRows))
+        #expect(model.edgeGrownRows == grew.grownRows && model.lastEdge == .top)
+        // A note drag is y ONLY: deep in the x band at mid-height, nothing.
+        #expect(model.edgeStep(pointer: CGPoint(x: 399, y: 98), viewport: docked, dt: 0.25) == .none)
+        // The bottom grows too, and its write is the NEW content's own maximum.
+        let bottom = model.edgeStep(pointer: CGPoint(x: start.x, y: 194), viewport: docked, dt: 0.25)
+        #expect(bottom.grownRows >= 1 && bottom.edge == .bottom)
+        #expect(bottom.scrollY == model.geometry.contentHeight - 196, "the grown row was not revealed")
+        #expect(model.edgeGrownRows == grew.grownRows + bottom.grownRows && model.lastEdge == .bottom)
+        // With ROOM on y it scrolls, exactly `EdgeAutoScroll`'s answer, and grows nothing.
+        let content = model.geometry.contentHeight
+        let window = model.geometry.midiRange
+        let roomy = PitchEditorViewport(offset: CGPoint(x: 0, y: 50), viewportSize: CGSize(width: 400, height: 100),
+                                        contentSize: CGSize(width: 1000, height: content))
+        let scrolled = model.edgeStep(pointer: CGPoint(x: start.x, y: 52), viewport: roomy, dt: 1)
+        #expect(scrolled.scrollY != nil && scrolled.grownRows == 0 && scrolled.edge == .top)
+        #expect(scrolled.scrollY == EdgeAutoScroll.push(pointer: 52, offset: 50, viewport: 100, content: content)?.next)
+        #expect(model.geometry.midiRange == window)
+        model.cancelDrag()
+        #expect(model.edgeStep(pointer: top, viewport: docked, dt: 1) == .none, "a cancelled drag pushes nothing")
+
+        // A BAND scrolls on x AND y, and never grows — not even at a wall.
+        let empty = emptyPoint(model)
+        _ = model.trackPress(start: empty, location: empty, modifiers: .none)
+        _ = model.trackPress(start: empty, location: CGPoint(x: 398, y: 98), modifiers: .none)
+        #expect(model.band != nil)
+        #expect(model.edgePushAxes == .both)
+        let room = PitchEditorViewport(offset: .zero, viewportSize: CGSize(width: 400, height: 100),
+                                       contentSize: CGSize(width: 1000, height: content))
+        let band = model.edgeStep(pointer: CGPoint(x: 398, y: 98), viewport: room, dt: 1)
+        #expect(band.scrollX == EdgeAutoScroll.push(pointer: 398, offset: 0, viewport: 400, content: 1000)?.next)
+        #expect(band.scrollY == EdgeAutoScroll.push(pointer: 98, offset: 0, viewport: 100, content: content)?.next)
+        #expect(band.scrollX != nil && band.scrollY != nil && band.grownRows == 0)
+        #expect(model.edgeStep(pointer: CGPoint(x: 200, y: 2), viewport: docked, dt: 1) == .none,
+                "a band at the top wall grew or scrolled")
+        #expect(model.geometry.midiRange == window)
+        model.cancelDrag()
+
+        // A CUT pushes nothing.
+        model.tool = .scissors
+        _ = model.trackPress(start: start, location: start, modifiers: .none)
+        _ = model.trackPress(start: start, location: top, modifiers: .none)
+        #expect(model.edgeStep(pointer: top, viewport: docked, dt: 1) == .none)
+        #expect(model.edgePushAxes.isEmpty)
+        model.cancelDrag()
+        model.tool = .pointer
+    }
+
+    // MARK: - S4 follow-up — each guard that keeps a band from growing the window, ALONE
+
+    /// ⚠️ **TWO GUARDS, EACH PINNED ON ITS OWN.** A band never grows the pitch
+    /// window, and two things say so: `edgeStep`'s `.band` arm answers
+    /// `grows: false`, and `growPitchWindowForDrag` returns 0 with no drag. S4's
+    /// plant 3 (the arm flipped to `true`) stayed GREEN because the second guard
+    /// still stopped the band — each hid the other's removal. These two tests
+    /// each read ONE guard directly, so a plant of either goes red on its own.
+    @Test("S4 — guard A ALONE: with no drag in flight (a band live, at a wall), growPitchWindowForDrag grows nothing on either side, at any depth or dt")
+    func s4NoDragNeverGrowsTheWindow() {
+        let (model, _, _) = fourNotes()                             // 53…66
+        let empty = emptyPoint(model)
+        _ = model.trackPress(start: empty, location: empty, modifiers: .none)
+        _ = model.trackPress(start: empty, location: CGPoint(x: empty.x + 60, y: 2), modifiers: .none)
+        #expect(model.band != nil && model.drag == nil, "precondition — a band, and no drag")
+        for side in [EdgeAutoScroll.Side.leading, .trailing] {
+            for dt in [0.05, 0.25, 1, 10] {
+                #expect(model.growPitchWindowForDrag(side: side, depthFraction: 1, dt: dt) == 0,
+                        "side \(side), dt \(dt)")
+            }
+        }
+        #expect(model.geometry.midiRange == 53...66, "the window grew with no drag")
+        model.cancelDrag()
+        // CONTROL — the same call with a drag in flight DOES grow.
+        #expect(model.beginPitchDrag(on: model.blobs[3]))
+        #expect(model.growPitchWindowForDrag(side: .leading, depthFraction: 1, dt: 0.25) == 3)
+        model.cancelDrag()
+    }
+
+    @Test("S4 — guard B ALONE: the edge decision's `.band` arm never grows (edgeGrowsAtWall is false for a band, true for a note drag); read straight from the switch, so the drag guard cannot stand in for it")
+    func s4TheBandArmNeverGrows() {
+        let (model, _, _) = fourNotes()
+        #expect(!model.edgeGrowsAtWall, "no press, no growth")
+        let empty = emptyPoint(model)
+        _ = model.trackPress(start: empty, location: empty, modifiers: .none)
+        _ = model.trackPress(start: empty, location: CGPoint(x: empty.x + 60, y: 2), modifiers: .none)
+        #expect(model.band != nil)
+        #expect(model.edgePushAxes == .both, "precondition — the band's arm answered")
+        #expect(!model.edgeGrowsAtWall, "the `.band` arm says a band grows the pitch window")
+        model.cancelDrag()
+        // CONTROL — the note-drag arm DOES grow, so the read can say true.
+        let d = model.blobs[3]
+        let start = centre(of: d, in: model)
+        _ = model.trackPress(start: start, location: start, modifiers: .none)
+        _ = model.trackPress(start: start, location: CGPoint(x: start.x, y: 2), modifiers: .none)
+        #expect(model.beginSelectionPitchDrag(on: d))
+        #expect(model.edgeGrowsAtWall, "positive control — a note drag grows at a wall")
+        model.cancelDrag()
+    }
+
+    // MARK: - UE-1 — sounds with no pitch (unpitched-notes design §1.7, U5 + R21)
+
+    /// ⭐ **THE FROZEN COPY.** `updatePitchDrag`'s one-note arithmetic and the
+    /// group branch's `snappedGroupLanding` / `allowedMidi`, copied as they
+    /// stood BEFORE UE-1 gave sounds a relative snap (2026-09-25, the tree
+    /// UE-1 started from). A notes-only drag must land on these bits exactly,
+    /// snapped AND free, one note AND a group, on a chromatic AND a major
+    /// scale, from zero AND non-zero baselines. The L3a precedent is
+    /// `i6bANonGrowingDragIsBitIdentical`, which froze the FREE branch only;
+    /// UE-1 edits the SNAPPED ones, so they are frozen here.
+    private enum FrozenDrag {
+        static func single(raw: Double, window: ClosedRange<Double>, free: Bool,
+                           scale: PitchCorrectionScale, centreMidi: Double, shift: Double) -> Double {
+            let clamped = min(max(raw, window.lowerBound), window.upperBound)
+            let landed = free
+                ? clamped
+                : scale.nearestAllowedMidi(
+                    to: min(max(raw, window.lowerBound + 1), window.upperBound - 1))
+            return PitchEditorGeometry.storedOffsetCents(
+                drawnMidi: landed, centreMidi: centreMidi, clipPitchShiftSemitones: shift)
+                .clamped(to: NoteSegment.pitchOffsetCentsRange)
+        }
+
+        static func allowedMidi(from midi: Double, step: Double,
+                                scale: PitchCorrectionScale) -> Double? {
+            let allowed = Set(scale.allowedPitchClasses)
+            var candidate = step < 0 ? midi.rounded(.down) : midi.rounded(.up)
+            for _ in 0...12 {
+                if allowed.contains(((Int(candidate) % 12) + 12) % 12) { return candidate }
+                candidate += step
+            }
+            return nil
+        }
+
+        static func groupLanding(origin: Double, rawDelta: Double, bounds: ClosedRange<Double>,
+                                 scale: PitchCorrectionScale) -> (Double, Double) {
+            let target = origin + min(max(rawDelta, bounds.lowerBound), bounds.upperBound)
+            var landed = scale.nearestAllowedMidi(to: target)
+            if landed - origin > bounds.upperBound {
+                landed = allowedMidi(from: origin + bounds.upperBound, step: -1, scale: scale) ?? origin
+            } else if landed - origin < bounds.lowerBound {
+                landed = allowedMidi(from: origin + bounds.lowerBound, step: 1, scale: scale) ?? origin
+            }
+            let delta = landed - origin
+            guard delta <= bounds.upperBound + 1e-9, delta >= bounds.lowerBound - 1e-9 else {
+                return (0, origin)
+            }
+            return (min(max(delta, bounds.lowerBound), bounds.upperBound), landed)
+        }
+
+        /// (pressed, member) offsets for a two-note group drag.
+        static func group(raw: Double, origins: [Double], baselines: [Double],
+                          window: ClosedRange<Double>, free: Bool, scale: PitchCorrectionScale,
+                          pressedCentreMidi: Double, shift: Double) -> (Double, Double) {
+            let bounds = PitchEditorModel.groupDeltaBounds(origins: origins, baselines: baselines,
+                                                           window: window)
+            let rawDelta = raw - origins[0]
+            let delta: Double
+            let landed: Double
+            if free {
+                delta = min(max(rawDelta, bounds.lowerBound), bounds.upperBound)
+                landed = origins[0] + delta
+            } else {
+                (delta, landed) = groupLanding(origin: origins[0], rawDelta: rawDelta,
+                                               bounds: bounds, scale: scale)
+            }
+            let pressed = delta == 0 ? baselines[0] : PitchEditorGeometry.storedOffsetCents(
+                drawnMidi: landed, centreMidi: pressedCentreMidi, clipPitchShiftSemitones: shift)
+                .clamped(to: NoteSegment.pitchOffsetCentsRange)
+            return (pressed, (baselines[1] + delta * 100).clamped(to: NoteSegment.pitchOffsetCentsRange))
+        }
+    }
+
+    /// The translation sweep every UE-1 bit-identity check drives.
+    private static var ue1Sweep: [CGFloat] {
+        var sweep: [CGFloat] = [-0.0, 0, 1e-9, -1e-9, 0.3, -0.3, 6.99, -6.99, 7, -7, 7.01, -7.01,
+                                13.99, -14, 20.123456789, -55.5, 100.7, -100.7, 333.3333, -333.3333,
+                                -1000, 1000]
+        sweep += stride(from: -300, through: 300, by: 0.37).map { CGFloat($0) }
+        return sweep
+    }
+
+    @Test("UE-1 — a NOTES-ONLY drag is bit-identical to the frozen pre-UE-1 arithmetic: one note and a group, snapped and free, chromatic and major, zero and non-zero baselines")
+    func ue1NotesOnlyDragIsBitIdenticalToTheFrozenArithmetic() {
+        let scales = [PitchCorrectionScale.chromatic,
+                      PitchCorrectionScale(tonicPitchClass: 2, mode: .major)]
+        // Baselines: as sung, then A and D already moved by off-grid amounts.
+        let baselineSets: [(a: Double, d: Double)] = [(0, 0), (37, -120)]
+        var report: [String] = []
+        for scale in scales {
+            for baselines in baselineSets {
+                for free in [false, true] {
+                    // ONE NOTE: D.
+                    let (model, _, _) = fourNotes()
+                    var table = model.noteTable
+                    table.segments[0].pitchOffsetCents = baselines.a
+                    table.segments[3].pitchOffsetCents = baselines.d
+                    model.syncStoredNoteTable(table)
+                    model.snapScale = scale
+                    let rh = model.geometry.rowHeight
+                    let window = model.geometry.midiRange
+                    let shift = model.geometry.clipPitchShiftSemitones
+                    let d = model.blobs[3]
+                    let origin = PitchEditorGeometry.drawnMidi(
+                        centreMidi: d.centreMidi, offsetCents: d.offsetCents,
+                        clipPitchShiftSemitones: shift)
+                    #expect(model.beginPitchDrag(on: d))
+                    var misses = 0
+                    for t in Self.ue1Sweep {
+                        model.updatePitchDrag(translationHeight: t, free: free)
+                        let want = FrozenDrag.single(raw: origin + -Double(t) / Double(max(1, rh)),
+                                                     window: window, free: free, scale: scale,
+                                                     centreMidi: d.centreMidi, shift: shift)
+                        if model.drag!.offsetCents.bitPattern != want.bitPattern { misses += 1 }
+                    }
+                    model.cancelDrag()
+                    if misses > 0 { report.append("one \(scale.mode) \(baselines) free=\(free): \(misses)") }
+
+                    // A GROUP: A pressed, D riding.
+                    let (group, _, ids) = fourNotes()
+                    var groupTable = group.noteTable
+                    groupTable.segments[0].pitchOffsetCents = baselines.a
+                    groupTable.segments[3].pitchOffsetCents = baselines.d
+                    group.syncStoredNoteTable(groupTable)
+                    group.snapScale = scale
+                    let a = group.blobs[0]
+                    let member = group.blobs[3]
+                    let origins = [a, member].map {
+                        PitchEditorGeometry.drawnMidi(centreMidi: $0.centreMidi, offsetCents: $0.offsetCents,
+                                                      clipPitchShiftSemitones: shift)
+                    }
+                    group.selectOnly(ids[0])
+                    group.toggle(ids[3])
+                    #expect(group.beginSelectionPitchDrag(on: a))
+                    var groupMisses = 0
+                    for t in Self.ue1Sweep {
+                        group.updatePitchDrag(translationHeight: t, free: free)
+                        let want = FrozenDrag.group(
+                            raw: origins[0] + -Double(t) / Double(max(1, rh)), origins: origins,
+                            baselines: [a.offsetCents, member.offsetCents],
+                            window: group.geometry.midiRange, free: free, scale: scale,
+                            pressedCentreMidi: a.centreMidi, shift: shift)
+                        if group.drag!.offsetCents.bitPattern != want.0.bitPattern
+                            || group.drag!.members[0].offsetCents.bitPattern != want.1.bitPattern {
+                            groupMisses += 1
+                        }
+                    }
+                    group.cancelDrag()
+                    if groupMisses > 0 {
+                        report.append("group \(scale.mode) \(baselines) free=\(free): \(groupMisses)")
+                    }
+                }
+            }
+        }
+        #expect(report.isEmpty, "\(Self.ue1Sweep.count) ticks per leg; legs that differ: \(report)")
+    }
+
+    /// `segment` as a SOUND (`NoteOrigin.unpitched`): same id, span and borrowed
+    /// anchor — `origin` is a `let`, so a sound is a new segment, as U-A's
+    /// builders make it.
+    private func soundCopy(of segment: NoteSegment, offsetCents: Double? = nil) -> NoteSegment {
+        NoteSegment(id: segment.id, startSeconds: segment.startSeconds,
+                    endSeconds: segment.endSeconds, detectedHz: segment.detectedHz,
+                    detectedConfidence: segment.detectedConfidence,
+                    pitchOffsetCents: offsetCents ?? segment.pitchOffsetCents, origin: .unpitched)
+    }
+
+    /// `fourNotes` (A3 · B3 · C4 · D4, window 53…66) with the notes at `indices`
+    /// turned into SOUNDS and every entry of `offsets` applied, STORED — the
+    /// table the store hands a pane once U-A made sounds.
+    private func withSounds(_ indices: Set<Int>, offsets: [Int: Double] = [:])
+        -> (model: PitchEditorModel, sink: Box, ids: [UUID]) {
+        let (model, sink, ids) = fourNotes()
+        var table = model.noteTable
+        for index in table.segments.indices {
+            if indices.contains(index) {
+                table.segments[index] = soundCopy(of: table.segments[index], offsetCents: offsets[index])
+            } else if let offset = offsets[index] {
+                table.segments[index].pitchOffsetCents = offset
+            }
+        }
+        model.syncStoredNoteTable(table)
+        return (model, sink, ids)
+    }
+
+    @Test("UE-1 — a blob KNOWS it is a sound: its origin is the segment's, it prints no cents (not even moved), it carries §1.7's sentence and a `.sound` menu target; the same segment as a NOTE is unchanged")
+    func ue1ABlobKnowsASound() {
+        // Off the grid by +40 c AND moved +300 c, so a note here HAS both numbers.
+        let segment = NoteSegment(startSeconds: 0.3, endSeconds: 0.62,
+                                  detectedHz: 440 * pow(2, 40.0 / 1200), detectedConfidence: 0.6,
+                                  pitchOffsetCents: 300)
+        let note = NoteBlob(segment: segment, frameCount: 0)
+        let sound = NoteBlob(segment: soundCopy(of: segment), frameCount: 0)
+        // POSITIVE CONTROL: the note prints both numbers, so their absence below is the rule.
+        #expect(note.centsReadout == "+40 cents")
+        #expect(note.offsetReadout == "+300 cents")
+        #expect(note.origin == .detected && !note.isUnpitched && note.soundReadout == nil)
+        #expect(note.menuTarget == PitchEditorNoteMenu.Target(kind: .note, isCleared: false))
+
+        #expect(sound.origin == .unpitched && sound.isUnpitched)
+        #expect(sound.centsReadout == nil && sound.offsetReadout == nil)
+        #expect(sound.soundReadout
+                == "No pitch found. Moving it shifts this sound: a breath or an 's' just gets brighter or darker.")
+        #expect(sound.menuTarget == PitchEditorNoteMenu.Target(kind: .sound, isCleared: false))
+        // It is still drawn where its anchor is, and still carries its edit.
+        #expect(sound.centreMidi == note.centreMidi && sound.offsetCents == 300)
+
+        // Through the MODEL: the stored table's sound is the blob's sound.
+        let (model, _, ids) = withSounds([1])
+        #expect(model.blobs.map(\.isUnpitched) == [false, true, false, false])
+        #expect(model.blobs[1].id == ids[1])
+        // A blob built with no segment (a contour run) is a note.
+        #expect(NoteBlob(startSeconds: 0, endSeconds: 1, detectedHz: 220, medianConfidence: 0.9,
+                         frameCount: 4).origin == .detected)
+    }
+
+    @Test("UE-1 — dragging a SOUND reads §1.7's sentence from the press on, with no note name and no cents; a note's label keeps its pre-UE-1 text")
+    func ue1ADraggingASoundReadsTheSentence() {
+        let (model, _, _) = withSounds([1])
+        let rh = model.geometry.rowHeight
+        #expect(model.beginPitchDrag(on: model.blobs[1]))
+        #expect(model.drag!.isUnpitched)
+        #expect(model.drag!.readout == PitchEditorReadout.unpitchedSound)
+        // UE-2: over the blob, the two-word TAG; the sentence is the palette's.
+        #expect(model.drag!.overlayLabel == PitchEditorReadout.unpitchedSoundTag)
+        model.updatePitchDrag(translationHeight: -2 * rh, free: false)
+        #expect(model.drag!.overlayLabel == PitchEditorReadout.unpitchedSoundTag)
+        model.updatePitchDrag(translationHeight: -2.3 * rh, free: true)
+        #expect(model.drag!.readout == PitchEditorReadout.unpitchedSound, "⌥ is free, still no number")
+        model.cancelDrag()
+        // The NOTE beside it: nothing drawn unmoved, then "name  cents", as before.
+        #expect(model.beginPitchDrag(on: model.blobs[0]))
+        #expect(!model.drag!.isUnpitched)
+        #expect(model.drag!.overlayLabel == nil, "an unmoved note draws no label")
+        model.updatePitchDrag(translationHeight: -2 * rh, free: false)
+        #expect(model.drag!.overlayLabel == "B3  +200 cents")
+        #expect(model.drag!.overlayLabel == model.drag!.readout.map { "\(model.drag!.targetNoteName)  \($0)" })
+        model.cancelDrag()
+    }
+
+    @Test("UE-1 — a SOUND moves in WHOLE SEMITONES FROM WHERE IT SITS: its off-grid offset is kept, the scale is ignored, ⌥ is free, and the release commits the exact offset")
+    func ue1ASoundMovesInWholeSemitonesFromWhereItSits() {
+        // B3 as a sound, already moved +37 c: drawn at 59.37. On C major a NOTE
+        // here would snap one row up to C4 (60), an offset of +100; the sound
+        // goes to +137.
+        let (model, sink, ids) = withSounds([1], offsets: [1: 37])
+        model.snapScale = PitchCorrectionScale(tonicPitchClass: 0, mode: .major)
+        let rh = model.geometry.rowHeight
+        #expect(model.beginPitchDrag(on: model.blobs[1]))
+        model.updatePitchDrag(translationHeight: -0.4 * rh, free: false)
+        #expect(model.drag!.offsetCents.bitPattern == (37.0).bitPattern, "under half a row moved it")
+        #expect(model.drag!.isNoOp)
+        model.updatePitchDrag(translationHeight: -0.6 * rh, free: false)
+        #expect(model.drag!.offsetCents.bitPattern == (137.0).bitPattern)
+        model.updatePitchDrag(translationHeight: -2.49 * rh, free: false)
+        #expect(model.drag!.offsetCents.bitPattern == (237.0).bitPattern)
+        model.updatePitchDrag(translationHeight: 1.6 * rh, free: false)
+        #expect(model.drag!.offsetCents.bitPattern == (-163.0).bitPattern)
+        #expect(!model.drag!.isFree)
+        // ⌥ — free, continuous: exactly the arithmetic a note's free drag uses.
+        model.updatePitchDrag(translationHeight: -0.3 * rh, free: true)
+        #expect(model.drag!.isFree)
+        #expect(close(model.drag!.offsetCents, 67, 1e-6))
+        // The window clamps in WHOLE semitones: 66 − 59.37 = 6.63 of room, so 6.
+        model.updatePitchDrag(translationHeight: -40 * rh, free: false)
+        #expect(model.drag!.offsetCents.bitPattern == (637.0).bitPattern)
+        model.updatePitchDrag(translationHeight: -3 * rh, free: false)
+        _ = model.endPitchDrag()
+        guard case .notePitch(let id, let cents)? = sink.commits.last?.kind else {
+            Issue.record("a sound's drag committed nothing")
+            return
+        }
+        #expect(id == ids[1])
+        #expect(cents.bitPattern == (337.0).bitPattern)
+        // Released where it began: no commit.
+        #expect(model.beginPitchDrag(on: model.blobs[1]))
+        model.updatePitchDrag(translationHeight: -0.49 * rh, free: false)
+        #expect(model.endPitchDrag() == nil)
+        #expect(sink.commits.count == 1)
+    }
+
+    @Test("UE-1 — the GROUP rule: the PRESSED blob decides the snap and every member rides its ONE delta — a sound pressed moves the group in whole semitones (a note riding keeps its sung offset, off the scale); a note pressed snaps to the scale and a sound riding takes that delta")
+    func ue1AGroupRuleThePressedBlobDecides() {
+        let major = PitchCorrectionScale(tonicPitchClass: 0, mode: .major)
+        // (i) SOUND pressed (B3 +37 c), NOTE riding (D4, as sung).
+        do {
+            let (model, sink, ids) = withSounds([1], offsets: [1: 37])
+            model.snapScale = major
+            let rh = model.geometry.rowHeight
+            model.selectOnly(ids[1])
+            model.toggle(ids[3])
+            #expect(model.beginSelectionPitchDrag(on: model.blobs[1]))
+            #expect(model.drag!.members.map(\.isUnpitched) == [false])
+            model.updatePitchDrag(translationHeight: -0.6 * rh, free: false)
+            // +1 each: D4 → D♯4, which C major does not allow — the interval is kept.
+            #expect(model.drag!.offsetCents.bitPattern == (137.0).bitPattern)
+            #expect(model.drag!.members[0].offsetCents.bitPattern == (100.0).bitPattern)
+            // The TIGHTEST member clamps, in whole semitones: D4 has 66 − 62 = 4.
+            model.updatePitchDrag(translationHeight: -10 * rh, free: false)
+            #expect(model.drag!.offsetCents.bitPattern == (437.0).bitPattern)
+            #expect(model.drag!.members[0].offsetCents.bitPattern == (400.0).bitPattern)
+            _ = model.endPitchDrag()
+            guard case .notePitches(let offsets, _)? = sink.commits.last?.kind else {
+                Issue.record("a group led by a sound committed nothing")
+                return
+            }
+            #expect(offsets.map(\.segmentId) == [ids[1], ids[3]])
+            #expect(offsets.map(\.offsetCents) == [437, 400])
+        }
+        // (ii) NOTE pressed (A3 +45 c, drawn 57.45), SOUND riding (B3 +37 c).
+        do {
+            let (model, _, ids) = withSounds([1], offsets: [0: 45, 1: 37])
+            model.snapScale = major
+            let rh = model.geometry.rowHeight
+            model.selectOnly(ids[0])
+            model.toggle(ids[1])
+            #expect(model.beginSelectionPitchDrag(on: model.blobs[0]))
+            #expect(!model.drag!.isUnpitched)
+            #expect(model.drag!.members.map(\.isUnpitched) == [true])
+            model.updatePitchDrag(translationHeight: -1 * rh, free: false)
+            // A snaps to the scale: 58.45 → B3 (59), a delta of 1.55 semitones.
+            #expect(close(model.drag!.targetMidi, 59))
+            // The sound rides that SAME delta — fractional — so it stays at its note.
+            #expect(close(model.drag!.members[0].offsetCents, 37 + 155, 1e-9))
+            model.cancelDrag()
+        }
+        // (iii) SOUNDS only: B3 pressed, C4 riding — both move by whole semitones.
+        do {
+            let (model, _, ids) = withSounds([1, 2], offsets: [1: 37, 2: -12])
+            model.snapScale = major
+            let rh = model.geometry.rowHeight
+            model.selectOnly(ids[1])
+            model.toggle(ids[2])
+            #expect(model.beginSelectionPitchDrag(on: model.blobs[1]))
+            model.updatePitchDrag(translationHeight: 1.6 * rh, free: false)
+            #expect(model.drag!.offsetCents.bitPattern == (-163.0).bitPattern)
+            #expect(model.drag!.members[0].offsetCents.bitPattern == (-212.0).bitPattern)
+            model.cancelDrag()
+        }
+    }
+
+    @Test("UE-1 — a sound's drag is HEARD: one drag step per whole semitone, carrying its id and exact offset, snapped — a transposed breath (U5), never a silent no-op")
+    func ue1ASoundDragIsHeard() {
+        let (model, _, ids) = withSounds([1], offsets: [1: 37])
+        let audition = listen(model)
+        let rh = model.geometry.rowHeight
+        #expect(model.beginPitchDrag(on: model.blobs[1]))
+        model.updatePitchDrag(translationHeight: -0.4 * rh, free: false)
+        #expect(dragSteps(audition).isEmpty, "nothing moved, nothing to hear")
+        model.updatePitchDrag(translationHeight: -0.6 * rh, free: false)
+        model.updatePitchDrag(translationHeight: -0.9 * rh, free: false)   // still +1
+        model.updatePitchDrag(translationHeight: -1.6 * rh, free: false)
+        let steps = dragSteps(audition)
+        #expect(steps.count == 2, "\(steps.map(\.offsets))")
+        #expect(steps.map { $0.offsets.map(\.segmentId) } == [[ids[1]], [ids[1]]])
+        #expect(steps.map { $0.offsets.map(\.offsetCents) } == [[137], [237]])
+        #expect(steps.allSatisfy { $0.snapped })
+        model.cancelDrag()
+    }
+
+    @Test("UE-1 — the menu and the status line NAME a sound: \"Clear Sound\", \"Clear 2 Selected\" for a mix, \"Restore Sound\"; Clear carries the sound's id; \"1 sound selected\", \"1 note and 1 sound selected\"; a notes-only selection reads as before")
+    func ue1AMenuAndStatusNameASound() {
+        let (model, sink, ids) = withSounds([1])
+        model.selectOnly(ids[1])
+        #expect(model.selectionSummary == "1 sound selected")
+        #expect(model.noteMenu(at: nil).map(\.title) == ["Clear Sound"])
+        model.toggle(ids[0])
+        #expect(model.selectionSummary == "1 note and 1 sound selected")
+        #expect(model.noteMenu(at: nil).map(\.title) == ["Clear 2 Selected"])
+        model.selectOnly(ids[1])
+        model.performNoteAction(.clear)
+        guard case .notesCleared(let cleared, true)? = sink.commits.last?.kind else {
+            Issue.record("Clear on a sound committed nothing")
+            return
+        }
+        #expect(cleared == [ids[1]])
+        // The store hands it back cleared: the way back names it.
+        var table = model.noteTable
+        table.segments[1].isCleared = true
+        model.syncStoredNoteTable(table)
+        #expect(model.noteMenu(at: nil).map(\.title) == ["Clear Sounds", "Restore Sound"])
+        #expect(model.blobs[1].isCleared && model.blobs[1].isUnpitched)
+        // Notes only: exactly the pre-UE-1 words.
+        model.selectOnly(ids[0])
+        model.toggle(ids[2])
+        #expect(model.selectionSummary == "2 notes selected")
+        #expect(model.noteMenu(at: nil).map(\.title) == ["Clear 2 Notes"])
+    }
+
+    @Test("UE-1 — Find sounds with no pitch: offered only for a STORED table with no sound; one press runs once (a second is ignored while it works) and is never a commit; a table the store would refuse is refused in words without asking it")
+    func ue1AFindSoundsOffersAndRunsOnce() {
+        let (model, _, _) = fourNotes()
+        #expect(model.storedTable == nil)
+        #expect(!model.offersFindSounds, "a seed already has its sounds")
+        // A stored table with no sound: the pre-U-A shape.
+        model.syncStoredNoteTable(model.noteTable)
+        #expect(model.offersFindSounds)
+        #expect(model.findSoundsLine == nil)
+        #expect(model.beginFindSounds())
+        #expect(model.isFindingSounds)
+        #expect(model.findSoundsLine == PitchEditorFindSounds.workingLine)
+        #expect(!model.beginFindSounds(), "a second press while the first works")
+        #expect(model.commitCount == 0, "finding sounds is the store's own undo step, never a commit")
+        model.finishFindSounds(.finished(added: 3, skipped: nil))
+        #expect(!model.isFindingSounds)
+        #expect(model.findSoundsLine == PitchEditorFindSoundsLine(
+            kind: .done,
+            text: "Added 3 sounds with no pitch, like breaths and \"s\" sounds. Undo takes them away."))
+        // Once the table holds a sound, it is no longer offered.
+        #expect(!withSounds([2]).model.offersFindSounds)
+        // Another detector generation: refused in words, before the store is asked.
+        let old = PitchEditSet(analysisVersion: PitchEditSet.currentAnalysisVersion + 1,
+                               segments: model.noteTable.segments)
+        model.syncStoredNoteTable(old)
+        #expect(model.offersFindSounds)
+        #expect(!model.beginFindSounds())
+        #expect(model.findSoundsLine?.kind == .shortfall)
+        #expect(model.findSoundsLine?.text == PitchEditorFindSounds.refusal(storedTable: old))
+        #expect(model.findSoundsLine?.text.contains("older version") == true)
+    }
+
+    @Test("UE-1 — Find sounds' words: each finder guard says nothing was added and why (three different sentences); finding nothing says so; one sound reads in the singular; a refusal is shown verbatim")
+    func ue1AFindSoundsWords() {
+        func line(_ outcome: PitchEditorFindSoundsOutcome) -> PitchEditorFindSoundsLine {
+            PitchEditorFindSounds.line(for: outcome)
+        }
+        var guards: Set<String> = []
+        for reason in PitchUnpitchedFinder.SkipReason.allCases {
+            let said = line(.finished(added: 0, skipped: reason))
+            #expect(said.kind == .shortfall)
+            #expect(said.text.hasPrefix("Nothing was added: "))
+            #expect(said.text == PitchEditorFindSounds.skipLine(reason))
+            guards.insert(said.text)
+        }
+        #expect(guards.count == PitchUnpitchedFinder.SkipReason.allCases.count)
+        #expect(PitchEditorFindSounds.skipLine(.notEnoughQuiet).contains("1 second"))
+        let none = line(.finished(added: 0, skipped: nil))
+        #expect(none.kind == .done)
+        #expect(none.text == "Found no breaths or other sounds between the notes, so nothing was added.")
+        #expect(line(.finished(added: 1, skipped: nil)).text
+                == "Added 1 sound with no pitch, like a breath or an \"s\". Undo takes it away.")
+        #expect(line(.refused("That clip is gone.")) == PitchEditorFindSoundsLine(kind: .shortfall,
+                                                                                text: "That clip is gone."))
+    }
+
+    @Test("UE-1 — Find sounds' pre-check AGREES with the store: the two tables `findUnpitchedSounds` refuses before reading the pitch are the two the editor refuses in words, and a current table passes both")
+    func ue1AFindSoundsPreCheckAgreesWithTheStore() async {
+        let segments = [NoteSegment(startSeconds: 0.5, endSeconds: 1.0, detectedHz: 220,
+                                    detectedConfidence: 0.9)]
+        let cases: [(name: String, table: PitchEditSet?)] = [
+            ("no table", nil),
+            ("another detector", PitchEditSet(analysisVersion: PitchEditSet.currentAnalysisVersion + 1,
+                                              segments: segments)),
+            ("current", PitchEditSet(segments: segments)),
+        ]
+        for (name, table) in cases {
+            // An audio clip with NO file: a store past its table checks fails
+            // next at `detectClipPitch` with `pitchDetectionRequiresAudioClip`,
+            // which is how this test sees that it got past them.
+            let clip = Clip(name: "UE-1 \(name)", startBeat: 0, lengthBeats: 8, audioFileURL: nil,
+                            pitchEdits: table)
+            let store = ProjectStore(tracks: [Track(name: "Vocals", kind: .audio, clips: [clip])])
+            var storeRefusedTheTable = false
+            do {
+                _ = try await store.findUnpitchedSounds(clipId: clip.id)
+                Issue.record("\(name): the store ran with no file")
+            } catch ProjectError.invalidClipEdit(_) {
+                storeRefusedTheTable = true
+            } catch ProjectError.pitchDetectionRequiresAudioClip(_) {
+                storeRefusedTheTable = false
+            } catch {
+                Issue.record("\(name): unexpected \(error)")
+            }
+            let editorRefuses = PitchEditorFindSounds.refusal(storedTable: table) != nil
+            #expect(editorRefuses == storeRefusedTheTable, "\(name): editor \(editorRefuses), store \(storeRefusedTheTable)")
+        }
+    }
+
+    // MARK: - UE-2 — how a sound LOOKS, and the words around it
+
+    @Test("UE-2 — the LOOK has one home and one precedence: a note draws as a note, a sound as a sound (moved or not), and a CLEARED blob draws cleared whatever it is; through the model, the stored sound is the one drawn striped")
+    func ue2TheLookPrecedence() {
+        let segment = NoteSegment(startSeconds: 0.3, endSeconds: 0.62, detectedHz: 440,
+                                  detectedConfidence: 0.59, pitchOffsetCents: 0)
+        var cleared = segment
+        cleared.isCleared = true
+        var clearedSound = soundCopy(of: segment)
+        clearedSound.isCleared = true
+        #expect(NoteBlob(segment: segment, frameCount: 0).look == .note)
+        #expect(NoteBlob(segment: soundCopy(of: segment), frameCount: 0).look == .sound)
+        #expect(NoteBlob(segment: soundCopy(of: segment, offsetCents: 300), frameCount: 0).look == .sound,
+                "a MOVED sound is still a sound (its stripes turn `signal`, like a tuned note)")
+        #expect(NoteBlob(segment: cleared, frameCount: 0).look == .cleared)
+        #expect(NoteBlob(segment: clearedSound, frameCount: 0).look == .cleared,
+                "a cleared sound plays silence: hollow, never striped")
+        // Its confidence (0.59, §1.2's median) cannot move the look.
+        for confidence in [0.0, 0.59, 1.0] {
+            let blob = NoteBlob(startSeconds: 0, endSeconds: 1, detectedHz: 220,
+                                medianConfidence: confidence, frameCount: 4, origin: .unpitched)
+            #expect(blob.look == .sound)
+        }
+        let (model, _, _) = withSounds([1])
+        #expect(model.blobs.map(\.look) == [.note, .sound, .note, .note])
+    }
+
+    @Test("UE-2 — the status line never calls a sound a note: \"Found 3 notes and 1 sound with no pitch.\" on a table with a sound, the pre-UE-2 sentence without one, and every state key unchanged")
+    func ue2StatusLineCountsSoundsApart() {
+        #expect(PitchEditorState.ready(noteCount: 72, soundCount: 32).message
+                == "Found 40 notes and 32 sounds with no pitch.")
+        #expect(PitchEditorState.ready(noteCount: 2, soundCount: 1).message
+                == "Found 1 note and 1 sound with no pitch.")
+        #expect(PitchEditorState.ready(noteCount: 3, soundCount: 3).message == "Found 3 sounds with no pitch.")
+        // CONTROL: no sound, the sentence every earlier pin knows.
+        #expect(PitchEditorState.ready(noteCount: 12).message == "Found 12 notes.")
+        #expect(PitchEditorState.ready(noteCount: 12, soundCount: 0).message == "Found 12 notes.")
+        #expect(PitchEditorState.ready(noteCount: 72, soundCount: 32).statusKey == "ready")
+        // Through the model: the stored sound is counted as a sound.
+        let (model, _, _) = withSounds([1])
+        #expect(model.state == .ready(noteCount: 4, soundCount: 1))
+        #expect(model.state.message == "Found 3 notes and 1 sound with no pitch.")
+        #expect(fourNotes().model.state.message == "Found 4 notes.")
+    }
+
+    @Test("UE-2 — the header's legend explains the stripes ONLY while a sound is drawn striped, and says nothing with no notes on screen")
+    func ue2LegendExplainsTheStripes() {
+        #expect(PitchEditorSoundLook.legend(drawsNotes: false, drawsSounds: true) == "")
+        #expect(PitchEditorSoundLook.legend(drawsNotes: true, drawsSounds: false)
+                == "Fainter notes mean we are less sure you were singing there.")
+        let both = PitchEditorSoundLook.legend(drawsNotes: true, drawsSounds: true)
+        #expect(both == PitchEditorSoundLook.notesLegend + " " + PitchEditorSoundLook.soundsLegend)
+        #expect(both.contains("Striped boxes are sounds with no pitch"))
+        // A beginner's words: no note name, no number, no jargon.
+        #expect(PitchEditorSoundLook.soundsLegend.rangeOfCharacter(from: .decimalDigits) == nil)
+        #expect(!PitchEditorSoundLook.soundsLegend.lowercased().contains("unpitched"))
+    }
+
+    @Test("UE-2 — a dragged SOUND carries the two-word TAG above itself and the whole §1.7 sentence in the palette readout; the tag is the sentence's own start, with no note name and no number")
+    func ue2OverlayTagAndPaletteSentence() {
+        let (model, _, _) = withSounds([1])
+        let rh = model.geometry.rowHeight
+        #expect(model.beginPitchDrag(on: model.blobs[1]))
+        model.updatePitchDrag(translationHeight: -3 * rh, free: false)
+        let draft = model.drag!
+        #expect(draft.overlayLabel == "No pitch")
+        #expect(draft.readout == PitchEditorReadout.unpitchedSound, "the palette keeps the whole sentence")
+        #expect(PitchEditorReadout.unpitchedSound.hasPrefix(PitchEditorReadout.unpitchedSoundTag))
+        #expect(PitchEditorReadout.unpitchedSoundTag.split(separator: " ").count <= 2)
+        #expect(!draft.overlayLabel!.contains(draft.targetNoteName))
+        #expect(draft.overlayLabel!.rangeOfCharacter(from: .decimalDigits) == nil)
+        model.cancelDrag()
+    }
+
+    @Test("UE-2 — an UNDONE merge withdraws its \"Added\" line (the table holds no sound again, the button is back); the line stays while the sounds do, and a \"none found\" answer survives a table change")
+    func ue2UndoWithdrawsTheAddedLine() {
+        let (model, _, _) = fourNotes()
+        let soundFree = model.noteTable
+        model.syncStoredNoteTable(soundFree)
+        #expect(model.beginFindSounds())
+        model.finishFindSounds(.finished(added: 2, skipped: nil))
+        let added = model.findSoundsLine
+        #expect(added?.kind == .done && added?.text.hasPrefix("Added 2 sounds") == true)
+        // The merge lands: the table now HOLDS sounds — the line stays.
+        var merged = soundFree
+        merged.segments[1] = soundCopy(of: merged.segments[1])
+        merged.segments[3] = soundCopy(of: merged.segments[3])
+        model.syncStoredNoteTable(merged)
+        #expect(!model.offersFindSounds)
+        #expect(model.findSoundsLine == added, "the sounds it names are on screen")
+        // An unrelated edit that keeps a sound: still true, still shown.
+        merged.segments[0].pitchOffsetCents = 100
+        model.syncStoredNoteTable(merged)
+        #expect(model.findSoundsLine == added)
+        // UNDO: the table is sound-free again.
+        model.syncStoredNoteTable(soundFree)
+        #expect(model.offersFindSounds)
+        #expect(model.findSoundsLine == nil, "\"Added 2 sounds\" beside the button that is back names sounds that are gone")
+        // CONTROL: "none found" is not withdrawn by a table change.
+        #expect(model.beginFindSounds())
+        model.finishFindSounds(.finished(added: 0, skipped: nil))
+        let none = model.findSoundsLine
+        #expect(none?.kind == .done)
+        var edited = soundFree
+        edited.segments[2].pitchOffsetCents = -100
+        model.syncStoredNoteTable(edited)
+        #expect(model.findSoundsLine == none)
+    }
+
+    /// The merge's shape (`ProjectStore.findUnpitchedSounds`): every note KEPT,
+    /// with its id, and one sound ADDED in each of the first two gaps, with a
+    /// new id — never a note turned into a sound.
+    private func merged(_ table: PitchEditSet) -> PitchEditSet {
+        let s = table.segments
+        let sounds = (0..<2).map { i in
+            NoteSegment(startSeconds: s[i].endSeconds, endSeconds: s[i + 1].startSeconds,
+                        detectedHz: s[i].detectedHz, detectedConfidence: 0, origin: .unpitched)
+        }
+        return table.withSegments(s + sounds)
+    }
+
+    /// A PRESET pass over the same audio: the same notes and sounds, every one
+    /// with a NEW id — what `PitchAutoCorrect.build` mints on each run (pinned
+    /// below, `ue2APresetPassMintsNewIDs`).
+    private func rebuilt(_ table: PitchEditSet) -> PitchEditSet {
+        table.withSegments(table.segments.map {
+            NoteSegment(startSeconds: $0.startSeconds, endSeconds: $0.endSeconds,
+                        detectedHz: $0.detectedHz, detectedConfidence: $0.detectedConfidence,
+                        pitchOffsetCents: $0.pitchOffsetCents, origin: $0.origin)
+        })
+    }
+
+    @Test("UE-2 edge — a table REBUILT under an \"Added\" line (a preset pass: new ids, sounds still drawn) withdraws it, whichever of the answer and the merge's write reaches the pane first; a pitch drag, a level change and a note's split keep it")
+    func ue2ARebuildWithdrawsTheAddedLine() {
+        for answerFirst in [true, false] {
+            let (model, _, _) = fourNotes()
+            let soundFree = model.noteTable
+            model.syncStoredNoteTable(soundFree)
+            #expect(model.beginFindSounds())
+            let withSounds = merged(soundFree)
+            if answerFirst {
+                model.finishFindSounds(.finished(added: 2, skipped: nil))
+                model.syncStoredNoteTable(withSounds)
+            } else {
+                model.syncStoredNoteTable(withSounds)
+                model.finishFindSounds(.finished(added: 2, skipped: nil))
+            }
+            let added = model.findSoundsLine
+            #expect(added?.kind == .done && added?.text.hasPrefix("Added 2 sounds") == true,
+                    "answerFirst \(answerFirst): \(String(describing: added))")
+            // Edits that keep every sound: the line stays.
+            var edited = withSounds
+            edited.segments[0].pitchOffsetCents = 100               // a pitch drag
+            edited.segments[1].amplitudeDb = -6                     // a level change
+            model.syncStoredNoteTable(edited)
+            let note = edited.segments[2]
+            let mid = (note.startSeconds + note.endSeconds) / 2
+            var split = edited
+            split.segments[2] = NoteSegment(startSeconds: note.startSeconds, endSeconds: mid,
+                                            detectedHz: note.detectedHz,
+                                            detectedConfidence: note.detectedConfidence)
+            split.segments.append(NoteSegment(startSeconds: mid, endSeconds: note.endSeconds,
+                                              detectedHz: note.detectedHz,
+                                              detectedConfidence: note.detectedConfidence))
+            model.syncStoredNoteTable(split.withSegments(split.segments))  // a note's split
+            #expect(model.findSoundsLine == added, "answerFirst \(answerFirst): an edit that kept the sounds withdrew it")
+            // THE REBUILD: sounds are still drawn (so the old rule, "no sound
+            // left", does not fire), but none of them is one the line named.
+            let preset = rebuilt(split)
+            #expect(preset.segments.contains { $0.origin == .unpitched })
+            model.syncStoredNoteTable(preset)
+            #expect(!model.offersFindSounds, "precondition — the offer is NOT back, so only the new rule can withdraw")
+            #expect(model.findSoundsLine == nil,
+                    "answerFirst \(answerFirst): \"Undo takes them away\" would now undo the preset")
+        }
+    }
+
+    @Test("UE-2 edge — the mechanism: a preset pass builds its table afresh, so two passes over the same audio share NO segment id (the store writes `PitchAutoCorrect.build`'s table as built, stamped)")
+    func ue2APresetPassMintsNewIDs() {
+        // `fourNotes`' audio (A3 · B3 · C4 · D4), built twice.
+        let midis: [Double] = [57, 59, 60, 62]
+        var frames: [ClipPitchFrame] = []
+        var start = 0.30
+        for (index, midi) in midis.enumerated() {
+            frames += voiced(count: 20, from: start, hz: 440 * pow(2, (midi - 69) / 12))
+            start += 20 * Self.framePeriod
+            if index < midis.count - 1 {
+                frames += unvoiced(count: 10, from: start)
+                start += 10 * Self.framePeriod
+            }
+        }
+        let pitch = detection(frames).pitch
+        let first = PitchAutoCorrect.build(from: pitch, options: PitchAutoCorrectOptions()).editSet
+        let second = PitchAutoCorrect.build(from: pitch, options: PitchAutoCorrectOptions()).editSet
+        #expect(!first.segments.isEmpty && first.segments.count == second.segments.count)
+        #expect(Set(first.segments.map(\.id)).isDisjoint(with: second.segments.map(\.id)),
+                "a preset pass kept an id — the rebuild rule would not see it")
+        // The stamp the store adds keeps them.
+        #expect(first.stampedAsAutoCorrectOutput().segments.map(\.id) == first.segments.map(\.id))
+    }
+
+    @Test("UE-2 — a finder DECLINE is remembered per clip and table: a pane rebuilt on the same table shows the same button WITH the same answer; another table, another clip, no memory, an \"Added\" line or a store refusal restore nothing")
+    func ue2FindSoundsDeclineIsRemembered() {
+        let memory = PitchEditorFindSoundsMemory()
+        let clipID = UUID()
+        let (first, _, _) = fourNotes(clipID: clipID)
+        first.findSoundsMemory = memory
+        let table = first.noteTable
+        first.syncStoredNoteTable(table)
+        #expect(first.beginFindSounds())
+        first.finishFindSounds(.finished(added: 0, skipped: .notEnoughQuiet))
+        let declined = first.findSoundsLine
+        #expect(declined == PitchEditorFindSoundsLine(kind: .shortfall,
+                                                      text: PitchEditorFindSounds.skipLine(.notEnoughQuiet)))
+
+        // THE REBUILD: a new pane model on the same clip and the same table.
+        let rebuilt = PitchEditorModel(clipID: clipID, geometry: first.geometry)
+        rebuilt.findSoundsMemory = memory
+        rebuilt.syncStoredNoteTable(table)
+        #expect(rebuilt.offersFindSounds, "the button stays: it is the only door to asking again")
+        #expect(rebuilt.findSoundsLine == declined)
+        // A pitch drag keeps every id: still the same answer.
+        var moved = table
+        moved.segments[0].pitchOffsetCents = 200
+        let afterDrag = PitchEditorModel(clipID: clipID, geometry: first.geometry)
+        afterDrag.findSoundsMemory = memory
+        afterDrag.syncStoredNoteTable(moved)
+        #expect(afterDrag.findSoundsLine == declined)
+
+        // CONTROLS — each restores NOTHING.
+        func line(clip: UUID, table: PitchEditSet, memory: PitchEditorFindSoundsMemory?) -> PitchEditorFindSoundsLine? {
+            let model = PitchEditorModel(clipID: clip, geometry: first.geometry)
+            model.findSoundsMemory = memory
+            model.syncStoredNoteTable(table)
+            return model.findSoundsLine
+        }
+        let resplit = PitchEditSet(analysisVersion: table.analysisVersion,
+                                   segments: table.segments.map {
+                                       NoteSegment(startSeconds: $0.startSeconds, endSeconds: $0.endSeconds,
+                                                   detectedHz: $0.detectedHz,
+                                                   detectedConfidence: $0.detectedConfidence)
+                                   })
+        #expect(line(clip: clipID, table: resplit, memory: memory) == nil, "new note ids: ask again")
+        #expect(line(clip: UUID(), table: table, memory: memory) == nil, "another clip")
+        #expect(line(clip: clipID, table: table, memory: nil) == nil, "no memory installed")
+
+        let other = UUID()
+        let (added, _, _) = fourNotes(clipID: other)
+        added.findSoundsMemory = memory
+        added.syncStoredNoteTable(added.noteTable)
+        #expect(added.beginFindSounds())
+        added.finishFindSounds(.finished(added: 3, skipped: nil))
+        #expect(line(clip: other, table: added.noteTable, memory: memory) == nil, "an Added line is never remembered")
+        #expect(added.beginFindSounds())
+        added.finishFindSounds(.refused("That clip is gone."))
+        #expect(line(clip: other, table: added.noteTable, memory: memory) == nil, "a store refusal is never remembered")
+    }
+
+    @Test("UE-2 — Edit ▸ Delete NAMES the selection with the note menu's nouns, count-free: \"Clear Selected Notes\" (unchanged), \"Clear Selected Sounds\", \"Clear Selected\" for a mix — on both doors, from the model's selection kinds through the bridge")
+    func ue2EditMenuClearTitleNamesTheSelection() {
+        #expect(PitchEditorNoteMenu.selectionClearTitle(kinds: [.note]) == "Clear Selected Notes")
+        #expect(PitchEditorNoteMenu.selectionClearTitle(kinds: [.sound]) == "Clear Selected Sounds")
+        #expect(PitchEditorNoteMenu.selectionClearTitle(kinds: [.note, .sound]) == "Clear Selected")
+        #expect(PitchEditorNoteMenu.selectionClearTitle(kinds: []) == "Clear Selected Notes")
+        #expect(DeleteMenuPolicy.pitchEditorClearTitle == "Clear Selected Notes")
+
+        func menu(_ kinds: Set<PitchEditorNoteMenu.Kind>) -> DeleteMenuItem {
+            DeleteMenuPolicy.editMenuItem(
+                arrangeWorkspace: true, isModalPresented: false, pianoRollHasNoteSelection: false,
+                automationPointCount: 0, pitchEditorOpen: true, pitchEditorHasNoteSelection: true,
+                pitchEditorSelectionKinds: kinds, arrangeClipCount: 1)
+        }
+        func key(_ kinds: Set<PitchEditorNoteMenu.Kind>) -> DeleteMenuItem {
+            DeleteMenuPolicy.keyPress(
+                arrangeWorkspace: true, isModalPresented: false, isTextEditingFocused: false,
+                pianoRollHasNoteSelection: false, automationPointCount: 0, pitchEditorOpen: true,
+                pitchEditorHasNoteSelection: true, pitchEditorSelectionKinds: kinds, arrangeClipCount: 1)
+        }
+        #expect(menu([.sound]).title == "Clear Selected Sounds")
+        #expect(menu([.note, .sound]).title == "Clear Selected")
+        #expect(key([.sound]).title == "Clear Selected Sounds", "the key door forwards the noun")
+        // The noun changes NOTHING else: same surface, same live state.
+        #expect(menu([.sound]).surface == menu([.note]).surface)
+        #expect(menu([.sound]).isEnabled && menu([.sound]).refusedBy == nil)
+        // A kinds report with NO selection claims nothing (the arm needs the Bool).
+        let stale = DeleteMenuPolicy.editMenuItem(
+            arrangeWorkspace: true, isModalPresented: false, pianoRollHasNoteSelection: false,
+            automationPointCount: 0, pitchEditorOpen: true, pitchEditorHasNoteSelection: false,
+            pitchEditorSelectionKinds: [.sound], arrangeClipCount: 1)
+        #expect(stale.refusedBy == .pitchEditorOpen)
+
+        // The model's kinds, and the bridge's compare-on-change report.
+        let (model, _, ids) = withSounds([1])
+        #expect(model.selectionKinds == [])
+        model.selectOnly(ids[1])
+        #expect(model.selectionKinds == [.sound])
+        model.selectOnly(ids[0])
+        #expect(model.selectionKinds == [.note])
+        model.selectAll()
+        #expect(model.selectionKinds == [.note, .sound])
+        let bridge = PitchEditorInteractionBridge()
+        bridge.report(selectionKinds: model.selectionKinds)
+        #expect(bridge.selectionKinds == [.note, .sound])
+        let token = UUID()
+        bridge.reportSurface(token: token, .empty)
+        bridge.clearSurface(from: token)
+        #expect(bridge.selectionKinds == [], "a pane that went away leaves no noun behind")
+    }
 }
 
 // MARK: - I1 UI hooks fakes
@@ -3520,5 +4949,1459 @@ private final class ScriptedAuditionDoors: PitchEditorAuditionDoors {
         readWaiterGuard?.cancel()
         readWaiterGuard = nil
         waiter.continuation.resume()
+    }
+}
+
+// MARK: - m23-ap C5a-4b — the Wobble tool, WIRED (vibrato-handle §4–§6, unpitched §4)
+//
+// The gesture itself is C5a-4a's, headless, and `PitchWobbleGestureTests`
+// covers it. These are what the WIRING can get wrong: which notes show a dot
+// and in which tool, what a press on a sound does, the one slop, one commit
+// per gesture, the undo fold through the REAL store, and the menu's way back.
+//
+// ⚠️ An EXTENSION of the existing `@MainActor` suite, never a new `@Suite`:
+// `MainActorOccupancySiteTests` bounds the suites (394, 393 used).
+@MainActor
+extension PitchEditorModelTests {
+
+    /// C-0's fixture (`PitchEditorPlayedLineTests`): A sung with a 5.5 Hz ±40 c
+    /// wobble and untouched, B flattened (`vibratoScale: 0`), C a new 6 Hz
+    /// ±40 c wobble — on a 1.25× clip, the render's contour ANSWERED, so the
+    /// basis gate is open unless `contour` says otherwise.
+    private func wobbleModel(contour: PitchRenderContour? = .detected(PitchEditorPlayedLineTests.wholeFile))
+    async -> (model: PitchEditorModel, sink: PitchEditorPlayedLineTests.Sink,
+              f: PitchEditorPlayedLineTests.Fixture) {
+        let f = PitchEditorPlayedLineTests.fixture(shift: 0)
+        let (model, sink) = await PitchEditorPlayedLineTests.loadedModel(f, contour: contour)
+        return (model, sink, f)
+    }
+
+    private func wobbleRect(_ model: PitchEditorModel, _ id: UUID) -> CGRect {
+        model.rect(for: model.blobs.first { $0.id == id }!)
+    }
+
+    /// The dot's centre on note `id` (the blob's top centre).
+    private func dotPoint(_ model: PitchEditorModel, _ id: UUID) -> CGPoint {
+        PitchWobbleGesture.dot(in: wobbleRect(model, id))
+    }
+
+    /// A point on note `id`'s body OUTSIDE the dot's 12 pt reach: the drag door.
+    private func bodyPoint(_ model: PitchEditorModel, _ id: UUID) -> CGPoint {
+        let rect = wobbleRect(model, id)
+        let point = CGPoint(x: rect.minX + 3, y: rect.midY)
+        #expect(PitchWobbleGesture.door(at: point, blobRect: rect) == .drag,
+                "the fixture's body point must be the drag door, or the test aims at the dot")
+        return point
+    }
+
+    /// ONE press, the pane's own calls in the pane's order: `dragChanged`'s
+    /// (`trackPress`, then `updateWobbleDrag` while a session exists) for the
+    /// first tick and for `end`, then `dragEnded`'s (`releasePress`, then the
+    /// release's own model call). ⌥ rides as it does there: fine per tick and
+    /// "smaller" at release.
+    @discardableResult
+    private func wobblePress(_ model: PitchEditorModel, from start: CGPoint, to end: CGPoint,
+                             option: Bool = false) -> PitchEditorReleaseAction {
+        _ = model.trackPress(start: start, location: start, modifiers: .none)
+        if model.wobble != nil { model.updateWobbleDrag(translation: .zero, fine: option) }
+        if end != start {
+            _ = model.trackPress(start: start, location: end, modifiers: .none)
+            if model.wobble != nil {
+                model.updateWobbleDrag(translation: CGSize(width: end.x - start.x, height: end.y - start.y),
+                                       fine: option)
+            }
+        }
+        let action = model.releasePress(start: start, location: end, modifiers: .none, snapBypassed: option)
+        switch action {
+        case .endWobble: _ = model.endWobbleDrag()
+        case .wobbleStep(let id, let bigger): _ = model.stepWobble(segmentID: id, bigger: bigger)
+        default: break
+        }
+        return action
+    }
+
+    /// Planted and seen red, each separately: (a) `wobbleDot` without its
+    /// `tool == .wobble` guard (a dot drawn in the Move tool); (b)
+    /// `wobbleDotHit` without `wobbleCanGrab` (a sound's dot grabs a press).
+    @Test("C5a-4b — THE DOT: none in the Move tool, one on a grabbable note in the Wobble tool (where a press grabs it), none on a SOUND, none while the basis gate refuses")
+    func wobbleDotOnlyWhereTheToolCanGrab() async {
+        let (model, _, f) = await wobbleModel()
+        let a = f.a.id
+        let dot = dotPoint(model, a)
+        let body = bodyPoint(model, a)
+        // The Move tool: no dot anywhere, and the dot's point is not a dot hit.
+        #expect(model.tool == .pointer)
+        #expect(model.wobbleDot(at: body) == nil, "a dot is drawn in the Move tool")
+        #expect(model.wobbleDot(at: dot) == nil, "a dot is drawn in the Move tool")
+        #expect(model.pressHit(at: dot) != .dot(a))
+        #expect(model.wobbleReadout(dot: nil) == nil)
+
+        // POSITIVE CONTROL — the Wobble tool on the same note draws it, where
+        // `pressHit` answers the dot, with a tip in words.
+        model.tool = .wobble
+        let shown = model.wobbleDot(at: body)
+        #expect(shown?.segmentID == a)
+        #expect(shown?.centre == dot)
+        #expect(shown?.reason == .hover)
+        #expect(shown?.tip.text.isEmpty == false)
+        #expect(model.pressHit(at: dot) == .dot(a))
+        #expect(model.pressHit(at: body) == .note(a))
+        #expect(model.wobbleReadout(dot: shown) == shown?.readout)
+
+        // A SOUND: A as a sound, same place. No dot drawn, and its dot's point
+        // is the note (whose press is refused, below), never a dot grab.
+        var table = model.noteTable
+        table.segments[0] = soundCopy(of: table.segments[0])
+        model.syncStoredNoteTable(table)
+        #expect(model.wobbleDot(at: body) == nil, "a dot is drawn on a sound")
+        #expect(model.wobbleDot(at: dot) == nil, "a dot is drawn on a sound")
+        #expect(model.pressHit(at: dot) != .dot(a), "a sound's dot grabs a press")
+        // …while the sung note beside it keeps its own (the sound removed it,
+        // not the tool).
+        #expect(model.wobbleDot(at: bodyPoint(model, f.b.id))?.segmentID == f.b.id)
+
+        // THE BASIS GATE: with no usable contour a note with no new wobble has
+        // no dot (A here, restored as a note); C — a new wobble at both scales
+        // 1, which needs no contour — keeps one.
+        let (gated, _, g) = await wobbleModel(contour: .unavailable(reason: "no model in this build"))
+        gated.tool = .wobble
+        #expect(gated.wobbleDot(at: bodyPoint(gated, g.a.id)) == nil, "a dot is offered while the gate refuses")
+        #expect(gated.pressHit(at: dotPoint(gated, g.a.id)) != .dot(g.a.id))
+        #expect(gated.wobbleDot(at: bodyPoint(gated, g.c.id))?.segmentID == g.c.id,
+                "C needs no contour, so the gate must not take its dot")
+    }
+
+    @Test("C5a-4b — a press on a SOUND in the Wobble tool does NOTHING: no session, no draft, no selection, no commit — just §1.7's sentence")
+    func wobblePressOnASoundDoesNothing() async {
+        let (model, sink, f) = await wobbleModel()
+        var table = model.noteTable
+        table.segments[0] = soundCopy(of: table.segments[0])
+        model.syncStoredNoteTable(table)
+        model.tool = .wobble
+        let body = bodyPoint(model, f.a.id)
+        // A click.
+        #expect(wobblePress(model, from: body, to: body) == .nothing)
+        #expect(model.refusal == NoteVibratoLimits.noPitchHereSentence)
+        #expect(model.wobble == nil)
+        #expect(model.selection.isEmpty, "a refused press selected the sound")
+        // A drag, well past the slop and the dead zone.
+        #expect(wobblePress(model, from: body, to: CGPoint(x: body.x + 40, y: body.y - 30)) == .nothing)
+        #expect(model.wobble == nil && model.draftPlayedLine == nil)
+        #expect(model.selection.isEmpty)
+        #expect(sink.commits.isEmpty, "a press on a sound committed")
+        // POSITIVE CONTROL — the same drag on the sung note beside it commits once.
+        let b = bodyPoint(model, f.b.id)
+        wobblePress(model, from: b, to: CGPoint(x: b.x, y: b.y - 30))
+        #expect(sink.commits.count == 1)
+    }
+
+    /// ⭐ The ONE slop (vibrato-handle §18.8): a dot press that travels exactly
+    /// 4 pt is a DRAG — and a 4 pt drag plays like the stored note, so it
+    /// commits nothing (T10) — never a step. Planted and seen red: the
+    /// tracker's release reading the dot's travel with its own `> 4`.
+    @Test("C5a-4b — 4 pt on the dot is a DRAG (endWobble, no commit); 3.99 pt is ONE step up, ⌥ at release one step down")
+    func fourPointsIsADragNotAStep() async {
+        let (model, sink, f) = await wobbleModel()
+        model.tool = .wobble
+        let a = f.a.id
+        let dot = dotPoint(model, a)
+        #expect(wobblePress(model, from: dot, to: CGPoint(x: dot.x + 4, y: dot.y)) == .endWobble(a))
+        #expect(sink.commits.isEmpty, "a 4 pt drag that changed nothing committed")
+        #expect(model.wobbleTipNoteID == nil, "a drag left the step's tip showing")
+        #expect(model.wobble == nil && model.draftPlayedLine == nil)
+
+        #expect(wobblePress(model, from: dot, to: CGPoint(x: dot.x + 3.99, y: dot.y))
+                == .wobbleStep(a, bigger: true))
+        #expect(sink.commits.count == 1)
+        guard case .noteVibrato(let id, let edit)? = sink.commits.last?.kind else {
+            Issue.record("a dot click did not commit a wobble: \(String(describing: sink.commits.last))")
+            return
+        }
+        #expect(id == a)
+        // A's own wobble, one keep step (0.10) up. The proportional coupling
+        // moves drift only DOWN with keep (`PitchWobbleGesture.driftScale`), so
+        // widening leaves it where it was.
+        #expect(close(edit.vibratoScale ?? .nan, 1.1, 1e-9))
+        #expect(close(edit.driftScale ?? .nan, 1, 1e-9))
+        #expect(model.wobbleTipNoteID == a)
+        #expect(model.wobbleDot(at: nil)?.reason == .afterClick, "the step's tip is not drawn after the click")
+
+        // ⌥ at release: one step DOWN, from the stored note (the model was not
+        // resynced, so the stored keep is still 1).
+        #expect(wobblePress(model, from: dot, to: dot, option: true) == .wobbleStep(a, bigger: false))
+        guard case .noteVibrato(_, let down)? = sink.commits.last?.kind else {
+            Issue.record("an ⌥-click did not commit a wobble")
+            return
+        }
+        #expect(close(down.vibratoScale ?? .nan, 0.9, 1e-9))
+        #expect(close(down.driftScale ?? .nan, 0.9, 1e-9), "smoothing leaves the drift where it was")
+        // A click on the BODY (not the dot) is the house click: it selects, and
+        // commits nothing.
+        let body = bodyPoint(model, a)
+        #expect(wobblePress(model, from: body, to: body) == .click(.selectOnly(a)))
+        #expect(model.selection == [a])
+        #expect(sink.commits.count == 2)
+        #expect(model.wobble == nil, "a house click left its wobble session speaking")
+    }
+
+    /// T-dot-4 through the REAL store and the app's own write
+    /// (`PitchEditorWobbleWrite`, the funnel's arm). Planted and seen red:
+    /// `PitchEditorWobbleWrite` writing a single note through the batch
+    /// setter under `structuralKey` (three clicks, three undo steps).
+    @Test("C5a-4b T-dot-4 — three dot clicks on ONE note inside 800 ms are ONE undo step (keep 1 → 1.3), undo restores as sung; another note is its own step; a click after the window is a new one")
+    func dotClicksFoldIntoOneUndoStep() async throws {
+        let f = PitchEditorPlayedLineTests.fixture(shift: 0)
+        let store = ProjectStore(tracks: [Track(name: "Vocals", kind: .audio, clips: [f.clip])])
+        let (model, _) = await PitchEditorPlayedLineTests.loadedModel(f, contour: .detected(PitchEditorPlayedLineTests.wholeFile))
+        var writes: [Bool?] = []
+        model.onCommit = { commit in
+            writes.append(try? PitchEditorWobbleWrite.commit(commit.kind, clipID: f.clip.id,
+                                                             seedIfAbsent: commit.seedIfAbsent, to: store))
+            // The pane resyncs from the clip, as `onChange(of: clip.pitchEdits)` does.
+            model.syncStoredNoteTable(store.tracks[0].clips[0].pitchEdits)
+        }
+        model.tool = .wobble
+        func stored(_ id: UUID) -> NoteSegment? {
+            store.tracks[0].clips[0].pitchEdits?.segments.first { $0.id == id }
+        }
+        let a = f.a.id
+        let before = store.undoHistory().undo.count
+        for _ in 0..<3 {
+            let dot = dotPoint(model, a)
+            wobblePress(model, from: dot, to: dot)
+        }
+        #expect(writes == [true, true, true], "a click's write did not take")
+        #expect(close(stored(a)?.vibratoScale ?? .nan, 1.3, 1e-9), "three steps did not land 1.3")
+        #expect(store.undoHistory().undo.count == before + 1,
+                "three clicks on one note inside 800 ms are \(store.undoHistory().undo.count - before) undo steps")
+
+        _ = try store.undo()
+        #expect(stored(a)?.vibratoScale == 1 && stored(a)?.driftScale == 1, "one undo did not restore as sung")
+        #expect(store.undoHistory().undo.count == before)
+        model.syncStoredNoteTable(store.tracks[0].clips[0].pitchEdits)
+
+        // POSITIVE CONTROL — the key is the NOTE: a click on A then one on C,
+        // inside the window, are two steps.
+        let dotA = dotPoint(model, a)
+        wobblePress(model, from: dotA, to: dotA)
+        let dotC = dotPoint(model, f.c.id)
+        wobblePress(model, from: dotC, to: dotC)
+        #expect(store.undoHistory().undo.count == before + 2, "clicks on two notes folded into one step")
+
+        // Past the journal's 800 ms window, the same note is a NEW step.
+        try await Task.sleep(for: .milliseconds(900))
+        let again = dotPoint(model, a)
+        wobblePress(model, from: again, to: again)
+        #expect(store.undoHistory().undo.count == before + 3, "a click after the window folded into the old step")
+        #expect(writes.allSatisfy { $0 == true })
+    }
+
+    /// §13 — THE HANDOFF READS THE NOTE WITHOUT ITS DRAWING. A C5b shape is
+    /// part of the played line; if the handoff's measurement copy kept it, the
+    /// drawing would be read as wobble, copied into the new sine, and then play
+    /// twice. Planted and seen red: `wobbleHandoffLine` without
+    /// `clearingShapeOf:` (the shaped note seeds a wider wobble than the plain
+    /// one).
+    @Test("C5a-4b §13 — a handoff on a note with a DRAWN SHAPE seeds exactly what the same note without it seeds (the copy is cleared), keeps the stored drawing, and the readout says the drawing stays on top")
+    func handoffSeedExcludesTheDrawnShape() async {
+        let f = PitchEditorPlayedLineTests.fixture(shift: 0)
+        let contour = PitchRenderContour.detected(PitchEditorPlayedLineTests.wholeFile)
+        let (plain, _) = await PitchEditorPlayedLineTests.loadedModel(f, contour: contour)
+        let (shaped, _) = await PitchEditorPlayedLineTests.loadedModel(f, contour: contour)
+        // A with a drawn 5.5 Hz, ±30 c shape IN PHASE with its sung ±40 c wobble.
+        var table = shaped.noteTable
+        var a = table.segments[0]
+        #expect(a.id == f.a.id)
+        let first = NoteShapeSamples.gridIndex(atOrAfter: a.startSeconds)
+        let last = NoteShapeSamples.gridIndex(atOrBefore: a.endSeconds)
+        a.shapeStartIndex = first
+        a.shapeTenthsOfCents = (first...last).map {
+            Int16((300 * sin(2 * .pi * 5.5 * Double($0) / NoteSegment.shapeGridHz)).rounded())
+        }
+        table.segments[0] = a
+        shaped.syncStoredNoteTable(table)
+        // CONTROL: the drawing is really in the played line, so it COULD leak.
+        #expect(shaped.playedLine.curve != plain.playedLine.curve, "the drawn shape is not in the line at all")
+        if case .wobble(_, let plainDepth, _, _) = PitchWobbleEstimate.played(f.a, line: plain.playedLine),
+           case .wobble(_, let shapedDepth, _, _) = PitchWobbleEstimate.played(a, line: shaped.playedLine) {
+            #expect(shapedDepth > plainDepth + 15,
+                    "the shaped line reads ±\(shapedDepth) c vs ±\(plainDepth) c: the drawing does not widen it, so this proves nothing")
+        } else {
+            Issue.record("a line reads no wobble, so the control cannot run")
+        }
+        // The same sideways drag on both, past the 16 pt crossing.
+        for model in [plain, shaped] {
+            model.tool = .wobble
+            let body = bodyPoint(model, f.a.id)
+            _ = model.trackPress(start: body, location: body, modifiers: .none)
+            for dx in [10.0, 30.0] {
+                _ = model.trackPress(start: body, location: CGPoint(x: body.x + dx, y: body.y), modifiers: .none)
+                model.updateWobbleDrag(translation: CGSize(width: dx, height: 0), fine: false)
+            }
+        }
+        #expect(plain.wobble?.session.phase == .handedOff && shaped.wobble?.session.phase == .handedOff,
+                "a drag did not hand off, so the seed was never read")
+        #expect(plain.wobble?.edit != nil && shaped.wobble?.edit == plain.wobble?.edit,
+                "the drawing leaked into the new wobble: \(String(describing: shaped.wobble?.edit)) vs \(String(describing: plain.wobble?.edit))")
+        #expect(shaped.wobble?.session.draft.shapeTenthsOfCents == a.shapeTenthsOfCents,
+                "the draft lost the note's drawing — only the MEASUREMENT's copy may")
+        // The words: the drawing stays on top, said on the shaped note only.
+        let suffix = PitchWobbleCopy.drawnChangesStayOnTop
+        #expect(shaped.wobble?.readout.text.hasSuffix(suffix) == true, "\(String(describing: shaped.wobble?.readout.text))")
+        #expect(plain.wobble?.readout.text.hasSuffix(suffix) == false)
+    }
+
+    /// Natural tuning D4-1 — the user's Q-U1 = (b), 2026-09-26: the first hand
+    /// edit on a vocal that `predatesNaturalTuning` upgrades the WHOLE set
+    /// (`PitchEditSet.afterHandEdit()`). A set-level change like that is
+    /// exactly what a per-note draft write cannot reproduce, so the draft runs
+    /// the commit's OWN set transform (`PitchEditorDraftEdit.draftSet`), and
+    /// this pins the result: the draft set at the last tick IS the set the
+    /// release stores, whole-struct equality, for a wobble drag and for a
+    /// pitch drag, on a legacy vocal.
+    ///
+    /// Planted and seen red, with (b) in force: `draftSet` keeping the note
+    /// fields its transform wrote but NOT the set-level upgrade
+    /// (`set.withSegments(next.set.segments)`, a draft "built any other way")
+    /// — the draft draws the old rule while the release stores the new one,
+    /// which is the D4-1 hazard. (An earlier plant, the draft upgrading while
+    /// the commit did not, went green once D4-1 made the wobble transform
+    /// upgrade too: the two then agree, which is the point.)
+    @Test("C5a-4b × D4-1 — on a LEGACY vocal, a wobble drag's draft set IS the set its release stores (whole struct), and so is a pitch drag's, and (C5b-4b) a brush stroke's")
+    func legacyDraftSetIsTheStoredSet() async throws {
+        let f = PitchEditorPlayedLineTests.fixture(shift: 0)
+        let contour = PitchRenderContour.detected(PitchEditorPlayedLineTests.wholeFile)
+        #expect(f.set.predatesNaturalTuning, "the fixture must be a LEGACY vocal, or this proves nothing about D4-1")
+
+        // A wobble drag on B: 30 pt up, the keep lever.
+        do {
+            let store = ProjectStore(tracks: [Track(name: "Vocals", kind: .audio, clips: [f.clip])])
+            let (model, _) = await PitchEditorPlayedLineTests.loadedModel(f, contour: contour)
+            model.onCommit = { commit in
+                _ = try? PitchEditorWobbleWrite.commit(commit.kind, clipID: f.clip.id,
+                                                       seedIfAbsent: commit.seedIfAbsent, to: store)
+            }
+            model.tool = .wobble
+            let start = bodyPoint(model, f.b.id)
+            let end = CGPoint(x: start.x, y: start.y - 30)
+            _ = model.trackPress(start: start, location: start, modifiers: .none)
+            _ = model.trackPress(start: start, location: end, modifiers: .none)
+            model.updateWobbleDrag(translation: CGSize(width: 0, height: -30), fine: false)
+            let draft = try #require(model.draftEditSet, "the wobble drag built no draft set")
+            #expect(model.releasePress(start: start, location: end, modifiers: .none) == .endWobble(f.b.id))
+            _ = model.endWobbleDrag()
+            let stored = try #require(store.tracks[0].clips[0].pitchEdits)
+            #expect(stored != f.set, "the wobble drag stored nothing, so the equality below proves nothing")
+            #expect(draft == stored, "the wobble draft set is not the set its release stored")
+            // With (b) in force the release upgrades the whole vocal — the
+            // set-level change the equality above must have carried.
+            if PitchEditSet.handEditUpgradesLegacyVocal {
+                #expect(!stored.predatesNaturalTuning, "(b) is on, and the wobble release did not upgrade the vocal")
+            }
+        }
+
+        // A pitch drag on A: 40 pt up, the Move tool, the pane's calls in order.
+        do {
+            let store = ProjectStore(tracks: [Track(name: "Vocals", kind: .audio, clips: [f.clip])])
+            let (model, _) = await PitchEditorPlayedLineTests.loadedModel(f, contour: contour)
+            model.onCommit = { commit in
+                if case .notePitch(let id, let cents) = commit.kind {
+                    _ = try? store.setClipNotePitchOffset(clipId: f.clip.id, segmentId: id,
+                                                          offsetCents: cents, seedIfAbsent: commit.seedIfAbsent)
+                }
+            }
+            let start = bodyPoint(model, f.a.id)
+            let end = CGPoint(x: start.x, y: start.y - 40)
+            _ = model.trackPress(start: start, location: start, modifiers: .none)
+            let tick = model.trackPress(start: start, location: end, modifiers: .none)
+            if tick.didPromote, let blob = model.blobs.first(where: { $0.id == f.a.id }) {
+                _ = model.beginSelectionPitchDrag(on: blob)
+            }
+            model.updatePitchDrag(translationHeight: -40, free: false)
+            let draft = try #require(model.draftEditSet, "the pitch drag built no draft set")
+            #expect(model.releasePress(start: start, location: end, modifiers: .none) == .endNoteDrag(f.a.id))
+            _ = model.endPitchDrag()
+            let stored = try #require(store.tracks[0].clips[0].pitchEdits)
+            #expect(stored != f.set, "the pitch drag stored nothing, so the equality below proves nothing")
+            #expect(draft == stored, "the pitch draft set is not the set its release stored")
+            if PitchEditSet.handEditUpgradesLegacyVocal {
+                #expect(!stored.predatesNaturalTuning, "(b) is on, and the pitch release did not upgrade the vocal")
+            }
+        }
+
+        // C5b-4b × D4-1 #1 — a brush STROKE across A and B, the pane's calls
+        // in order, through the app's own write (`PitchEditorShapeWrite`). The
+        // draft's `.shape` case runs `applyingNoteShapes`, the transform the
+        // store's `setClipNoteShapes` runs, `afterHandEdit(from:)` included (it
+        // updates the vocal only when the write changed a note). Planted and
+        // seen red (W7-C5b4b p1): that case writing each note with
+        // `NoteShapeSamples.applied(to:)` alone (no set transform, so no
+        // whole-vocal upgrade in the draft).
+        do {
+            let store = ProjectStore(tracks: [Track(name: "Vocals", kind: .audio, clips: [f.clip])])
+            let (model, _) = await PitchEditorPlayedLineTests.loadedModel(f, contour: contour)
+            model.onCommit = { commit in
+                _ = try? PitchEditorShapeWrite.commit(commit.kind, clipID: f.clip.id,
+                                                      seedIfAbsent: commit.seedIfAbsent, to: store)
+            }
+            let (start, path) = acrossAB(model, f)
+            _ = model.trackPress(start: start, location: start, modifiers: .command)
+            for point in path { _ = model.trackPress(start: start, location: point, modifiers: .command) }
+            let draft = try #require(model.draftEditSet, "the stroke built no draft set")
+            #expect(model.releasePress(start: start, location: path.last!, modifiers: .command)
+                    == .endBrush(f.a.id))
+            _ = model.endBrush()
+            let stored = try #require(store.tracks[0].clips[0].pitchEdits)
+            #expect(stored != f.set, "the stroke stored nothing, so the equality below proves nothing")
+            #expect(draft == stored, "the stroke's draft set is not the set its release stored")
+            if PitchEditSet.handEditUpgradesLegacyVocal {
+                #expect(!stored.predatesNaturalTuning, "(b) is on, and the stroke's release did not upgrade the vocal")
+            }
+        }
+    }
+
+    @Test("C5a-4b — \"Back to how you sang it\": offered only on a note whose wobble changed, it puts that note back as sung in ONE commit, and then is not offered")
+    func backToHowYouSangIt() async throws {
+        let f = PitchEditorPlayedLineTests.fixture(shift: 0)
+        let store = ProjectStore(tracks: [Track(name: "Vocals", kind: .audio, clips: [f.clip])])
+        let (model, sink) = await PitchEditorPlayedLineTests.loadedModel(f, contour: .detected(PitchEditorPlayedLineTests.wholeFile))
+        model.onCommit = { commit in
+            sink.commits.append(commit)
+            _ = try? PitchEditorWobbleWrite.commit(commit.kind, clipID: f.clip.id,
+                                                   seedIfAbsent: commit.seedIfAbsent, to: store)
+            model.syncStoredNoteTable(store.tracks[0].clips[0].pitchEdits)
+        }
+        let a = f.a.id
+        let body = bodyPoint(model, a)
+        let title = PitchEditorNoteMenu.resetWobbleTitle
+        #expect(title == "Back to how you sang it")
+        // A is as sung: no row.
+        #expect(!model.noteMenu(at: body).contains { $0.action == .resetWobble })
+        // B IS changed (flattened) in the fixture: the row is offered there.
+        #expect(model.noteMenu(at: bodyPoint(model, f.b.id)).contains { $0.title == title })
+        // Change A's wobble with one dot click, then ask the menu on A.
+        model.tool = .wobble
+        let dot = dotPoint(model, a)
+        wobblePress(model, from: dot, to: dot)
+        #expect(model.noteMenu(at: body).contains { $0.action == .resetWobble && $0.isEnabled })
+        model.selectForContextMenu(at: body)
+        let commits = sink.commits.count
+        let reset = model.performNoteAction(.resetWobble)
+        #expect(reset?.kind == .noteVibratoReset(segmentIDs: [a]))
+        #expect(sink.commits.count == commits + 1)
+        let stored = store.tracks[0].clips[0].pitchEdits?.segments.first { $0.id == a }
+        #expect(stored.map(NoteVibratoEdit.init(storedIn:)) == .asSung)
+        #expect(!model.noteMenu(at: body).contains { $0.action == .resetWobble },
+                "the row is offered on a note that is already as sung")
+    }
+}
+
+// MARK: - m23-ap C5b-4b — the freehand brush, wired (timing-and-freehand §5.5–§5.6)
+//
+// The stroke's MATH is C5b-4a's, headless, and `PitchShapeBrushTests` covers
+// it (max weight, the swept path, the pre-stroke line, the gaps). These are
+// what the WIRING can get wrong: which press is a stroke (⌘, a note, past the
+// slop), one commit per stroke through the REAL store (one undo step), the
+// draft being the stored set on a legacy vocal, the two refusals said in
+// words, Escape, the band, the help and the cursor promising exactly what the
+// press does, the menu's way back, and the draft window asking DAWCore.
+//
+// ⚠️ An EXTENSION of the existing `@MainActor` suite, never a new `@Suite`:
+// `MainActorOccupancySiteTests` bounds the suites (394, 393 used).
+@MainActor
+extension PitchEditorModelTests {
+
+    /// C-0's fixture (`PitchEditorPlayedLineTests`: A 0–0.8 s at A3, B
+    /// 0.896–1.856 s at B3, C 2.016–2.976 s at G3, holes between; a LEGACY set)
+    /// with the render's contour answered unless `contour` says otherwise,
+    /// wired to a REAL store through the app's own write
+    /// (`PitchEditorShapeWrite`, the funnel's arm) and resynced from the clip
+    /// the way the pane's `onChange(of: clip.pitchEdits)` does. `writes` holds
+    /// each write's read-back verdict.
+    @MainActor private final class BrushRig {
+        let f: PitchEditorPlayedLineTests.Fixture
+        let store: ProjectStore
+        let model: PitchEditorModel
+        var commits: [PitchEditorCommit] = []
+        var writes: [Bool?] = []
+        var refusals: [String] = []
+
+        init(f: PitchEditorPlayedLineTests.Fixture, store: ProjectStore, model: PitchEditorModel) {
+            self.f = f
+            self.store = store
+            self.model = model
+        }
+
+        var stored: PitchEditSet? { store.tracks[0].clips[0].pitchEdits }
+        func storedNote(_ id: UUID) -> NoteSegment? { stored?.segments.first { $0.id == id } }
+    }
+
+    /// `table` edits the fixture's own table (its ids are minted per call, so
+    /// a table built from ANOTHER fixture call would name notes this one does
+    /// not draw); A, B and C are re-read from the edited table.
+    private func brushRig(table: ((PitchEditSet) -> PitchEditSet)? = nil,
+                          contour: PitchRenderContour? = .detected(PitchEditorPlayedLineTests.wholeFile))
+    async -> BrushRig {
+        var f = PitchEditorPlayedLineTests.fixture(shift: 0)
+        if let table {
+            var clip = f.clip
+            let edited = table(f.set)
+            clip.pitchEdits = edited
+            f = PitchEditorPlayedLineTests.Fixture(a: edited.segments[0], b: edited.segments[1],
+                                                   c: edited.segments[2], clip: clip)
+        }
+        let store = ProjectStore(tracks: [Track(name: "Vocals", kind: .audio, clips: [f.clip])])
+        let (model, _) = await PitchEditorPlayedLineTests.loadedModel(f, contour: contour)
+        let rig = BrushRig(f: f, store: store, model: model)
+        model.onCommit = { [unowned rig] commit in
+            rig.commits.append(commit)
+            do {
+                rig.writes.append(try PitchEditorShapeWrite.commit(commit.kind, clipID: f.clip.id,
+                                                                   seedIfAbsent: commit.seedIfAbsent,
+                                                                   to: store))
+            } catch {
+                rig.refusals.append("\(error)")
+            }
+            model.syncStoredNoteTable(store.tracks[0].clips[0].pitchEdits)
+        }
+        return rig
+    }
+
+    /// Where note `id`'s line is drawn at SOURCE second `seconds`, pulled
+    /// `cents` up: content space, through the geometry's one mapping.
+    private func linePoint(_ model: PitchEditorModel, _ id: UUID, at seconds: Double,
+                           cents: Double = 0) -> CGPoint {
+        let blob = model.blobs.first { $0.id == id }!
+        return CGPoint(x: model.geometry.x(forSourceSecond: seconds),
+                       y: model.geometry.y(forMidi: model.geometry.drawnMidi(for: blob) + cents / 100))
+    }
+
+    /// ONE press, the pane's own calls in the pane's order: `dragChanged`'s
+    /// `trackPress` for the first tick and each point of `path`, then
+    /// `dragEnded`'s `releasePress` and the release's own model call (the
+    /// brush's `endBrush`; `cancelDrag` for a click, a band or nothing).
+    @discardableResult
+    private func brushPress(_ model: PitchEditorModel, from start: CGPoint, through path: [CGPoint],
+                            chord: ArrangeClickModifiers = .command) -> PitchEditorReleaseAction {
+        _ = model.trackPress(start: start, location: start, modifiers: chord)
+        for point in path { _ = model.trackPress(start: start, location: point, modifiers: chord) }
+        let action = model.releasePress(start: start, location: path.last ?? start, modifiers: chord)
+        switch action {
+        case .endBrush: _ = model.endBrush()
+        case .click, .endBand, .nothing: model.cancelDrag()
+        default: break
+        }
+        return action
+    }
+
+    /// A stroke from A's middle, pulled 60 c up, across the hole into B's
+    /// middle: it writes into BOTH notes.
+    private func acrossAB(_ model: PitchEditorModel, _ f: PitchEditorPlayedLineTests.Fixture)
+    -> (start: CGPoint, path: [CGPoint]) {
+        let start = linePoint(model, f.a.id, at: 0.4)
+        let aHigh = linePoint(model, f.a.id, at: 0.6, cents: 60)
+        let bMid = linePoint(model, f.b.id, at: 1.3, cents: -60)
+        return (start, [CGPoint(x: start.x + 1, y: start.y - 1), aHigh, bMid])
+    }
+
+    /// ⭐ THE CADENCE AND THE ONE UNDO STEP, through the real store. Planted
+    /// and seen red, each (W7-C5b4b p2, p6): `PitchEditorShapeWrite` writing
+    /// each note of a stroke in its OWN store call (two undo steps for one
+    /// stroke; the model's commit count stays 1, so only the journal can see
+    /// it); and `advanceBrush` emitting a commit on every tick that changed
+    /// the draft (the design's own C5b-4 plant, "a commit per tick").
+    @Test("C5b-4b — ⭐ a ⌘-drag across two notes commits NOTHING per tick, then ONE .noteShapes at release: ONE \"Draw Pitch\" undo step through the real store; the draft IS the stored set; one undo restores the table")
+    func aStrokeIsOneCommitAndOneUndoStep() async throws {
+        let rig = await brushRig()
+        let model = rig.model, f = rig.f
+        #expect(f.set.predatesNaturalTuning, "the fixture must be a LEGACY vocal (D4-1's first-edit upgrade)")
+        let (start, path) = acrossAB(model, f)
+        let before = rig.store.undoHistory().undo.count
+
+        // First tick: routed, nothing begun (inside the slop a press is a click).
+        #expect(model.trackPress(start: start, location: start, modifiers: .command).kind == .brush(f.a.id))
+        #expect(model.brush == nil && model.draftPlayedLine == nil)
+        // A tick still inside the slop: still nothing.
+        _ = model.trackPress(start: start, location: path[0], modifiers: .command)
+        #expect(model.brush == nil, "a stroke began inside the slop")
+        // Past it: the stroke is live, the line drafts, and NOTHING is written.
+        for point in path.dropFirst() {
+            _ = model.trackPress(start: start, location: point, modifiers: .command)
+            #expect(rig.commits.isEmpty, "a stroke tick committed")
+        }
+        let brush = try #require(model.brush, "the promoted ⌘ press did not start a stroke")
+        #expect(brush.pressedNoteID == f.a.id)
+        #expect(Set(brush.shapes.keys) == [f.a.id, f.b.id], "the stroke did not write into both notes")
+        #expect(brush.readout.hasPrefix("Drawing · moves the line by up to "))
+        #expect(model.draftPlayedLine != nil, "the stroke drew no draft line")
+        let draft = try #require(model.draftEditSet, "the stroke built no draft set")
+        #expect(model.escapeGestureLive)
+        #expect(model.selection.isEmpty, "a stroke selected notes")
+
+        // The release: ONE commit, of exactly what the last tick drew.
+        let action = model.releasePress(start: start, location: path.last!, modifiers: .command)
+        #expect(action == .endBrush(f.a.id))
+        let commit = model.endBrush()
+        #expect(commit?.kind == .noteShapes(shapes: brush.shapes))
+        #expect(rig.commits.count == 1)
+        #expect(rig.writes == [true], "the write did not take (\(rig.refusals))")
+        #expect(model.brush == nil && model.draftPlayedLine == nil && model.draftEditSet == nil)
+
+        // ONE undo step, the store's own label.
+        #expect(rig.store.undoHistory().undo.count == before + 1,
+                "one stroke is \(rig.store.undoHistory().undo.count - before) undo steps")
+        #expect(rig.store.undoHistory().undo.first == "Draw Pitch")
+        // ⭐ The draft set IS the stored set — whole struct, the legacy
+        // upgrade included (D4-1 (b): the first hand edit updates the vocal).
+        let stored = try #require(rig.stored)
+        #expect(stored != f.set, "the stroke stored nothing, so the equality below proves nothing")
+        #expect(draft == stored, "the stroke's draft set is not the set its release stored")
+        for (id, samples) in brush.shapes {
+            #expect(rig.storedNote(id).map(NoteShapeSamples.init(storedIn:)) == samples,
+                    "note \(id) stores a different drawing from the one the stroke drew")
+        }
+        if PitchEditSet.handEditUpgradesLegacyVocal {
+            #expect(!stored.predatesNaturalTuning, "(b) is on, and the stroke's release did not upgrade the vocal")
+        }
+        // One undo puts the whole table back.
+        _ = try rig.store.undo()
+        #expect(rig.stored == f.set, "one undo did not restore the table the stroke started from")
+    }
+
+    @Test("C5b-4b — a ⌘-click that stays inside the slop is the house click: it toggles the note and draws nothing")
+    func aCommandClickStillToggles() async {
+        let rig = await brushRig()
+        let model = rig.model, f = rig.f
+        let start = linePoint(model, f.a.id, at: 0.4)
+        let action = brushPress(model, from: start, through: [CGPoint(x: start.x + 3, y: start.y)])
+        #expect(action == .click(.toggle(f.a.id)))
+        #expect(model.selection == [f.a.id])
+        #expect(model.brush == nil && model.draftPlayedLine == nil)
+        #expect(rig.commits.isEmpty && model.refusal == nil)
+        // POSITIVE CONTROL — the same press WITHOUT ⌘, travelled, is a pitch
+        // drag's route (the chord, not the travel, is what made it a stroke).
+        #expect(model.trackPress(start: start, location: start, modifiers: .none).kind == .noteDrag(f.a.id))
+        model.cancelDrag()
+    }
+
+    @Test("C5b-4b — Escape mid-stroke drops it: nothing committed, the draft gone, and the rest of the gesture does nothing")
+    func escapeCancelsAStroke() async {
+        let rig = await brushRig()
+        let model = rig.model, f = rig.f
+        let (start, path) = acrossAB(model, f)
+        _ = model.trackPress(start: start, location: start, modifiers: .command)
+        for point in path { _ = model.trackPress(start: start, location: point, modifiers: .command) }
+        #expect(model.brush != nil && model.escapeGestureLive)
+        #expect(model.handleEscapeKey(appDecision: { live, _ in live ? .cancelGesture : .pass }))
+        #expect(model.brush == nil && model.draftPlayedLine == nil && model.draftEditSet == nil)
+        #expect(!model.escapeGestureLive)
+        // The pointer is still down: its next tick and its release are inert.
+        _ = model.trackPress(start: start, location: CGPoint(x: path.last!.x + 20, y: path.last!.y),
+                             modifiers: .command)
+        #expect(model.brush == nil, "a cancelled stroke restarted on the next tick")
+        #expect(model.releasePress(start: start, location: path.last!, modifiers: .command) == .nothing)
+        #expect(rig.commits.isEmpty && rig.store.undoHistory().undo.isEmpty)
+    }
+
+    /// Planted and seen red: `beginBrush` ignoring a refusal (no sentence, the
+    /// press not abandoned) — the release becomes `.endBrush` and the line
+    /// below reads nil.
+    @Test("C5b-4b — a stroke that starts on a SOUND is refused in words and abandoned: no draft, no selection, no commit; the band says so first")
+    func aStrokeOnASoundIsRefused() async {
+        let rig = await brushRig(table: { set in
+            var table = set
+            table.segments[0] = self.soundCopy(of: table.segments[0])
+            return table
+        })
+        let model = rig.model, f = rig.f
+        let (start, path) = acrossAB(model, f)
+        // Before the press: the band is dim and says why; the cursor is plain.
+        let band = model.brushBand(at: start, commandHeld: true)
+        #expect(band?.refusal == PitchShapeBrush.soundCaption)
+        #expect(model.paletteHelp(commandHeld: true, band: band) == PitchShapeBrush.soundCaption)
+        #expect(model.surfaceCursor(at: start, modifiers: [.command]) == nil)
+        // The press.
+        #expect(brushPress(model, from: start, through: path) == .nothing)
+        #expect(model.refusal == PitchShapeBrush.soundCaption)
+        #expect(model.brush == nil && model.draftPlayedLine == nil)
+        #expect(model.selection.isEmpty, "a refused stroke selected the sound")
+        #expect(rig.commits.isEmpty)
+        // POSITIVE CONTROL — the same stroke from B (a sung note) draws.
+        let fromB = linePoint(model, f.b.id, at: 1.3)
+        #expect(brushPress(model, from: fromB,
+                           through: [linePoint(model, f.b.id, at: 1.5, cents: 50)]) == .endBrush(f.b.id))
+        #expect(rig.writes == [true], "the stroke from a sung note did not draw (\(rig.refusals))")
+        #expect(model.refusal == nil, "a stroke that drew kept the old refusal on screen")
+    }
+
+    @Test("C5b-4b — while the line is an ESTIMATE the brush is refused with the design's caption; with the render's line it draws")
+    func theBrushWaitsForTheRendersLine() async {
+        let rig = await brushRig(contour: nil)
+        let model = rig.model, f = rig.f
+        #expect(model.playedLine.basis != .render, "the fixture must draw an ESTIMATE without the contour")
+        let (start, path) = acrossAB(model, f)
+        let band = model.brushBand(at: start, commandHeld: true)
+        #expect(band?.refusal == PitchShapeBrush.estimateCaption)
+        #expect(model.paletteHelp(commandHeld: true, band: band) == PitchShapeBrush.estimateCaption)
+        #expect(brushPress(model, from: start, through: path) == .nothing)
+        #expect(model.refusal == PitchShapeBrush.estimateCaption)
+        #expect(rig.commits.isEmpty)
+        // POSITIVE CONTROL — the render's line answers, and the same stroke draws.
+        await model.loadRenderContour(using: PitchEditorPlayedLineTests.seam(.detected(PitchEditorPlayedLineTests.wholeFile)))
+        #expect(model.playedLine.basis == .render)
+        #expect(brushPress(model, from: start, through: path) == .endBrush(f.a.id))
+        #expect(rig.writes == [true])
+    }
+
+    @Test("C5b-4b — the band, the help and the cursor promise exactly what a ⌘-press does: over a note in Move or Wobble, never over empty surface, never with the knife, never without ⌘")
+    func theBandHelpAndCursorMatchThePress() async {
+        let rig = await brushRig()
+        let model = rig.model, f = rig.f
+        let onA = linePoint(model, f.a.id, at: 0.4)
+        let empty = CGPoint(x: onA.x, y: model.geometry.y(forMidi: model.geometry.drawnMidi(
+            for: model.blobs.first { $0.id == f.a.id }!) + 6))
+        #expect(model.pressHit(at: empty) == .empty, "the empty point must be empty")
+        // Move tool, ⌘ over A: the band — 2R wide, centred, full height, live.
+        let band = model.brushBand(at: onA, commandHeld: true)
+        #expect(band?.rect == CGRect(x: onA.x - 12, y: 0, width: 24, height: model.geometry.contentHeight))
+        #expect(band?.refusal == nil && band?.isStroking == false)
+        #expect(model.paletteHelp(commandHeld: true, band: band) == PitchShapeBrush.help)
+        #expect(model.surfaceCursor(at: onA, modifiers: [.command]) == .crosshair)
+        // Without ⌘: nothing, and the tool's own help.
+        #expect(model.brushBand(at: onA, commandHeld: false) == nil)
+        #expect(model.paletteHelp(commandHeld: false, band: nil) == PitchEditorTool.pointer.help)
+        #expect(model.surfaceCursor(at: onA, modifiers: []) == nil)
+        // Over empty surface ⌘ places the playhead: no band.
+        #expect(model.brushBand(at: empty, commandHeld: true) == nil)
+        #expect(model.surfaceCursor(at: empty, modifiers: [.command]) == .verticalBar)
+        // The knife never draws: no band, the knife's help, the knife's cursor.
+        model.tool = .scissors
+        #expect(model.brushBand(at: onA, commandHeld: true) == nil)
+        #expect(model.paletteHelp(commandHeld: true, band: nil) == PitchEditorTool.scissors.help)
+        #expect(model.surfaceCursor(at: onA, modifiers: [.command]) == .crosshair,
+                "the knife keeps its own crosshair")
+        // The Wobble tool: ⌘ draws there too, and its help says so.
+        model.tool = .wobble
+        #expect(model.brushBand(at: onA, commandHeld: true)?.refusal == nil)
+        #expect(PitchEditorTool.wobble.help.contains("Hold ⌘ to draw instead."))
+        #expect(PitchEditorTool.pointer.help.contains("Hold ⌘ to draw its line"))
+        // While a stroke is live the band follows IT, with ⌘ up or down.
+        model.tool = .pointer
+        let (start, path) = acrossAB(model, f)
+        _ = model.trackPress(start: start, location: start, modifiers: .command)
+        for point in path { _ = model.trackPress(start: start, location: point, modifiers: .command) }
+        let following = model.brushBand(at: nil, commandHeld: false)
+        #expect(following?.isStroking == true && following?.point == path.last)
+        #expect(model.paletteHelp(commandHeld: false, band: following) == PitchShapeBrush.help)
+        model.cancelDrag()
+    }
+
+    @Test("C5b-4b — in the Wobble tool a ⌘-press on the note or its dot is the brush: no wobble session, no dot while drawing, one shape commit")
+    func theWobbleToolDrawsWithCommand() async {
+        let rig = await brushRig()
+        let model = rig.model, f = rig.f
+        model.tool = .wobble
+        let dot = dotPoint(model, f.a.id)
+        _ = model.trackPress(start: dot, location: dot, modifiers: .command)
+        #expect(model.wobble == nil, "a ⌘-press began a wobble session")
+        let end = CGPoint(x: dot.x + 8, y: dot.y - 12)
+        _ = model.trackPress(start: dot, location: end, modifiers: .command)
+        #expect(model.brush != nil)
+        #expect(model.wobbleDot(at: dot) == nil, "the dot is drawn during a stroke")
+        #expect(model.releasePress(start: dot, location: end, modifiers: .command) == .endBrush(f.a.id))
+        _ = model.endBrush()
+        #expect(rig.commits.count == 1)
+        guard case .noteShapes? = rig.commits.first?.kind else {
+            Issue.record("the Wobble tool's ⌘-drag committed \(String(describing: rig.commits.first?.kind))")
+            return
+        }
+        #expect(rig.writes == [true])
+    }
+
+    @Test("C5b-4b — \"Reset drawn shape\": offered only on a note that carries a drawing; ONE commit of clears, ONE \"Reset Drawn Shape\" undo step; then not offered")
+    func resetDrawnShape() async throws {
+        let rig = await brushRig()
+        let model = rig.model, f = rig.f
+        let onA = linePoint(model, f.a.id, at: 0.4)
+        #expect(!model.noteMenu(at: onA).contains { $0.action == .resetShape }, "offered on an undrawn note")
+        let (start, path) = acrossAB(model, f)
+        brushPress(model, from: start, through: path)
+        #expect(rig.writes == [true])
+        #expect(rig.storedNote(f.a.id)?.hasShape == true && rig.storedNote(f.b.id)?.hasShape == true)
+        let item = model.noteMenu(at: onA).first { $0.action == .resetShape }
+        #expect(item?.title == "Reset drawn shape" && item?.isEnabled == true)
+        model.selectForContextMenu(at: onA)
+        let before = rig.store.undoHistory().undo.count
+        let reset = model.performNoteAction(.resetShape)
+        #expect(reset?.kind == .noteShapes(shapes: [f.a.id: .clear]), "the reset named more (or less) than A")
+        #expect(rig.writes == [true, true])
+        #expect(rig.store.undoHistory().undo.count == before + 1)
+        #expect(rig.store.undoHistory().undo.first == "Reset Drawn Shape")
+        #expect(rig.storedNote(f.a.id)?.hasShape == false, "A still carries its drawing")
+        #expect(rig.storedNote(f.b.id)?.hasShape == true, "the reset reached B, which was not selected")
+        #expect(!model.noteMenu(at: onA).contains { $0.action == .resetShape })
+    }
+
+    /// ⭐ D4-1 #2 (orchestrator's scope addition to C5b-4b): the draft window
+    /// ASKS DAWCore (`PitchEditSet.pitchDragReach`) instead of restating the
+    /// reach, and its memo cannot outlive the table it was read from. ONE
+    /// model throughout, so the memo is really exercised: a first move on the
+    /// legacy vocal (whole vocal), a stroke (both notes asked, merged), its
+    /// commit through the real store (the vocal upgraded, the table and the
+    /// line rebuilt), then a second drag (the note's own reach).
+    ///
+    /// Planted and seen red, each: (1) `draftSpan` back to the note widened by
+    /// half the retune (the first leg's window stops short of C); (2) the memo
+    /// never emptied (`draftReachCache` not keyed on `playedLineRevision`): the
+    /// second drag reads the FIRST drag's whole-vocal reach from a table that
+    /// no longer exists.
+    @Test("D4-1 #2 — the draft window is DAWCore's reach: a FIRST move on a legacy vocal owns the WHOLE vocal; after the upgrade lands, a second drag owns only its note's reach (the memo does not outlive its table)")
+    func theDraftWindowAsksDAWCore() async throws {
+        let rig = await brushRig()
+        let model = rig.model, f = rig.f
+        #expect(f.set.predatesNaturalTuning)
+        let whole = try #require(f.set.pitchDragReach(ofSegmentAt: 0))
+        #expect(whole.lowerBound <= f.a.startSeconds && whole.upperBound >= f.c.endSeconds,
+                "DAWCore's first-edit reach on a legacy vocal is not the whole vocal (\(whole))")
+
+        // 1. A first MOVE (a pitch drag) on the legacy vocal: the whole vocal.
+        let blob = try #require(model.blobs.first { $0.id == f.a.id })
+        #expect(model.beginPitchDrag(on: blob))
+        model.updatePitchDrag(translationHeight: -30, free: false)
+        #expect(model.draftSpan == whole, "a first move's window is not DAWCore's whole-vocal reach")
+        #expect(model.draftSpans == [whole])
+        model.cancelDrag()
+
+        // 2. A stroke across A and B asks the same rule for BOTH notes, merged.
+        let (start, path) = acrossAB(model, f)
+        _ = model.trackPress(start: start, location: start, modifiers: .command)
+        for point in path { _ = model.trackPress(start: start, location: point, modifiers: .command) }
+        #expect(model.draftSpans == [whole], "a stroke's windows are not DAWCore's reach, merged")
+        #expect(model.releasePress(start: start, location: path.last!, modifiers: .command) == .endBrush(f.a.id))
+        _ = model.endBrush()
+        #expect(rig.writes == [true])
+        let upgraded = try #require(rig.stored)
+        #expect(!upgraded.predatesNaturalTuning, "the stroke's release did not upgrade the vocal")
+
+        // 3. A SECOND drag on the SAME model, after the upgrade was read back:
+        // the note's own reach, from the table as it is NOW.
+        let own = try #require(upgraded.pitchDragReach(ofSegmentAt: 0))
+        #expect(own != whole && own.upperBound < f.c.startSeconds,
+                "the fixture must make the note's own reach narrower than the vocal (\(own))")
+        let again = try #require(model.blobs.first { $0.id == f.a.id })
+        #expect(model.beginPitchDrag(on: again))
+        model.updatePitchDrag(translationHeight: -30, free: false)
+        #expect(model.draftSpan == own,
+                "the second drag's window is \(String(describing: model.draftSpan)), not the note's own reach \(own) — a memo outlived its table")
+        model.cancelDrag()
+    }
+}
+
+// MARK: - W7-NTU U1 — the header group "Sound like the singer" (natural tuning X9)
+//
+// The gestures (ONE commit per gesture, never per tick; on a vocal tuned before
+// the update every press is THE update, never a voice-size write) and each
+// write through a REAL store via the app funnel's own arm
+// (`PitchEditorSingerWrite`), read back from the store, counted in the undo
+// journal, and undone. The faces, words and metrics are pinned headless in
+// `PitchEditorSingerGroupTests` (nonisolated).
+//
+// ⚠️ An EXTENSION of the existing `@MainActor` suite, never a new `@Suite`:
+// `MainActorOccupancySiteTests` bounds the suites (394, 393 used).
+@MainActor
+extension PitchEditorModelTests {
+
+    /// C-0's three-note fixture on a clip that is NOT stretched or transposed
+    /// (so the consonant row is not paused), with `table(f.set)` stored — nil
+    /// for none, so the editor's seed is the table — wired to a real store
+    /// through `PitchEditorSingerWrite` and resynced from the clip, as the
+    /// pane's `onChange(of: clip.pitchEdits)` does.
+    @MainActor private final class SingerRig {
+        let clip: Clip
+        let store: ProjectStore
+        let model: PitchEditorModel
+        var commits: [PitchEditorCommit] = []
+        var writes: [Bool?] = []
+        var refusals: [String] = []
+
+        init(clip: Clip, store: ProjectStore, model: PitchEditorModel) {
+            self.clip = clip
+            self.store = store
+            self.model = model
+        }
+
+        var stored: PitchEditSet? { store.tracks[0].clips[0].pitchEdits }
+        var undoDepth: Int { store.undoHistory().undo.count }
+        var undoTop: String? { store.undoHistory().undo.first }
+        var group: PitchEditorSingerGroup {
+            model.singerGroup(stretchRatio: clip.stretchRatio, clipSemitones: clip.pitchShiftSemitones)
+        }
+    }
+
+    private func singerRig(_ table: ((PitchEditSet) -> PitchEditSet?)?) async -> SingerRig {
+        let f = PitchEditorPlayedLineTests.fixture(shift: 0)
+        var clip = f.clip
+        clip.stretchRatio = 1
+        if let table { clip.pitchEdits = table(f.set) }
+        let fixture = PitchEditorPlayedLineTests.Fixture(a: f.a, b: f.b, c: f.c, clip: clip)
+        let store = ProjectStore(tracks: [Track(name: "Vocals", kind: .audio, clips: [clip])])
+        let (model, _) = await PitchEditorPlayedLineTests.loadedModel(fixture, contour: nil)
+        let rig = SingerRig(clip: clip, store: store, model: model)
+        model.onCommit = { [unowned rig] commit in
+            rig.commits.append(commit)
+            do {
+                rig.writes.append(try PitchEditorSingerWrite.commit(commit.kind, clipID: clip.id,
+                                                                    seedIfAbsent: commit.seedIfAbsent,
+                                                                    to: store))
+            } catch {
+                rig.refusals.append("\(error)")
+            }
+            model.syncStoredNoteTable(store.tracks[0].clips[0].pitchEdits)
+        }
+        return rig
+    }
+
+    /// The fixture's own set, updated (the notes a new vocal would have).
+    private static func updatedTable(_ set: PitchEditSet) -> PitchEditSet? { set.upgradedToNaturalTuning() }
+    /// The fixture's own set as stored: a vocal tuned BEFORE the update.
+    private static func legacyTable(_ set: PitchEditSet) -> PitchEditSet? { set }
+
+    /// Planted and seen red (W7-NTU P-tick): `trackVoiceSize` emitting a
+    /// `.voiceSize` commit per tick.
+    @Test("W7-NTU U1 — Keep voice size: a drag is ONE commit, on release, never per tick; the draft draws while it runs")
+    func voiceSizeDragCommitsOnce() async throws {
+        let rig = await singerRig(Self.updatedTable)
+        let model = rig.model
+        #expect(model.offersSingerGroup)
+        #expect(rig.group.voice.readout == "100%")
+        for fraction in [0.9, 0.8, 0.7, 0.6, 0.52] {
+            model.trackVoiceSize(atFraction: fraction, fine: false)
+        }
+        #expect(rig.commits.isEmpty, "a tick committed")
+        #expect(model.voiceSizePress == .drag(amount: 0.5), "0.52 lands on the 50% stop")
+        #expect(model.voiceSizeDraft == 0.5)
+        #expect(rig.group.voice.readout == "50%")
+        #expect(rig.group.voice.isDragging)
+        let commit = try #require(model.releaseVoiceSize())
+        #expect(commit.kind == .voiceSize(amount: 0.5))
+        #expect(rig.commits.count == 1)
+        #expect(model.voiceSizePress == nil)
+        #expect(!rig.group.voice.isDragging)
+        // ⌥ (fine) skips the stop.
+        model.trackVoiceSize(atFraction: 0.52, fine: true)
+        #expect(model.voiceSizeDraft == 0.52)
+        model.cancelVoiceSize()
+    }
+
+    @Test("W7-NTU U1 — a voice drag released where it started, or cancelled, commits nothing")
+    func voiceSizeNoOpAndCancel() async {
+        let rig = await singerRig(Self.updatedTable)
+        let model = rig.model
+        model.trackVoiceSize(atFraction: 0.99, fine: false)          // the 100% stop = stored
+        #expect(model.releaseVoiceSize() == nil)
+        model.trackVoiceSize(atFraction: 0.3, fine: false)
+        model.cancelDrag()                                             // the pane's Escape / disappear path
+        #expect(model.voiceSizePress == nil)
+        #expect(model.releaseVoiceSize() == nil)
+        #expect(rig.commits.isEmpty)
+    }
+
+    /// Planted and seen red (W7-NTU P-legacy-write): the legacy press routed
+    /// to `.voiceSize` (a drag on the dim slider writing its amount alone,
+    /// which `setClipFormantCorrection` stores WITHOUT the update — D4-1 (b)
+    /// broken with a green read-back).
+    @Test("⭐ W7-NTU U1 — on a vocal tuned before the update, every press on the slider is THE update: no draft, ONE commit on release")
+    func legacyPressIsTheUpdate() async throws {
+        let rig = await singerRig(Self.legacyTable)
+        let model = rig.model
+        #expect(rig.group.voice.needsUpdate)
+        model.trackVoiceSize(atFraction: 0.3, fine: false)
+        #expect(model.voiceSizePress == .update)
+        #expect(model.voiceSizeDraft == nil, "a legacy press drew a draft")
+        model.trackVoiceSize(atFraction: 0.8, fine: false)
+        #expect(model.voiceSizePress == .update)
+        #expect(rig.group.voice.amount == nil)
+        #expect(rig.commits.isEmpty)
+        let commit = try #require(model.releaseVoiceSize())
+        #expect(commit.kind == .naturalTuningUpdate)
+        #expect(rig.commits.count == 1)
+    }
+
+    @Test("W7-NTU U1 — the update line: a tap on an old vocal is ONE update; on an updated one, nothing")
+    func updateLineTap() async {
+        let old = await singerRig(Self.legacyTable)
+        #expect(old.model.updateToNaturalTuning()?.kind == .naturalTuningUpdate)
+        #expect(old.commits.count == 1)
+        let new = await singerRig(Self.updatedTable)
+        #expect(new.model.updateToNaturalTuning() == nil)
+        #expect(new.commits.isEmpty)
+    }
+
+    /// Planted and seen red (W7-NTU P-consonants): the switch writing the
+    /// state it SHOWS (`enabled: keepsConsonantsUntuned`); and (P-snappy0)
+    /// Snappy writing 0.
+    @Test("W7-NTU U1 — Consonants and Slides: one commit per click; the lit step commits nothing")
+    func consonantsAndSlidesCommitOnce() async {
+        let rig = await singerRig(Self.updatedTable)
+        let model = rig.model
+        #expect(model.toggleConsonants()?.kind == .consonants(enabled: false))
+        #expect(model.toggleConsonants()?.kind == .consonants(enabled: true))
+        #expect(model.pickSlides(.smooth) == nil, "the lit step re-committed")
+        #expect(model.pickSlides(.slow)?.kind == .slideSmoothness(centsPerSecond: 1500))
+        #expect(model.pickSlides(.snappy)?.kind == .slideSmoothness(centsPerSecond: 20000))
+        #expect(rig.commits.count == 4)
+    }
+
+    @Test("W7-NTU U1 — no notes, no group: every door is a no-op")
+    func noNotesNoGroup() {
+        let model = PitchEditorModel(clipID: UUID(), geometry: awkwardGeometry())
+        let sink = Box()
+        model.onCommit = { sink.commits.append($0) }
+        #expect(!model.offersSingerGroup)
+        model.trackVoiceSize(atFraction: 0.5, fine: false)
+        #expect(model.voiceSizePress == nil)
+        #expect(model.releaseVoiceSize() == nil)
+        #expect(model.updateToNaturalTuning() == nil)
+        #expect(model.toggleConsonants() == nil)
+        #expect(model.pickSlides(.slow) == nil)
+        #expect(sink.commits.isEmpty)
+    }
+
+    // MARK: Through the store
+
+    /// Planted and seen red (W7-NTU P-wrong-amount): the funnel sending the
+    /// store 0.75 for any amount — the funnel's read-back says NO, and this
+    /// test's own read of the clip finds 0.75. And (P-consonants): the switch
+    /// writing the state it SHOWS — the funnel's read-back says YES (ON was
+    /// sent and ON is stored), and only this test's read of the clip (`.on`,
+    /// not `.offByChoice`) and the undo journal catch it.
+    @Test("⭐ W7-NTU U1 — through the store: each gesture is ONE undo step with its own name, reads back from the clip, moves nothing else, and undo restores the vocal exactly")
+    func groupThroughTheStore() async throws {
+        let rig = await singerRig(Self.updatedTable)
+        let model = rig.model
+        let before = try #require(rig.stored)
+        let depth = rig.undoDepth
+
+        // Keep voice size: a drag through four ticks, one write.
+        for fraction in [0.8, 0.7, 0.6, 0.5] { model.trackVoiceSize(atFraction: fraction, fine: false) }
+        model.releaseVoiceSize()
+        #expect(rig.writes == [true])
+        #expect(rig.stored?.formantCorrection == 0.5, "the clip does not hold 50%")
+        #expect(rig.undoDepth == depth + 1)
+        #expect(rig.undoTop == "Keep Voice Size")
+        #expect(rig.group.voice.readout == "50%", "the row does not read the stored value back")
+
+        // Consonants: OFF is a CHOICE (W7-D2), and the row reads OFF.
+        model.toggleConsonants()
+        #expect(rig.writes == [true, true])
+        #expect(rig.stored?.consonantProtection == .offByChoice)
+        #expect(rig.undoTop == "Keep Consonants")
+        #expect(rig.group.consonants.face == "OFF")
+
+        // Slides: Snappy is the ceiling, never 0.
+        model.pickSlides(.snappy)
+        #expect(rig.writes == [true, true, true])
+        #expect(rig.stored?.transitionSlopeCentsPerSecond == PitchEditSet.transitionSlopeRange.upperBound)
+        #expect(rig.undoTop == "Slide Smoothness")
+        #expect(rig.group.slides.selected == .snappy)
+        #expect(rig.undoDepth == depth + 3, "three gestures are \(rig.undoDepth - depth) undo steps")
+        #expect(rig.refusals.isEmpty, "\(rig.refusals)")
+
+        // The invariance control: no note moved.
+        #expect(rig.stored?.segments == before.segments)
+
+        for _ in 0..<3 { _ = try rig.store.undo() }
+        #expect(rig.stored == before, "three undos did not restore the vocal exactly")
+    }
+
+    /// Planted and seen red (W7-NTU P-legacy-write), through the store: the
+    /// dim slider's press writing `.voiceSize(0.2)` stores 20% and leaves the
+    /// vocal un-updated (consonants off, slides 0) — and the funnel's read-back
+    /// says YES (20% was sent, 20% is stored): only this test's own read of the
+    /// clip and the journal's step name catch it.
+    @Test("⭐ W7-NTU U1 — an old vocal through the store: the tap is ONE \"Update Tuning\" step that sets all three and keeps every note; undo brings the old vocal back exactly; a slider press is the SAME update")
+    func legacyUpdateThroughTheStore() async throws {
+        let rig = await singerRig(Self.legacyTable)
+        let model = rig.model
+        let before = try #require(rig.stored)
+        #expect(before.predatesNaturalTuning)
+        let depth = rig.undoDepth
+
+        model.updateToNaturalTuning()
+        #expect(rig.writes == [true])
+        let after = try #require(rig.stored)
+        #expect(after == before.upgradedToNaturalTuning())
+        #expect(after.formantCorrection == PitchEditSet.newSetFormantCorrection)
+        #expect(after.keepsConsonantsUntuned)
+        #expect(after.transitionSlopeCentsPerSecond == PitchEditSet.defaultTransitionSlope)
+        #expect(after.segments == before.segments, "the update moved a note")
+        #expect(rig.undoDepth == depth + 1)
+        #expect(rig.undoTop == "Update Tuning")
+        #expect(!rig.group.voice.needsUpdate, "the row still asks for the update")
+        #expect(rig.group.voice.readout == "100%")
+
+        _ = try rig.store.undo()
+        #expect(rig.stored == before, "undo did not bring the old vocal back exactly")
+        model.syncStoredNoteTable(rig.stored)
+        #expect(rig.group.voice.needsUpdate)
+
+        // The dim slider: a press anywhere is the update, never its amount.
+        model.trackVoiceSize(atFraction: 0.2, fine: false)
+        model.releaseVoiceSize()
+        #expect(rig.writes == [true, true])
+        #expect(rig.stored?.formantCorrection == PitchEditSet.newSetFormantCorrection,
+                "a press on the dim slider wrote \(String(describing: rig.stored?.formantCorrection))")
+        #expect(rig.stored?.keepsConsonantsUntuned == true)
+        #expect(rig.undoTop == "Update Tuning")
+    }
+
+    @Test("W7-NTU U1 — a clip holding only the editor's seed: the first group click stores the seed WITH the change, as ONE step")
+    func seedOnlyClipStoresTheSeed() async throws {
+        let rig = await singerRig { _ in nil }
+        let model = rig.model
+        #expect(rig.stored == nil)
+        #expect(model.offersSingerGroup)
+        let seed = model.seedForCommit
+        #expect(!seed.predatesNaturalTuning, "the editor's seed is never a legacy set")
+        let depth = rig.undoDepth
+        let commit = try #require(model.pickSlides(.slow))
+        #expect(commit.seedIfAbsent == seed)
+        #expect(rig.writes == [true])
+        let stored = try #require(rig.stored)
+        #expect(stored.transitionSlopeCentsPerSecond == 1500)
+        #expect(stored.segments == seed.segments)
+        #expect(rig.undoDepth == depth + 1)
+    }
+}
+
+
+// MARK: - W7-NTU U3 — the Voice tool (natural tuning §1(f) items 2-3)
+//
+// The pane half: a press on a note in the Voice tool, made with the pane's own
+// calls in the pane's order; ONE commit per gesture and none for one that
+// changes nothing; a sound refused in words; R11's short note; the double-click
+// reset; Escape; the note menu's Voice row; and each write through a REAL store
+// via the app funnel's own arm (`PitchEditorVoiceWrite`), read back WHOLE,
+// counted in the undo journal and undone. The arithmetic and the words are
+// pinned headless in `PitchEditorVoiceToolTests` (nonisolated).
+//
+// ⚠️ An EXTENSION of the existing `@MainActor` suite, never a new `@Suite`:
+// `MainActorOccupancySiteTests` bounds the suites.
+@MainActor
+extension PitchEditorModelTests {
+
+    /// C-0's three-note fixture (unstretched, untransposed) in the Voice tool,
+    /// with `table(f.set)` stored (nil: the editor's seed is the table), wired
+    /// to a real store through `PitchEditorVoiceWrite` and resynced from the
+    /// clip, as the pane does.
+    private func voiceRig(_ table: ((PitchEditSet) -> PitchEditSet?)?) async -> SingerRig {
+        let f = PitchEditorPlayedLineTests.fixture(shift: 0)
+        var clip = f.clip
+        clip.stretchRatio = 1
+        if let table { clip.pitchEdits = table(f.set) }
+        let fixture = PitchEditorPlayedLineTests.Fixture(a: f.a, b: f.b, c: f.c, clip: clip)
+        let store = ProjectStore(tracks: [Track(name: "Vocals", kind: .audio, clips: [clip])])
+        let (model, _) = await PitchEditorPlayedLineTests.loadedModel(fixture, contour: nil)
+        model.tool = .voice
+        let rig = SingerRig(clip: clip, store: store, model: model)
+        model.onCommit = { [unowned rig] commit in
+            rig.commits.append(commit)
+            do {
+                rig.writes.append(try PitchEditorVoiceWrite.commit(commit.kind, clipID: clip.id,
+                                                                   seedIfAbsent: commit.seedIfAbsent,
+                                                                   to: store))
+            } catch {
+                rig.refusals.append("\(error)")
+            }
+            model.syncStoredNoteTable(store.tracks[0].clips[0].pitchEdits)
+        }
+        return rig
+    }
+
+    /// ONE Voice press, made with the pane's own calls in the pane's order:
+    /// `dragChanged`'s (`trackPress`, then `updateVoiceDrag` while a draft
+    /// exists) for the first tick and for each point, then `dragEnded`'s
+    /// (`releasePress` with the click count, then the release's own model
+    /// call). ⌥ rides as it does there: fine per tick.
+    @discardableResult
+    private func voicePress(_ model: PitchEditorModel, from start: CGPoint, through points: [CGPoint] = [],
+                            fine: Bool = false, clicks: Int = 1) -> PitchEditorReleaseAction {
+        _ = model.trackPress(start: start, location: start, modifiers: .none)
+        if model.voiceDrag != nil { model.updateVoiceDrag(translationHeight: 0, fine: fine) }
+        for point in points {
+            _ = model.trackPress(start: start, location: point, modifiers: .none)
+            if model.voiceDrag != nil {
+                model.updateVoiceDrag(translationHeight: Double(point.y - start.y), fine: fine)
+            }
+        }
+        let action = model.releasePress(start: start, location: points.last ?? start, modifiers: .none,
+                                        snapBypassed: fine, clickCount: clicks)
+        switch action {
+        case .endFormantDrag: _ = model.endVoiceDrag()
+        case .formantReset(let id): _ = model.resetVoice(segmentID: id)
+        default: break
+        }
+        return action
+    }
+
+    /// Planted and seen red (W7-NTU P-v-tick): `updateVoiceDrag` emitting a
+    /// commit per tick.
+    @Test("W7-NTU U3 — a Voice drag: up is brighter; the draft, its mark and the readout follow the pointer with NO commit; the release is ONE \"Set Note Voice\" step of the note's final Voice, read back from the store")
+    func voiceDragCommitsOnce() async throws {
+        let rig = await voiceRig(Self.updatedTable)
+        let model = rig.model
+        let a = try #require(rig.stored?.segments.first).id
+        let start = bodyPoint(model, a)
+        _ = model.trackPress(start: start, location: start, modifiers: .none)
+        #expect(model.voiceDrag?.segmentID == a)
+        #expect(model.voiceDrag?.isDragging == false)
+        for step in 1...4 {
+            let point = CGPoint(x: start.x, y: start.y - CGFloat(step * 6))
+            _ = model.trackPress(start: start, location: point, modifiers: .none)
+            model.updateVoiceDrag(translationHeight: Double(point.y - start.y), fine: false)
+        }
+        // 24 pt up: +2.0, drawn, and nothing written.
+        #expect(model.voiceDrag?.semitones == 2)
+        #expect(rig.commits.isEmpty, "a Voice tick committed")
+        #expect(model.voiceMarks.map(\.chip) == ["Brighter 2.0"])
+        #expect(model.voiceMarks.first?.isLive == true)
+        #expect(model.voiceReadout(hover: nil) == "Voice: brighter 2.0")
+        #expect(model.escapeGestureLive)
+        let depth = rig.undoDepth
+        let action = model.releasePress(start: start, location: CGPoint(x: start.x, y: start.y - 24),
+                                        modifiers: .none)
+        #expect(action == .endFormantDrag(a))
+        let commit = try #require(model.endVoiceDrag())
+        #expect(commit.kind == .noteFormant(segmentIDs: [a], semitones: 2))
+        #expect(rig.commits.count == 1)
+        #expect(rig.writes == [true])
+        #expect(rig.stored?.segments.first { $0.id == a }?.formantOffsetSemitones == 2)
+        #expect(rig.undoDepth == depth + 1)
+        #expect(rig.undoTop == "Set Note Voice")
+        #expect(model.voiceDrag == nil)
+        // At rest, the STORED value is what the mark draws.
+        #expect(model.voiceMarks.map(\.chip) == ["Brighter 2.0"])
+        #expect(model.voiceMarks.first?.isLive == false)
+    }
+
+    @Test("W7-NTU U3 — a click selects and writes nothing; a drag that comes back to where it began writes nothing; a sideways drag writes nothing")
+    func voiceNoOps() async throws {
+        let rig = await voiceRig(Self.updatedTable)
+        let model = rig.model
+        let a = try #require(rig.stored?.segments.first).id
+        let start = bodyPoint(model, a)
+        #expect(voicePress(model, from: start) == .click(.selectOnly(a)))
+        #expect(model.selection == [a])
+        #expect(model.voiceDrag == nil, "a click left its draft behind")
+        #expect(voicePress(model, from: start, through: [CGPoint(x: start.x, y: start.y - 24), start])
+                == .endFormantDrag(a))
+        #expect(voicePress(model, from: start, through: [CGPoint(x: start.x + 30, y: start.y)])
+                == .endFormantDrag(a))
+        #expect(rig.commits.isEmpty, "a gesture that changed nothing wrote \(rig.commits.map(\.kind))")
+        #expect(model.voiceDrag == nil)
+    }
+
+    @Test("W7-NTU U3 — ⌥ is fine: the same 24 pt with ⌥ held is a quarter of the change (0.5, not 2.0)")
+    func voiceFine() async throws {
+        let rig = await voiceRig(Self.updatedTable)
+        let model = rig.model
+        let a = try #require(rig.stored?.segments.first).id
+        let start = bodyPoint(model, a)
+        voicePress(model, from: start, through: [CGPoint(x: start.x, y: start.y - 24)], fine: true)
+        #expect(rig.commits.map(\.kind) == [.noteFormant(segmentIDs: [a], semitones: 0.5)])
+        #expect(rig.writes == [true])
+    }
+
+    /// Planted and seen red (W7-NTU P-v-reset): `resetVoice` writing on a
+    /// note already as sung.
+    @Test("W7-NTU U3 — a double-click puts the note back as sung: the first click selects, the second is ONE \"Set Note Voice\" step of 0; on a note already as sung it writes nothing")
+    func voiceDoubleClickResets() async throws {
+        let rig = await voiceRig { set in
+            var table = set.upgradedToNaturalTuning()
+            table.segments[0].formantOffsetSemitones = -3
+            return table
+        }
+        let model = rig.model
+        let a = try #require(rig.stored?.segments.first).id
+        let start = bodyPoint(model, a)
+        #expect(voicePress(model, from: start) == .click(.selectOnly(a)))
+        #expect(voicePress(model, from: start, clicks: 2) == .formantReset(a))
+        #expect(rig.commits.map(\.kind) == [.noteFormant(segmentIDs: [a], semitones: 0)])
+        #expect(rig.writes == [true])
+        #expect(rig.stored?.segments.first { $0.id == a }?.formantOffsetSemitones == 0)
+        #expect(rig.undoTop == "Set Note Voice")
+        // Again, on a note now as sung: nothing.
+        voicePress(model, from: start)
+        #expect(voicePress(model, from: start, clicks: 2) == .formantReset(a))
+        #expect(rig.commits.count == 1, "a reset of a note already as sung wrote an undo step")
+    }
+
+    /// Planted and seen red (W7-NTU P-v-sound): `beginVoiceDrag` without its
+    /// `.unpitched` guard.
+    @Test("W7-NTU U3 — a SOUND is refused at its press, in words, and the press abandoned: no draft, no selection, no commit, and its release does nothing")
+    func voiceRefusesASound() {
+        let (model, sink, _) = withSounds([1])
+        model.tool = .voice
+        let sound = model.blobs[1]
+        let start = centre(of: sound, in: model)
+        _ = model.trackPress(start: start, location: start, modifiers: .none)
+        #expect(model.refusal == PitchEditorFormantCopy.voiceSoundRefusal)
+        #expect(model.voiceDrag == nil)
+        #expect(model.press.current?.kind == PitchEditorPressKind.none)
+        let end = CGPoint(x: start.x, y: start.y - 30)
+        _ = model.trackPress(start: start, location: end, modifiers: .none)
+        model.updateVoiceDrag(translationHeight: -30, fine: false)
+        #expect(model.releasePress(start: start, location: end, modifiers: .none) == .nothing)
+        #expect(sink.commits.isEmpty)
+        #expect(model.selection.isEmpty)
+        // Hovered, a sound says nothing; the note beside it says its Voice.
+        #expect(model.voiceReadout(hover: start) == nil)
+        #expect(model.voiceReadout(hover: centre(of: model.blobs[0], in: model)) == "Voice: as sung")
+    }
+
+    @Test("W7-NTU U3 — R11: over a note shorter than 80 ms the readout says it is too short to change alone, at rest and mid-drag; the drag is still taken and its chip prints the number")
+    func voiceShortNote() throws {
+        let (model, sink, ids) = fourNotes()
+        var table = model.noteTable
+        table.segments[2].endSeconds = table.segments[2].startSeconds + 0.05
+        model.syncStoredNoteTable(table)
+        model.tool = .voice
+        let short = try #require(model.blobs.first { $0.id == ids[2] })
+        let start = centre(of: short, in: model)
+        #expect(model.voiceReadout(hover: start) == PitchEditorFormantCopy.voiceTooShort)
+        #expect(model.voiceReadout(hover: centre(of: model.blobs[0], in: model)) == "Voice: as sung")
+        let end = CGPoint(x: start.x, y: start.y + 36)
+        _ = model.trackPress(start: start, location: start, modifiers: .none)
+        _ = model.trackPress(start: start, location: end, modifiers: .none)
+        model.updateVoiceDrag(translationHeight: 36, fine: false)
+        #expect(model.voiceDrag?.isTooShort == true)
+        #expect(model.voiceReadout(hover: nil) == PitchEditorFormantCopy.voiceTooShort)
+        #expect(model.voiceMarks.map(\.chip) == ["Deeper 3.0"])
+        _ = model.releasePress(start: start, location: end, modifiers: .none)
+        model.endVoiceDrag()
+        #expect(sink.commits.map(\.kind) == [.noteFormant(segmentIDs: [ids[2]], semitones: -3)])
+    }
+
+    @Test("W7-NTU U3 — Escape mid-drag drops the Voice draft with NOTHING committed, and the rest of that press does nothing")
+    func voiceEscape() {
+        let (model, sink, _) = fourNotes()
+        model.tool = .voice
+        let start = centre(of: model.blobs[0], in: model)
+        _ = model.trackPress(start: start, location: start, modifiers: .none)
+        #expect(!model.escapeGestureLive, "a press inside the slop is not a live gesture")
+        let end = CGPoint(x: start.x, y: start.y - 30)
+        _ = model.trackPress(start: start, location: end, modifiers: .none)
+        model.updateVoiceDrag(translationHeight: -30, fine: false)
+        #expect(model.escapeGestureLive)
+        model.cancelGestureForEscape()
+        #expect(model.voiceDrag == nil)
+        _ = model.trackPress(start: start, location: CGPoint(x: start.x, y: start.y - 40), modifiers: .none)
+        model.updateVoiceDrag(translationHeight: -40, fine: false)
+        #expect(model.voiceDrag == nil, "a cancelled Voice drag restarted itself")
+        #expect(model.releasePress(start: start, location: end, modifiers: .none) == .nothing)
+        #expect(model.endVoiceDrag() == nil)
+        #expect(sink.commits.isEmpty)
+    }
+
+    /// Planted and seen red (W7-NTU P-v-marks): `voiceMarks` without its
+    /// `tool == .voice` guard.
+    @Test("W7-NTU U3 — the marks: only in the Voice tool, only for NOTES with a Voice, at the STORED value at rest; never for a sound, whatever it carries")
+    func voiceMarksOnlyInTheVoiceTool() {
+        let (model, _, ids) = withSounds([1])
+        var table = model.noteTable
+        table.segments[0].formantOffsetSemitones = -3
+        table.segments[1].formantOffsetSemitones = 2   // a sound: never drawn
+        table.segments[2].formantOffsetSemitones = 1.5
+        model.syncStoredNoteTable(table)
+        #expect(model.voiceMarks.isEmpty, "a Voice drawn in the Move tool")
+        model.tool = .voice
+        let marks = model.voiceMarks
+        #expect(marks.map(\.segmentID) == [ids[0], ids[2]])
+        #expect(marks.map(\.chip) == ["Deeper 3.0", "Brighter 1.5"])
+        #expect(marks.map(\.offsetFraction) == [-0.5, 0.25])
+        #expect(marks.allSatisfy { !$0.isLive })
+        #expect(marks.first?.blobRect == model.rect(for: model.blobs[0]))
+    }
+
+    /// Planted and seen red (W7-NTU P-v-menu-model): the Voice row naming the
+    /// sound's id (the store would refuse the whole batch).
+    @Test("W7-NTU U3 — the note menu's Voice row: Deeper and Brighter in the Voice tool only, As sung in every tool once a note has a Voice; each is ONE commit naming only the NOTES that change, never a sound")
+    func voiceMenuRow() {
+        let (model, sink, ids) = withSounds([1])
+        model.selectOnly(ids[0])
+        model.toggle(ids[1])
+        model.toggle(ids[2])
+        #expect(model.noteMenu(at: nil).map(\.title) == ["Clear 3 Selected"], "the Move tool's menu changed")
+        model.tool = .voice
+        #expect(model.noteMenu(at: nil).map(\.title)
+                == ["Clear 3 Selected", "Voice: Deeper 2.0", "Voice: Brighter 2.0"])
+        model.performNoteAction(.voiceDeeper)
+        #expect(sink.commits.map(\.kind) == [.noteFormant(segmentIDs: [ids[0], ids[2]], semitones: -2)])
+        // The store hands it back.
+        var table = model.noteTable
+        table.segments[0].formantOffsetSemitones = -2
+        table.segments[2].formantOffsetSemitones = -2
+        model.syncStoredNoteTable(table)
+        let items = model.noteMenu(at: nil)
+        #expect(items.map(\.title)
+                == ["Clear 3 Selected", "Voice: Deeper 2.0", "Voice: Brighter 2.0", "Voice: As sung"])
+        #expect(items.first { $0.action == .voiceDeeper }?.isEnabled == false)
+        // Deeper again changes nothing, so nothing is written.
+        #expect(model.performNoteAction(.voiceDeeper) == nil)
+        #expect(sink.commits.count == 1)
+        // The Move tool: the reset stays offered, the two steps do not.
+        model.tool = .pointer
+        #expect(model.noteMenu(at: nil).map(\.title) == ["Clear 3 Selected", "Voice: As sung"])
+        model.performNoteAction(.voiceAsSung)
+        #expect(sink.commits.last?.kind == .noteFormant(segmentIDs: [ids[0], ids[2]], semitones: 0))
+    }
+
+    /// Planted and seen red (W7-NTU P-v-d41, through the store): `took` without
+    /// `afterHandEdit(from:)` reads NO to the store's correct write.
+    @Test("⭐ W7-NTU U3 — an old vocal through the store: the first Voice drag is ONE \"Set Note Voice\" step that ALSO updates the vocal (D4-1 (b)), keeps a consonant OFF somebody chose (NT-C2-F1) and moves no pitch; undo brings the old vocal back exactly")
+    func voiceOnAnOldVocalThroughTheStore() async throws {
+        let rig = await voiceRig { set in
+            var legacy = set
+            legacy.consonantProtection = .offByChoice
+            return legacy
+        }
+        let model = rig.model
+        let before = try #require(rig.stored)
+        #expect(before.predatesNaturalTuning)
+        #expect(before.consonantProtection == .offByChoice)
+        let a = try #require(before.segments.first).id
+        let depth = rig.undoDepth
+        let start = bodyPoint(model, a)
+        voicePress(model, from: start, through: [CGPoint(x: start.x, y: start.y + 24)])
+        #expect(rig.commits.map(\.kind) == [.noteFormant(segmentIDs: [a], semitones: -2)])
+        #expect(rig.writes == [true], "the funnel's read-back said NO to the store's own write")
+        let after = try #require(rig.stored)
+        #expect(after.segments.first?.formantOffsetSemitones == -2)
+        #expect(after.formantCorrection == PitchEditSet.newSetFormantCorrection)
+        #expect(after.transitionSlopeCentsPerSecond == PitchEditSet.defaultTransitionSlope)
+        #expect(after.consonantProtection == .offByChoice, "the update switched a chosen OFF back on")
+        #expect(after.segments.map(\.pitchOffsetCents) == before.segments.map(\.pitchOffsetCents))
+        #expect(rig.undoDepth == depth + 1)
+        #expect(rig.undoTop == "Set Note Voice")
+        _ = try rig.store.undo()
+        #expect(rig.stored == before, "undo did not bring the old vocal back exactly")
+    }
+
+    @Test("W7-NTU U3 — a clip holding only the editor's seed: the first Voice drag stores the seed WITH the Voice, as ONE step")
+    func voiceOnASeedOnlyClip() async throws {
+        let rig = await voiceRig { _ in nil }
+        let model = rig.model
+        #expect(rig.stored == nil)
+        let seed = model.seedForCommit
+        let a = try #require(seed.segments.first).id
+        let depth = rig.undoDepth
+        let start = bodyPoint(model, a)
+        voicePress(model, from: start, through: [CGPoint(x: start.x, y: start.y - 12)])
+        #expect(rig.commits.first?.seedIfAbsent == seed)
+        #expect(rig.writes == [true])
+        let stored = try #require(rig.stored)
+        #expect(stored.segments.first { $0.id == a }?.formantOffsetSemitones == 1)
+        #expect(stored.segments.count == seed.segments.count)
+        #expect(rig.undoDepth == depth + 1)
     }
 }

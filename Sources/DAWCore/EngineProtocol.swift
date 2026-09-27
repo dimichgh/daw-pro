@@ -360,6 +360,26 @@ public enum ClipStretchStatus: Sendable, Equatable {
     case failed(String)
 }
 
+/// p2-ren Stage B′ (`docs/design/2026-09-25-incremental-note-render.md` §11
+/// step 14): what a clip's node is ACTUALLY PLAYING right now, so an agent
+/// can tell a quick stand-in from the exact result before trusting what it
+/// hears. Pull-based, like `ClipStretchStatus` — the control snapshot queries
+/// this at build time; never persisted.
+///
+/// - `.exact`: its own committed render, or its source (an identity clip).
+/// - `.preview`: Stage B's PROVISIONAL — a spliced quick stand-in for the
+///   pending render, notice `clip-render-preview`.
+/// - `.previous`: Stage A's BRIDGE — the file the clip played a moment ago,
+///   notice `clip-render-previous`.
+/// - `.silent`: no node — the render is pending and no previous file
+///   qualified (spec §5's honest silence), notice `clip-stretch-pending`.
+public enum ClipRenderAudible: String, Sendable, Equatable, Codable {
+    case exact
+    case preview
+    case previous
+    case silent
+}
+
 /// One schedule-time degradation as the engine reports it (m15-e, audit F6):
 /// playback proceeded, but not exactly as the project describes (a fade/
 /// envelope bake failed, a stretched or tuned clip is still rendering, …).
@@ -705,6 +725,16 @@ public protocol AudioEngineControlling: AnyObject {
     /// for engines without stretch support.
     func clipStretchStatus(trackID: UUID, clipID: UUID) -> ClipStretchStatus?
 
+    /// p2-ren Stage B′: what this clip's node is ACTUALLY PLAYING right now
+    /// (`ClipRenderAudible`) — `.exact`, Stage B's `.preview` (a provisional
+    /// splice), Stage A's `.previous` (a bridge), or `.silent` (no node).
+    /// trackID is accepted for surface stability; the graph keys nodes per
+    /// clip. Pull-based like `clipStretchStatus`: the control snapshot
+    /// queries this at build time and emits the transient `renderAudible`
+    /// field. nil for engines without bridge/preview support (the snapshot
+    /// then omits the field, exactly like `clipStretchStatus`).
+    func renderAudible(trackID: UUID, clipID: UUID) -> ClipRenderAudible?
+
     /// Transient onset markers for the audio file at `url` (M5 iii-e):
     /// offline spectral-flux analysis, content-key cached on disk. Times are
     /// SOURCE-FILE seconds (geometry-free — callers map to clip windows and
@@ -958,6 +988,41 @@ public protocol AudioEngineControlling: AnyObject {
     func renderMixdown(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
                        masterEffects: [EffectDescriptor],
                        masterAutomation: [AutomationLane],
+                       fromBeat: Double, durationSeconds: Double,
+                       to url: URL, format: DeliveryFormat) async throws -> AudioFileInfo
+
+    /// `renderOffline` carrying the MASTER strip's modulation (m39-e-2) — the
+    /// sources and routes `masterModulationChanged` hands the live graph. The
+    /// offline graph is a separate graph, so without this parameter pair no
+    /// render could carry master modulation: an LFO or macro on the master
+    /// fader moved live and was missing from every export.
+    ///
+    /// The render class is `masterAutomation`'s, verbatim, again with NO
+    /// default: MASTERED renders (mixdown, bounce, measureLoudness, the stems'
+    /// mastered sibling) pass the project's master sources and routes; STEM
+    /// renders (stems, their "00 Mixdown" reference, bounce-in-place) pass `[]`
+    /// for both — a master tremolo baked into a stem or a bounced clip would
+    /// apply twice on playback (S-3′). The requirement above renders with no
+    /// master modulation; it stays for the renders that can never have any
+    /// (synthetic dry renders: AI-fix regions, voice-conversion sources,
+    /// timbre probes) and for every conformer written before m39-e-2.
+    func renderOffline(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
+                       masterEffects: [EffectDescriptor],
+                       masterAutomation: [AutomationLane],
+                       masterModulationSources: [ModulationSource],
+                       masterModulationRoutes: [ModulationRoute],
+                       fromBeat: Double, durationSeconds: Double,
+                       forcedCompensationTargets: [UUID: Int]?) async throws -> RenderedAudio
+
+    /// The format-aware `renderMixdown` carrying the master strip's modulation
+    /// (m39-e-2), same rule and same reason as the `renderOffline` twin above.
+    /// `render.mixdown` needs its own seam because here the ENGINE renders and
+    /// writes (the m23-m2 lesson).
+    func renderMixdown(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
+                       masterEffects: [EffectDescriptor],
+                       masterAutomation: [AutomationLane],
+                       masterModulationSources: [ModulationSource],
+                       masterModulationRoutes: [ModulationRoute],
                        fromBeat: Double, durationSeconds: Double,
                        to url: URL, format: DeliveryFormat) async throws -> AudioFileInfo
 
@@ -1899,6 +1964,11 @@ extension AudioEngineControlling {
     /// headless) report nothing pending.
     public func clipStretchStatus(trackID: UUID, clipID: UUID) -> ClipStretchStatus? { nil }
 
+    /// p2-ren Stage B′: bridge/preview reporting is optional capability —
+    /// engines without it (fakes, headless) report nothing, so the snapshot
+    /// omits `renderAudible` exactly as it omits `stretchRendering`.
+    public func renderAudible(trackID: UUID, clipID: UUID) -> ClipRenderAudible? { nil }
+
     /// Transient analysis is optional capability: engines without it (fakes,
     /// headless) report no onsets.
     public func detectTransients(inFileAt url: URL, sensitivity: Double) async throws -> [TransientMarker] { [] }
@@ -2164,5 +2234,51 @@ extension AudioEngineControlling {
             tracks: tracks, tempoMap: tempoMap, masterVolume: masterVolume,
             masterEffects: masterEffects, masterAutomation: masterAutomation,
             fromBeat: fromBeat, durationSeconds: durationSeconds, to: url)
+    }
+
+    /// Master-modulation rendering is optional capability (m39-e-2), and this
+    /// default REFUSES rather than drops, the m23-m2 format precedent for the
+    /// same reason: the defect m39-e-2 closes IS master modulation silently
+    /// missing from a render, and a discarding default would recreate it in
+    /// every engine that implements only the requirement without it. When
+    /// nothing could change the render (no ENABLED route: an unrouted source or
+    /// a disabled route is inert, the m39-e law) it forwards unchanged, so every
+    /// existing conformer, and every project without master modulation,
+    /// renders exactly as before.
+    public func renderOffline(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
+                              masterEffects: [EffectDescriptor],
+                              masterAutomation: [AutomationLane],
+                              masterModulationSources: [ModulationSource],
+                              masterModulationRoutes: [ModulationRoute],
+                              fromBeat: Double, durationSeconds: Double,
+                              forcedCompensationTargets: [UUID: Int]?) async throws -> RenderedAudio {
+        guard !masterModulationRoutes.contains(where: { $0.enabled }) else {
+            throw ProjectError.engineUnavailable
+        }
+        return try await renderOffline(
+            tracks: tracks, tempoMap: tempoMap, masterVolume: masterVolume,
+            masterEffects: masterEffects, masterAutomation: masterAutomation,
+            fromBeat: fromBeat, durationSeconds: durationSeconds,
+            forcedCompensationTargets: forcedCompensationTargets)
+    }
+
+    /// The format-aware mixdown twin (m39-e-2): same refusal, and it forwards
+    /// to the FORMAT-aware requirement, so an engine that plumbs the format but
+    /// not master modulation still writes the format it was asked for.
+    public func renderMixdown(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
+                              masterEffects: [EffectDescriptor],
+                              masterAutomation: [AutomationLane],
+                              masterModulationSources: [ModulationSource],
+                              masterModulationRoutes: [ModulationRoute],
+                              fromBeat: Double, durationSeconds: Double,
+                              to url: URL, format: DeliveryFormat) async throws -> AudioFileInfo {
+        guard !masterModulationRoutes.contains(where: { $0.enabled }) else {
+            throw ProjectError.engineUnavailable
+        }
+        return try await renderMixdown(
+            tracks: tracks, tempoMap: tempoMap, masterVolume: masterVolume,
+            masterEffects: masterEffects, masterAutomation: masterAutomation,
+            fromBeat: fromBeat, durationSeconds: durationSeconds,
+            to: url, format: format)
     }
 }

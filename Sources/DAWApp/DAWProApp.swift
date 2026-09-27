@@ -20,7 +20,16 @@ struct DAWProApp: App {
                     // Running from `swift run` (no app bundle): become a real
                     // foreground app so the window shows and takes focus.
                     NSApplication.shared.setActivationPolicy(.regular)
-                    NSApplication.shared.activate(ignoringOtherApps: true)
+                    // C5b-4b — a staging gate that must leave the user's focus
+                    // where it is sets DAWPRO_STAGING_NO_ACTIVATE=1 and skips
+                    // ONLY the activation (the `.regular` policy above is what
+                    // gives an unbundled binary its window at all). Opt-IN, not
+                    // a staging default: `m23r3b-live-layers.mjs` F0 asserts a
+                    // staging app is ACTIVE at launch, and every focus gate
+                    // measures under that ambient.
+                    if ProcessInfo.processInfo.environment["DAWPRO_STAGING_NO_ACTIVATE"] != "1" {
+                        NSApplication.shared.activate(ignoringOtherApps: true)
+                    }
                     // Enforce the MEASURED window floor (m10-j) directly on the
                     // NSWindow too — belt-and-suspenders with the root
                     // `.frame(minWidth:minHeight:)` — so a user drag can never shrink
@@ -74,7 +83,14 @@ final class AppModel {
     /// The local ACE-Step song generator + its sidecar manager, SHARED with the
     /// control router (so the Sketchpad panel and the `ai.*` wire path talk to
     /// the same job state) and used directly by the Sketchpad model.
-    let songGenerator: ACEStepClient
+    ///
+    /// p2-sing-0: this is the LIFECYCLE-TRACKED handle, never the raw
+    /// `ACEStepClient`. The raw client is built inline inside the tracker at the
+    /// one construction site in `init`, so no handle on it exists to reach around
+    /// the tracker. Every submission, from every origin, opens a job with the
+    /// model lifecycle coordinator, which is what stops an RVC (or SoulX) boot
+    /// from evicting ACE mid-song.
+    let songGenerator: LifecycleTrackingSongGenerator
     let sidecarManager: SidecarManager
 
     /// The unified generation-progress registry (m17-h): EVERY generation job
@@ -155,8 +171,13 @@ final class AppModel {
     /// SECOND local sidecar (127.0.0.1:8002, `scripts/rvc/`). SHARED with the
     /// control router (the `sidecarManager` precedent) so the Voice panel and
     /// the `vc.*` wire path never diverge on sidecar/boot state.
+    ///
+    /// p2-sing-0: `voiceConversionClient` is the LIFECYCLE-TRACKED handle (the raw
+    /// `VoiceConversionClient` is built inline inside the tracker in `init`), so
+    /// every `convert`/`train`, from the panel or the wire, holds an RVC job open
+    /// while it runs, and an ACE boot cannot evict RVC mid-conversion.
     let voiceConversionManager: VoiceConversionManager
-    let voiceConversionClient: VoiceConversionClient
+    let voiceConversionClient: LifecycleTrackingVoiceConverter
 
     /// The Voice panel's headless model (m10-p-5): local voice DATASETS under
     /// app support, the voice-engine banner (user copy), the facade voice
@@ -757,6 +778,11 @@ final class AppModel {
     /// view's `@State` so it survives a clip switch and so the `debug.followPlayhead`
     /// echo can report BOTH surfaces' ground truth from one place.
     let pianoRollFollow = FollowPlayheadModel()
+    /// m23-ap I5 — the PITCH EDITOR's follow runtime, the `pianoRollFollow` twin:
+    /// its own instance (scrolling the note editor must not suspend the roll or
+    /// the arrange), app-held so it survives the pane's `.id(clip.id)` rebuild,
+    /// and reading the SAME one persisted `panelLayout.followPlayhead` flag.
+    let pitchEditorFollow = FollowPlayheadModel()
     /// The lanes' LAID-OUT content width, reported by the lanes' own geometry. The
     /// follow clamp's ceiling — computing it here instead would fork
     /// `TimelineLanesView.totalBeats`'s padding heuristic into a second source of
@@ -1490,6 +1516,14 @@ final class AppModel {
         pitchEditorPaneOpen && pitchEditorInteraction.hasNoteSelection
     }
 
+    /// UE-2 — THE ONE HOME for what KINDS the open note editor's selection
+    /// holds (`PitchEditorInteractionBridge.selectionKinds`): the noun of the
+    /// Edit menu's Clear ("Clear Selected Sounds"). Read by `deleteMenuItem`
+    /// and `deleteKeyRouting`, beside `pitchEditorWouldConsumeKey`.
+    var pitchEditorSelectionKinds: Set<PitchEditorNoteMenu.Kind> {
+        pitchEditorInteraction.selectionKinds
+    }
+
     /// The Edit ▸ Delete item — title, target surface, enabled state.
     ///
     /// ⚠️ THE POLICY LIVES IN `DAWAppKit.DeleteMenuPolicy`, NOT HERE, and its doc
@@ -1522,6 +1556,9 @@ final class AppModel {
             // "Clear Selected Notes", the same action as ⌫ and the pane's
             // right-click Clear.
             pitchEditorHasNoteSelection: pitchEditorWouldConsumeKey,
+            // UE-2: its NOUN — "Clear Selected Sounds" over sounds, "Clear
+            // Selected" over a mix (the right-click menu's nouns).
+            pitchEditorSelectionKinds: pitchEditorSelectionKinds,
             arrangeClipCount: arrangeSelection.count)
     }
 
@@ -2819,6 +2856,8 @@ final class AppModel {
             pitchEditorOpen: pitchEditorPaneOpen,
             // m23-ap I4 — the SAME home `deleteMenuItem` reads.
             pitchEditorHasNoteSelection: pitchEditorWouldConsumeKey,
+            // UE-2 — and the same noun (the debug seam's `deleteKeyTitle`).
+            pitchEditorSelectionKinds: pitchEditorSelectionKinds,
             arrangeClipCount: arrangeSelection.count)
     }
 
@@ -3471,6 +3510,70 @@ final class AppModel {
     /// (the clip menu and the note editor's chips), because both reach
     /// `tuneVocalFromContextMenu`. Behaviour in `PitchCorrectionStaging.swift`.
     let pitchPresetReplaceGate = PitchPresetReplaceGate()
+
+    /// p2-ren Stage B″(c) — what the pitch editor's clip is PLAYING, polled
+    /// while the pane is open (`pollPitchEditorRenderAudible`), keyed by the
+    /// clip it was read for so a clip switch can never show the last clip's
+    /// answer. `nil` while no poll runs.
+    private(set) var pitchEditorRenderPoll: PitchEditorRenderPoll?
+    /// How many times the poll WROTE `pitchEditorRenderPoll` — one per change,
+    /// never one per tick (`debug.pitchEditor`'s `renderPoll.writes`). Plain
+    /// state, not observed: nothing draws it.
+    @ObservationIgnored private(set) var pitchEditorRenderPollWrites = 0
+
+    /// One poll's answer: the clip, and `ProjectStore.renderAudible` for it.
+    struct PitchEditorRenderPoll: Equatable {
+        let clipID: UUID
+        let audible: ClipRenderAudible?
+    }
+
+    /// The pane's `renderAudible` input: the poll's answer for THIS clip, or nil.
+    func pitchEditorRenderAudible(clipID: UUID) -> ClipRenderAudible? {
+        pitchEditorRenderPoll?.clipID == clipID ? pitchEditorRenderPoll?.audible : nil
+    }
+
+    /// ⭐ **THE POLL — PULL, BECAUSE THE ENGINE PUSHES NOTHING** (Stage B″(c)).
+    /// `renderAudible` is read on demand (the snapshot asks it per tuned clip),
+    /// so the pane's "Preview" caption needs someone to ask. Run by
+    /// `ContentView` as the pane's `.task(id: clip.id)`: it lives exactly as long
+    /// as the pane is open on this clip — SwiftUI cancels it on close and on a
+    /// clip switch — and it runs on the main actor, never near the render
+    /// thread. Each ask is the snapshot's own call (`store.renderAudible`, one
+    /// walk over the graph's track nodes), made only for a clip that renders
+    /// (`rendersThroughStretchCache`, the snapshot's own gate), every
+    /// `PitchEditorRenderCaption.pollInterval`. It writes only on a CHANGE, so a
+    /// steady state invalidates nothing.
+    func pollPitchEditorRenderAudible(clipID: UUID) async {
+        while !Task.isCancelled {
+            var audible: ClipRenderAudible?
+            for track in store.tracks {
+                guard let clip = track.clips.first(where: { $0.id == clipID }) else { continue }
+                if clip.rendersThroughStretchCache {
+                    audible = store.renderAudible(trackID: track.id, clipID: clipID)
+                }
+                break
+            }
+            let next = PitchEditorRenderPoll(clipID: clipID, audible: audible)
+            // ⚠️ COMPARE FIRST: `@Observable` invalidates on ASSIGNMENT, not
+            // on change, and a same-value write every tick would re-render
+            // the pane at the poll's rate.
+            if next != pitchEditorRenderPoll {
+                pitchEditorRenderPoll = next
+                pitchEditorRenderPollWrites += 1
+            }
+            do {
+                try await Task.sleep(for: PitchEditorRenderCaption.pollInterval)
+            } catch {
+                break
+            }
+        }
+        // Stopped: take down THIS clip's answer only — a switch's new poll may
+        // already have written the next clip's.
+        if pitchEditorRenderPoll?.clipID == clipID {
+            pitchEditorRenderPoll = nil
+            pitchEditorRenderPollWrites += 1
+        }
+    }
 
     /// The clip the PITCH EDITOR is actually open on: the explicit request,
     /// re-resolved against the live store and filtered to AUDIO.
@@ -4591,6 +4694,11 @@ final class AppModel {
         // (flushForTransition) with no other cleanup path — prune to the newest
         // few at launch.
         store.pruneUntitledRecoveryBundles()
+        // p2-ren B″ (design erratum E9): a crashed session's provisional
+        // renders (`<cache>/Provisional/<pid>-<uuid>`) are swept at LAUNCH, not
+        // at this session's first provisional build. Dead pids only: a live
+        // staging instance or a second app sharing the cache keeps its folder.
+        engine.wipeDeadProvisionalSessions()
         self.store = store
         self.pitchEditorAudition = PitchEditorAuditionRouter(doors: store)
         self.engine = engine
@@ -4659,7 +4767,21 @@ final class AppModel {
         // One song generator + sidecar manager, shared with the router so the
         // panel's own generate/import and the `ai.*` wire path never diverge on
         // job state or audio caching.
-        let songGenerator = ACEStepClient()
+        //
+        // ⭐ p2-sing-0 — the raw `ACEStepClient` is wrapped ONCE, right here, in
+        // the lifecycle tracker, and every other handle below (the three origin
+        // observers, the presence poll, the clip-fix status poll, the router) is
+        // built over the tracked one. Every accepted submission, from every
+        // origin, opens a job with the coordinator, and the first terminal status
+        // any poller sees closes it. Before this, the Sketchpad's and the import
+        // seam's jobs were invisible to eviction, and an RVC boot mid-song
+        // SIGTERMed ACE. ⚠️ Do NOT bind the raw client to a name: a handle on it
+        // is a way around the tracker. The wire's own job hooks
+        // (`noteACEJobStarted`) stay; the coordinator keys jobs by id, so the
+        // double registration is harmless (pinned by
+        // `LifecycleTrackingSongGeneratorTests`).
+        let songGenerator = LifecycleTrackingSongGenerator(
+            wrapping: ACEStepClient(), coordinator: ModelLifecycleCoordinator.shared)
         let sidecarManager = SidecarManager()
         self.songGenerator = songGenerator
         self.sidecarManager = sidecarManager
@@ -4670,7 +4792,11 @@ final class AppModel {
         // button and the wire's vc.sidecarStart track the SAME boot, and the
         // panel's convert/train ride the SAME client the vc.* commands use.
         let voiceConversionManager = VoiceConversionManager()
-        let voiceConversionClient = VoiceConversionClient()
+        // p2-sing-0: tracked, for the reason given on `songGenerator` above. Every
+        // `convert`/`train` holds an RVC job open while it runs. The raw client is
+        // built inline so that no handle on it exists.
+        let voiceConversionClient = LifecycleTrackingVoiceConverter(
+            wrapping: VoiceConversionClient(), coordinator: ModelLifecycleCoordinator.shared)
         self.voiceConversionManager = voiceConversionManager
         self.voiceConversionClient = voiceConversionClient
 
@@ -4760,11 +4886,18 @@ final class AppModel {
         self.referencePanel = ReferencePanelModel()
 
         // The unified generation-progress registry (m17-h): its own polls read
-        // the RAW client (never a decorator — no self-observation loop) and the
-        // sidecar manager's own status; a sidecar death mid-job posts an
-        // engine notice through the SAME handler funnel the engine uses (the
-        // `debug.postEngineNotice` path), so the transport chip lights up —
-        // failed card + notice, never silent.
+        // the lifecycle-tracked client and the sidecar manager's own status; a
+        // sidecar death mid-job posts an engine notice through the SAME handler
+        // funnel the engine uses (the `debug.postEngineNotice` path), so the
+        // transport chip lights up — failed card + notice, never silent.
+        //
+        // ⚠️ NEVER an OBSERVING decorator here (a `GenerationObservingGenerator`):
+        // it would feed each of this registry's own polls back into it, a
+        // self-observation loop. The lifecycle tracker (p2-sing-0) is not one. It
+        // reports to nothing but the model lifecycle coordinator, and it cannot
+        // name this registry at all (AIServices sits below DAWAppKit). Reading
+        // through it is loop-free, and it lets a terminal poll from the card close
+        // the job.
         let generationPresence = GenerationPresenceModel(
             status: { [songGenerator] jobID in
                 try await songGenerator.generationStatus(jobID: jobID)
@@ -4798,7 +4931,9 @@ final class AppModel {
             return false
         }
 
-        // ONE real client, THREE origin-tagged observers (m17-h) — job state
+        // ONE real client, THREE origin-tagged observers (m17-h), all built
+        // ABOVE the lifecycle tracker (p2-sing-0), so a Sketchpad or import
+        // submission registers its job exactly like a wire one — job state
         // and audio caching stay unified in `songGenerator`; only the presence
         // tag differs. The Sketchpad's awaits the auto-start boot (its generate
         // is a panel action, free to take the boot inline); the wire's and the
@@ -5278,7 +5413,12 @@ final class AppModel {
         // m18-b: the wedge monitor must exist before the server so the queue
         // tier can consult it on every frame. Strong capture is cycle-free
         // (server → closure → monitor; the monitor references nothing back).
-        let livenessMonitor = MainActorLivenessMonitor()
+        // WF: every breadcrumb names its writer — the log is shared by the
+        // user's live app and every staging launch.
+        let livenessMonitor = MainActorLivenessMonitor(
+            origin: MainActorLiveness.originTag(
+                pid: ProcessInfo.processInfo.processIdentifier, port: Int(port),
+                processName: ProcessInfo.processInfo.processName))
         self.livenessMonitor = livenessMonitor
         // m23-av: the AU-prepare in-flight read is `nonisolated` end to end
         // (engine → registry → NSLock-protected ledger), so the queue tier can
@@ -6202,6 +6342,7 @@ final class AppModel {
             // over from the previous one.
             arrangeVFollow.resetCounters()
             pianoRollFollow.resetCounters()
+            pitchEditorFollow.resetCounters()
         }
         // A simulated POINTER scroll (gate seam): moves the named surface's scroller
         // without registering an expected offset, which is exactly what a drag looks
@@ -6222,10 +6363,13 @@ final class AppModel {
             case "arrangeVertical":
                 reportArrangeVScroll(CGFloat(raw), contentHeight: arrangeVContentHeight)
             case "pianoRoll": pianoRollFollow.scrollExternally(to: CGFloat(raw))
+            // m23-ap I5 — the pitch editor's scroller lives in its view state,
+            // like the roll's, so it travels the same `scrollExternally` seam.
+            case "pitchEditor": pitchEditorFollow.scrollExternally(to: CGFloat(raw))
             default:
                 throw DebugError(
                     "unknown surface \"\(surface)\" — expected \"arrange\", "
-                    + "\"arrangeVertical\" or \"pianoRoll\"")
+                    + "\"arrangeVertical\", \"pianoRoll\" or \"pitchEditor\"")
             }
         }
         // Geometry is echoed LIVE where the app owns it. The follow model only
@@ -6284,6 +6428,9 @@ final class AppModel {
                 "anchorsBottom": .bool(arrangeVFollowAnchorsBottom),
             ]),
             "pianoRoll": surface(pianoRollFollow),
+            // m23-ap I5, ADDITIVE: the pitch editor's runtime — geometry as its
+            // own model last saw it, the roll's reason (it lives in view state).
+            "pitchEditor": surface(pitchEditorFollow),
         ])
     }
 
@@ -6341,6 +6488,7 @@ final class AppModel {
                 "minWidth": .number(Double(WindowFloor.minWidth)),
                 "minHeight": .number(Double(WindowFloor.minWindowContentHeight)),
                 "layoutMinHeight": .number(Double(WindowFloor.minHeight)),
+                "occlusionVisible": .bool(false),
             ])
         }
         // The floor is also enforced on the NSWindow itself; re-assert here so a
@@ -6376,6 +6524,11 @@ final class AppModel {
             // The OTHER quantity, kept reachable: the SwiftUI layout floor below the
             // titlebar (what `ContentView`'s root `.frame` and `ExportSheetLayout` use).
             "layoutMinHeight": .number(Double(WindowFloor.minHeight)),
+            // WF: whether the window is being DRAWN (AppKit's own occlusion state —
+            // false when another app covers it, it is minimized, or the display
+            // sleeps). A gate about compositing (`wedge-render-pending.mjs`) is
+            // blind while this is false, and must refuse rather than pass.
+            "occlusionVisible": .bool(window.occlusionState.contains(.visible)),
         ])
     }
 
@@ -6637,6 +6790,14 @@ final class AppModel {
     func zoomPitchEditorIn() { panelLayout.setPitchEditorPPB(PianoRollZoom.zoomedIn(panelLayout.pitchEditorPPB)) }
     func zoomPitchEditorOut() { panelLayout.setPitchEditorPPB(PianoRollZoom.zoomedOut(panelLayout.pitchEditorPPB)) }
     func zoomPitchEditorReset() { panelLayout.setPitchEditorPPB(PianoRollZoom.defaultPixelsPerBeat) }
+    /// m23-ap I2 — THE PINCH's entry point: a continuous scale rather than a
+    /// ladder step (`PitchEditorPinch.tick` computed it from the gesture-start
+    /// scale; the store clamps it). The pane routes here through
+    /// `onZoom(.timeScale)` because it writes no slot itself
+    /// (`PitchEditorInteractionSiteTests.theZoomClusterUsesTheOneLadder`).
+    /// ⚠️ NO `engage` HERE EITHER: the GESTURE engages, before it asks — this is
+    /// on `EditorSurfaceOwnershipSiteTests.zoomEntryPoints`.
+    func setPitchEditorTimeScale(_ ppb: CGFloat) { panelLayout.setPitchEditorPPB(ppb) }
 
     /// The pitch editor's VERTICAL zoom entry points (m23-ap C4) — the
     /// semitone-row height. `rowZoomIn`'s shape, one surface over, on the ONE
@@ -6893,6 +7054,8 @@ final class AppModel {
             // vertical scroll has stood half of it down.
             || (arrangeVerticalFollowEnabled && arrangeVFollow.isSuspended)
             || (panelLayout.followPlayhead && pianoRollFollow.isSuspended)
+            // m23-ap I5: the pitch editor reads the same preference as the roll.
+            || (panelLayout.followPlayhead && pitchEditorFollow.isSuspended)
     }
 
     /// The FOLLOW chip's action. While follow is PAUSED (the user scrolled during
@@ -6942,6 +7105,7 @@ final class AppModel {
         // as far as the person watching is concerned.
         arrangeVFollow.rearm()
         pianoRollFollow.rearm()
+        pitchEditorFollow.rearm()
     }
 
     /// One transport tick's follow for the ARRANGE lanes. Driven from the
@@ -8995,8 +9159,11 @@ final class AppModel {
             // MEASURED FROM STAGING, and without which a "not focused" reading
             // does not transfer to the user's app:
             //
-            //   • `appActive` — staging deliberately never calls `NSApp.activate`
-            //     (it must not steal the user's system focus), so it can run
+            //   • `appActive` — no staging COMMAND calls `NSApp.activate` (none
+            //     may steal the user's system focus); the ONE call is the
+            //     launch-time `activate(ignoringOtherApps:)` in `DAWProApp`'s
+            //     `onAppear`, skipped under DAWPRO_STAGING_NO_ACTIVATE=1 — and
+            //     another app can take focus afterwards, so staging can run
             //     INACTIVE. SwiftUI grants keyboard focus only in the key window
             //     of an active app; a `false` here means a focus negative
             //     measured in staging is CONDITIONAL, not the user's state.
@@ -9430,13 +9597,16 @@ final class AppModel {
                 "ink": entry.ink.map { JSONValue.string($0) } ?? .null,
             ])
         }
-        return .object([
+        // Read ONCE: `editorOpen` and the I5-F2 ruler echo below describe the
+        // same clip (and `EditorSurfaceOwnershipSiteTests` censuses this home).
+        let rollClip = openEditorClip
+        var fields: [String: JSONValue] = [
             // The SAME gate `ContentView` puts the roll behind (`openEditorClip`,
             // which additionally requires the clip to be MIDI) — not the looser
             // `selectedClipID != nil`, which is true with an AUDIO clip selected
             // and no roll on screen. On a cycle about a field claiming more than
             // it measures, this one does not get to.
-            "editorOpen": .bool(openEditorClip != nil),
+            "editorOpen": .bool(rollClip != nil),
             "density": .string(
                 panelDensity.density(forPanel: PianoRollView.panelID) == .pro ? "pro" : "simple"),
             "roles": .object(roles),
@@ -9458,7 +9628,40 @@ final class AppModel {
                 "textFaint": .string(DAWTheme.hexString(DAWTheme.textFaint)),
                 "ai": .string(DAWTheme.hexString(DAWTheme.ai)),
             ]),
-        ])
+        ]
+        // m23-ap I5-F2 — the roll numbers the SONG's bars, so a gate compares the
+        // transport's bar.beat exactly as `TransportBar` draws it, the ruler's
+        // labelled ticks and the grid's bar lines, all in the roll's CONTENT x
+        // (x 0 = the clip's first beat). Re-derived through the SAME functions and
+        // inputs the band and the grid are handed (`PitchEditorSongRuler.ticks`,
+        // `PianoRollSongGrid.forEachLine`, the one `panelLayout.pianoRollPPB` slot
+        // that feeds the roll's `pixelsPerBeat`, and `transport.meterMap`). ⚠️ A
+        // re-derivation, not a reading of the pixels: a capture is what shows the
+        // band and the grid drew them. The I5-F1 `debug.pitchEditor` shape.
+        fields["transportReadout"] = .string(store.transport.barsBeatsDisplay)
+        fields["ruler"] = .null
+        fields["gridBarXs"] = .null
+        if let clip = rollClip {
+            let ppb = panelLayout.pianoRollPPB
+            let meterMap = store.transport.meterMap
+            let labels = PitchEditorSongRuler.ticks(
+                clipStartBeat: clip.startBeat, lengthBeats: clip.lengthBeats,
+                pixelsPerBeat: ppb, meterMap: meterMap)
+                .compactMap { tick -> JSONValue? in
+                    guard let text = tick.label else { return nil }
+                    return .object(["x": .number(Double(tick.x)), "text": .string(text),
+                                    "isBar": .bool(tick.isBar)])
+                }
+            fields["ruler"] = .object(["numbering": .string("song"), "labels": .array(labels)])
+            var barXs: [JSONValue] = []
+            PianoRollSongGrid.forEachLine(clipStartBeat: clip.startBeat, spanBeats: clip.lengthBeats,
+                                          pixelsPerBeat: ppb, step: 1, drawsDivisions: false,
+                                          meterMap: meterMap) { x, kind in
+                if kind == .bar { barXs.append(.number(Double(x))) }
+            }
+            fields["gridBarXs"] = .array(barXs)
+        }
+        return .object(fields)
     }
 
     private func liveLayersDebug(_ params: [String: JSONValue]) -> JSONValue {
@@ -13541,11 +13744,13 @@ final class AppModel {
                 // those runs never recorded whether the app was frontmost, so
                 // the question could not be asked BACKWARD. Recording it beside
                 // every capture is what makes the next occurrence localisable
-                // instead of forensic. ⚠️ Staging never calls `NSApp.activate`,
-                // but it is nonetheless ACTIVE by default at launch (m23r3b's
-                // F0 leg asserts exactly that) — so this is a fact that VARIES
-                // with the desktop, which is precisely why it must be recorded
-                // rather than assumed.
+                // instead of forensic. ⚠️ No staging COMMAND calls
+                // `NSApp.activate`; the app activates ONCE at launch
+                // (`DAWProApp`'s `onAppear` — m23r3b's F0 leg asserts a staging
+                // app is ACTIVE then) unless DAWPRO_STAGING_NO_ACTIVATE=1 (C5b-4b)
+                // — so this is a fact that VARIES with the desktop and the
+                // launch, which is precisely why it must be recorded rather
+                // than assumed.
                 "appActive": .bool(core.appActive),
             ])
         }

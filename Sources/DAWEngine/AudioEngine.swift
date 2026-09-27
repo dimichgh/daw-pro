@@ -141,6 +141,60 @@ public final class AudioEngine: AudioEngineControlling {
     /// before the bridge EXACTLY (the resolutions and the notices, pinned by
     /// `EngineNoticeEngineTests`' revert test). Production never sets it.
     var bridgeEnabled = true
+    /// p2-ren Stage B — THE PROVISIONAL'S BASE (design §6 step 1): per audio
+    /// clip, the last COMMITTED file its node played (its committed render, or
+    /// its source when it rendered nothing), what that file is the render
+    /// of, its time base and its length. NEVER a provisional or a bridge:
+    /// chaining would make a provisional's content depend on edit history.
+    /// Fed when a node opens a `.ready` answer or an identity source
+    /// (`rememberClipFileOpened`) and when a final lands; pruned with
+    /// `lastPlayed`.
+    struct CommittedBase: Equatable {
+        let base: ProvisionalRender.Base
+        let timeBase: RenderTimeBase
+        let frameCount: Int
+    }
+    private var lastCommitted: [UUID: CommittedBase] = [:]
+    /// The `.ready` answer `resolveStretch` last gave each clip, as a base:
+    /// promoted to `lastCommitted` when the node actually opens it.
+    private var readyAnswers: [UUID: ProvisionalRender.Base] = [:]
+    /// p2-ren Stage B — THE PROVISIONAL, AS ONE SWITCH. `false` restores Stage
+    /// A′ exactly: no build is ever requested, so no `.provisional` answer,
+    /// no `.preview` node, no file and no notice exists. Production never
+    /// sets it; Stage A's pinned transcripts and counts run with it off.
+    var provisionalsEnabled = true
+    /// p2-ren Stage B — the delegated default of design §14 "deferring the
+    /// final swap while rolling": set by the §12 G2 measurement (see
+    /// `ProvisionalRenderTests`). While the transport rolls and a clip plays
+    /// its provisional, its final does not restart the transport; it
+    /// replaces the provisional at the next reschedule (`restart`,
+    /// `stopPlayback`). `false`: every final restarts at once, as a bridge's.
+    var defersFinalSwapWhileRolling = true
+    /// The finals waiting for that reschedule, by clip: the render key they
+    /// are the render of, and the committed file.
+    struct DeferredFinalSwap: Equatable {
+        let key: String
+        let url: URL
+    }
+    private var deferredFinalSwaps: [UUID: DeferredFinalSwap] = [:]
+    /// p2-ren Stage B: the provisional builds and their files, rooted beside
+    /// the render cache (`<cache>/Provisional`); re-created with the cache.
+    private(set) var provisionals: ProvisionalRenderStore
+    /// TEST INSTRUMENTATION (p2-ren Stage B): `.provisional` answers given,
+    /// and — G1's product stamp — the host time (`mach_absolute_time`) at
+    /// which each clip's node last OPENED a provisional. Production never
+    /// reads them.
+    private(set) var provisionalResolutionCountForTesting = 0
+    private(set) var provisionalOpenedHostTimeForTesting: [UUID: UInt64] = [:]
+    private(set) var deferredFinalSwapCountForTesting = 0
+    /// TEST INSTRUMENTATION (p2-ren Stage B): every provisional file a node
+    /// opened, in order (failure mode 4: a stale one must never be here).
+    private(set) var provisionalFilesOpenedForTesting: [URL] = []
+    /// TEST SEAM (p2-ren Stage B): awaited by every final-render kick before
+    /// it asks the cache, so a test can hold a final back while a provisional
+    /// lands. Which of two real renders lands first is a race, never a
+    /// premise. Production never sets it.
+    var finalRenderHoldForTesting: (@MainActor () async -> Void)?
     /// TEST INSTRUMENTATION (p2-ren Stage A, G4/G5): how many `.bridge`
     /// answers `resolveStretch` has given. Production never reads it.
     private(set) var bridgeResolutionCountForTesting = 0
@@ -150,6 +204,18 @@ public final class AudioEngine: AudioEngineControlling {
     /// needs the audio hardware, and this count does not. Production never
     /// reads it.
     private(set) var scheduleChangingPassCountForTesting = 0
+    /// TEST SEAM (p2-ren Stage A′/B): stands in for "the transport is rolling"
+    /// in `transportRollsForInterimRenders`, so a headless test (no audio
+    /// hardware, so never a real anchor) can take the rolling branches. The
+    /// `clipAuditionTransportRollingForTesting` precedent. Production never
+    /// sets it.
+    var interimTransportRollingForTesting: Bool?
+    /// p2-ren Stage A′/B: is a stand-in render (a bridge, a provisional) being
+    /// HEARD right now? True while the transport rolls on a running engine:
+    /// the condition the edit restart in `tracksDidChangeBody` itself uses.
+    var transportRollsForInterimRenders: Bool {
+        interimTransportRollingForTesting ?? (isRunning && currentAnchor != nil)
+    }
     /// contour-to-render: the params each clip's "plays WITHOUT flattening"
     /// notice was last posted for — so the resolver, which re-runs whenever a
     /// clip's node is rebuilt, says it once per (clip, edit) per session.
@@ -793,6 +859,7 @@ public final class AudioEngine: AudioEngineControlling {
 
     public init() {
         graph = PlaybackGraph(engine: engine, graphRate: Self.projectSampleRate)
+        provisionals = ProvisionalRenderStore(root: Self.provisionalRoot(of: stretchCache))
         wireGraphHooks()
         wireStretchCacheHooks()
         observeConfigurationChanges()
@@ -807,6 +874,21 @@ public final class AudioEngine: AudioEngineControlling {
         stretchCache.onRenderComplete = { [weak self] clipID in
             self?.clipRenderCompleteHandler?(clipID)
         }
+        // p2-ren Stage B: the provisional store lives beside THIS cache (a test
+        // pointing the cache at a temp directory moves it too).
+        if provisionals.root.standardizedFileURL
+            != Self.provisionalRoot(of: stretchCache).standardizedFileURL {
+            provisionals = ProvisionalRenderStore(root: Self.provisionalRoot(of: stretchCache))
+        }
+        provisionals.onBuilt = { [weak self] clipID, pair, url in
+            self?.provisionalDidLand(clipID: clipID, pair: pair, url: url)
+        }
+    }
+
+    /// Where a cache's provisionals live: a subfolder no key can name
+    /// (`<key>.caf` files sit beside it, never in it).
+    static func provisionalRoot(of cache: StretchRenderCache) -> URL {
+        cache.directory.appendingPathComponent("Provisional", isDirectory: true)
     }
 
     /// Wires every AudioEngine-owned hook into the CURRENT `graph` — called
@@ -887,6 +969,9 @@ public final class AudioEngine: AudioEngineControlling {
         // rebuilt graph re-wires here, and the memo survives the rebuild.
         graph.onClipFileOpened = { [weak self] clip, url, frames in
             self?.rememberClipFileOpened(clip, url: url, frameCount: frames)
+        }
+        graph.onClipNodeOpened = { [weak self] clip, url, plays in
+            self?.noteClipNodeOpened(clip, url: url, plays: plays)
         }
         // Routing rewires (fan-out re-issue, send-gain/bus teardown) are not
         // safe against a running AVAudioEngine — measured live: a mid-play
@@ -1209,6 +1294,11 @@ public final class AudioEngine: AudioEngineControlling {
             // hand back to lane-value previews at the exact stop position.
             graph.applyParameters(tracks: lastTracks, playheadBeat: beats)
         }
+        // p2-ren Stage B: a stopped transport hears nothing, so a final that
+        // waited for a reschedule replaces its provisional now.
+        if !applyDeferredFinalSwaps().isEmpty {
+            tracksDidChange(lastTracks)
+        }
     }
 
     public func seek(_ transport: TransportState) {
@@ -1302,6 +1392,16 @@ public final class AudioEngine: AudioEngineControlling {
         // p2-ren Stage A G6 instrumentation only: a changed pass is exactly the
         // pass that restarts a rolling transport on the line below.
         if changed { scheduleChangingPassCountForTesting += 1 }
+        // p2-ren Stage A′: an edit whose clip kept playing its stand-in (a
+        // bridge) under the new key changed no schedule, so no restart and no
+        // schedule pass follows, and the schedule pass is where render notices
+        // post. While the transport ROLLS that stand-in is being heard, so the
+        // notice a restart would have posted posts here instead (once per
+        // episode, as there). A stopped transport posts nothing: its next
+        // play's schedule pass reports it, exactly as before A′.
+        if !changed, graph.adoptedInterimInLastPass, transportRollsForInterimRenders {
+            graph.postRenderNoticesForPlayback()
+        }
         // isRunning guard: if the post-rewire engine restart failed (device
         // gone), players must not be started against a dead engine — the
         // configuration-change path owns recovery.
@@ -2322,11 +2422,11 @@ public final class AudioEngine: AudioEngineControlling {
                 return .ready(ClipSpanAuditionRequest(
                     fileURL: rendered, ratio: clip.stretchRatio, startSourceSeconds: start,
                     endSourceSeconds: end, gain: gain, fadeSeconds: fade))
-            case .pending?, .bridge?, nil:
+            case .pending?, .bridge?, .provisional?, nil:
                 // Playback plays this clip as silence until its render lands,
-                // or (p2-ren Stage A) its PREVIOUS version. Neither is the note
-                // as it now stands, so the voice waits for the render either
-                // way: exactly its behaviour before the bridge.
+                // or (p2-ren Stage A) its PREVIOUS version, or (Stage B) a
+                // quick PREVIEW. None is the note exactly as it now stands, so
+                // the voice waits for the render: its behaviour before both.
                 return .refused(.inaudibleNotReady)
             }
         case .storedSpanRender:
@@ -2768,14 +2868,51 @@ public final class AudioEngine: AudioEngineControlling {
             // no render this session (contour-to-render).
             postContourShortfallNoticeIfNeeded(clip: clip, source: source, params: params,
                                                everyTime: false)
+            // p2-ren Stage B: once a node opens it, this is the clip's base.
+            readyAnswers[clip.id] = ProvisionalRender.Base(
+                url: rendered, params: params,
+                name: rendered.deletingPathExtension().lastPathComponent, isSource: false,
+                contourFallback: rendered.deletingPathExtension().lastPathComponent
+                    != keys.resolved)
             return .ready(rendered)
         }
         kickStretchRender(clipID: clip.id, source: source, params: params, key: keys.resolved)
+        // p2-ren Stage B (design §6 step 7): committed → PROVISIONAL → bridge
+        // (and ask for the provisional) → pending. The final's kick above is
+        // unchanged in every branch.
+        let base = provisionalsEnabled ? provisionalBase(for: clip, keys: keys) : nil
+        if let base, let stand = provisionals.url(for: ProvisionalRenderStore.Pair(
+            newKey: keys.resolved, baseName: base.name)) {
+            provisionalResolutionCountForTesting += 1
+            return .provisional(stand)
+        }
         if let previous = bridgeFile(for: clip, keys: keys) {
             bridgeResolutionCountForTesting += 1
+            if let base {
+                provisionals.request(
+                    clipID: clip.id,
+                    pair: ProvisionalRenderStore.Pair(newKey: keys.resolved, baseName: base.name),
+                    source: source, base: base, params: params,
+                    renderCacheDirectory: stretchCache.directory,
+                    detector: stretchCache.contourDetector)
+            }
             return .bridge(previous)
         }
         return .pending
+    }
+
+    /// p2-ren Stage B: the base a provisional for `keys` may be built from, or
+    /// nil. `lastCommitted[clip.id]` under the SAME rules the bridge's file
+    /// obeys (`standInAllowed`: the render asked for, the time base, no
+    /// failure, the file on disk, its length), and never the render asked for
+    /// itself.
+    func provisionalBase(for clip: Clip, keys: StretchRenderCache.RenderKeys)
+        -> ProvisionalRender.Base? {
+        guard let memo = lastCommitted[clip.id], memo.base.name != keys.resolved,
+              standInAllowed(file: memo.base.url, timeBase: memo.timeBase,
+                             frameCount: memo.frameCount, clip: clip, keys: keys)
+        else { return nil }
+        return memo.base
     }
 
     /// p2-ren Stage A — **THE ONE PREDICATE** (design §5, §11 step 4): the file
@@ -2811,19 +2948,30 @@ public final class AudioEngine: AudioEngineControlling {
     /// 4), the same class of work the add loop already does per clip. Nothing
     /// here touches the render thread.
     func bridgeFile(for clip: Clip, keys: StretchRenderCache.RenderKeys) -> URL? {
-        guard bridgeEnabled,
-              let memo = lastPlayed[clip.id],
-              let source = clip.audioFileURL,
-              stretchDesired[clip.id] == keys.resolved,
-              let timeBase = try? RenderTimeBase.of(source: source, clip: clip),
-              timeBase == memo.timeBase
-        else { return nil }
-        if case .failed = stretchCache.status(forClip: clip.id) { return nil }
-        guard FileManager.default.fileExists(atPath: memo.fileURL.path),
-              let sourceFrames = try? AVAudioFile(forReading: source).length,
-              memo.frameCount == timeBase.expectedFrames(sourceFrames: Int(sourceFrames))
+        guard bridgeEnabled, let memo = lastPlayed[clip.id],
+              standInAllowed(file: memo.fileURL, timeBase: memo.timeBase,
+                             frameCount: memo.frameCount, clip: clip, keys: keys)
         else { return nil }
         return memo.fileURL
+    }
+
+    /// Rules 0-4 above, for any file that would stand in for the render
+    /// `keys` names: the bridge's (Stage A) and the provisional's base
+    /// (Stage B). Extracted verbatim from `bridgeFile`, in the same order.
+    private func standInAllowed(file: URL, timeBase memoTimeBase: RenderTimeBase,
+                                frameCount: Int, clip: Clip,
+                                keys: StretchRenderCache.RenderKeys) -> Bool {
+        guard let source = clip.audioFileURL,
+              stretchDesired[clip.id] == keys.resolved,
+              let timeBase = try? RenderTimeBase.of(source: source, clip: clip),
+              timeBase == memoTimeBase
+        else { return false }
+        if case .failed = stretchCache.status(forClip: clip.id) { return false }
+        guard FileManager.default.fileExists(atPath: file.path),
+              let sourceFrames = try? AVAudioFile(forReading: source).length,
+              frameCount == timeBase.expectedFrames(sourceFrames: Int(sourceFrames))
+        else { return false }
+        return true
     }
 
     /// p2-ren Stage A: remembers the file a clip's node just opened, with its
@@ -2835,10 +2983,41 @@ public final class AudioEngine: AudioEngineControlling {
         guard let source = clip.audioFileURL,
               let timeBase = try? RenderTimeBase.of(source: source, clip: clip) else {
             lastPlayed[clip.id] = nil
+            lastCommitted[clip.id] = nil
             return
         }
         lastPlayed[clip.id] = LastPlayed(fileURL: url, timeBase: timeBase,
                                          frameCount: Int(frameCount))
+        // p2-ren Stage B: a COMMITTED file (the `.ready` answer, or the source
+        // of a clip that renders nothing) becomes the clip's provisional base.
+        // A bridge or a provisional never does.
+        let opened = url.standardizedFileURL
+        if let ready = readyAnswers[clip.id], ready.url.standardizedFileURL == opened {
+            lastCommitted[clip.id] = CommittedBase(base: ready, timeBase: timeBase,
+                                                   frameCount: Int(frameCount))
+        } else if !StretchRenderCache.needsRender(clip), opened == source.standardizedFileURL,
+                  let identity = try? StretchRenderCache.sourceIdentityFields(source: source) {
+            lastCommitted[clip.id] = CommittedBase(
+                base: ProvisionalRender.Base(
+                    url: source, params: StretchRenderCache.Params(clip: clip),
+                    name: "src-" + StretchRenderCache.keyDigest(identity), isSource: true,
+                    contourFallback: false),
+                timeBase: timeBase, frameCount: Int(frameCount))
+        }
+    }
+
+    /// p2-ren Stage B, test instrumentation only (the graph's
+    /// `onClipNodeOpened`): G1's product stamp, the host time a node opened a
+    /// provisional, and the ledger of provisional files opened.
+    private func noteClipNodeOpened(_ clip: Clip, url: URL, plays: PlaybackGraph.ClipNodePlays) {
+        guard plays == .preview else { return }
+        provisionalOpenedHostTimeForTesting[clip.id] = mach_absolute_time()
+        provisionalFilesOpenedForTesting.append(url)
+    }
+
+    /// Test seam (p2-ren Stage B): the provisional base memo for one clip.
+    func lastCommittedForTesting(clipID: UUID) -> CommittedBase? {
+        lastCommitted[clipID]
     }
 
     /// Test seam (p2-ren Stage A): the bridge memo's entry for one clip.
@@ -2858,8 +3037,15 @@ public final class AudioEngine: AudioEngineControlling {
         stretchDesired[clipID] = key
         Task { @MainActor [weak self] in
             guard let self else { return }
+            if let hold = self.finalRenderHoldForTesting {
+                await hold()
+                // Released holds resume in any order; a kick an edit already
+                // superseded must not reach the cache after its successor.
+                guard self.stretchDesired[clipID] == key else { return }
+            }
+            let committed: URL
             do {
-                _ = try await self.stretchCache.renderIfNeeded(
+                committed = try await self.stretchCache.renderIfNeeded(
                     clipID: clipID, source: source, params: params)
             } catch {
                 // p2-ren Stage A — THE FAILURE RULE (design §5 step 4, §10 row
@@ -2875,15 +3061,39 @@ public final class AudioEngine: AudioEngineControlling {
                 // status), and whatever superseded it ends the bridge itself.
                 // And with no bridge playing, nothing happens at all: the
                 // behaviour before the bridge, which the veto must restore.
+                //
+                // p2-ren Stage B: a PROVISIONAL is a stand-in too, and a failure
+                // ends it the same way (the resolver then refuses to serve one
+                // for a failed clip).
                 if self.stretchDesired[clipID] == key,
-                   case .failed = self.stretchCache.status(forClip: clipID),
-                   self.graph.isPlayingBridge(clipID: clipID) {
-                    self.graph.invalidateClipSchedule(clipID: clipID)
-                    self.tracksDidChange(self.lastTracks)
+                   case .failed = self.stretchCache.status(forClip: clipID) {
+                    self.provisionals.cancel(clipID: clipID)
+                    if let plays = self.graph.clipPlays(clipID: clipID), plays != .exact {
+                        self.graph.invalidateClipSchedule(clipID: clipID)
+                        self.tracksDidChange(self.lastTracks)
+                    }
                 }
                 return  // superseded or failed — status(forClip:) carries it
             }
             guard self.stretchDesired[clipID] == key else { return }  // stale
+            // p2-ren Stage B: the final is the clip's base from now on, whether
+            // or not a node opens it at once; and no provisional for it is
+            // needed any more.
+            self.rememberCommittedFinal(clipID: clipID, key: key, url: committed)
+            self.provisionals.cancel(clipID: clipID)
+            // p2-ren Stage B — THE DEFERRED FINAL SWAP (design §6 step 9): while
+            // the transport rolls and the clip plays its PROVISIONAL, the final
+            // does not restart the transport. It replaces the provisional under
+            // the same player at the next reschedule that happens anyway
+            // (`restart`, `stopPlayback`: `applyDeferredFinalSwaps`). The bridge
+            // memo stays: the node still plays the provisional.
+            if self.defersFinalSwapWhileRolling, self.transportRollsForInterimRenders,
+               self.graph.clipPlays(clipID: clipID) == .preview,
+               self.graph.canSwapClipFileInPlace(clipID: clipID, to: committed) {
+                self.deferredFinalSwaps[clipID] = DeferredFinalSwap(key: key, url: committed)
+                self.deferredFinalSwapCountForTesting += 1
+                return
+            }
             // p2-ren Stage A: the render any bridge stood in for has landed, so
             // the memo of the previous file retires here. The reconcile below
             // opens the committed render, which feeds it again; if that open
@@ -2894,8 +3104,97 @@ public final class AudioEngine: AudioEngineControlling {
             // the existing restart seam resumes playback with it.
             self.graph.invalidateClipSchedule(clipID: clipID)
             self.tracksDidChange(self.lastTracks)
+            // p2-ren Stage B: the final plays; its provisionals are superseded.
+            self.provisionals.collectGarbage(clipID: clipID, keep: [],
+                                             inUse: self.graph.openClipFileURLs)
         }
     }
+
+    /// p2-ren Stage B: a clip's final landed at `url` for render `key`; it is
+    /// the clip's provisional base from now on, when it has the clip's time
+    /// base and length (the same rules as any base).
+    private func rememberCommittedFinal(clipID: UUID, key: String, url: URL) {
+        guard let clip = lastTracks.lazy.flatMap(\.clips).first(where: { $0.id == clipID }),
+              let source = clip.audioFileURL,
+              let timeBase = try? RenderTimeBase.of(source: source, clip: clip),
+              let frames = try? AVAudioFile(forReading: url).length else { return }
+        let params = StretchRenderCache.Params(clip: clip)
+        guard let keys = try? stretchCache.keys(source: source, params: params),
+              keys.resolved == key else { return }
+        let name = url.deletingPathExtension().lastPathComponent
+        lastCommitted[clipID] = CommittedBase(
+            base: ProvisionalRender.Base(url: url, params: params, name: name, isSource: false,
+                                         contourFallback: name != keys.resolved),
+            timeBase: timeBase, frameCount: Int(frames))
+    }
+
+    /// p2-ren Stage B: a provisional build landed (`ProvisionalRenderStore.
+    /// onBuilt`). When the clip still asks for that render, the final has not
+    /// landed, nothing failed, and the node does not already play it, the
+    /// same seam as a final replaces the node (`invalidateClipSchedule` +
+    /// `tracksDidChange`): the re-resolve answers `.provisional`. A stale one
+    /// (a newer edit, a landed final) is never opened (design §10 row 4).
+    private func provisionalDidLand(clipID: UUID, pair: ProvisionalRenderStore.Pair, url: URL) {
+        guard provisionalsEnabled, stretchDesired[clipID] == pair.newKey,
+              let clip = lastTracks.lazy.flatMap(\.clips).first(where: { $0.id == clipID }),
+              let source = clip.audioFileURL,
+              let keys = try? stretchCache.keys(source: source,
+                                                params: StretchRenderCache.Params(clip: clip)),
+              keys.resolved == pair.newKey,
+              stretchCache.committedURL(for: keys) == nil else { return }
+        if case .failed = stretchCache.status(forClip: clipID) { return }
+        guard provisionalBase(for: clip, keys: keys)?.name == pair.baseName else { return }
+        switch graph.clipPlays(clipID: clipID) {
+        case .exact?:
+            return
+        case .preview? where graph.clipFileURL(clipID: clipID)?.standardizedFileURL
+            == url.standardizedFileURL:
+            return
+        case .previous? where graph.relabelBridgeAsPreview(clipID: clipID, url: url):
+            // The node already plays this very file (a timing-only edit's
+            // base): relabelled in place, no reschedule. A rolling transport
+            // hears it, so it says so now (Stage A′'s rule).
+            if transportRollsForInterimRenders { graph.postRenderNoticesForPlayback() }
+            return
+        default:
+            break
+        }
+        graph.invalidateClipSchedule(clipID: clipID)
+        tracksDidChange(lastTracks)
+        provisionals.collectGarbage(clipID: clipID, keep: [pair], inUse: graph.openClipFileURLs)
+    }
+
+    /// p2-ren Stage B: replaces each clip's provisional with the final that
+    /// landed while the transport rolled (`deferredFinalSwaps`), under the
+    /// STOPPED players (`PlaybackGraph.swapClipFileInPlace`). Called by
+    /// `restart` and `stopPlayback` right after `stopAllPlayers`; a test calls
+    /// it directly (no audio hardware, so no restart). A mark whose clip moved
+    /// on (a newer edit, a node already replaced) is dropped: whatever moved
+    /// it on replaces the stand-in itself. Returns the clips whose swap was
+    /// refused; their nodes are invalidated, and the caller must reconcile.
+    @discardableResult
+    func applyDeferredFinalSwaps() -> [UUID] {
+        guard !deferredFinalSwaps.isEmpty else { return [] }
+        let marks = deferredFinalSwaps
+        deferredFinalSwaps = [:]
+        var refused: [UUID] = []
+        for (clipID, mark) in marks {
+            guard stretchDesired[clipID] == mark.key,
+                  graph.clipPlays(clipID: clipID) == .preview else { continue }
+            if graph.swapClipFileInPlace(clipID: clipID, to: mark.url) {
+                provisionals.collectGarbage(clipID: clipID, keep: [],
+                                            inUse: graph.openClipFileURLs)
+            } else {
+                lastPlayed[clipID] = nil
+                graph.invalidateClipSchedule(clipID: clipID)
+                refused.append(clipID)
+            }
+        }
+        return refused
+    }
+
+    /// Test seam (p2-ren Stage B): the finals waiting for a reschedule.
+    var deferredFinalSwapsForTesting: [UUID: DeferredFinalSwap] { deferredFinalSwaps }
 
     /// contour-to-render: a clip whose edits ask for flattening (Hard Tune, a
     /// vibrato/drift scale) but PLAYS its constant-offset fallback — audible,
@@ -2947,12 +3246,18 @@ public final class AudioEngine: AudioEngineControlling {
         // clips included (an identity clip's first edit bridges on its
         // source), so it is pruned only for clips that LEFT the model, never
         // by the `needsRender` set below.
-        if !lastPlayed.isEmpty {
+        if !lastPlayed.isEmpty || !lastCommitted.isEmpty || !readyAnswers.isEmpty {
             var present: Set<UUID> = []
             for track in tracks where track.kind == .audio {
                 for clip in track.clips { present.insert(clip.id) }
             }
             lastPlayed = lastPlayed.filter { present.contains($0.key) }
+            // p2-ren Stage B: the base memo follows the bridge's, and a clip
+            // that left takes its provisional builds and files with it.
+            lastCommitted = lastCommitted.filter { present.contains($0.key) }
+            readyAnswers = readyAnswers.filter { present.contains($0.key) }
+            deferredFinalSwaps = deferredFinalSwaps.filter { present.contains($0.key) }
+            provisionals.prune(keeping: present, inUse: graph.openClipFileURLs)
         }
         guard !stretchDesired.isEmpty || !contourNoticePosted.isEmpty else { return }
         var live: Set<UUID> = []
@@ -2974,6 +3279,23 @@ public final class AudioEngine: AudioEngineControlling {
     /// is accepted for surface stability; the cache keys jobs per clip.
     public func clipStretchStatus(trackID: UUID, clipID: UUID) -> ClipStretchStatus? {
         stretchCache.status(forClip: clipID)
+    }
+
+    /// Pull-based render-audible state for the control snapshot (p2-ren
+    /// Stage B′). trackID is accepted for surface stability; the graph keys
+    /// nodes per clip, exactly like `clipStretchStatus` above. A clip with no
+    /// node (never resolved, or `StretchResolution.pending`: no bridge, no
+    /// provisional) reports `.silent` — that IS the pending-and-nothing-to-
+    /// stand-in-on state, `graph.clipPlays` has nothing to say about a clip
+    /// with no node, so nil there is read as `.silent`, never as "ask the
+    /// caller to assume `.exact`".
+    public func renderAudible(trackID: UUID, clipID: UUID) -> ClipRenderAudible? {
+        switch graph.clipPlays(clipID: clipID) {
+        case .exact?: return .exact
+        case .preview?: return .preview
+        case .previous?: return .previous
+        case nil: return .silent
+        }
     }
 
     /// Offline transient analysis (M5 iii-e): content-key cached spectral-flux
@@ -3198,8 +3520,15 @@ public final class AudioEngine: AudioEngineControlling {
     }
 
     /// m39-e — the master modulation twin. One parameter pass republishes the
-    /// master strip's snapshot; the pass runs the same way live and offline, so
-    /// the two paths agree by construction.
+    /// master strip's snapshot on the LIVE graph.
+    ///
+    /// ⚠️ The offline graph is a DIFFERENT graph (`OfflineRenderer` builds its
+    /// own), so the live cache below never reaches a bounce. A bounce carries
+    /// master modulation only because the store hands the same sources and
+    /// routes to `renderOffline` / `renderMixdown` (m39-e-2), which set them on
+    /// the offline graph before its first parameter pass. Until m39-e-2 this
+    /// comment said the two paths "agree by construction" — they did not: every
+    /// export silently dropped master modulation.
     public func masterModulationChanged(sources: [ModulationSource],
                                         routes: [ModulationRoute]) {
         lastMasterModulationSources = sources
@@ -3243,16 +3572,41 @@ public final class AudioEngine: AudioEngineControlling {
                               fromBeat: Double, durationSeconds: Double,
                               to url: URL,
                               format: DeliveryFormat) async throws -> AudioFileInfo {
+        // m39-e-2: this signature has no master modulation to carry, so it is
+        // the modulation-carrying mixdown with none — byte-identical to the
+        // pre-m39-e-2 body, which now lives there.
+        try await renderMixdown(
+            tracks: tracks, tempoMap: tempoMap, masterVolume: masterVolume,
+            masterEffects: masterEffects, masterAutomation: masterAutomation,
+            masterModulationSources: [], masterModulationRoutes: [],
+            fromBeat: fromBeat, durationSeconds: durationSeconds,
+            to: url, format: format)
+    }
+
+    /// m39-e-2 — the format-aware mixdown carrying the MASTER strip's
+    /// modulation (`render.mixdown`'s seam: here the engine renders AND writes).
+    /// No default argument anywhere, for the disambiguation reason above; the
+    /// render class is the caller's to state.
+    public func renderMixdown(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
+                              masterEffects: [EffectDescriptor],
+                              masterAutomation: [AutomationLane],
+                              masterModulationSources: [ModulationSource],
+                              masterModulationRoutes: [ModulationRoute],
+                              fromBeat: Double, durationSeconds: Double,
+                              to url: URL,
+                              format: DeliveryFormat) async throws -> AudioFileInfo {
         // Refactored over the M5 iv-b buffer seam: render to memory (the
         // WYSIWYG stretch await and fresh-renderer rules live there), then
         // write — the exact composition `renderToWAV` performed, behavior
         // frozen (the existing mixdown/stretch suites are the proof).
-        // Internal delegation forwards its own render-class parameter
-        // (design §2.1).
+        // Internal delegation forwards its own render-class parameters
+        // (design §2.1; master modulation since m39-e-2).
         let audio = try await renderOffline(
             tracks: tracks, tempoMap: tempoMap, masterVolume: masterVolume,
             masterEffects: masterEffects,
             masterAutomation: masterAutomation,
+            masterModulationSources: masterModulationSources,
+            masterModulationRoutes: masterModulationRoutes,
             fromBeat: fromBeat, durationSeconds: durationSeconds,
             forcedCompensationTargets: nil
         )
@@ -3260,10 +3614,31 @@ public final class AudioEngine: AudioEngineControlling {
     }
 
     /// `masterEffects` / `masterAutomation` concrete-class defaults — see
-    /// `renderMixdown`.
+    /// `renderMixdown`. m39-e-2: this signature carries no master modulation,
+    /// so it forwards the modulation-carrying render below with none, which is
+    /// byte-identical to the pre-m39-e-2 body (the offline graph's own default).
     public func renderOffline(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
                               masterEffects: [EffectDescriptor] = [],
                               masterAutomation: [AutomationLane] = [],
+                              fromBeat: Double, durationSeconds: Double,
+                              forcedCompensationTargets: [UUID: Int]?) async throws -> RenderedAudio {
+        try await renderOffline(
+            tracks: tracks, tempoMap: tempoMap, masterVolume: masterVolume,
+            masterEffects: masterEffects, masterAutomation: masterAutomation,
+            masterModulationSources: [], masterModulationRoutes: [],
+            fromBeat: fromBeat, durationSeconds: durationSeconds,
+            forcedCompensationTargets: forcedCompensationTargets)
+    }
+
+    /// m39-e-2 — the offline render carrying the MASTER strip's modulation,
+    /// which the fresh `OfflineRenderer` sets on its own graph before the
+    /// pre-start parameter pass. No defaults: the render class (MASTERED passes
+    /// the project's sources/routes, STEM passes `[]`) is the caller's to state.
+    public func renderOffline(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
+                              masterEffects: [EffectDescriptor],
+                              masterAutomation: [AutomationLane],
+                              masterModulationSources: [ModulationSource],
+                              masterModulationRoutes: [ModulationRoute],
                               fromBeat: Double, durationSeconds: Double,
                               forcedCompensationTargets: [UUID: Int]?) async throws -> RenderedAudio {
         // Stretch WYSIWYG (M5 ii-d): a bounce WAITS for pending stretch
@@ -3322,7 +3697,9 @@ public final class AudioEngine: AudioEngineControlling {
                 tracks: tracks, tempoMap: tempoMap, fromBeat: fromBeat,
                 durationSeconds: durationSeconds, masterVolume: masterVolume,
                 masterEffects: masterEffects,
-                masterAutomation: masterAutomation
+                masterAutomation: masterAutomation,
+                masterModulationSources: masterModulationSources,
+                masterModulationRoutes: masterModulationRoutes
             )
         } catch {
             postEngineExceptionNotice(error)
@@ -3330,13 +3707,35 @@ public final class AudioEngine: AudioEngineControlling {
         }
     }
 
+    /// TEST SEAM (AUR-1), never set in production: handed the planning
+    /// renderer `offlineCompensationTargets` builds, and the tracks it plans,
+    /// BEFORE anything is prepared. A gate spies on what that throwaway
+    /// instantiates (its registry's `instantiator` and prepare counters)
+    /// through the REAL entry point, or rebuilds the pre-AUR-1 plan to compare
+    /// against. nil, as in production: nothing extra runs.
+    var offlinePlanRendererForTesting: (@MainActor (OfflineRenderer, [Track]) async -> Void)?
+
     public func offlineCompensationTargets(tracks: [Track]) async -> [UUID: Int] {
-        // A planning OfflineRenderer prepares the session's AUs (their hosted
-        // latency is part of the plan), then builds the offline graph and runs
-        // one parameter pass without rendering — parity with a real render
-        // pass by construction (spec §5), asserted by test.
+        // A planning OfflineRenderer prepares the session's hosted INSERT
+        // effects (their latency is the plan's only hosted input), then builds
+        // the offline graph and runs one parameter pass without rendering —
+        // parity with a real render pass by construction (spec §5), asserted
+        // by test.
+        //
+        // AUR-1 (docs/design/2026-09-27-au-instance-reuse.md §3.1): hosted
+        // INSTRUMENTS are deliberately not prepared. The plan never reads an
+        // instrument's latency, and an unprepared one's strip plans exactly as
+        // a prepared one's (`OfflineRenderer.prepareHostedInsertEffects`). Yet
+        // preparing them loaded every hosted instrument in the session into
+        // this throwaway, which died moments later, mid-load, before every
+        // stem export and every bounce-in-place. That double load was the one
+        // code-path difference between those two verbs and `render.mixdown`
+        // when a hosted sampler's opening went missing (sax defect ③).
+        // Removing it is the experiment; whether it was the CAUSE is for a
+        // same-plugin before/after render to say, not this comment.
         let renderer = OfflineRenderer()
-        await renderer.prepareAudioUnits(tracks: tracks)
+        await offlinePlanRendererForTesting?(renderer, tracks)
+        await renderer.prepareHostedInsertEffects(tracks: tracks)
         return renderer.compensationPlanTargets(tracks: tracks)
     }
 
@@ -4932,6 +5331,15 @@ public final class AudioEngine: AudioEngineControlling {
     private func restart(fromBeat beats: Double, tempoMap: TempoMap,
                          cause: RescheduleCause) {
         graph.stopAllPlayers()
+        // p2-ren Stage B: the reschedule a deferred final was waiting for. A
+        // refused swap (the final's file changed under it) replaces the node
+        // on the next main-actor turn, through the ordinary seam.
+        if !applyDeferredFinalSwaps().isEmpty {
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.tracksDidChange(self.lastTracks)
+            }
+        }
         currentAnchor = nil
         // `cause: cause` stays on the SAME LINE as `startPlayers(` — m23-bp's
         // forward pin (NoteChaseSiteTests) matches per line, and wrapping it

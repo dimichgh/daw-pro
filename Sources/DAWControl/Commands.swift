@@ -514,6 +514,78 @@ public final class CommandRouter {
         // the tail), still beside clip.sliceToSampler. NOTE: no quoted
         // string in this comment, deliberately (the m25-d rule).
         "clip.auditionNote",
+        // U-B (unpitched-notes-presets-midi-targets design §1.10, UB-2): the
+        // merge verb over ProjectStore.findUnpitchedSounds — adds the SOUNDS
+        // with no detected pitch (a breath, a consonant) to a clip's STORED
+        // note table, filling only time no stored segment already covers and
+        // never moving or re-identifying one. Placed HERE, immediately after
+        // clip.auditionNote, in the same per-note pitch-editor door cluster
+        // beside clip.sliceToSampler, rather than at the literal tail: every
+        // dropLast(N)/suffix window and tail pin elsewhere stays true by
+        // construction (the m25-d rule this whole cluster follows). NOTE: no
+        // quoted string in this comment, deliberately (the m25-d rule).
+        "clip.findUnpitchedSounds",
+        // C5a-3 (+ natural tuning §3e, NT-L3): the per-note WOBBLE writers —
+        // the wire door for ProjectStore.setClipNoteVibrato (single) and
+        // setClipNotesVibrato (batch), design `docs/design/2026-09-24-
+        // pitch-editor-vibrato-handle.md` §12.1/§12.4 and `docs/design/
+        // 2026-09-25-natural-tuning.md` §3e. Placed HERE, immediately after
+        // clip.findUnpitchedSounds, in the same per-note pitch-editor door
+        // cluster beside clip.sliceToSampler, rather than at the literal
+        // tail: every dropLast(N)/suffix window and tail pin elsewhere stays
+        // true by construction (the m25-d rule this whole cluster follows).
+        // NOTE: no quoted string in this comment, deliberately (the m25-d
+        // rule).
+        "clip.setNoteVibrato",
+        "clip.setNoteVibratos",
+        // NT-W (natural tuning §1(e)/§4.e, docs/design/2026-09-25-natural-tuning.md):
+        // the two VOICE (formant) verbs and the three SLIDE (transition) verbs —
+        // the wire door for ProjectStore.setClipNoteFormant/setClipFormantCorrection
+        // (formant fields, NT-C C0/C1) and setClipNoteTransition/
+        // setClipPitchTransitionSmoothness/setClipNoteGlideFollow (soft joins,
+        // NT-C C4). Placed HERE, immediately after clip.setNoteVibratos, in the
+        // same per-note pitch-editor door cluster beside clip.sliceToSampler,
+        // rather than at the literal tail: every dropLast(N)/suffix window and
+        // tail pin elsewhere stays true by construction (the m25-d rule this
+        // whole cluster follows). NOTE: no quoted string in this comment,
+        // deliberately (the m25-d rule). The two formant verbs render (NT-E1)
+        // and are SHIPPED: NT-PK's provisional-render memo-key fix landed and
+        // was verified by the orchestrator, lifting the earlier hold.
+        "clip.setNoteFormant",
+        "clip.setFormantCorrection",
+        "clip.setNoteTransition",
+        "clip.setPitchTransitionSmoothness",
+        "clip.setNoteGlideFollow",
+        // NT-W over NT-C C2 (natural tuning §2e): "keep breaths and
+        // consonants at their own pitch" — the wire door for
+        // ProjectStore.setClipConsonantProtection. Same cluster, same
+        // placement rule as the five verbs just above (immediately after
+        // them, beside clip.sliceToSampler, not at the tail). NT-E2 has
+        // landed: the render mix is live (see the verb's own doc comment,
+        // below in this file's `handle` switch).
+        "clip.setConsonantProtection",
+        // C5b-3b (freehand design §5.7): the DRAWN pitch-line wire door.
+        // Placed HERE, immediately after clip.setConsonantProtection, in the
+        // same per-note pitch-editor door cluster beside clip.sliceToSampler,
+        // rather than at the literal tail (the m25-d rule this whole cluster
+        // follows). NOTE: no quoted string in this comment, deliberately.
+        "clip.setNoteShape",
+        // W7-WIRE2: the BATCH twin of clip.setNoteShape — several notes'
+        // drawn pitch lines in ONE undo step, over the SAME
+        // ProjectStore.setClipNoteShapes the single verb already calls (the
+        // clip.setNotePitch -> clip.setNotePitches / clip.setNoteVibrato ->
+        // clip.setNoteVibratos precedent pair). Placed HERE, immediately
+        // after clip.setNoteShape, in the same per-note pitch-editor door
+        // cluster beside clip.sliceToSampler, NOT at the tail. NOTE: no
+        // quoted string in this comment, deliberately (the m25-d rule).
+        "clip.setNoteShapes",
+        // X4 (natural tuning design §X4, `docs/design/2026-09-25-
+        // natural-tuning.md`): the ONE upgrade path — the wire door for
+        // ProjectStore.upgradeToNaturalTuning. Same cluster, same placement
+        // rule as the verbs above (immediately after clip.setNoteShapes,
+        // beside clip.sliceToSampler, NOT at the tail). NOTE: no quoted
+        // string in this comment, deliberately (the m25-d rule).
+        "clip.upgradeNaturalTuning",
         "arrange.insertBars",
         "arrange.deleteBars",
         "take.group",
@@ -981,6 +1053,11 @@ public final class CommandRouter {
 
     private func route(_ request: ControlRequest) async throws -> ControlResponse {
         let params = request.params ?? [:]
+        // m23-ap I5-F4 round 4: ONE timeline ceiling for every command, checked
+        // before any command reads a position (`TimelineCeiling`).
+        if let beyond = TimelineCeiling.problem(in: params, command: request.command) {
+            throw ControlError(beyond)
+        }
         switch request.command {
         case "transport.play":
             // No params (m16-e, audit F5 survey: closes the zero-param gap).
@@ -1618,6 +1695,14 @@ public final class CommandRouter {
             // provenance recorded by instrument.importSampleLibrary; they are
             // emitted, preserved across edits, and ignored on input.
             //
+            // W7-SMP: when the `sampler` object writes a global that EVERY zone
+            // overrides (attack/decay/sustain/release/oneShot — the engine reads
+            // a zone's own value first), the write still lands and the reply
+            // adds `warnings` (describeSampler's own sentence, only for the
+            // globals this call named) plus `effectiveGlobals` (describeSampler's
+            // shape). Both keys are absent otherwise. See the block at the end
+            // of this case.
+            //
             // m30-a: a zone `path` accepts a BUNDLED SAMPLE NAME as well as a
             // filesystem path — `builtin:test-tone-a4`, a 0.35 s A4 one-shot
             // the app ships, whose root pitch is 69. This is the ONLY way to
@@ -1846,8 +1931,36 @@ public final class CommandRouter {
             let instWarnings = InstrumentControllerChangeWarnings.warnings(
                 changingFrom: instOldDescriptor, to: descriptor,
                 carriedLaneTypes: instCarriedLaneTypes)
-            if !instWarnings.isEmpty, case .object(var instObj) = instPayload {
-                instObj["warnings"] = .array(instWarnings.map { .string($0.message) })
+            // W7-SMP (the sax-team ② SETTER half, open since 2026-08-20): a
+            // `sampler` write that lands on a global EVERY zone overrides is
+            // stored exactly as before — a later zone edit can make it heard
+            // again — but until then the engine never reads it, and this reply
+            // used to say nothing. That silence is how a release of 3.4465 s
+            // reached a sampler whose every zone releases in 0.5 s. The warning
+            // is `samplerEffectiveGlobalsJSON`'s own sentence — the function
+            // `instrument.describeSampler` calls, ONE home — filtered to the
+            // globals THIS payload named (the m27-b noise rule above: warn about
+            // what the caller touched, never about every inert global the track
+            // happens to carry). `effectiveGlobals` rides along ONLY when such a
+            // warning fires: the sentence points at it, and its `note` carries
+            // the per-zone remedy. A zoneless sampler is skipped, as describe
+            // skips it — no inheritance, nothing to warn about.
+            var instSamplerWarnings: [String] = []
+            if case .object(let instSamplerPayload)? = params["sampler"],
+               let instWritten = descriptor.sampler, !instWritten.zones.isEmpty {
+                let (effectiveGlobals, warnings) = Self.samplerEffectiveGlobalsJSON(
+                    instWritten, warningFields: Set(instSamplerPayload.keys))
+                if !warnings.isEmpty, case .object(var instObj) = instPayload {
+                    instObj["effectiveGlobals"] = effectiveGlobals
+                    instPayload = .object(instObj)
+                    instSamplerWarnings = warnings
+                }
+            }
+            // ONE `warnings` array for both sources — controller lanes first,
+            // then inert sampler globals — assigned once, only when non-empty.
+            let instAllWarnings = instWarnings.map(\.message) + instSamplerWarnings
+            if !instAllWarnings.isEmpty, case .object(var instObj) = instPayload {
+                instObj["warnings"] = .array(instAllWarnings.map { .string($0) })
                 instPayload = .object(instObj)
             }
             return .success(request.id, instPayload)
@@ -2353,7 +2466,10 @@ public final class CommandRouter {
             // Response: {trackId, kind, isActiveInstrument, parameterCount,
             // order:[…], parameters:{<name>:{value?, effective, default,
             // nilResolvesTo?, min?, max?, values?, unit, meaning, optional,
-            // isSet?, integer?}}, derived:{…}, constants:{…}, warnings?}.
+            // isSet?, integer?, curve?, note?}}, derived:{…}, constants:{…},
+            // warnings?}. `curve` (m39-f-2, additive) and `note` (the same
+            // param's disagreement teaching line) are present ONLY for the 7
+            // params with a declared `ParamCurve` — see the injection below.
             //
             // DONE (m39-f, MCP, 2026-09-19): exposed as `instrument_describe_synth`
             // — a DIRECT mirror of this command's name (the
@@ -2389,9 +2505,68 @@ public final class CommandRouter {
             // `ProjectStore.setInstrument` uses to build its overlay base, so
             // what this verb describes for an untouched track is exactly what a
             // one-knob edit would start from.
-            return .success(request.id, .object(PolySynthDescription.payload(
+            //
+            // m39-f-2 (additive): `curve`, layered ONTO the payload here rather
+            // than inside `PolySynthDescription.payload`/`entry` — that file's
+            // functions are a different lane's fence, and post-processing the
+            // return is exactly as additive without crossing it. Reads
+            // `InstrumentParamSpec` (`Sources/DAWCore/InstrumentParams.swift`),
+            // never a restated table. CENSUSED: that spec's `curve` field has
+            // exactly TWO consumers in the tree, and they agree —
+            // `ModulationSnapshotBuilder.resolveTarget`'s `.instrumentParam`
+            // branch (`Sources/DAWEngine/Modulation/ModulationSnapshotBuilder.swift:281`),
+            // which sets the render-thread modulation depth-law curve for a
+            // live `mod.addRoute`, and this file's OWN `modulatedValue`
+            // (below, in this same file), the `mod.describe` READ-path arithmetic
+            // that previews what a route's modulated value would be without
+            // re-deriving the render thread's law. (`EffectParamSpec.curve`
+            // has the same live/read-path pair, in the sibling `.effectParam`
+            // case right beside each `.instrumentParam` one above — a sibling
+            // table for effect params, not this one.) Automation reads
+            // the SAME spec table
+            // (`AutomationTarget.valueRange`, `Sources/DAWCore/Automation.swift:158`)
+            // for its value RANGE only, never `.curve` — automation has no
+            // curve concept of its own beyond `AutomationPoint.curve`, which is
+            // the unrelated per-breakpoint interpolation shape. So `curve`
+            // here is honestly "what modulation does," nothing broader.
+            //
+            // Covers the 7 params `InstrumentParamSpec.specs(for: .polySynth)`
+            // declares (cutoffHz/resonance/gain/attack/decay/sustain/release);
+            // OMITTED — never a fabricated `.linear` — for the other 17
+            // (waveform, pedalHoldLimit, the 15 m39-g richness knobs), which
+            // have no declared curve anywhere, the same optional-field
+            // precedent `fx.describe`'s `note` already uses.
+            //
+            // ⚠️ m39-a-2 IS STILL OPEN AND UNCHANGED BY THIS: the on-screen
+            // knob (`PolySynthEditorModel.PolySynthParamSpec`, DAWAppKit) is a
+            // SEPARATE, hand-declared curve this verb cannot reach and does
+            // not touch — it reports `.linear` for attack/decay/release today,
+            // disagreeing with the `.logarithmic` modulation reports here. So
+            // those three ALSO carry a `note`: `curve` alone would let a
+            // caller reasonably assume the knob matches, which it does not.
+            let describeSynthPayload = PolySynthDescription.payload(
                 trackID: describeSynthTrackID,
-                descriptor: describeSynthTrack.instrument ?? .default)))
+                descriptor: describeSynthTrack.instrument ?? .default)
+            func injectSynthParamCurves(_ payload: [String: JSONValue]) -> [String: JSONValue] {
+                guard var parameters = payload["parameters"]?.objectValue else { return payload }
+                let envelopeNote = "Modulation (mod.addRoute) reads this parameter on a "
+                    + "logarithmic curve: depth is even in DOUBLINGS of time, so the same depth "
+                    + "swings a long value further than a short one. The on-screen knob still "
+                    + "moves in even STEPS of time today, not doublings — that disagreement is "
+                    + "real and not yet decided, and this field does not change it."
+                for spec in InstrumentParamSpec.specs(for: .polySynth) {
+                    guard var paramObject = parameters[spec.name]?.objectValue else { continue }
+                    paramObject["curve"] = .string(spec.curve.rawValue)
+                    if ["attack", "decay", "release"].contains(spec.name) {
+                        paramObject["note"] = .string(envelopeNote)
+                    }
+                    parameters[spec.name] = .object(paramObject)
+                }
+                var result = payload
+                result["parameters"] = .object(parameters)
+                return result
+            }
+            return .success(request.id, .object(injectSynthParamCurves(describeSynthPayload)))
 
         case "instrument.setDrumParam":
             // m39-dm — THE PER-PARAMETER PATH, and there is exactly one of it
@@ -2413,6 +2588,16 @@ public final class CommandRouter {
             let drumParamTrackID = try params.requireTrackID()
             guard let drumParamName = params["name"]?.stringValue, !drumParamName.isEmpty else {
                 throw ControlError("name is required — a dotted drum parameter like 'kick.decay'")
+            }
+            // TPL-0 — `noteLayout` is STRUCTURAL (which note plays which drum)
+            // and its value is a word. Refused BEFORE the number check, so the
+            // caller learns where it lives instead of "must be a number".
+            if drumParamName == DrumKitParams.noteLayoutKey
+                || drumParamName == "kit.\(DrumKitParams.noteLayoutKey)" {
+                throw ControlError("noteLayout chooses which MIDI notes play which drum, so it is "
+                    + "not one of the \(DrumKitParams.paramSpecs.count) sound settings. Change it "
+                    + "with track.setInstrument: {\"drumKit\": {\"noteLayout\": \"gm\"}} for "
+                    + "General MIDI drum notes, or \"pads\" for notes 36-43 in pad order.")
             }
             guard let drumParamValue = params["value"]?.doubleValue else {
                 throw ControlError("value is required and must be a number")
@@ -2500,14 +2685,21 @@ public final class CommandRouter {
                 throw ControlError("unknown drum preset '\(loadPresetName)' — valid names: "
                     + DrumKitParams.presets.map(\.name).joined(separator: ", "))
             }
+            // TPL-0 — a preset changes how the drums SOUND, never which note
+            // plays which drum: `applyingPreset` keeps the kit's `noteLayout`
+            // (the one DAWCore home; `DemoRender` calls it too).
+            let loadPresetCurrentKit = store.tracks.first { $0.id == loadPresetTrackID }?
+                .instrument?.resolvedDrumKit ?? DrumKitParams()
             guard let loadPresetDescriptor = try store.setInstrument(
-                id: loadPresetTrackID, drumKit: preset.params
+                id: loadPresetTrackID, drumKit: loadPresetCurrentKit.applyingPreset(preset)
             ) else { throw ControlError.noTrack(loadPresetTrackID) }
             return .success(request.id, .object([
                 "trackId": .string(loadPresetTrackID.uuidString),
                 "name": .string(preset.name),
                 "summary": .string(preset.summary),
                 "replacedAllParameters": .bool(true),
+                // TPL-0: KEPT from the kit, never taken from the preset.
+                "noteLayout": .string(loadPresetDescriptor.resolvedDrumKit.noteLayout.rawValue),
                 "parameterCount": .number(Double(DrumKitParams.paramSpecs.count)),
                 "kind": .string(loadPresetDescriptor.kind.rawValue),
                 "isActiveInstrument": .bool(loadPresetDescriptor.kind == .drumSynth),
@@ -3056,9 +3248,10 @@ public final class CommandRouter {
             // params: kind? (omit for every kind). Returns the parameter schemas
             // from EffectParamSpec — MCP discoverability. Unknown kind lists valid
             // kinds. Wire shape: {"kinds": [{"kind", "params": [{name, min, max,
-            // default, unit, curve, note?}]}]}. `note` (m22-a, additive) teaches
-            // the semantics a bare range can't: the EQ's nil-means-off HP/LP
-            // corners, 12/24 slope snapping, and 0/1 per-band bypass. `curve`
+            // default, unit, curve, modulatable, note?}]}]}. `note` (m22-a,
+            // additive) teaches the semantics a bare range can't: the EQ's
+            // nil-means-off HP/LP corners, 12/24 slope snapping, and 0/1 per-band
+            // bypass. `curve`
             // (m39-a, additive) is `ParamCurve`'s ONE HOME for how a 0...1 knob
             // position maps onto this range: `linear` (even steps in the
             // parameter's own units — the default, and every non-frequency
@@ -3069,6 +3262,16 @@ public final class CommandRouter {
             // in the first tenth of the travel), or `decibel` (the same
             // multiplicative curve read in dB rather than octaves; no shipping
             // param uses it yet).
+            // `modulatable` (m39-f-3, additive) is `EffectParamSpec.modulatable`'s
+            // ONE HOME verdict, VERBATIM — `mod.describeKinds`'s own
+            // `targets.effectParam` prose has pointed agents at "fx.describe's
+            // modulatable verdict" since m39-e, but this was the one place on the
+            // wire that promise went unkept: the value here is read from the
+            // SAME `EffectParamSpec` the `mod.addRoute` refusal path
+            // (`ProjectStore+Modulation.swift`'s `validate(target:on:)`) switches
+            // on, so a `.refused` reported here is refused for real and a `.yes`/
+            // `.warned` reported here is exactly what a real route against that
+            // param gets. Never re-derived, never a second table.
             try params.rejectUnknownKeys(["kind"], verb: "fx.describe")
             let fxKinds: [EffectDescriptor.Kind]
             if let rawKind = params["kind"]?.stringValue {
@@ -3092,6 +3295,7 @@ public final class CommandRouter {
                                 "default": .number(spec.defaultValue),
                                 "unit": .string(spec.unit),
                                 "curve": .string(spec.curve.rawValue),
+                                "modulatable": .string(spec.modulatable.rawValue),
                             ]
                             // Omitted when nil (additive m22-a teaching line).
                             if let note = spec.note { paramObj["note"] = .string(note) }
@@ -4668,6 +4872,21 @@ public final class CommandRouter {
             // clipNotFound surfaces via the LocalizedError mapping. Response: the
             // updated clip.
             //
+            // m23-ap I5-F4 — THE GRID IS THE SONG'S: its lines are multiples of
+            // gridBeats from the song's beat 0 (the lines the piano roll draws),
+            // not from the clip's first beat, so an off-grid clip's notes land
+            // on the lines the user sees. The store reads the clip's startBeat
+            // itself (ProjectStore.quantizeClipNotes), so this case passes
+            // nothing new and no param was added: the old clip-counted grid
+            // was a bug against the drawn one, not a mode worth keeping.
+            // Swing/groove slots count from the song's beat 0 too (ruled
+            // 2026-09-27; clip.quantizeAudio always did), so the notes that
+            // swing are the song's offbeats. A clip that starts on a grid line
+            // quantizes exactly as before when straight, or when that line is
+            // an even song slot and a whole number of groove cycles from 0.
+            // Round 3: gridBeats must also be finite and at least 1/1024 beat
+            // (gridFloorProblem), refused in words that name that value.
+            //
             // groove? (M5 iii-g): optional ref — a built-in swing name
             // ("swing8:66"), a saved template id, or a saved template name —
             // resolved to QuantizeSettings.groove (parseQuantizeSettings →
@@ -4820,8 +5039,10 @@ public final class CommandRouter {
             // chop-to-SAMPLER-PADS verb is clip.sliceToSampler.
             //
             // params: trackId (required), clipId (required), gridBeats
-            // (required, > 0 — OPTIONAL when strength is explicitly 0, where
-            // nothing is nudged and the grid is irrelevant), strength? (0...1,
+            // (required, > 0, finite and at least 1/1024 beat: gridFloorProblem
+            // — OPTIONAL when strength is explicitly 0, where nothing is nudged
+            // and the grid is irrelevant, but a SENT grid is still checked),
+            // strength? (0...1,
             // default 1), swing? (50...75, default 50), sensitivity? (0...1,
             // default 0.5 — detector knob) [transient slicing only],
             // divisions? (2...128 — cut into N EQUAL parts instead of at
@@ -5083,6 +5304,14 @@ public final class CommandRouter {
             // caller outside those ranges almost certainly meant something
             // else.
             //
+            // formantCorrection? (natural tuning §1(e), W7-D2/W7-WIRE2):
+            // 0...1, how much of the singer's own voice size the new tuning
+            // keeps. Absent = today's rule (DAWCore's own carry of the
+            // clip's current amount, or the seed 1.0 for a fresh set). An
+            // explicit JSON null, and a value outside 0...1, are BOTH
+            // refused in words rather than silently read as "no override"
+            // or clamped — see the parse site's own comment for why.
+            //
             // ✅ RETIRED 2026-09-24 (contour-to-render). hardTune / any
             // preserveVibrato:false request asks the CURVE to flatten the
             // sung contour onto the target, which needs the detected
@@ -5124,12 +5353,27 @@ public final class CommandRouter {
             // clip.autoCorrectPitch {replaceExisting:false} call would refuse
             // RIGHT NOW — swift-app review, 2026-09-24),
             // appliedOptions: {scale: {tonicPitchClass,
-            // mode, displayName}, strength, retuneMs, preserveVibrato},
+            // mode, displayName}, strength, retuneMs, preserveVibrato,
+            // formantCorrection (present only when the caller passed one)},
             // segments: [{id, startSeconds, endSeconds, detectedHz,
-            // detectedConfidence, pitchOffsetCents, driftScale, vibratoScale}],
-            // warnings}. Every segment field is ALWAYS present (unlike
-            // NoteSegment's own omit-when-default Codable encoder) so a
-            // caller reading this back can't mistake "default" for "absent."
+            // detectedConfidence, pitchOffsetCents, driftScale, vibratoScale,
+            // …, origin}], warnings, unpitchedCount, unpitchedSkippedReason?}.
+            // Every segment field is ALWAYS present (unlike NoteSegment's own
+            // omit-when-default Codable encoder) so a caller reading this back
+            // can't mistake "default" for "absent." `origin` (U-A, UB-2) is
+            // "detected" for a note the splitter found, "transition" for a
+            // sung slide, or "unpitched" for a SOUND with no detected pitch —
+            // both builders run the unpitched finder, so a freshly-corrected
+            // clip's `segments` already include its sounds without a second
+            // call. `unpitchedCount` (UB-2) counts the STORED `.unpitched`
+            // segments (0 when `strength:0` never ran the finder, or the
+            // finder found none); `unpitchedSkippedReason` is present only
+            // when the finder declined on purpose — "notEnoughQuiet" (under a
+            // second of quiet, so the clip's own noise floor could not be
+            // measured), "tooNoisy" (the singing is not far enough above that
+            // floor), or "noNotes" (nothing to borrow a drawn pitch from) —
+            // see clip.findUnpitchedSounds for the same three reasons in
+            // plain words.
             //
             // replaceExisting? (C-F3, F22): defaults to TRUE — today's
             // behaviour, additive and unconditional, UNCHANGED when the key
@@ -5144,7 +5388,7 @@ public final class CommandRouter {
             // as before this flag existed.
             try params.rejectUnknownKeys(
                 ["clipId", "preset", "tonicPitchClass", "mode",
-                 "strength", "retuneMs", "preserveVibrato", "replaceExisting"],
+                 "strength", "retuneMs", "preserveVibrato", "replaceExisting", "formantCorrection"],
                 verb: "clip.autoCorrectPitch")
             let acClipID = try params.requireClipID()
             let acReplaceExisting = try Self.optionalBool(
@@ -5187,10 +5431,56 @@ public final class CommandRouter {
             if let preserveRaw = try Self.optionalBool(params["preserveVibrato"], "'preserveVibrato'") {
                 acOptions.preserveVibrato = preserveRaw
             }
-            let acClip = try await store.autoCorrectClipPitch(
+            // NT-W follow-up (natural tuning §1(e), W7-D2 -> W7-WIRE2): the
+            // voice-size override. Absent asks for TODAY'S rule — DAWCore's
+            // own carry/seed decides (`PitchAutoCorrectOptions.
+            // formantCorrection`'s own doc). An explicit JSON `null` is
+            // REFUSED, in words, rather than read as "no override": `null`
+            // already means LEGACY on clip.setFormantCorrection / in this
+            // verb's own reply, so null-as-absent here would silently drop
+            // a caller's "keep it as it is" request into "start a fresh
+            // seed" instead — the read-back hazard this sentence names.
+            // Out-of-range is REFUSED, not clamped — this verb's own
+            // convention (`strength`/`retuneMs` above).
+            if let formantRaw = params["formantCorrection"] {
+                guard case .number(let formantAmount) = formantRaw else {
+                    throw ControlError(
+                        "'formantCorrection' must be a number from 0 to 1. Leave it out to keep "
+                        + "this clip's own voice size (new tuning starts at 1). To go back to the "
+                        + "behaviour from before voice-keeping, call clip.setFormantCorrection "
+                        + "with amount null after this call.")
+                }
+                guard PitchEditSet.formantCorrectionRange.contains(formantAmount) else {
+                    throw ControlError("'formantCorrection' must be between 0 and 1")
+                }
+                acOptions.formantCorrection = formantAmount
+            }
+            // UB-2: the Report variant, not the plain `autoCorrectClipPitch`
+            // this case called before — it is the ONE path that can also
+            // report what the unpitched finder decided while building the
+            // set (`unpitchedCount`/`unpitchedSkippedReason` below), a fact
+            // `autoCorrectClipPitch` itself has no way to hand back (it
+            // returns only the stored `Clip`).
+            let acReport = try await store.autoCorrectClipPitchReport(
                 clipId: acClipID, options: acOptions, replaceExisting: acReplaceExisting)
+            var acExtra: [String: JSONValue] = [
+                // ALWAYS present (the segments-array convention this response
+                // already follows): counted off the STORED set
+                // (`PitchAutoCorrectReport.unpitchedCount`), never the
+                // finder's own list, so it is exactly what a `segments` scan
+                // for `origin == "unpitched"` would find.
+                "unpitchedCount": .number(Double(acReport.unpitchedCount)),
+            ]
+            // OMITTED, not null, when the finder never declined anything —
+            // the `playedPitchResponse` `reason` idiom: a strength-0 request
+            // never even runs the finder (`unpitched` is `nil`), and a run
+            // that found sounds (or found nothing because every stretch was
+            // already a note) has no reason to report.
+            if let skipped = acReport.unpitched?.skipped {
+                acExtra["unpitchedSkippedReason"] = .string(skipped.rawValue)
+            }
             return .success(request.id, Self.pitchEditsResponse(
-                clip: acClip, appliedOptions: acOptions))
+                clip: acReport.clip, appliedOptions: acOptions, extra: acExtra))
 
         case "clip.clearPitchEdits":
             // params: clipId (required). Removes clip.pitchEdits entirely —
@@ -5223,7 +5513,11 @@ public final class CommandRouter {
             // Response: same shape as clip.autoCorrectPitch, minus
             // appliedOptions (nothing was applied THIS call) — a clip that
             // has never been corrected, or was cleared, reads back
-            // hasPitchEdits:false, segmentCount:0, segments:[].
+            // hasPitchEdits:false, segmentCount:0, segments:[]. `segmentCount`
+            // (U-A, UB-2) now counts SOUNDS with no detected pitch too — a
+            // breath, an "s", a "t" — alongside notes: each carries `origin`,
+            // "detected"/"transition"/"unpitched", so a caller can tell them
+            // apart rather than mistaking a sound for a badly-detected note.
             try params.rejectUnknownKeys(["clipId"], verb: "clip.getPitchEdits")
             let gpeClipID = try params.requireClipID()
             let gpeClip = try store.pitchEditClip(forClipId: gpeClipID)
@@ -5828,8 +6122,1103 @@ public final class CommandRouter {
             let gplWindow = gplLine.responseWindow(
                 fromSeconds: gplFromSeconds, durationSeconds: gplDurationSeconds,
                 clipWindow: gplClipWindow, maxPoints: gplMaxPoints)
+            // C5a-3 (design §12.3, additive): per-note wobble readings need
+            // the CONTOUR `playedPitchLine` already fetched, which
+            // `PitchPlayedLine` does not retain — a second call to the same
+            // cached `renderPitchContour` (see `playedPitchResponse`'s doc).
+            // `pitchEditClip` is a synchronous store lookup, not an engine
+            // call; `playedPitchLine` already proved a stored table exists.
+            let gplContourInputs = await store.renderPitchContour(clipId: gplClipID)
+            let gplPitchEditClip = try store.pitchEditClip(forClipId: gplClipID)
             return .success(request.id, Self.playedPitchResponse(
-                clipId: gplClipID, line: gplLine, window: gplWindow, maxPoints: gplMaxPoints))
+                clipId: gplClipID, line: gplLine, window: gplWindow, maxPoints: gplMaxPoints,
+                segments: gplPitchEditClip.pitchEdits?.segments ?? [],
+                contour: gplContourInputs.contour, stretchRatio: gplPitchEditClip.stretchRatio))
+
+        case "clip.findUnpitchedSounds":
+            // U-B (unpitched-notes-presets-midi-targets design §1.10, UB-2):
+            // the merge verb over `ProjectStore.findUnpitchedSounds` — adds
+            // the SOUNDS with no detected pitch (a breath, a consonant, a
+            // piece of a sung note the detector never committed to) to a
+            // clip's STORED note table, for a table built before sounds
+            // existed (F-stale). A FRESH table already has them: both
+            // builders run the same finder, so a clip.autoCorrectPitch call
+            // never needs this verb afterward.
+            //
+            // params: clipId (required). marginDb? (default
+            // PitchUnpitchedFinder.defaultMarginDb, 9 — dB above the clip's
+            // own noise floor a no-note stretch must clear to count as an
+            // audible sound rather than silence; 0...60, refused outside
+            // that range rather than healed, the boundedOption idiom — the
+            // finder itself only heals a NON-FINITE value, `PitchUnpitchedFinder`'s
+            // own doc leaves the range to this wire verb to decide).
+            //
+            // ⭐ IT FILLS ONLY UNCOVERED TIME, AND NEVER MOVES OR
+            // RE-IDENTIFIES A STORED SEGMENT. Every stored segment (a note,
+            // a slide, or an already-found sound) covers its own time, so
+            // the user's own splits and moves count, and a sound is only
+            // ever added into a gap nothing else claims — an `.unpitched`
+            // segment is covered time but NEVER a lender for another sound
+            // (`ProjectStore.findUnpitchedSounds`'s own doc). Finding
+            // nothing is not a failure: a guard that fired
+            // (`notEnoughQuiet`/`tooNoisy`/`noNotes`) or a table with no
+            // audible gap returns the finder's own reason with no sounds
+            // added and no undo entry.
+            //
+            // Errors, in the store's own words (inherited via the
+            // LocalizedError mapping, never re-decided here): clipNotFound;
+            // a MIDI clip → pitchDetectionRequiresAudioClip; a comp-lane
+            // member → invalidClipEdit; a clip with NO stored table (a
+            // teaching invalidClipEdit naming clip.autoCorrectPitch as the
+            // fix — nothing to merge SOUNDS into until a table exists); a
+            // table from another detector generation (`analysisVersion`),
+            // whose notes this build's frames cannot be lined up against.
+            // Coalescing key: nil (structural, one `performEdit("Find
+            // Sounds", …)` per call, the clip.autoCorrectPitch precedent).
+            //
+            // Response: clip.getPitchEdits' own shape (the full stored
+            // table, every note AND sound, each segment's `origin` telling
+            // them apart) plus: `added` (how many sounds THIS call stored —
+            // 0 is not a failure), `sounds` (only the ones just added, in
+            // time order: `{segmentId, startSeconds, endSeconds, anchorHz,
+            // borrowedFromSegmentId, borrowedFrom}` — `anchorHz` is where a
+            // sound is DRAWN, the lending note's own detected pitch, never a
+            // measurement of the sound itself; `borrowedFrom` is
+            // "previous"/"following"), `marginDb` (the margin actually
+            // applied), `floorIsDigitalSilence` (true when the clip's
+            // quietest tenth is exact digital silence, so `floorDbfs` below
+            // is absent on purpose, not unmeasured). `floorDbfs`/
+            // `thresholdDbfs` are present whenever the floor was measured as
+            // a level (absent when it is digital silence, or when
+            // `skippedReason` is "notEnoughQuiet" and the floor was never
+            // measured at all); `singingDbfs` is present whenever at least
+            // one voiced frame had a level. `skippedReason` and
+            // `skippedMessage` (the SAME reason, machine value then plain
+            // words) are present ONLY when the finder declined on purpose —
+            // "notEnoughQuiet"/"tooNoisy"/"noNotes", the same three
+            // `clip.autoCorrectPitch`'s own `unpitchedSkippedReason` can
+            // report.
+            try params.rejectUnknownKeys(["clipId", "marginDb"], verb: "clip.findUnpitchedSounds")
+            let fusClipID = try params.requireClipID()
+            let fusMarginDb = try boundedOption(
+                params, "marginDb", 0, 60, PitchUnpitchedFinder.defaultMarginDb,
+                "how many dB above the clip's own noise floor (its unvoiced frames' 10th "
+                    + "percentile level) a no-note stretch must clear to count as an audible "
+                    + "sound rather than silence")
+            let fusResult = try await store.findUnpitchedSounds(clipId: fusClipID, marginDb: fusMarginDb)
+            var fusExtra: [String: JSONValue] = [
+                "added": .number(Double(fusResult.added)),
+                "marginDb": .number(fusResult.finder.marginDb),
+                "floorIsDigitalSilence": .bool(fusResult.finder.floor == .digitalSilence),
+                "sounds": .array(fusResult.sounds.map { sound in
+                    .object([
+                        "segmentId": .string(sound.segmentId.uuidString),
+                        "startSeconds": .number(sound.startSeconds),
+                        "endSeconds": .number(sound.endSeconds),
+                        "anchorHz": .number(sound.anchorHz),
+                        "borrowedFromSegmentId": .string(sound.borrowedFromSegmentId.uuidString),
+                        "borrowedFrom": .string(sound.borrowedFrom.rawValue),
+                    ])
+                }),
+            ]
+            if let floorDbfs = fusResult.finder.floorDbfs {
+                fusExtra["floorDbfs"] = .number(floorDbfs)
+            }
+            if let thresholdDbfs = fusResult.finder.thresholdDbfs {
+                fusExtra["thresholdDbfs"] = .number(thresholdDbfs)
+            }
+            if let singingDbfs = fusResult.finder.singingDbfs {
+                fusExtra["singingDbfs"] = .number(singingDbfs)
+            }
+            if let skipped = fusResult.finder.skipped {
+                fusExtra["skippedReason"] = .string(skipped.rawValue)
+                fusExtra["skippedMessage"] = .string(Self.unpitchedSkipMessage(skipped))
+            }
+            return .success(request.id, Self.pitchEditsResponse(
+                clip: fusResult.clip, appliedOptions: nil, extra: fusExtra))
+
+        case "clip.setNoteVibrato":
+            // C5a-3 (vibrato-handle design §12.1): the wire door for
+            // `ProjectStore.setClipNoteVibrato` / `resetClipNoteVibrato` —
+            // C5a-2's Wobble store leg. Arguments are ABSOLUTE, never a delta
+            // (natural tuning §3b's "additive Δ" is the UI's own arithmetic
+            // over each note's mouse-down value, never the wire's): an
+            // omitted field means "leave it".
+            //
+            // params: clipId, segmentId (both required UUIDs). Then EITHER
+            // at least one of vibratoRateHz / vibratoDepthCents /
+            // vibratoOnsetSeconds / vibratoPhaseAnchorSeconds / vibratoScale
+            // / driftScale (each a finite number, the model's OWN units —
+            // exactly what clip.getPitchEdits echoes, so a caller can read a
+            // segment and write it back with no translation table) OR
+            // `reset: true` ALONE — `reset` together with any other field is
+            // refused, verbatim (design §12.1); `reset` present but not
+            // literally `true` is refused too.
+            //
+            // ⛔ NO PITCH DETECTION ON THE WIRE PATH, the clip.setNotePitch
+            // rule: `seedIfAbsent` is never supplied, so a clip with no
+            // stored table refuses with the store's own teaching text.
+            //
+            // A non-number value for a supplied field is refused in words,
+            // naming the field — never coerced (`optionalNumber`).
+            //
+            // Refusals are C5a-2's `NoteVibratoLimits`/
+            // `PitchEditSet.applyingNoteVibratos` sentences, verbatim,
+            // inherited via the LocalizedError mapping and never re-decided
+            // here: an empty edit ("Nothing to change…"), a NaN or infinity
+            // (naming the field — reachable only through a non-JSON caller,
+            // since JSON itself cannot carry one), a sound named alone ("No
+            // pitch here…"), an unknown segmentId (naming the count),
+            // clipNotFound, a MIDI clip, a comp-lane member, no stored
+            // table.
+            //
+            // Coalescing key: `PitchCorrectionUndoKey.vibrato(clipID:
+            // segmentID:)`, chosen by the store itself — two calls on the
+            // SAME note inside the 800 ms journal window fold into one undo
+            // step (design §10 item 6); `reset` uses `structuralKey` (a
+            // deliberate, discrete reset never merges into the drag before
+            // it).
+            //
+            // Response: `clip.getPitchEdits`'s shape plus `segmentId` and
+            // `vibrato: {requested, applied, heardRateHz, clamped,
+            // silentWobble, parkedRate, note?}` (design §12.1) plus
+            // `skippedSoundIds` — ALWAYS present, always EMPTY here (a lone
+            // sound is REFUSED, never skipped; the empty array keeps this
+            // response's shape symmetric with clip.setNoteVibratos', so one
+            // parser reads both). `applied` is the STORED segment's six
+            // fields, never the setter's own return — the C5a-2 read-back
+            // rule (natural tuning §3g G5): an agent wanting PROOF compares
+            // against `NoteVibratoLimits.clamp(edit, stretchRatio:).edit`,
+            // independently, never this echo.
+            // A literal array here, not `Self.noteVibratoFieldKeys.union(…)`
+            // even though that reads better: both the doc-count-drift gate
+            // and ZeroParamVerbRejectionTests's source scrape need an inline
+            // array literal as the guard's first argument to find this call
+            // site at all — a computed expression made this verb read as
+            // advertised-but-unguarded, a false wire-self-disagreement.
+            // ⚠️ That scrape does NOT strip `//` comments first (unlike the
+            // doc-count-drift gate, which does): earlier drafts of THIS
+            // comment spelled out the call shape in backticks and were
+            // themselves matched by the scraper, producing a phantom
+            // orphaned verb. Do not restate the call's own punctuation here.
+            // Kept in sync with `noteVibratoFieldKeys` by the plain-English
+            // comment there, not by sharing the literal.
+            try params.rejectUnknownKeys(
+                ["clipId", "segmentId", "reset", "vibratoRateHz", "vibratoDepthCents",
+                 "vibratoOnsetSeconds", "vibratoPhaseAnchorSeconds", "vibratoScale", "driftScale"],
+                verb: "clip.setNoteVibrato")
+            let snvClipID = try params.requireClipID()
+            let snvSegmentID = try params.requireUUID("segmentId")
+            let snvFieldKeysSent = Self.noteVibratoFieldKeys.filter { params[$0] != nil }
+            let snvReset: Bool
+            if let snvResetValue = params["reset"] {
+                guard snvResetValue.boolValue == true else {
+                    throw ControlError(
+                        "'reset' must be true; omit it entirely to change wobble settings instead.")
+                }
+                guard snvFieldKeysSent.isEmpty else {
+                    throw ControlError(
+                        "reset puts every wobble setting back to how it was sung; send it on its own.")
+                }
+                snvReset = true
+            } else {
+                snvReset = false
+            }
+            let snvResult: NoteVibratoResult
+            if snvReset {
+                snvResult = try store.resetClipNoteVibrato(clipId: snvClipID, segmentId: snvSegmentID)
+            } else {
+                let snvEdit = try Self.parseNoteVibratoEdit(params)
+                snvResult = try store.setClipNoteVibrato(
+                    clipId: snvClipID, segmentId: snvSegmentID, edit: snvEdit)
+            }
+            let snvVibrato = Self.noteVibratoFields(
+                requested: snvResult.requested, segment: snvResult.segment, bound: snvResult.clamped,
+                heardRateHz: snvResult.heardRateHz, stretchRatio: snvResult.clip.stretchRatio,
+                silentWobble: snvResult.silentWobble, parkedRate: snvResult.parkedRate)
+            return .success(request.id, Self.pitchEditsResponse(
+                clip: snvResult.clip, appliedOptions: nil,
+                extra: ["segmentId": .string(snvSegmentID.uuidString),
+                        "vibrato": .object(snvVibrato),
+                        "skippedSoundIds": .array([])]))
+
+        case "clip.setNoteVibratos":
+            // NT-L3 (natural-tuning design §3e): the BATCH twin of
+            // clip.setNoteVibrato — `ProjectStore.setClipNotesVibrato`,
+            // C5a-2's group leg — the clip.setNotePitch -> clip.setNotePitches
+            // precedent.
+            //
+            // params: clipId (required UUID); notes (required array of
+            // {segmentId: UUID string, <any of the six wobble fields>}).
+            // Each item's fields are ABSOLUTE, never a delta — the
+            // setClipNotePitchOffsets rule verbatim. No `reset` on this
+            // verb: reset stays single-note, clip.setNoteVibrato's job
+            // alone.
+            //
+            // ⛔ NO PITCH DETECTION ON THE WIRE PATH, the clip.setNotePitch
+            // rule.
+            //
+            // ALL OR NOTHING (the store's own rule, via `PitchEditSet.
+            // applyingNoteVibratos`, never re-decided here): an empty
+            // `notes` array, an item with no field, a NaN or infinity
+            // (naming the field, prefixed per item in a batch of more than
+            // one), an unknown segmentId (naming the count), one note named
+            // twice with two DIFFERENT edits — every one refuses the WHOLE
+            // call, verbatim, C5a-2's sentences.
+            //
+            // ⭐ A SOUND NAMED BESIDE SUNG NOTES IS SKIPPED AND REPORTED,
+            // never written and never silent (natural tuning §3b's "select
+            // all, then Drift" macro: every table the editor seeds carries
+            // its sounds): `skippedSoundIds` is ALWAYS present (empty when
+            // nothing was skipped) plus `skippedSoundsSentence` when it is
+            // not. A batch that is ALL sounds is refused outright — a call
+            // that changes nothing must not succeed.
+            //
+            // A non-number value for a supplied field is refused in words,
+            // naming the item and the field — never coerced. An unknown key
+            // INSIDE one item is refused too, naming the item index — a
+            // typo'd field would otherwise be silently ignored (the m16-e
+            // rule, extended per item).
+            //
+            // Undo key: `PitchCorrectionUndoKey.structuralKey` (nil) — NEVER
+            // coalesces, the clip.setNotePitches precedent: a one-shot wire
+            // call has no open selection gesture for a second call to
+            // continue.
+            //
+            // Response: `clip.getPitchEdits`'s shape plus `notes`: one entry
+            // per note THIS call named (deduplicated, in request order,
+            // skipped sounds excluded) — `{segmentId, requested, applied,
+            // heardRateHz, clamped, silentWobble, parkedRate, note?}`,
+            // `applied` read back from the STORED segment, never the
+            // request — plus `skippedSoundIds` / `skippedSoundsSentence`.
+            try params.rejectUnknownKeys(["clipId", "notes"], verb: "clip.setNoteVibratos")
+            let snvsClipID = try params.requireClipID()
+            guard let snvsRawNotes = params["notes"]?.arrayValue else {
+                throw ControlError(
+                    "'notes' must be an array of {segmentId, <wobble fields>} — segmentId is "
+                    + "the `id` of each note in clip.getPitchEdits' `segments`")
+            }
+            var snvsItems: [NoteVibratoItem] = []
+            var snvsRequestOrder: [UUID] = []
+            for (index, entry) in snvsRawNotes.enumerated() {
+                guard let object = entry.objectValue else {
+                    throw ControlError(
+                        "notes[\(index)] must be an object {segmentId, <wobble fields>}")
+                }
+                guard let rawID = object["segmentId"]?.stringValue, let segmentID = UUID(uuidString: rawID) else {
+                    throw ControlError("notes[\(index)].segmentId is not a valid UUID")
+                }
+                let snvsUnknownItemKeys = Set(object.keys)
+                    .subtracting(Self.noteVibratoFieldKeys.union(["segmentId"]))
+                guard snvsUnknownItemKeys.isEmpty else {
+                    let named = snvsUnknownItemKeys.sorted().map { "'\($0)'" }.joined(separator: ", ")
+                    let valid = (["segmentId"] + Self.noteVibratoFieldKeys.sorted())
+                        .map { "'\($0)'" }.joined(separator: ", ")
+                    throw ControlError(
+                        "clip.setNoteVibratos: notes[\(index)] has unknown "
+                        + "parameter\(snvsUnknownItemKeys.count > 1 ? "s" : "") \(named) — "
+                        + "valid keys are \(valid)")
+                }
+                let snvsEdit = try Self.parseNoteVibratoEdit(object, prefix: "notes[\(index)].")
+                snvsItems.append(NoteVibratoItem(segmentId: segmentID, edit: snvsEdit))
+                snvsRequestOrder.append(segmentID)
+            }
+            let snvsBatch = try store.setClipNotesVibrato(
+                clipId: snvsClipID, edits: snvsItems,
+                undoKey: PitchCorrectionUndoKey.structuralKey)
+            var snvsSeen = Set<UUID>()
+            let snvsNamedOrder = snvsRequestOrder.filter { snvsSeen.insert($0).inserted }
+            let snvsNotesEcho: [JSONValue] = snvsNamedOrder.compactMap { id -> JSONValue? in
+                guard let note = snvsBatch.notes.first(where: { $0.segmentId == id }) else { return nil }
+                var fields = Self.noteVibratoFields(
+                    requested: note.requested, segment: note.segment, bound: note.bound,
+                    heardRateHz: note.heardRateHz, stretchRatio: note.stretchRatio,
+                    silentWobble: note.silentWobble, parkedRate: note.parkedRate)
+                fields["segmentId"] = .string(id.uuidString)
+                return .object(fields)
+            }
+            var snvsExtra: [String: JSONValue] = [
+                "notes": .array(snvsNotesEcho),
+                "skippedSoundIds": .array(snvsBatch.skippedSoundIds.map { .string($0.uuidString) }),
+            ]
+            if let snvsSkippedSentence = snvsBatch.skippedSoundsSentence {
+                snvsExtra["skippedSoundsSentence"] = .string(snvsSkippedSentence)
+            }
+            return .success(request.id, Self.pitchEditsResponse(
+                clip: snvsBatch.clip, appliedOptions: nil, extra: snvsExtra))
+
+        case "clip.setNoteFormant":
+            // NT-W (natural tuning §1(e)): the per-note VOICE tool's wire
+            // door — `ProjectStore.setClipNoteFormant`, the `clip.setNoteGain`
+            // shape (absolute, all-or-nothing, one undo step for N notes).
+            //
+            // params: clipId (required UUID); segmentIds (required array of
+            // note ids from clip.getPitchEdits; a repeated id is folded, an
+            // empty array is refused by the store in words); formantSemitones
+            // (required Double, the note's FINAL voice offset — 0 = as sung,
+            // never a delta). Clamped to `NoteSegment.formantOffsetSemitonesRange`
+            // (±24 st); a value outside that range is echoed back CLAMPED,
+            // never refused.
+            //
+            // ⛔ NO PITCH DETECTION ON THE WIRE PATH, the clip.setNoteGain
+            // rule verbatim: `seedIfAbsent` is never supplied.
+            //
+            // Errors, inherited from the store, never re-decided here:
+            // clipNotFound, a MIDI clip, a comp-lane member, no stored table,
+            // an unknown id (naming how many notes the clip DOES carry), and
+            // a SOUND named among the ids ("no voice to make deeper or
+            // brighter" — a refusal `clip.setNoteGain` does not have, since a
+            // sound's level still plays; a sound's formant curve never
+            // engages at all). ALL OR NOTHING.
+            //
+            // Response: `clip.getPitchEdits`'s own shape plus `segmentIds`
+            // (deduplicated, request order), `formantSemitones` (the STORED,
+            // post-clamp value — `.null` only if the named notes somehow
+            // disagree, which only a store defect could produce), the clip's
+            // own `formantCorrection` (the OTHER half of "how much voice size
+            // is kept" — this verb changes a note's target, that one changes
+            // how far the render pulls the envelope toward it), and
+            // `clamped`/`note` when the request was out of range (the
+            // `clip.setNoteVibrato` house style).
+            //
+            // ✅ SHIPPED: this verb renders (NT-E1), and NT-PK's
+            // provisional-render memo-key fix (it now hashes per-chunk
+            // formant values through RenderDiff.formant/formantCurve) landed
+            // and was verified — a voice-only edit no longer replays a stale
+            // preview.
+            try params.rejectUnknownKeys(
+                ["clipId", "segmentIds", "formantSemitones"], verb: "clip.setNoteFormant")
+            let snfClipID = try params.requireClipID()
+            guard let snfRawIDs = params["segmentIds"]?.arrayValue else {
+                throw ControlError(
+                    "'segmentIds' must be an array of note id strings, the `id` of each "
+                    + "note in clip.getPitchEdits' `segments`")
+            }
+            var snfSegmentIDs: [UUID] = []
+            for (index, element) in snfRawIDs.enumerated() {
+                guard let raw = element.stringValue, let id = UUID(uuidString: raw) else {
+                    throw ControlError("segmentIds[\(index)] is not a valid UUID")
+                }
+                snfSegmentIDs.append(id)
+            }
+            let snfRequested = try params.require("formantSemitones", \.doubleValue)
+            let snfClip = try store.setClipNoteFormant(
+                clipId: snfClipID, segmentIds: snfSegmentIDs, semitones: snfRequested)
+            var snfSeen = Set<UUID>()
+            let snfNamed = snfSegmentIDs.filter { snfSeen.insert($0).inserted }
+            let snfStoredValues = snfNamed.compactMap { id in
+                snfClip.pitchEdits?.segments.first(where: { $0.id == id })?.formantOffsetSemitones
+            }
+            let snfExpectedStored = PitchCorrectionMath.finite(snfRequested, default: 0)
+                .clamped(to: NoteSegment.formantOffsetSemitonesRange)
+            // ⭐ A setter's return is not proof it took: read every named
+            // note's STORED offset back (the `clip.setNoteGain` shape).
+            let snfStoredFormant: JSONValue =
+                snfStoredValues.count == snfNamed.count && Set(snfStoredValues).count == 1
+                    ? .number(snfStoredValues[0]) : .null
+            var snfExtra: [String: JSONValue] = [
+                "segmentIds": .array(snfNamed.map { .string($0.uuidString) }),
+                "formantSemitones": snfStoredFormant,
+                "formantCorrection": (snfClip.pitchEdits?.formantCorrection).map { JSONValue.number($0) } ?? .null,
+            ]
+            let snfClamped = snfExpectedStored != snfRequested
+            snfExtra["clamped"] = .bool(snfClamped)
+            if snfClamped {
+                snfExtra["note"] = .string(
+                    "formantSemitones \(Self.g(snfRequested)) was clamped to "
+                    + "\(Self.g(snfExpectedStored)): it has to be between "
+                    + "\(Self.g(NoteSegment.formantOffsetSemitonesRange.lowerBound)) and "
+                    + "\(Self.g(NoteSegment.formantOffsetSemitonesRange.upperBound)) semitones.")
+            }
+            return .success(request.id, Self.pitchEditsResponse(
+                clip: snfClip, appliedOptions: nil, extra: snfExtra))
+
+        case "clip.setFormantCorrection":
+            // NT-W (natural tuning §1(e)): the set-level "keep voice natural"
+            // control's wire door — `ProjectStore.setClipFormantCorrection`.
+            //
+            // params: clipId (required UUID); amount (REQUIRED key, number
+            // 0...1 or `null`). `null` restores LEGACY: the clip's own
+            // whole-clip `formantPreserve` flag governs instead, exactly as a
+            // set tuned before this feature renders. `amount` must be present
+            // (never omitted) — a dropped key and an explicit `null` mean
+            // different things (legacy vs "I did not ask"), so omitting the
+            // key is refused in words rather than silently read as `null`.
+            // Clamped to 0...1; a non-finite amount is refused in words (the
+            // store's own rule: a NaN silently becoming legacy would be a
+            // tone change nobody asked for).
+            //
+            // Errors, inherited from the store: clipNotFound, a MIDI clip, a
+            // comp-lane member, no stored table.
+            //
+            // Response: `clip.getPitchEdits`'s own shape plus `amount` (the
+            // STORED value, `.null` when legacy), `clamped`/`note` when an
+            // in-range request was clamped, and `plainLanguage` — a novice
+            // sentence naming the SIZE kept ("Voice kept natural: 100 %") or,
+            // on legacy, which whole-clip flag is now in force.
+            //
+            // ✅ SHIPPED — see clip.setNoteFormant's own note: NT-PK's fix
+            // landed and was verified, lifting the earlier hold.
+            try params.rejectUnknownKeys(["clipId", "amount"], verb: "clip.setFormantCorrection")
+            let sfcClipID = try params.requireClipID()
+            let sfcRequested: Double?
+            switch params["amount"] {
+            case .number(let value)?:
+                sfcRequested = value
+            case .null?:
+                sfcRequested = nil
+            case nil:
+                throw ControlError(
+                    "'amount' is required: a number from 0 to 1, or null to go back to the "
+                    + "behaviour from before voice-keeping. Nothing was changed.")
+            default:
+                throw ControlError("'amount' must be a number from 0 to 1, or null")
+            }
+            let sfcClip = try store.setClipFormantCorrection(clipId: sfcClipID, amount: sfcRequested)
+            let sfcStored = sfcClip.pitchEdits?.formantCorrection
+            var sfcExtra: [String: JSONValue] = [
+                "amount": sfcStored.map { JSONValue.number($0) } ?? .null,
+            ]
+            if let sfcRequested, let sfcStoredValue = sfcStored {
+                let sfcExpectedStored = sfcRequested.clamped(to: PitchEditSet.formantCorrectionRange)
+                // ⭐ Compared against the RAW REQUEST, never the actual stored
+                // value: both `sfcExpectedStored` and `sfcStoredValue` apply the
+                // SAME clamp formula, so a Stored-vs-Expected compare is a
+                // tautology and `clamped` would never read true. Caught by
+                // `setFormantCorrectionClamps` (NT-W).
+                let sfcClamped = sfcExpectedStored != sfcRequested
+                sfcExtra["clamped"] = .bool(sfcClamped)
+                if sfcClamped {
+                    sfcExtra["note"] = .string(
+                        "amount \(Self.g(sfcRequested)) was clamped to \(Self.g(sfcStoredValue)): "
+                        + "it has to be between "
+                        + "\(Self.g(PitchEditSet.formantCorrectionRange.lowerBound)) and "
+                        + "\(Self.g(PitchEditSet.formantCorrectionRange.upperBound)).")
+                }
+            } else {
+                sfcExtra["clamped"] = .bool(false)
+            }
+            sfcExtra["plainLanguage"] = .string(Self.formantPlainLanguage(
+                amount: sfcStored, formantPreserve: sfcClip.formantPreserve))
+            return .success(request.id, Self.pitchEditsResponse(
+                clip: sfcClip, appliedOptions: nil, extra: sfcExtra))
+
+        case "clip.setNoteTransition":
+            // NT-W (natural tuning §4.e): the rear-edge SLIDE-WIDTH control's
+            // wire door — `ProjectStore.setClipNoteTransition`. `noteId` is
+            // the LEFT note of the join (Melodyne's "rear part of the note").
+            //
+            // params: clipId (required UUID); noteId (required UUID); widthMs
+            // (REQUIRED key, number or `null`). `null` or `0` = Auto — the
+            // width grows with the size of the jump the correction has to
+            // travel across the join; otherwise clamped to 30...1000 ms OF
+            // THE ORIGINAL TAKE, and further capped to the shorter of the two
+            // notes at render time (`effectiveWidthMs` reports what actually
+            // applies; the stored value is never silently rewritten by that
+            // cap, so a later split or retime cannot leave a stale one).
+            // `widthMs` must be present (never omitted): a dropped key and an
+            // explicit `null` both mean Auto, but requiring the key keeps
+            // this verb's "always say what you mean" shape consistent with
+            // its two set-level siblings below.
+            //
+            // Errors, `PitchTransitionSentences` verbatim (never re-decided
+            // here): a negative or non-finite width, an unknown note (naming
+            // the count), a SOUND named as the left note, the LAST sung note
+            // (nothing to slide into), and a note whose right edge faces a
+            // GAP (silence/breath/consonant — no slide there to shape). The
+            // per-note gates come first: clipNotFound, a MIDI clip, a
+            // comp-lane member, no stored table.
+            //
+            // Response: `clip.getPitchEdits`'s own shape plus `noteId`,
+            // `widthMs` (the STORED value, 0 = Auto), `effectiveWidthMs` (the
+            // width THIS join actually renders with right now, computed
+            // through the same `PitchEditSet.joinReading` the curve uses —
+            // `.null` when the join is a gap/last, or a legacy set with no
+            // width rule for it), `joinToNext` (the same read, its `kind`:
+            // `"soft"`/`"gap"`/`"last"`), and `clamped`/`note` when the raw
+            // 30...1000 clamp applied (the shorter-note cap is NOT a
+            // "clamp" of the stored value — it shows up as a difference
+            // between `widthMs` and `effectiveWidthMs` instead).
+            //
+            // ✅ SHIPPED: this feature never had a formant-curve stale-preview
+            // hazard (that hold, since lifted, was scoped to the formant pair
+            // only).
+            try params.rejectUnknownKeys(["clipId", "noteId", "widthMs"], verb: "clip.setNoteTransition")
+            let sntClipID = try params.requireClipID()
+            let sntNoteID = try params.requireUUID("noteId")
+            let sntRequestedRaw: Double?
+            switch params["widthMs"] {
+            case .number(let value)?:
+                sntRequestedRaw = value
+            case .null?:
+                sntRequestedRaw = nil
+            case nil:
+                throw ControlError(
+                    "'widthMs' is required: a number of milliseconds from 30 to 1000, or 0/null "
+                    + "for Auto. Nothing was changed.")
+            default:
+                throw ControlError("'widthMs' must be a number of milliseconds, or 0/null for Auto")
+            }
+            let sntClip = try store.setClipNoteTransition(
+                clipId: sntClipID, segmentId: sntNoteID, widthMs: sntRequestedRaw)
+            let sntSegments = sntClip.pitchEdits?.segments ?? []
+            let sntIndex = sntSegments.firstIndex(where: { $0.id == sntNoteID })
+            // ⭐ A setter's return is not proof it took: read the STORED width
+            // back rather than trusting the request.
+            let sntStoredWidth = sntIndex.map { sntSegments[$0].transitionOutMs } ?? 0
+            let sntRequestedWidth = sntRequestedRaw ?? 0
+            let sntExpectedStored = sntRequestedWidth > 0
+                ? sntRequestedWidth.clamped(to: NoteSegment.transitionOutMsRange) : 0
+            let sntJoin = sntIndex.flatMap { sntClip.pitchEdits?.joinReading(afterSegmentAt: $0) }
+            var sntExtra: [String: JSONValue] = [
+                "noteId": .string(sntNoteID.uuidString),
+                "widthMs": .number(sntStoredWidth),
+                "effectiveWidthMs": sntJoin?.appliedWidthMs.map { JSONValue.number($0) } ?? .null,
+                "joinToNext": sntJoin.map { .string($0.kind.rawValue) } ?? .null,
+            ]
+            // ⭐ Compared against the RAW REQUEST, never the actual stored
+            // width: both apply the same clamp formula, so Stored-vs-Expected
+            // is a tautology (`setNoteTransitionClamps`, NT-W).
+            let sntClamped = sntExpectedStored != sntRequestedWidth
+            sntExtra["clamped"] = .bool(sntClamped)
+            if sntClamped {
+                sntExtra["note"] = .string(
+                    "widthMs \(Self.g(sntRequestedWidth)) was clamped to \(Self.g(sntStoredWidth)): "
+                    + "it has to be 0 (Auto) or between "
+                    + "\(Self.g(NoteSegment.transitionOutMsRange.lowerBound)) and "
+                    + "\(Self.g(NoteSegment.transitionOutMsRange.upperBound)) milliseconds.")
+            }
+            return .success(request.id, Self.pitchEditsResponse(
+                clip: sntClip, appliedOptions: nil, extra: sntExtra))
+
+        case "clip.setPitchTransitionSmoothness":
+            // NT-W (natural tuning §4.e): the set-level "Slide smoothness"
+            // control's wire door — `ProjectStore.setClipPitchTransitionSmoothness`.
+            //
+            // params: clipId (required UUID); centsPerSecond (REQUIRED key,
+            // number or `null`). `null` = the default (3000 c/s,
+            // `PitchEditSet.defaultTransitionSlope`); otherwise clamped to
+            // 500...20000. **`0` is REFUSED, in words** — going back to the
+            // behaviour from before this feature is Undo's job, never a
+            // setting (§4.e); a negative or non-finite value is refused too.
+            // An EXPLICIT request, so it upgrades a LEGACY set on this field
+            // alone, whatever the D4-1 hand-edit policy says elsewhere.
+            //
+            // Errors, `PitchTransitionSentences` verbatim: the `0`/negative/
+            // non-finite refusals above. The per-note gates come first:
+            // clipNotFound, a MIDI clip, a comp-lane member, no stored table.
+            //
+            // Response: `clip.getPitchEdits`'s own shape plus
+            // `centsPerSecond` (the STORED value — never the request) and
+            // `clamped`/`note` when an in-range request was clamped to
+            // 500...20000.
+            try params.rejectUnknownKeys(
+                ["clipId", "centsPerSecond"], verb: "clip.setPitchTransitionSmoothness")
+            let sptsClipID = try params.requireClipID()
+            let sptsRequestedRaw: Double?
+            switch params["centsPerSecond"] {
+            case .number(let value)?:
+                sptsRequestedRaw = value
+            case .null?:
+                sptsRequestedRaw = nil
+            case nil:
+                throw ControlError(
+                    "'centsPerSecond' is required: a speed from 500 to 20000, or null for the "
+                    + "default (3000). Nothing was changed.")
+            default:
+                throw ControlError("'centsPerSecond' must be a number, or null for the default")
+            }
+            let sptsClip = try store.setClipPitchTransitionSmoothness(
+                clipId: sptsClipID, centsPerSecond: sptsRequestedRaw)
+            // ⭐ A setter's return is not proof it took: read the STORED slope
+            // back rather than trusting the request.
+            let sptsStored = sptsClip.pitchEdits?.transitionSlopeCentsPerSecond
+                ?? PitchEditSet.defaultTransitionSlope
+            let sptsRequestedResolved = sptsRequestedRaw ?? PitchEditSet.defaultTransitionSlope
+            let sptsExpectedStored = sptsRequestedResolved.clamped(to: PitchEditSet.transitionSlopeRange)
+            var sptsExtra: [String: JSONValue] = [
+                "centsPerSecond": .number(sptsStored),
+            ]
+            // ⭐ Compared against the RAW REQUEST (resolved for null = default),
+            // never the actual stored slope: both apply the same clamp
+            // formula, so Stored-vs-Expected is a tautology
+            // (`setPitchTransitionSmoothnessClamps`, NT-W).
+            let sptsClamped = sptsExpectedStored != sptsRequestedResolved
+            sptsExtra["clamped"] = .bool(sptsClamped)
+            if sptsClamped {
+                sptsExtra["note"] = .string(
+                    "centsPerSecond \(Self.g(sptsRequestedResolved)) was clamped to "
+                    + "\(Self.g(sptsStored)): it has to be between "
+                    + "\(Self.g(PitchEditSet.transitionSlopeRange.lowerBound)) and "
+                    + "\(Self.g(PitchEditSet.transitionSlopeRange.upperBound)) cents per second.")
+            }
+            return .success(request.id, Self.pitchEditsResponse(
+                clip: sptsClip, appliedOptions: nil, extra: sptsExtra))
+
+        case "clip.setNoteGlideFollow":
+            // NT-W (natural tuning §4.e): the per-note "slide follows its
+            // neighbours" toggle's wire door — `ProjectStore.setClipNoteGlideFollow`.
+            //
+            // params: clipId (required UUID); noteId (required UUID); amount
+            // (required Double, 0...1 — 0 = the slide keeps its own pitch
+            // (today), 1 = it tilts from the previous note's offset to the
+            // next one's). Clamped, never refused for being out of range.
+            //
+            // Errors, `PitchTransitionSentences` verbatim: a non-finite
+            // amount, an unknown note, a SOUND (no sung pitch to follow
+            // with), and an amount above 0 on a note joined to no curve note
+            // on either side (the write would take and do nothing) — `0` is
+            // always allowed there. The per-note gates come first:
+            // clipNotFound, a MIDI clip, a comp-lane member, no stored table.
+            //
+            // Response: `clip.getPitchEdits`'s own shape plus `noteId`,
+            // `amount` (the STORED, post-clamp value), and `clamped`/`note`
+            // when the request was out of range.
+            try params.rejectUnknownKeys(
+                ["clipId", "noteId", "amount"], verb: "clip.setNoteGlideFollow")
+            let sngfClipID = try params.requireClipID()
+            let sngfNoteID = try params.requireUUID("noteId")
+            let sngfRequested = try params.require("amount", \.doubleValue)
+            let sngfClip = try store.setClipNoteGlideFollow(
+                clipId: sngfClipID, segmentId: sngfNoteID, amount: sngfRequested)
+            // ⭐ A setter's return is not proof it took: read the STORED
+            // amount back rather than trusting the request.
+            let sngfStored = sngfClip.pitchEdits?.segments
+                .first(where: { $0.id == sngfNoteID })?.glideFollow ?? sngfRequested
+            let sngfExpectedStored = sngfRequested.clamped(to: NoteSegment.glideFollowRange)
+            var sngfExtra: [String: JSONValue] = [
+                "noteId": .string(sngfNoteID.uuidString),
+                "amount": .number(sngfStored),
+            ]
+            // ⭐ Compared against the RAW REQUEST, never the actual stored
+            // amount: both apply the same clamp formula, so Stored-vs-Expected
+            // is a tautology (`setNoteGlideFollowClamps`, NT-W).
+            let sngfClamped = sngfExpectedStored != sngfRequested
+            sngfExtra["clamped"] = .bool(sngfClamped)
+            if sngfClamped {
+                sngfExtra["note"] = .string(
+                    "amount \(Self.g(sngfRequested)) was clamped to \(Self.g(sngfStored)): it has "
+                    + "to be between 0 (the slide keeps its own pitch) and 1 (it follows fully).")
+            }
+            return .success(request.id, Self.pitchEditsResponse(
+                clip: sngfClip, appliedOptions: nil, extra: sngfExtra))
+
+        case "clip.setConsonantProtection":
+            // NT-W over NT-C C2 (natural tuning §2e): the "keep breaths and
+            // consonants at their own pitch" toggle's wire door —
+            // `ProjectStore.setClipConsonantProtection`.
+            //
+            // NT-E2 has landed: the mix is LIVE in the product render
+            // (`StretchRenderCache.renderAudio` calls `applyConsonantMix`
+            // before `applyLevelMask`, gated on
+            // `StretchCurvePlan.consonantMixActive(params)`, which forwards
+            // to the same `PitchEditSet.consonantMixIsActive` this verb's
+            // `consonantProtection.active` reads — the two can never
+            // disagree for a stored clip, `Params(clip:)` feeds both the
+            // same `stretchRatio`/`pitchShiftSemitones`/`pitchEdits`). Keeps
+            // breaths and consonants (s, t, p, ch) at the singer's original
+            // pitch when notes are moved: the time between notes plays the
+            // original recording, with a 10 ms blend at each note edge.
+            // Works on clips that are not stretched or transposed;
+            // otherwise `inactiveReason` on `clip.getPitchEdits` reports
+            // why. Limits: an "s" sung onto the end of a vowel is part of
+            // that note and still moves with it; a gap shorter than 64 ms
+            // stays tuned; a breath or consonant dragged on purpose moves
+            // with the drag; flipping this setting makes the clip render
+            // again in full.
+            //
+            // params: clipId (required UUID); enabled (required Bool).
+            //
+            // Errors: clipNotFound, a MIDI clip, a comp-lane member (the
+            // per-note gates), and `PitchConsonantSentences.noTuning`
+            // verbatim when the clip has no tuning and no seed — `seedIfAbsent`
+            // is never supplied on the wire path, the `clip.setNoteFormant`
+            // rule (no pitch detection here).
+            //
+            // Response: `clip.getPitchEdits`'s own shape plus `enabled` (the
+            // STORED flag). `keepConsonantsUntuned` and `consonantProtection
+            // {active, inactiveReason}` are NOT repeated here as `extra`
+            // keys: they are set-level fields of `clip.getPitchEdits` itself
+            // (`Self.pitchEditsResponse`, ONE home), so every verb that
+            // returns this shape — this one included — already carries them.
+            try params.rejectUnknownKeys(
+                ["clipId", "enabled"], verb: "clip.setConsonantProtection")
+            let scpClipID = try params.requireClipID()
+            let scpRequested = try params.require("enabled", \.boolValue)
+            let scpClip = try store.setClipConsonantProtection(
+                clipId: scpClipID, enabled: scpRequested)
+            // ⭐ A setter's return is not proof it took: read the STORED flag
+            // back rather than trusting the request.
+            let scpStored = scpClip.pitchEdits?.keepsConsonantsUntuned ?? scpRequested
+            let scpExtra: [String: JSONValue] = ["enabled": .bool(scpStored)]
+            return .success(request.id, Self.pitchEditsResponse(
+                clip: scpClip, appliedOptions: nil, extra: scpExtra))
+
+        case "clip.setNoteShape":
+            // C5b-3b (freehand design `docs/design/2026-09-24-pitch-editor-
+            // timing-and-freehand.md` §5.7): the DRAWN pitch-line wire door —
+            // `ProjectStore.setClipNoteShapes` (`NoteShapeSamples`, the ONE
+            // home, `Sources/DAWCore/NoteShapeSamples.swift`). Placed HERE,
+            // immediately after clip.setConsonantProtection, in the same
+            // per-note pitch-editor door cluster beside clip.sliceToSampler,
+            // rather than at the literal tail (the m25-d rule this whole
+            // cluster follows).
+            //
+            // params: clipId (required UUID); noteId (required UUID);
+            // EXACTLY ONE of `points` (array of {seconds, cents}, SOURCE
+            // seconds in the recording — the clip.getPlayedPitch/
+            // clip.setNoteTransition time axis) or `clear` (must be `true`).
+            //
+            // ⛔ NO SEED ON THE WIRE PATH — the `clip.setNotePitch` rule,
+            // verbatim: a clip with no stored note table refuses rather than
+            // seeding one. Since `points` must be SPLICED onto the note's
+            // CURRENT drawing (`NoteShapeSamples.splicing(points:onto:)`),
+            // this handler reads the stored note through
+            // `store.editableStoredNote(clipId:noteId:)` BEFORE calling the
+            // setter: the store's own read-only check, so its refusals are
+            // the SAME sentences, in the same order, as every per-note
+            // writer's (no copies kept here). `clear: true` needs no
+            // pre-check: `.clear` reaches the setter directly.
+            //
+            // Errors, in order: a malformed `points` entry -> field-named
+            // here / clipNotFound / comp-lane member / a MIDI clip ->
+            // `pitchDetectionRequiresAudioClip` / no stored table -> the
+            // noteTable sentence / unknown noteId -> segmentIndex's words
+            // (naming the count) / everything past that — no points, a
+            // point that is not a number, one second named twice with
+            // different values, points off the grid, points missing the
+            // note entirely, and a SOUND (`.unpitched`) named —
+            // `NoteShapeSentences` verbatim, thrown by
+            // `NoteShapeSamples.splicing`/`PitchEditSet.applyingNoteShapes`
+            // (the latter inside the setter), never re-decided here.
+            //
+            // ⚠️ A DRAWN LINE IS A HAND EDIT: on a LEGACY vocal
+            // (`predatesNaturalTuning`) it upgrades the WHOLE vocal to
+            // natural tuning in the same undo step (`afterHandEdit()`, the
+            // D4-1/C4 rule) — same as every other per-note writer on this
+            // door.
+            //
+            // Response: `clip.getPitchEdits`'s own shape plus `noteId` and
+            // `shape` — this note's drawing exactly as stored, ALWAYS
+            // present: `{startSeconds, stepSeconds: 0.01, cents: []}` when
+            // cleared (never omitted, unlike the per-segment echo below,
+            // which omits the KEY for a note with none).
+            try params.rejectUnknownKeys(
+                ["clipId", "noteId", "points", "clear"], verb: "clip.setNoteShape")
+            let snsClipID = try params.requireClipID()
+            let snsNoteID = try params.requireUUID("noteId")
+            let snsPointsRaw = params["points"]
+            let snsClearRaw = params["clear"]
+            guard (snsPointsRaw != nil) != (snsClearRaw != nil) else {
+                throw ControlError(
+                    "clip.setNoteShape needs exactly one of 'points' (an array of "
+                    + "{seconds, cents} to draw onto the note) or 'clear' (true, to remove "
+                    + "its drawing) — not both, not neither.")
+            }
+            let snsShape: NoteShapeSamples
+            if let snsClearRaw {
+                guard snsClearRaw.boolValue == true else {
+                    throw ControlError(
+                        "'clear' must be true — omit it and send 'points' to draw instead.")
+                }
+                snsShape = .clear
+            } else {
+                guard let snsRawPoints = snsPointsRaw?.arrayValue else {
+                    throw ControlError(
+                        "'points' must be an array of {seconds, cents} — seconds is SOURCE "
+                        + "time in the recording, cents is the drawn offset at that moment.")
+                }
+                var snsPoints: [NoteShapePoint] = []
+                for (index, entry) in snsRawPoints.enumerated() {
+                    guard let object = entry.objectValue else {
+                        throw ControlError("points[\(index)] must be {seconds: number, cents: number}")
+                    }
+                    guard let seconds = object["seconds"]?.doubleValue else {
+                        throw ControlError("points[\(index)].seconds must be a number")
+                    }
+                    guard let cents = object["cents"]?.doubleValue else {
+                        throw ControlError("points[\(index)].cents must be a number")
+                    }
+                    snsPoints.append(NoteShapePoint(seconds: seconds, cents: cents))
+                }
+                // The store's OWN read-only check, its own sentences and order.
+                let snsNote = try store.editableStoredNote(clipId: snsClipID, noteId: snsNoteID)
+                snsShape = try NoteShapeSamples.splicing(points: snsPoints, onto: snsNote)
+            }
+            let snsClip = try store.setClipNoteShapes(
+                clipId: snsClipID, shapes: [snsNoteID: snsShape])
+            // ⭐ A setter's return is not proof it took: read the STORED note
+            // back rather than trusting `snsShape`.
+            guard let snsStoredNote = snsClip.pitchEdits?.segments.first(where: { $0.id == snsNoteID }) else {
+                throw ControlError(
+                    "clip.setNoteShape: note \(snsNoteID) was not found after being written. "
+                    + "This should never happen — please report it.")
+            }
+            return .success(request.id, Self.pitchEditsResponse(
+                clip: snsClip, appliedOptions: nil,
+                extra: ["noteId": .string(snsNoteID.uuidString),
+                        "shape": Self.noteShapeJSON(snsStoredNote)]))
+
+        case "clip.setNoteShapes":
+            // W7-WIRE2: the BATCH twin of clip.setNoteShape — several
+            // notes' drawn pitch lines in ONE call and ONE undo step, the
+            // SAME `ProjectStore.setClipNoteShapes` call the single verb
+            // already makes (`Sources/DAWCore/ProjectStore+PitchNoteEdits.
+            // swift`, all-or-nothing), the clip.setNotePitch ->
+            // clip.setNotePitches / clip.setNoteVibrato ->
+            // clip.setNoteVibratos precedent pair. The editor's Cmd-drag
+            // brush commits a stroke across several notes exactly this way.
+            //
+            // params: clipId (required UUID); notes (required, non-empty
+            // array of {noteId: UUID string, EXACTLY ONE of `points` or
+            // `clear`} — the SAME two keys as one clip.setNoteShape call,
+            // minus clipId; `noteId` is the key that verb uses, not
+            // `segmentId`).
+            //
+            // ⛔ NO SEED ON THE WIRE PATH, the clip.setNoteShape rule
+            // verbatim.
+            //
+            // Per item, in order: not an object, an unknown key (always
+            // naming the item's index, the clip.setNoteVibratos unknown-key
+            // precedent verbatim), a malformed/missing noteId, or
+            // neither/both of points/clear — refused, prefixed `notes[i]: `
+            // ONLY when the batch has more than one item (the same
+            // conditional-prefix shape `PitchEditSet.applyingNoteVibratos`
+            // uses for its own per-note sentences, applied here to the
+            // WIRE-level parsing errors instead, since a malformed item may
+            // not have resolved a note id yet to prefix by). The SAME note
+            // named twice refuses the whole call outright — unconditional,
+            // never folded even when the two writes are identical: unlike
+            // clip.setNoteVibratos' array of edits, this verb's payload is
+            // a DICTIONARY keyed by note id, which cannot represent two
+            // writes for one key at all, so the wire is the only place a
+            // repeat is even visible.
+            //
+            // ⭐ SOUNDS (`.unpitched`), natural tuning §3b's "select all,
+            // then …" macro, the clip.setNoteVibratos precedent: a
+            // `points` item naming a sound is SKIPPED AND REPORTED —
+            // `skippedSoundIds` (always present) / `skippedSoundsSentence`
+            // (when non-empty) — but ONLY when at least one OTHER `points`
+            // item in the same call names a sung note (each note's origin
+            // read via `store.editableStoredNote`, the store's OWN
+            // read-only check, no seed, no copy kept here). When NO
+            // `points` item names a sung note — zero `points` items, or
+            // every one of them is a sound — nothing is filtered: the
+            // whole map reaches the store exactly as built, and the
+            // store's own ALL-OR-NOTHING sound refusal
+            // (`NoteShapeSentences.soundHasNoPitchLine`, thrown inside
+            // `PitchEditSet.applyingNoteShapes`) answers — the SAME
+            // sentence a single clip.setNoteShape call on that note would
+            // give, never copied here. A `clear` item on a sound is NEVER
+            // filtered either way — the store allows it (a hand-authored
+            // file's cleanup path, `setClipNoteShapes`'s own doc), the
+            // clip.setNoteShape rule.
+            //
+            // An empty `notes` array reaches the store as an empty map —
+            // never special-cased here — and is refused with the store's
+            // own `NoteShapeSentences.nameAtLeastOneNote`, the
+            // clip.setNoteVibratos "reaches the bridge, no .min(1)" rule
+            // verbatim (the MCP tool's OWN schema refuses it earlier, at
+            // zero bridge calls; a raw wire caller still reaches this
+            // door).
+            //
+            // ONE store call — so ONE undo step, and the store's own label
+            // ("Draw Pitch" / "Reset Drawn Shape").
+            //
+            // ⚠️ A DRAWN LINE IS A HAND EDIT: the clip.setNoteShape rule
+            // verbatim (`afterHandEdit()`, the D4-1/C4 rule), inherited
+            // from the ONE store call — never re-decided here.
+            //
+            // Response: `clip.getPitchEdits`'s own shape plus `notes`: one
+            // entry per note THIS call actually wrote — `{noteId, shape}`
+            // — in REQUEST order, a skipped sound excluded, each `shape`
+            // read back from the STORED segment (`Self.noteShapeJSON`),
+            // never rebuilt from the request (the clip.setNoteVibratos
+            // "applied read back from the STORED segment" rule) — plus
+            // `skippedSoundIds` / `skippedSoundsSentence`.
+            try params.rejectUnknownKeys(["clipId", "notes"], verb: "clip.setNoteShapes")
+            let snssClipID = try params.requireClipID()
+            guard let snssRawNotes = params["notes"]?.arrayValue else {
+                throw ControlError(
+                    "'notes' must be an array of {noteId, points|clear} — noteId is the `id` "
+                    + "of each note in clip.getPitchEdits' `segments`")
+            }
+            let snssBatch = snssRawNotes.count > 1
+            func snssItemSentence(_ text: String, at index: Int) -> String {
+                snssBatch ? "notes[\(index)]: \(text)" : text
+            }
+            var snssItems: [(index: Int, noteId: UUID, points: [NoteShapePoint]?)] = []
+            var snssSeenIDs = Set<UUID>()
+            for (index, entry) in snssRawNotes.enumerated() {
+                guard let object = entry.objectValue else {
+                    throw ControlError(snssItemSentence("must be an object {noteId, points|clear}", at: index))
+                }
+                let snssUnknownItemKeys = Set(object.keys).subtracting(["noteId", "points", "clear"])
+                guard snssUnknownItemKeys.isEmpty else {
+                    let named = snssUnknownItemKeys.sorted().map { "'\($0)'" }.joined(separator: ", ")
+                    throw ControlError(
+                        "clip.setNoteShapes: notes[\(index)] has unknown "
+                        + "parameter\(snssUnknownItemKeys.count > 1 ? "s" : "") \(named) — "
+                        + "valid keys are 'noteId', 'points', 'clear'")
+                }
+                guard let rawID = object["noteId"]?.stringValue, let noteID = UUID(uuidString: rawID) else {
+                    throw ControlError(snssItemSentence("noteId is not a valid UUID", at: index))
+                }
+                guard snssSeenIDs.insert(noteID).inserted else {
+                    throw ControlError("Note \(noteID) is named twice in this batch. Name each note once.")
+                }
+                let snssPointsRaw = object["points"]
+                let snssClearRaw = object["clear"]
+                guard (snssPointsRaw != nil) != (snssClearRaw != nil) else {
+                    throw ControlError(snssItemSentence(
+                        "needs exactly one of 'points' (an array of {seconds, cents} to draw "
+                        + "onto the note) or 'clear' (true, to remove its drawing) — not both, "
+                        + "not neither.", at: index))
+                }
+                if let snssClearRaw {
+                    guard snssClearRaw.boolValue == true else {
+                        throw ControlError(snssItemSentence(
+                            "'clear' must be true — omit it and send 'points' to draw instead.",
+                            at: index))
+                    }
+                    snssItems.append((index, noteID, nil))
+                } else {
+                    guard let snssRawPoints = snssPointsRaw?.arrayValue else {
+                        throw ControlError(snssItemSentence(
+                            "'points' must be an array of {seconds, cents} — seconds is SOURCE "
+                            + "time in the recording, cents is the drawn offset at that moment.",
+                            at: index))
+                    }
+                    var snssPoints: [NoteShapePoint] = []
+                    for (pointIndex, pointEntry) in snssRawPoints.enumerated() {
+                        guard let pointObject = pointEntry.objectValue else {
+                            throw ControlError(snssItemSentence(
+                                "points[\(pointIndex)] must be {seconds: number, cents: number}",
+                                at: index))
+                        }
+                        guard let seconds = pointObject["seconds"]?.doubleValue else {
+                            throw ControlError(snssItemSentence(
+                                "points[\(pointIndex)].seconds must be a number", at: index))
+                        }
+                        guard let cents = pointObject["cents"]?.doubleValue else {
+                            throw ControlError(snssItemSentence(
+                                "points[\(pointIndex)].cents must be a number", at: index))
+                        }
+                        snssPoints.append(NoteShapePoint(seconds: seconds, cents: cents))
+                    }
+                    snssItems.append((index, noteID, snssPoints))
+                }
+            }
+
+            // Resolve every `points` item's CURRENT note — the store's OWN
+            // read-only check (`clip.setNoteShape`'s own pre-check, no
+            // copies kept here) — before deciding whether any filtering
+            // applies.
+            var snssResolvedPoints: [UUID: NoteSegment] = [:]
+            for item in snssItems where item.points != nil {
+                snssResolvedPoints[item.noteId] = try store.editableStoredNote(
+                    clipId: snssClipID, noteId: item.noteId)
+            }
+            let snssHasSungPointsItem = snssResolvedPoints.values.contains { $0.origin != .unpitched }
+
+            var snssShapes: [UUID: NoteShapeSamples] = [:]
+            var snssSkippedSoundIds: [UUID] = []
+            for item in snssItems {
+                guard let points = item.points else {
+                    snssShapes[item.noteId] = .clear
+                    continue
+                }
+                guard let note = snssResolvedPoints[item.noteId] else {
+                    throw ControlError(
+                        "clip.setNoteShapes: notes[\(item.index)] (\(item.noteId)) was not "
+                        + "resolved before writing. This should never happen — please report it.")
+                }
+                if snssHasSungPointsItem, note.origin == .unpitched {
+                    snssSkippedSoundIds.append(item.noteId)
+                    continue
+                }
+                snssShapes[item.noteId] = try NoteShapeSamples.splicing(points: points, onto: note)
+            }
+
+            let snssClip = try store.setClipNoteShapes(clipId: snssClipID, shapes: snssShapes)
+            // ⭐ A setter's return is not proof it took: read every written
+            // note's STORED shape back, never rebuild it from the request.
+            var snssNotesEcho: [JSONValue] = []
+            for item in snssItems {
+                guard snssShapes[item.noteId] != nil else { continue }  // a skipped sound
+                guard let storedNote = snssClip.pitchEdits?.segments.first(where: { $0.id == item.noteId }) else {
+                    throw ControlError(
+                        "clip.setNoteShapes: note \(item.noteId) was not found after being "
+                        + "written. This should never happen — please report it.")
+                }
+                snssNotesEcho.append(.object([
+                    "noteId": .string(item.noteId.uuidString),
+                    "shape": Self.noteShapeJSON(storedNote),
+                ]))
+            }
+            var snssExtra: [String: JSONValue] = [
+                "notes": .array(snssNotesEcho),
+                "skippedSoundIds": .array(snssSkippedSoundIds.map { .string($0.uuidString) }),
+            ]
+            if !snssSkippedSoundIds.isEmpty {
+                snssExtra["skippedSoundsSentence"] = .string(
+                    Self.skippedNoteShapeSoundsSentence(count: snssSkippedSoundIds.count))
+            }
+            return .success(request.id, Self.pitchEditsResponse(
+                clip: snssClip, appliedOptions: nil, extra: snssExtra))
+
+        case "clip.upgradeNaturalTuning":
+            // X4 (natural tuning design §X4, `docs/design/2026-09-25-
+            // natural-tuning.md`): the ONE upgrade path — the wire door for
+            // `ProjectStore.upgradeToNaturalTuning`. The SAME call the pitch
+            // editor's "Tuned before this update. Tap to update." line makes,
+            // and the one every per-note hand edit on a legacy vocal already
+            // triggers automatically (`PitchEditSet.afterHandEdit()`, the
+            // D4-1 hook) — this verb is that same update, invocable directly,
+            // without having to touch a note first.
+            //
+            // Sets all three set-level fields to a BRAND NEW set's own seed
+            // values, as ONE undo step ("Update Tuning"): voice size kept
+            // (`formantCorrection`), consonants and breaths left at their own
+            // pitch (`keepConsonantsUntuned`), and joins between notes
+            // softened (`transitionSlopeCentsPerSecond`) — EXCEPT that an
+            // explicit prior `clip.setPitchTransitionSmoothness` pick
+            // survives: the slope is filled in only when it is still exactly
+            // 0 (never touched). No note is changed, and no retune runs.
+            //
+            // params: clipId (required UUID) — nothing else; there is no
+            // amount to choose, every field goes to its one seed value.
+            //
+            // ⚠️ NOT gated on `predatesNaturalTuning` — gated on the table
+            // EXISTING at all. A clip with NO stored tuning (never edited,
+            // never auto-corrected) REFUSES in words: "This clip has no
+            // tuning to update. Tune it first...". A clip that already
+            // carries a table already AT the seed values (whether seeded
+            // that way from the start, or upgraded by an earlier call) is a
+            // NO-OP: success, the clip comes back unchanged, and nothing is
+            // added to the undo stack (`performEdit`'s before/after compare
+            // finds no change) — calling it twice in a row, or on a freshly
+            // auto-corrected clip, is harmless. This is a NARROWER question
+            // than `predatesNaturalTuning`: an untouched table reads
+            // `predatesNaturalTuning: false` (identity is exempt) even while
+            // its fields still sit at the pre-feature defaults (nil/false/0)
+            // — calling this verb on one of those still does real work,
+            // moving them to the seed values for the first time.
+            //
+            // Errors: clipNotFound, a MIDI clip, a take-group comp member
+            // (the per-note gates, `locateEditableNoteClip`), and the
+            // no-table refusal above, all via the LocalizedError mapping.
+            //
+            // Response: `clip.getPitchEdits`'s own shape — no extra keys;
+            // read `formantCorrection`/`keepConsonantsUntuned`/
+            // `transitionSlopeCentsPerSecond`/`predatesNaturalTuning` (now
+            // false) straight off it, same as after any other natural-tuning
+            // verb.
+            try params.rejectUnknownKeys(["clipId"], verb: "clip.upgradeNaturalTuning")
+            let untClipID = try params.requireClipID()
+            let untClip = try store.upgradeToNaturalTuning(clipId: untClipID)
+            return .success(request.id, Self.pitchEditsResponse(
+                clip: untClip, appliedOptions: nil))
 
         case "arrange.insertBars":
             // params: atBar (required int >= 1, 1-BASED — bar 1 is the first bar,
@@ -6050,12 +7439,19 @@ public final class CommandRouter {
 
         case "groove.extract":
             // params: clipId (required), name (required), gridBeats? (> 0,
-            // default 0.25 = 1/16), cycleBeats? (> 0, default 4 = one bar at
-            // x/4). Extracts a GROOVE (per-slot timing-offset table, M5 iii-g)
+            // default 0.25 = 1/16; finite and at least 1/1024 beat,
+            // gridFloorProblem), cycleBeats? (> 0, default 4 = one bar at
+            // x/4; at most QuantizeLimits.maximumGrooveSlots = 65536 grid slots
+            // per cycle, refused by the store in words). Extracts a GROOVE
+            // (per-slot timing-offset table, M5 iii-g)
             // from a clip's onsets — a MIDI clip's note onsets, or an AUDIO
             // clip's detected transients (engine, content-key cached) — and
             // appends it to the project palette (one undo step). Onsets fold into
             // the cycle and per-slot deviations average; empty slots read 0.
+            // m23-ap I5-F4: deviations are measured from the SONG's grid lines
+            // and the slots count from the song's beat 0 (ruled 2026-09-27),
+            // matching clip.quantize: a groove taken from one clip lands on the
+            // same song beats when applied to another.
             // clipNotFound / engineUnavailable (audio, headless) / invalidClipEdit
             // (non-positive grid/cycle) surface via the LocalizedError mapping.
             // Response: {"groove": {...}}.
@@ -6067,6 +7463,7 @@ public final class CommandRouter {
             guard extractGrid > 0 else {
                 throw ControlError("'gridBeats' must be greater than 0 (beats: 0.25 = 1/16, 0.5 = 1/8)")
             }
+            if let floor = gridFloorProblem(extractGrid) { throw ControlError(floor) }
             let extractCycle = params["cycleBeats"]?.doubleValue ?? 4
             guard extractCycle > 0 else {
                 throw ControlError("'cycleBeats' must be greater than 0 (beats: 4 = one bar at x/4)")
@@ -13311,9 +14708,45 @@ public final class CommandRouter {
         return curve
     }
 
+    /// m23-ap I5-F4 round 3 — THE FINEST GRID the quantize and groove verbs
+    /// accept (`clip.quantize`, `clip.quantizeAudio`, `groove.extract`, the
+    /// verbs whose grid reaches the song-grid slot math): a finite `gridBeats`
+    /// of at least `QuantizeLimits.minimumGridBeats` (1/1024 beat =
+    /// 0.0009765625), refused in words that name that value. Checked AFTER the
+    /// shipped `> 0` rule, so a zero or negative grid keeps its shipped wording.
+    ///
+    /// This is not the crash guard: the song-grid math is total on its own (a
+    /// 1e-300 grid returns finite beats and never traps, `Quantize.swift`). It
+    /// refuses, before any engine pass, a grid no musician means, which would
+    /// otherwise succeed as a plausible-looking no-op. The floor sits 64 times
+    /// below the finest grid the app offers (1/64 note = 0.0625 beat, the
+    /// quantize panel's and the piano roll's finest). A non-finite value cannot
+    /// arrive over the socket (its JSON decoder rejects 1e400), but an
+    /// in-process caller can build one, so it is refused here too.
+    ///
+    /// Round 4: `clip.sliceToSampler`'s `gridBeats` (a slice length, not
+    /// quantize slots) comes through here too: a 1e-20 slice grid asked
+    /// `SliceBoundaries` for 4e20 grid lines. And a grid may be no longer than
+    /// the timeline (`TimelineLimits.maximumBeats`, 2^20 beats): the ONE test is
+    /// `QuantizeLimits.isUsableGrid`. A finite grid past that ceiling gets its
+    /// own words; every other refusal keeps round 3's. (The "finest grid the
+    /// app offers" in those words is the piano roll's and quantize panel's
+    /// 1/64 note; the chop panel's finest is 1/16.)
+    private func gridFloorProblem(_ gridBeats: Double) -> String? {
+        if QuantizeLimits.isUsableGrid(gridBeats) { return nil }
+        if gridBeats.isFinite, gridBeats > TimelineLimits.maximumBeats {
+            return "'gridBeats' is \(gridBeats), past the timeline limit: a grid may be at most "
+                + "\(Int(TimelineLimits.maximumBeats)) beats (2^20)"
+        }
+        return "'gridBeats' must be a finite number of at least 1/1024 beat "
+            + "(\(QuantizeLimits.minimumGridBeats)); the finest grid the app offers is 1/64 note = 0.0625 "
+            + "(beats: 1 = 1/4 note, 0.5 = 1/8, 0.25 = 1/16)"
+    }
+
     /// Builds a `QuantizeSettings` from the `clip.quantize` params with
     /// field-named range validation (the parseFadeCurve style): `gridBeats`
-    /// (required, > 0), `strength` (optional, 0...1, default 1), `swing`
+    /// (required, > 0, and finite and at least 1/1024 beat: `gridFloorProblem`),
+    /// `strength` (optional, 0...1, default 1), `swing`
     /// (optional, 50...75, default 50 — the wire name for `swingPercent`),
     /// `quantizeEnds` (optional bool, default false). Shared shape iii-f's audio
     /// quantize and iii-g's groove ref (resolved to `settings.groove`) extend.
@@ -13331,10 +14764,12 @@ public final class CommandRouter {
 
         var gridBeats = 0.0
         if let raw = params["gridBeats"]?.doubleValue {
-            if raw > 0 {
-                gridBeats = raw
-            } else {
+            if !(raw > 0) {
                 problems.append("'gridBeats' must be greater than 0 (beats: 1 = 1/4 note, 0.5 = 1/8, 0.25 = 1/16)")
+            } else if let floor = gridFloorProblem(raw) {
+                problems.append(floor)
+            } else {
+                gridBeats = raw
             }
         } else {
             problems.append("missing or invalid required param 'gridBeats'")
@@ -13422,9 +14857,12 @@ public final class CommandRouter {
         let wantsDivisions = params["divisions"] != nil
         var divisions: Int?
         if wantsDivisions {
+            // m23-ap I5-F4 round 4: the range is checked while `raw` is still a
+            // Double. `Int(raw)` trapped on a whole number of 2^63 or more (1e20).
             if let raw = params["divisions"]?.doubleValue,
                raw == raw.rounded(),
-               AudioQuantizeSettings.divisionsRange.contains(Int(raw)) {
+               raw >= Double(AudioQuantizeSettings.divisionsRange.lowerBound),
+               raw <= Double(AudioQuantizeSettings.divisionsRange.upperBound) {
                 divisions = Int(raw)
             } else {
                 problems.append(
@@ -13444,10 +14882,14 @@ public final class CommandRouter {
         // and still requires the grid, so no shipped caller changes.
         var gridBeats = 0.0
         if let raw = params["gridBeats"]?.doubleValue {
-            if raw > 0 {
-                gridBeats = raw
-            } else {
+            if !(raw > 0) {
                 problems.append("'gridBeats' must be greater than 0 (beats: 1 = 1/4 note, 0.5 = 1/8, 0.25 = 1/16)")
+            } else if let floor = gridFloorProblem(raw) {
+                // m23-ap I5-F4 round 3: refused at strength 0 too — a sent grid
+                // is checked even where it would be irrelevant, like any field.
+                problems.append(floor)
+            } else {
+                gridBeats = raw
             }
         } else if params["strength"]?.doubleValue == 0 {
             gridBeats = 1.0   // irrelevant at strength 0; any positive value slices identically
@@ -13575,11 +15017,14 @@ public final class CommandRouter {
                 problems.append(
                     "'gridBeats' only applies to mode 'grid' — pass mode: \"grid\" to cut on the "
                     + "musical grid")
-            } else if raw > 0 {
-                gridBeats = raw
-            } else {
+            } else if !(raw > 0) {
                 problems.append(
                     "'gridBeats' must be greater than 0 (beats: 1 = 1/4 note, 0.5 = 1/8, 0.25 = 1/16)")
+            } else if let floor = gridFloorProblem(raw) {
+                // m23-ap I5-F4 round 4: the quantize verbs' floor and ceiling.
+                problems.append(floor)
+            } else {
+                gridBeats = raw
             }
         } else if mode == .grid {
             problems.append("mode 'grid' requires 'gridBeats' (> 0 beats per slice)")
@@ -14195,6 +15640,36 @@ public final class CommandRouter {
         )
     }
 
+    /// C5b-3b (freehand design §5.7): the `shape` echo shared by
+    /// `clip.setNoteShape`'s own top-level response and `clip.getPitchEdits`'
+    /// per-segment one — `NoteShapeSamples(storedIn:)`, verbatim (no
+    /// materialising), as `{startSeconds, stepSeconds: 0.01, cents: [...]}`.
+    /// `cents` is EMPTY for a note with no drawing (or a write that just
+    /// cleared one): `NoteShapeSamples.clear`'s `startIndex` is 0, so
+    /// `startSeconds` reads 0 too in that case — uniform, no special-casing.
+    private static func noteShapeJSON(_ note: NoteSegment) -> JSONValue {
+        let samples = NoteShapeSamples(storedIn: note)
+        return .object([
+            "startSeconds": .number(NoteShapeSamples.seconds(atGridIndex: samples.startIndex)),
+            "stepSeconds": .number(0.01),
+            "cents": .array(samples.tenthsOfCents.map { .number(Double($0) / 10) }),
+        ])
+    }
+
+    /// `clip.setNoteShapes` (W7-WIRE2): what a batch that skipped sounds
+    /// says about them — the `NoteVibratoLimits.skippedSoundsSentence`
+    /// shape, worded for a DRAWN LINE rather than a wobble (never copied:
+    /// "no pitch line to draw" is `NoteShapeSentences.soundHasNoPitchLine`'s
+    /// own phrase, reused here in tone only, not verbatim — that sentence
+    /// REFUSES one note, this one reports several skipped alongside a write
+    /// that succeeded).
+    private static func skippedNoteShapeSoundsSentence(count: Int) -> String {
+        count == 1
+            ? "Left 1 sound alone: it is a breath or a consonant, so it has no pitch line to draw."
+            : "Left \(count) sounds alone: they are breaths or consonants, so they have no pitch "
+                + "line to draw."
+    }
+
     /// The shared response builder for `clip.autoCorrectPitch` /
     /// `clip.clearPitchEdits` / `clip.getPitchEdits` (m23-q Phase 2). Reads
     /// `edits` back rather than trusting a setter's return — "a setter's
@@ -14282,8 +15757,68 @@ public final class CommandRouter {
             // `nil` edits reads false: nothing to lose, so nothing to ask —
             // the same "proceeds regardless" rule the store itself applies.
             "handEditedSinceAutoCorrect": .bool(edits?.hasHandEditsSinceAutoCorrect ?? false),
-            "segments": .array(segments.map { segment in
-                .object([
+            // NT-W (natural tuning §1(e), set-level "how much voice is kept"):
+            // `nil` means legacy — `Clip.formantPreserve` governs the WHOLE
+            // clip's transpose instead (§1(c)); an ENGAGED amount, including
+            // `0.0`, is stored and echoed as a number. Written by
+            // `clip.setFormantCorrection`.
+            "formantCorrection": (edits?.formantCorrection).map { JSONValue.number($0) } ?? .null,
+            // NT-W (natural tuning §4.e, set-level slide smoothness): `0`
+            // when the set has never engaged soft joins (the legacy ramps
+            // apply everywhere) — never `nil`, since the field itself is a
+            // plain non-optional Double on `PitchEditSet` (0 = legacy,
+            // `PitchEditSet.defaultTransitionSlope` = 3000 is what a NEW
+            // explicit request without a number falls back to, never a
+            // silent read-back default). Written by
+            // `clip.setPitchTransitionSmoothness`.
+            "transitionSlopeCentsPerSecond": .number(edits?.transitionSlopeCentsPerSecond ?? 0),
+            // NT-W (natural tuning R16): a tuned vocal made before natural
+            // tuning existed — `PitchEditSet.predatesNaturalTuning`, the ONE
+            // predicate (never restated here): `formantCorrection == nil`
+            // AND the set actually bends pitch. `nil` edits (no table at
+            // all) reads `false` — nothing to predate.
+            "predatesNaturalTuning": .bool(edits?.predatesNaturalTuning ?? false),
+            // NT-W over NT-C C2 (natural tuning §2e): "keep breaths and
+            // consonants at their own pitch" — `PitchEditSet.
+            // keepsConsonantsUntuned`, `false` when there is no table at all
+            // (nothing to protect yet). Written by
+            // `clip.setConsonantProtection`. NT-E2 has landed: the render
+            // mix is live (see that verb's own doc comment).
+            "keepConsonantsUntuned": .bool(edits?.keepsConsonantsUntuned ?? false),
+            // NT-C2-F1 (W7-D2/W7-WIRE2): true when consonant protection was
+            // switched OFF on purpose (`PitchEditSet.consonantProtection ==
+            // .offByChoice`) — a preset re-run keeps it off. `false` covers
+            // BOTH "never chosen" and "on": `keepConsonantsUntuned` already
+            // tells those two states apart from ON, so this field answers
+            // the one question it cannot — whether an OFF was somebody's
+            // pick or nobody's. `false` with no table at all (nothing to
+            // choose yet).
+            "consonantsOffByChoice": .bool(edits?.consonantProtection == .offByChoice),
+            // NT-W over NT-C C2: `active` and `inactiveReason` are BOTH read
+            // through `PitchEditSet.consonantMixIsActive`/
+            // `consonantMixInactiveReason` — THE ONE RULE (never a local
+            // `semitones != 0` restatement, the `glideIsEffective` law) —
+            // against this CLIP's own `stretchRatio`/`pitchShiftSemitones`.
+            // `active` reads `false` and `inactiveReason` reads `null` with
+            // no table at all (nothing asked for the mix, so nothing is
+            // "inactive" either).
+            "consonantProtection": .object([
+                "active": .bool(edits?.consonantMixIsActive(
+                    stretchRatio: clip.stretchRatio,
+                    clipSemitones: clip.pitchShiftSemitones) ?? false),
+                "inactiveReason": edits?.consonantMixInactiveReason(
+                    stretchRatio: clip.stretchRatio,
+                    clipSemitones: clip.pitchShiftSemitones
+                ).map { JSONValue.string($0.rawValue) } ?? .null,
+            ]),
+            "segments": .array(segments.enumerated().map { index, segment in
+                // NT-W (natural tuning §4.e): the ONE read of what this
+                // note's join to its right actually is/does, from
+                // `PitchEditSet.joinReading(afterSegmentAt:)` — never
+                // restated as a second predicate. `nil` only for a SOUND
+                // (`entersPitchCurve == false`), which has no join to report.
+                let joinReading = edits?.joinReading(afterSegmentAt: index)
+                var segmentFields: [String: JSONValue] = [
                     "id": .string(segment.id.uuidString),
                     "startSeconds": .number(segment.startSeconds),
                     "endSeconds": .number(segment.endSeconds),
@@ -14300,36 +15835,111 @@ public final class CommandRouter {
                     // formant field it shipped beside. `vibratoRateHz`/
                     // `vibratoDepthCents`/`vibratoOnsetSeconds` are READ by
                     // the render curve (`hasGeneratedVibrato` is
-                    // `vibratoDepthCents != 0`); `formantOffsetSemitones` is
-                    // carried, unread, Phase 4. Every field ALWAYS present,
+                    // `vibratoDepthCents != 0`). Every field ALWAYS present,
                     // the same rule as the eight above — a caller reading
                     // this back cannot mistake "default" for "absent."
                     "vibratoRateHz": .number(segment.vibratoRateHz),
                     "vibratoDepthCents": .number(segment.vibratoDepthCents),
                     "vibratoOnsetSeconds": .number(segment.vibratoOnsetSeconds),
+                    // C5a-3 (vibrato-handle design §12.2, additive):
+                    // `vibratoPhaseAnchorSeconds` is C5a-1's stored field,
+                    // echoed like every other field above — "default" and
+                    // "absent" must never be confused. `heardVibratoRateHz`
+                    // is NOT a stored field: it is `vibratoRateHz ÷ this
+                    // clip's stretchRatio` (design V5 — the model stores per
+                    // SOURCE second, a listener hears per OUTPUT second), the
+                    // same arithmetic `NoteVibratoResult.heardRateHz` uses.
+                    // ⚠️ That property sanitises the ratio through
+                    // `NoteVibratoLimits.sanitisedRatio`, which has no access
+                    // modifier and so is `internal` to DAWCore — unreachable
+                    // from this module. Dividing by `clip.stretchRatio`
+                    // directly is the identity for every REAL clip (every
+                    // `Clip` holds a ratio inside `Clip.stretchRatioRange` by
+                    // construction, the same fact `NoteVibratoLimits.clamp`'s
+                    // own doc cites for why its sanitising is a no-op on a
+                    // real caller). ⚠️ The design doc says this response
+                    // "gains a `stretchRatio:` parameter" — that is STALE:
+                    // `clip` (and so `clip.stretchRatio`) was already a
+                    // parameter of this function before C5a-3, so no
+                    // signature change was needed; see the close report.
+                    "vibratoPhaseAnchorSeconds": .number(segment.vibratoPhaseAnchorSeconds),
+                    "heardVibratoRateHz": .number(segment.vibratoRateHz / clip.stretchRatio),
+                    // NT-W (natural tuning §1(e)): this text used to say
+                    // "carried, unread by any renderer today, always 0" —
+                    // FALSE as of NT-E1's formant render. This note's OWN
+                    // voice-size offset, in semitones (0 = as sung), read by
+                    // the render whenever the set `engagesFormantCurve`.
+                    // Written by `clip.setNoteFormant`. ✅ SHIPPED: NT-PK's
+                    // provisional-render memo-key fix landed and was verified
+                    // (see that verb's own doc comment).
                     "formantOffsetSemitones": .number(segment.formantOffsetSemitones),
+                    // NT-W (natural tuning §4.e): the width of the slide INTO
+                    // the NEXT note, ms of the original take — `0` means
+                    // Auto (the width grows with the size of the jump).
+                    // Written by `clip.setNoteTransition`.
+                    "transitionOutMs": .number(segment.transitionOutMs),
+                    // NT-W (natural tuning §4.e): how much this note FOLLOWS
+                    // the notes beside it when it is a sung slide — `0` =
+                    // today (its own constant offset only), `1` = it tilts
+                    // fully from the previous note's offset to the next
+                    // one's. Written by `clip.setNoteGlideFollow`.
+                    "glideFollow": .number(segment.glideFollow),
+                    // NT-W: `joinReading?.kind.rawValue` verbatim — `"soft"`
+                    // (a join the curve crossfades across), `"gap"` (a
+                    // silence/breath/consonant between two sung notes — no
+                    // slide there to shape) or `"last"` (nothing after this
+                    // note). `.null` only for a SOUND (no join to report).
+                    "joinToNext": joinReading.map { .string($0.kind.rawValue) } ?? .null,
+                    // NT-W: the width THIS join actually renders with right
+                    // now (ms of the original take), through the SAME
+                    // `PitchEditSet.joinReading` the wire's `clip_set_note_
+                    // transition` echo uses — `.null` on a `"gap"`/`"last"`
+                    // join, or a `"soft"` join with no width rule for it yet
+                    // (a legacy set nothing has widened).
+                    "effectiveTransitionMs": joinReading?.appliedWidthMs.map { JSONValue.number($0) } ?? .null,
                     // ⚠️ The two timing deltas are carried and UNREAD by the
                     // render until C2-3 (`NoteSegment`'s own doc).
                     // `amplitudeDb` is the note's LEVEL, read by the offline
                     // render since I7a/U-C (`PitchEditSet.gain(atSourceSecond:)`),
-                    // though nothing writes it yet (U-D will). All three are
-                    // included anyway: `clip.autoCorrectPitch`'s own rule is
-                    // EVERY field, always, and a wire view that curates which
-                    // unread fields are worth showing is a second opinion
-                    // about what "complete" means. All three are 0 on every
-                    // segment this milestone can produce.
+                    // though nothing writes it yet (U-D will). Both timing
+                    // deltas are included anyway: `clip.autoCorrectPitch`'s
+                    // own rule is EVERY field, always, and a wire view that
+                    // curates which unread fields are worth showing is a
+                    // second opinion about what "complete" means. Both are 0
+                    // on every segment this milestone can produce.
                     "timeStartDeltaSeconds": .number(segment.timeStartDeltaSeconds),
                     "timeEndDeltaSeconds": .number(segment.timeEndDeltaSeconds),
                     "amplitudeDb": .number(segment.amplitudeDb),
                     // I7a: the clear flag, ALWAYS present like every key above,
                     // so a note that is not cleared never reads as "absent".
                     "cleared": .bool(segment.isCleared),
-                ])
+                    // U-A (unpitched-notes-presets-midi-targets design §1.4,
+                    // UB-2): where this segment came from — "detected" (a note
+                    // the splitter found), "transition" (a sung slide) or
+                    // "unpitched" (a SOUND with no detected pitch,
+                    // `PitchUnpitchedFinder`). ALWAYS present, the same rule as
+                    // every key above, even though `NoteSegment`'s own Codable
+                    // encoder omits it for `.detected` to keep old files
+                    // byte-identical — the on-disk omit-when-default shape and
+                    // this wire's "every field, always" shape are allowed to
+                    // differ, and this response already draws that line at
+                    // `cleared` right above.
+                    "origin": .string(segment.origin.rawValue),
+                ]
+                // C5b-3b: additive, and NOT "always present" like every field
+                // above — a drawn shape's samples can run the length of the
+                // whole note at 100 Hz, so the KEY itself is omitted for a
+                // note with none (`NoteSegment.hasShape`) rather than shipping
+                // an empty object on every undrawn note in every response.
+                if segment.hasShape {
+                    segmentFields["shape"] = Self.noteShapeJSON(segment)
+                }
+                return .object(segmentFields)
             }),
             "warnings": .array(warnings.map { .string($0) }),
         ]
         if let appliedOptions {
-            response["appliedOptions"] = .object([
+            var appliedOptionsJSON: [String: JSONValue] = [
                 "scale": .object([
                     "tonicPitchClass": .number(Double(appliedOptions.scale.tonicPitchClass)),
                     "mode": .string(appliedOptions.scale.mode.rawValue),
@@ -14338,10 +15948,40 @@ public final class CommandRouter {
                 "strength": .number(appliedOptions.strength),
                 "retuneMs": .number(appliedOptions.retuneMs),
                 "preserveVibrato": .bool(appliedOptions.preserveVibrato),
-            ])
+            ]
+            // NT-W follow-up (W7-WIRE2): OMITTED, not null, when the caller
+            // never passed formantCorrection — every existing reply stays
+            // byte-identical (the unpitchedSkippedReason omit idiom above).
+            if let formantCorrectionOverride = appliedOptions.formantCorrectionOverride {
+                appliedOptionsJSON["formantCorrection"] = .number(formantCorrectionOverride)
+            }
+            response["appliedOptions"] = .object(appliedOptionsJSON)
         }
         for (key, value) in extra { response[key] = value }
         return .object(response)
+    }
+
+    /// `clip.findUnpitchedSounds`' `skippedMessage` (UB-2): the ONE place the
+    /// finder's three `SkipReason` cases become plain words, so the wire and
+    /// `clip.autoCorrectPitch`'s own `unpitchedSkippedReason` (which reports
+    /// only the raw wire value, the machine-checkable one) can point at the
+    /// SAME sentence rather than drifting into two explanations of the same
+    /// fact. Cites the finder's own named constants rather than restating
+    /// their numbers, the ONE-home rule `PitchUnpitchedFinder`'s doc argues.
+    private static func unpitchedSkipMessage(_ reason: PitchUnpitchedFinder.SkipReason) -> String {
+        switch reason {
+        case .notEnoughQuiet:
+            return "Under \(Int(PitchUnpitchedFinder.minimumQuietSeconds)) second(s) of quiet "
+                + "time were found between notes, so this clip's own noise floor could not be "
+                + "measured — there is nothing to compare a sound's loudness against."
+        case .tooNoisy:
+            return "The singing is not at least \(Int(PitchUnpitchedFinder.minimumHeadroomDb)) dB "
+                + "louder than this clip's own noise floor, so quiet and loud could not be told "
+                + "apart reliably."
+        case .noNotes:
+            return "No note in this clip has a detected pitch to lend, so a sound would have "
+                + "nothing to borrow its drawn pitch from."
+        }
     }
 
     /// The response builder for `clip.getPlayedPitch` (C-0c). Every field
@@ -14349,8 +15989,21 @@ public final class CommandRouter {
     /// the `clip.detectPitch` per-frame `frequencyHz?` idiom for an honestly
     /// absent value — `.null` would claim there IS a reason and it is
     /// nothing).
+    ///
+    /// `segments`/`contour`/`stretchRatio` are C5a-3's addition (design
+    /// §12.3, additive only): per-note wobble readings, filtered to notes
+    /// overlapping the RETURNED window — the same scope `runs` is already
+    /// narrowed to — so a narrow call does not pay for every note in a long
+    /// file. `contour` is fetched by the CALLER through the same cached
+    /// `ProjectStore.renderPitchContour(clipId:)` `playedPitchLine` itself
+    /// calls (⚠️ a SECOND call, since `PitchPlayedLine` does not retain the
+    /// contour it was built from — see the close report); within one command
+    /// execution this is the same cache entry, so it cannot disagree with
+    /// `line`, which is the risk the design guards against by saying "the
+    /// contour and the line the verb has ALREADY built."
     private static func playedPitchResponse(
-        clipId: UUID, line: PitchPlayedLine, window: PitchPlayedLine.ResponseWindow, maxPoints: Int
+        clipId: UUID, line: PitchPlayedLine, window: PitchPlayedLine.ResponseWindow, maxPoints: Int,
+        segments: [NoteSegment], contour: PitchRenderContour, stretchRatio: Double
     ) -> JSONValue {
         var response: [String: JSONValue] = [
             "clipId": .string(clipId.uuidString),
@@ -14376,7 +16029,257 @@ public final class CommandRouter {
         if let reason = line.basis.reason {
             response["reason"] = .string(reason)
         }
+        let gplNotesInWindow = segments.filter { segment in
+            segment.startSeconds < window.fromSeconds + window.durationSeconds
+                && segment.endSeconds > window.fromSeconds
+        }
+        response["notes"] = .array(gplNotesInWindow.map { segment in
+            var noteObj: [String: JSONValue] = ["segmentId": .string(segment.id.uuidString)]
+            if case .estimate(let estimateReason) = line.basis {
+                // Design §12.3: "When the basis is not render, wobble is
+                // null and a wobbleNote says why, in C-0's caption words" —
+                // the SAME sentence this response's own top-level `reason`
+                // already carries above, never a second, possibly-drifting
+                // spelling of the same fact.
+                noteObj["wobble"] = .null
+                noteObj["wobbleNote"] = .string(estimateReason)
+            } else {
+                let sung = PitchWobbleEstimate.sung(segment, contour: contour)
+                let played = PitchWobbleEstimate.played(segment, line: line)
+                noteObj["wobble"] = .object([
+                    "sung": Self.wobbleReadingJSON(
+                        sung, pitchHz: segment.detectedHz, stretchRatio: stretchRatio),
+                    "played": Self.wobbleReadingJSON(
+                        played, pitchHz: segment.detectedHz, stretchRatio: stretchRatio),
+                ])
+            }
+            return .object(noteObj)
+        })
         return .object(response)
+    }
+
+    /// One `PitchWobbleReading` as the wire's `Reading` shape (design §12.3):
+    /// `{kind, heardRateHz?, depthCents?, depthResponse?, anchorSeconds?,
+    /// fit?, reason?}`. `nil` in means no reading was attempted at all
+    /// (`sung` when the contour never resolved to `.detected`) and reads
+    /// back `.null` — an honestly ABSENT reading, never a fabricated one
+    /// (the `clip.getPlayedPitch` house rule).
+    ///
+    /// ⛔ **§18's decision, not the design body's original "below 150 Hz"
+    /// pick** (superseded by the addendum's measurement): the detector's
+    /// depth response is calibrated ONLY where
+    /// `PitchWobbleEstimate.response(pitchHz:)` returns non-nil — today
+    /// roughly 127-180 Hz and above ~180 Hz; the addendum's own 82/110 Hz
+    /// blocks STOPPED (§18.7), so a real singer living there gets `nil`.
+    /// Where it is `nil`, `depthCents` is WITHHELD — "never print a number
+    /// the detector can't support" — and `reason` says why in words.
+    /// `heardRateHz`/`anchorSeconds`/`fit` stay regardless: only the WIDTH
+    /// response was measured unreliable at low pitch, never the rate or the
+    /// anchor (T6, §18.1.2/§18.1.6). Where `response` IS non-nil,
+    /// `depthResponse` (the measured share, inside [0.5, 1.1]) rides along
+    /// too, so an agent that wants to correct for the under-read can, without
+    /// this wire pretending the raw number is exact — design §18.2's own
+    /// rule ("the readout never shows the calibrated number") stays true:
+    /// nothing here IS the calibrated number, only its ingredients.
+    private static func wobbleReadingJSON(
+        _ reading: PitchWobbleReading?, pitchHz: Double, stretchRatio: Double
+    ) -> JSONValue {
+        guard let reading else { return .null }
+        switch reading {
+        case .wobble(let rateHz, let depthCents, let anchorSeconds, let fit):
+            var obj: [String: JSONValue] = [
+                "kind": .string("wobble"),
+                "heardRateHz": .number(rateHz / stretchRatio),
+                "anchorSeconds": .number(anchorSeconds),
+                "fit": .number(fit),
+            ]
+            if let response = PitchWobbleEstimate.response(pitchHz: pitchHz) {
+                obj["depthCents"] = .number(depthCents)
+                obj["depthResponse"] = .number(response)
+            } else {
+                obj["reason"] = .string(
+                    "The app's detector under-reads a wobble's width at this pitch, so no width "
+                    + "number is printed here yet — only the speed and phase are measured "
+                    + "reliably. The note can still be smoothed or given a new wobble in the "
+                    + "editor.")
+            }
+            return .object(obj)
+        case .noWobble:
+            return .object(["kind": .string("noWobble")])
+        case .unmeasurable(let shortfall):
+            let reason: String
+            switch shortfall {
+            case .tooFewSamples, .tooShort:
+                reason = "This note is too short to measure its wobble."
+            case .tooUneven:
+                reason = "This note's pitch slides around rather than wobbling evenly."
+            }
+            return .object(["kind": .string("unmeasurable"), "reason": .string(reason)])
+        }
+    }
+
+    // MARK: - Per-note wobble echoes (C5a-3, natural tuning §3e NT-L3)
+
+    /// The wire's six wobble-field keys, exactly `NoteVibratoEdit`'s own
+    /// names — also `clip.getPitchEdits`' keys, so a caller can read a
+    /// segment and write it back with no translation table (design §12.1).
+    ///
+    /// ⚠️ `clip.setNoteVibrato`'s own `rejectUnknownKeys` call spells these
+    /// six out AGAIN as a literal (plus `clipId`/`segmentId`/`reset`),
+    /// rather than `.union`-ing this set in, so the doc-count-drift gate's
+    /// array-literal regex can still find that call site. If a seventh
+    /// field is ever added here, add it there too — grep
+    /// `rejectUnknownKeys(\n.*"clipId", "segmentId", "reset"` to find it.
+    private static let noteVibratoFieldKeys: Set<String> = [
+        "vibratoRateHz", "vibratoDepthCents", "vibratoOnsetSeconds",
+        "vibratoPhaseAnchorSeconds", "vibratoScale", "driftScale",
+    ]
+
+    /// Parses the six OPTIONAL wobble fields from a params-shaped object.
+    /// Absent means "leave it" (`NoteVibratoEdit`'s own rule); a PRESENT
+    /// non-number value is refused in words, never coerced
+    /// (`optionalNumber`). `prefix` names the field inside a batch item's
+    /// error ("notes[2].vibratoRateHz must be a number"); empty for the
+    /// single verb.
+    private static func parseNoteVibratoEdit(
+        _ object: [String: JSONValue], prefix: String = ""
+    ) throws -> NoteVibratoEdit {
+        func field(_ key: String) throws -> Double? {
+            try Self.optionalNumber(object[key], "\(prefix)\(key)")
+        }
+        return NoteVibratoEdit(
+            vibratoRateHz: try field("vibratoRateHz"),
+            vibratoDepthCents: try field("vibratoDepthCents"),
+            vibratoOnsetSeconds: try field("vibratoOnsetSeconds"),
+            vibratoPhaseAnchorSeconds: try field("vibratoPhaseAnchorSeconds"),
+            vibratoScale: try field("vibratoScale"),
+            driftScale: try field("driftScale"))
+    }
+
+    /// `NoteVibratoEdit`'s non-nil fields, as sent — `requested` in the
+    /// wire's `vibrato`/`notes[]` echo (design §12.1: "only the keys sent").
+    private static func noteVibratoEditJSON(_ edit: NoteVibratoEdit) -> JSONValue {
+        var obj: [String: JSONValue] = [:]
+        if let v = edit.vibratoRateHz { obj["vibratoRateHz"] = .number(v) }
+        if let v = edit.vibratoDepthCents { obj["vibratoDepthCents"] = .number(v) }
+        if let v = edit.vibratoOnsetSeconds { obj["vibratoOnsetSeconds"] = .number(v) }
+        if let v = edit.vibratoPhaseAnchorSeconds { obj["vibratoPhaseAnchorSeconds"] = .number(v) }
+        if let v = edit.vibratoScale { obj["vibratoScale"] = .number(v) }
+        if let v = edit.driftScale { obj["driftScale"] = .number(v) }
+        return .object(obj)
+    }
+
+    /// All six of `segment`'s wobble fields, AS STORED — `applied` in the
+    /// wire's echo. Never the setter's own clamp result; always the segment
+    /// actually written (C5a-2's read-back rule, natural tuning §3g G5).
+    private static func noteVibratoAppliedJSON(_ segment: NoteSegment) -> JSONValue {
+        .object([
+            "vibratoRateHz": .number(segment.vibratoRateHz),
+            "vibratoDepthCents": .number(segment.vibratoDepthCents),
+            "vibratoOnsetSeconds": .number(segment.vibratoOnsetSeconds),
+            "vibratoPhaseAnchorSeconds": .number(segment.vibratoPhaseAnchorSeconds),
+            "vibratoScale": .number(segment.vibratoScale),
+            "driftScale": .number(segment.driftScale),
+        ])
+    }
+
+    /// One teaching sentence per `NoteVibratoLimit` (design §12.1's clamp
+    /// examples for the two rate limits, extended here to the other four
+    /// fields the design only sketched). `%g` formatting matches
+    /// `NoteVibratoLimits.Field.text`'s own choice, so a number here reads
+    /// the same way the DAWCore refusal sentences do (e.g. "8", never
+    /// "8.0"). `heardRateHz`/`stretchRatio` are the CALLER's own already-
+    /// PUBLIC values (`NoteVibratoResult.heardRateHz` /
+    /// `NoteVibratoNoteReport.heardRateHz` and `Clip.stretchRatio` /
+    /// `NoteVibratoNoteReport.stretchRatio`) — never recomputed here, and
+    /// never through `NoteVibratoLimits.sanitisedRatio`, which carries no
+    /// access modifier and so is `internal` to DAWCore, unreachable from
+    /// this module.
+    private static func noteVibratoClampSentence(
+        _ limit: NoteVibratoLimit, requested: NoteVibratoEdit, segment: NoteSegment,
+        heardRateHz: Double, stretchRatio: Double
+    ) -> String {
+        func g(_ v: Double) -> String { String(format: "%g", v) }
+        switch limit {
+        case .rateRange:
+            return "vibratoRateHz \(g(requested.vibratoRateHz ?? segment.vibratoRateHz)) was "
+                + "clamped to \(g(segment.vibratoRateHz)): it has to be between "
+                + "\(g(NoteSegment.vibratoRateHzRange.lowerBound)) and "
+                + "\(g(NoteSegment.vibratoRateHzRange.upperBound)) per source second."
+        case .heardRateCeiling:
+            return "vibratoRateHz \(g(requested.vibratoRateHz ?? segment.vibratoRateHz)) was "
+                + "clamped to \(g(segment.vibratoRateHz)): this clip plays at "
+                + "\(g(stretchRatio))× length, so \(g(segment.vibratoRateHz)) per source second "
+                + "is heard at \(g(heardRateHz)) per second, the fastest that plays cleanly."
+        case .depthRange:
+            return "vibratoDepthCents \(g(requested.vibratoDepthCents ?? segment.vibratoDepthCents)) "
+                + "was clamped to \(g(segment.vibratoDepthCents)): it has to be between "
+                + "\(g(NoteSegment.vibratoDepthCentsRange.lowerBound)) and "
+                + "\(g(NoteSegment.vibratoDepthCentsRange.upperBound)) cents each way."
+        case .onsetRange:
+            return "vibratoOnsetSeconds "
+                + "\(g(requested.vibratoOnsetSeconds ?? segment.vibratoOnsetSeconds)) was clamped "
+                + "to \(g(segment.vibratoOnsetSeconds)): it has to be between "
+                + "\(g(NoteSegment.vibratoOnsetSecondsRange.lowerBound)) and "
+                + "\(g(NoteSegment.vibratoOnsetSecondsRange.upperBound)) seconds."
+        case .anchorRange:
+            return "vibratoPhaseAnchorSeconds "
+                + "\(g(requested.vibratoPhaseAnchorSeconds ?? segment.vibratoPhaseAnchorSeconds)) "
+                + "was clamped to \(g(segment.vibratoPhaseAnchorSeconds)): it has to be between "
+                + "\(g(NoteSegment.vibratoPhaseAnchorSecondsRange.lowerBound)) and "
+                + "\(g(NoteSegment.vibratoPhaseAnchorSecondsRange.upperBound)) seconds."
+        case .scaleRange:
+            return "vibratoScale \(g(requested.vibratoScale ?? segment.vibratoScale)) was clamped "
+                + "to \(g(segment.vibratoScale)): it has to be between "
+                + "\(g(NoteSegment.shapeScaleRange.lowerBound)) and "
+                + "\(g(NoteSegment.shapeScaleRange.upperBound)) (1 = as sung, 0 = removed)."
+        case .driftRange:
+            return "driftScale \(g(requested.driftScale ?? segment.driftScale)) was clamped to "
+                + "\(g(segment.driftScale)): it has to be between "
+                + "\(g(NoteSegment.shapeScaleRange.lowerBound)) and "
+                + "\(g(NoteSegment.shapeScaleRange.upperBound)) (1 = as sung, 0 = removed)."
+        }
+    }
+
+    /// The `vibrato` object (single verb) / one `notes[]` item (batch verb)
+    /// — shared so the two verbs cannot drift into two different shapes for
+    /// the same fact (design §12.1, natural tuning §3e). Never includes
+    /// `segmentId`: the single verb puts it as a SIBLING of `vibrato`, the
+    /// batch verb merges it into this dictionary itself.
+    private static func noteVibratoFields(
+        requested: NoteVibratoEdit, segment: NoteSegment, bound: [NoteVibratoLimit],
+        heardRateHz: Double, stretchRatio: Double, silentWobble: Bool, parkedRate: Bool
+    ) -> [String: JSONValue] {
+        var obj: [String: JSONValue] = [
+            "requested": Self.noteVibratoEditJSON(requested),
+            "applied": Self.noteVibratoAppliedJSON(segment),
+            "heardRateHz": .number(heardRateHz),
+            "clamped": .array(bound.map { .string($0.rawValue) }),
+            "silentWobble": .bool(silentWobble),
+            "parkedRate": .bool(parkedRate),
+        ]
+        var notes = bound.map {
+            Self.noteVibratoClampSentence(
+                $0, requested: requested, segment: segment, heardRateHz: heardRateHz,
+                stretchRatio: stretchRatio)
+        }
+        // Design §12.1: "present whenever something was clamped, OR when
+        // the stored result is silent ... It also appears when a rate is
+        // parked with no depth." Both sentences verbatim.
+        if silentWobble {
+            notes.append(
+                "vibratoDepthCents is set but vibratoRateHz is 0, so this wobble does not move, "
+                + "and the clip is still re-rendered through the stretcher for nothing. Send a "
+                + "rate, per source second, or set the depth back to 0.")
+        }
+        if parkedRate {
+            notes.append(
+                "vibratoRateHz is set but vibratoDepthCents is 0, so there is no new wobble yet.")
+        }
+        if !notes.isEmpty {
+            obj["note"] = .string(notes.joined(separator: " "))
+        }
+        return obj
     }
 
     /// One optional, RANGE-CHECKED number inside the `sampler` object. Refuses
@@ -14553,6 +16456,25 @@ public final class CommandRouter {
         return number
     }
 
+    /// NT-W (natural tuning §1(e)/§4.e): a shared "%g" number formatter for
+    /// the five slide/voice verbs' `clamped`/`note` sentences — the
+    /// `noteVibratoClampSentence` house style's own nested `g(_:)`,
+    /// generalized to file scope so five call sites do not each redeclare it.
+    private static func g(_ value: Double) -> String { String(format: "%g", value) }
+
+    /// `clip.setFormantCorrection`'s `plainLanguage` field (§1(e)): a novice
+    /// sentence naming the SIZE of voice kept when `amount` is explicit, or
+    /// which whole-clip flag governs instead on a legacy (`nil`) clip —
+    /// `Clip.formantPreserve`, the ONLY thing that then applies (§1(c)).
+    private static func formantPlainLanguage(amount: Double?, formantPreserve: Bool) -> String {
+        guard let amount else {
+            return "Voice kept natural: using this clip's whole-clip \"Preserve formants\" "
+                + "setting instead (currently \(formantPreserve ? "on" : "off"))."
+        }
+        let percent = Int((amount * 100).rounded())
+        return "Voice kept natural: \(percent) %."
+    }
+
     /// Parses an optional `audioUnit` object `{type?, subType, manufacturer}`
     /// (type defaults `defaultType`) and resolves it STRICTLY against
     /// `candidates`: no match → a readable error naming the FourCCs and the
@@ -14719,12 +16641,21 @@ public final class CommandRouter {
             trackObject["effects"] = effectsJSON(track.effects, trackID: track.id)
             // Transient per-clip stretch render state (M5 ii-d): engine-
             // sourced at snapshot-build time, never persisted.
-            // `stretchRendering: true` while the render job runs -- p2-ren Stage A:
-            // meanwhile the clip plays its previous version when the edit kept its
-            // time base (notice `clip-render-previous`), or silence when it did not
-            // (notice `clip-stretch-pending`). `stretchError` carries a readable
-            // reason on failure -- never bridged, always silent. Both omit-when-
+            // `stretchRendering: true` while the FINAL render job runs, independent
+            // of what the clip plays meanwhile -- p2-ren Stage A/B: a bridge
+            // (notice `clip-render-previous`) or a provisional (notice
+            // `clip-render-preview`) can both be sounding while `stretchRendering`
+            // is true, since either one exists BECAUSE that render is still in
+            // flight. `stretchError` carries a readable reason on failure -- never
+            // bridged or previewed once failed, always silent. Both omit-when-
             // default; clips that never render are never queried.
+            // p2-ren Stage B′: `renderAudible` (exact | preview | previous | silent)
+            // says what the clip's node is ACTUALLY PLAYING right now, so an agent
+            // can tell a quick stand-in from the exact result before trusting what
+            // it hears -- `.preview` (Stage B's provisional splice), `.previous`
+            // (Stage A's bridge), or `.silent` (no node: the pending render has no
+            // previous version to fall back on, or it failed). Omit-when-`.exact`,
+            // the common case, and when the engine has no bridge/preview support.
             // m23-ap-p2 p2-snapshot: "renders" is `Clip.rendersThroughStretchCache`
             // — the SAME predicate the engine renders on — so a TUNED clip
             // (pitch edits, no stretch) reports here too. This gate used to ask
@@ -14742,6 +16673,16 @@ public final class CommandRouter {
                     case .failed(let reason)?:
                         clipObject["stretchError"] = .string(reason)
                     case .idle?, nil:
+                        break
+                    }
+                    switch store.renderAudible(trackID: track.id, clipID: clip.id) {
+                    case .preview?:
+                        clipObject["renderAudible"] = .string("preview")
+                    case .previous?:
+                        clipObject["renderAudible"] = .string("previous")
+                    case .silent?:
+                        clipObject["renderAudible"] = .string("silent")
+                    case .exact?, nil:
                         break
                     }
                     clipArray[j] = .object(clipObject)
@@ -15005,6 +16946,7 @@ public final class CommandRouter {
     /// appears on the wire with no edit to this function.
     static func drumKitJSON(_ kit: DrumKitParams) -> JSONValue {
         var payload: [String: JSONValue] = [:]
+        let layout = kit.noteLayout
         for voice in DrumVoice.allCases {
             var voiceObject: [String: JSONValue] = [:]
             for spec in DrumKitParams.paramSpecs where spec.voice == voice {
@@ -15015,11 +16957,19 @@ public final class CommandRouter {
             if let group = kit[voice].chokeGroup {
                 voiceObject["chokeGroup"] = .number(Double(group))
             }
-            voiceObject["note"] = .number(Double(voice.note))
+            // TPL-0: the LOWEST note that plays this voice in the kit's layout
+            // (36-43 in `pads`; `instrument.describeDrumKit`'s `voiceNotes`
+            // lists every one).
+            voiceObject["note"] = .number(Double(voice.notes(in: layout).first ?? voice.note))
             payload[voice.rawValue] = .object(voiceObject)
         }
         for spec in DrumKitParams.paramSpecs where spec.voice == nil {
             payload[spec.leaf.rawValue] = .number(kit[keyPath: spec.keyPath])
+        }
+        // TPL-0 — only-when-set, like `chokeGroup`: a `pads` kit keeps its
+        // pre-TPL-0 wire shape byte for byte.
+        if layout != .pads {
+            payload[DrumKitParams.noteLayoutKey] = .string(layout.rawValue)
         }
         return .object(payload)
     }
@@ -15039,6 +16989,17 @@ public final class CommandRouter {
         var kit = base
         let voiceNames = Set(DrumVoice.allCases.map(\.rawValue))
         for (key, entry) in root {
+            // TPL-0 — the one kit-level key whose value is a WORD. Matched
+            // FIRST: the kit-level branch below requires a number and would
+            // refuse "gm" as "must be a number".
+            if key == DrumKitParams.noteLayoutKey {
+                guard let raw = entry.stringValue, let layout = DrumNoteLayout(rawValue: raw) else {
+                    throw ControlError("drumKit.noteLayout must be \"pads\" (notes 36-43 play the "
+                        + "eight drums in pad order) or \"gm\" (General MIDI drum notes)")
+                }
+                kit.noteLayout = layout
+                continue
+            }
             if let voice = DrumVoice(rawValue: key) {
                 guard case .object(let voiceObject) = entry else {
                     throw ControlError("drumKit.\(key) must be an object")
@@ -15092,14 +17053,20 @@ public final class CommandRouter {
         let specs = DrumKitParams.paramSpecs
 
         var voices: [String: JSONValue] = [:]
+        // TPL-0 — which notes play which voice in THIS kit's layout: what an
+        // agent reads before it writes drum notes.
+        var voiceNotes: [String: JSONValue] = [:]
         for voice in DrumVoice.allCases {
             var parameters: [String: JSONValue] = [:]
             for spec in specs where spec.voice == voice {
                 parameters[spec.leaf.rawValue] = Self.drumParamDescription(spec, kit: kit)
             }
+            let notes = voice.notes(in: kit.noteLayout)
+            voiceNotes[voice.rawValue] = .array(notes.map { .number(Double($0)) })
             var voiceObject: [String: JSONValue] = [
                 "displayName": .string(voice.displayName),
-                "note": .number(Double(voice.note)),
+                // The LOWEST note that plays it; `voiceNotes` lists them all.
+                "note": .number(Double(notes.first ?? voice.note)),
                 "parameters": .object(parameters),
             ]
             if let group = kit[voice].chokeGroup {
@@ -15119,6 +17086,10 @@ public final class CommandRouter {
             // dialled kit while playing something else. Say which.
             "isActiveInstrument": .bool(descriptor.kind == .drumSynth),
             "isConfigured": .bool(descriptor.drumKit != nil),
+            "noteLayout": .string(kit.noteLayout.rawValue),
+            "noteLayoutMeaning": .string(kit.noteLayout.summary),
+            "voiceNotes": .object(voiceNotes),
+            "silentGMNotes": .array(kit.noteLayout.silentGMNotes.map { .number(Double($0)) }),
             "voices": .object(voices),
             "kit": .object(kitParameters),
             "parameterCount": .number(Double(specs.count)),
@@ -15396,10 +17367,18 @@ public final class CommandRouter {
     /// with EACH OTHER, not just with the global), so the only way to make an
     /// inert global impossible to miss for that caller is a sibling top-level
     /// key naming it.
+    ///
+    /// `warningFields` (W7-SMP): nil — `instrument.describeSampler`'s call —
+    /// warns about EVERY inert global; a set warns only about the globals it
+    /// names. `track.setInstrument` passes the keys its `sampler` payload
+    /// carried, so its reply warns about the global the caller just WROTE, in
+    /// THIS function's sentence (one home, never a second wording). The JSON
+    /// is identical either way.
     private static func samplerEffectiveGlobalsJSON(
-        _ params: SamplerParams
+        _ params: SamplerParams, warningFields: Set<String>? = nil
     ) -> (json: JSONValue, warnings: [String]) {
         var warnings: [String] = []
+        func warns(_ name: String) -> Bool { warningFields?.contains(name) ?? true }
         // Defect C (2026-08-20 sax-team round): a per-zone override is the
         // ordinary cause of an inert global regardless of how the sampler was
         // built — hand-authored over the wire, imported from a `.dspreset`, or
@@ -15450,10 +17429,12 @@ public final class CommandRouter {
                         + " instrument_set_sampler_zones (patch [{id, \(name)}]) — or, over the"
                         + " raw control protocol, track.setInstrument's sampler.zonePatches"
                         + " [{id, \(name)}]; changing the global will do nothing.")
-                warnings.append(
-                    "\(name): the stored global (\(use.global)) is NOT what you'll hear — every"
-                        + " zone overrides it; the engine actually applies"
-                        + " \(formattedEffectiveValues(use)). See effectiveGlobals.\(name).")
+                if warns(name) {
+                    warnings.append(
+                        "\(name): the stored global (\(use.global)) is NOT what you'll hear — every"
+                            + " zone overrides it; the engine actually applies"
+                            + " \(formattedEffectiveValues(use)). See effectiveGlobals.\(name).")
+                }
             }
             return .object(obj)
         }
@@ -15488,7 +17469,7 @@ public final class CommandRouter {
                     + " track.setInstrument's sampler.zonePatches [{id, oneShot}]; changing the"
                     + " global will do nothing.")
         }
-        if oneShotUse.globalIsInert {
+        if oneShotUse.globalIsInert, warns("oneShot") {
             warnings.append(
                 "oneShot: the stored global (\(oneShotUse.global)) is NOT what happens — every"
                     + " zone sets its own flag. See effectiveGlobals.oneShot.")

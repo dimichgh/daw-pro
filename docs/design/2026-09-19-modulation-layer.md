@@ -247,7 +247,8 @@ Five things follow, and together they are the whole argument:
 2. **Seek-exactness and loop-exactness are free.** Position-absolute evaluation is the same discipline
    `AutomationSchedule.value(at:)` and `AutomationRenderer.quantumStart` already use, and it is why a
    mid-playback republish re-seeks rather than replays.
-3. **Live and offline agree by construction** for every path we own — the single most useful property
+3. **Live and offline agree by construction** for every path we own (⚠️ **except the master strip until
+   2026-09-27: see §15**) — the single most useful property
    in the whole design, and the hypothesis m39-d must test rather than assume (§8.2).
 4. **Block size becomes irrelevant to our own code.** A 512-frame offline block and a 2048-frame live
    hardware buffer evaluate the same function at the same `p`.
@@ -1465,3 +1466,20 @@ fourth site must too.
 structural byte-identity claim), and the routed assertion the old code failed.
 Falsified by reverting the fix: it fails with 2 issues on the original code.
 Measured after the fix: 48,760 differing samples, RMS 0.354 → 0.250.
+
+## 15. ERRATUM — 2026-09-27: the master strip never reached a bounce
+
+Claim 3 in §2 ("live and offline agree by construction") was false for the MASTER strip from m39's first
+release until W7-ME2 (m39-e-2, 2026-09-27). `graph.masterModulationSources/Routes` were set only on the
+LIVE graph (`AudioEngine`); `OfflineRenderer` builds its own `PlaybackGraph` and was never given them. So
+a master LFO or macro was heard live and silently absent from every mixdown, bounce and loudness reading.
+
+The fix threads both arrays through `renderOffline`/`renderMixdown` into `OfflineRenderer.beginSession`,
+next to `masterAutomation`, before the first parameter pass. The render-class rule follows the master
+volume lane: mixdown, bounce, measureLoudness and the stems' "00 Mastered Mix" carry it; each stem, the
+"00 Mixdown" reference and bounce-in-place never do (baking it in would apply it twice through the live
+master). Gate: `MasterModulationBounceTests` + `MasterModulationBounceSeamTests`, bit-exact against the
+engine's formula, with 36 of 42 digests pinned byte-identical.
+
+> **"By construction" held only where the construction reached.** The track strips shared the one
+> seam (`applyParameters`); the master strip's publication lived outside it, so nothing forced parity.

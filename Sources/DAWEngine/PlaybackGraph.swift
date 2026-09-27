@@ -63,7 +63,37 @@ final class PlaybackGraph {
         /// file: a correction the user made, rendered correctly, and never
         /// heard. The DIGEST rather than the set itself because `ClipKey` is
         /// `Equatable` and compared for every clip on every reconcile.
-        let pitchEditSetHash: String
+        ///
+        /// p2-ren Stage A′: a key that differs from a node's ONLY here
+        /// re-resolves IN PLACE (`differsOnlyInEditDigest(from:)`), and keeps
+        /// its node when the answer is the file the node already plays. The
+        /// guarantee above still holds, because a render's completion always
+        /// invalidates its clip (`AudioEngine.kickStretchRender`), whatever this
+        /// key says.
+        var pitchEditSetHash: String
+
+        /// p2-ren Stage A′: true when `other` is this key with a different
+        /// edit digest and nothing else changed: the same clip, the same place,
+        /// the same fades, the same source and the same three stretch fields.
+        func differsOnlyInEditDigest(from other: ClipKey) -> Bool {
+            guard pitchEditSetHash != other.pitchEditSetHash else { return false }
+            var probe = other
+            probe.pitchEditSetHash = pitchEditSetHash
+            return probe == self
+        }
+    }
+
+    /// p2-ren: what a clip's node plays, beside the render its key asks for.
+    enum ClipNodePlays: Equatable, Sendable {
+        /// What the key asks for: its committed render, or the source of a
+        /// clip that renders nothing.
+        case exact
+        /// Stage A, THE BRIDGE (`StretchResolution.bridge`): the file the clip
+        /// played a moment ago, while the render its key asks for is made.
+        case previous
+        /// Stage B, THE PROVISIONAL (`StretchResolution.provisional`): a quick
+        /// stand-in for the render its key asks for, until that render lands.
+        case preview
     }
 
     /// Resolution of one NON-IDENTITY stretched clip at reconcile time.
@@ -87,6 +117,15 @@ final class PlaybackGraph {
         /// committed renders and cannot answer it. The engine's render
         /// completion (or failure) replaces it through the restart seam.
         case bridge(URL)
+        /// p2-ren Stage B, THE PROVISIONAL: the render the clip asks for is
+        /// still being made, and THIS quick stand-in for it plays meanwhile:
+        /// the clip's last committed render (same time base) with the frames
+        /// the edit changes spliced in from a span render
+        /// (`ProvisionalRender`). Opened exactly like `.ready`; never seen
+        /// offline (the bounce's resolver reads committed renders only); the
+        /// render's completion replaces it (at once, or at the next
+        /// reschedule while the transport rolls: `swapClipFileInPlace`).
+        case provisional(URL)
         /// Render in flight (or failed) and no bridge available: the clip is
         /// SKIPPED — honest silence, never wrong-speed audio (spec §5). The
         /// engine's render-completion hook re-resolves through the restart seam.
@@ -95,14 +134,24 @@ final class PlaybackGraph {
 
     private final class ClipNode {
         let player = AVAudioPlayerNode()
-        let file: AVAudioFile
-        let key: ClipKey
-        /// p2-ren Stage A: this node plays a BRIDGE (`StretchResolution.bridge`),
-        /// the clip's previous file, while the render its key asks for is being
-        /// made. On the NODE, not in a per-pass ledger: a bridged clip keeps its
-        /// node across later passes (its key no longer changes), so no later pass
-        /// re-resolves it, and only the node still knows what it plays.
-        let isBridge: Bool
+        /// `var` since p2-ren Stage B: a deferred final swap replaces a
+        /// provisional with its final, of the same format and length, under
+        /// the STOPPED player (`swapClipFileInPlace`).
+        var file: AVAudioFile
+        /// `var` since p2-ren Stage A′: a node that keeps playing the same file
+        /// through an edit that changed only its edit digest ADOPTS the new key
+        /// (`reconcile`'s changed-key loop), so the next pass compares equal.
+        var key: ClipKey
+        /// p2-ren Stage A: what this node plays. `.previous` is a BRIDGE
+        /// (`StretchResolution.bridge`), the clip's previous file, while the
+        /// render its key asks for is being made. On the NODE, not in a
+        /// per-pass ledger: a bridged clip keeps its node across later passes
+        /// (its key no longer changes), so no later pass re-resolves it, and
+        /// only the node still knows what it plays. `var` since Stage A′: an
+        /// adopted node takes the in-place answer's kind.
+        var plays: ClipNodePlays
+        /// Stage A's name for `plays == .previous`.
+        var isBridge: Bool { plays == .previous }
         /// Main-actor domain copy for schedule-time work (fade bake evaluates
         /// `Clip.envelopeGain`); refreshed every reconcile pass so parameter
         /// edits (gainDb) stay current without a rebuild.
@@ -113,11 +162,11 @@ final class PlaybackGraph {
         /// read position is stateful — sharing it would race.
         private var bakeFile: AVAudioFile?
 
-        init(file: AVAudioFile, key: ClipKey, clip: Clip, isBridge: Bool = false) {
+        init(file: AVAudioFile, key: ClipKey, clip: Clip, plays: ClipNodePlays = .exact) {
             self.file = file
             self.key = key
             self.clip = clip
-            self.isBridge = isBridge
+            self.plays = plays
         }
 
         func bakeReader() throws -> AVAudioFile {
@@ -125,6 +174,13 @@ final class PlaybackGraph {
             let reader = try AVAudioFile(forReading: file.url)
             bakeFile = reader
             return reader
+        }
+
+        /// p2-ren Stage B: the node now plays `newFile` (a deferred final
+        /// swap); the bake reader follows it on its next use.
+        func replaceFile(_ newFile: AVAudioFile) {
+            file = newFile
+            bakeFile = nil
         }
 
         // MARK: R1 enqueue ledger (m19-f)
@@ -719,6 +775,53 @@ final class PlaybackGraph {
     /// graph and keeps the caches. nil (offline renders, tests) = nothing kept.
     var onClipFileOpened: (@MainActor (Clip, URL, AVAudioFramePosition) -> Void)?
 
+    /// p2-ren Stage B: the same event with what the node plays (`.preview` for
+    /// a provisional). A separate hook so Stage A's stays as it was; fired
+    /// right after `onClipFileOpened`, while the node is not yet visible
+    /// through `clipPlays(clipID:)` (the track's node is published at the end
+    /// of its pass).
+    var onClipNodeOpened: (@MainActor (Clip, URL, ClipNodePlays) -> Void)?
+
+    /// p2-ren Stage A′: what one clip's resolution told the reconcile to do.
+    enum ResolvedPlayback {
+        /// Open this file; it plays as `ClipNodePlays` says.
+        case file(URL, ClipNodePlays)
+        /// No node: the render is pending (or failed) and nothing may stand in.
+        case pending
+    }
+
+    /// THE ONE RESOLUTION of what an audio clip plays, for the add loop and
+    /// for Stage A′'s in-place re-resolve alike: its source when it renders
+    /// nothing (identity clips never invoke the resolver: the bypass
+    /// contract), else what `stretchResolver` answers. Each call is one
+    /// resolver call, with its side effects (a render kick, the bridge count),
+    /// so `reconcile` makes at most one per clip per pass.
+    private func resolvePlayback(_ clip: Clip, sourceURL: URL) -> ResolvedPlayback {
+        guard StretchRenderCache.needsRender(clip) else { return .file(sourceURL, .exact) }
+        switch stretchResolver?(clip) {
+        case .ready(let rendered): return .file(rendered, .exact)
+        case .bridge(let previous): return .file(previous, .previous)
+        case .provisional(let stand): return .file(stand, .preview)
+        case .pending, nil: return .pending
+        }
+    }
+
+    /// p2-ren Stage A′: true when the last `reconcile` kept a node playing a
+    /// stand-in (a bridge) under a NEW key without a schedule change. Nothing
+    /// restarts for such a pass, so no `scheduleAll` reports it; the engine
+    /// reads this and, when the transport is rolling (the stand-in is being
+    /// HEARD), asks `postRenderNoticesForPlayback()` to say what plays.
+    private(set) var adoptedInterimInLastPass = false
+
+    /// p2-ren Stage A′: the render notices a schedule pass would post, posted
+    /// now: for a rolling transport whose clip kept playing a stand-in through
+    /// an edit (no restart, so no `scheduleAll`). Once per episode, exactly
+    /// like the schedule pass (`postPendingRenderSilence`). Never call it for
+    /// a stopped transport: an edit's reconcile is not playback (p2-notice).
+    func postRenderNoticesForPlayback() {
+        postPendingRenderSilence()
+    }
+
     /// Per-track meter frames, called on the main actor. Fed by a tap on each
     /// track mixer; drives both the live engine's handler and offline tests.
     var meterSink: ((UUID, MeterFrame) -> Void)?
@@ -772,10 +875,12 @@ final class PlaybackGraph {
     private var stretchPendingClips: [PendingRenderSilence] = []
 
     /// p2-ren Stage A: one audio clip the last reconcile pass left playing a
-    /// BRIDGE, its previous file, while its render is being made.
+    /// BRIDGE, its previous file, while its render is being made. Stage B:
+    /// or a PROVISIONAL (`plays == .preview`).
     private struct PendingRenderBridge {
         let clip: Clip
         let beat: Double
+        var plays: ClipNodePlays = .previous
     }
 
     /// The bridge ledger, in track/clip order: rebuilt WHOLE at the end of
@@ -790,6 +895,11 @@ final class PlaybackGraph {
     /// the clip stops playing a bridge by any route: its render lands, it
     /// fails, its time base changes, or it leaves the model.
     private var stretchBridgeNoticed: Set<UUID> = []
+
+    /// p2-ren Stage B: clip ids whose PROVISIONAL has already been noticed
+    /// (`clip-render-preview`), once per clip per preview episode, the same
+    /// discipline as `stretchBridgeNoticed`.
+    private var stretchPreviewNoticed: Set<UUID> = []
 
     /// Clip ids whose media OPEN failed at graph-build time and have already
     /// posted their `clip-file-missing` notice (m16-c, audit F2): the skipped
@@ -910,6 +1020,7 @@ final class PlaybackGraph {
     /// cold-builds a fresh one from the model.
     @discardableResult
     func reconcile(tracks: [Track]) -> Bool {
+        adoptedInterimInLastPass = false
         // A graph marked for rebuild is about to be discarded — no further
         // mutation may touch its (once-rendered) engine. Report "changed"
         // so no caller can mistake the refusal for a clean no-op.
@@ -1073,6 +1184,14 @@ final class PlaybackGraph {
         // m23-ap-p2 p2-notice: this pass's pending-render clips, committed to
         // `stretchPendingClips` with the signatures at the end of the pass.
         var pendingThisPass: [PendingRenderSilence] = []
+        // p2-ren Stage A′: the answer each clip's in-place re-resolve got THIS
+        // pass. A clip whose node is torn down anyway takes the same answer in
+        // the add loop, so the resolver (which kicks renders and counts
+        // bridges) is asked ONCE per clip per pass, as before A′.
+        var resolvedThisPass: [UUID: ResolvedPlayback] = [:]
+        // p2-ren Stage A′: nodes that kept playing their file and adopted a
+        // new key, by track, so the change test below does not count them.
+        var adoptedKeys: [(trackID: UUID, key: ClipKey)] = []
         for track in audioTracks {
             let keys = newSignature[track.id] ?? []
             var node: TrackNode
@@ -1105,6 +1224,29 @@ final class PlaybackGraph {
                     if let domainClip = clipByID[clipID] { clipNode.clip = domainClip }
                     continue
                 }
+                // p2-ren Stage A′ (design §5 "Tier 1b", §11 step 8): NO RESTART AT
+                // THE EDIT. A key that differs ONLY in its edit digest is
+                // re-resolved here, in place (which still kicks the render). When
+                // the answer is the very file this node plays (the bridge on
+                // it, or the source of a clip that renders nothing again), the
+                // node keeps playing and adopts the new key, so this pass does
+                // not count as a schedule change and a rolling transport is not
+                // restarted. Any other answer tears the node down as before, and
+                // the add loop below opens that answer without asking again.
+                if let newKey = keyByID[clipID], let domainClip = clipByID[clipID],
+                   let sourceURL = newKey.url, newKey.differsOnlyInEditDigest(from: clipNode.key) {
+                    let answer = resolvePlayback(domainClip, sourceURL: sourceURL)
+                    resolvedThisPass[clipID] = answer
+                    if case .file(let url, let plays) = answer,
+                       url.standardizedFileURL == clipNode.file.url.standardizedFileURL {
+                        clipNode.key = newKey
+                        clipNode.clip = domainClip
+                        clipNode.plays = plays
+                        adoptedKeys.append((track.id, newKey))
+                        if plays != .exact { adoptedInterimInLastPass = true }
+                        continue
+                    }
+                }
                 clipNode.player.stop()
                 teardownDetach(clipNode.player)
                 node.clips.removeValue(forKey: clipID)
@@ -1125,37 +1267,36 @@ final class PlaybackGraph {
                 // CAF. Identity clips never invoke the resolver (the bypass
                 // contract). p2-ren Stage A: a pending clip with a BRIDGE (its
                 // previous file, same time base) opens that file instead of
-                // going silent.
-                var fileURL = url
-                var bridged = false
-                if StretchRenderCache.needsRender(domainClip) {
-                    switch stretchResolver?(domainClip) {
-                    case .ready(let rendered):
-                        // The episode ends here; the pass-end prune of
-                        // `stretchPendingNoticed` re-arms the gate.
-                        fileURL = rendered
-                    case .bridge(let previous):
-                        // Opened exactly like `.ready`. The node is marked, so
-                        // the schedule pass says what is playing
-                        // (`clip-render-previous`) and a failed render can end
-                        // it (`isPlayingBridge`).
-                        fileURL = previous
-                        bridged = true
-                    case .pending, nil:
-                        // m15-e (audit F6) → m23-ap-p2 p2-notice: RECORD, do
-                        // not post. A reconcile is what an edit runs, with the
-                        // transport usually stopped; the silence is reported
-                        // when a schedule pass actually plays it
-                        // (`postPendingRenderSilence`, from `scheduleAll`).
-                        pendingThisPass.append(
-                            PendingRenderSilence(clip: domainClip, beat: key.startBeat))
-                        continue
-                    }
+                // going silent. The resolution is `resolvePlayback`; a clip the
+                // changed-key loop already re-resolved this pass (Stage A′)
+                // takes that answer, never a second one.
+                let fileURL: URL
+                let plays: ClipNodePlays
+                switch resolvedThisPass[key.id] ?? resolvePlayback(domainClip, sourceURL: url) {
+                case .file(let resolved, let kind):
+                    // `.exact`: the committed render or the source (the episode
+                    // ends here; the pass-end prune of `stretchPendingNoticed`
+                    // re-arms the gate). `.previous`: opened exactly like
+                    // `.exact`; the node is marked, so the schedule pass says
+                    // what is playing (`clip-render-previous`) and a failed
+                    // render can end it (`isPlayingBridge`).
+                    fileURL = resolved
+                    plays = kind
+                case .pending:
+                    // m15-e (audit F6) → m23-ap-p2 p2-notice: RECORD, do
+                    // not post. A reconcile is what an edit runs, with the
+                    // transport usually stopped; the silence is reported
+                    // when a schedule pass actually plays it
+                    // (`postPendingRenderSilence`, from `scheduleAll`).
+                    pendingThisPass.append(
+                        PendingRenderSilence(clip: domainClip, beat: key.startBeat))
+                    continue
                 }
+                let bridged = plays != .exact
                 do {
                     let file = try AVAudioFile(forReading: fileURL)
                     let clipNode = ClipNode(file: file, key: key, clip: domainClip,
-                                            isBridge: bridged)
+                                            plays: plays)
                     engine.attach(clipNode.player)
                     engine.connect(clipNode.player, to: node.sumMixer, format: file.processingFormat)
                     node.clips[key.id] = clipNode
@@ -1164,6 +1305,7 @@ final class PlaybackGraph {
                     // p2-ren Stage A: every successful open, identity clips
                     // included, is what the next edit may bridge on.
                     onClipFileOpened?(domainClip, fileURL, file.length)
+                    onClipNodeOpened?(domainClip, fileURL, plays)
                 } catch {
                     if bridged {
                         // p2-ren Stage A: a bridge that will not open is no
@@ -1392,6 +1534,15 @@ final class PlaybackGraph {
                                         of: node.chainHost)
         }
 
+        // p2-ren Stage A′: a node that adopted its new key plays exactly what it
+        // played, so its key change is not a schedule change. The OLD signature
+        // takes the adopted key before the comparison; everything else about
+        // the pass (another clip, a move, a routing edit) still counts.
+        for (trackID, key) in adoptedKeys {
+            if let index = signature[trackID]?.firstIndex(where: { $0.id == key.id }) {
+                signature[trackID]?[index] = key
+            }
+        }
         let changed = newSignature != signature
             || newInstrumentSignature != instrumentSignature
             || newRoutingSignature != routingSignature
@@ -1409,15 +1560,22 @@ final class PlaybackGraph {
         // p2-ren Stage A: the bridge ledger, WHOLE, read off the NODES in
         // track/clip order. A bridge opened in an earlier pass is still on its
         // node, and no pass after the one that opened it re-resolves it.
+        // Stage B: a node playing a PROVISIONAL is on the same ledger, with
+        // its own kind and its own episode set.
         var bridgedThisPass: [PendingRenderBridge] = []
         for track in audioTracks {
             guard let node = trackNodes[track.id] else { continue }
-            for clip in track.clips where node.clips[clip.id]?.isBridge == true {
-                bridgedThisPass.append(PendingRenderBridge(clip: clip, beat: clip.startBeat))
+            for clip in track.clips {
+                guard let plays = node.clips[clip.id]?.plays, plays != .exact else { continue }
+                bridgedThisPass.append(PendingRenderBridge(clip: clip, beat: clip.startBeat,
+                                                           plays: plays))
             }
         }
         stretchBridgedClips = bridgedThisPass
-        stretchBridgeNoticed.formIntersection(bridgedThisPass.map(\.clip.id))
+        stretchBridgeNoticed.formIntersection(
+            bridgedThisPass.filter { $0.plays == .previous }.map(\.clip.id))
+        stretchPreviewNoticed.formIntersection(
+            bridgedThisPass.filter { $0.plays == .preview }.map(\.clip.id))
         return changed
     }
 
@@ -2792,6 +2950,75 @@ final class PlaybackGraph {
         clipNode(for: clipID)?.isBridge ?? false
     }
 
+    /// p2-ren Stage B: what this clip's node plays, or nil when it has none.
+    func clipPlays(clipID: UUID) -> ClipNodePlays? {
+        clipNode(for: clipID)?.plays
+    }
+
+    /// p2-ren Stage B: the file this clip's node has open, or nil.
+    func clipFileURL(clipID: UUID) -> URL? {
+        clipNode(for: clipID)?.file.url
+    }
+
+    /// p2-ren Stage B: every file a clip node has open (the provisional
+    /// store's garbage collector never deletes one of these).
+    var openClipFileURLs: Set<URL> {
+        var urls: Set<URL> = []
+        for node in trackNodes.values {
+            for clip in node.clips.values { urls.insert(clip.file.url.standardizedFileURL) }
+        }
+        return urls
+    }
+
+    /// p2-ren Stage B — THE DEFERRED FINAL SWAP (design §6 step 9, §11 step
+    /// 12): the clip's node, which plays a PROVISIONAL, now plays `url` (its
+    /// committed final) under the same player, key and schedule identity.
+    /// Refused (false, nothing changed) unless the node plays a provisional
+    /// and the new file has exactly its format and length, so every frame
+    /// position the next schedule pass computes is the one it computed.
+    ///
+    /// ⚠️ **ONLY WITH THE PLAYER STOPPED**: the engine calls it after
+    /// `stopAllPlayers` (its `restart` and `stopPlayback`), never while a
+    /// player streams (the streaming-thread rule: a file a player reads is
+    /// never changed under it; here the reader itself is replaced while
+    /// nothing reads it). Main actor; the render thread is untouched.
+    func swapClipFileInPlace(clipID: UUID, to url: URL) -> Bool {
+        guard let node = clipNode(for: clipID), node.plays == .preview,
+              let file = try? AVAudioFile(forReading: url),
+              file.processingFormat == node.file.processingFormat,
+              file.length == node.file.length else { return false }
+        node.player.stop()
+        node.replaceFile(file)
+        node.plays = .exact
+        stretchBridgedClips.removeAll { $0.clip.id == clipID }
+        onClipFileOpened?(node.clip, url, file.length)
+        return true
+    }
+
+    /// p2-ren Stage B: the provisional that landed IS the file this clip's
+    /// bridge already plays (a timing-only edit, whose render is predicted
+    /// identical to its base): the node is relabelled a preview in place, with
+    /// no teardown and no reschedule. False (nothing changed) otherwise.
+    func relabelBridgeAsPreview(clipID: UUID, url: URL) -> Bool {
+        guard let node = clipNode(for: clipID), node.plays == .previous,
+              node.file.url.standardizedFileURL == url.standardizedFileURL else { return false }
+        node.plays = .preview
+        if let index = stretchBridgedClips.firstIndex(where: { $0.clip.id == clipID }) {
+            stretchBridgedClips[index].plays = .preview
+        }
+        return true
+    }
+
+    /// p2-ren Stage B: would `swapClipFileInPlace` accept `url` for this clip
+    /// right now? (The engine asks at the final's completion, to choose
+    /// between deferring the swap and replacing the node at once.)
+    func canSwapClipFileInPlace(clipID: UUID, to url: URL) -> Bool {
+        guard let node = clipNode(for: clipID), node.plays == .preview,
+              let file = try? AVAudioFile(forReading: url) else { return false }
+        return file.processingFormat == node.file.processingFormat
+            && file.length == node.file.length
+    }
+
     /// Tears down ONE instrument track's node (unpublish + flush, tap off,
     /// detach) and drops its signature entry so the next `reconcile` rebuilds
     /// it — the seam AudioEngine uses when an async AU preparation finishes
@@ -3294,13 +3521,33 @@ final class PlaybackGraph {
         // p2-ren Stage A: a bridged clip is NOT silent, so it never gets the
         // copy above ("plays as silence", which would lie about it). It says
         // what it plays instead, once per bridge episode, from this same pass.
-        for bridged in stretchBridgedClips
-        where stretchBridgeNoticed.insert(bridged.clip.id).inserted {
-            noticeSink?(EngineNoticeEvent(
-                code: "clip-render-previous",
-                message: Self.renderPreviousMessage(for: bridged.clip),
-                beat: bridged.beat))
+        // Stage B: a provisional says it is a preview, once per episode.
+        for bridged in stretchBridgedClips {
+            switch bridged.plays {
+            case .previous:
+                guard stretchBridgeNoticed.insert(bridged.clip.id).inserted else { continue }
+                noticeSink?(EngineNoticeEvent(
+                    code: "clip-render-previous",
+                    message: Self.renderPreviousMessage(for: bridged.clip),
+                    beat: bridged.beat))
+            case .preview:
+                guard stretchPreviewNoticed.insert(bridged.clip.id).inserted else { continue }
+                noticeSink?(EngineNoticeEvent(
+                    code: "clip-render-preview",
+                    message: Self.renderPreviewMessage(for: bridged.clip),
+                    beat: bridged.beat))
+            case .exact:
+                continue
+            }
         }
+    }
+
+    /// The `clip-render-preview` copy (p2-ren Stage B; design §6 step 10): a
+    /// clip plays a quick preview of the change, and the exact version
+    /// replaces it on its own.
+    static func renderPreviewMessage(for clip: Clip) -> String {
+        "'\(clip.name)' is playing a quick preview of your change; "
+            + "the exact version replaces it in a moment."
     }
 
     /// The `clip-render-previous` copy (p2-ren Stage A; design §5 step 5): a

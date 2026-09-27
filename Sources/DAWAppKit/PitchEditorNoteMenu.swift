@@ -26,12 +26,16 @@ import Foundation
 // pending. The plural itself is `EditMenuTitles.counted` — the ONE producer, so
 // this menu invents no plural of its own.
 //
-// ⚠️ **SOUNDS ARE MAPPED, NOT PRODUCED.** Unpitched sounds (U-A/U-E,
+// ⭐ **SOUNDS ARE MAPPED AND, SINCE UE-1, PRODUCED.** Unpitched sounds (U-A/U-E,
 // `docs/design/2026-09-24-unpitched-notes-presets-midi-targets.md` §1.8) are
-// cleared from this same menu once they exist as selectable segments. The noun
-// mapping is ready ("Clear Sound", "Clear 3 Sounds", "Clear 3 Selected" for a
-// mix) so U-E adds a producer and not a second menu; until then every caller
-// hands in `.note`.
+// cleared from this same menu: `NoteBlob.menuTarget` hands in `.sound` for a
+// blob whose segment is `NoteOrigin.unpitched`, so the titles read "Clear
+// Sound", "Clear 3 Sounds", and "Clear 3 Selected" for a mix — one menu, never a
+// second. Clear and Restore work on a sound (`setClipNotesCleared` refuses no
+// origin). No row the store would refuse for a sound is offered for one: the
+// Voice row (W7-NTU U3) reaches `setClipNoteFormant`, which refuses sounds in
+// words, so it counts NOTE targets only, drops out when every target is a
+// sound, and never sends a sound's id (`PitchEditorModel.performNoteAction`).
 //
 // NO NEW WIRE VERB IS OWED FOR THIS MENU. Clear
 // and Restore are `clip.setNoteCleared` (MCP tool `clip_set_note_cleared`) and
@@ -63,9 +67,43 @@ public enum PitchEditorNoteMenu {
         case clear
         /// Bring cleared targets back at their own level (`cleared: false`).
         case restore
+        /// m23-ap C5a-4b — "Back to how you sang it": the targets' WOBBLE back
+        /// to as sung (design 2026-09-24 vibrato-handle §13, §10 item 8), one
+        /// undo step. Offered only when a NOTE target carries a wobble change;
+        /// a sound has no wobble to put back, so it never earns the row.
+        case resetWobble
+        /// m23-ap C5b-4b — "Reset drawn shape": remove the targets' DRAWN line
+        /// (the freehand brush's, or `clip.setNoteShape`'s), design 2026-09-24
+        /// timing-and-freehand §5.5, one undo step ("Reset Drawn Shape").
+        /// Offered only when a target carries a drawing.
+        case resetShape
+        /// W7-NTU U3 — "Voice: Deeper 2.0" (natural tuning §1(f) item 3): the
+        /// NOTE targets' Voice to `-PitchEditorVoiceTool.menuSemitones`, one
+        /// undo step ("Set Note Voice"). Offered in the Voice tool, for NOTE
+        /// targets; greyed when every one is already there.
+        case voiceDeeper
+        /// W7-NTU U3 — "Voice: Brighter 2.0": the same, to
+        /// `+PitchEditorVoiceTool.menuSemitones`.
+        case voiceBrighter
+        /// W7-NTU U3 — "Voice: As sung": the NOTE targets' Voice back to 0.
+        /// A reset, so it follows "Back to how you sang it": offered in every
+        /// tool, only when a NOTE target's Voice is not as sung.
+        case voiceAsSung
     }
 
-    /// What a target IS, for its noun. Only `.note` is produced today.
+    /// W7-NTU U3 — the Voice a Voice row SETS, in semitones (absolute, the
+    /// store's own rule: one final value for every note), or `nil` for a row
+    /// that is not a Voice row.
+    public static func voiceValue(of action: Action) -> Double? {
+        switch action {
+        case .voiceDeeper: return -PitchEditorVoiceTool.menuSemitones
+        case .voiceBrighter: return PitchEditorVoiceTool.menuSemitones
+        case .voiceAsSung: return 0
+        case .clear, .restore, .resetWobble, .resetShape: return nil
+        }
+    }
+
+    /// What a target IS, for its noun (`NoteBlob.menuTarget` produces both).
     public enum Kind: String, Sendable, Equatable {
         case note
         case sound
@@ -75,12 +113,36 @@ public enum PitchEditorNoteMenu {
     public struct Target: Sendable, Equatable {
         public var kind: Kind
         public var isCleared: Bool
+        /// m23-ap C5a-4b — the note's wobble is not as sung (any of its six
+        /// wobble fields departs from `NoteVibratoEdit.asSung`).
+        public var hasWobbleEdit: Bool
+        /// m23-ap C5b-4b — the target carries a drawn line
+        /// (`NoteSegment.hasShape`).
+        public var hasDrawnShape: Bool
+        /// W7-NTU U3 — the target's STORED Voice
+        /// (`NoteSegment.formantOffsetSemitones`), 0 = as sung.
+        public var voiceSemitones: Double
 
-        public init(kind: Kind = .note, isCleared: Bool) {
+        public init(kind: Kind = .note, isCleared: Bool, hasWobbleEdit: Bool = false,
+                    hasDrawnShape: Bool = false, voiceSemitones: Double = 0) {
             self.kind = kind
             self.isCleared = isCleared
+            self.hasWobbleEdit = hasWobbleEdit
+            self.hasDrawnShape = hasDrawnShape
+            self.voiceSemitones = voiceSemitones
         }
     }
+
+    /// m23-ap C5a-4b — the reset row's title, the design's own words (vibrato
+    /// handle §13: "Back to how you sang it" (C5a) beside C5b's "Reset drawn
+    /// shape"). The same words for one note or several: it says where the
+    /// wobble goes, and "sang" is true of every note it can be offered on.
+    public static let resetWobbleTitle = "Back to how you sang it"
+
+    /// m23-ap C5b-4b — the drawn line's reset row, the design's own words
+    /// (timing-and-freehand §5.5; the store's journal label is "Reset Drawn
+    /// Shape", the Edit menu's title case of the same words).
+    public static let resetShapeTitle = "Reset drawn shape"
 
     /// One menu item: what it does, what it says, whether it is live.
     public struct Item: Sendable, Equatable, Identifiable {
@@ -110,7 +172,14 @@ public enum PitchEditorNoteMenu {
     ///   `DeleteMenuPolicy.noteContextTitle` rule).
     /// - Every target already cleared: Clear is disabled and count-free, and
     ///   Restore is live — the way back is the one live item.
-    public static func items(for targets: [Target]) -> [Item] {
+    ///
+    /// W7-NTU U3 — then the Voice row, over the NOTE targets only (a sound has
+    /// no Voice, and the store refuses one): "Voice: Deeper 2.0" and "Voice:
+    /// Brighter 2.0" while the Voice tool is engaged (`voiceTool`), each shown
+    /// and greyed when every note is already at its value; "Voice: As sung" in
+    /// every tool, only when a note's Voice is not as sung. `voiceTool`
+    /// defaults to false, so a caller that never had one reads as before.
+    public static func items(for targets: [Target], voiceTool: Bool = false) -> [Item] {
         let toClear = targets.filter { !$0.isCleared }
         let toRestore = targets.filter(\.isCleared)
         var items = [Item(action: .clear,
@@ -120,6 +189,31 @@ public enum PitchEditorNoteMenu {
             items.append(Item(action: .restore,
                               title: title(verb: "Restore", changing: toRestore, all: targets),
                               isEnabled: true))
+        }
+        // C5a-4b — only when a NOTE target's wobble was changed: a row that
+        // would put back nothing is not offered, and a sound has no wobble.
+        if targets.contains(where: { $0.kind == .note && $0.hasWobbleEdit }) {
+            items.append(Item(action: .resetWobble, title: resetWobbleTitle, isEnabled: true))
+        }
+        // C5b-4b — only when a target carries a drawing: a row that would
+        // remove nothing is not offered. A sound can carry one only from a
+        // hand-written file, and the store allows clearing it, so it counts.
+        if targets.contains(where: \.hasDrawnShape) {
+            items.append(Item(action: .resetShape, title: resetShapeTitle, isEnabled: true))
+        }
+        // W7-NTU U3 — the Voice row, NOTE targets only.
+        let notes = targets.filter { $0.kind == .note }
+        if voiceTool && !notes.isEmpty {
+            for action in [Action.voiceDeeper, .voiceBrighter] {
+                let value = voiceValue(of: action) ?? 0
+                items.append(Item(action: action,
+                                  title: PitchEditorFormantCopy.voiceMenuTitle(value),
+                                  isEnabled: notes.contains { $0.voiceSemitones != value }))
+            }
+        }
+        if notes.contains(where: { $0.voiceSemitones != 0 }) {
+            items.append(Item(action: .voiceAsSung,
+                              title: PitchEditorFormantCopy.voiceMenuTitle(0), isEnabled: true))
         }
         return items
     }
@@ -165,6 +259,25 @@ public enum PitchEditorNoteMenu {
         return base + " It also brings back \(notes)."
     }
 
+    /// UE-2 — **EDIT ▸ DELETE's title** while the note editor holds a
+    /// selection (`DeleteMenuPolicy.editMenuItem`'s `.pitchEditorNotes` arm, the
+    /// same Clear this menu runs): "Clear Selected Notes", "Clear Selected
+    /// Sounds", and "Clear Selected" for a mix — THIS menu's nouns (`nouns(for:)`,
+    /// never a second table), so the Edit menu and the right-click menu cannot
+    /// name a selection differently.
+    ///
+    /// ⚠️ **COUNT-FREE, ON PURPOSE** — `DeleteMenuPolicy.pitchEditorClearTitle`'s
+    /// rule, unchanged: the app layer is handed the selection's KINDS
+    /// (`PitchEditorInteractionBridge.selectionKinds`), transition-reported, not
+    /// a count, so it says what the item acts on and never how many. The
+    /// right-click menu, which sees every target, carries the count ("Clear 2
+    /// Selected"). An empty set reads as notes, `nouns(for:)`'s rule.
+    public static func selectionClearTitle(kinds: Set<Kind>) -> String {
+        let noun = nouns(for: Array(kinds))
+        // The mix's noun IS "Selected"; "Clear Selected Selected" is not a title.
+        return noun.plural == "Selected" ? "Clear Selected" : "Clear Selected \(noun.plural)"
+    }
+
     // MARK: - The nouns
 
     /// "Clear 2 Notes" — counted over the targets that CHANGE — or, when none
@@ -179,8 +292,8 @@ public enum PitchEditorNoteMenu {
     }
 
     /// Note / Notes, Sound / Sounds, and "Selected" for a mix ("Clear 3
-    /// Selected", design §17.4). An empty set reads as notes — the only thing
-    /// this editor draws today.
+    /// Selected", design §17.4). An empty set reads as notes, the editor's
+    /// common case (sounds are the exception it also draws, UE-1).
     private static func nouns(for kinds: [Kind]) -> (singular: String, plural: String) {
         let set = Set(kinds)
         if set == [.sound] { return ("Sound", "Sounds") }

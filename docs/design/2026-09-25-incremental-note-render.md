@@ -1000,3 +1000,164 @@ audibility rule). It is not needed to ship.
 - The `@MainActor` suite cap (quoted from I1-F1's brief; not re-counted).
 
 **UNRECOVERED.** The original `stretch-seam-spec.md` §5 text. The surviving record is the list under VERIFIED.
+
+## 17. Erratum and as-built notes: Stage B (2026-09-25)
+
+Written by the Stage B lane. Where the design above and the build disagree, this section is the record; §0-§16 are
+left as written. Every number here was measured on this machine on 2026-09-25 unless it says INFERRED.
+
+**E1. The in-place patch is `clonefile(2)` + `pwrite`, not `AudioFileWritePackets` (§6 step 6, §11 step 10, §15).**
+- The base is cloned with `clonefile` (APFS copy-on-write). The patch frames are written, interleaved little-endian
+  Float32, at `payloadOffset + frame × bytesPerFrame`. The offset comes from parsing the base's CAF chunks
+  (`ProvisionalRender.CAFLayout`).
+- The parse refuses anything but the layout `performRender` writes: the `data` chunk last, Float32 little-endian
+  interleaved, and a size consistent with the frame count. On a refusal, or when `clonefile` fails, the build takes the
+  streaming rewrite.
+- MEASURED: the clone-and-patch output is byte-identical to the rewrite
+  (`ProvisionalRenderTests.cloneAndPatchEqualsRewrite`). A committed render's payload starts at byte 4096
+  (`cafLayoutOfARenderFile`).
+- The rewrite uses `StretchRenderCache.renderFileSettings(sourceFormat:)`, extracted verbatim from `performRender`.
+  - MEASURED: the render files' bytes are identical before and after the extraction (the old inline form against the
+    new one, 4 cases, in an isolated copy).
+  - The whole-file goldens are unchanged too (`wholeFileGoldenCapture`).
+- NOT measured: the space a clone shares with its base. `du` cannot see clone sharing, so G7's "du ≤ 2 × span" was
+  not decidable that way. What G7 did measure: at most 1 provisional file on disk during 50 edits, and 0 files and 0
+  bytes after the final landed.
+
+**E2. The base may be on the other loop, and the prefix is then approximate (§6 step 1; §12 G2 "prefix: hard gate").**
+- An identity clip's first pitch edit takes its SOURCE as the base. A level-only render (source × mask) can also be
+  the base of a curve-path edit. The final, though, runs the whole file through the stretcher at 0 st.
+- That stretcher output is not the source bit for bit. MEASURED on the user's take (`firstEditColouringProbe`): after
+  the file's first 0.2 s it is −127 to −130 dB from the source. Over whole prefixes it is −76 to −84 dB, dominated by
+  the stretcher's start.
+- `RenderDiff.Extent.prefixExact` is false for such pairs.
+  - G2's zero-difference prefix gate applies only when it is true: 7/7 render bases gave 0 differing samples.
+  - For the 7 source bases, the prefix residual measured −75.9 to −84.0 dB against the final's prefix RMS, and was
+    reported, not gated.
+- A formant-preserving side across loops is refused (`formantAcrossLoops`). The 0-st equivalence was measured
+  without formant preservation, and the stretcher takes another branch with it.
+
+**E3. G3's local-envelope window is 20 ms, not 2 ms (§12 G3).**
+- On a 110 Hz voice, a 2 ms RMS window follows the waveform, not its envelope. It flags a FLAT crossfade (identical
+  sides, equal-gain) as an envelope breach.
+- MEASURED in `seamInstrumentPositiveControls`: the 2 ms window fails that flat crossfade; the 20 ms window reads it
+  flat; the 20 ms window still fails equal-power on identical sides (+3 dB) and a hard cut.
+
+**E4. The crossfade law below ρ 0.9 is POWER-MATCHED, not equal-power (§6 step 4).**
+- Gains are the linear ramp divided by √(s² + b² + 2ρsb), with ρ clamped to [0, 1]. At ρ = 0 this is equal-power; at
+  ρ = 1 it is equal-gain. Equal-gain is still used at ρ ≥ 0.9.
+- MEASURED (`seamLawMeasurement`, 8 single-note edits on a synthetic voice, 16 seams): equal-power failed the
+  envelope bound at 8/16 seams (partially correlated sides bump). Power-matched passed 16/16.
+- On the user's take: 28/28 seams passed G3 (7 notes × 2 bases × 2 seams).
+
+**E5. The seam search window is 0.5 s, not 1.0 s (§6 step 4); a delegated default, set by measurement.**
+- On the user's take, W = 1.0 s gave 1.61 s of patch (mean) against 1.08 s at W = 0.5, and the chosen seams were only
+  1.7 dB quieter. Both numbers are independent of load.
+  - The two runs' build times are NOT compared here: the W = 0.5 run started LOADED (1-minute load 63.6) and the
+    W = 1.0 run at 3.3.
+  - Build-time claims come from G1, measured under the timing lock at load ≤ 3.8.
+- At either W, no seam on the take reached the −40 dB "quiet" threshold: 0 of 56. The nearest came 28 dB short. So the
+  10 ms fade was never exercised on real singing; every seam there used 30 ms, and passed.
+
+**E6. Per-cluster spans and a PATCH MEMO (§6 steps 1 and 5): the pre-memo build FAILED G1.**
+- As designed, the base is the last COMMITTED render. In a burst of edits, finals lag, so every provisional's extent
+  held every edit since that render, and the span grew with the burst.
+- MEASURED on the 33 s take, 50 edits ~1 s apart, finals concurrent: p50 566, p95 781, max 870 ms (fails ≤ 400).
+- As built:
+  - The extent is split into clusters, each with its own seams. The frames between clusters are the base's.
+  - A per-session memo holds each cluster's patch (64 MB, least recently used out). Its key is a SHA-256 over
+    everything that patch reads: the base's name, the ratio / semitones / formant bits, the tuning fingerprint, the
+    cluster, its chunk range, every transpose on the chunks the span renders (pre-roll included), and the mask over
+    the window, or "no mask" when it is all ones.
+- MEASURED:
+  - a memoised build writes the same bytes as a memo-less one (`patchMemoIsPure`). Three cases must miss: a level
+    edit inside a memoised region, a re-drag of the same note, and a level-only re-edit of a levelled region;
+  - plants: dropping the transposes from the key, or the mask, turns that test red. Each went green until the case
+    that isolates it was added (the re-drag, the level-only re-edit): the first level case also changes the cluster's
+    range, which forces its miss by another term;
+  - G1 after the memo: 33 s p50 183 / p95 277 / max 315 ms; 300 s p50 184 / p95 220 / max 225 ms (ratio 0.79);
+  - take33 rendered 3.84 M span frames and reused 9.56 M; take300 rendered 2.77 M and reused 12.76 M.
+
+**E7. G2's DOWNSTREAM bound measures the edit's own wake (§12 G2).**
+- After the right seam, a spliced provisional IS its base, so the compare is final(new) against the base: the phase
+  wake of the edit itself (R5: it does not converge). No provisional that ends its span at a seam can reduce it; only
+  the final can. The floor it is held to (a final against a final with one extra edit ≥ 2 s earlier) is a different
+  wake.
+- MEASURED on the user's take, W = 0.5:
+  - downstream LSD 0.27-0.60 dB against floors of 0.11-0.45 dB;
+  - under the design's strict 1.5 × floor, 4/14 pass downstream, and 13/14 in the extent (note 4, render base:
+    0.27 dB against a 0.26 dB limit).
+- ⚠️ **A RELAXATION THAT TURNED A FAILING GATE GREEN; OPEN FOR THE ORCHESTRATOR TO RULE ON.** The gate as built is
+  max(1 dB, 1.5 × floor): 14/14 pass in both regions.
+  - The absolute 1 dB term is this lane's choice, not the design's.
+  - Downstream, the reason is above: the compare is the edit's own wake, which only the final removes.
+  - In the extent it rescues one case (0.27 dB against a 0.26 dB limit).
+- Pitch agreement (render bases): median ≤ 2.1 c, p95 ≤ 8.0 c. Waveform residual in the extent: −9.2 to +5.9 dB
+  (render bases; the wake, as R5 predicts, so −40 dB is unreachable) and −120.8 to −134.1 dB (source bases).
+
+**E8. Restarts per edit while rolling (§12 G6): MEASURED with the fake rolling transport (`provisionalRestartsPerEdit`).**
+- With the deferred final: a pitch edit costs 1 restart (the provisional's arrival), a timing-only edit 0, and a ratio
+  edit 2.
+- Without the deferred final: 2, 1 and 2.
+- The timing-only 0 comes from Stage A′. A timing-only edit before C2-3 has an empty extent, so its provisional IS the
+  base, the file the node already has open. The resolution relabels the adopted bridge as a preview and reschedules
+  nothing.
+- A ratio edit builds no provisional and plays no bridge.
+
+**E9. The dead-session wipe runs at a session's first build, not at launch (§6 "Disk and memory", §12 G7).**
+- `ProvisionalRenderStore.ensureSessionDirectory` removes `Provisional/<pid>-<uuid>` folders whose pid is not
+  running, and leaves live ones alone: the user's app and a staging instance share the cache.
+- MEASURED: `sessionWipeKeepsLiveSessions`.
+- Consequence: after a relaunch, a crashed session's files stay until the first provisional build. A launch-time call
+  is an app-side hook (Stage B′ or B″); the function is `ProvisionalRenderStore.wipeDeadSessions(in:except:)`.
+
+**E10. Concurrency (§10 failure mode 12).**
+- Provisional builds run on ONE dedicated serial `DispatchQueue` (`.userInitiated`), machine-wide. They are not on the
+  cooperative pool the whole-file renders use.
+- So Stage B adds at most ONE concurrent render beside the finals; two clips' builds queue.
+  - This is INFERRED by construction (`ProvisionalRenderStore.swift:68`, one serial queue; the finals'
+    `Task.detached` in `StretchRenderCache` is untouched). No spy measured the peak number of concurrent renders.
+  - One qualification: a build that is cancelled keeps running until its loops next poll the flag. During that time
+    it still holds the one queue slot, so it delays the next build rather than adding a second one beside it.
+- The final's priority is unchanged. G1 passed with the finals rendering concurrently, so the `.utility` knob was not
+  needed.
+
+**E11. G3's first-difference bound is too weak to rule out a click on a stretched voice; a SMOOTH-GAIN residual is
+added (§12 G3).**
+- MEASURED under the hard-cut plant (every seam a cut, no fade), synthetic voice: the first-difference bound flagged 2
+  of 22 seams (1 of 16 in `seamLawMeasurement`, 1 of 4 in `twoRegionsAreTwoSpans`, 0 of 2 in
+  `splicedProvisionalOnASyntheticVoice`).
+  - The reason: the stretched voice's own max |Δ| in a seam window is 0.11-0.28, where the source's 10-harmonic
+    sawtooth has about 0.026. A step the size of the local signal (about 0.03 at a −30 dB seam) hides under that.
+- The added instrument fits y ≈ gb(n)·base + gs(n)·span over the fade ± 2 ms, with gb and gs piecewise linear:
+  - knots every 1 ms and on both fade edges, so it holds any real law, including the corner where a fade starts;
+  - a cut cannot be fitted: its step stays in the residual.
+- The number is the worst 1 ms of residual power against the window's mean output power. The limit is −40 dB.
+- MEASURED (`seamInstrumentPositiveControls` and the synthetic-voice seams):
+  - real crossfades read −74.1 to −145.3 dB: equal-gain, equal-power, power-matched, and every product seam;
+  - a cut between two phases of a tone reads −12.0 dB;
+  - a cut hidden in a hissy voice reads −18.1 dB. The first-difference bound PASSES that cut (0.196 against 0.216).
+- MEASURED under the hard-cut plant:
+  - synthetic voice: 22 of 22 seams fail (−6.5 to −23.3 dB);
+  - the user's take: 21 of 28 fail, against 8 for the first-difference bound. The 7 that pass are the source bases'
+    left seams, where span and base agree to ρ = 0.99999999999995 (the stretcher at 0 st, E2). There a cut changes
+    nothing audible, and the residual reads −132 to −139 dB.
+- The PRODUCT on the user's take: 28 of 28 seams pass all three bounds; smooth-gain reads −66.2 to −140.0 dB.
+- G3 is now: first-difference AND envelope AND smooth-gain.
+
+### E7 ruling (orchestrator, 2026-09-25 ~17:40): ACCEPTED
+
+The G2 spectral-distance bound as built, `max(1 dB, 1.5 × floor)`, is accepted as a measurable default. The user delegated those ("pick the options that would produce best results").
+
+Why:
+1. After the right seam the preview IS the previous render, so the distance there measures the edit's own phase wake. R5 shows that wake never converges, at +5.7 dB from 1 to 5 s. The FINAL render differs from the old one in the same way, so a stricter bound would measure the stretcher, not the splice.
+2. The preview is temporary: the exact whole-file render replaces it (G5 ends a preview whose final failed).
+3. Inside the edited region, 13 of 14 cases passed the strict bound (0.27 vs 0.26 dB).
+
+**Verified by me before ruling:**
+- regression: 162/162 in 10 suites (`ren-b/logs/b5-regression.log`);
+- the Stage B suite: 18/18;
+- G1: p50 183 / p95 277 ms on the 33 s take, and p95 220 ms on the 300 s take (the JSON summaries);
+- G4: goldens identical (`goldens-after2.log`).
+
+**Follow-up filed:** tests created an empty `Provisional/` folder in the user's real `~/Library/Caches/DAWPro/StretchRenders`. Tests must use a temp cache root, not the user's cache.

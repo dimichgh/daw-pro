@@ -1,7 +1,7 @@
 import Foundation
 
-// m23-ap C5a-0 / C5a-0b — THE WOBBLE ESTIMATOR: how fast and how wide a SUNG
-// note wobbles.
+// m23-ap C5a-0 / C5a-0b / C5a-0c — THE WOBBLE ESTIMATOR: how fast and how wide
+// a SUNG note wobbles.
 //
 // Design: `docs/design/2026-09-24-pitch-editor-vibrato-handle.md` §8 (what is
 // measured, the method), §15 T5/T6, and **§18 (C5a-0b: every threshold
@@ -43,6 +43,10 @@ import Foundation
 //    `response` is `nil`; the readout never prints that calibrated number as a
 //    measurement, and prints no width at all where no block covers the pitch
 //    (§18.3).
+//  * **A phase is on the DETECTOR's clock.** The read anchor lands LATE at
+//    low pitch (`anchorLagSeconds(pitchHz:)`, C5a-0c, measured by T6). Read
+//    that function's ⚠️ before correcting any anchor by it: the render
+//    flattens against the detected contour, not the voice.
 //
 // ═══════════════════════════════════════════════════════════════════════════
 // WHAT IT IS
@@ -234,26 +238,44 @@ public enum PitchWobbleEstimate {
         return read(times: times, cents: cents)
     }
 
-    /// **The PLAYED reading** (§8.1): the line's points attributed to the note
-    /// by frame CENTRE in `[startSeconds, endSeconds)` — the
-    /// `PitchPlayedLine.noteSummaries` rule — at `Point.editedSeconds`, in
-    /// cents against the note's played median.
+    /// **The PLAYED reading** (§8.1): `read` over `playedSamples` — the
+    /// line's points attributed to the note by frame CENTRE in
+    /// `[startSeconds, endSeconds)`, at `Point.editedSeconds`, in cents
+    /// against the note's played median.
     ///
     /// The caller builds `line` (the DRAFT played line, with any drawn C5b
     /// shape cleared from its table copy — §8.1, §13); this only reads it.
     public static func played(_ segment: NoteSegment,
                               line: PitchPlayedLine) -> PitchWobbleReading {
+        let samples = playedSamples(segment, line: line)
+        return read(times: samples.times, cents: samples.cents)
+    }
+
+    /// **The PLAYED samples** — the one home of `played`'s attribution, for a
+    /// caller that fits them itself (C5a-F9: the Wobble handoff's floor-free
+    /// `refit` at the sung rate). The line's points whose frame CENTRE lies in
+    /// `[startSeconds, endSeconds)` (the `PitchPlayedLine.noteSummaries`
+    /// rule), in line order:
+    ///  - `times`: `Point.editedSeconds` — the axis the reading's rate is per;
+    ///  - `cents`: `(playedMidi − median) × 100`, against the note's played
+    ///    median (0 for no points);
+    ///  - `sourceSeconds`: each point's `Point.sourceSeconds`, index for index,
+    ///    so a caller can measure the line's edited-per-source slope.
+    public static func playedSamples(_ segment: NoteSegment, line: PitchPlayedLine)
+    -> (times: [Double], cents: [Double], sourceSeconds: [Double]) {
         var times: [Double] = []
         var midi: [Double] = []
+        var sources: [Double] = []
         for run in line.runs {
             for point in run where point.sourceSeconds >= segment.startSeconds
                 && point.sourceSeconds < segment.endSeconds {
                 times.append(point.editedSeconds)
                 midi.append(point.playedMidi)
+                sources.append(point.sourceSeconds)
             }
         }
         let median = PitchCorrectionMath.median(midi) ?? 0
-        return read(times: times, cents: midi.map { ($0 - median) * 100 })
+        return (times, midi.map { ($0 - median) * 100 }, sources)
     }
 
     // MARK: - The product's depth response (design §18.2, measured by T6)
@@ -282,6 +304,68 @@ public enum PitchWobbleEstimate {
         return nil
     }
 
+    // MARK: - The product's anchor lag (C5a-0c, measured by T6)
+
+    /// **How LATE the product chain reads a wobble's phase** at a note's
+    /// pitch, seconds: the MEDIAN of `anchorSeconds − the tone's own rising
+    /// zero crossing` that `PitchWobbleDetectorTests` (T6) measured —
+    /// SwiftF0, then this estimator, on tones carrying a known wobble — for
+    /// the measured pitch block covering `pitchHz`. POSITIVE = the reading
+    /// lands AFTER the voice. Blocks and their edges are `response(pitchHz:)`'s,
+    /// one home. **Only the 146.8 Hz block has one: +6.7 ms**, i.e. about
+    /// 127–180 Hz. `nil` everywhere else, for one of two reasons:
+    ///  * NOT MEASURED: outside every block, and in every block whose
+    ///    `response` is `nil` (82.4, 110 Hz — the handoff is refused there).
+    ///    T6 still LOGS their signed anchors, as data for C5a-F8: 82.4 Hz
+    ///    +8.3…+13.6 ms (median +11.7), 110 Hz +11.1…+12.4 (median +11.5).
+    ///  * MEASURED AND NOT HELD — the mid block, C5a-0c's stop condition, the
+    ///    same rule as `response`'s (§18.4): no band is widened to fit one
+    ///    value. Its own pitches read +0.9 (220 Hz), −1.0 (247) and −3.4 ms
+    ///    (330), and its INFERRED lower edge, 179.7 Hz, reads +7.1 ms: its
+    ///    −1.6 ms median would move that anchor FURTHER from the voice. That
+    ///    median is ~3° of phase at 5.5 Hz: there is little to buy.
+    /// The lag also moves with the wobble's depth (±80 c reads 1.5–2.7 ms
+    /// later than ±40 c, except at 110 Hz) and rate: the same per-(pitch,
+    /// rate) shape §18.7 filed for the response (C5a-F8). A median here is
+    /// "about", never exact.
+    ///
+    /// **The axis.** SOURCE seconds on the frame-CENTRE axis that `sung` and
+    /// `PitchPlayedLine.Point.sourceSeconds` share, i.e. what is LEFT after
+    /// `PitchRenderContour.frameValueOffsetSeconds`' half frame — which is
+    /// right at mid pitch only. A reading taken in EDITED seconds (the played
+    /// line under a C2 retime) maps the lag through the note's warp; that is
+    /// the caller's job. Fixing the lag INSIDE the estimator would change the
+    /// analysis version (§18.7), so `read`, `sung` and `played` stay as they
+    /// are and this is a separate lookup.
+    ///
+    /// ⚠️ **WHETHER THE HANDOFF SUBTRACTS IT IS NOT SETTLED.** Design §18.7
+    /// says the handoff's τ subtracts it; C5a-4a decides, and its T14 (the
+    /// handoff matches what was on screen) is the gate that catches a wrong
+    /// choice. The render flattens against the DETECTED contour, not the
+    /// voice — `PitchCorrectionCurve`'s doc: REPLACE is `− sung(t) +
+    /// generated(t)`, "you cannot cancel what you have not measured". So at
+    /// the crossing tick [INFERRED from that rule, not rendered]:
+    ///  * before, at keep 1: heard = true;
+    ///  * after, both scales 0 plus the generator: heard = true − detected +
+    ///    generator;
+    ///  * continuous ⟺ generator = detected ⟺ the UNCORRECTED read anchor
+    ///    (§6.2's own τ: the sine fitted to the draft's PLAYED line);
+    ///  * subtracting the lag moves the generator off the played line by
+    ///    about `2A · sin(π · rate · lag)`, on screen AND in the audio.
+    /// This number describes the detector against the TRUE voice, which the
+    /// handoff never compares against. Where it DOES bite: the flatten
+    /// subtracts a late copy of a low note's wobble and leaves more of it
+    /// behind (§18.1.6, §18.5); a pitch-dependent frame offset in the render
+    /// would fix that — a shaping-version change, its own item, and these
+    /// values are its input.
+    public static func anchorLagSeconds(pitchHz: Double) -> Double? {
+        guard pitchHz.isFinite, pitchHz > 0 else { return nil }
+        for block in responseBlocks where block.coversHz.contains(pitchHz) {
+            return block.medianLagSeconds
+        }
+        return nil
+    }
+
     /// One measured pitch block of the product chain's depth response.
     struct ResponseBlock: Sendable, Equatable {
         /// The name T6 logs it under.
@@ -293,6 +377,14 @@ public enum PitchWobbleEstimate {
         /// The MEDIAN read ÷ true share T6 measured over the block's notes,
         /// rounded to 0.01; `nil` where §18.4's stop condition fired.
         let medianShare: Double?
+        /// The MEDIAN signed anchor lag T6 measured over the same notes
+        /// (read anchor − the tone's true rising crossing; positive = LATE),
+        /// seconds, rounded to 0.1 ms. `nil` where it was not measured —
+        /// every block whose `medianShare` is `nil` — AND where it was
+        /// measured but one value could not be held across the block's band
+        /// (C5a-0c's stop, the mid block). Never set where `medianShare` is
+        /// `nil`: no lag is handed out where the handoff is refused.
+        let medianLagSeconds: Double?
     }
 
     /// **The measured blocks, low to high** (§18.1.2 mid, §18.1.6 low).
@@ -310,6 +402,17 @@ public enum PitchWobbleEstimate {
     ///    in depth, so no single share is exact).
     /// This singer's median note is 106 Hz: for most of their notes this
     /// returns `nil` (§18.3's speed-only row, the handoff refused).
+    ///
+    /// MEASURED 2026-09-25 (C5a-0c, same suite, same notes), the signed
+    /// anchor lag behind `medianLagSeconds` (`anchorLagSeconds(pitchHz:)`):
+    ///  * 82.4 / 110.0 Hz — `nil`, not measured (no response);
+    ///  * **146.8 Hz — +6.7 ms:** +3.48…+8.10 (median +6.73); taken out, the
+    ///    anchor's p95 falls 8.01 → 2.75 ms, and 10.42 → 3.72 / 8.31 → 1.65
+    ///    at the block's edges (127.1 / 179.7 Hz);
+    ///  * **mid — `nil`, STOPPED:** −4.79…+3.47 (median −1.56), and its lower
+    ///    edge reads +7.11: see `anchorLagSeconds(pitchHz:)`.
+    /// So the lag's measured edges are NOT the response's: at 179.7 Hz the
+    /// response holds for the mid block, the lag does not.
     ///
     /// ⚠️ **WHERE A BLOCK APPLIES IS [INFERRED], not measured:** each pitch
     /// belongs to the block of its NEAREST measured pitch (the band edges are
@@ -329,13 +432,17 @@ public enum PitchWobbleEstimate {
         let top = mid[2] * (mid[2] / mid[1]).squareRoot()
         return [
             ResponseBlock(name: "82.4 Hz", measuredHz: [e2],
-                          coversHz: bottom..<between(e2, a2), medianShare: nil),
+                          coversHz: bottom..<between(e2, a2), medianShare: nil,
+                          medianLagSeconds: nil),
             ResponseBlock(name: "110.0 Hz", measuredHz: [a2],
-                          coversHz: between(e2, a2)..<between(a2, d3), medianShare: nil),
+                          coversHz: between(e2, a2)..<between(a2, d3), medianShare: nil,
+                          medianLagSeconds: nil),
             ResponseBlock(name: "146.8 Hz", measuredHz: [d3],
-                          coversHz: between(a2, d3)..<between(d3, mid[0]), medianShare: 0.83),
+                          coversHz: between(a2, d3)..<between(d3, mid[0]), medianShare: 0.83,
+                          medianLagSeconds: 0.0067),
             ResponseBlock(name: "mid 220–330 Hz", measuredHz: mid,
-                          coversHz: between(d3, mid[0])..<top, medianShare: 0.88),
+                          coversHz: between(d3, mid[0])..<top, medianShare: 0.88,
+                          medianLagSeconds: nil),
         ]
     }()
 

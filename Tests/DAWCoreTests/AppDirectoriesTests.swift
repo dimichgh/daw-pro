@@ -40,6 +40,13 @@ struct AppDirectoriesTests {
             // m23-fp: the RVC voice-conversion OUTPUT home (our captured
             // copies, plus the facade's own raw writes in `sidecar-out/`).
             .voiceConversions: "VoiceConversions",
+            // p2-sing-c: the local singing engine's runtime, the user's voice
+            // references, and the rendered-phrase cache — three separate
+            // categories so uninstalling the engine can never delete a voice
+            // or land a purgeable cache lifetime on user content.
+            .singingEngine: "SingingEngine",
+            .singingVoices: "SingingVoices",
+            .singingCache: "SingingCache",
         ]
         // Closed set: a NEW category must be added to the pin above, so it can
         // never be introduced without someone reading this table.
@@ -95,6 +102,24 @@ struct AppDirectoriesTests {
         let feedback = AppDirectories.applicationSupport(.feedback)
         #expect(banks != feedback)
         #expect(banks.deletingLastPathComponent() == feedback.deletingLastPathComponent())
+    }
+
+    /// p2-sing-c: the three new categories must land in three DIFFERENT directories — a
+    /// collision here would mean uninstalling the singing engine could delete the user's voice
+    /// references or the phrase cache, which is exactly what having three categories exists to
+    /// prevent (see each case's doc comment).
+    @Test("The three singing categories resolve to three distinct directories")
+    func singingCategoriesAreDistinct() {
+        let engine = AppDirectories.applicationSupport(.singingEngine)
+        let voices = AppDirectories.applicationSupport(.singingVoices)
+        let cache = AppDirectories.applicationSupport(.singingCache)
+        #expect(Set([engine, voices, cache]).count == 3)
+        #expect(engine.lastPathComponent == "SingingEngine")
+        #expect(voices.lastPathComponent == "SingingVoices")
+        #expect(cache.lastPathComponent == "SingingCache")
+        // Siblings under the same DAWPro product directory, like every other category.
+        #expect(engine.deletingLastPathComponent() == voices.deletingLastPathComponent())
+        #expect(engine.deletingLastPathComponent() == cache.deletingLastPathComponent())
     }
 
     @Test("The resolver is stable across calls")

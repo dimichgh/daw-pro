@@ -214,6 +214,42 @@ struct GrooveCommandTests {
         #expect(badCycle.error?.contains("cycleBeats") == true)
     }
 
+    // 7b. m23-ap I5-F4 round 3: a grid finer than 1/1024 beat, or not finite,
+    // is refused BY THE WIRE in words that name the finest grid allowed. The
+    // store refuses it too, in its own words, so this asserts the WIRE's. A
+    // cycle of more than 65536 slots is refused by the store, in words.
+    @Test("groove.extract refuses a grid finer than 1/1024 beat, and a cycle of more than 65536 slots, in words")
+    func extractRefusesAbsurdGridsInWords() async throws {
+        let (router, store) = makeRouter()
+        let clipID = try await addMIDIClip(router, notes: swungNotes)
+        func extract(_ extra: [String: JSONValue]) async -> ControlResponse {
+            await router.handle(ControlRequest(id: "1", command: "groove.extract",
+                params: extra.merging(["clipId": .string(clipID), "name": .string("g")]) { a, _ in a }))
+        }
+        for grid in [1e-20, 1e-300, Double.leastNonzeroMagnitude, 0.0009, Double.infinity] {
+            let resp = await extract(["gridBeats": .number(grid)])
+            #expect(!resp.ok, "gridBeats \(grid) must be refused")
+            #expect(resp.error?.contains("'gridBeats' must be a finite number of at least 1/1024 beat (0.0009765625)") == true,
+                    "gridBeats \(grid): \(resp.error ?? "no error")")
+        }
+        let zero = await extract(["gridBeats": .number(0)])
+        #expect(zero.error?.contains("must be greater than 0") == true)
+        for cycle in [1e19, Double.infinity, 0.25 * 65_537] {
+            let resp = await extract(["gridBeats": .number(0.25), "cycleBeats": .number(cycle)])
+            #expect(!resp.ok, "cycleBeats \(cycle) must be refused")
+            #expect(resp.error?.contains("at most 65536 slots") == true,
+                    "cycleBeats \(cycle): \(resp.error ?? "no error")")
+        }
+        #expect(store.grooveTemplates.isEmpty)
+        // POSITIVE CONTROL: the finest grid, and the longest cycle a groove
+        // holds (65536 slots of 1/16), both extract.
+        let finest = await extract(["gridBeats": .number(1.0 / 1024), "cycleBeats": .number(1)])
+        #expect(finest.ok, "\(finest.error ?? "")")
+        let longest = await extract(["gridBeats": .number(0.25), "cycleBeats": .number(0.25 * 65_536)])
+        #expect(longest.ok, "\(longest.error ?? "")")
+        #expect(store.grooveTemplates.count == 2)
+    }
+
     // 8. allCommands advertises the three groove commands.
     @Test("allCommands advertises groove.extract/list/remove")
     func advertised() {

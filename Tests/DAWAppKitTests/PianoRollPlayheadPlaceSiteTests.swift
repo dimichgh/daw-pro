@@ -174,32 +174,44 @@ struct PianoRollPlayheadPlaceSiteTests {
 
     // MARK: - Snap, in the one place it belongs
 
-    @Test("the placement beat is snapped ONCE, in clip-local space, through the model")
+    /// ⭐ **RESTATED BY m23-ap I5-F2.** This pinned the snap in CLIP-LOCAL space
+    /// through `model.snap(`, because the roll's grid, bar emphasis and ruler all
+    /// counted from the clip's first beat. They now count the SONG's bars, so the
+    /// snap runs on the song's grid through the headless
+    /// `PianoRollSongGrid.placementLocalBeat` (unit-tested in
+    /// `PianoRollSongGridTests`); the "once, in one place, with the gesture's
+    /// grid" legs are unchanged.
+    @Test("the placement beat is snapped ONCE, on the SONG's grid, through the headless producer")
     func placementSnapsOnce() {
         let producer = rollBody("placementLocalBeat")
-        #expect(producer.contains("model.snap("),
-                "snapping must go through `PianoRollModel` — the ONE home for the roll's grid arithmetic")
+        #expect(producer.contains("PianoRollSongGrid.placementLocalBeat("),
+                "snapping must go through the headless song-grid producer")
         #expect(producer.contains("effectiveSnap"),
                 "the gesture's snap resolution, not a hardcoded grid")
-        #expect(occurrences("model.snap(", in: producer) == 1,
+        #expect(occurrences("PianoRollSongGrid.placementLocalBeat(", in: producer) == 1,
                 "snap is a property of the GESTURE (m23-g2) — exactly once")
+        #expect(producer.contains("model.snap(") == false,
+                "a clip-local `model.snap(` here is the pre-I5-F2 grid coming back")
+        #expect(producer.contains("meterMap: meterMap") && producer.contains("clipStartBeat: clip.startBeat"),
+                "the song's grid needs the clip's start and the song's meter map")
         // ⚠️ The coordinate-space trap: `gridDrag` and `.onContinuousHover` report
         // in grid CONTENT space already. Adding the scroll offset here would put
         // the playhead a viewport-width off at any scrolled position.
         #expect(producer.contains("gridScrollX") == false,
                 "grid points are already content-space — `gridScrollX` is the scrub STRIP's correction and must not appear here")
 
-        // ⚠️⚠️ **AND THE RELEASE ITSELF MUST NOT SNAP — THIS IS THE CLIP-LOCAL
-        // DECISION, PINNED WHERE IT CAN ACTUALLY BREAK.** `PianoRollGridReleaseTests`
-        // shows the correct COMPOSITION (snap the clip-local beat, then offset), but
-        // it cannot see a view that composes it wrongly. A `model.snap(...)` wrapped
-        // around `projectBeat`'s result would snap in PROJECT space, landing the
-        // playhead on the ARRANGE's grid — a different set of lines whenever
-        // `clip.startBeat` is not a multiple of the meter, i.e. visibly off the line
-        // the user aimed at, in exactly the case snapping exists for.
+        // ⚠️⚠️ **AND THE RELEASE ITSELF MUST NOT SNAP.** `PianoRollGridReleaseTests`
+        // shows the correct COMPOSITION (snap, then clamp, then offset), but it
+        // cannot see a view that composes it wrongly. A second snap wrapped around
+        // `projectBeat`'s result would snap AFTER the clamp, so a clip edge that
+        // sits off the grid would be pushed off the clip. ⭐ Restated by m23-ap
+        // I5-F2: this used to say the danger was snapping in PROJECT space at all.
+        // The grid, the ruler and "BAR n" now count the song's bars, so the one
+        // snap is on the song's grid (`placementLocalBeat`), and the release must
+        // still add none of its own.
         let end = rollBody("endGesture")
         #expect(end.contains("model.snap(") == false,
-                "the release must not snap — the snap belongs to `placementLocalBeat`, in CLIP-LOCAL space, before the project offset")
+                "the release must not snap — the snap belongs to `placementLocalBeat` (the song's grid, then the clamp), before the project offset")
         // Positive control: `model.` IS findable in `endGesture`, so the absence
         // above is a real absence and not a broken needle.
         #expect(end.contains("model."),

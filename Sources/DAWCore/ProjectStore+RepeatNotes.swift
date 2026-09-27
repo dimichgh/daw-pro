@@ -281,7 +281,9 @@ extension ProjectStore {
             $0.startBeat > timelineSpanStart && $0.startBeat < timelineSpanEnd
         }.count
 
-        // Decide the grow BEFORE the edit opens — `ClipAutoExtend` is pure.
+        // Decide the grow BEFORE the edit opens — `ClipAutoExtend` is pure, and
+        // it gets the clip's place in the SONG, as in `setClipNotes`, so the
+        // new end lands on the next bar line the piano roll draws (m23-ap AX).
         // `ids` is the FRESH copy id set only (disjoint from every
         // pre-existing note by construction, one fresh UUID() per copy via
         // `MIDINote.init` above) — deriving the span from every note would
@@ -296,7 +298,8 @@ extension ProjectStore {
                         currentLengthBeats: clip.lengthBeats,
                         coveringOnsetBeat: span.onsetBeat,
                         coveringEndBeat: span.endBeat,
-                        beatsPerBar: transport.meterMap.beatsPerBar(atBeat: clip.startBeat),
+                        clipStartBeat: clip.startBeat,
+                        meterMap: transport.meterMap,
                         maxLengthBeats: trailingHeadroom(trackIndex: t, clipIndex: c))
                 } ?? .notNeeded
             lastAutoExtendOutcome = outcome

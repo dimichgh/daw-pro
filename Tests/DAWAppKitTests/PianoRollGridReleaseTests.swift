@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import DAWCore
 @testable import DAWAppKit
 
 /// m25-o — ⌘-click on empty grid positions the playhead, and the three shipped
@@ -198,25 +199,52 @@ struct PianoRollPlacementSnapTests {
         #expect(raw != 2, "premise — if x 70 were already on a grid line this test proves nothing")
     }
 
-    @Test("⚠️ the snap is applied in CLIP-LOCAL space, so an off-grid clip start cannot shift it")
+    /// ⭐⭐ **RESTATED BY m23-ap I5-F2 — THE PREMISE FLIPPED, SO THE ASSERTION DID.**
+    /// This was "⚠️ the snap is applied in CLIP-LOCAL space, so an off-grid clip
+    /// start cannot shift it", and it asserted a clip at 8.25 placed the playhead
+    /// on project 10.25 — the clip's beat 2 — because the roll's grid, bar
+    /// emphasis and ruler were all clip-local, so clip-local was what the user
+    /// saw. They now all show the SONG's beats and bars (like the transport and
+    /// the arrange), so the placement lands on the song's grid, and the same
+    /// fixture must land on a WHOLE project beat.
+    @Test("⚠️ the snap is applied on the SONG's grid (I5-F2), so an off-grid clip start cannot pull it off the lines the roll draws")
     func snapIsClipLocal() {
-        // THE BUG THIS PREVENTS: snapping the PROJECT beat instead would land the
-        // playhead on the ARRANGE's grid, which is a different set of lines
-        // whenever `clipStartBeat` is not a multiple of the meter — i.e. visibly
-        // off the line the user aimed at, in exactly the case snapping exists for.
-        // The roll's grid, bar emphasis and ruler labels are all clip-local
-        // (`PianoRollScrubRuler`'s axis note), so clip-local is what the user sees.
         let m = model()
         let offGridClipStart = 8.25
-        let local = m.snap(beat: m.beat(forX: 70), resolution: .beat)
+        let local = PianoRollSongGrid.placementLocalBeat(
+            rawLocalBeat: m.beat(forX: 70), clipStartBeat: offGridClipStart, lengthBeats: 16,
+            resolution: .beat, meterMap: MeterMap(constant: TimeSignature()), snapBypassed: false)
         let placed = PianoRollPlayhead.projectBeat(localBeat: local,
                                                    clipStartBeat: offGridClipStart,
                                                    lengthBeats: 16)
-        // Lands on the CLIP's beat 2 — which is project 10.25, deliberately NOT a
-        // whole project beat.
-        #expect(placed == 10.25)
+        // x 70 is clip-local 2.1875 = project 10.4375 → the song's beat 10 — a
+        // WHOLE project beat, clip-local 1.75.
+        #expect(placed == 10)
         #expect(PianoRollPlayhead.localBeat(position: placed,
-                                            clipStartBeat: offGridClipStart) == 2)
+                                            clipStartBeat: offGridClipStart) == 1.75)
+        // CONTROL — the clip-local snap this replaced lands on project 10.25.
+        #expect(PianoRollPlayhead.projectBeat(localBeat: m.snap(beat: m.beat(forX: 70), resolution: .beat),
+                                              clipStartBeat: offGridClipStart, lengthBeats: 16) == 10.25)
+    }
+
+    /// m23-ap I5-F3 — the MODEL's snaps (note add, move, resize, scale, and the
+    /// paste anchors) read the clip's place on the song's grid. The default
+    /// context is the old clip-local grid, which is why every other model test
+    /// in the repo is unchanged.
+    @Test("I5-F3 — the model snaps notes on the SONG's grid: a clip at 2.5 under Simple's whole-beat snap adds, snaps and snaps up onto song beats; the default context is the old clip-local grid")
+    func modelSnapsOnTheSongsGrid() {
+        let m = model()
+        #expect(m.snap(beat: 1.2, resolution: .beat) == 1, "default context — the clip's own beats")
+        m.songGrid = PianoRollSongGrid.Context(clipStartBeat: 2.5, meterMap: MeterMap(constant: TimeSignature()))
+        #expect(m.snap(beat: 1.2, resolution: .beat) == 1.5, "song beat 4")
+        #expect(m.snapUp(beat: 1.6, resolution: .beat) == 2.5, "song beat 5")
+        let added = m.addNote(atBeat: 1.2, pitch: 60, resolution: .beat)
+        #expect(added.startBeat == 1.5, "a note placed in the clip lands ON a drawn song-beat line")
+        // A group move snaps its anchor on the song's grid too.
+        m.selection = [added.id]
+        m.beginMove(anchorID: added.id)
+        m.moveSelection(deltaBeats: 1.3, deltaPitch: 0, resolution: .beat)
+        #expect(m.draft.first { $0.id == added.id }?.startBeat == 2.5, "1.5 + 1.3 = 2.8 → song beat 5 = 2.5")
     }
 
     @Test("a snapped placement past the clip end is clamped, not snapped outside")

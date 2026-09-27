@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased (after 2026-09-25's commit)
+
+1. **Pitch moves now land where you ask, from small corrections to two-octave jumps.**
+   - **Before:** moving a note, correcting pitch, or transposing a clip landed a little off: about 10 cents on a mid-range note, and up to about 40 cents on low bass notes (a −25 cent correction came out near −15). Octave jumps on low notes could be off by up to about 44 cents. And a clip stretched by a hair (say, a long clip's edge dragged by one 1/16) played up to about 1 cent off, even with no pitch change at all.
+   - **Why:** three small bugs in the pitch-shifting library we build on. We fixed all three in our copy.
+   - **Now:** steady notes land within about a hundredth of a cent, from a few cents up to two octaves either way, and a slightly stretched clip keeps its exact pitch. One exception: a rich, low sound taken down so far that its harmonics end up closer than about 34 Hz apart (a 110 Hz voice taken down two octaves) is still about 12 cents off.
+   - **What it costs, plainly:**
+     - **Deep vibrato moved down an octave.** A note with a very wide vibrato (about ±60 cents) moved down 12 semitones can now sit up to about 4 cents sharp on average. An ordinary vibrato (about ±30 cents) stays within about 1.2 cents (before, it could be up to about 30 cents off on a rich low voice moved down an octave), and within 0.07 cents for moves of a semitone.
+     - **Big upward jumps on low sounds.** From about +9 semitones up, the faint noise between a low sound's harmonics (breath, hiss) is pulled toward the harmonics. Overall loudness does not change, but that noise can sound slightly thinner or more "combed". A 55 Hz tone moved up an octave keeps its in-between noise within about 2 dB of before; bass moved up 19 semitones loses much more of it.
+     - **Two sounds very close in pitch** (within about 15 Hz of each other) move as one when shifted. The quieter one was already tens of cents off there (in one measured case, about 21 cents; now about 33).
+     - Transposing takes a little longer to prepare, roughly a sixth longer than the last release. It never happens while audio plays.
+   - **What you'll notice:** clips you had already transposed or tuned re-render once, the first time they play. So do plain time-stretched clips stretched by less than 5 % either way, because those were the slightly-off ones. Every other plain time-stretched clip is untouched.
+
 ## 2026-09-25 — Hear the note you're editing
 
 **Press a note in the pitch editor and you hear it. Drag it and it plays at each step. Let go and it plays once more, about 50 ms later, even on a 5-minute recording. While an edit is being prepared, the vocal keeps playing the version before it instead of going silent.**

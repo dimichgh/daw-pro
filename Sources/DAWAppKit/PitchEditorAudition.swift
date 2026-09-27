@@ -284,6 +284,40 @@ public final class PitchEditorAuditionRouter {
             return PitchEditorReleaseAudition(edit: .clear, segmentIDs: ids)
         case .splitNote:
             return nil
+        case .noteVibrato(let id, _):
+            // m23-ap C5a-4b — a wobble change IS heard ("Let go to hear it",
+            // the tool's own help): the changed note, with the pitch edit's
+            // context. `ClipNoteEdit` has no wobble case (DAWCore's), and
+            // `.pitch` is the right one for what plays: a note whose pitch
+            // curve changed, heard with the standard context.
+            return PitchEditorReleaseAudition(edit: .pitch, segmentIDs: [id])
+        case .noteVibratoReset(let ids):
+            return PitchEditorReleaseAudition(edit: .pitch, segmentIDs: ids)
+        case .noteShapes(let shapes):
+            // m23-ap C5b-4b — a drawn line IS heard ("Let go to hear it", the
+            // brush's own words): every note the stroke touched, with the pitch
+            // edit's context (a note whose pitch curve changed). A reset plays
+            // too, like "Back to how you sang it". Sorted, so one stroke asks
+            // for the same notes in the same order every time.
+            return PitchEditorReleaseAudition(
+                edit: .pitch, segmentIDs: shapes.keys.sorted { $0.uuidString < $1.uuidString })
+        case .voiceSize, .naturalTuningUpdate, .consonants, .slideSmoothness:
+            // W7-NTU U1 — the header group's SET-LEVEL switches name no note:
+            // they change how every moved note renders, so there is no one
+            // note to play back, and playing an arbitrary one would claim the
+            // change lives there. Silent, like a split; the transport plays the
+            // result.
+            return nil
+        case .noteFormant(let ids, _):
+            // W7-NTU U3 — a note's Voice IS heard ("Let go to hear it", the
+            // tool's own help; natural tuning §1(f) item 2: "reuse the existing
+            // note-audition path"): the changed notes, rendered through the
+            // product path, with the pitch edit's context. `ClipNoteEdit` has
+            // no Voice case (DAWCore's), and `.pitch` is the right one for what
+            // plays: a note whose sound changed where it sits, heard with the
+            // standard context. A reset to as sung plays too, like "Back to how
+            // you sang it".
+            return PitchEditorReleaseAudition(edit: .pitch, segmentIDs: ids)
         }
     }
 

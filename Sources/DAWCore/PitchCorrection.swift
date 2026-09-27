@@ -49,10 +49,14 @@ import Foundation
 //     interpolate away. A tolerance tighter than ±12.90 cents is unreachable by
 //     construction, not by quality.
 //
-//  2. **THE TRANSPOSER WE SHIP IS ITSELF SHARP: +5.45 cents at +2 st, +3.95 at
-//     −2 st, −0.019 at 0** (phase-0 §7, measured on `OfflineStretcher` as
-//     shipped). Correcting to ±5 cents through a transposer that is 5 cents off
-//     is a closed loop that will not close.
+//  2. **THE TRANSPOSER WAS SHARP; SINCE p2-acc-3 (2026-09-25) IT LANDS WITHIN
+//     0.01 c.** Phase-0 §7 measured +5.45 c at +2 st, +3.95 at −2 st: three
+//     defects in the vendored stretcher (a fractional-bin phase read, a biased
+//     peak position, a reused previous hop), fixed by three local patches
+//     (`Sources/CSignalsmithStretch/VENDORED.md`, 0001-0003). Measured: steady
+//     partials within 0.01 c across ±24 st, harmonic tones to ±12 st and +24 st.
+//     Item 1 still sets the tolerance: a ±5 c loop does not close through a
+//     25.79 c-per-bin detector, however exact the transposer is.
 //
 //  3. **CONFIDENCE GATES VOICING. IT DOES NOT GATE ACCURACY.** A 440 Hz sine
 //     reads 437.55 Hz — 9.7 cents FLAT — at confidence ≥ 0.985. Nothing in this
@@ -335,7 +339,8 @@ public struct NoteSegment: Identifiable, Codable, Sendable, Equatable {
     // from `Vibrato 5.5 Hz ±93 c` to `Vibrato 7.8 Hz ±32 c` is SYNTHESIS.
     // Design `docs/design/2026-09-22-pitch-editor-ui.md` §7.5 conflict 2.
     //
-    // **THE THREE FIELDS BELOW ARE A GENERATOR, NOT A SCALE**, and the two
+    // **THE FOUR FIELDS BELOW (rate, depth, onset and, since C5a-1, the phase
+    // anchor) ARE A GENERATOR, NOT A SCALE**, and the two
     // mechanisms are deliberately separate rather than merged into one number:
     //
     //  * `vibratoScale` is RELATIVE — a fraction of a quantity nobody has
@@ -345,16 +350,26 @@ public struct NoteSegment: Identifiable, Codable, Sendable, Equatable {
     //    nothing but itself, which is why it renders through the shipped path
     //    and `vibratoScale` does not.
     //
-    // One stored number cannot be both. A UI that wants ONE axis running
-    // `sung → flat → synthesised` (which is what the reference frames show, as
-    // one continuous edit of one note) maps that axis onto BOTH fields in one
-    // atomic edit: the flat half drives `vibratoScale` 1 → 0, and the
-    // synthesised half drives `vibratoDepthCents` 0 → N. The natural zero the
-    // axis passes through is exactly the point where both are at zero.
+    // One stored number cannot be both. ⚠️ Corrected at C5a-2 (vibrato-handle
+    // design §5.3 D5 and §5.6): this paragraph used to say a UI running ONE
+    // axis `sung → flat → synthesised` drives `vibratoScale` 1 → 0 on its flat
+    // half. Both halves of that were wrong. `vibratoScale 0` ALONE is not flat:
+    // it keeps the slow drift, and with the 250 ms boxcar separator it also kept
+    // an INVERTED 17–22 % of a 4.5–6 Hz wobble (V3). Since natural tuning §3
+    // (W7-C3) an unequal-scale note takes the non-inverting v2 separator
+    // (`PitchCorrectionCurve.Separator`), so the inversion is gone, but flat is
+    // still BOTH scales at 0, where the drift/vibrato split cancels and the note
+    // sits on its centre (Hard Tune's composition).
+    // And the Wobble tool is not one continuous range: narrowing the singer's
+    // wobble and adding a new one are two branches, chosen at mouse-down
+    // (§5.1), joined only by the one-way handoff (§6). The two mechanisms stay
+    // separate fields either way; `ProjectStore.setClipNoteVibrato` writes any
+    // of them in one atomic edit.
     //
     // **THE GENERATOR ADDS; IT DOES NOT REPLACE.** Replacement is
-    // `vibratoScale: 0` set in the same edit — see `PitchCorrectionCurve`'s
-    // banner for the full argument and for what does and does not render.
+    // `vibratoScale: 0` AND `driftScale: 0` set in the same edit as the
+    // generator (the handoff's write) — see `PitchCorrectionCurve`'s banner for
+    // the full argument and for what does and does not render.
 
     /// Rate of the SYNTHESISED vibrato, Hz. `0` = no generator.
     ///
@@ -414,8 +429,33 @@ public struct NoteSegment: Identifiable, Codable, Sendable, Equatable {
     /// generator's PHASE deliberately does not — see `PitchCorrectionCurve`.
     public var vibratoOnsetSeconds: Double
 
-    /// Phase 4 — carried so the schema does not change under a saved project
-    /// later. **No renderer reads it today.**
+    /// Where the SYNTHESISED wobble's phase is anchored, source seconds
+    /// (m23-ap C5a-1, vibrato-handle design §7): the generator is
+    /// `depth × fade(t) × sin(2π · rate · (t − vibratoPhaseAnchorSeconds))`,
+    /// so the wobble crosses zero, rising, at the anchor.
+    ///
+    /// `0` (the default) is exactly the phase every set had before this field
+    /// existed, anchored at source second zero, bit for bit (`t − 0.0 == t`).
+    /// **STORED, NOT DERIVED FROM `startSeconds`**, so `PitchEditSet.canonical`
+    /// truncation cannot re-phase it and a split copies it to both halves (the
+    /// two guarantees the curve banner's source-zero phase existed for). The
+    /// wobble editor puts it at the note's centre, so a speed change stretches
+    /// the cycles around the knob instead of jumping them (design V6). Under
+    /// per-note timing the phase is anchored at `W(anchor)` on the edited axis.
+    ///
+    /// Inert at `vibratoDepthCents == 0`, like rate and onset, so it is in
+    /// `isEdited` but NOT in `isIdentity` (see there). Codable key
+    /// `vibratoPhaseAnchorSeconds`, written only when non-zero. The digest
+    /// hashes it in its own block, slot 2 (`PitchEditSetDigest.hex`).
+    public var vibratoPhaseAnchorSeconds: Double
+
+    /// The Voice tool's per-note value (natural tuning §1(b)): semitones of
+    /// formant shift ON TOP of what the set's `formantCorrection` leaves,
+    /// relative to the source envelope. Negative = deeper, positive =
+    /// brighter; the pitch does not move. `PitchCorrectionCurve`'s
+    /// `formantSemitones` reads it (NT-C C1) and `engagesFormantCurve` says
+    /// when it counts; ⚠️ the RENDER reads it only once NT-E1's formant
+    /// closures land. Writer: `ProjectStore.setClipNoteFormant`.
     public var formantOffsetSemitones: Double
     /// Per-note timing (m23-ap C2): how far this note's start / end edge has
     /// moved, read as EDITED seconds. The edited start is `startSeconds +
@@ -444,6 +484,65 @@ public struct NoteSegment: Identifiable, Codable, Sendable, Equatable {
     /// none of them is served a render made while this field was unread.
     public var amplitudeDb: Double
 
+    /// Natural tuning §4 (m23-nt, design `docs/design/2026-09-25-natural-tuning.md`
+    /// §4.b.1): the width of the join to the NEXT note, ms of the ORIGINAL take,
+    /// stored on the LEFT note (Melodyne's "rear part of the note"). `0` = Auto.
+    /// Otherwise `30...1000`: the floor is one analysis hop, the ceiling a
+    /// bounded pick, not a measurement.
+    ///
+    /// Read by the curve since NT-C C4 (`PitchEditSet.softJoin`, the one
+    /// width rule) and hashed in digest slot 9. It is deliberately NOT part
+    /// of `isPitchIdentity`, `isIdentity` or `isEdited`: with every offset at
+    /// 0 a width bends nothing, so a seeded table stays identity (§4.b.1 ⛔).
+    /// Codable key `transitionOut`, written only when non-zero.
+    public var transitionOutMs: Double
+
+    /// Natural tuning §4: this note is a sung SLIDE that follows its
+    /// neighbours, `0...1`. `0` = today (its own constant only). New editor
+    /// tables seed `1` on `.transition` parts (`PitchEditSet.seeded`, X3);
+    /// presets keep `0`, the user's (a-T) ruling. Read by the curve since C4
+    /// (the TILT, `PitchCorrectionCurve.bridge`; slot 9 keys it), and outside
+    /// every identity predicate for the reason `transitionOutMs` gives.
+    /// Codable key `glideFollow`, written only when non-zero.
+    ///
+    /// ⚠️ Both natural-tuning note fields are Doubles declared BEFORE
+    /// `isCleared`, so the note stays a UUID, Doubles, the drawn shape's two
+    /// 8-byte fields below, and two trailing one-byte fields, `isCleared` and
+    /// `origin` (`ClipRenderSignatureTests.noteBytesAreExactlyItsFields`).
+    public var glideFollow: Double
+
+    // ───────────────────────────────────────────────────────────────────────
+    // m23-ap C5b-1 — THE DRAWN SHAPE (design
+    // `docs/design/2026-09-24-pitch-editor-timing-and-freehand.md` §5.2, B1).
+    // ───────────────────────────────────────────────────────────────────────
+    //
+    // A DELTA, in tenths of a cent, ADDED to whatever the note already plays:
+    // one more term in the curve's sum, inside the note's gate, read in SOURCE
+    // time (`PitchCorrectionCurve.drawnShape`). It needs no contour, so it
+    // plays the same whether or not detection is available. Stored densely on
+    // ONE global grid anchored at source second 0 (`shapeGridHz`, 10 ms), so a
+    // split, a first-wins truncation and a retime are index operations that
+    // never resample. FLAT fields, not a nested struct, so the reflection
+    // censuses see each one.
+    //
+    // ⚠️ **DECLARED BEFORE `isCleared`, ON PURPOSE.** An `Int` and an
+    // `Array` are 8 bytes each and 8-aligned, so the note keeps all its
+    // padding at the TAIL. The array is a REFERENCE (one pointer), which is
+    // why `ClipRenderSignature.Tuning.bitIdentical` skips its 8 bytes and
+    // compares its CONTENTS instead (`noteBytesAreExactlyItsFields`).
+
+    /// Grid index of `shapeTenthsOfCents[0]`: sample `k` sits at source
+    /// second `Double(shapeStartIndex + k) / shapeGridHz`. 0 when there is no
+    /// shape. Codable key `shapeStartIndex`, written only with a shape.
+    public var shapeStartIndex: Int
+
+    /// The drawn delta, tenths of a cent, one sample per grid step, within
+    /// ±12 000 (±1200 c: an octave move is what `pitchOffsetCents` is for).
+    /// EMPTY means no shape (`hasShape`, the one predicate). Codable key
+    /// `shapeTenthsOfCents`, written only when non-empty; healed by
+    /// `healedShape` in `init`, decode included.
+    public var shapeTenthsOfCents: [Int16]
+
     /// The note is CLEARED: silenced in place, nothing else moved (I7a, design
     /// `docs/design/2026-09-24-pitch-editor-interaction-batch.md` §10/§17).
     ///
@@ -453,13 +552,37 @@ public struct NoteSegment: Identifiable, Codable, Sendable, Equatable {
     /// pitch curve never reads it, so a cleared note keeps its place in the
     /// curve and its neighbours render exactly as before.
     ///
-    /// ⚠️ **DECLARED LAST ON PURPOSE.** It is the only field after the UUID that
-    /// is not a Double, so as the last stored property its padding sits at the
-    /// TAIL of the struct. `ClipRenderSignature.Tuning.bitIdentical` compares
-    /// each note's `size` bytes and relies on there being no INTERIOR padding;
+    /// ⚠️ **DECLARED AFTER EVERY 8-BYTE FIELD ON PURPOSE.** It and `origin`
+    /// below are the only one-byte fields, so as the last two stored
+    /// properties their padding sits at the TAIL of the struct.
+    /// `ClipRenderSignature.Tuning.bitIdentical` compares each note's `size`
+    /// bytes (skipping only the drawn shape's pointer, whose contents it
+    /// compares) and relies on there being no INTERIOR padding;
     /// `ClipRenderSignatureTests.noteBytesAreExactlyItsFields` pins that.
     /// Codable key `cleared`, written only when true.
     public var isCleared: Bool
+
+    /// Where this segment came from (U-A, unpitched-notes design §1.4, U2): a
+    /// note the splitter found, a sung slide, or a SOUND with no detected
+    /// pitch (`PitchUnpitchedFinder`). A DETECTION fact, like `detectedHz`:
+    /// no edit changes it, which is why it is a `let`. A split carries it
+    /// through `reidentified`'s Codable round trip.
+    ///
+    /// For `.unpitched`, `detectedHz` is the BORROWED drawing anchor (§1.5),
+    /// never a measurement, and `detectedConfidence` the median confidence of
+    /// the sound's own frames. It is not part of `isIdentity`, `isEdited` or
+    /// any other edit predicate: where a note came from is not an edit. It
+    /// decides one thing on its own, `entersPitchCurve`.
+    ///
+    /// ⚠️ **DECLARED LAST, AFTER `isCleared`, ON PURPOSE.** A one-byte enum
+    /// anywhere before an 8-byte field would put padding INSIDE the note, and
+    /// the byte comparison would then call equal notes unequal
+    /// (`noteBytesAreExactlyItsFields` pins the layout). Codable key
+    /// `origin`, written only when it is not `.detected`, so every stored
+    /// table keeps its bytes and its `contentStamp`; decoded through
+    /// `NoteOrigin(storedValue:)`, so a missing OR unknown value reads as
+    /// `.detected` and a file from a newer build still opens.
+    public let origin: NoteOrigin
 
     /// ±24 semitones expressed in cents — the same span as
     /// `Clip.pitchShiftSemitonesRange`, so a per-note offset can never ask for
@@ -470,6 +593,81 @@ public struct NoteSegment: Identifiable, Codable, Sendable, Equatable {
     public static let shapeScaleRange: ClosedRange<Double> = 0...4
     /// ±24 semitones, matching the whole-clip pitch range.
     public static let formantOffsetSemitonesRange: ClosedRange<Double> = -24...24
+    /// Natural tuning §4.b.1: an explicit join width, ms. `0` (Auto) sits
+    /// outside it on purpose; `init` maps `0 < x < 30` to the floor. The
+    /// floor is one 30 ms hop (`PitchEditSet.engineMinimumRetuneMs`), the
+    /// ceiling a bounded pick.
+    public static let transitionOutMsRange: ClosedRange<Double> =
+        PitchEditSet.engineMinimumRetuneMs...1000
+    /// Natural tuning §4.b.1: 0 (own constant only) to 1 (fully follows).
+    public static let glideFollowRange: ClosedRange<Double> = 0...1
+
+    /// C5b-1: the drawn shape's grid, samples per SOURCE second (10 ms). A
+    /// pick, not a measurement (§5.2): finer than the detector's 16 ms frame
+    /// and the renderer's 30 ms hop, coarse enough to keep a fully drawn
+    /// vocal small.
+    public static let shapeGridHz: Double = 100
+    /// C5b-1: the drawn delta's range, cents. Stored as tenths of a cent in
+    /// `shapeTenthsRange`.
+    public static let shapeCentsRange: ClosedRange<Double> = -1200...1200
+    /// `shapeCentsRange` in the stored unit, tenths of a cent.
+    public static let shapeTenthsRange: ClosedRange<Int16> = -12_000...12_000
+    /// C5b-1: the last grid index a sample may sit at, 24 h on the grid. A
+    /// STRUCTURAL bound (the phase anchor's 24 h precedent) that keeps
+    /// `shapeStartIndex + k` far from overflow; no take is that long.
+    public static let shapeMaxIndex: Int = 86_400 * 100
+    /// C5b-1: the version of the curve's shape arithmetic (grid, units,
+    /// interpolation, held ends). It sits inside the render digest's shape
+    /// block (slot 4), so a bump re-keys exactly the renders of shaped sets.
+    public static let shapeRenderVersion: Int = 1
+
+    /// True when this note carries a drawn shape. ⭐ **THE ONE PREDICATE**
+    /// (C5b-1): `isPitchIdentity`, `entersPitchCurve`, the curve's
+    /// structural branch, the digest's shape block and `encode` all ask
+    /// this, and none of them restates it. An all-zero array IS a shape here
+    /// (it renders as nothing through the stretcher); emptying one is the
+    /// setter's normalisation (§5.2), not `init`'s.
+    public var hasShape: Bool { !shapeTenthsOfCents.isEmpty }
+
+    /// ⭐ THE SHAPE'S HEALING RULE (C5b-1), the one home for `init` and so
+    /// for decode:
+    ///  * every sample is clamped to `shapeTenthsRange` (±1200 c);
+    ///  * a sample whose GRID INDEX falls outside `0...shapeMaxIndex` is
+    ///    DROPPED, never moved: a negative start keeps only the samples at
+    ///    index ≥ 0, each at its own source second (the global-grid rule),
+    ///    and samples past 24 h go the same way;
+    ///  * nothing left means no shape, and no shape stores index 0.
+    /// A shape that needs none of this is returned as it came, storage and
+    /// all, so an untouched note's array is never copied.
+    static func healedShape(startIndex: Int, tenths: [Int16]) -> (startIndex: Int, tenths: [Int16]) {
+        let count = tenths.count
+        // Every index is `startIndex + k`, `k` in `0..<count`. Rejecting the
+        // all-outside cases first keeps every sum below in range, `Int.min`
+        // and `Int.max` included.
+        guard count > 0, startIndex > -count, startIndex <= shapeMaxIndex else { return (0, []) }
+        let first = max(0, -startIndex)
+        let end = min(count, shapeMaxIndex - startIndex + 1)
+        guard first < end else { return (0, []) }
+        let range = shapeTenthsRange
+        if first == 0, end == count, tenths.allSatisfy({ range.contains($0) }) {
+            return (startIndex, tenths)
+        }
+        return (startIndex + first, tenths[first..<end].map { $0.clamped(to: range) })
+    }
+
+    /// Decode's reading of the stored samples: JSON numbers, healed one by
+    /// one to the nearest tenth within `shapeTenthsRange` (a non-finite one
+    /// to 0, no delta), BEFORE any conversion to `Int16`. Decoding `[Int16]`
+    /// directly would THROW on a hand-written 40 000, and one bad note would
+    /// fail the whole project.
+    static func decodedShapeTenths(_ values: [Double]) -> [Int16] {
+        let low = Double(shapeTenthsRange.lowerBound)
+        let high = Double(shapeTenthsRange.upperBound)
+        return values.map { value in
+            guard value.isFinite else { return 0 }
+            return Int16(value.rounded().clamped(to: low...high))
+        }
+    }
 
     /// **THE CEILING IS AN ENGINE LIMIT, MEASURED, NOT A TASTE DECISION** —
     /// the same kind of number as `PitchEditSet.engineMinimumRetuneMs`, and
@@ -519,6 +717,11 @@ public struct NoteSegment: Identifiable, Codable, Sendable, Equatable {
     /// reason a fade fails to complete.
     public static let vibratoOnsetSecondsRange: ClosedRange<Double> = 0...5
 
+    /// −1 s to 24 h. A STRUCTURAL bound for sanity, not a taste pick: the
+    /// wobble editor anchors inside a note or within half a period of one, so
+    /// no real value falls outside it (design §7.1).
+    public static let vibratoPhaseAnchorSecondsRange: ClosedRange<Double> = -1...86_400
+
     /// True when this segment asks the curve for nothing — a detected note the
     /// user has not edited. Such a segment is still worth persisting (it is the
     /// note table an editor draws), which is why this is NOT the emptiness test
@@ -532,7 +735,11 @@ public struct NoteSegment: Identifiable, Codable, Sendable, Equatable {
     /// than a needless render. Rate and onset are the other case and the
     /// distinction is structural, not a preference:
     ///
-    ///  * Those fields are UNREAD, so their render effect is UNKNOWN.
+    ///  * Those fields were UNREAD when this was written, so their render
+    ///    effect was UNKNOWN. (Since natural tuning C1 the formant offset is
+    ///    READ by `PitchCorrectionCurve.formantSemitones`, and a non-zero
+    ///    offset DOES change the render once NT-E1 lands, so it belongs here
+    ///    on the stronger ground: it is an edit, not a maybe.)
     ///  * Rate and onset are READ, and they enter the curve only as
     ///    `depthSemitones × envelope(t) × sin(…)`. At `vibratoDepthCents == 0`
     ///    that product is exactly zero for every `t`, for every rate and every
@@ -546,6 +753,10 @@ public struct NoteSegment: Identifiable, Codable, Sendable, Equatable {
     /// through a full stretch render, and a ratio-1 stretch is not its own
     /// input. So the conservative direction for THESE two is to stay out.
     /// `NoteVibratoGeneratorTests` pins both halves of this.
+    ///
+    /// `vibratoPhaseAnchorSeconds` (C5a-1) is a third field of that kind, for
+    /// the same arithmetic reason: it enters only inside the same `sin(…)`, so
+    /// at depth 0 it is inert for every `t`.
     ///
     /// **I7a/U-C (interaction-batch design §17): identity is two halves, each
     /// with ONE home.** `isPitchIdentity` is everything the STRETCHER would
@@ -563,11 +774,19 @@ public struct NoteSegment: Identifiable, Codable, Sendable, Equatable {
     /// clip that is neither stretched nor transposed it never runs the
     /// stretcher at all. A ratio-1 stretch is not its own input, and clearing
     /// one breath must not recolour the take.
+    ///
+    /// ⛔ **C5b-1: `!hasShape` IS HERE, NOT ONLY IN `isIdentity`.** A drawn
+    /// shape is a STRETCHER edit. Without it a shape-only set would take the
+    /// render's bypass (and hash to `""`), and the clip would play unshaped
+    /// while every setter echoed success (design §5.8, mode 1).
+    /// `isIdentity`, `isEdited`, `hasPitchEdits`, the digest guard and
+    /// `RenderDiff`'s plan all follow from this line.
     public var isPitchIdentity: Bool {
         pitchOffsetCents == 0 && driftScale == 1 && vibratoScale == 1
             && vibratoDepthCents == 0
             && formantOffsetSemitones == 0
             && timeStartDeltaSeconds == 0 && timeEndDeltaSeconds == 0
+            && !hasShape
     }
 
     /// True when the LEVEL MASK touches this note: it is cleared, or its level
@@ -589,8 +808,10 @@ public struct NoteSegment: Identifiable, Codable, Sendable, Equatable {
     /// report a write that took as one that did not. Before this existed the
     /// spy read `pitchOffsetCents != 0` alone, so a Hard-Tuned note that sat
     /// already in tune (offset 0, both scales 0) read as untouched.
+    /// C5a-1: the phase anchor is the third such field.
     public var isEdited: Bool {
         !isIdentity || vibratoRateHz != 0 || vibratoOnsetSeconds != 0
+            || vibratoPhaseAnchorSeconds != 0
     }
 
     /// True when the synthesised generator contributes anything at all.
@@ -620,6 +841,70 @@ public struct NoteSegment: Identifiable, Codable, Sendable, Equatable {
     /// name — stale audio that looks like a working cache.
     public var wantsContourShaping: Bool { driftScale != 1 || vibratoScale != 1 }
 
+    /// Natural tuning §3b/§3d (W7-C3): true when this note's shaping takes the
+    /// SEPARATED (v2) branch of `PitchCorrectionCurve.make`: it shapes against
+    /// the contour AND its two scales differ, so the drift/vibrato split no
+    /// longer cancels and the separator's kernel is heard.
+    ///
+    /// ⭐ **THE ONE PREDICATE FOR "WHICH SEPARATOR SHAPES THIS NOTE".** `make`
+    /// branches on it, and the render key's `shaping:` version comes from it
+    /// (`PitchEditSet.needsSeparatedShaping` →
+    /// `PitchRenderContour.shapingVersion(for:)`), so a note can never be shaped
+    /// by one separator and keyed as the other. Equal scales, which is every set
+    /// the product has ever written, are false here and render and key exactly
+    /// as before v2.
+    public var takesSeparatedShaping: Bool { wantsContourShaping && driftScale != vibratoScale }
+
+    /// True when `PitchCorrectionCurve.make` builds a span for this segment.
+    /// ⭐ **THE ONE PREDICATE** for "does this segment take part in the pitch
+    /// curve" (unpitched-notes design §1.6, U4, as amended by natural-tuning
+    /// design R21): every note does; a SOUND (`.unpitched`) does only once
+    /// someone asked the curve for something on it.
+    ///
+    /// **Why an untouched sound must stay out, even though it is identity.**
+    /// An identity span still joins the gate sum, and the evaluator normalises
+    /// that sum whenever it exceeds 1. Beside a note with a longer ramp, the
+    /// sound's gate then trims the NOTE's correction near their shared edge.
+    /// Out of the curve, a table with untouched sounds renders byte for byte
+    /// as the same table without them (`PitchCurveRenderTests` §10, G-C13).
+    ///
+    /// **Why a moved sound comes in (R21, U5 kept).** The user asked to move
+    /// sounds: a breath or an "s" dragged on purpose renders moved (it
+    /// transposes noise; the editor says so). A deliberate drift, vibrato or
+    /// generator value on a sound enters too, rather than being a silent
+    /// no-op: a sound has no voiced frames to shape, so the curve names it in
+    /// `unresolvedShapingSegmentIDs`, the honest failure. The shape setters
+    /// refuse sounds in words before that can happen (§1.7).
+    ///
+    /// **A drawn shape comes in too (C5b-1), by the same R21 rule.** A shape
+    /// breaks `isPitchIdentity`, so the stretcher runs; a sound with no span
+    /// would then drop the shape in silence. With a span it plays like a
+    /// moved sound: the drawn delta needs no contour, so it resolves.
+    public var entersPitchCurve: Bool {
+        origin != .unpitched || pitchOffsetCents != 0 || wantsContourShaping
+            || hasGeneratedVibrato || hasShape
+    }
+
+    /// True when this note's OWN formant offset reaches the formant curve
+    /// (natural tuning §1(b), NT-C C1): the offset is non-zero AND the note
+    /// has a span to carry it (`entersPitchCurve`). `PitchEditSet`'s
+    /// `engagesFormantCurve` asks this and nothing else.
+    ///
+    /// ⚠️ **AN UNTOUCHED SOUND'S OFFSET DOES NOT COUNT, AND THAT IS THE
+    /// RULING, NOT AN OVERSIGHT.** The formant evaluator reads offsets from
+    /// the pitch curve's spans (one set of gates, X7), and an untouched sound
+    /// has none. Making a formant-only edit give a sound a span would put it
+    /// into the PITCH gate sum too, where its normaliser trims a neighbour's
+    /// pitch near their shared edge (`entersPitchCurve`'s own reason): a pitch
+    /// change caused by a voice edit. And under `keepsConsonantsUntuned` (R21)
+    /// that sound plays the dry take anyway. So the offset is not read, it
+    /// does not engage the curve (engaging would run the formant stage for a
+    /// value nothing applies), and `ProjectStore.setClipNoteFormant` refuses
+    /// every sound in words, so only a hand-authored file can carry one. A
+    /// MOVED sound enters like any note (R21): its move follows the set's
+    /// amount, and a hand-authored offset on it is read.
+    public var engagesFormantCurve: Bool { formantOffsetSemitones != 0 && entersPitchCurve }
+
     /// Note length in source seconds; never negative.
     public var durationSeconds: Double { max(0, endSeconds - startSeconds) }
 
@@ -635,11 +920,17 @@ public struct NoteSegment: Identifiable, Codable, Sendable, Equatable {
         vibratoRateHz: Double = 0,
         vibratoDepthCents: Double = 0,
         vibratoOnsetSeconds: Double = 0,
+        vibratoPhaseAnchorSeconds: Double = 0,
         formantOffsetSemitones: Double = 0,
         timeStartDeltaSeconds: Double = 0,
         timeEndDeltaSeconds: Double = 0,
         amplitudeDb: Double = 0,
-        isCleared: Bool = false
+        transitionOutMs: Double = 0,
+        glideFollow: Double = 0,
+        shapeStartIndex: Int = 0,
+        shapeTenthsOfCents: [Int16] = [],
+        isCleared: Bool = false,
+        origin: NoteOrigin = .detected
     ) {
         self.id = id
         let start = max(0, PitchCorrectionMath.finite(startSeconds, default: 0))
@@ -670,6 +961,10 @@ public struct NoteSegment: Identifiable, Codable, Sendable, Equatable {
             .finite(vibratoDepthCents, default: 0).clamped(to: Self.vibratoDepthCentsRange)
         self.vibratoOnsetSeconds = PitchCorrectionMath
             .finite(vibratoOnsetSeconds, default: 0).clamped(to: Self.vibratoOnsetSecondsRange)
+        // Non-finite reverts to 0, today's phase: never to a phase nobody set.
+        self.vibratoPhaseAnchorSeconds = PitchCorrectionMath
+            .finite(vibratoPhaseAnchorSeconds, default: 0)
+            .clamped(to: Self.vibratoPhaseAnchorSecondsRange)
         self.formantOffsetSemitones = PitchCorrectionMath
             .finite(formantOffsetSemitones, default: 0)
             .clamped(to: Self.formantOffsetSemitonesRange)
@@ -677,15 +972,37 @@ public struct NoteSegment: Identifiable, Codable, Sendable, Equatable {
         self.timeEndDeltaSeconds = PitchCorrectionMath.finite(timeEndDeltaSeconds, default: 0)
         self.amplitudeDb = PitchCorrectionMath
             .finite(amplitudeDb, default: 0).clamped(to: Clip.gainDbRange)
+        self.transitionOutMs = Self.healedTransitionOutMs(transitionOutMs)
+        // Non-finite reverts to 0 (today's behaviour), never to a follow
+        // nobody asked for.
+        self.glideFollow = PitchCorrectionMath
+            .finite(glideFollow, default: 0).clamped(to: Self.glideFollowRange)
+        // C5b-1: clamp, drop what sits off the grid, empty stores index 0
+        // (`healedShape`, the one rule).
+        (self.shapeStartIndex, self.shapeTenthsOfCents) =
+            Self.healedShape(startIndex: shapeStartIndex, tenths: shapeTenthsOfCents)
         self.isCleared = isCleared
+        self.origin = origin
+    }
+
+    /// `0` stays Auto (non-finite and non-positive read as Auto, so `-0.0`
+    /// cannot round-trip as a distinct value); a positive width below one
+    /// hop is raised to the floor and one above the ceiling lowered to it,
+    /// so a read-back is what applies (the `retuneMs` precedent).
+    private static func healedTransitionOutMs(_ value: Double) -> Double {
+        let ms = PitchCorrectionMath.finite(value, default: 0)
+        return ms > 0 ? ms.clamped(to: transitionOutMsRange) : 0
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, startSeconds, endSeconds, detectedHz, detectedConfidence
         case pitchOffsetCents, driftScale, vibratoScale
-        case vibratoRateHz, vibratoDepthCents, vibratoOnsetSeconds
+        case vibratoRateHz, vibratoDepthCents, vibratoOnsetSeconds, vibratoPhaseAnchorSeconds
         case formantOffsetSemitones, timeStartDeltaSeconds, timeEndDeltaSeconds, amplitudeDb
+        case transitionOutMs = "transitionOut", glideFollow
+        case shapeStartIndex, shapeTenthsOfCents
         case isCleared = "cleared"
+        case origin
     }
 
     /// Decoding routes through the healing `init` — the `Clip`/`MIDINote`
@@ -707,6 +1024,11 @@ public struct NoteSegment: Identifiable, Codable, Sendable, Equatable {
                 Double.self, forKey: .vibratoDepthCents) ?? 0,
             vibratoOnsetSeconds: try c.decodeIfPresent(
                 Double.self, forKey: .vibratoOnsetSeconds) ?? 0,
+            // C5a-1: absent from every note saved before the field, and from
+            // every note since whose anchor is 0 (written only when non-zero),
+            // so absent is today's source-zero phase.
+            vibratoPhaseAnchorSeconds: try c.decodeIfPresent(
+                Double.self, forKey: .vibratoPhaseAnchorSeconds) ?? 0,
             formantOffsetSemitones: try c.decodeIfPresent(
                 Double.self, forKey: .formantOffsetSemitones) ?? 0,
             timeStartDeltaSeconds: try c.decodeIfPresent(
@@ -714,13 +1036,32 @@ public struct NoteSegment: Identifiable, Codable, Sendable, Equatable {
             timeEndDeltaSeconds: try c.decodeIfPresent(
                 Double.self, forKey: .timeEndDeltaSeconds) ?? 0,
             amplitudeDb: try c.decodeIfPresent(Double.self, forKey: .amplitudeDb) ?? 0,
+            // Natural tuning §4: absent from every note saved before the
+            // fields existed, and from every note since that keeps them at
+            // 0 (written only when non-zero), so absent is today's join.
+            transitionOutMs: try c.decodeIfPresent(Double.self, forKey: .transitionOutMs) ?? 0,
+            glideFollow: try c.decodeIfPresent(Double.self, forKey: .glideFollow) ?? 0,
+            // C5b-1: absent from every note saved before the shape existed
+            // and from every note without one (written only with a shape),
+            // so absent is no shape. Samples are read as NUMBERS and healed
+            // (`decodedShapeTenths`), never as `Int16`, which would throw.
+            shapeStartIndex: try c.decodeIfPresent(Int.self, forKey: .shapeStartIndex) ?? 0,
+            shapeTenthsOfCents: Self.decodedShapeTenths(
+                try c.decodeIfPresent([Double].self, forKey: .shapeTenthsOfCents) ?? []),
             // I7a: absent from every set saved before clearing existed, and
             // from every uncleared note since (it is written only when true).
-            isCleared: try c.decodeIfPresent(Bool.self, forKey: .isCleared) ?? false)
+            isCleared: try c.decodeIfPresent(Bool.self, forKey: .isCleared) ?? false,
+            // U-A: read as a STRING and healed, never as `NoteOrigin` itself.
+            // A decode of the enum would THROW on a case a newer build added,
+            // and one unknown note would then fail the whole project. Absent
+            // (every note written before U-A, and every detected note since)
+            // and unknown both read as `.detected`.
+            origin: NoteOrigin(storedValue: try c.decodeIfPresent(String.self, forKey: .origin)))
     }
 
-    /// Writes the four detection facts always (they are what the segment IS),
-    /// and every EDIT field only when it departs from its default — the
+    /// Writes the four detection facts always (they are what the segment IS;
+    /// `origin`, the fifth, only when it is not `.detected`, U-A), and every
+    /// EDIT field only when it departs from its default — the
     /// `Clip`/`Track` omit-when-default rule. A freshly detected, unedited note
     /// is therefore five keys, not twelve, which is what keeps §7.3's ~200
     /// bytes/segment sizing honest at 450 segments per corrected vocal.
@@ -745,6 +1086,9 @@ public struct NoteSegment: Identifiable, Codable, Sendable, Equatable {
         if vibratoOnsetSeconds != 0 {
             try c.encode(vibratoOnsetSeconds, forKey: .vibratoOnsetSeconds)
         }
+        if vibratoPhaseAnchorSeconds != 0 {
+            try c.encode(vibratoPhaseAnchorSeconds, forKey: .vibratoPhaseAnchorSeconds)
+        }
         if formantOffsetSemitones != 0 {
             try c.encode(formantOffsetSemitones, forKey: .formantOffsetSemitones)
         }
@@ -755,9 +1099,24 @@ public struct NoteSegment: Identifiable, Codable, Sendable, Equatable {
             try c.encode(timeEndDeltaSeconds, forKey: .timeEndDeltaSeconds)
         }
         if amplitudeDb != 0 { try c.encode(amplitudeDb, forKey: .amplitudeDb) }
+        // Natural tuning §4: omit-when-default, so a note saved before these
+        // existed re-saves byte-identically (G-FILE).
+        if transitionOutMs != 0 { try c.encode(transitionOutMs, forKey: .transitionOutMs) }
+        if glideFollow != 0 { try c.encode(glideFollow, forKey: .glideFollow) }
+        // C5b-1: both keys, or neither (an empty shape stores index 0), so a
+        // note with no shape saves byte-identically to one saved before it
+        // existed and keeps its `contentStamp`.
+        if hasShape {
+            try c.encode(shapeStartIndex, forKey: .shapeStartIndex)
+            try c.encode(shapeTenthsOfCents, forKey: .shapeTenthsOfCents)
+        }
         // I7a: omit-when-default like every edit field, so a project with no
         // cleared note saves byte-identically to one saved before the flag.
         if isCleared { try c.encode(true, forKey: .isCleared) }
+        // U-A: omit-when-default, so a table with no sound and no slide saves
+        // byte-identically to one saved before the field (and keeps its
+        // `contentStamp`, so a preset's own output still reads as untouched).
+        if origin != .detected { try c.encode(origin.rawValue, forKey: .origin) }
     }
 }
 
@@ -815,6 +1174,152 @@ public struct PitchEditSet: Codable, Sendable, Equatable {
     /// from the payload when nil, so a legacy set re-saves byte-identically.
     public var autoCorrectStamp: String?
 
+    // ───────────────────────────────────────────────────────────────────────
+    // Natural tuning (m23-nt, design `docs/design/2026-09-25-natural-tuning.md`).
+    // THREE SET-LEVEL FIELDS, ONE RULE FOR EACH OF THEM:
+    //  * the memberwise default is the LEGACY value, so every existing
+    //    `PitchEditSet(...)` call and every test golden is unchanged (X2);
+    //  * an ABSENT key decodes to that legacy value and the legacy value is
+    //    never written, so a saved project re-saves byte-identically (G-FILE);
+    //  * NEW sets get the new values only through `PitchEditSet.seeded` (X3),
+    //    and every rebuild goes through `withSegments`, which carries them.
+    // ⚠️ NT-C C0 landed the fields only. C1 added the formant evaluator
+    // (`PitchCorrectionCurve.formantSemitones`, `engagesFormantCurve`; slot
+    // 7, NT-E1). C4 made the curve read the §4 fields (`usesSoftJoins`) and
+    // keys them in slot 9. C2 gave `keepsConsonantsUntuned` its mask
+    // (`PitchConsonantMask.swift`) and keys it in slot 8; the render's mix
+    // that reads the mask is NT-E2's. NT-C2-F1 (W7-D2) made the consonant
+    // field's STORED state `consonantProtection` (three cases, so a preset
+    // re-run can tell an OFF somebody chose from one nobody chose);
+    // `keepsConsonantsUntuned` is its on/off reading, and the legacy rule
+    // above still holds for it.
+    // ───────────────────────────────────────────────────────────────────────
+
+    /// §1: how much of a moved note's formant shift is REMOVED, `0...1`.
+    /// `nil` = legacy (the clip's `formantPreserve` flag alone, today's code).
+    ///
+    /// ⚠️ **`0.0` IS NOT LEGACY.** At 0.0 the formant branch still runs
+    /// (§1(b)), so 0.0 is ENCODED like any other value; only nil is omitted.
+    /// An omit-at-zero habit would silently flip a saved 0.0 back to legacy
+    /// on reopen. A non-finite value reads as nil.
+    public var formantCorrection: Double?
+
+    /// §2: the gaps between notes play the untouched take, so consonants and
+    /// breaths keep their own pitch. ⭐ **THE ON/OFF READING of
+    /// `consonantProtection`** (the stored state, below), and what every
+    /// reader asks: the mask (`PitchConsonantMask.swift`, `hasConsonantMix`,
+    /// `tunedWeight`), digest slot 8, the wire. `false` = legacy. Its store
+    /// door is `ProjectStore.setClipConsonantProtection`.
+    ///
+    /// ⚠️ **WRITING IT SWITCHES THE FLAG AND NEVER RECORDS OR ERASES A
+    /// CHOICE:** `true` is `.on`; `false` on an `.on` set is `.offByDefault`;
+    /// `false` on either off state changes nothing. Only
+    /// `setClipConsonantProtection` records a choice (`.offByChoice`), so no
+    /// other writer (a fixture, a copy, a future rebuild) can turn an OFF
+    /// nobody chose into a chosen one, or quietly forget a chosen one.
+    public var keepsConsonantsUntuned: Bool {
+        get { consonantProtection == .on }
+        set {
+            if newValue {
+                consonantProtection = .on
+            } else if consonantProtection == .on {
+                consonantProtection = .offByDefault
+            }
+        }
+    }
+
+    /// §2, NT-C2-F1 (W7-D2): the consonant setting AS STORED, three states,
+    /// because a Bool cannot tell an OFF somebody CHOSE from one nobody
+    /// chose, and a preset re-run must keep the first and seed the second
+    /// (`ProjectStore.autoCorrectClipPitchReport` is the one home of that
+    /// rule). Codable key `keepsConsonantsUntuned`: ABSENT is
+    /// `.offByDefault`, `true` is `.on`, an explicit `false` is
+    /// `.offByChoice` (`ConsonantProtection` argues each).
+    ///
+    /// ⭐ **ONE STORED FIELD, NOT A Bool PLUS A "chosen" Bool.** Two fields
+    /// need an invariant between them ("OFF was chosen" with the flag on
+    /// means nothing), and a state the file cannot hold would not survive a
+    /// save. Three cases are exactly the three encodings, and the
+    /// synthesized `==` tells `.offByDefault` from `.offByChoice`, which is
+    /// what makes `performEdit` journal a choice and undo restore "never
+    /// chosen" exactly.
+    ///
+    /// ⚠️ **NOT RENDER MATERIAL BEYOND ITS ON/OFF READING.** Every render
+    /// reader asks `keepsConsonantsUntuned`, which is false in both off
+    /// states, so `.offByDefault` and `.offByChoice` render, key and digest
+    /// alike (the `autoCorrectStamp` precedent; DAWEngineTests'
+    /// `ConsonantChoiceDigestTests` pins it). It IS part of what the set
+    /// saves, so `contentStamp` sees it: a choice made after a preset reads
+    /// as a change since that preset, as a flip of the flag always has.
+    ///
+    /// ⚠️ Not the `consonantProtection` OBJECT in `clip.getPitchEdits`' reply
+    /// (`active`/`inactiveReason`: whether the mix runs, read through
+    /// `consonantMixIsActive`). That reply does not carry this state yet.
+    public var consonantProtection: ConsonantProtection
+
+    /// §4: the fastest the ADDED correction may travel across a soft join,
+    /// cents per second; also the soft-join mode switch. `0` = legacy
+    /// (today's centred per-span ramps), otherwise `500...20000` (bounded
+    /// picks). Codable key `transitionSlope`, written only when non-zero.
+    public var transitionSlopeCentsPerSecond: Double
+
+    /// §1(c): the correction a NEW set starts with. Provisional: the 1(h)
+    /// listening round picks the final value, and this is the one line.
+    public static let newSetFormantCorrection: Double = 1.0
+    /// §1: the amount's range. nil (legacy) sits outside it.
+    public static let formantCorrectionRange: ClosedRange<Double> = 0...1
+    /// §1(d): the version of what an ENGAGED formant curve renders, hashed in
+    /// digest slot 7 (NT-E1) so a bump re-keys only the sets that
+    /// `engagesFormantCurve`, never every stretched clip
+    /// (`stretchEngineVersion` is NOT the lever). Bump it when the base
+    /// policy (`PitchCorrectionCurve.formantBaseHz`: the step rule, the
+    /// unpitched skip, the 50 Hz floor), the F arithmetic
+    /// (`formantSemitones`), the shim's formant semantics or the vendored
+    /// library's ENGAGED formant path (patch 0004) change. R8: the explicit
+    /// base's half-bin offset is part of versions 1 and 2.
+    ///
+    /// **2 (NT-E1b): the render READS the curve.** Under version 1, slot 7
+    /// keyed every engaged set while `StretchRenderCache.renderAudio` still
+    /// handed the curve loop no formant curve, so every render cached then
+    /// (staging builds share the render cache) holds UN-shaped audio under
+    /// an engaged key. Version 2 orphans those entries ON PURPOSE: each
+    /// re-renders once, shaped. A legacy set has no slot 7 and keeps its key.
+    ///
+    /// **3 (NT-F220): the library's formant envelope, explicit base only.**
+    /// Vendored patch 0004 (`Sources/CSignalsmithStretch/VENDORED.md`)
+    /// replaces signalsmith's decay-and-erode envelope with one drawn through
+    /// the harmonic peaks, WHEN the caller hands over a base (every engaged
+    /// render does: `formantBaseHz`). The old envelope sagged about 4 dB
+    /// between two strong harmonics and handed a weak harmonic its louder
+    /// neighbour's skirt, so the compensation over-corrected down-shifts
+    /// (220 Hz −5 st read +63 c against a 50 c bound). Every render cached
+    /// under version 2 holds the old envelope under an engaged key, so it
+    /// re-renders once. With no explicit base (the clip's own formant flag,
+    /// `css_set_formant_preserve`) the library runs upstream's code and the
+    /// bytes do not move, so a legacy set keeps its key AND its audio. R8's
+    /// half bin: the new envelope reads the spacing as `freqEstimate + 0.5`
+    /// bins, so the half-bin offset no longer shapes an engaged render; the
+    /// base handed over is unchanged.
+    public static let formantRenderVersion: Int = 3
+    /// §1 R11: the shortest note whose Voice offset
+    /// (`NoteSegment.formantOffsetSemitones`) the render can give to that
+    /// note alone, seconds. MEASURED by NT-E1 (`NaturalTuningFormantRender
+    /// Tests.probeMinimumVoiceNote`: f0 110 Hz, a −3 st offset on a note
+    /// between two long abutting notes, retune 45 ms, amount 1, one
+    /// 2048-frame envelope window at the note's centre): the offset reaches
+    /// 82 % of a 1 s note's reading at 60 ms, 90 % at 80 ms and about 100 %
+    /// from 100 ms, with no leak into either neighbour. The render sets one
+    /// formant value per 1440-frame hop and shapes 120 ms blocks, so a
+    /// shorter note cannot hold its own value. Nothing reads this yet: the
+    /// pitch editor's "too short to change the voice of this note alone"
+    /// line (NT-U) will.
+    public static let minimumVoiceNoteSeconds: Double = 0.08
+    /// §4.c: the slope a NEW set starts with, provisional 3000 c/s pending
+    /// the 4.h listening round (R14: presets get it too).
+    public static let defaultTransitionSlope: Double = 3000
+    /// §4.b.1: `0` (legacy) sits outside it; `init` raises `0 < x < 500`.
+    public static let transitionSlopeRange: ClosedRange<Double> = 500...20000
+
     /// The shortest ramp the renderer can honour: one 30 ms analysis hop at
     /// 48 kHz (phase-0 §2/§6 — the curve is read once per chunk, and a mid-hop
     /// request waits exactly one full hop, not a fraction of one).
@@ -851,6 +1356,13 @@ public struct PitchEditSet: Codable, Sendable, Equatable {
     /// and keys — exactly as it did before the contour reached the render.
     public var needsDetectedContour: Bool { segments.contains(where: \.wantsContourShaping) }
 
+    /// Natural tuning §3d (W7-C3): true when some note takes the SEPARATED (v2)
+    /// drift/vibrato branch (`NoteSegment.takesSeparatedShaping`, the one
+    /// predicate). The render key's `shaping:` field is version 2 exactly when
+    /// this holds (`PitchRenderContour.shapingVersion(for:)`); every other set,
+    /// Hard Tune and every preset included, keys version 1 as it always did.
+    public var needsSeparatedShaping: Bool { segments.contains(where: \.takesSeparatedShaping) }
+
     /// True when any note is retimed: `NoteSegment.hasTimeEdits`, the one
     /// predicate (m23-ap C2-1). When this is false, `PitchTimeWarp.make`
     /// returns nil, the digest emits no time-warp block, and a render takes
@@ -873,14 +1385,29 @@ public struct PitchEditSet: Codable, Sendable, Equatable {
 
     public static let empty = PitchEditSet(analysisVersion: currentAnalysisVersion, segments: [])
 
+    /// The three natural-tuning parameters are TRAILING and DEFAULT TO LEGACY
+    /// (X2), so no existing call site changes. They CLAMP, like `retuneMs`,
+    /// so a decoded or hand-built set reads back what applies.
     public init(analysisVersion: Int = PitchEditSet.currentAnalysisVersion,
                 segments: [NoteSegment] = [],
-                retuneMs: Double = PitchEditSet.engineMinimumRetuneMs) {
+                retuneMs: Double = PitchEditSet.engineMinimumRetuneMs,
+                formantCorrection: Double? = nil,
+                keepsConsonantsUntuned: Bool = false,
+                transitionSlopeCentsPerSecond: Double = 0) {
         self.analysisVersion = analysisVersion
         self.retuneMs = PitchCorrectionMath
             .finite(retuneMs, default: Self.engineMinimumRetuneMs)
             .clamped(to: Self.retuneMsRange)
         self.segments = Self.canonical(segments)
+        self.formantCorrection = formantCorrection.flatMap {
+            $0.isFinite ? $0.clamped(to: Self.formantCorrectionRange) : nil
+        }
+        // The memberwise Bool can say on or off, never "chosen": a choice is
+        // the store door's alone (`consonantProtection`).
+        self.consonantProtection = keepsConsonantsUntuned ? .on : .offByDefault
+        let slope = PitchCorrectionMath.finite(transitionSlopeCentsPerSecond, default: 0)
+        self.transitionSlopeCentsPerSecond = slope > 0
+            ? slope.clamped(to: Self.transitionSlopeRange) : 0
     }
 
     /// Ascending by start, strictly non-overlapping, zero-length dropped.
@@ -915,29 +1442,570 @@ public struct PitchEditSet: Codable, Sendable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case analysisVersion, segments, retuneMs, autoCorrectStamp
+        case formantCorrection, keepsConsonantsUntuned
+        case transitionSlopeCentsPerSecond = "transitionSlope"
     }
 
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
+        let consonants = try c.decodeIfPresent(Bool.self, forKey: .keepsConsonantsUntuned)
         self.init(
             analysisVersion: try c.decodeIfPresent(Int.self, forKey: .analysisVersion)
                 ?? Self.currentAnalysisVersion,
             segments: try c.decodeIfPresent([NoteSegment].self, forKey: .segments) ?? [],
             retuneMs: try c.decodeIfPresent(Double.self, forKey: .retuneMs)
-                ?? Self.engineMinimumRetuneMs)
+                ?? Self.engineMinimumRetuneMs,
+            // Natural tuning: ABSENT is LEGACY for all three (every set saved
+            // before 2026-09-25 lacks them), routed through the clamping init.
+            formantCorrection: try c.decodeIfPresent(Double.self, forKey: .formantCorrection),
+            keepsConsonantsUntuned: consonants == true,
+            transitionSlopeCentsPerSecond: try c.decodeIfPresent(
+                Double.self, forKey: .transitionSlopeCentsPerSecond) ?? 0)
+        // NT-C2-F1: an EXPLICIT `false` is an OFF somebody chose (only
+        // `.offByChoice` writes one). Absent stays the init's `.offByDefault`.
+        if consonants == false { self.consonantProtection = .offByChoice }
         // Absent (every set saved before C-F3) stays nil, which reads as "may
         // carry hand edits" — the CONFIRM answer, never the silent one.
         self.autoCorrectStamp = try c.decodeIfPresent(String.self, forKey: .autoCorrectStamp)
     }
 
     /// `retuneMs` is omitted at the floor and `autoCorrectStamp` when nil, the
-    /// same omit-when-default rule the rest of the clip payload follows.
+    /// same omit-when-default rule the rest of the clip payload follows. The
+    /// natural-tuning fields follow it too, with TWO deliberate exceptions:
+    /// `formantCorrection` is omitted only when nil and written at every
+    /// value INCLUDING 0.0, because 0.0 is an engaged amount, not legacy; and
+    /// a consonant OFF somebody CHOSE (`.offByChoice`) writes an explicit
+    /// `false`, because it is not the legacy default either. An OFF nobody
+    /// chose still writes nothing.
     public func encode(to encoder: any Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(analysisVersion, forKey: .analysisVersion)
         try c.encode(segments, forKey: .segments)
         if retuneMs != Self.engineMinimumRetuneMs { try c.encode(retuneMs, forKey: .retuneMs) }
         if let autoCorrectStamp { try c.encode(autoCorrectStamp, forKey: .autoCorrectStamp) }
+        if let formantCorrection { try c.encode(formantCorrection, forKey: .formantCorrection) }
+        switch consonantProtection {
+        case .offByDefault: break
+        case .on: try c.encode(true, forKey: .keepsConsonantsUntuned)
+        case .offByChoice: try c.encode(false, forKey: .keepsConsonantsUntuned)
+        }
+        if transitionSlopeCentsPerSecond != 0 {
+            try c.encode(transitionSlopeCentsPerSecond, forKey: .transitionSlopeCentsPerSecond)
+        }
+    }
+}
+
+// MARK: - Natural tuning: the ONE seed and the ONE rebuild (design X2/X3)
+
+extension PitchEditSet {
+
+    /// NT-C2-F1 (W7-D2): the three consonant states `consonantProtection`
+    /// stores, one per encoding.
+    public enum ConsonantProtection: Sendable, Equatable, CaseIterable {
+        /// OFF, and nobody chose it: the legacy default. Every set saved
+        /// before natural tuning, every memberwise construction, and a legacy
+        /// set given only a voice size (`setClipFormantCorrection` writes its
+        /// own field alone). Encoded as NO key. A preset re-run gives it the
+        /// new-set seed, ON.
+        case offByDefault
+        /// ON: seeded (every new set, `seeded`) or switched on. Encoded
+        /// `true`. A preset re-run keeps it. "Chosen ON" and "seeded ON" are
+        /// not told apart because the seed is ON too, so they have one
+        /// future; `ConsonantChoiceTests`' seed tripwire fails the day the
+        /// seed stops being ON, and that day this needs a chosen-ON case.
+        case on
+        /// OFF because somebody switched it off
+        /// (`ProjectStore.setClipConsonantProtection(enabled: false)`, the
+        /// only writer). Encoded as an EXPLICIT `false`, which no file saved
+        /// before this state existed contains: every encoder this field has
+        /// had wrote `true` or nothing. A preset re-run and the
+        /// natural-tuning update (`upgradedToNaturalTuning`) both keep it.
+        case offByChoice
+    }
+
+    /// Which product seam is minting a NEW set. The seed values differ in
+    /// exactly one place, deliberately (X3, "do NOT unify them"): only the
+    /// editor marks sung slides as following their neighbours.
+    public enum SeedPolicy: Sendable, Equatable {
+        /// `PitchNoteTable.detected`: the note table the editor draws.
+        case editor
+        /// `PitchAutoCorrect.editSet`: auto-correct and every preset. Slides
+        /// stay AS SUNG (`glideFollow` 0), the user's (a-T) ruling.
+        case preset
+    }
+
+    /// This set with its notes replaced and EVERY other stored property
+    /// carried, the set-level natural-tuning fields and `autoCorrectStamp`
+    /// included. ⭐ **THE ONE REBUILD (X2 rule 2).** A copy, not a memberwise
+    /// call, so a field added tomorrow is carried without this function
+    /// changing; `canonical` heals the notes exactly as `init` would.
+    ///
+    /// ⛔ A rebuild through `PitchEditSet(analysisVersion:segments:retuneMs:)`
+    /// silently reverts every other field to legacy: a tone change nobody
+    /// asked for. `NaturalTuningFieldCarryTests` and the store-writer carry
+    /// test in `PitchCorrectionWriterTests` pin it.
+    public func withSegments(_ segments: [NoteSegment]) -> PitchEditSet {
+        var copy = self
+        copy.segments = Self.canonical(segments)
+        return copy
+    }
+
+    /// ⭐ **THE ONE SEED (X2 rule 3, R29).** Every product seam that CREATES a
+    /// set calls this, and nothing else sets the natural-tuning fields on a
+    /// new set. Per-field policy (X3 as amended by R14):
+    ///
+    ///     field                      editor seed        preset seed
+    ///     formantCorrection          newSet (1.0)       newSet (1.0)
+    ///     keepsConsonantsUntuned     true               true
+    ///     transitionSlope            default (3000)     default (3000)
+    ///     glideFollow, .transition   1                  0
+    ///
+    /// `partKinds` is a TRANSIENT hint (never stored): the splitter's kind for
+    /// each segment id, which only the editor seam still holds. The POLICY
+    /// decides whether it is read, not its emptiness, so a preset caller that
+    /// passed kinds by mistake still cannot tilt a slide.
+    public static func seeded(analysisVersion: Int,
+                              segments: [NoteSegment],
+                              retuneMs: Double,
+                              partKinds: [UUID: NotePart.Kind],
+                              seedPolicy: SeedPolicy) -> PitchEditSet {
+        var notes = segments
+        if seedPolicy == .editor {
+            for index in notes.indices where partKinds[notes[index].id] == .transition {
+                notes[index].glideFollow = 1
+            }
+        }
+        return PitchEditSet(analysisVersion: analysisVersion,
+                            segments: notes,
+                            retuneMs: retuneMs,
+                            formantCorrection: newSetFormantCorrection,
+                            keepsConsonantsUntuned: true,
+                            transitionSlopeCentsPerSecond: defaultTransitionSlope)
+    }
+
+    /// R16: a tuned vocal made before natural tuning existed. It carries no
+    /// formant amount and asks the stretcher for something. The editor's
+    /// "Tuned before this update. Tap to update." line and the wire's
+    /// `predatesNaturalTuning` both read THIS, and the tap is
+    /// `ProjectStore.upgradeToNaturalTuning`. A set that bends nothing is not
+    /// "tuned", so it never asks.
+    public var predatesNaturalTuning: Bool { formantCorrection == nil && !isPitchIdentity }
+
+    /// §1(b)/(d): the render builds the per-hop FORMANT curve for this set
+    /// (NT-E1's closures, digest slot 7). ⭐ **THE ONE PREDICATE**: the plan,
+    /// the digest block and RenderDiff all ask this and none restates it.
+    ///
+    /// True when the set carries an amount (`0.0` included: it is an engaged
+    /// amount, not legacy) or any note's own offset reaches the curve
+    /// (`NoteSegment.engagesFormantCurve`). A legacy set with every offset 0
+    /// is false, so it renders and keys exactly as before §1. A legacy set
+    /// with a hand-authored offset engages with `c` = the clip's flag, which
+    /// is how that offset is finally read (§1(c) row 2).
+    public var engagesFormantCurve: Bool {
+        formantCorrection != nil || segments.contains(where: \.engagesFormantCurve)
+    }
+}
+
+// MARK: - Natural tuning §4: soft joins (NT-C C4)
+
+/// Where two NEIGHBOURING CURVE NOTES meet (natural tuning R15, which amends
+/// §4.b.2, §2b.2 and X8). ⭐ **THE ONE PREDICATE** for "soft join": §4's
+/// curve (`PitchCorrectionCurve.make`), the digest and the wire read it, and
+/// §2's consonant mask reads the same function, so the two sections act on
+/// disjoint places by construction: a `.gap` is §2's (the dry take plays
+/// there), a `.soft` join is §4's (the correction crossfades across it).
+public enum PitchJoinKind: String, Sendable, Equatable, CaseIterable {
+    /// The notes abut bit for bit (a join inside one voiced run), or a hole
+    /// shorter than `PitchEditSet.consonantMinimumGapSeconds` separates
+    /// them (a detector blink). The correction crossfades across it.
+    case soft
+    /// A silence, a breath or a consonant separates them. Each note keeps its
+    /// own ramp into the gap, today's rule.
+    case gap
+}
+
+extension NoteSegment {
+    /// True when this note carries a §4 transition edit: an explicit join
+    /// width or a follow amount. ⭐ **THE ONE PREDICATE**; `PitchEditSet`'s
+    /// `usesSoftJoins` asks it. NOT part of any identity predicate: with
+    /// every offset at 0 a width or a follow bends nothing (§4.b.1 ⛔).
+    public var hasTransitionEdits: Bool { transitionOutMs != 0 || glideFollow != 0 }
+}
+
+extension PitchEditSet {
+
+    /// True when `PitchCorrectionCurve.make` takes the SOFT branch (§4.b.2):
+    /// the set carries a transition slope, or some note carries a transition
+    /// edit. ⭐ **THE ONE PREDICATE**: `make`, the digest's slot 9 and the
+    /// wire all ask this. A LEGACY set (every set saved before natural
+    /// tuning) is false, takes the unchanged branch and keeps its key.
+    public var usesSoftJoins: Bool {
+        transitionSlopeCentsPerSecond > 0 || segments.contains(where: \.hasTransitionEdits)
+    }
+
+    /// The version of the join arithmetic a SOFT set renders with, hashed in
+    /// digest slot 9 so a bump re-keys exactly the soft sets (never
+    /// `stretchEngineVersion`, which would re-render every stretched clip).
+    /// ⚠️ **BUMP IT** when `softJoin`'s width or edge rule, the bridge
+    /// (`PitchCorrectionCurve.bridge`), `joinKind` or
+    /// `consonantMinimumGapSeconds` changes: none of them is in the digest
+    /// as a value.
+    public static let transitionRenderVersion: Int = 1
+
+    /// The shortest hole between two curve notes that counts as a GAP rather
+    /// than a soft join, seconds (R15). ⚠️ **A PROVISIONAL PICK, NOT A
+    /// MEASUREMENT:** 64 ms is four detector frames, U-A's "keep ≥ 4 frames"
+    /// precedent and §2's starting candidate; M-3's gap histogram sets the
+    /// one threshold for both sections. `voicedRuns` ends a note at any
+    /// unvoiced frame, so a one-frame blink leaves a 16-32 ms hole: soft.
+    /// Changing this changes which joins are soft on every soft set AND
+    /// where the consonant mask plays the dry take, so it bumps BOTH
+    /// `transitionRenderVersion` and §2's `consonantMaskVersion`.
+    public static let consonantMinimumGapSeconds: Double = 0.064
+
+    /// R15's rule on two EDGES: `.soft` when the notes abut bit for bit or
+    /// the hole between them is shorter than `consonantMinimumGapSeconds`,
+    /// else `.gap`. Pure; §2's mask calls this with its own region bounds.
+    public static func joinKind(leftEndSeconds: Double,
+                                rightStartSeconds: Double) -> PitchJoinKind {
+        if leftEndSeconds == rightStartSeconds { return .soft }
+        return rightStartSeconds - leftEndSeconds < consonantMinimumGapSeconds ? .soft : .gap
+    }
+
+    /// R15's `joinKind(between: i, and: i+1)`, on segment INDICES.
+    ///
+    /// ⚠️ **MEANINGFUL BETWEEN NEIGHBOURING CURVE NOTES ONLY**
+    /// (`NoteSegment.entersPitchCurve`; `nextCurveNoteIndex(after:)` finds
+    /// the neighbour). An untouched SOUND builds no span, and a note abuts
+    /// its neighbouring sound bit for bit, so asking about a note and its
+    /// sound would call that edge soft and widen the correction INTO the
+    /// consonant: the exact spill §2 exists to stop. The curve never asks
+    /// that question: across an untouched sound, the join is between the two
+    /// notes on either side of it, and the sound's length is the gap.
+    public func joinKind(between left: Int, and right: Int) -> PitchJoinKind {
+        Self.joinKind(leftEndSeconds: segments[left].endSeconds,
+                      rightStartSeconds: segments[right].startSeconds)
+    }
+
+    /// The index of the next segment after `index` that enters the pitch
+    /// curve, or nil when there is none (`index` is the last curve note).
+    public func nextCurveNoteIndex(after index: Int) -> Int? {
+        guard index + 1 < segments.count else { return nil }
+        return segments[(index + 1)...].firstIndex(where: \.entersPitchCurve)
+    }
+
+    /// The index of the previous segment before `index` that enters the
+    /// pitch curve, or nil when there is none.
+    public func previousCurveNoteIndex(before index: Int) -> Int? {
+        guard index > 0, index <= segments.count else { return nil }
+        return segments[..<index].lastIndex(where: \.entersPitchCurve)
+    }
+
+    /// One soft join as the curve applies it: the edge both gates centre on
+    /// (the shared boundary, or an R15 short hole's midpoint) and the ONE
+    /// half-width both sides use.
+    public struct SoftJoin: Sendable, Equatable {
+        public let edgeSeconds: Double
+        public let halfWidthSeconds: Double
+    }
+
+    /// ⭐ **THE ONE WIDTH RULE** (§4.b.2 step 2), for a join the caller has
+    /// already found `.soft` between two neighbouring curve notes.
+    /// `PitchCorrectionCurve.make` and `joinReading(afterSegmentAt:)` (the
+    /// wire's echo) both call it, so what an agent reads is what renders.
+    ///  * Each side's value at the join, cents: its own offset, plus, when
+    ///    it FOLLOWS (`glideFollow` g > 0), g × the other side's OWN offset
+    ///    (the bridge's value at that edge; no recursion). So a slide that
+    ///    follows a moved note meets it with Δ = 0 and takes the floor.
+    ///  * `W` = the LEFT note's `transitionOutMs` when set; else, with a
+    ///    slope, `max(retuneMs, 1000 · Δ / slope)` ms; else nil: this join
+    ///    keeps its legacy halves (a set can be soft only because another
+    ///    note carries an explicit width).
+    ///  * `h = min(W / 2, left / 2, right / 2)`: never wider than half the
+    ///    shorter note, so no point along a chain of soft joins sees three
+    ///    gates (I1). The slope cap is not honoured next to a very short
+    ///    note (§4.b.6, a stated bound).
+    public static func softJoin(left: NoteSegment, right: NoteSegment,
+                                retuneMs: Double,
+                                slopeCentsPerSecond: Double) -> SoftJoin? {
+        let widthMs: Double
+        if left.transitionOutMs > 0 {
+            widthMs = left.transitionOutMs
+        } else if slopeCentsPerSecond > 0 {
+            var endValue = left.pitchOffsetCents
+            if left.glideFollow > 0 { endValue += left.glideFollow * right.pitchOffsetCents }
+            var startValue = right.pitchOffsetCents
+            if right.glideFollow > 0 { startValue += right.glideFollow * left.pitchOffsetCents }
+            widthMs = max(retuneMs, 1000 * abs(endValue - startValue) / slopeCentsPerSecond)
+        } else {
+            return nil
+        }
+        let half = min(widthMs / 2000, left.durationSeconds / 2, right.durationSeconds / 2)
+        let edge = left.endSeconds == right.startSeconds
+            ? left.endSeconds : (left.endSeconds + right.startSeconds) / 2
+        return SoftJoin(edgeSeconds: edge, halfWidthSeconds: half)
+    }
+
+    /// What the join to a note's RIGHT is, as the curve applies it: the
+    /// wire's `joinToNext` and `effectiveTransitionMs` (§4.e), and the pitch
+    /// editor's slide caption (R12).
+    public struct JoinReading: Sendable, Equatable {
+        public enum Kind: String, Sendable, Equatable {
+            /// A soft join to `nextSegmentId` (R15).
+            case soft
+            /// A gap before `nextSegmentId`: no slide to shape.
+            case gap
+            /// No curve note after this one.
+            case last
+        }
+        public let kind: Kind
+        public let nextSegmentId: UUID?
+        /// The full width the soft rule applies, ms of the ORIGINAL take
+        /// (`2 · h`, clamps included), or nil when this join keeps each
+        /// note's legacy ramp: a gap, a last note, or a soft join on a set
+        /// with no width rule for it (a legacy set).
+        public let appliedWidthMs: Double?
+        /// The note's `transitionOutMs` is 0: the width is the automatic one.
+        public let isAuto: Bool
+    }
+
+    /// The join after the note at `index`, or nil when that segment does not
+    /// enter the pitch curve (an untouched sound has no join).
+    public func joinReading(afterSegmentAt index: Int) -> JoinReading? {
+        guard segments.indices.contains(index), segments[index].entersPitchCurve else { return nil }
+        let left = segments[index]
+        let isAuto = left.transitionOutMs == 0
+        guard let next = nextCurveNoteIndex(after: index) else {
+            return JoinReading(kind: .last, nextSegmentId: nil, appliedWidthMs: nil, isAuto: isAuto)
+        }
+        let right = segments[next]
+        guard joinKind(between: index, and: next) == .soft else {
+            return JoinReading(kind: .gap, nextSegmentId: right.id, appliedWidthMs: nil,
+                               isAuto: isAuto)
+        }
+        let applied = usesSoftJoins
+            ? Self.softJoin(left: left, right: right, retuneMs: retuneMs,
+                            slopeCentsPerSecond: transitionSlopeCentsPerSecond)
+                .map { $0.halfWidthSeconds * 2000 }
+            : nil
+        return JoinReading(kind: .soft, nextSegmentId: right.id, appliedWidthMs: applied,
+                           isAuto: isAuto)
+    }
+
+    /// The source seconds a change of ONE note's pitch offset can change on
+    /// the curve: the window a pitch drag's DRAFT line must own (NT-U2; the
+    /// pitch editor's `draftSpan`), so that outside it the committed line and
+    /// the line that plays are the same numbers. CONSERVATIVE, never exact: a
+    /// wider window only redraws more of a line that is correct everywhere.
+    ///  * ⭐ D4-1 (b), the user's ruling (`handEditUpgradesLegacyVocal`): on a
+    ///    vocal that `predatesNaturalTuning` a drag that MOVES the note is its
+    ///    FIRST hand edit (one that moves nothing changes nothing, the no-op
+    ///    rule), and it updates the WHOLE vocal in the same step (every
+    ///    bent note takes the new voice amount, every join the soft rule). So
+    ///    the reach is the whole vocal, `wholeVocalDragReach()`.
+    ///  * Otherwise (a second drag, or a set that is already new) the note's
+    ///    own reach, `noteDragReach(ofSegmentAt:)`: this function's rule
+    ///    before D4-1 (b).
+    /// nil for an index outside the table.
+    public func pitchDragReach(ofSegmentAt index: Int) -> ClosedRange<Double>? {
+        guard segments.indices.contains(index) else { return nil }
+        if afterHandEdit() != self { return wholeVocalDragReach() }
+        return noteDragReach(ofSegmentAt: index)
+    }
+
+    /// Every segment of this set, each widened the way the soft rule widens
+    /// a dragged note (`max(retuneMs / 2, half its length + half an R15 short
+    /// hole)` on each side), merged into one range: the reach of a drag that
+    /// updates the whole vocal (D4-1 (b), `pitchDragReach`). Sounds count
+    /// too: a wider window is the safe direction. nil for an empty set.
+    func wholeVocalDragReach() -> ClosedRange<Double>? {
+        guard !segments.isEmpty else { return nil }
+        let legacyHalf = max(0, retuneMs / 1000 / 2)
+        let slack = Self.consonantMinimumGapSeconds / 2
+        var lower = Double.infinity
+        var upper = -Double.infinity
+        for segment in segments {
+            let widening = max(legacyHalf, segment.durationSeconds / 2 + slack)
+            lower = min(lower, segment.startSeconds - widening)
+            upper = max(upper, segment.endSeconds + widening)
+        }
+        return lower...upper
+    }
+
+    /// The NOTE's own reach: what moving the note at `index` can change while
+    /// every other note stays as it is (`pitchDragReach`'s rule before D4-1
+    /// (b)).
+    ///  * A LEGACY set (`!usesSoftJoins`): the note widened by half the
+    ///    retune on each side, today's `draftSpan` rule verbatim.
+    ///  * A SOFT set, also: the note's own soft edges (a soft half never
+    ///    exceeds half the note, but its centre can sit half an R15 short hole
+    ///    outside it), and each neighbouring curve note across a soft join:
+    ///    its side of the join moves with the jump (to the neighbour's middle
+    ///    at most), and a neighbour that FOLLOWS tilts over its whole length.
+    ///    ⚠️ This is why today's `draftSpan` is too narrow on a soft set: a
+    ///    300 c drag widens the join past `retuneMs / 2` and tilts a followed
+    ///    slide next to it end to end.
+    ///  * ⚠️ LEGACY OR SOFT IS READ ON THE SET THE DRAG STORES, not on this
+    ///    one (`setADragStores(ofSegmentAt:)`). A table with no voice amount
+    ///    whose notes bend nothing yet (never tuned, or every move undone) does
+    ///    not predate natural tuning, so `pitchDragReach` does not give it the
+    ///    whole vocal. But the drag bends a note, and `afterHandEdit()` then
+    ///    updates the set it stores, default slope included, so its joins are
+    ///    soft. Nothing else bends there, so the note's own reach holds, by
+    ///    the SOFT rule.
+    /// nil for an index outside the table.
+    func noteDragReach(ofSegmentAt index: Int) -> ClosedRange<Double>? {
+        guard segments.indices.contains(index) else { return nil }
+        let note = segments[index]
+        let legacyHalf = max(0, retuneMs / 1000 / 2)
+        var lower = note.startSeconds - legacyHalf
+        var upper = note.endSeconds + legacyHalf
+        guard setADragStores(ofSegmentAt: index).usesSoftJoins else { return lower...upper }
+        let slack = Self.consonantMinimumGapSeconds / 2
+        lower = min(lower, note.startSeconds - note.durationSeconds / 2 - slack)
+        upper = max(upper, note.endSeconds + note.durationSeconds / 2 + slack)
+        // A note outside the curve today (an untouched sound) ENTERS it when
+        // dragged, so its neighbours are the curve notes around it, joined
+        // either to it (after) or to each other across it (before).
+        let previous = previousCurveNoteIndex(before: index)
+        let next = nextCurveNoteIndex(after: index)
+        func softAcross(_ left: NoteSegment, _ right: NoteSegment) -> Bool {
+            Self.joinKind(leftEndSeconds: left.endSeconds,
+                          rightStartSeconds: right.startSeconds) == .soft
+        }
+        if let p = previous {
+            let neighbour = segments[p]
+            if softAcross(neighbour, note) || next.map({ softAcross(neighbour, segments[$0]) }) == true {
+                let whole = neighbour.startSeconds
+                    - max(legacyHalf, neighbour.durationSeconds / 2 + slack)
+                let side = neighbour.startSeconds + neighbour.durationSeconds / 2
+                lower = min(lower, neighbour.glideFollow > 0 ? whole : side)
+            }
+        }
+        if let n = next {
+            let neighbour = segments[n]
+            if softAcross(note, neighbour) || previous.map({ softAcross(segments[$0], neighbour) }) == true {
+                let whole = neighbour.endSeconds
+                    + max(legacyHalf, neighbour.durationSeconds / 2 + slack)
+                let side = neighbour.endSeconds - neighbour.durationSeconds / 2
+                upper = max(upper, neighbour.glideFollow > 0 ? whole : side)
+            }
+        }
+        return lower...upper
+    }
+
+    /// The set a pitch drag of the note at `index` stores, for its SET-LEVEL
+    /// fields: this set with that note bent, through D4-1's one home
+    /// (`afterHandEdit(from: self)`), so the reach never restates which sets
+    /// a hand edit updates. The bend is always a real move (never 0 c): the
+    /// reach answers for a drag that MOVES the note. A drag that moves
+    /// nothing changes nothing (the no-op rule: no update, not one sample),
+    /// so any window holds for it. Whether the home updates a set depends on
+    /// whether a note changed, never on how far, so the notes it returns are
+    /// a probe, not the drag's: read only the set-level fields.
+    private func setADragStores(ofSegmentAt index: Int) -> PitchEditSet {
+        var bent = self
+        bent.segments[index].pitchOffsetCents = abs(segments[index].pitchOffsetCents) + 100
+        return bent.afterHandEdit(from: self)
+    }
+
+    /// ⭐ **D4-1 = (b), THE USER'S RULING (Q-U1, 2026-09-26). FINAL: do not
+    /// re-ask, do not soften it.** The handoff page asked "Vocals you tuned
+    /// before this update: what should happen?" and the user picked "Update
+    /// when I edit them: The first note you drag on an old vocal updates the
+    /// whole vocal (also one Undo)." (The design had recommended (a).)
+    ///
+    /// So `true`: a HAND edit on a vocal that `predatesNaturalTuning` switches
+    /// it onto natural tuning through `afterHandEdit(from:)`, in the edit's
+    /// own undo step. A hand edit is EVERY per-note change, from the editor
+    /// or the wire: pitch, split, slide width and follow, wobble and drift
+    /// (and Reset Wobble), the drawn line, a note's Voice, its level, clear
+    /// and restore. One rule, "the first time you change a note", so the
+    /// vocal never updates on the 2nd or 3rd edit depending on the tool.
+    /// ⚠️ **AN EDIT THAT CHANGES NO NOTE IS NOT A CHANGE** (the 2026-09-27
+    /// ruling on the user's words, "the first note you DRAG"): Reset Wobble on
+    /// a note already as sung, a Restore of a note that is not cleared, a
+    /// drag released where it started. It leaves an old vocal exactly as it
+    /// is, with no undo step: switching the whole vocal is audible, so a
+    /// no-op must have no side effect. `afterHandEdit(from:)` is the ONE home
+    /// of both rules; `NaturalTuningHandEditCensusTests` keeps every such
+    /// writer routed through it. NOT a hand edit: the set-level switches
+    /// (`setClipFormantCorrection`, `setClipConsonantProtection`,
+    /// `setClipPitchTransitionSmoothness`: explicit requests, their own field
+    /// only), `upgradeToNaturalTuning` (it IS the update), and auto-correct
+    /// (it builds a new, seeded set).
+    public static let handEditUpgradesLegacyVocal = true
+
+    /// X4's upgrade, pure: the voice size kept, consonants untuned, and
+    /// soft joins, at the values a NEW set is seeded with.
+    /// `ProjectStore.upgradeToNaturalTuning` (the one-tap line and the wire)
+    /// and `afterHandEdit()` (D4-1) both call it.
+    ///
+    /// ⚠️ **AN EXPLICIT SLOPE IS KEPT** (C4's ruling, the decision C0's doc
+    /// left here): `transitionSlopeCentsPerSecond` is filled only when it
+    /// is 0 (legacy). A set whose slope a user or agent PICKED
+    /// (`setClipPitchTransitionSmoothness`) can still predate natural tuning
+    /// (its formant amount is nil), and tapping "update" must not throw that
+    /// pick away. The formant amount is set as X4 says.
+    ///
+    /// ⚠️ **A CHOSEN CONSONANT OFF IS KEPT TOO** (NT-C2-F1, W7-D2, for the
+    /// slope's reason): consonants are switched on unless they are
+    /// `.offByChoice`. An old vocal whose consonants somebody switched off
+    /// keeps them off through the tap AND through D4-1's first hand edit.
+    /// That state did not exist before the choice was recorded, so no vocal
+    /// that could be updated before it updates differently now.
+    public func upgradedToNaturalTuning() -> PitchEditSet {
+        var copy = self
+        copy.formantCorrection = Self.newSetFormantCorrection
+        if copy.consonantProtection != .offByChoice {
+            copy.consonantProtection = .on
+        }
+        if copy.transitionSlopeCentsPerSecond == 0 {
+            copy.transitionSlopeCentsPerSecond = Self.defaultTransitionSlope
+        }
+        return copy
+    }
+
+    /// D4-1's update, for a hand edit that CHANGED a note: on a set that
+    /// `predatesNaturalTuning` it returns `upgradedToNaturalTuning()` (the
+    /// user's ruling (b) of 2026-09-26, "The first note you drag on an old
+    /// vocal updates the whole vocal (also one Undo)"); on any other set,
+    /// `self`, so only the FIRST such edit updates. It answers "what would a
+    /// real edit leave this set as", the question `pitchDragReach` asks.
+    ///
+    /// ⛔ **A WRITER NEVER CALLS THIS BARE: it calls `afterHandEdit(from:)`**,
+    /// which adds the no-op rule. Called bare, a no-op (Reset Wobble on a note
+    /// already as sung) would switch a whole old vocal.
+    /// `NaturalTuningHandEditCensusTests` refuses a bare call in every
+    /// hand-edit writer and transform.
+    public func afterHandEdit() -> PitchEditSet {
+        guard Self.handEditUpgradesLegacyVocal, predatesNaturalTuning else { return self }
+        return upgradedToNaturalTuning()
+    }
+
+    /// ⭐ **D4-1's ONE HOME**: this set after a HAND edit that started from
+    /// `before` (the set the edit was applied to).
+    ///  * The edit changed NO note (`segments == before.segments`): `self`,
+    ///    as the edit left it. A no-op has no side effect (the 2026-09-27
+    ///    ruling: an edit that changes nothing must not update an old vocal).
+    ///  * Otherwise `afterHandEdit()`: an old vocal is updated, any other set
+    ///    is left as the edit made it.
+    /// The writer stores the result in the edit's own `performEdit`, so the
+    /// edit and the update are ONE undo step and undoing it gives back the
+    /// old vocal exactly; a no-op stores the set it found, which journals
+    /// nothing (`performEdit` records only a real change).
+    ///
+    /// ⚠️ Every hand edit calls it LAST. The transforms pass `from: self`:
+    /// `applyingNotePitchOffsets` (the drag's draft and both commits),
+    /// `applyingNoteTransition`, `applyingNoteGlideFollow`,
+    /// `applyingNoteShapes` and `applyingNoteVibratos`. The store writers that
+    /// edit notes inline (split, clear, level, Voice, Reset Wobble) pass the
+    /// table they started from. `NaturalTuningHandEditCensusTests` is the
+    /// census. A draft built any other way must call it too, or the line
+    /// drawn during a FIRST drag on an old vocal differs from what plays after
+    /// the release.
+    public func afterHandEdit(from before: PitchEditSet) -> PitchEditSet {
+        segments == before.segments ? self : afterHandEdit()
     }
 }
 
@@ -977,23 +2045,48 @@ public enum PitchCorrectionUndoKey {
         "pitch.segment:\(clipID.uuidString):\(segmentID.uuidString)"
     }
 
-    /// A drift-scale drag on one note.
+    /// A drift-scale drag on one note: natural tuning's Drift tool (§3b,
+    /// C5a-5), which writes `driftScale` alone through a one-item
+    /// `ProjectStore.setClipNotesVibrato`.
     public static func drift(clipID: UUID, segmentID: UUID) -> String {
         "pitch.drift:\(clipID.uuidString):\(segmentID.uuidString)"
     }
 
-    /// A vibrato drag on one note.
+    /// A wobble edit on one note: the Wobble tool's gesture and the
+    /// `clip.setNoteVibrato` verb (`ProjectStore.setClipNoteVibrato`).
     ///
-    /// ⭐ **ONE KEY FOR BOTH MECHANISMS, DELIBERATELY.** The reference app's
-    /// gesture runs one note from sung → flat → synthesised without letting
-    /// go, which writes `vibratoScale` on the way down and
-    /// `vibratoRateHz`/`vibratoDepthCents` on the way up. A second key for the
-    /// generator would split ONE drag into TWO undo entries at the moment the
-    /// axis crossed zero — the user would have to undo twice to get back to
-    /// where they started, and the halfway state they land in is one they
-    /// never saw. The key is the rule, so the rule is stated at the key.
+    /// ⭐ **ONE KEY FOR BOTH MECHANISMS, DELIBERATELY.** ⚠️ Corrected at C5a-2
+    /// (vibrato-handle design §5.6): the reason is NOT one continuous
+    /// sung → flat → synthesised axis. The Wobble tool does not run one range
+    /// through flat: pulling down narrows the singer's wobble, and a new
+    /// wobble is a separate branch chosen at mouse-down (§5.1). The reason is
+    /// the HANDOFF (§6): ONE gesture that crosses the dead zone writes BOTH
+    /// scales to 0 (the singer's wobble and drift out) AND the generator's
+    /// rate, depth and anchor (the new wobble in). A second key for the
+    /// generator would split that one gesture into two undo entries, and the
+    /// halfway state undo would land in (flattened, nothing added) is one the
+    /// user never saw. The key is the rule, so the rule is stated at the key.
     public static func vibrato(clipID: UUID, segmentID: UUID) -> String {
         "pitch.vibrato:\(clipID.uuidString):\(segmentID.uuidString)"
+    }
+
+    /// A wobble edit on a GROUP of selected notes: the Wobble tool's keep
+    /// lever on a multi-selection (natural tuning §3b). The `group` key's twin,
+    /// built the same way and for the same reason (a second drag of the SAME
+    /// selection coalesces, a different selection does not).
+    ///
+    /// ⚠️ **ITS OWN VERB, NOT `group`'s.** `group` is a PITCH drag's key; a
+    /// wobble drag and a pitch drag of the same selection inside the 800 ms
+    /// window are two decisions and must be two undo steps.
+    public static func vibratoGroup(clipID: UUID, selectionToken: UUID) -> String {
+        "pitch.vibratoGroup:\(clipID.uuidString):\(selectionToken.uuidString)"
+    }
+
+    /// A drift edit on a GROUP of selected notes: the Drift tool on a
+    /// multi-selection (natural tuning §3b). `vibratoGroup`'s twin, with its
+    /// own verb so a drift drag and a wobble drag of one selection never fold.
+    public static func driftGroup(clipID: UUID, selectionToken: UUID) -> String {
+        "pitch.driftGroup:\(clipID.uuidString):\(selectionToken.uuidString)"
     }
 
     /// A pitch drag on a GROUP of selected notes (m23-ap I4, UI design §8.4).
@@ -1010,6 +2103,15 @@ public enum PitchCorrectionUndoKey {
     /// that happened to share a member with it must not fold into it.
     public static func group(clipID: UUID, selectionToken: UUID) -> String {
         "pitch.group:\(clipID.uuidString):\(selectionToken.uuidString)"
+    }
+
+    /// A slide-width edit on the join to the RIGHT of one note (natural
+    /// tuning §4.e, `ProjectStore.setClipNoteTransition`): the rear-edge drag
+    /// and `clip.setNoteTransition`. Its own verb, so a width drag and a
+    /// pitch drag of the same note inside the 800 ms window are two undo
+    /// steps; two width drags of the same join fold into one.
+    public static func transition(clipID: UUID, segmentID: UUID) -> String {
+        "pitch.transition:\(clipID.uuidString):\(segmentID.uuidString)"
     }
 
     /// Structural and deliberate on/off edits: `nil` — never coalesces.
@@ -1096,22 +2198,32 @@ public enum PitchCorrectionUndoKey {
 /// papered over here by making the generator subtract a contour it does not
 /// have.
 ///
-/// **THE PHASE IS ANCHORED AT SOURCE SECOND ZERO — `sin(2π · rate · t)` — NOT
-/// AT THE NOTE'S START**, and that choice is defensive:
+/// **THE PHASE IS ANCHORED AT A STORED SOURCE SECOND —
+/// `sin(2π · rate · (t − vibratoPhaseAnchorSeconds))` — NEVER AT THE NOTE'S
+/// START**, and that choice is defensive:
 ///
 ///  * `PitchEditSet.canonical` heals overlaps FIRST-WINS by moving a later
 ///    segment's `startSeconds` forward. A start-anchored phase would silently
 ///    re-phase the vibrato of a note the user never touched.
 ///  * Splitting a note (editor C3) makes two segments from one. Start-anchored,
-///    identical generator settings would restart the sine at the split; at
-///    source second 0 the two halves stay one continuous vibrato.
+///    identical generator settings would restart the sine at the split; with a
+///    STORED anchor, which the split copies to both halves, the two halves
+///    stay one continuous vibrato.
+///
+/// The anchor defaults to 0, which is source second zero: the phase every set
+/// had before the field existed (m23-ap C5a-1, vibrato-handle design §7), bit
+/// for bit, because `t − 0.0 == t` in IEEE arithmetic. The wobble editor
+/// stores the note's centre instead, so a speed change stretches the cycles
+/// around the knob rather than moving the phase by `2π · t · Δrate`, which a
+/// note 30 s into a take would feel as a jump of whole cycles (design V6).
 ///
 /// The ENVELOPE (`vibratoOnsetSeconds`) is anchored at the note start instead,
 /// because a fade-in is a statement about the note and a shortened note should
 /// re-anchor its fade. `generatorIsContinuousAcrossASplit` pins the phase half.
 /// On a retimed curve both anchors move onto the edited axis: the phase is
-/// `sin(2π · rate · W(t))`, which is anchored at edited second 0 (`W(0) = 0`),
-/// and the fade is anchored at `W(startSeconds)`.
+/// `sin(2π · rate · (W(t) − W(anchor)))`, which at the default is anchored at
+/// edited second 0 (`W(0) = 0` exactly), and the fade is anchored at
+/// `W(startSeconds)`.
 ///
 /// **EXTENSION SEAM (editor C5b, freehand ⌘+drag).** The generator is a TERM
 /// IN A SUM, not "the note's shape". A later per-note contour OVERRIDE is
@@ -1119,6 +2231,17 @@ public enum PitchCorrectionUndoKey {
 /// disturb anything here. What it WOULD need is a rule for override + generator
 /// together; that is a UI decision, not a representation one, and nothing in
 /// this layout forecloses it.
+///
+/// ⭐ **C5b-1 FILLED THE SEAM, AS A DELTA, NOT AN OVERRIDE** (design
+/// `2026-09-24-pitch-editor-timing-and-freehand.md` §5.1-§5.3). Inside a
+/// note's gate the sum is four terms: `constant + shaping(s) + generator(e ?? s)
+/// + drawnShape(s)`. The drawn shape ADDS, for the generator's reason
+/// (replacing needs `− sung(t)`, which needs the contour), so "override +
+/// generator" is simply both terms. It reads SOURCE time and is held at both
+/// ends; it never enters the formant curve (the envelope follows the constant
+/// move only); and it is local to its own span, so at a soft join it reaches
+/// the neighbour only through the gates' crossfade, never through the tilt
+/// or the join's width, which read offsets alone.
 ///
 /// **Smoothness, honestly.** Inside a note with default scales the curve is
 /// CONSTANT, and each boundary is a smoothstep — C¹ everywhere, which is what
@@ -1134,16 +2257,49 @@ public enum PitchCorrectionUndoKey {
 /// crossfade. Where gates do sum above 1 (very short notes under a long ramp)
 /// they are normalised, so the result is always a convex blend of the active
 /// corrections and never overshoots past either of them.
+///
+/// ⭐ **SOFT JOINS (natural tuning §4, NT-C C4).** On a set that
+/// `usesSoftJoins`, each join between neighbouring curve notes that
+/// `PitchEditSet.joinKind` calls `.soft` takes ONE width from
+/// `PitchEditSet.softJoin` (it grows with the size of the jump, capped by the
+/// set's slope) and ONE edge, on both sides, so the two gates are exactly
+/// complementary there and never dip (F12 gone). A sung slide that follows
+/// its neighbours (`glideFollow`) TILTS from the previous note's offset to
+/// the next one's. Joins facing a GAP, and every join of a LEGACY set, keep
+/// the per-note ramps above, bit for bit.
 public struct PitchCorrectionCurve: Sendable, Equatable {
     /// One note's precomputed contribution.
     fileprivate struct Span: Sendable, Equatable {
         let startSeconds: Double
         let endSeconds: Double
-        /// Half the ramp width, already clamped so it cannot exceed half the
-        /// note.
-        let halfRamp: Double
+        /// Half the RISE ramp's width, and the second the rise is centred on
+        /// (natural tuning §4.b.2). On a LEGACY set, and at every edge a soft
+        /// join does not reach, the half is today's `min(ramp/2, duration/2)`
+        /// and the centre is `startSeconds`, the same Double, so the gate
+        /// reads exactly the values it always read. A soft join replaces
+        /// both with the ONE width and edge it shares with the note before
+        /// (`PitchEditSet.softJoin`); across an R15 short hole that edge is
+        /// the hole's midpoint.
+        var halfRampIn: Double
+        var riseCentreSeconds: Double
+        /// The FALL ramp's half and centre: `halfRampIn`'s twin at the end.
+        var halfRampOut: Double
+        var fallCentreSeconds: Double
         /// `pitchOffsetCents / 100`.
         let constantSemitones: Double
+        /// §4.b.2 step 3, the TILT of a sung slide that follows its
+        /// neighbours (`NoteSegment.glideFollow`): the previous and next
+        /// SOFT-joined curve notes' own offsets, semitones (0 across a gap),
+        /// and the follow amount. `bridgeAmount` EXACTLY 0 means no tilt,
+        /// and both evaluators branch on it rather than adding a zero (the
+        /// generator's rule; see the `-0.0` note in `semitones`).
+        var bridgeFromSemitones: Double
+        var bridgeToSemitones: Double
+        var bridgeAmount: Double
+        /// `NoteSegment.formantOffsetSemitones`, verbatim. Read ONLY by the
+        /// formant evaluator (natural tuning §1(b)); the pitch loop never
+        /// touches it, so it cannot move a pitch bit.
+        let formantOffsetSemitones: Double
         /// Shaping contribution per detector frame, semitones, or empty when
         /// both scales are 1 (the Phase-1 case) or no contour covered the note.
         let shapingSemitones: [Double]
@@ -1169,6 +2325,19 @@ public struct PitchCorrectionCurve: Sendable, Equatable {
         /// warp's PRESENCE, so an untimed curve's fade is bit-identical to
         /// the pre-C2 fade by construction.
         let envelopeStartSeconds: Double
+        /// `NoteSegment.vibratoPhaseAnchorSeconds` ON THE GENERATOR'S AXIS
+        /// (C5a-1, design §7.1/§7.6): the stored value verbatim on an untimed
+        /// curve, `W(anchor)` on a retimed one, computed once in `make` by the
+        /// same presence branch as `envelopeStartSeconds`.
+        let vibratoPhaseAnchorSeconds: Double
+        /// C5b-1: the DRAWN shape, semitones per grid sample
+        /// (`NoteSegment.shapeTenthsOfCents` ÷ 1000), or EMPTY when the note
+        /// has none (`hasShape`). Empty means no term: the evaluator branches
+        /// on it rather than adding a zero (the generator's rule).
+        let shapeSemitones: [Double]
+        /// `NoteSegment.shapeStartIndex` as a Double: sample `k` is read at
+        /// grid position `sourceSecond · shapeGridHz − shapeStartGrid = k`.
+        let shapeStartGrid: Double
     }
 
     /// The whole-clip term this curve subsumes.
@@ -1206,30 +2375,162 @@ public struct PitchCorrectionCurve: Sendable, Equatable {
     /// `a + (t − a)·1.0` is not `t` bit for bit).
     public let timeWarp: PitchTimeWarp?
 
+    /// The set's `PitchEditSet.formantCorrection`, carried verbatim for the
+    /// formant evaluator (natural tuning §1(b)). `nil` = legacy, and the
+    /// evaluator then falls back to the clip's `formantPreserve` flag, which
+    /// it is HANDED per call rather than stored: see
+    /// `formantSemitones(atSourceSecond:editedSecond:formantPreserve:)`.
+    public let formantCorrection: Double?
+
     fileprivate let spans: [Span]
+
+    /// p2-span: the SEARCH's key, the running maximum of
+    /// `fallCentreSeconds + halfRampOut` (on a legacy set exactly
+    /// `endSeconds + halfRamp`) over `spans[0...i]`. The reach itself is NOT
+    /// non-decreasing in start order: `halfRamp` clamps to half the note, so
+    /// a short note after a long one reaches LESS far (NT-G: `[2.1, 2.09]`),
+    /// and a binary search over the raw reach could land past a span still
+    /// open. Every span before the first index this passes has closed. Where
+    /// the reach already ascends this IS the reach, value for value, so the
+    /// search lands where it always did.
+    fileprivate let spanReachPrefixMax: [Double]
+    /// p2-span: the EARLY EXIT's key, the minimum of
+    /// `riseCentreSeconds − halfRampIn` (on a legacy set exactly
+    /// `startSeconds − halfRamp`) over `spans[i...]`. A long note after a
+    /// short one OPENS before it, so stopping at the first span not yet open
+    /// could stop short of a later one that is. Below this nothing from `i`
+    /// on is open. Where the openings ascend it IS the span's own opening.
+    fileprivate let spanOpenSuffixMin: [Double]
+
+    /// The formant BASE's step function (§1(b)): the start second and the
+    /// detected f0 of every note whose `detectedHz` is a measurement,
+    /// ascending. Built from ALL of the set's notes, not from `spans`: an
+    /// untouched note still tells the stretcher where the singer's f0 is.
+    fileprivate let formantBaseStarts: [Double]
+    fileprivate let formantBaseValues: [Double]
 
     fileprivate init(clipPitchShiftSemitones: Double,
                      spans: [Span],
                      unresolvedShapingSegmentIDs: [UUID],
-                     timeWarp: PitchTimeWarp?) {
+                     timeWarp: PitchTimeWarp?,
+                     formantCorrection: Double?,
+                     formantBaseStarts: [Double],
+                     formantBaseValues: [Double]) {
         self.clipPitchShiftSemitones = clipPitchShiftSemitones
         self.spans = spans
+        (self.spanReachPrefixMax, self.spanOpenSuffixMin) = Self.searchBounds(spans)
         self.unresolvedShapingSegmentIDs = unresolvedShapingSegmentIDs
         self.timeWarp = timeWarp
+        self.formantCorrection = formantCorrection
+        self.formantBaseStarts = formantBaseStarts
+        self.formantBaseValues = formantBaseValues
     }
 
-    /// Window over which macro DRIFT is separated from periodic VIBRATO: drift
-    /// is the contour averaged over this long, vibrato is what is left.
+    /// Window of the v1 drift/vibrato separator (`PitchCorrectionMath.movingAverage`,
+    /// an edge-truncated boxcar): drift is the contour averaged over this long,
+    /// vibrato is what is left.
     ///
-    /// ⚠️ **AN UNCALIBRATED PICK, and it is exercised less than it looks.**
-    /// 250 ms averages away anything at or above 4 Hz, which is where sung
-    /// vibrato lives. But when `driftScale == vibratoScale` — which is EVERY
-    /// set `PitchAutoCorrect` produces — the split cancels algebraically
-    /// (`(s−1)·drift + (s−1)·vib == (s−1)·(drift + vib)`) and the window has no
-    /// effect at all. It only starts to matter when a Phase-2 editor moves the
-    /// two apart, and that is the point at which it should be measured rather
-    /// than picked.
+    /// ⭐ **SINCE natural tuning §3 (W7-C3) THE v1 SEPARATOR SHAPES ONLY
+    /// EQUAL-SCALE NOTES, WHERE ITS SPLIT CANCELS.** When `driftScale ==
+    /// vibratoScale`, which is every set `PitchAutoCorrect` produces, Hard Tune
+    /// included, `(s−1)·drift + (s−1)·vib == (s−1)·(drift + vib)`, so this
+    /// window reaches only the low bits of those renders. It stays exactly as it
+    /// was so that they stay bit for bit (`PitchSeparatorV2Tests`, G1). It is
+    /// NOT a good separator: its response at 5.5 Hz is −0.2155 (16 ms frames),
+    /// so it passes 121 % of a sung wobble into "vibrato" and inverts the rest.
+    /// A note whose scales DIFFER takes the v2 kernel instead
+    /// (`separatedDriftWindowSeconds`).
     public static let driftWindowSeconds: Double = 0.25
+
+    /// Natural tuning §3b (W7-C3): the v2 separator's boxcar length L. An
+    /// UNEQUAL-scale note's drift is its contour averaged by a TRIANGULAR
+    /// kernel, two cascaded centred boxcars of this length
+    /// (`PitchCorrectionMath.triangularAverage`). Its response is sinc² ≥ 0, so
+    /// no band is passed into "vibrato" at more than 100 % and nothing is
+    /// inverted.
+    ///
+    /// PICKED 2026-09-27 by G3's pre-registered FALLBACK rule
+    /// (`NaturalTuningDriftVibratoTests`). The primary rule, the smallest L in
+    /// {0.16, 0.20, 0.25} s that passes every G3 cell at 110 Hz, found none: the
+    /// (1,0) cell kept 0.211 (0.16 s) to 0.237 (0.25 s) of the sung wobble
+    /// against ≤ 0.2 for every kernel. The fallback, the same rule over the
+    /// separator's own legs only, picks 0.16 s. Its measured cost, not part of
+    /// the rule: under Drift 0 at 220 Hz a 4 Hz wobble keeps 0.886 of itself
+    /// at 0.16 s (0.991 at 0.25 s), where a 5.5 Hz one keeps 0.994. A change
+    /// here changes the audio of every unequal-scale render: bump
+    /// `PitchRenderContour.separatedShapingVersion`, never `shapingVersion`.
+    public static let separatedDriftWindowSeconds: Double = 0.16
+
+    /// Natural tuning §3b (W7-C3): how the v2 kernel treats a note's ends. Picked
+    /// with `separatedDriftWindowSeconds` by the pre-registered tie-break
+    /// (truncate); on G3's 4 s notes the two edges read identically, because
+    /// both edges sit inside the measured window's trim. Versioned with it.
+    public static let separatedDriftEdge: PitchCorrectionMath.AverageEdge = .truncate
+
+    /// Natural tuning §3g (W7-C3): the shortest note, seconds, whose drift and
+    /// wobble the v2 separator tells apart, by G3's pre-registered short-note
+    /// rule (`NaturalTuningDriftVibratoTests`, "§8 minimumSeparableSeconds …"):
+    /// the shortest tested length that, together with every longer tested
+    /// length, keeps a Drift-0 note's 5.5 Hz wobble within [0.8, 1.2] of the
+    /// ideal AND removes at least half its drift, at 110 Hz, through the
+    /// product render. MEASURED 2026-09-27: 0.5 s (0.4 s removed 47 % of the
+    /// drift; 0.2 and 0.3 s notes did not detect as one note). Nothing reads it
+    /// yet: it is the length below which a Drift control should warn. The test
+    /// named above re-derives it and fails if the rule's answer moves.
+    public static let minimumSeparableSeconds: Double = 0.5
+
+    /// Natural tuning §3b (W7-C3): WHICH drift/vibrato separator `make` gives a
+    /// note whose scales DIFFER (`NoteSegment.takesSeparatedShaping`).
+    ///
+    /// ⚠️ **AN EQUAL-SCALE NOTE ALWAYS TAKES THE v1 LINES, WHATEVER THIS SAYS.**
+    /// That branch keeps every Hard Tune and preset render bit for bit (G1), and
+    /// no separator value can reach it.
+    ///
+    /// `.production` is the only value the app ever passes. The others exist so
+    /// the physics gate (`NaturalTuningDriftVibratoTests`, G3) can render its
+    /// controls through the SHIPPING path: `StretchRenderCache` carries one per
+    /// instance (a test initialiser; the app's is `.production`), never a global
+    /// switch, because tests render in parallel.
+    public enum Separator: Sendable, Hashable {
+        /// v2: `triangularAverage` over `separatedDriftWindowSeconds`, with
+        /// `separatedDriftEdge`.
+        case production
+        /// v1 for unequal notes too: `movingAverage` over `driftWindowSeconds`,
+        /// the separator before natural tuning §3. G3's negative control.
+        case v1Everywhere
+        /// v2's kernel at an explicit L and edge. G3's sweep.
+        case triangular(windowSeconds: Double, edge: PitchCorrectionMath.AverageEdge)
+        /// Any centred kernel, one tap per contour frame (odd count), edges
+        /// truncated and renormalised. G3's negative-lobe plant.
+        case kernelTaps([Double])
+
+        /// The drift (slow) part of an unequal-scale note's contour, `cents`
+        /// sampled every `stepSeconds`.
+        func separatedDrift(_ cents: [Double], stepSeconds: Double) -> [Double] {
+            switch self {
+            case .production:
+                return PitchCorrectionMath.triangularAverage(
+                    cents, windowSeconds: PitchCorrectionCurve.separatedDriftWindowSeconds,
+                    stepSeconds: stepSeconds, edge: PitchCorrectionCurve.separatedDriftEdge)
+            case .v1Everywhere:
+                return PitchCorrectionMath.movingAverage(
+                    cents, windowSeconds: PitchCorrectionCurve.driftWindowSeconds,
+                    stepSeconds: stepSeconds)
+            case .triangular(let windowSeconds, let edge):
+                return PitchCorrectionMath.triangularAverage(
+                    cents, windowSeconds: windowSeconds, stepSeconds: stepSeconds, edge: edge)
+            case .kernelTaps(let taps):
+                return PitchCorrectionMath.centredAverage(cents, weights: taps, edge: .truncate)
+            }
+        }
+    }
+
+    /// TEST SEAM (natural tuning §3 G1, W7-C3): every span's stored shaping
+    /// samples, in span order, exactly as `make` built them. `internal`, so only
+    /// an `@testable` import reaches it; nothing in the product reads it.
+    var shapingSamplesForTesting: [(startSeconds: Double, stepSeconds: Double, semitones: [Double])] {
+        spans.map { ($0.shapingStartSeconds, $0.shapingStepSeconds, $0.shapingSemitones) }
+    }
 
     /// Build the curve. The ONLY producer.
     ///
@@ -1267,16 +2568,35 @@ public struct PitchCorrectionCurve: Sendable, Equatable {
     ///     `nil` takes no edited-time arithmetic anywhere. ⚠️ A retimed set
     ///     built WITHOUT its warp plays its synthesised wobble in source time,
     ///     which is at the wrong rate on a stretched note.
+    ///   - separator: natural tuning §3 (W7-C3): the drift/vibrato separator for
+    ///     notes whose scales DIFFER. The app always passes nothing
+    ///     (`.production`); see `Separator`. Equal-scale notes never read it.
     public static func make(editSet: PitchEditSet,
                             contour: [ClipPitchFrame] = [],
                             contourValueOffsetSeconds: Double = 0,
                             clipPitchShiftSemitones: Double = 0,
-                            timeWarp: PitchTimeWarp? = nil) -> PitchCorrectionCurve {
+                            timeWarp: PitchTimeWarp? = nil,
+                            separator: Separator = .production) -> PitchCorrectionCurve {
         let base = PitchCorrectionMath.finite(clipPitchShiftSemitones, default: 0)
         guard !editSet.segments.isEmpty else {
             return PitchCorrectionCurve(clipPitchShiftSemitones: base,
                                         spans: [], unresolvedShapingSegmentIDs: [],
-                                        timeWarp: timeWarp)
+                                        timeWarp: timeWarp,
+                                        formantCorrection: editSet.formantCorrection,
+                                        formantBaseStarts: [], formantBaseValues: [])
+        }
+        // The formant base's steps (§1(b)), from EVERY note that carries a
+        // measured f0. ⚠️ **A SOUND (`.unpitched`) IS SKIPPED:** its
+        // `detectedHz` is a neighbour's pitch BORROWED as a drawing anchor
+        // (`PitchUnpitchedFinder`'s `anchorHz`), not the singer's f0 at that
+        // moment. A non-positive value (`init` heals non-finite to 0) is no
+        // measurement either. Segments are canonical, so the steps ascend.
+        var baseStarts: [Double] = []
+        var baseValues: [Double] = []
+        for segment in editSet.segments
+        where segment.origin != .unpitched && segment.detectedHz > 0 && segment.detectedHz.isFinite {
+            baseStarts.append(segment.startSeconds)
+            baseValues.append(segment.detectedHz)
         }
         let ramp = editSet.retuneMs / 1000
         let valueOffset = PitchCorrectionMath.finite(contourValueOffsetSeconds, default: 0)
@@ -1289,8 +2609,19 @@ public struct PitchCorrectionCurve: Sendable, Equatable {
         var spans: [Span] = []
         var unresolved: [UUID] = []
         spans.reserveCapacity(editSet.segments.count)
+        // Natural tuning §4: the soft pass below needs each span's note. A
+        // LEGACY set (`usesSoftJoins` false, THE one predicate) collects
+        // nothing and never reaches the pass, so its spans are exactly the
+        // ones this loop has always built.
+        let softJoins = editSet.usesSoftJoins
+        var curveNotes: [NoteSegment] = []
 
-        for segment in editSet.segments {
+        // U-A: an untouched SOUND builds no span at all (`entersPitchCurve`,
+        // the one predicate, argues why): skipping it here is what keeps a
+        // table with sounds rendering byte for byte as the same table
+        // without them. A moved sound comes in like any note (R21).
+        for segment in editSet.segments where segment.entersPitchCurve {
+            if softJoins { curveNotes.append(segment) }
             let wantsShaping = segment.wantsContourShaping
             var shaping: [Double] = []
             var shapingStart = 0.0
@@ -1312,12 +2643,33 @@ public struct PitchCorrectionCurve: Sendable, Equatable {
                             PitchCorrectionMath.cents(from: segment.detectedHz,
                                                       to: $0.frequencyHz ?? segment.detectedHz)
                         }
-                        let drift = PitchCorrectionMath.movingAverage(
-                            cents, windowSeconds: driftWindowSeconds, stepSeconds: step)
-                        shaping = zip(cents, drift).map { total, macro in
-                            let vibrato = total - macro
-                            return ((segment.driftScale - 1) * macro
-                                + (segment.vibratoScale - 1) * vibrato) / 100
+                        // ⛔ Natural tuning §3b (W7-C3): BYTE IDENTITY BY
+                        // BRANCH, NOT BY ALGEBRA. `PitchSeparatorV2Tests` (G1)
+                        // is the guard. An EQUAL-scale note, every set the
+                        // product has ever written, runs the v1 lines below
+                        // EXACTLY as they stood before v2: its split cancels,
+                        // but the expression still carries `macro` in its low
+                        // bits, so any other separator here would move every
+                        // Hard Tune render. Only an unequal-scale note reaches
+                        // `separator`. Edit the first branch → bump
+                        // `PitchRenderContour.shapingVersion` (re-keys Hard
+                        // Tune); edit the second → bump
+                        // `separatedShapingVersion` only.
+                        if !segment.takesSeparatedShaping {
+                            let drift = PitchCorrectionMath.movingAverage(
+                                cents, windowSeconds: driftWindowSeconds, stepSeconds: step)
+                            shaping = zip(cents, drift).map { total, macro in
+                                let vibrato = total - macro
+                                return ((segment.driftScale - 1) * macro
+                                    + (segment.vibratoScale - 1) * vibrato) / 100
+                            }
+                        } else {
+                            let drift = separator.separatedDrift(cents, stepSeconds: step)
+                            shaping = zip(cents, drift).map { total, macro in
+                                let vibrato = total - macro
+                                return ((segment.driftScale - 1) * macro
+                                    + (segment.vibratoScale - 1) * vibrato) / 100
+                            }
                         }
                         // `+ valueOffset` is the ONLY place the offset
                         // enters: at the default 0 this line is exactly the
@@ -1329,11 +2681,22 @@ public struct PitchCorrectionCurve: Sendable, Equatable {
                 if shaping.isEmpty { unresolved.append(segment.id) }
             }
 
+            // The LEGACY half, today's expression, stored in BOTH halves; the
+            // centres are the note's own edges. `softened` below rewrites
+            // only the edges a soft join reaches.
+            let halfRamp = min(ramp / 2, segment.durationSeconds / 2)
             spans.append(Span(
                 startSeconds: segment.startSeconds,
                 endSeconds: segment.endSeconds,
-                halfRamp: min(ramp / 2, segment.durationSeconds / 2),
+                halfRampIn: halfRamp,
+                riseCentreSeconds: segment.startSeconds,
+                halfRampOut: halfRamp,
+                fallCentreSeconds: segment.endSeconds,
                 constantSemitones: segment.pitchOffsetCents / 100,
+                bridgeFromSemitones: 0,
+                bridgeToSemitones: 0,
+                bridgeAmount: 0,
+                formantOffsetSemitones: segment.formantOffsetSemitones,
                 shapingSemitones: shaping,
                 shapingStartSeconds: shapingStart,
                 shapingStepSeconds: shapingStep,
@@ -1349,12 +2712,33 @@ public struct PitchCorrectionCurve: Sendable, Equatable {
                 // Branch on the warp's PRESENCE: an untimed curve stores the
                 // same Double it always did, never an identity W's output.
                 envelopeStartSeconds: timeWarp?.editedSecond(
-                    forSourceSecond: segment.startSeconds) ?? segment.startSeconds))
+                    forSourceSecond: segment.startSeconds) ?? segment.startSeconds,
+                // C5a-1: the phase anchor, by the same presence branch. At the
+                // default 0 a retimed curve stores `W(0)`, and `W` returns a
+                // non-positive input verbatim (`PitchTimeWarp.interpolate`), so
+                // it is exactly 0.0 there too and the edited-time phase is the
+                // pre-anchor phase, bit for bit.
+                vibratoPhaseAnchorSeconds: timeWarp?.editedSecond(
+                    forSourceSecond: segment.vibratoPhaseAnchorSeconds)
+                    ?? segment.vibratoPhaseAnchorSeconds,
+                // C5b-1: precomputed once per curve, and only for a note that
+                // `hasShape` (the one predicate), so every other span stores
+                // the empty array the evaluator skips. SOURCE time needs no
+                // warp here: the grid is on the source axis.
+                shapeSemitones: segment.hasShape
+                    ? segment.shapeTenthsOfCents.map { Double($0) / 1000 } : [],
+                shapeStartGrid: segment.hasShape ? Double(segment.shapeStartIndex) : 0))
+        }
+        if softJoins {
+            spans = Self.softened(spans, notes: curveNotes, editSet: editSet)
         }
         return PitchCorrectionCurve(clipPitchShiftSemitones: base,
                                     spans: spans,
                                     unresolvedShapingSegmentIDs: unresolved,
-                                    timeWarp: timeWarp)
+                                    timeWarp: timeWarp,
+                                    formantCorrection: editSet.formantCorrection,
+                                    formantBaseStarts: baseStarts,
+                                    formantBaseValues: baseValues)
     }
 
     /// Absolute pitch, in semitones, that the renderer should be transposing by
@@ -1399,13 +2783,21 @@ public struct PitchCorrectionCurve: Sendable, Equatable {
         var weighted = 0.0
         var totalGate = 0.0
         // Segments are canonical (ascending, non-overlapping) and a ramp reaches
-        // at most half its width past an edge, so only neighbours of the hit
+        // at most half its width past an edge, so only spans near the hit
         // point can contribute. Scan from the first span that could still be
-        // open at `sourceSecond`.
-        var index = Self.firstSpanIndex(spans, notEndedBefore: sourceSecond)
+        // open at `sourceSecond`, and stop once no later span has opened.
+        // ⚠️ p2-span: BOTH bounds come from the precomputed
+        // `spanReachPrefixMax` / `spanOpenSuffixMin`, never from the span in
+        // hand. A short note's clamped ramp reaches less far than a long
+        // predecessor's and opens later than a long successor's, so neither
+        // the reach nor the opening ascends in start order, and the per-span
+        // bounds skipped open ramps (for 220 ms, 41 c per 100 c of move, in
+        // `PitchSpanSearchTests`' 500 ms-retune cases).
+        // `PitchSpanSearchTests` holds this loop to a linear scan, bit for bit.
+        var index = Self.firstSpanIndex(spanReachPrefixMax, notEndedBefore: sourceSecond)
         while index < spans.count {
             let span = spans[index]
-            if sourceSecond < span.startSeconds - span.halfRamp { break }
+            if sourceSecond < spanOpenSuffixMin[index] { break }
             let gate = Self.gate(span, at: sourceSecond)
             // Flush a vanishing gate rather than accumulating denormals into
             // the blend.
@@ -1436,10 +2828,27 @@ public struct PitchCorrectionCurve: Sendable, Equatable {
                 // C2-1: the gate and the shaping stay in SOURCE time, and the
                 // generator runs on `generatorSecond` (EDITED time on a
                 // retimed curve). See the type banner, "two time axes".
-                var contribution = span.constantSemitones
+                //
+                // Natural tuning §4.b.3: a following slide's TILT is ADDED
+                // to its own constant (so dragging the slide still moves
+                // it), in source time like the gate, and only when present:
+                // BRANCH ON PRESENCE, never `+ 0`. Everything that is not
+                // a followed slide takes today's expression untouched.
+                var constant = span.constantSemitones
+                if span.bridgeAmount != 0 {
+                    constant += Self.bridge(span, at: sourceSecond)
+                }
+                var contribution = constant
                     + Self.shaping(span, at: sourceSecond)
                 if span.vibratoDepthSemitones != 0 {
                     contribution += Self.generatedVibrato(span, at: generatorSecond)
+                }
+                // C5b-1 (design §5.3): the DRAWN shape, the fourth term, in
+                // SOURCE time like the gate and the shaping. BRANCH ON
+                // PRESENCE, never `+ 0`, so every shape-free span keeps
+                // today's expression bit for bit.
+                if !span.shapeSemitones.isEmpty {
+                    contribution += Self.drawnShape(span, at: sourceSecond)
                 }
                 weighted += gate * contribution
                 totalGate += gate
@@ -1455,19 +2864,241 @@ public struct PitchCorrectionCurve: Sendable, Equatable {
         return total.isFinite ? total : clipPitchShiftSemitones
     }
 
+    // MARK: Natural tuning §1(b): the formant curve (NT-C C1)
+
+    /// The formant shift the stretcher should apply at `sourceSecond`, in
+    /// semitones RELATIVE TO THE SOURCE ENVELOPE (signalsmith's
+    /// `compensatePitch = true`): `0` keeps the singer's envelope where the
+    /// throat put it, the note's own move follows the pitch (the "chipmunk"),
+    /// and `−2` is deeper than sung. Design
+    /// `docs/design/2026-09-25-natural-tuning.md` §1(b), R6:
+    ///
+    ///     spanFormant_i = (1 − c) · constantSemitones_i + formantOffsetSemitones_i
+    ///     F(t)          = clipPart + Σ gate_i(t) · spanFormant_i / norm(t)
+    ///     clipPart      = formantPreserve ? 0 : clipPitchShiftSemitones
+    ///     c             = formantCorrection ?? (formantPreserve ? 1 : 0)
+    ///
+    /// ⚠️ **`formantPreserve` IS A PARAMETER, NOT STORED, ON PURPOSE.** It is
+    /// `Clip.formantPreserve`, a CLIP fact, and every other stored property
+    /// of this type comes from the edit set, the contour, the clip transpose
+    /// and the warp, which the pitch editor's display curve and the render's
+    /// curve are built from alike (`PitchEditorDisplayMatchesRenderTests`
+    /// compares the two as OBJECTS). Storing the flag would make those two
+    /// objects differ on every `formantPreserve` clip unless both builders
+    /// passed it; as a non-defaulted argument here, no caller can forget it.
+    ///
+    /// ⚠️ **THE EDIT TERM IS THE NOTE'S CONSTANT MOVE ONLY.** No drift or
+    /// vibrato shaping and no generator: a real singer's formants stay put
+    /// through vibrato, so the envelope must never wobble with a kept or a
+    /// synthesised one. Hence `editedSecond` enters nothing but the
+    /// non-finite guard; it is accepted so that this evaluator and
+    /// `semitones(atSourceSecond:editedSecond:)` fall back to their clip
+    /// terms at exactly the same hops, and so the render's two per-hop calls
+    /// take the same arguments.
+    ///
+    /// **Same gates, same scan, same normaliser as the pitch curve** (§1(b),
+    /// X7): `gate(_:at:)`, `firstSpanIndex` and "divide only when the gates
+    /// over-sum", over the SAME `spans`. So a per-note offset ramps over the
+    /// same `retuneMs` window as the move, two abutting notes crossfade their
+    /// offsets, and a join §4 later widens is widened for the formant too. Only the
+    /// LOOP is a second copy: see the `-0.0` banner in `semitones` for why
+    /// the pitch loop is never refactored into a shared helper.
+    ///
+    /// ⚠️ An offset is read only on a segment that has a span
+    /// (`NoteSegment.entersPitchCurve`), which is exactly what
+    /// `PitchEditSet.engagesFormantCurve` counts: an untouched SOUND's
+    /// offset neither engages the curve nor is read, so it can never switch
+    /// the formant stage on for a value nothing applies.
+    ///
+    /// Pure and total: a non-finite input, or a result that came out
+    /// non-finite, returns `clipPart`.
+    public func formantSemitones(atSourceSecond sourceSecond: Double,
+                                 editedSecond: Double?,
+                                 formantPreserve: Bool) -> Double {
+        let clipPart = formantPreserve ? 0 : clipPitchShiftSemitones
+        guard sourceSecond.isFinite else { return clipPart }
+        guard !spans.isEmpty else { return clipPart }
+        if let editedSecond, !editedSecond.isFinite { return clipPart }
+        let correction = formantCorrection ?? (formantPreserve ? 1 : 0)
+        let follow = 1 - correction
+
+        var weighted = 0.0
+        var totalGate = 0.0
+        // The pitch loop's scan, verbatim in shape: canonical spans, ramps
+        // reach at most half their width past an edge, and p2-span's two
+        // precomputed bounds (see the pitch loop for why not the span's own).
+        var index = Self.firstSpanIndex(spanReachPrefixMax, notEndedBefore: sourceSecond)
+        while index < spans.count {
+            let span = spans[index]
+            if sourceSecond < spanOpenSuffixMin[index] { break }
+            let gate = Self.gate(span, at: sourceSecond)
+            // Flush a vanishing gate, as the pitch loop does.
+            if gate > 1e-12 {
+                // §4 / X7: a followed slide's tilt is part of the note's
+                // CONSTANT move (the correction, not the singer's shape), so
+                // the formant follows it exactly as it follows the constant,
+                // by the same presence branch as the pitch loop. At the new
+                // sets' `c` = 1 `follow` is 0 and the tilt cannot reach F.
+                var constant = span.constantSemitones
+                if span.bridgeAmount != 0 {
+                    constant += Self.bridge(span, at: sourceSecond)
+                }
+                let spanFormant = follow * constant + span.formantOffsetSemitones
+                weighted += gate * spanFormant
+                totalGate += gate
+            }
+            index += 1
+        }
+        guard totalGate > 1e-12 else { return clipPart }
+        let blended = totalGate > 1 ? weighted / totalGate : weighted
+        let total = clipPart + blended
+        return total.isFinite ? total : clipPart
+    }
+
+    /// `formantSemitones(atSourceSecond:editedSecond:formantPreserve:)` for a
+    /// caller holding only the source second: the edited second comes from
+    /// this curve's own warp, exactly as `semitones(atSourceSecond:)` does it.
+    public func formantSemitones(atSourceSecond sourceSecond: Double,
+                                 formantPreserve: Bool) -> Double {
+        formantSemitones(atSourceSecond: sourceSecond,
+                         editedSecond: timeWarp?.editedSecond(forSourceSecond: sourceSecond),
+                         formantPreserve: formantPreserve)
+    }
+
+    /// The lowest formant base this curve ever returns, Hz (§1(b)). Below it a
+    /// detection is not a sung f0 the envelope estimate should trust, and a
+    /// base must never reach 0 (the next doc says why).
+    public static let formantBaseFloorHz: Double = 50
+
+    /// The f0 HINT for the formant stage at `sourceSecond`, Hz (§1(b), R3):
+    /// a STEP function over the set's notes.
+    ///  * the `detectedHz` of the note covering `sourceSecond`;
+    ///  * between notes, the LAST note's value is held;
+    ///  * before the first note, the FIRST note's value;
+    ///  * a SOUND (`.unpitched`) is skipped: its `detectedHz` is borrowed from
+    ///    a neighbour to draw it, never measured (the steps are built in
+    ///    `make`, which says so);
+    ///  * a non-finite or non-positive `detectedHz` is skipped;
+    ///  * the result is floored at `formantBaseFloorHz`.
+    ///
+    /// ⛔ **NEVER 0.** A base of 0 tells signalsmith to estimate f0 itself,
+    /// an estimator upstream calls "VERY rough", smoothed by an IIR across
+    /// blocks that a window render cannot reproduce. An explicit base buys
+    /// DETERMINISM and a trusted f0 (R3). With no measured note at all this
+    /// returns the floor; a non-finite `sourceSecond` reads as "before the
+    /// first note". Neither is ever 0.
+    ///
+    /// Source seconds, like the gates: the base describes the SUNG audio,
+    /// which the stretcher moves together with the note. `detectedHz` is
+    /// never changed by an edit, so a pure function of stored data: a window
+    /// render reproduces it exactly.
+    public func formantBaseHz(atSourceSecond sourceSecond: Double) -> Double {
+        let floor = Self.formantBaseFloorHz
+        guard let first = formantBaseValues.first else { return floor }
+        guard sourceSecond.isFinite else { return max(floor, first) }
+        // The last step whose start is at or before `sourceSecond`: the note
+        // covering it, or the last one to end before it. None ⇒ the first.
+        var low = 0
+        var high = formantBaseStarts.count
+        while low < high {
+            let mid = (low + high) / 2
+            if formantBaseStarts[mid] <= sourceSecond {
+                low = mid + 1
+            } else {
+                high = mid
+            }
+        }
+        let hz = low == 0 ? first : formantBaseValues[low - 1]
+        return max(floor, hz)
+    }
+
     /// The boundary ramp, 0 outside the note and 1 in its middle, C¹ at both
     /// ends (§6.4: smooth inside a note, fast but never instantaneous across a
     /// boundary — a map change moves the spectral envelope discontinuously, and
     /// phase-0 §5.4 measured the resulting level dip at −5.11 dB for an
     /// instantaneous 2-semitone jump against −1.20 dB spread over three hops).
+    ///
+    /// Natural tuning §4.b.3: the rise reads `halfRampIn` about
+    /// `riseCentreSeconds` and the fall `halfRampOut` about
+    /// `fallCentreSeconds`. ⭐ **ON A LEGACY SET THIS IS TODAY'S GATE BIT FOR
+    /// BIT:** both halves hold the same `min(ramp/2, duration/2)` and the
+    /// centres are `startSeconds`/`endSeconds` themselves, so each smoothstep
+    /// takes the same arguments; a zero (or non-positive, or NaN) half makes
+    /// that edge a hard step, and the product of two `1`/`0` steps is the
+    /// `1`/`0` today's `half > 0` guard returned.
     fileprivate static func gate(_ span: Span, at t: Double) -> Double {
-        let half = span.halfRamp
-        guard half > 0 else {
-            return (t >= span.startSeconds && t < span.endSeconds) ? 1 : 0
+        let halfIn = span.halfRampIn
+        let rise: Double
+        if halfIn > 0 {
+            rise = smoothstep((t - (span.riseCentreSeconds - halfIn)) / (2 * halfIn))
+        } else {
+            rise = t >= span.riseCentreSeconds ? 1 : 0
         }
-        let rise = smoothstep((t - (span.startSeconds - half)) / (2 * half))
-        let fall = 1 - smoothstep((t - (span.endSeconds - half)) / (2 * half))
+        let halfOut = span.halfRampOut
+        let fall: Double
+        if halfOut > 0 {
+            fall = 1 - smoothstep((t - (span.fallCentreSeconds - halfOut)) / (2 * halfOut))
+        } else {
+            fall = t < span.fallCentreSeconds ? 1 : 0
+        }
         return rise * fall
+    }
+
+    /// Natural tuning §4.b.3: a following slide's TILT at source second `t`,
+    /// semitones, before the gate: `g · (from + (to − from) · u)` with `u` a
+    /// smoothstep across the note's OWN span, so the tilt adds no slope at
+    /// either join and stays C¹ with the crossfades. The caller adds it only
+    /// when `bridgeAmount != 0`.
+    fileprivate static func bridge(_ span: Span, at t: Double) -> Double {
+        let length = span.endSeconds - span.startSeconds
+        let u = length > 0 ? smoothstep((t - span.startSeconds) / length) : 0
+        return span.bridgeAmount
+            * (span.bridgeFromSemitones + (span.bridgeToSemitones - span.bridgeFromSemitones) * u)
+    }
+
+    /// Natural tuning §4.b.2 steps 2 and 3, R15: the SOFT pass over a set
+    /// that `usesSoftJoins`. `spans` arrive with legacy halves and centres,
+    /// one per `notes[i]` (the curve notes, `entersPitchCurve`, in order).
+    ///  * Each join between neighbouring curve notes that
+    ///    `PitchEditSet.joinKind` calls `.soft` and that
+    ///    `PitchEditSet.softJoin` gives a width gets ONE half and ONE edge on
+    ///    both sides (the left note's fall, the right note's rise), so the
+    ///    two gates are complementary and sum to exactly 1: no F12 dip (I2).
+    ///    A soft join with no width rule (slope 0, no explicit width) keeps
+    ///    its legacy halves and edges. Every GAP keeps them too (§2's
+    ///    protection: a join facing a silence or a sound is never widened).
+    ///  * Each note with `glideFollow > 0` gets its bridge: the previous and
+    ///    next curve notes' OWN offsets across SOFT joins (0 across a gap or
+    ///    at an end), never their bridged values (no recursion).
+    /// O(n), once per curve; the per-hop evaluators only read the result.
+    fileprivate static func softened(_ spans: [Span], notes: [NoteSegment],
+                                     editSet: PitchEditSet) -> [Span] {
+        guard spans.count == notes.count, !spans.isEmpty else { return spans }
+        var out = spans
+        let count = notes.count
+        var softAfter = [Bool](repeating: false, count: count)
+        for index in 0..<(count - 1) {
+            softAfter[index] = PitchEditSet.joinKind(
+                leftEndSeconds: notes[index].endSeconds,
+                rightStartSeconds: notes[index + 1].startSeconds) == .soft
+        }
+        for index in 0..<count where notes[index].glideFollow > 0 {
+            out[index].bridgeFromSemitones = index > 0 && softAfter[index - 1]
+                ? notes[index - 1].pitchOffsetCents / 100 : 0
+            out[index].bridgeToSemitones = softAfter[index]
+                ? notes[index + 1].pitchOffsetCents / 100 : 0
+            out[index].bridgeAmount = notes[index].glideFollow
+        }
+        for index in 0..<(count - 1) where softAfter[index] {
+            guard let join = PitchEditSet.softJoin(
+                left: notes[index], right: notes[index + 1], retuneMs: editSet.retuneMs,
+                slopeCentsPerSecond: editSet.transitionSlopeCentsPerSecond) else { continue }
+            out[index].halfRampOut = join.halfWidthSeconds
+            out[index].fallCentreSeconds = join.edgeSeconds
+            out[index + 1].halfRampIn = join.halfWidthSeconds
+            out[index + 1].riseCentreSeconds = join.edgeSeconds
+        }
+        return out
     }
 
     /// Hermite smoothstep `3x² − 2x³`, clamped. C¹ at both ends, and
@@ -1494,16 +3125,40 @@ public struct PitchCorrectionCurve: Sendable, Equatable {
             + span.shapingSemitones[lower + 1] * fraction
     }
 
+    /// C5b-1 (design §5.3): the DRAWN shape's term at SOURCE second `t`,
+    /// semitones, before the gate. Linear between grid samples, at grid
+    /// position `t · shapeGridHz − shapeStartIndex`, and HELD at both ends,
+    /// the convention `shaping` uses. The caller adds it only when the span
+    /// has a shape; the empty guard is a second line of defence.
+    ///
+    /// ⭐ **SOURCE TIME, NEVER THE GENERATOR'S AXIS.** The user drew against
+    /// the SUNG audio, so a retime (C2) carries the drawing with the audio it
+    /// was drawn on. The synthesised generator is the other case: a rate the
+    /// user chose, so it runs in edited time.
+    fileprivate static func drawnShape(_ span: Span, at t: Double) -> Double {
+        let samples = span.shapeSemitones
+        guard let first = samples.first else { return 0 }
+        let position = t * NoteSegment.shapeGridHz - span.shapeStartGrid
+        guard position > 0 else { return first }
+        let last = samples.count - 1
+        guard position < Double(last) else { return samples[last] }
+        let lower = Int(position)
+        let fraction = position - Double(lower)
+        return samples[lower] * (1 - fraction) + samples[lower + 1] * fraction
+    }
+
     /// The SYNTHESISED vibrato term, semitones, before the boundary gate.
     ///
-    /// `depth × fade(t) × sin(2π · rate · t)`, with the phase anchored at
-    /// SOURCE SECOND ZERO and the fade anchored at the NOTE'S START — see the
-    /// type's banner for why those two anchors differ on purpose.
+    /// `depth × fade(t) × sin(2π · rate · (t − anchor))`, with the phase
+    /// anchored at the STORED `vibratoPhaseAnchorSeconds` (source second zero
+    /// by default) and the fade anchored at the NOTE'S START — see the type's
+    /// banner for why those two anchors differ on purpose.
     ///
     /// `t` is on the GENERATOR'S axis: source seconds on an untimed curve,
     /// EDITED seconds on a retimed one (C2-1), and `span.envelopeStartSeconds`
-    /// is already on the same axis. The phase stays anchored at axis zero,
-    /// which is source zero because `W(0) = 0`.
+    /// and `span.vibratoPhaseAnchorSeconds` are already on the same axis. The
+    /// default anchor stays at axis zero, which is source zero because
+    /// `W(0) = 0`.
     ///
     /// Total and inert-by-construction: a zero depth or a zero rate returns
     /// exactly `0`, and a non-finite `t` cannot reach here (the evaluator
@@ -1523,28 +3178,62 @@ public struct PitchCorrectionCurve: Sendable, Equatable {
         } else {
             fade = smoothstep((t - span.envelopeStartSeconds) / span.vibratoOnsetSeconds)
         }
-        // SLOT (C5a-1, vibrato-handle design §7.1 and §7.6): the stored phase
-        // anchor lands here as `sin(ω · (t − anchorOnThisAxis))`, where the
-        // anchor is precomputed in `make` as `W(vibratoPhaseAnchorSeconds)` on
-        // a retimed curve and as the stored value verbatim otherwise, exactly
-        // like `envelopeStartSeconds`.
-        return depth * fade * sin(span.vibratoRadiansPerSecond * t)
+        // C5a-1 (vibrato-handle design §7.1 and §7.6): the phase anchor, on
+        // this axis (`make` precomputed `W(anchor)` on a retimed curve).
+        // ⭐ NO BRANCH AT THE DEFAULT, ON PURPOSE: `t − (+0.0) == t` for every
+        // finite `t` in IEEE arithmetic, `−0.0` included (`−0 − +0 = −0`), so
+        // at anchor 0 the argument is bit for bit the pre-anchor `ω · t`.
+        // `NoteVibratoGeneratorTests.anchorZeroIsTodayBitForBit` (T12) is the
+        // proof, not this comment.
+        let phase = span.vibratoRadiansPerSecond * (t - span.vibratoPhaseAnchorSeconds)
+        return depth * fade * sin(phase)
     }
 
     /// Binary search for the first span whose ramped window could still be open
-    /// at `t` — i.e. the first with `endSeconds + halfRamp > t`.
-    fileprivate static func firstSpanIndex(_ spans: [Span], notEndedBefore t: Double) -> Int {
+    /// at `t` — i.e. the first with `reachPrefixMax > t`, where
+    /// `reachPrefixMax` is `spanReachPrefixMax`: NON-DECREASING by
+    /// construction, which a binary search needs and the raw
+    /// `endSeconds + halfRamp` is not (p2-span).
+    fileprivate static func firstSpanIndex(_ reachPrefixMax: [Double],
+                                           notEndedBefore t: Double) -> Int {
         var low = 0
-        var high = spans.count
+        var high = reachPrefixMax.count
         while low < high {
             let mid = (low + high) / 2
-            if spans[mid].endSeconds + spans[mid].halfRamp > t {
+            if reachPrefixMax[mid] > t {
                 high = mid
             } else {
                 low = mid + 1
             }
         }
         return low
+    }
+
+    /// p2-span: `spanReachPrefixMax` and `spanOpenSuffixMin`, O(n), built
+    /// once per curve so the per-hop evaluators read them and never allocate.
+    /// The reach and opening are the same expressions the scan evaluated per
+    /// span before, so on a set where both already ascend the two arrays hold
+    /// exactly those values and every search and exit lands where it did.
+    fileprivate static func searchBounds(_ spans: [Span])
+        -> (reachPrefixMax: [Double], openSuffixMin: [Double]) {
+        var reachPrefixMax: [Double] = []
+        reachPrefixMax.reserveCapacity(spans.count)
+        // Natural tuning §4: the reach and opening are the GATE's edges,
+        // `centre ± half`. On a legacy set the centres ARE `endSeconds` and
+        // `startSeconds` and both halves are the legacy half, so these are
+        // the p2-span expressions value for value.
+        var running = -Double.infinity
+        for span in spans {
+            running = max(running, span.fallCentreSeconds + span.halfRampOut)
+            reachPrefixMax.append(running)
+        }
+        var openSuffixMin = [Double](repeating: 0, count: spans.count)
+        var lowest = Double.infinity
+        for index in spans.indices.reversed() {
+            lowest = min(lowest, spans[index].riseCentreSeconds - spans[index].halfRampIn)
+            openSuffixMin[index] = lowest
+        }
+        return (reachPrefixMax, openSuffixMin)
     }
 }
 
@@ -1607,12 +3296,16 @@ public enum PitchRenderContour: Sendable, Equatable {
         return 0.5 / rate
     }
 
-    /// **THE VERSION OF THE CONTOUR-SHAPING ARITHMETIC** — bump it whenever a
-    /// curve built by `curve(editSet:…)` from an UNCHANGED edit set and an
-    /// UNCHANGED contour would come out different: the drift/vibrato separator
-    /// (`PitchCorrectionCurve.driftWindowSeconds` and the moving average
-    /// behind it), `frameValueOffsetSeconds`, or the shaping expression in
-    /// `PitchCorrectionCurve.make`.
+    /// **THE VERSION OF THE EQUAL-SCALE CONTOUR-SHAPING ARITHMETIC** — bump it
+    /// whenever a curve built by `curve(editSet:…)` from an UNCHANGED edit set
+    /// whose notes all have `driftScale == vibratoScale` and an UNCHANGED
+    /// contour would come out different: the v1 separator
+    /// (`PitchCorrectionCurve.driftWindowSeconds` and the moving average behind
+    /// it), `frameValueOffsetSeconds`, or the equal-scale branch of
+    /// `PitchCorrectionCurve.make`. Since natural tuning §3 (W7-C3) a set with an
+    /// UNEQUAL-scale note keys `separatedShapingVersion` instead
+    /// (`shapingVersion(for:)`); a bump here re-keys every Hard Tune render,
+    /// a bump there never does.
     ///
     /// It sits in every CONTOUR-SHAPED render's cache key and in no other
     /// (`StretchRenderCache.renderKeys`), so a bump re-renders exactly the
@@ -1624,18 +3317,41 @@ public enum PitchRenderContour: Sendable, Equatable {
     /// it re-renders EVERY stretched clip on every disk, including all the
     /// contour-free ones this cannot affect.)
     ///
-    /// ⚠️ The separator IS the likeliest thing to change: on a 5.5 Hz vibrato
-    /// the 250 ms window passes 121 % of the wobble into "vibrato", so
-    /// `vibratoScale: 0` on its own over-corrects wherever the detector reads
-    /// the depth fully (measured 2026-09-24: 34 % wander cut at B3, where
-    /// SwiftF0 reads 97 % of the depth, against 56 % at A3, where it reads
-    /// 80 %; Hard Tune — drift AND vibrato at 0, which cancels the split —
-    /// cuts 48–58 % at both, through the product render). Most of what is
-    /// left in every case is the renderer, not the arithmetic: the same
-    /// curves evaluated WITHOUT the stretcher leave 2.6–8.2 cents.
-    /// `ContourShapingSweepTests` (DAWEngineTests, env-gated) re-derives all
-    /// of these.
+    /// ⚠️ The v1 separator was the likeliest thing to change, and it did: on a
+    /// 5.5 Hz vibrato the 250 ms window passes 121 % of the wobble into
+    /// "vibrato", so `vibratoScale: 0` on its own over-corrected wherever the
+    /// detector reads the depth fully. Since W7-C3 `vibratoScale: 0` alone is
+    /// an unequal-scale note and takes v2, which does not invert; Hard Tune
+    /// still takes v1 and is unchanged. `ContourShapingSweepTests`
+    /// (DAWEngineTests, env-gated) re-derives the wander cut through the
+    /// product render; MEASURED 2026-09-27 on one tree before and after v2:
+    /// `vibratoScale: 0` alone cuts 44–46 % at A3 and 26–31 % at B3 under v1,
+    /// 48–51 % and 41–45 % under v2; Hard Tune cuts 39–51 %, identical under
+    /// both. (The 2026-09-24 figures, 56 % / 34 % / 48–58 %, no longer
+    /// reproduce even on v1: the render changed between the two dates, the
+    /// curve did not.) Most of what is left in every case is the renderer: the
+    /// same curves evaluated WITHOUT the stretcher leave 2.6–8.2 cents (v1)
+    /// and 3.7–9.3 cents (v2).
     public static let shapingVersion = 1
+
+    /// Natural tuning §3b/§3d (W7-C3): **THE VERSION OF THE SEPARATED (v2)
+    /// SHAPING ARITHMETIC**: the unequal-scale branch of
+    /// `PitchCorrectionCurve.make` and its kernel
+    /// (`PitchCorrectionMath.triangularAverage`,
+    /// `PitchCorrectionCurve.separatedDriftWindowSeconds`, `.separatedDriftEdge`).
+    /// Bump THIS, never `shapingVersion`, when that branch changes: it re-keys
+    /// only renders that hold an unequal-scale note, never Hard Tune.
+    /// `ShapingKeyVersionTests` (G2) holds the split.
+    public static let separatedShapingVersion = 2
+
+    /// The `shaping:` version a contour-shaped render of `set` keys:
+    /// `separatedShapingVersion` when some note takes the v2 branch
+    /// (`PitchEditSet.needsSeparatedShaping`, the one predicate), else
+    /// `shapingVersion`. A pure function of the set, so `ClipRenderSignature`,
+    /// which already covers the set, needs no field of its own.
+    public static func shapingVersion(for set: PitchEditSet?) -> Int {
+        set?.needsSeparatedShaping == true ? separatedShapingVersion : shapingVersion
+    }
 
     /// **THE curve a render of `editSet` plays.** `StretchCurvePlan` builds its
     /// curve through this and nothing else; a display must too.
@@ -1645,11 +3361,13 @@ public enum PitchRenderContour: Sendable, Equatable {
     /// set. Passing nothing is exactly the pre-C2 call.
     public func curve(editSet: PitchEditSet,
                       clipPitchShiftSemitones: Double,
-                      timeWarp: PitchTimeWarp? = nil) -> PitchCorrectionCurve {
+                      timeWarp: PitchTimeWarp? = nil,
+                      separator: PitchCorrectionCurve.Separator = .production) -> PitchCorrectionCurve {
         PitchCorrectionCurve.make(editSet: editSet, contour: frames,
                                   contourValueOffsetSeconds: frameValueOffsetSeconds,
                                   clipPitchShiftSemitones: clipPitchShiftSemitones,
-                                  timeWarp: timeWarp)
+                                  timeWarp: timeWarp,
+                                  separator: separator)
     }
 }
 
@@ -1685,16 +3403,56 @@ public struct PitchAutoCorrectOptions: Codable, Sendable, Equatable {
     ///    and it needs the detected contour at render time.
     public var preserveVibrato: Bool
 
+    /// Natural tuning §1(e): the voice-size amount (`PitchEditSet.formantCorrection`)
+    /// this pass STORES, over both rules that otherwise decide it.
+    ///  * `nil` (the default, and every preset's): today's rule. A new set
+    ///    takes the seed (`PitchEditSet.newSetFormantCorrection`), and
+    ///    `ProjectStore.autoCorrectClipPitch` carries an amount the clip's
+    ///    CURRENT table already holds (the user's own pick, §1(c) D-F2).
+    ///  * a number: clamped to `PitchEditSet.formantCorrectionRange` and
+    ///    stored over BOTH the seed and the carry. `0.0` is an engaged
+    ///    amount, never legacy (the `PitchEditSet.formantCorrection` rule).
+    ///  * a NON-FINITE number is kept as it is, never healed to nil:
+    ///    `autoCorrectClipPitch` REFUSES it in words before detection runs.
+    ///    A NaN quietly read as "no override" would drop a request without
+    ///    a word. `formantCorrectionOverride` is the one reading of it.
+    ///
+    /// ⚠️ nil means "no override", so this can never ask a pass for LEGACY
+    /// (no amount): legacy stays reachable only through
+    /// `ProjectStore.setClipFormantCorrection(amount: nil)`. Declared LAST
+    /// and omitted from the payload when nil (the synthesized `Codable`
+    /// skips a nil optional), so an options value that names no amount
+    /// encodes byte for byte as it did before the field existed.
+    public var formantCorrection: Double?
+
     public init(scale: PitchCorrectionScale = .chromatic,
                 strength: Double = 1,
                 retuneMs: Double = PitchEditSet.engineMinimumRetuneMs,
-                preserveVibrato: Bool = true) {
+                preserveVibrato: Bool = true,
+                formantCorrection: Double? = nil) {
         self.scale = scale
         self.strength = PitchCorrectionMath.finite(strength, default: 0).clamped(to: 0...1)
         self.retuneMs = PitchCorrectionMath
             .finite(retuneMs, default: PitchEditSet.engineMinimumRetuneMs)
             .clamped(to: PitchEditSet.retuneMsRange)
         self.preserveVibrato = preserveVibrato
+        // Clamped like `strength`, but a non-finite value is KEPT so the
+        // store can refuse it in words (see the field).
+        self.formantCorrection = formantCorrection.map {
+            $0.isFinite ? $0.clamped(to: PitchEditSet.formantCorrectionRange) : $0
+        }
+    }
+
+    /// ⭐ **THE ONE READING of `formantCorrection`**, shared by the policy
+    /// (`PitchAutoCorrect.build`, over the seed) and the store
+    /// (`ProjectStore.autoCorrectClipPitch`, over the carry): the amount
+    /// clamped to `PitchEditSet.formantCorrectionRange` (a direct field
+    /// write bypasses `init`'s clamp), or nil for "no override". A
+    /// non-finite amount reads nil here: the store has refused it before
+    /// this is asked, and the pure policy keeps the seed.
+    public var formantCorrectionOverride: Double? {
+        guard let amount = formantCorrection, amount.isFinite else { return nil }
+        return amount.clamped(to: PitchEditSet.formantCorrectionRange)
     }
 }
 
@@ -1888,6 +3646,10 @@ public enum PitchAutoCorrect {
     /// wrote before p2-seg (design §2.4; `PitchNoteSplitterTests` checks it field
     /// by field against a frozen copy of that function).
     ///
+    /// **Plus one IDENTITY `.unpitched` segment per SOUND between the notes
+    /// (U-A)**, in every row; `build(contour:…)` says why, and returns the
+    /// finder's result beside the set.
+    ///
     /// - Parameter slideShape: THE policy constant `slideShape` by default; every
     ///   production caller leaves it there. A test passes each case.
     public static func editSet(contour frames: [ClipPitchFrame],
@@ -1896,27 +3658,111 @@ public enum PitchAutoCorrect {
                                analysisVersion: Int = PitchEditSet.currentAnalysisVersion,
                                slideShape: PitchSlideShape = PitchAutoCorrect.slideShape)
     -> PitchEditSet {
-        guard options.strength > 0 else { return .empty }
+        build(contour: frames, frameRateHz: frameRateHz, options: options,
+              analysisVersion: analysisVersion, slideShape: slideShape).editSet
+    }
+
+    /// `editSet(contour:…)` plus what the unpitched finder decided (U-A,
+    /// unpitched-notes design §1.10): the ONE policy, and the variant a caller
+    /// uses when it has to REPORT the finder's skip reason, floor or threshold
+    /// (`ProjectStore.autoCorrectClipPitchReport`, the wire's
+    /// `unpitchedSkippedReason`). `editSet(contour:…)` forwards here, so the
+    /// two cannot build different sets.
+    ///
+    /// ⭐ **SOUNDS (U-A, §1.6, U4).** After the splitter's parts, the finder
+    /// adds one `.unpitched` segment per audible stretch between notes. Each
+    /// is IDENTITY under every preset and every slide shape (never `locked`,
+    /// never `shapeScale`): a sound has no voiced frames to shape, and Hard
+    /// Tune's scale 0 would name it in `unresolvedShapingSegmentIDs`, which
+    /// the editor reads as "couldn't analyse". Untouched, it does not enter
+    /// the curve (`NoteSegment.entersPitchCurve`), so every preset renders
+    /// exactly as it did before sounds existed.
+    public static func build(contour frames: [ClipPitchFrame],
+                             frameRateHz: Double,
+                             options: PitchAutoCorrectOptions,
+                             analysisVersion: Int = PitchEditSet.currentAnalysisVersion,
+                             slideShape: PitchSlideShape = PitchAutoCorrect.slideShape)
+    -> PitchNoteTableBuild {
+        guard options.strength > 0 else {
+            return PitchNoteTableBuild(editSet: .empty, unpitched: nil)
+        }
         // f0 alone decides where notes are: onset placement (S3) is not scheduled
         // (design §12 item 3), so no onsets are passed.
         let parts = PitchNoteSplitter.parts(in: frames, frameRateHz: frameRateHz,
                                             onsetSeconds: [])
+        // Run even with no parts, so the report names the reason (`noNotes`,
+        // or a guard that fired first) rather than going quiet.
+        let unpitched = PitchUnpitchedFinder.sounds(
+            in: frames, frameRateHz: frameRateHz,
+            notes: parts.map(PitchUnpitchedFinder.Note.init(part:)))
+        // Natural tuning X3 (R14, R29): a NEW set, so the preset seed. Slides
+        // stay as sung (`glideFollow` 0) because the policy says so, not
+        // because no kinds are passed.
         guard !parts.isEmpty else {
-            return PitchEditSet(analysisVersion: analysisVersion,
-                                segments: [], retuneMs: options.retuneMs)
+            return PitchNoteTableBuild(
+                editSet: newSet(segments: [], options: options, analysisVersion: analysisVersion),
+                unpitched: unpitched)
         }
         // Flattening IS correction, so it scales with strength: at strength 0
         // both branches are the identity, and at strength 1 the robot branch
         // replaces the contour outright.
         let shapeScale = options.preserveVibrato ? 1 : (1 - options.strength)
 
-        let segments = parts.indices.map { index -> NoteSegment in
+        let notes = parts.indices.map { index -> NoteSegment in
             segment(forPart: index, of: parts, options: options,
                     shapeScale: shapeScale, slideShape: slideShape)
         }
-        return PitchEditSet(analysisVersion: analysisVersion,
-                            segments: segments,
-                            retuneMs: options.retuneMs)
+        let sounds = unpitched.sounds.map(segment(forSound:))
+        return PitchNoteTableBuild(
+            editSet: newSet(segments: notes + sounds, options: options,
+                            analysisVersion: analysisVersion),
+            unpitched: unpitched)
+    }
+
+    /// A pass's NEW set: the preset seed (X3, `PitchEditSet.seeded`), then
+    /// the voice size the options NAME (§1(e), `formantCorrectionOverride`)
+    /// over the seed's. Both of `build`'s tables come through here, so an
+    /// empty one and a full one cannot disagree about it. With no override
+    /// this is exactly the seed, byte for byte.
+    private static func newSet(segments: [NoteSegment], options: PitchAutoCorrectOptions,
+                               analysisVersion: Int) -> PitchEditSet {
+        var set = PitchEditSet.seeded(analysisVersion: analysisVersion, segments: segments,
+                                      retuneMs: options.retuneMs, partKinds: [:],
+                                      seedPolicy: .preset)
+        if let amount = options.formantCorrectionOverride { set.formantCorrection = amount }
+        return set
+    }
+
+    /// ONE sound's segment (U-A, §1.4/§1.6): `.unpitched`, drawn at the
+    /// borrowed anchor, and IDENTITY — every edit field at its default, under
+    /// every preset. Both builders and the merge verb
+    /// (`ProjectStore.findUnpitchedSounds`) make sounds here and nowhere else.
+    static func segment(forSound sound: PitchUnpitchedFinder.Sound) -> NoteSegment {
+        NoteSegment(startSeconds: sound.startSeconds,
+                    endSeconds: sound.endSeconds,
+                    detectedHz: sound.anchorHz,
+                    detectedConfidence: sound.medianConfidence,
+                    origin: .unpitched)
+    }
+
+    /// ⭐ **THE ONE MAPPING from a part's kind to the stored origin** (UA-2,
+    /// unpitched-notes design §1.4 U2; it settles p2-seg §10 item 9). Both
+    /// builders call it: `segment(forPart:)` below and `PitchNoteTable.build`.
+    /// So the editor and the corrector cannot stamp a slide differently. A
+    /// `.held` part is a `.detected` note and a `.transition` part is a sung
+    /// slide. A part is never `.unpitched` (`segment(forSound:)` makes the
+    /// sounds). The switch is exhaustive, so a new part kind is a compile
+    /// error here and never a silent `.detected`.
+    ///
+    /// The stamp bends nothing: `.transition` enters the curve exactly as
+    /// `.detected` does (`NoteSegment.entersPitchCurve`, and the formant base
+    /// in `PitchCorrectionCurve.make`). It moves only the render KEY (digest
+    /// slot 6), and only for a set that bends pitch and has a slide.
+    static func origin(of kind: NotePart.Kind) -> NoteOrigin {
+        switch kind {
+        case .held: return .detected
+        case .transition: return .transition
+        }
     }
 
     /// One part's segment: the table on `editSet`, and nothing else.
@@ -1924,6 +3770,9 @@ public enum PitchAutoCorrect {
                                 options: PitchAutoCorrectOptions, shapeScale: Double,
                                 slideShape: PitchSlideShape) -> NoteSegment {
         let part = parts[index]
+        // UA-2: the part's own kind, in every preset and every shape, whichever
+        // branch below builds the segment (a slide can be locked or as sung).
+        let origin = Self.origin(of: part.kind)
         // Today's per-note arithmetic, for ONE part, aimed at the nearest allowed
         // note to `aimHz`. Aimed at the part's own median it is, expression for
         // expression, what this function computed per run before p2-seg.
@@ -1939,7 +3788,8 @@ public enum PitchAutoCorrect {
                 detectedConfidence: part.medianConfidence,
                 pitchOffsetCents: offset,
                 driftScale: shapeScale,
-                vibratoScale: shapeScale)
+                vibratoScale: shapeScale,
+                origin: origin)
         }
         // IDENTITY: the note as sung — offset 0, both scales 1. A real, editable
         // note rather than a gap: a gap would sound the same (the curve is
@@ -1948,7 +3798,8 @@ public enum PitchAutoCorrect {
         // user could not grab (design §3.2 (a-T)).
         func asSung() -> NoteSegment {
             NoteSegment(startSeconds: part.startSeconds, endSeconds: part.endSeconds,
-                        detectedHz: part.centreHz, detectedConfidence: part.medianConfidence)
+                        detectedHz: part.centreHz, detectedConfidence: part.medianConfidence,
+                        origin: origin)
         }
         switch part.kind {
         case .held:
@@ -2002,6 +3853,36 @@ public enum PitchAutoCorrect {
     -> PitchEditSet {
         editSet(contour: result.frames, frameRateHz: result.frameRateHz,
                 options: options, analysisVersion: analysisVersion, slideShape: slideShape)
+    }
+
+    /// `build(contour:…)` over a whole `clip.detectPitch` response, at the
+    /// result's OWN frame rate (the `editSet(from:…)` rule).
+    public static func build(from result: PitchDetectionResult,
+                             options: PitchAutoCorrectOptions,
+                             analysisVersion: Int = PitchEditSet.currentAnalysisVersion,
+                             slideShape: PitchSlideShape = PitchAutoCorrect.slideShape)
+    -> PitchNoteTableBuild {
+        build(contour: result.frames, frameRateHz: result.frameRateHz,
+              options: options, analysisVersion: analysisVersion, slideShape: slideShape)
+    }
+}
+
+/// A note table as one of the two builders made it, with what the unpitched
+/// finder decided on the way (U-A, unpitched-notes design §1.10).
+/// `PitchAutoCorrect.build` and `PitchNoteTable.build` return it; their plain
+/// twins (`editSet`, `detected`) forward to them and keep only `editSet`.
+public struct PitchNoteTableBuild: Sendable, Equatable {
+    /// The table, sounds included (`NoteOrigin.unpitched`).
+    public let editSet: PitchEditSet
+    /// The finder's result: the sounds it found, the floor, the threshold and,
+    /// when it found none on purpose, why. `nil` exactly when the builder
+    /// never ran it (a zero-strength pass, which returns `PitchEditSet.empty`
+    /// before looking at a frame).
+    public let unpitched: PitchUnpitchedFinder.Result?
+
+    public init(editSet: PitchEditSet, unpitched: PitchUnpitchedFinder.Result?) {
+        self.editSet = editSet
+        self.unpitched = unpitched
     }
 }
 
@@ -2101,9 +3982,11 @@ public enum PitchCorrectionMath {
         return pow(2, logMedian)
     }
 
-    /// Centred moving average over `windowSeconds`, edge-clamped. The drift /
-    /// vibrato separator — see `PitchCorrectionCurve.driftWindowSeconds` for
-    /// why the window is a pick and when it is exercised at all.
+    /// Centred moving average over `windowSeconds`, edge-clamped. The v1 drift /
+    /// vibrato separator, which since natural tuning §3 shapes only equal-scale
+    /// notes (where its split cancels) — see
+    /// `PitchCorrectionCurve.driftWindowSeconds`. NOT edited by v2: G1 holds its
+    /// callers bit for bit.
     public static func movingAverage(_ values: [Double],
                                      windowSeconds: Double,
                                      stepSeconds: Double) -> [Double] {
@@ -2120,5 +4003,93 @@ public enum PitchCorrectionMath {
             out[i] = sum / Double(high - low + 1)
         }
         return out
+    }
+
+    /// Natural tuning §3b (W7-C3): how a centred average treats a note's ends.
+    public enum AverageEdge: String, Sendable, Hashable, CaseIterable {
+        /// The kernel is cut at the ends and renormalised over what is left:
+        /// `movingAverage`'s rule, generalised. A near-edge output averages one
+        /// side only.
+        case truncate
+        /// The contour is mirrored about its end frames (`x[−k] = x[k]`,
+        /// whole-sample symmetric), repeatedly when the kernel is longer than
+        /// the note, so the kernel keeps its full shape everywhere.
+        case reflect
+    }
+
+    /// Natural tuning §3b (W7-C3): the v2 drift/vibrato separator. Two cascaded
+    /// centred boxcars of `windowSeconds`, a TRIANGULAR kernel, applied as one
+    /// centred convolution.
+    ///
+    /// Each boxcar has `M = 2h + 1` taps, `h = round(windowSeconds /
+    /// stepSeconds / 2)` (`movingAverage`'s own half-width rule), so the
+    /// triangle has `2M − 1` taps with integer weights `M − |k|`. Its response
+    /// is the boxcar's squared, `[sin(πfMT) / (M·sin(πfT))]²`: never negative.
+    /// No frequency is passed into "vibrato" at more than 100 % and none is
+    /// inverted, which is the boxcar's defect (−0.2155 at 5.5 Hz, 16 ms frames).
+    ///
+    /// Total, like `movingAverage`: an empty input returns `[]`; a
+    /// non-positive or non-finite window or step, or one under a frame,
+    /// returns the input unchanged. Unlike it, a non-finite sample is LEFT OUT
+    /// of every average that reaches it (its weight dropped, the rest
+    /// renormalised), and an output no finite sample reaches is 0.
+    public static func triangularAverage(_ values: [Double],
+                                         windowSeconds: Double,
+                                         stepSeconds: Double,
+                                         edge: AverageEdge) -> [Double] {
+        guard !values.isEmpty else { return [] }
+        guard stepSeconds.isFinite, windowSeconds.isFinite,
+              stepSeconds > 0, windowSeconds > 0 else { return values }
+        let halfWidth = max(0, Int((windowSeconds / stepSeconds / 2).rounded()))
+        guard halfWidth > 0 else { return values }
+        let taps = 2 * halfWidth + 1
+        let weights = (-(taps - 1)...(taps - 1)).map { Double(taps - abs($0)) }
+        return centredAverage(values, weights: weights, edge: edge)
+    }
+
+    /// A centred weighted average: `weights` has an odd count and its middle
+    /// tap sits on the output frame; each output is divided by the sum of the
+    /// weights that reached a finite sample (0 when that sum is 0). The ONE
+    /// convolution behind `triangularAverage` and G3's plant kernel
+    /// (`PitchCorrectionCurve.Separator.kernelTaps`). An even `weights` count
+    /// returns the input unchanged.
+    static func centredAverage(_ values: [Double], weights: [Double],
+                               edge: AverageEdge) -> [Double] {
+        let count = values.count
+        guard count > 0 else { return [] }
+        guard weights.count % 2 == 1 else { return values }
+        let half = weights.count / 2
+        var out = [Double](repeating: 0, count: count)
+        for i in 0..<count {
+            var sum = 0.0
+            var norm = 0.0
+            for k in -half...half {
+                let j: Int
+                switch edge {
+                case .truncate:
+                    j = i + k
+                    if j < 0 || j >= count { continue }
+                case .reflect:
+                    j = reflectedIndex(i + k, count: count)
+                }
+                let value = values[j]
+                guard value.isFinite else { continue }
+                let weight = weights[k + half]
+                sum += weight * value
+                norm += weight
+            }
+            out[i] = norm != 0 ? sum / norm : 0
+        }
+        return out
+    }
+
+    /// Whole-sample symmetric reflection of index `j` into `0..<count`
+    /// (`−1 → 1`, `count → count − 2`), repeated for any distance.
+    static func reflectedIndex(_ j: Int, count: Int) -> Int {
+        guard count > 1 else { return 0 }
+        let period = 2 * (count - 1)
+        var m = j % period
+        if m < 0 { m += period }
+        return m < count ? m : period - m
     }
 }

@@ -125,13 +125,16 @@ struct PitchPresetRenderGateTests {
     /// asked for the same number of cents in one go, with no curve anywhere.
     ///
     /// ⭐ **THIS IS THE SECOND INSTRUMENT, AND IT IS WHAT MAKES THE MAGNITUDE
-    /// NUMBER MEAN ANYTHING.** The shipped transposer does not land exactly
-    /// where it is asked — design §5.5.3, measured: +5.45 cents at +2 st, +3.95
-    /// at −2 st, i.e. SHARP in both directions. So a render that comes back a
-    /// few cents shy of the request is the product's own documented behaviour,
-    /// not a shallow curve. Rendering the same request BOTH ways separates
-    /// those two: if the curve path and the constant path land together, the
-    /// curve is delivering full depth and the remaining offset belongs to the
+    /// NUMBER MEAN ANYTHING.** The transposer used to miss where it was asked
+    /// — design §5.5.3 measured +5.45 cents at +2 st, +3.95 at −2 st — until
+    /// p2-acc and p2-acc-3 (2026-09-25) fixed three defects in the vendored
+    /// stretcher (`Sources/CSignalsmithStretch/VENDORED.md`, patches 0001-0003);
+    /// it now lands within 0.01 c for steady partials across ±24 st and for
+    /// harmonic tones to ±12 st and +24 st, but a shared residual can still
+    /// remain on real material (breath, noise, a moving voice).
+    /// Rendering the same request BOTH ways separates a shallow curve from
+    /// that: if the curve path and the constant path land together, the curve
+    /// is delivering full depth and any remaining offset belongs to the
     /// transposer everything already shares.
     static func constantRender(_ input: [Float], cents: Double) throws -> [Float] {
         try OfflineStretcher.stretch(
@@ -314,9 +317,10 @@ struct PitchPresetRenderGateTests {
             // (c) MAGNITUDE against the request, to the ±12.90 cent floor §5.5.3
             //     writes the product claim against ("pulls a note's centre onto
             //     the scale, TO ROUGHLY THE DETECTOR'S OWN RESOLUTION"). Measured
-            //     here: the render lands 10.4 / 9.5 / 7.4 cents shy of the
-            //     request for gentle / natural / tight, all of it the shipped
-            //     transposer's documented sharpness — which (b) is what proves.
+            //     here after p2-acc (2026-09-25): the render lands within 0.1 c
+            //     of the request (asked −16.8 / −28.5 / −33.5 c; curve −16.9 /
+            //     −28.5 / −33.5; constant the same). Before the vendored
+            //     fractional-read fix it landed 10.4 / 9.5 / 7.4 c shy.
             #expect(abs(movedCents - askedCents) < 12.90,
                     "\(preset.rawValue) asked for \(String(format: "%+.1f", askedCents)) cents and the render delivered \(String(format: "%+.1f", movedCents)) — further off the request than the detector's own resolution, so the product claim no longer holds")
 

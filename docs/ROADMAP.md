@@ -1589,7 +1589,7 @@ Seeded 2026-07-26 from the user's hands-on session against **`dist/DAWPro.app` b
 - [ ] (m23-ap-p2) **PHASE 2 — THE PITCH EDITOR (Melodyne-class), tracked here from 2026-09-24.** Designs: `docs/design/2026-09-22-pitch-editor-ui.md` (+ `2026-09-24-pitch-editor-vibrato-handle.md`, `2026-09-24-pitch-editor-timing-and-freehand.md`). Status as checked against source on 2026-09-24; every item marked LANDED below was committed on 2026-09-24, in the commit after `ed0d3ad`.
   - [x] p2-a headless model (`PitchEditorModel`) · p2-b the pane (`PitchEditorView`) · p2-c `view.openPitchEditor` + `debug.pitchEditor` + MCP · p2-e the four presets (`clip.autoCorrectPitch` / `clearPitchEdits` / `getPitchEdits`).
   - [x] C1 drag a note (`clip.setNotePitch`) · C3 split (`clip.splitNote`) · C4 zoom (TIME/PITCH − +, seen in the 2026-09-24 live look) · C-0c `clip.getPlayedPitch` · C-F3 `replaceExisting` (hand edits are refused, not overwritten) · C2-1 `PitchTimeWarp` (groundwork for note length) · C5a-L the wobble-onset listening set (on the handoff page).
-  - [ ] C2-2 … C2-5 (drag a note's edge: longer/shorter) · C5a-0b → C5a-1 … C5a-4 (the wobble tool) · C5a-L2 · C5b (⌘-drag freehand) · p2-g (the E2 listening round, = m23-ap-5).
+  - [ ] C2-2 … C2-5 (drag a note's edge: longer/shorter) · ~~C5a-0b~~ ✅ (built, design §18.7) → ~~C5a-1~~ ✅ (2026-09-25, the phase anchor) → C5a-2 … C5a-4 (the wobble tool) · C5a-L2 · C5b (⌘-drag freehand) · p2-g (the E2 listening round, = m23-ap-5).
   - [x] **p2-seg — automatic note splitting.** ✅ **DONE 2026-09-24 (S1, R1, L, S2 = `109b483`, S2-close, S4):** §5.1 re-registered as design §16.1 and PASSED on the shipped (a-T) shape, 10/10 held parts, the rule having first caught all six of T2's plants (three of them ONLY by the new unfolded octave guard); the LOOK drew all five notes exactly; ARCHITECTURE entry + editor-doc §17 status line written. ✅ **p2-seg-F-metric LANDED, uncommitted, VERIFIED BY MY OWN RE-RUN 2026-09-24:** `ContourRenderListeningTests` is GREEN, per held part (Hard Tune 37.6 → 15.2 c, median cut 49 %, 0 of 19 notes off; 68 % by YIN), both plants are caught, and my 8 WAVs are md5-identical to the lane's. M23Q: the pre-registered per-note leg went red for a measured DETECTOR reason. On 6 of 25 near-boundary detuned held notes, the corrector's own reading crossed the halfway line (error 5–22 c). Ruled (iii), and ✅ LANDED: a POST-HOC addendum (written 18:54:17, before run 5 at 18:57:53, frozen) gates a conditional leg (c′) plus a RATCHET of crossed readings ≤ 7, and reports the old leg (c). Run 5 is GREEN, and all 4 plants are caught (W1 by b and c′, W2 by c′, W3 by b and the ratchet, W4 by the ratchet alone); the old per-run score would have passed all 4. I verified the log. ⚠ MARGINS TO WATCH after any render-code change: the ratchet is AT its ceiling (7 of 7; the nearest readings are 1.9–3 c from the line), and ContourRender's leg N is 3.1 c inside its limit (part 41). If one trips, the READING moved: never widen. The 6 flips are p2-seg-F-detect's first per-note cost count. ✅ **The published "62.8 → 18.2 c (70 %)" is CORRECTED** in the CHANGELOG, ARCHITECTURE:215, DESIGN-LANGUAGE:42 and all 6 code comments. ONE home, `PitchCorrectionPreset.offeredInUI`'s doc, holds the figures and the retraction. ✅ `server.ts` and the built plugin (0.16.0) carry the corrected figure too (the MCP lane, verified by me 2026-09-24). Hard Tune pins a slide into a held note to the middle of the slide. MEASURED on the user's take in two renders (the 23 s held A#2+41 c plays G#2; the 16.8 s held ≈D3 plays A#2, ~4 st low; an earlier "C#3" was a tracker-mask artefact), 5 of 42 notes. The m23-q §11.2 Phase-2 scope that no item owned. Filed in the editor doc's §17; design → `docs/design/2026-09-24-pitch-note-splitting.md`. Route: daw-architect → audio-dsp-engineer. **STATUS 2026-09-24: S1, R1, L and S2 LANDED** — `PitchNoteSplitter` (T = 8, S = 8 frames); `editSet` and `PitchNoteTable.detected` both consume its parts; Hard Tune's slide shape is (a-T) "slide kept, note locked", the user's pick BY EAR from four rendered options (handoff answer `slide-shape=kept`). No stored table is re-split, no new persisted field, no analysisVersion bump. The real splitter's renders of the listening excerpt are byte-identical to L's hand-cut WAVs for all four shapes. **Still open → S2-close:** a ruling on §5.1's octave rule (the pre-registered §5.1 FAILED on every render for detector reasons, design §15); a LOOK at the five notes in the editor on a rebuilt app; S2's four hand-offs (the ±80 c edge over-split, (a-N)'s dependency, the M23QDetuneRepair metric, whether (c) writes one segment per run). Then S4 (the ARCHITECTURE.md entry, verbatim in design §6 S4). Filed, not scheduled: **p2-seg-F-detect** (the product detector reads ~21–23 c sharp of YIN and pYIN on the 0:22.6 D#2, so every shape lands ~20 c flat), **p2-seg-F-tail** (a short tail absorbed into the held note, run 28 at 23.712 s). **p2-seg-F-metric** (`M23QDetuneRepairTests` scores per RUN, so a split run's median lands between its notes: 11.7 → 17.0 c while every per-note figure improved; needs a per-PART metric + a plant). S2-close's criterion is written: design §16 (the re-registered octave rule, which must first fail T2's plants). **S2-close LOOK DONE 2026-09-24** (qa-test-engineer, `dist/DAWPro-next.app` = 109b483 on staging 17695): the editor reports "Found 59 notes." (42 before the split; 59 = 30 unsplit + 22 held parts + 7 transitions = §11.6), and all five named notes draw EXACTLY §11.5's parts to the frame. Held parts are flat bars (render spread 0.05–0.76 st), slides follow the sung line, 0:22.6 has no transition. Natural writes the SAME 59 boundaries, its transitions are identity too. Orchestrator LOOKED at the 0:09.2 / 0:16.4 / 0:22.6 crops. Novice notes for p2-int: at a zoomed-out view, bars under ~300 ms show no note name (default zoom unchecked); a slide's grey pill carries a note name that could read as a target.
   - [x] **p2-notice — the amber "⚠ 1" after every tuning is a FALSE ALARM.** ✅ **LANDED 2026-09-24** (audio-dsp-engineer): reconcile now RECORDS pending clips in a ledger rebuilt every pass; `scheduleAll` (reached only via `AudioEngine.startPlayers`: play, record, restarts, resume, recovery) POSTS. A tuned clip's copy: "The tuned version of '<name>' is still being prepared — the clip plays as silence until it's ready." 9 red-first tests red→green, verified by display name; wider run 1598/131 green. TICKED 2026-09-24 after the orchestrator's full suite (9243 tests / 792 suites; the one ✘ is the named `AUPrepareRenegotiationStressTests` load flake, 2/2 green alone; MCP 992/992). Known residue: a pending clip behind the playhead still posts at play; the ring still never clears. `PlaybackGraph.swift:950-962` posts `clip-stretch-pending` on ANY reconcile that finds the tuned render pending, and the store's own pitch edit triggers that reconcile (`ProjectStore+PitchCorrection.swift:147`). So it fires with the transport STOPPED. The popover then says in the past tense that the sound "played… not exactly as set", calls a tuning "time-stretched", and never clears. MEASURED on staging 2026-09-24: the render was ready in 0.36–0.83 s; the chip stayed lit; no sung audio was lost on this take (the vocal starts at 1.7 s), and the mechanism can eat an earlier onset. After the swap, every note drag will light it. Fix: post only while the transport runs; name a pitch-only clip's render "tuned version". Route: audio-dsp-engineer (control-side schedule code; no render-thread change).
   - [x] **p2-snapshot — the wire cannot see a tuned clip's render.** ✅ **LANDED 2026-09-24:** ONE home `Clip.rendersThroughStretchCache` (`Model.swift:778`); `needsRender` and the snapshot gate both use it; `server.ts` documents it (npm 992/992). TICKED 2026-09-24 after the orchestrator's full suite (9243 tests / 792 suites; the one ✘ is the named `AUPrepareRenegotiationStressTests` load flake, 2/2 green alone; MCP 992/992); the plugin bundle needs a regen before release. `Commands.swift:14264-14267` gates `stretchRendering`/`stretchError` on `!isStretchIdentity`, but the engine renders on `needsRender` = `!isStretchIdentity || hasPitchEdits` (`StretchRenderCache.swift:174-176`). So a pitch-only clip's render state, including a FAILED render, never reaches `project.snapshot`. Two predicates for one fact: give it ONE home in DAWCore.
@@ -1856,7 +1856,1432 @@ Seeded 2026-07-26 from the user's hands-on session against **`dist/DAWPro.app` b
           → **p2-ren-pool (new, not scheduled):** bound the whole-file renders in flight, or run `performRender` on a dedicated DispatchQueue (the GCD arm shows it takes no pool width). Route: daw-architect → audio-dsp-engineer.
         - **Law candidate:** MainActorOccupancy's scanner sees clock-deadline spins and sleeps, never a synchronous CPU TAIL in an `async` `@MainActor` test.
   - **Follow-on, done by me:** `clip_audition_note`'s text now says that at most about 6 s is HEARD and that `startSeconds`/`endSeconds` are recording seconds. The bundle was regenerated, still 0.17.0: `npm test` 1017/1017, and my smoke test serves the sentence.
-- ✅ **Full suite GREEN (2026-09-25 11:26–11:32, run alone): 9638 tests in 821 suites, 0 failures, EXIT=0.** By name against the 10:50 run: one test added (the Playbox sweep), none retired; the three tests that failed at 08:47 and the Playbox test all pass. ✅ **The new build is made** (`dist/DAWPro-next.app`, 11:36: signed and verified; the new command names are in the binary). **Waiting on the user:** the commit and the swap (asked on the handoff page, v37).
+- ✅ **Full suite GREEN (2026-09-25 11:26–11:32, run alone): 9638 tests in 821 suites, 0 failures, EXIT=0.** By name against the 10:50 run: one test added (the Playbox sweep), none retired; the three tests that failed at 08:47 and the Playbox test all pass. ✅ **The new build is made** (`dist/DAWPro-next.app`, 11:36: signed and verified; the new command names are in the binary). ✅ **The user answered (2026-09-25): committed and pushed as `813c415`; the new build swapped into `dist/DAWPro.app` (old one backed up to `dist/DAWPro-backup-2026-09-25-1359.zip`); the disk image rebuilt from it.** Bridge: keep. Singing spike: yes.
+- ⏳ **Running now (2026-09-25 ~14:10):**
+  - the p2-sing spike (SoulX-Singer on this Mac, ACE Cover as the baseline; plan `docs/design/2026-09-24-p2-sing-spike.md`). ✅ **RAN 2026-09-25 (report verified by me at 16:17):** no KILL on §1.1–§1.5 or §1.7; §1.6 (the user's own voice) needs the user's recording.
+    - **Runtime:** PyTorch 2.11 on the GPU (MPS) in fp32. The pinned 2.2 fails on MPS.
+    - **Speed:** real-time factor 0.38 warm. It grows with phrase length (60 s runs at 2.04× the short-phrase RTF, above the plan's 1.5× limit), so the engine should render per phrase.
+    - **Memory and accuracy:** peak 6–8.3 GiB; 14/14 and 19/19 notes hit; the `auto_shift` option must be forced OFF.
+    - ⛔ **The ACE baseline (D) was NOT made.** An ACE Cover of 14.7 s grew ACE's python child to 84 GiB, and the Mac hit CRITICAL memory pressure for 1 s. The spike's watchdog was blocked inside an HTTP poll for about 45 s (**lesson: a watchdog must kill the process itself**). My check: no DAW Pro crash report, no listeners left, memory 88% free.
+    - **Listening set:** C (stock voice) and C + voice changer, both -18 LUFS and ≤ -5.7 dBTP (re-measured by me with ffmpeg, the 12 kHz sine control reading +3.1). A third option, C2 (a different stock singer), was requested to meet the 3–4 rule.
+    - **Disk:** 6.0 GB in `~/DAWPro-spikes/sing-soulx`, kept until the user says.
+  - p2-ren Stage A′ then Stage B ("update the segment": a provisional render spliced from a span render, design `docs/design/2026-09-25-incremental-note-render.md` §11);
+    ✅ **STAGE A′ + B LANDED (2026-09-25 ~17:35; verified by me).**
+    - **What it does:** an edit plays a spliced preview (the last final plus a re-rendered span, crossfaded at quiet seams) until the exact render lands.
+    - **Speed:** the new pitch is heard p50 183 / p95 277 ms after an edit on the 33 s take (it was 1748 ms), and p95 220 ms on the 300 s take.
+    - **Unchanged:** goldens, ContourRender 8/8 and the unedited render are byte-identical.
+    - **Tests:** regression 162/162; the new ProvisionalRenderTests 18/18.
+    - **Test changes:** one test retired, the Stage A G6 "two schedule-changing passes", replaced by A′ `noRestartAtTheEdit`.
+    - **E7 (G2 bound relaxed to max(1 dB, 1.5×floor)) ACCEPTED by me**, with reasons in the design doc.
+    - ✅ **B′ LANDED (~18:15; verified by me 18:17-18:19):** `ClipRenderAudible` (`exact|preview|previous|silent`).
+      - **Where it lives:** an engine accessor through the defaulted `AudioEngineControlling.renderAudible`, then `ProjectStore`, then the `project.snapshot` per-clip field `renderAudible`. The field is omitted when `.exact` or nil, under the same `rendersThroughStretchCache` gate as `stretchRendering`.
+      - **MCP descriptions** for `clip_set_note_pitch`, `clip_auto_correct_pitch` and `project_snapshot` teach `clip-render-preview`. `clip_set_stretch` and `clip_stretch_to_length` were deliberately left alone: a whole-clip change always exceeds the preview cap. A control test locks that in.
+      - **Other text:** `docs/FEATURES.md` notice count 10 → 12. The plugin bundle was regenerated (text only: 249 tools, no new tool, `plugin.json` still 0.17.0; `/plugin update` is the user's action).
+      - **My runs:** swift filter `ClipRenderStatusSnapshot|EngineNotice|Snapshot` 64/64 in 23 suites, 0 ✘, including both new B′ tests; MCP npm **1020/1020** (1017 + 3); doc-count-drift exit 0, wire **244**. The bundle carries the new text (`clip-render-preview` ×3, `renderAudible` ×3; control `clip_audition_note` ×2).
+    - **Next:** B″ (the two stale comments, the launch-time `wipeDeadSessions`, an optional "Preview" caption), folded into lane L3a after NT-U0.
+  - a research sprint on the user's question, "Synthesizer V runs locally on CPU; could we build similar?" (→ `docs/research/2026-09-25-build-our-own-singing-voice.md`).
+  - **The user's ask (2026-09-25): finish the rest of the note editor as well:** I2 pinch-to-zoom, I5 the playhead, I6b auto-scroll, U-A/U-B notes for unpitched sounds, C5a the Wobble tool with the dot, and C5b the freehand curve. A read-only survey is mapping each against its design and the code, to produce a schedule of parallel lanes that do not share files.
+  - ⭐⭐⭐ **(m23-nt) THE USER'S MUST (2026-09-25 ~14:30): NATURAL-SOUNDING TUNING.** *"we need this support for our vocal tuning. This is a MUST."* Four capabilities, from the Melodyne practice they pasted (brief: the session scratchpad's `natural-tuning/user-ask-2026-09-25.md`):
+    1. **formants**, so a note moved up does not chipmunk;
+    2. **consonants and breaths that never change pitch**;
+    3. **drift and modulation tools** that steady a note without making it rigid;
+    4. **smooth transitions** where a moved note meets an unmoved one.
+
+    **State found at intake (READ by me):**
+    - the clip-level `formantPreserve` exists and defaults to OFF;
+    - `NoteSegment.formantOffsetSemitones` is stored but no renderer reads it (`PitchCorrection.swift:417-419`);
+    - `driftScale`/`vibratoScale` and the vibrato generator render;
+    - moving an unpitched note shifts a breath or an "s" (unpitched design U5; "never transpose" was the follow-up U-F2).
+
+    ✅ **DESIGNED (2026-09-25 ~16:40):** `docs/design/2026-09-25-natural-tuning.md`, 1961 lines. Five maps, four section designers, an integrator, three critics (DSP, product, gates; 0/11/15/6 findings, one product blocker: the join gesture collided with C2's edge drag), then Revision 2 (R1-R31, none rejected). Spot-checked by me: `setFormantSemitones`/`setFormantBase` exist in the vendored signalsmith (:124-135); `formantPreserve` defaults false (Model.swift:846).
+    - Lanes: NT-G, NT-C, NT-E1, NT-E2 (after Stage B is green), NT-W, NT-U, NT-L, NT-D.
+    - Listening pages L1 (voice size), L2 (slides) and L3 (drift, only if G3 passes).
+    - U5 STAYS (R21): a deliberate drag on a breath moves it; moving the note beside it never does. This supersedes the survey's "setters refuse on .unpitched" (L2b/L4a briefs must follow R21).
+    - Questions Q-U1 (old vocals) and Q-U3 (words or a number) are on handoff page v39.
+    - ✅ **NT-D (~18:20):** the three amended designs now say where they are overridden.
+      - The timing design gains §3.8b, R12's shared note-edge spec: all five spec bullets checked by me line-by-line against the source. NT-U2 is unblocked on the docs side.
+      - The C5a design notes the Drift tool and the gate rename to C5a-G.
+      - The unpitched design notes R21 (U5 stays) and UA-2 as an enabler for §4.
+  - ✅ **WAVE 1 of the six editor items: DONE, and MERGED into main by me at about 17:05.** Every lane was verified by me: the patch matches its worktree, it applies cleanly to main, and the logs were read.
+    - L1a: I2-1..4, pinch-to-zoom. 385/385, 6 plants red.
+    - L1b: I6b-S1, `EdgeAutoScroll`. 53/53, 4 plants.
+    - L1c: the UA-1 finder, `PitchUnpitchedFinder`. 22/22, 21 plants; 38 sounds on the take, as designed.
+    - L1d: C5a-0c, the anchor lag, 146.8 Hz only. 30/30, 2 plants.
+    - L1e: the X1 look harness `scripts/gates/_pitch-editor-look.mjs`, captures looked at.
+    - **Main after the merge, run by me:** 147 tests in 10 suites passed, 0 warnings in `Sources/`.
+    - ⚠️ **The Agent tool's `isolation: worktree` cut every lane from 6acd3fe (26 Aug), not 813c415.** All four lanes re-homed to `git worktree add --detach … 813c415`.
+    - Follow-ups for later lanes: `scratchpad/survey/followups.md`. The main one: L1d found that C5a §18.7's "subtract the lag at the handoff" contradicts the REPLACE render rule, and C5a-4a must decide it (gate T14).
+  - ✅ **NT-C C0 MERGED (~17:45):** the natural-tuning DAWCore fields (`transitionOutMs`, `glideFollow`, set-level `formantCorrection`), with field-carry tests. The patch was verified by me against its worktree.
+  - ✅ **W2 L2b MERGED (~18:00): UA-1 core + UB-1, notes for unpitched sounds.**
+    - **What it adds:** `NoteSegment.origin` (a 1-byte `let`, declared last; the note is now 130 bytes), `entersPitchCurve` (per R21), digest slot 6, and `findUnpitchedSounds(clipId:marginDb:)` / `autoCorrectClipPitchReport`.
+    - **Lane result:** 788 tests in 57 suites green, plants red. 14 files, each `cmp`-equal to the worktree after the apply.
+    - **Main after the NT-C C0 + L2b merges, run by me (18:07-18:09):**
+      - `swift build` of the whole package, DAWApp included (the lane never compiled it): 632 files compiled, 0 warnings.
+      - The filtered test run: 412 tests in 34 suites, 0 ✘. It includes U-A, natural tuning C0, the finder, persistence, the curve render and the main-actor pin.
+    - **UA-2 is NOT started:** about 8 fixture files, and slot 6 would re-key tables that have a slide.
+    - **Findings** (in `scratchpad/survey/followups.md`):
+      - a +100 c move renders at **+109.7 c** on a pure sine (+300 c → +301.5 c), now under investigation;
+      - `PitchTimeWarp.make` anchors the edges of an untouched sound;
+      - ⛔ **no dist build before UE-1/UE-2:** a fresh table draws every breath as an ordinary note.
+  - ✅ **W2 L2a: I2-5 + I5 (the playhead) LANDED ~18:25, uncommitted. The lane's report is below; my verification follows it.**
+      - **I2-5:** `scripts/gates/m23ap-i2-pitch-pinch.mjs` passed 28/28, and again 28/28 on the final I5 build.
+        - The beat under the anchor held within 1 pt across a 6-step sweep.
+        - The negative control (the same scale through `debug.panelLayout`) drifted up to 320 pt.
+        - The narrow-window LOOK at 1208 pt: the hint "Pinch to zoom time" sits on one line, left of TIME. The transport bar was already truncating at that floor.
+      - **I5, what landed:**
+        - The time ruler is a SIBLING ROW above the grid (not an overlay), drawn by the roll's `PianoRollScrubRulerBand`.
+        - A click, a drag, or ⌘-click on empty grid places the playhead through ONE producer, `PitchEditorModel.placePlayhead`. It snaps to 1/16 in CLIP-LOCAL beats (density `.pro`) and follows the arrange's snap ON/OFF; ⌥ places it between grid lines.
+        - Follow-playhead now works in the pitch editor too (`pitchEditorFollow`, the third surface on the one flag). It stands down while a pinch owns the scroll.
+      - **I5, the evidence:**
+        - `scripts/gates/m23ap-i5-playhead.mjs` passed 28/28 on the final binary. It reads `transport.positionBeats` back over the wire.
+        - Staging plants: raw offset → 1 RED (the fitting-clip tick). The offset moved to the grid path → 8 RED, with the unscrolled control green.
+        - Headless plants A–D were each RED, then restored.
+        - Filtered tests: 330 in 18 suites, 0 ✘, 0 warnings in `Sources/`.
+      - **Found by the lane (I0's viewport):** after scrolling, zoom out until the clip fits, then press TIME − once more. The horizontal reader then keeps reporting the old offset (900) while the grid draws at 0. The ruler showed bar 8 over bar 1, and a click landed 28 beats late.
+        - **Fixed at the consumer:** `PitchEditorViewport.shownOffsetX`.
+        - **Root not built:** stop issuing `scrollTo` while the new content fits. This is unmeasured and would need an I2 re-run.
+      - **Found by the lane (the staging tier):** skipping the second clock for ruler ticks dropped about 1 in 30 back-to-back ticks. The clock is restored: 0 of 90 dropped.
+      - `scripts/video/screenrec` matched the staging window but captured 0 frames (it fails loudly), so there is no follow film. The gate's follow legs are the evidence instead.
+      - The design §8 amendment is dated 2026-09-25. The ARCHITECTURE pitch-editor entry has its I5 and follow sentences, and its status is corrected.
+      - ✅ **VERIFIED BY ME (18:32-18:35):**
+        - Filter `PitchEditorModel|PitchEditorInteractionSite|PitchEditorViewport|FollowPlayhead|EditorSurfaceOwnership|PianoRollSnapPolicy|PanelLayout|MainActorOccupancySiteTests`: **236/236** in 10 suites, 0 ✘.
+        - Both gates on ONE build of my own (sha `54ca9d99…`, unchanged after each run): I5 **28/28**, I2 **28/28**.
+        - My first test try collided with UB-2's mid-edit of `Commands.swift` (a use saved before its definition); the retry was clean.
+        - The lane's plant runs had touched `.build/debug/DAWApp` to get past the gate's provenance check (it disclosed this). My clean run supersedes them.
+        - **Looked at, in my own captures:** at 160 and at 32 pt/beat, the ruler's handle sits on the grid's playhead line and the top pitch row is fully visible.
+        - ⚠️ **What looking found: the ruler numbers and the playhead snap are CLIP-LOCAL.** The transport read 4.4 while the editor ruler sat at about "4.1¾"; a beginner sees two different bar numbers for one moment.
+        - Filed as **I5-F1**: number and snap in the SONG's bars, queued on token P after L3a (`scratchpad/survey/followups.md`).
+  - ✅ **NT-C C1 MERGED (~18:37): the formant evaluator and its setters (DAWCore only; no render reads them until NT-E1).**
+    - **The evaluator:** `PitchCorrectionCurve.formantSemitones(atSourceSecond:editedSecond:formantPreserve:)`. The third argument is the clip flag, passed per call so the display curve and the render curve stay equal objects. Beside it: `formantBaseHz` (a step function that skips `.unpitched`, is floored at 50 Hz and is never 0), `engagesFormantCurve` on the set and the note, and `formantRenderVersion` = 1.
+    - **The setters:** `setClipNoteFormant` ("Set Note Voice"; it refuses a sound in words) and `setClipFormantCorrection` (nil = legacy; it refuses a non-finite amount). The auto-correct re-run carries a non-nil amount.
+    - **Lane:** 455/455 in 39 suites, 13 plants each RED. `semitones(atSourceSecond:)` is text-identical, checked by `cmp` of the extracted function.
+    - **Checked by me:**
+      - The patch was built against the byte snapshot; main had not drifted; it applied cleanly; all 5 files are `cmp`-equal to the worktree.
+      - I read the evaluator, the base and the setters.
+      - I renamed the undo title "Keep Voice Natural" → **"Keep Voice Size"** per R26 (the source, its doc comment and the test's expectation).
+    - **Main after the merge (my runs, 18:57-19:03):** the whole package compiled with 0 warnings in `Sources/`. The filter `FormantCorrectionModel|NaturalTuningFieldCarry|PitchCorrection|PitchCurveRender|ClipRenderSignature|UnpitchedSoundSegment|PitchUnpitchedFinder|PitchNoteSplitter|Persistence|MainActorOccupancySiteTests|PitchEditorDisplayMatchesRender|PitchEditorPlayedLine|PitchPlayedLineCleared|ProvisionalRender|StretchEngine` passed **520/520** in 41 suites, 0 ✘. The first two tries hit other lanes' half-written test files, UB-2's and then L3a's.
+  - ✅⭐ **(p2-acc) A DEFECT IN THE VENDORED PITCH SHIFTER, found by the render-cents investigation (~18:40), which explains +100 c → +109.7 c. FIXED, MERGED 19:33, VERIFIED BY ME 19:35-19:37.**
+    - **The mechanism:** `signalsmith-stretch.h` ~:713 interpolates the `prevInput` of two neighbouring bins, and each has ALREADY been rotated by its own bin's centre advance (84.4° apart at hop 1440 / N 6144). So a fractional-bin read gets the wrong phase advance.
+    - **The error:** a function of frac(shift in bins), ≈ constant in Hz, so larger in cents at low pitch. Measured on sines:
+      - +100 c @220 Hz → +9.69 c;
+      - −25 c lands at −14.7 c (about 40 % of a small correction undone);
+      - +300 c → +1.49 c;
+      - −150 c → +11.6 c.
+      It also explains m23-ap-4's unexplained "+5.45 c at +2 st" (re-measured +5.44).
+    - **How the other causes were excluded:** the constant path, the curve path and the plan are byte-equal, and the curve hands a flat, exact value to the stretcher. Plant A (integer reads) matched its written predictions to 0.01 c.
+    - **Scope:** EVERY shipped non-zero transpose, whole-clip transposes included. On a harmonic voice the fundamental errs +5…+13 c, while the periodicity pitch moves only +0.2…+1.1 c. Whether a listener hears it on a real voice is OPEN. SwiftF0 cannot see it, so a gate that re-detects with SwiftF0 would miss it.
+    - **Proposed fix (8 lines, not applied):**
+      - it re-references both neighbours to the fractional position before mixing, and measured under 0.5 c everywhere;
+      - 0 st stays byte-identical;
+      - it needs a `stretchEngineVersion` bump (global: every stretched clip re-renders once);
+      - it moves 8 goldens;
+      - upstream `main` has the same line.
+    - **Before it lands:** a daw-architect review of the math (stretch ratio ≠ 1, bounds, formant path) is running. ✅ **REPLICATED BY ME (18:42-18:49)** in the worktree, with the header saved and restored byte-exact: note A read +9.674 c on the pristine header and −0.121 c with the fix; the L4 sweep's worst error on the pristine header was 11.6 c and, with the fix, ≤ 0.36 c. Then a fix lane.
+    - ✅ **ARCHITECT REVIEW (~19:10): APPLY WITH CHANGES** (`scratchpad/w3/cents/architect-review.md`).
+      - **Diagnosis re-derived and re-measured** with an independent C++ harness. It reproduces +9.691 c, and +5.44/+3.93 c at ±2 st.
+      - **Low notes are WORSE than the investigation said:** +42 c at 55 Hz on −1 st, where a −100 c correction lands at −58 c.
+      - **Moves of 3 st or less (144 cases at 44.1/48/96 k, ratio 0.5–1.5, stereo, formant on):** the mean error goes from 7.16 c to 0.12 c, with a maximum of 0.42 c. Ratio 2.5 gives 0.80 c.
+      - **The architect's own §5 form ships:** equal accuracy at half the cost (+9 % render time, offline only, no allocation).
+      - **0 st is byte-identical:** 32/32 cases at -O0 and -O2.
+      - **Overstated by the investigation:** a SECOND residual of up to 0.64 Hz survives at 5–12 st. 12/96 large-shift cases get worse by more than 0.1 c (worst: 44.1 k, −12 st at 110 Hz, −6.3 → −10.3 c). This is filed as **p2-acc-2**, separately.
+      - **The cache:** a SCOPED re-key, `pv:` in `renderKeys` only when `semitones != 0 || pitchEditSetHash` is non-empty. It is NOT a global `stretchEngineVersion` bump, which would silence every time-stretch-only clip while it re-rendered unchanged bytes.
+      - **Goldens:** 8 re-pins; `:940` (timing only) must NOT move.
+      - **Upstream:** `main` still has the same line and there is no issue filed. Filing one is the user's word.
+    - ✅ **LANDED (lane done ~19:25, merged by me 19:33).**
+      - **What shipped:**
+        - the architect's §5 form in the vendored header, sha `2de8f20b…`, byte-equal to the review's `mine` variant;
+        - `patches/0001-fractional-prevInput-rotation.patch`, whose re-apply was tested (`patch -p1` onto a pristine copy gives the shipped header byte for byte);
+        - `VENDORED.md` "verbatim EXCEPT one local patch";
+        - the `patches` exclude in `Package.swift`;
+        - `StretchRenderCache.transposeEngineVersion = 2`, and a scoped `pv:` key field appended only when `semitones != 0 || pitchEditSetHash` is non-empty;
+        - a NEW `TransposeFractionalReadTests` (G0-G4, G9).
+      - **Lane gates:**
+        - G1: 15 zero-shift digests captured on the pristine header hold after the patch; the +1 st / −0.25 st controls differ.
+        - G2 (≤ 3 st): worst 0.420 c. Pristine: +9.691 c at +100 c @220 Hz.
+        - G3 (large shifts): worst 0.640 Hz / −12.18 c.
+        - G4 (ratio 2.5): 0.799 c.
+        - G6 tightened ±25 → ±0.5 c: +2 st −0.268 c, −2 st +0.241 c.
+        - G8: exactly the 3 untransposed whole-file captures are identical, and 7 differ.
+        - G9: time-stretch-only keys are unchanged, and transposed or edited keys gain exactly `pv:`.
+        - G11: the architect's harness reproduces all 12 `*_mine` logs byte for byte.
+        - Every added gate went RED on the pristine header.
+      - **8 goldens re-pinned, by test name:**
+        - `c21UntimedRendersAreByteIdentical`: offset, shaping, generator@1, generator@1.5;
+        - `c21TimedRendersUnchangedUntilC23`: delta@1, delta@1.5; C2-3 must still move them;
+        - NVG's `goldenRenderOffset` and `goldenRenderShaping`.
+        - `timingOnly` `80be0979…` did not move, and neither did any key digest.
+      - **The merge:**
+        - 12 files were `cmp`-equal to the base, so I copied them.
+        - `NoteVibratoGeneratorTests` 3-way merged with 0 conflicts.
+        - `PitchCurveRenderTests` had 1 conflict, at C5a-1's hoisted `c21GeneratorRenderGolden`, which I re-pinned to the lane's new generator@1 value `c7eaddc1…`.
+        - I applied the lane's proposed texts to the files other lanes hold (the `PitchCorrection.swift` item-2 header and the `PitchEditorModel.centsResolutionFloor` doc, comments only), plus the `RenderKeys` doc and the preset gate's (c) comment. I checked the preset gate's numbers in the lane's log first: asked −16.8 / −28.5 / −33.5, curve −16.9 / −28.5 / −33.5.
+        - Also updated: the phase-0 §7 erratum, the ARCHITECTURE entry beside "Time-stretch seam", the CHANGELOG (Unreleased) and two design notes.
+      - **My run in main:** 20-pattern filter, **324/324 in 29 suites, 0 ✘, 0 warnings.** The p2-acc suite, T12 (render `c7eaddc1…`), both C2-1 golden tests and constant-shift accuracy are in the log by name.
+        - ⭐ **C5a-1's `ceilingIsOutputTime` now has margin:** excess 22.75 % (ratio 1) against 21.24 % (ratio 0.5), a −1.50-point difference against the 3-point band (was −2.77).
+        - Failure-mode 16 now renders 2.174× (was 2.236×), closer to the 2.0× that means no separator leak: part of the old excess was the transposer.
+      - **The lane's one red** was `latestWinsCancelsInFlight`, a 250 ms debounce under load around 12. Its keys are 0 st and never carry `pv:`, and it passed alone.
+      - **p2-acc-2 STUDIED (~20:00, read-only, the architect's harness; `scratchpad/w4/acc2/`).**
+        - **The two causes, both confirmed by plants predicted in writing first:**
+          - (1) `findPeaks`' energy centroid is off by up to 0.076 bins; a phase-derived peak position is exact to under 1e-4 bins.
+          - (2) `updateOutputMap`'s smoothstep bends the offset inside a partial's main lobe toward window-SIDELOBE pseudo-peaks (about 190-415 per pure sine, at about −67 dB). This is DOMINANT at down-shifts.
+        - The review's "near-DC" mechanism was REFUTED (≤ 0.001 c at 41/55/73 Hz outputs once (1) and (2) are fixed).
+        - **Follow-up (b) is REAL:** up to 1.23 c, over a window of |1−ratio| < 2/H (not 1/H).
+        - **Proposed patches 0002 (peak position + flat-lobe map) and 0003 (exact previous hop)** take every mode to ≤ 0.001 c, including `large`: max 12.18 → 0.001 c.
+          - Vibrato improves in mean (1.90 → 0.29 c) and max (21.7 → 1.21 c), but 5/48 rows are worse by more than 0.1 c (worst 0.49 c), and a 1.21 c vibrato residual is undiagnosed.
+          - Cost +6.5 %.
+          - 0 st is byte-identical, EXCEPT that 0003 changes near-unity-ratio time-stretch bytes, which today's scoped `pv:` predicate does not re-key.
+        - **Upstream has neither fix.** Open PR #25 edits the `reanalysePrev` block, so 0003 would conflict on a re-vendor.
+        - ⏳ **A daw-architect review of 0002/0003 is running.** It covers a verdict per patch, the key change, the gates and the golden census.
+      - **p2-span** bumps `transposeEngineVersion` to 3 when it lands. Neither fix has shipped, so a user's tuned vocals still re-render ONCE. → **p2-acc-3 took it to 4** (patches 0002/0003, plus 0-st renders within ±5 % of ratio 1 now carry `pv:`). None has shipped, so it is still ONE re-render in total.
+    - The user will be TOLD on the handoff page: pitch moves will land exactly, and tuned vocals re-render once. Filing upstream is offered as a question.
+    - Report: `scratchpad/w3/cents/report.md`.
+  - ✅ **NT-G DONE (~19:00): natural-tuning fixtures and baselines. Its 5 new test files were copied into main by me (each `cmp`-equal to the worktree); my check in main is running.**
+    - **The instruments:**
+      - `SourceFilterVoice`;
+      - `SpectralEnvelopeMeter` (6/6 known-answer);
+      - `ConsonantSpectrumMeter` plus the M-1 lag/ρ instrument (7/7);
+      - 4 red-on-today baselines;
+      - the env-gated real-take harness.
+    - **M-1 verdict: C2 MAY PROCEED.** 16/16 gaps before the moved note read lag 0 at ρ ≥ 0.9.
+    - **The baselines:** §1 G5 is red on HEAD (the offset reads 0.3 c against a −160.5 c control). The §3 G0 leak measures +13 to +17 %.
+    - ⛔ **NEW (p2-span): `firstSpanIndex` assumes the spans' ramped reach is monotone in start order.** A short note after a long one breaks that, and the binary search then SKIPS a still-open ramp.
+      - NT-G measured an exact 0 in place of about 2 c at a ramp tail.
+      - By my arithmetic, a long retune with a very short neighbour loses a gate of about 0.4 for up to about 200 ms. That is unmeasured.
+      - C1's formant loop shares the scan.
+      - Queued on token D after C5a-1, to land with p2-acc's single re-render.
+    - Details: `scratchpad/w1/NTG/results.md` and `scratchpad/survey/followups.md`.
+  - ✅ **W3 UB-2 LANDED (~18:58), VERIFIED BY ME (19:00-19:02): `clip.findUnpitchedSounds` + MCP `clip_find_unpitched_sounds`.**
+    - **The command:** it sits in the per-note cluster, right after `clip.auditionNote`. It refuses a missing table, a MIDI clip or an unknown clip with the store's own words, and `marginDb` must be in 0...60.
+    - **Additive echoes:** `origin` is ALWAYS present on every `clip.getPitchEdits` segment. That is the response's convention; the disk format still omits `.detected`. `clip.autoCorrectPitch` gains `unpitchedCount` and `unpitchedSkippedReason`.
+    - **Tests:** 9 new Swift and 7 new MCP tests. The lane's two plants each went RED.
+    - **Pins moved:** 20 pin lines in 19 files (244 → 245) and the MCP counts (249 → 250).
+    - **My runs:**
+      - swift filter `PitchCorrectionCommand|CommandTests|ZeroParamVerbRejection|MainActorOccupancySiteTests`: **1238/1238** in 98 suites, 0 ✘, including all 9 new tests;
+      - MCP npm **1027/1027**;
+      - doc-count-drift exit 0: wire **245**;
+      - MCP **250** tools (42 direct + 208 wrapper, anchored greps).
+    - **Owed at the release step:** add `clip_find_unpitched_sounds` to the `composer.md` and `mix-engineer.md` allowlists, and regenerate the bundle (not done; the bundle still says 249).
+  - ✅ **W3 L3a LANDED (~19:14), VERIFIED BY ME (19:16-19:18): NT-U0, B″ (a)+(b), I6b S2-S3. B″ (c), the "Preview" caption, is NOT built.**
+    - **NT-U0:** the editor's draft line is rebuilt with `noteTable.withSegments(segments)`, so it carries the natural-tuning set fields (formant, consonant, slope, stamp). A plant of the old constructor turned 8 checks red. A census of `PitchEditSet(` over DAWAppKit/DAWApp now finds 0 constructions (control: 4 in DAWCore).
+    - **B″:** the stale comments are fixed. There is a launch sweep, `AudioEngine.wipeDeadProvisionalSessions()` in a NEW `Sources/DAWEngine/Stretch/ProvisionalLaunchSweep.swift`, called once in `AppModel.init` beside `pruneUntitledRecoveryBundles()`. It is not called in `AudioEngine.init`, because every engine test builds an engine on the real cache.
+      - **Read by me:** it removes a `<pid>-<uuid>` folder only when `kill(pid, 0)` answers `ESRCH`, so the user's live app and a staging app each keep their own.
+      - This is p2-ren's E9 "app-side hook". It is now BUILT; don't build it twice.
+      - (c) needs an `AppModel` poll of `renderAudible` plus a `ContentView` parameter; it is filed.
+    - **I6b S2-S3:**
+      - `PitchEditorRange.grown`, and `growPitchWindowForDrag(side:depthFraction:dt:)` with a carried row fraction;
+      - one exhaustive switch in `edgeStep`: a note drag scrolls vertically and grows the window at the wall; a band scrolls both axes and never grows; cut and none do nothing;
+      - a live-only clock that is armed after travel, stopped in `dragEnded` and `.onDisappear`, and checked against model state;
+      - a bottom reveal against the NEW content height;
+      - the echo `debug.pitchEditor.autoscroll`.
+      - The ungrown drag is BIT-IDENTICAL to the old arithmetic: about 1,640 drags compared by `.bitPattern`, and plant P3 turned it red.
+      - The lane subtracts `(upperBound − windowTopAtPress) × rowHeight`, not the brief's counter, because a relayout mid-drag also moves the top.
+    - **Lane:** 279/279, and 11 plants of which 10 went RED. The one that stayed green (a band grows the window) is blocked by two guards; P10a/b replace it.
+    - **INFERRED, not measured:** that SwiftUI keeps `offsetY` at 0 while the top grows. The S4 staging gate measures it.
+  - ✅ **C5a-1 MERGED (19:16), VERIFIED BY ME (19:16-19:18): the wobble's stored phase anchor plus digest slot 2.**
+    - **The field:** `NoteSegment.vibratoPhaseAnchorSeconds` is declared after `vibratoOnsetSeconds` (20 fields, 154 B, stride 160; MEASURED by the lane, where the brief's 138 was stale).
+      - Its range is −1…86 400; a non-finite value becomes 0.
+      - It is encoded only when non-zero, and in `isEdited`, not `isIdentity`.
+      - The generator is `sin(ω·(t − anchor))`; retimed, it anchors at `W(anchor)`.
+    - **Slot 2:** a marker-gated block, emitted only when a generated wobble has a non-zero anchor; `layoutVersion` stays 1.
+    - **Goldens:** no existing golden moved; the anchor-0 digest, render and curves are identical before and after. The C2-1 "generator" ratio-1 render golden is hoisted to `PitchCurveRenderTests.c21GeneratorRenderGolden`, which p2-acc will move once.
+    - **Measured by the lane:**
+      - heard rate = stored ÷ stretch ratio (T1: 6.00 / 3.00 / 6.00 Hz at ratios 1 / 2 / 0.5);
+      - the anchor shifts the render by 54.55 ms against 54.55 expected (ratio 1), and 109.17 against 109.09 (ratio 2).
+    - ⚠️ **`ceilingIsOutputTime` passes by 0.23 points** (−2.77 against a 3-point band). Re-run it after p2-acc's render change.
+    - **Lane:** 451/451, and 3 plant sets (45 issues) each RED.
+    - **Merge:** 4 files were `cmp`-equal to the base, so I copied them. `StretchCurvePlan.swift` was 3-way merged onto NT-E1's live slot-7 edits with 0 conflicts, and NT-E1 was told first.
+    - **My combined run, L3a + C5a-1:** 22-pattern filter, **723/723 in 51 suites, 0 ✘, 0 warnings in `Sources/`** (2 known in `Tests/`). The new suites (the anchor render, the launch sweep, slot 2, T12) are in the log by name, and `PitchCorrection.swift`, `StretchCurvePlan.swift` and the new test file were recompiled (the build lines are counted). Log: `scratchpad/w3/L3aC5a1/orch/swift-1.log`.
+  - ✅ **NT-E1 LANDED (~19:58), VERIFIED BY ME (19:58-20:00): the formant render path. ⛔ BUT THE APP DOES NOT CALL IT YET: the wiring is filed as NT-E1b.**
+    - **Built:**
+      - the shim setters `css_set_formant_semitones(…, compensatePitch)` and `css_set_formant_base_hz` (Hz ÷ sample rate; 0 = the library's estimator, never sent);
+      - `OfflineStretcher.FormantCurve` (ONE optional carrying both closures). `nil` runs today's loop byte for byte and still calls `css_set_formant_preserve`. Non-nil never calls it, and sets the formant beside the transpose at the SAME `curveLookupFrame` for the pre-roll and every chunk. I read the diff;
+      - `StretchCurvePlan.formantCurve(formantPreserve:)`;
+      - digest slot 7;
+      - banner rows 7/8/9;
+      - `RenderDiff` §1(d) items 1-4.
+    - **Measured (lane, after p2-acc's merge):**
+      - G1: legacy +400 c @110 Hz moves the envelope 280.5 c against 325 planted.
+      - G3: amounts 0 / 0.5 / 0.75 / 1 read 280.3 / 139.8 / 83.1 / 36.5 c.
+      - G5: the edited note −150.7 c against −158; its neighbours 0.7 and −1.6.
+      - G6: 0 samples differ at defaults. Plant P1 turns 72 000/72 000 red.
+      - G7: −123.2 dB.
+      - G4 (compensated): Δ +11 frames.
+      - Pitch stays within 0.5 c of legacy in every G2 cell.
+      - **Cost +31.9 %** on engaged renders (the design estimated 10-20 %).
+      - R11: the voice offset reaches 90 % at 80 ms, so `minimumVoiceNoteSeconds` ≈ 0.08 s (an NT-C constant, owed).
+    - **My run in main:** 13-pattern filter, **257/257 in 23 suites, 0 ✘, 1 KNOWN ISSUE, 0 warnings.**
+      - The known issue is G2's 110 Hz −300 c cell, pinned with `withKnownIssue` (not intermittent, so it goes red if the cell ever starts passing). The meter reads +86.6 c while LPC shows F1/F2/F3 kept (656/1229/2569 against 680/1221/2591 Hz).
+      - The formant render, slot-7 and RenderDiff suites are in the log by name.
+    - ⛔ **THE PRODUCT GAP (NT-E1b, next on the D token after C5a-2):**
+      - `StretchRenderCache.renderAudio` (:847 and :854, the only two `stretchTransposeCurve` callers, CENSUSED by me) does not pass `formant:`, so no render in the app engages the curve.
+      - Yet slot 7 already re-keys every engaged set, and C0 seeds NEW sets at amount 1.0. So staging renders since C0 may have cached NON-engaged audio under slot-7 keys (the cache is shared with staging; the user's live app, 813c415, has no slot 7).
+      - **The fix, all in ONE landing:**
+        - pass `formant: plan.formantCurve(formantPreserve: params.formantPreserve)` at both calls;
+        - bump `PitchEditSet.formantRenderVersion` 1 → 2 (DAWCore);
+        - flip `productRenderDoesNotEngageYet` to assert that the product render differs from legacy and equals the direct render;
+        - retire NT-G's `g5FormantOffsetIsUnreadToday`, which renders without `formant:` and so can never go red.
+      - **Once wired, every NEWLY tuned vocal keeps its voice size by default** (the MUST), at +32 % render cost for tuned clips. No formant control reaches the UI or the wire before this lands.
+    - **Filed:** NT-G's `SpectralEnvelopeMeter` reads a planted −700 c as EXACTLY 0.0 at 80/110/220 Hz (−500 reads fine). The −7 st cells are pinned to that. An exact 0 from a meter is this tree's silent-failure shape: a qa lane to fix the meter and re-pin.
+  - ✅ **W4 UE-1 LANDED (~20:05), VERIFIED BY ME (20:07): sounds with no pitch, the editor's LOGIC.**
+    - **Blobs:** they carry `origin`/`isUnpitched`, and a sound prints no cents, only §1.7's sentence ("No pitch found. Moving it shifts this sound: a breath or an 's' just gets brighter or darker.").
+    - **Drag:** a sound moves in whole semitones from where it sits (⌥ free), in its own `updateSoundPitchDrag`, so the notes-only paths are textually untouched. A frozen-arithmetic bit-identity test guards those paths.
+    - **Group rule:** the PRESSED blob decides the snap; every other member moves by the same amount.
+    - **Sound menu:** "Clear Sound" / "Clear 2 Selected" / "Restore Sound", and the status line says "1 note and 1 sound selected".
+    - **"Find sounds with no pitch"** sits in the header beside "Remove tuning". It is offered only on a stored table with no sounds, and it is one store undo step, with every outcome in words.
+    - **The spy:** `origin` and `soundReadout` on `notesAsDrawn`, a `findSounds` block, and the `{act:"findSounds"}` act.
+    - **Lane:** 345/345, 12 new tests, plants A/B/C all RED.
+    - **My run:** 11-pattern filter, **419/419 in 23 suites, 0 ✘, 0 warnings**, with 14 sound tests passing by name.
+    - **Flagged:** `DeleteMenuPolicy.pitchEditorClearTitle` says "Clear Selected Notes" for sounds. That is in UE-2's brief.
+  - ✅ **W4 C5a-2 LANDED (~20:05), VERIFIED BY ME (20:09): the Wobble store, single and BATCH (natural tuning §3 L2 folded in).**
+    - **Built:**
+      - `NoteVibratoLimits.swift`: `NoteVibratoEdit` with six ABSOLUTE optionals including the anchor, `NoteVibratoLimit`, `NoteVibratoItem`, `clamp` that THROWS on NaN/∞ and reports each limit that decided a value, and the pure batch transform `PitchEditSet.applyingNoteVibratos`;
+      - `setClipNoteVibrato` (a one-item batch) and `setClipNotesVibrato` (one undo step);
+      - `resetClipNoteVibrato` ("Reset Wobble", anchor back to 0);
+      - the split re-derives the right half's onset;
+      - the new selection keys `vibratoGroup` and `driftGroup`.
+    - **Sounds:** one sound alone is refused with "No pitch here, so there is no wobble to change." In a batch, sounds are SKIPPED and REPORTED (`skippedSoundIds` plus a sentence), so "select all, then Drift" works on a take with breaths. An all-sounds batch is refused.
+    - **Lane:** 473/473, 18 plants all RED.
+    - **My run:** 14-pattern filter, **488/488 in 41 suites, 0 ✘, 0 warnings.**
+    - **Design fixed by me:** §11.1's split-dip bound was too tight. Measured 0.422 against the stated 0.352 × depth, because the right half's fade starts flat.
+    - **Open inconsistency, for NT-W:** `setClipNoteFormant` REFUSES a sound among notes, while the vibrato batch SKIPS it.
+  - ✅ **p2-span LANDED (lane ~20:12), MERGED BY ME 20:15, VERIFIED 20:15-20:19: the curve's span search skipped still-open ramps. BOTH suspects were real.**
+    - **Measured on the old code (G-MAG):**
+      - the NT-G fixture: 2.175 c for 10 ms;
+      - a 2 s note moved +100 c, abutting a 20 ms note, then a 1 s note (retune 500 ms): **41.04 c for 220 ms**, because the long note's gate of 0.4104 was skipped;
+      - the scan's EARLY EXIT (`start − halfRamp`), the second suspect: the same 41.04 c for 220 ms;
+      - random sets: up to 536 c.
+      That is 41 c per 100 c of move: an audible blip on real takes with a very short note beside a long one.
+    - **The fix:** the curve's init precomputes `spanReachPrefixMax` and `spanOpenSuffixMin` once. Both loops (pitch and C1's formant) search and exit on them. Where the sequences were already in order, the arrays equal the old values, so every search lands where it did.
+    - **Cache:** `transposeEngineVersion` 2 → **3**. Nothing has shipped, so a user's tuned vocals re-render ONCE in total.
+    - **G-TWO:** the shipped evaluator equals a reference linear scan BIT FOR BIT over 200 seeded sets (159 out of order). Plants: today's search gave 12 121 / 11 807 mismatches, and the old exit per loop gave 17 716 / 16 959.
+    - **Goldens:** one moved, a pure-curve hash (`FormantCorrectionModelTests.pitchCurveBitsDidNotMove`). The lane checked it against a search-free evaluation at all 4001 points. NO render or digest golden moved. A census over 846 tests found no render fixture with the condition.
+    - **NT-G's f12 baseline** now reads the real F12 under-sum dip: 89.06 c at −25.5 ms. The old "300 c at +90 ms" was the trailing edge.
+    - **Merge:** `PitchCorrection.swift` was 3-way merged onto C5a-2's landed edits plus UA-2's in-flight builders, with 0 conflicts; UA-2 was told first. The 3 other files were `cmp`-equal to the base, so I copied them. `PitchSpanSearchTests.swift` is new.
+    - **My run in main:** 15-pattern filter, **427 tests, 1 ✘**: `StretchEngineTests.latestWinsCancelsInFlight` (`renderCount 2 == 1`) at load ~20-30. It is a 0 st test with no pitch edits, so no span code is reachable.
+      - **Mechanism:** a 50 ms sleep against a 250 ms debounce slips under load. It failed the same way in p2-acc's and p2-span's own runs today.
+      - **Re-run ALONE at load 3.4: 38/38.** The new span suites (G-TWO both loops, G-MAG ×3) passed by name.
+      - **Filed:** make that test independent of scheduling, with a controllable clock or an explicit gate instead of a sleep.
+  - ✅ **W4 I6b-S4 LANDED (~20:20), RE-RUN BY ME (20:22-20:27): the auto-scroll staging gate, `scripts/gates/m23ap-i6b-autoscroll.mjs`. ✅ I6b (auto-scroll while dragging) IS DONE (21:45): the 20.1 s freeze my first run hit now has a MECHANISM that is NOT in I6b's code. It is a pre-existing LIVE-APP bug; see W-wedge below.**
+    - **What it drives:** the pane's own funnel (`dragChanged` → `applyEdgeStep` → `edgeStep` → `EdgeAutoScroll.push`), through staged `debug.pitchEditor` press/drag/release steps with a controlled `dt`, on staging port 17695.
+    - **What it checks, 24 checks:**
+      - a top-wall drag GROWS `pitchWindow.high` and never scrolls;
+      - the note's gap to the pointer stays constant (spread 0), so `topShift` cancels the growth;
+      - `grownRows` = high(now) − high(at press);
+      - release keeps one row of headroom;
+      - the bottom SCROLLS until the wall, then grows, and the new row is revealed;
+      - a band scrolls sideways but never grows, and does not grow even at the top corner;
+      - the staged steps never arm the live clock, which is also the control.
+    - ⭐ **MEASURED, no longer inferred:** `viewport.offsetY` stays exactly 0 on every top-wall tick while the top grows (0,0,0,0,0). That closes L3a's open question.
+    - **Plants (lane, in its own worktree `w4-S4plant`):**
+      - 1, 2, 3b and 4 went RED. 4 aborted on its control leg: armed before any drag.
+      - 3 (a band grows) stayed green: two independent guards block it, the same finding as L3a's P10.
+      - The lane suggests a unit test pinning `growPitchWindowForDrag` returning 0 when `drag == nil` (filed).
+    - **Design corrections the gate measured:**
+      - S3's "at least 1 row after 3 ticks" is FALSE under wire timing (an uncontrolled probe measured gaps of 0 / 323 / 316 ms). It holds only with `dt` controlled at the 0.05 s cap, which is how the gate now drives it.
+      - `grownRows` is per-press, not high − fittedHigh.
+      - The staged pointer does not follow the scroll, so the gate recomputes it.
+    - **Lane:** 24/24 GREEN twice on one binary, plus a final main-tree sanity run, 24/24.
+    - **My runs, on one binary `7121c692…` built from main with other lanes' in-flight edits:**
+      - attempt 2: **24/24 GREEN**;
+      - ⛔ **attempt 1:** every top-wall check and release-headroom passed. Then the next call, `debug.pitchEditor {act:"scroll"}` right after the RELEASE, answered **"main actor has been unresponsive for 20.1 s"**. Load was about 3-6, and it was the binary's FIRST launch, right after the build.
+      - The staging log keeps only the last launch, so there is no app log of it.
+      - A 20 s freeze after dropping a note would be a user-facing bug. One failure in ~8 runs is a flake ONLY once its mechanism says so. **W-wedge** is reproducing it with a `sample` hook and reading the release path, and it is checking whether 813c415 (the user's app) has the same path.
+  - ✅ **W5 UA-2 LANDED (~20:55), VERIFIED BY ME (20:59-21:01): sung slides are stamped `origin: .transition` in BOTH note builders.**
+    - **One exhaustive mapping:** `PitchAutoCorrect.origin(of:)`, used in every branch of the preset builder (`locked` and `asSung`, every shape) and by `PitchNoteTable.build`. A new part kind is a compile error, never a silent `.detected`.
+    - **My census:** `PitchNoteSplitter.parts(` has exactly 2 call sites in `Sources/`, the two builders.
+    - **The render does not move:** stamped and unstamped tables render byte-identical through `StretchRenderCache.renderAudio` (Gentle, Hard Tune and an edited editor seed; 146,688 samples each). The curve is bit-identical at every millisecond over 17 tables, and origin is the only field that changed.
+      - Only the KEY moves: slot 6, for tables that bend pitch and have a slide.
+      - Unedited editor seeds still key `""`.
+    - **Plants:** P0 (stamp nothing), P1 (stamp held parts) and P2 (slides leave the curve; the split drops origin) each turned the new tests RED.
+    - **Fixtures:** 2 of the 16 matching test files needed edits, `NoteSplitListeningTests` (env-gated, compile-checked) and the three `PrePitchNoteSplitReference.notesOnly` copies (all still `cmp`-identical).
+    - **Lane:** 582/582 in 51 suites.
+    - **My run:** 24-pattern filter, including `PitchEditorModel`, which the lane did not run. **722 tests in 53 suites, 1 ✘, 0 warnings in `Sources/` and `Tests/`.** Both UA-2 suites passed BY NAME. The one ✘ is C5a-4a's in-flight `PitchWobbleGestureTests.shortNotesCannotBeWidened`, a lane mid-work, not UA-2.
+    - **Handed on:**
+      - UA-2's wire test (`clip.getPitchEdits` echoes "transition" on exactly the slide) went to C5a-3 for `PitchCorrectionCommandTests`;
+      - its notes for C4 (on seeds, `glideFollow == 1` ⇔ `.transition`, at seed time only) are in C4's brief.
+    - **Filed:**
+      - `UnpitchedSoundSegmentTests:172` indexes `notes[0]` after a non-stopping check, so a plant CRASHED the test process;
+      - `NaturalWobbleListeningTests` and `NoteSplitListeningTests` pass 3 already fail on segment count since UA-1, because the product carries sounds and L's hand-built sets don't. Both are env-gated, so they need the user's take.
+  - ✅ **ARCHITECT REVIEW of p2-acc-2's patches DONE (~21:00): APPLY 0002 (in a corrected "V1" form) + 0003, TOGETHER ONLY.** Review: `scratchpad/w4/acc2-review/review.md`.
+    - **Independently reproduced** with its own harness (the product's schedule, two separate instruments, positive controls to 1e-4 c):
+      - steady partials ±24 st: up to 76 c → ≤ 0.01 c;
+      - harmonic tones ±12 st: 17 c → 0.001 c;
+      - near-unity 0 st time-stretch: −0.93 c → 0.000 c;
+      - vibrato ±1 st: 0.49 → 0.066 c.
+    - **Corrections to the lane:**
+      - 0003's window reaches 2.58/H on the product's constant loop, not 2/H;
+      - the vibrato residual is DIAGNOSED as intrinsic to shifting a moving partial: roughly depth², with sign opposite to the shift. 0001's errors used to cancel it partly;
+      - 0002 WITHOUT 0003 makes near-unity ratios worse (17/104 rows);
+      - the lane's 0002 form deepened the noise notch between harmonics at 55 Hz +12 st to −22.8 dB. The V1 cap (a quarter of BOTH gaps) brings it back to −5.9 dB, against 0001's −3.9.
+    - **Costs accepted:**
+      - +7 % render time, and +8.6 % inside the near-unity window (offline only);
+      - noise between harmonics pushed toward the harmonics at +9 st and above on low or dense material;
+      - the 60 c-depth vibrato octave-down corner gets about 3 c worse;
+      - close partials move rigidly.
+    - **The key:** `pv:` also covers 0-st renders within ±5 % of ratio 1 (sample-rate-free, ≥ 2.3× margin), and `transposeEngineVersion` 3 → 4.
+    - **Routed:** p2-acc-3 (audio-dsp-engineer, WORKTREE `w6-acc3`, brief `scratchpad/w6/acc3/brief.md`).
+    - **Filing upstream now covers THREE patches. It is outward-facing and needs the user's word** (handoff `file-upstream`).
+  - ✅ **W5 UE-2 LANDED (~21:10), VERIFIED BY ME (21:13-21:14), LOOKED AT BY ME: sounds with no pitch LOOK like sounds.**
+    - **The look:** ONE decision, `NoteBlob.look` (cleared, then sound, then note), which the surface switches on and `notesAsDrawn[].look` reports.
+      - A sound has no solid plate, so its waveform shows through. It gets a fixed faint wash, 45° stripes and a thin outline; it turns green when moved.
+      - Its brightness never depends on detection confidence, and it carries no note name.
+    - **Copy:**
+      - the legend adds "Striped boxes are sounds with no pitch, like a breath or an "s"." while a stripe is on screen;
+      - the status line says "Found 40 notes and 32 sounds with no pitch." (it used to count sounds as notes);
+      - a dragged sound carries the tag "No pitch", and the full §1.7 sentence sits on ONE line in the palette readout. It must never wrap: a taller palette would move the rows under the pointer mid-drag.
+    - **Find sounds:**
+      - a neutral chip;
+      - the tune row has a FIXED height, because seen by looking the chip made the pane jump about 6 pt;
+      - "Added N" is withdrawn on Undo;
+      - a finder decline is remembered per clip and note table, app-wide.
+    - **Edit ▸ Delete:** count-free nouns ("Clear Selected Notes" unchanged, "Clear Selected Sounds", "Clear Selected" for a mix), per `DeleteMenuPolicy`'s no-count rule. The note's context menu keeps its counts.
+    - **Lane:** 364/364 in 19 suites, 9 new tests, 3 plant sets (15 red in total, each `cmp`-restored).
+      - Captures on staging with the repo's own designed narrator voice (72 blobs: 40 notes, 32 sounds, 0 origin/look disagreements).
+      - `docs/DESIGN-LANGUAGE.md` gained 4 entries.
+    - **Looked at by me:**
+      - the default crop: stripes versus solid notes read apart;
+      - selected zoom: the stripes stay inside the white ring;
+      - the drag palette: one line;
+      - cleared/moved: a dashed "cleared" box and green stripes with a ghost;
+      - the tune-row stack: equal height in all three states;
+      - the minimum window, 1208×640: the sentence fits.
+    - **My run:** 10-pattern filter, **441/441 in 24 suites, 0 ✘, 0 warnings.**
+    - **Seen and routed:**
+      - the transport's labels break mid-word at the minimum window ("LOO PER", "EXP ORT", tempo "12…"). Pre-existing, routed to lane TB;
+      - the UE-2 edges (split cuts a breath, amber gap under sounds, `chrome.noteCount` still counting sounds, "Added N" surviving a preset) are in `scratchpad/survey/followups.md`; the last one is folded into I5-F1.
+  - ⛔ **W-wedge DONE (~21:40): a LIVE-APP BUG, present at HEAD 813c415. With a stretch render pending, the pitch-editor pane open, and the window being drawn, the MAIN THREAD stalls for seconds.** Measured blocks: 0.7 s, 3.3 s, 7.1 s, and 20 s once.
+    - **The stack, re-read by me:** in `probes/probe-2/sample-F-render-arrange.txt`, 3021 of 4180 main-thread samples sit in `CA::Transaction::commit` → `-[RBLayer display]` → `RB::SurfacePool::alloc` → `wait_image_queue` (`usleep`). There are no app frames except `VibeMeterView`'s Canvas.
+    - **The chain, read by me:**
+      - `ContentView.swift:376` `.onChange(of: renderSignature) → noteStretchEdit()`;
+      - that starts the 10 Hz poll;
+      - the clip goes `.rendering` → `ClipShimmer` (`TimelineLanesView.swift:4307-4330`: a `LinearGradient`, `.blendMode(.screen)`, `repeatForever`).
+    - **Conditions (lane, 23 gate runs plus 6 probes):**
+      - waits in 9/9 runs with the window drawn, and 0/9 with it fully covered;
+      - 0 with the pane never opened (probe-3), even with the shimmer running;
+      - CPU load is NOT the driver (`yes ×18`).
+      - Exonerated by measurement: the audition, the drag gesture, the store commit, autosave and a cold cache. The cache keys on path/size/mtime and every run writes a new fixture, so attempt 2 was as cold as attempt 1.
+    - **Not pinned:** WHICH layer waits. "Self-extending" (the stalled main queue delays the poll that would end the pending state) is INFERRED from code plus timing.
+    - **Also found:** `~/Library/Logs/DAWPro/main-actor-wedge.log` holds 576 lines of 3-7 s wedges over days. It is written by BOTH the live app and staging, with NO pid or port, so no one can say which were the user's. My attempt 1 is there: `03:23:49Z WEDGED`, with no RECOVERED because staging was stopped mid-block.
+    - **Routed:** **WF** (ui-design-engineer, WORKTREE `w6-wedge`, brief `scratchpad/w6/wedgefix/brief.md`):
+      - bisect the layer;
+      - fix at the cause;
+      - add pid+port to the breadcrumbs;
+      - promote the probe to a gate (`wait_image_queue` ≈ 0, ping < 500 ms, with a window-drawn check), plant it, and re-run I6b ×5.
+      - I5-F1 was told its new `AppModel` render poll must assign only on change.
+  - ✅ **LW LANDED (~21:40), VERIFIED BY ME (21:45-21:46, at load ≈ 30): `latestWinsCancelsInFlight` no longer races the debounce.**
+    - **The seam:** an internal `StretchRenderCache.debounceMillisecondsForInstance` (:242), defaulting to the static 250 and snapshotted per job (:557). Only tests write it, so production is unchanged. I read both hunks.
+    - **The rewrite:** a 60 s debounce keeps A provably asleep; a bounded `waitUntil(30)` poll replaces the fixed 50 ms sleep. Every assertion is kept.
+    - **The same race, found by the census and fixed:** `cancelledRenderKeepsTheBridge` asserted `renderCount + 1` after a 60 ms "still in debounce" sleep. It now uses the long debounce plus the second job's `job-start` phase as proof of supersession.
+    - **New test:** `lateSupersessionCancelsAnActiveRender` covers the JOB QUEUE's mid-render cancel, a real detached render on a 60 s source. Before, only `spanRenderStopsMidRender` covered the render loop, with a synthetic flag.
+    - **P2 (the supersession no longer cancels):** both tests went RED, with `renderCount → 2`, the original failure's exact signature. Restored and `cmp`-clean.
+    - **P1 (reproduce under `yes ×18`):** 0/6 failures, even on the old shape. It is an honest negative: the original failures came under bursty BUILD load, which starves the cooperative pool (cf. `CooperativePoolWakeProbeTests`).
+    - **My run:** 7-pattern filter at load ~30, **129/129 in 6 suites, 0 warnings.** All three tests passed BY NAME.
+    - **Filed:** `noRestartAtTheEdit`'s "two quick edits" has the same weaker shape; its assertions don't depend on the race.
+    - ⚠️ **Lock incident:** the lane's cleanup deleted BOTH heavy locks by name, including my verify's; no run was harmed. A second lane had done the same earlier (S4). The common brief now requires an owner-checked release, with a reference script, `scratchpad/orch-verify2.sh`.
+  - ✅ **p2-acc-3 LANDED (lane ~22:05), MERGED BY ME 22:10, VERIFIED 21:56-22:00: vendored patches 0002 (V1 form) + 0003, the near-unity key, `transposeEngineVersion` 3 → 4.**
+    - **The header** is sha `80d11216…`, byte-equal to the architect's ship form. The chain 2de8f20b → ed1356bc → 80d11216 also reproduces from pristine through 0001 → 0002 → 0003.
+    - **The key:** `StretchRenderCache.nearUnityRatioBand` = 0.05, and `phaseVocoderNearUnity(ratio)` joins the `pv:` predicate.
+      - G9 pins the edges at 1.049 / 1.051 and 0.951 / 0.949, and checks that band·H > 2 × 2.58 for H read at 4-96 kHz.
+      - ⚠️ The brief said "0.97 must not re-key". Inside a 5 % band it DOES; the lane corrected the brief, and G9 uses 0.94 / 1.06 as the outside legs.
+    - **Gates, each RED under its plant:**
+      - G2 (bound 0.5 → 0.05): 0.009 c on the ship form, 0.42 under the 0001-only plant;
+      - G3: 0.007 c on the ship form, −12.18 under the plant;
+      - G12 (±19/±24 st): 0.0013 on the ship form, −76.06 under the plant;
+      - G13: 0.0008 on the ship form, −9.10 under the plant;
+      - G15 (the V1 cap): −5.88 dB on the ship form, −22.75 under the un-capped plant;
+      - G14: V4 turns it red at 17.40. ⚠️ The un-capped form is MORE accurate on G14, so only G15 catches it;
+      - G16 (30 c vibrato): 1.21 c, and 0.066 at ±1 st;
+      - G17 (0 st near unity): 0.000 on the ship form, −0.93…+0.86 under the 0002-without-0003 plant;
+      - G18 (coupling): 0.002 on the ship form, −1.129 under the same plant;
+      - G1+: the near-unity controls fire;
+      - G11: 27/27 harness logs byte-identical to the review's.
+    - **Goldens:** the 8 transposing literals were re-pinned from the SHIPPED header in debug. Each comment keeps the chain pristine → 0001 → 0002/0003.
+      - The must-not-move literals were confirmed green BY NAME: timingOnly, the legacy digests, the NVG set/curve digests, G1's 15 pristine entries, `PitchTrackerInference`, `PitchTimeWarp`.
+    - **G7 (debug, 0001 → ship):**
+      - `constantShiftPitchAccuracy` +2 / −2 st: −0.268 / +0.241 → −0.003 / −0.021 c;
+      - U-A: note A 99.879 → 100.004 c, moved 299.576 → 300.006 c;
+      - PresetRenderGate peaks 0.58-0.75 → 0.57-0.67.
+    - **Merge:** 10 files were `cmp`-equal to the base, so I copied them. `PitchCurveRenderTests.swift` was 3-way merged onto C4's in-flight slot-9 rows with 0 conflicts, under a precheck that main hadn't moved. C4 and NT-G2 were told.
+    - **My run in main:** 18-pattern filter, **330 tests in 32 suites, 0 warnings.** "p2-acc — transposer vendored local patches 0001-0003" passed BY NAME.
+      - 1 ✘, PRE-EXISTING and NOT this merge: NT-E1's `G2 kept natural` at 220 Hz / −500 reads 63.2 against ±50, exactly the lane's predicted "after" value.
+      - It was already red before the merge (4 issues on the as-is tree at ~21:07), in the file NT-G2 is reworking, and NT-G2 has been told to re-measure.
+    - **Docs applied by me:**
+      - ARCHITECTURE (the review's §7 entry, "THREE local patches");
+      - CHANGELOG item 1, with its "before" figures from the pristine library, not the 0001 interim;
+      - the research doc's §7 "Closed" line;
+      - the natural-tuning v4 note;
+      - the `OfflineStretcherCurveTests` measured-values comment.
+    - **Owed:**
+      - `PitchCorrection.swift:52-59`'s header ("within 0.5 c … ≥ 5 st residual"), after C4 releases the file;
+      - `PitchPresetRenderGateTests:130-133` wording, after C4;
+      - an optional listening check of the noise-shaping and vibrato-corner trades (the review advises one, not as a gate).
+  - ✅ **W5 C5a-3 + NT-L3 LANDED (~22:05), VERIFIED BY ME (22:01-22:15): the Wobble on the wire and in MCP. Wire 245 → 247, MCP 250 → 252.**
+    - **`clip.setNoteVibrato`:** absolute args; `reset:true` is refused alongside any other field. It echoes `{requested, applied, heardRateHz, clamped, silentWobble, parkedRate, note?}`, and `skippedSoundIds` is ALWAYS present.
+    - **`clip.setNoteVibratos`:** a batch with `structuralKey` undo that never coalesces. Sounds are skipped and reported, and an all-sounds batch is refused. The refusal sentences are C5a-2's, verbatim.
+    - **Additive fields:**
+      - `clip.getPitchEdits`: `vibratoPhaseAnchorSeconds` and `heardVibratoRateHz` per segment;
+      - `clip.getPlayedPitch`: per-note `wobble {sung, played}` plus `wobbleNote`. Width is gated on the shipped `PitchWobbleEstimate.response != nil`, not on §18's stale 150 Hz literal.
+    - **MCP:** `clip_set_note_vibrato` and `clip_set_note_vibratos`, with extended `clip_get_pitch_edits` / `clip_get_played_pitch` text. `clip_auto_correct_pitch`'s coupling-trap text now states the CODE's mechanism: strength pulls `strength` of the way. The natural-tuning design §3e had it inverted; I corrected it.
+    - **UA-2's wire test**, pasted verbatim, passes.
+    - **Lane:** 9 Swift + 16 MCP tests, and 6 plants each RED.
+    - **My checks:**
+      - `doc-count-drift.mjs` **exit 0, 247**, both routes agree;
+      - anchored MCP count **42 + 210 = 252**, with both new names found;
+      - `npm run build && npm test` **1040/1040**;
+      - Swift filter `PitchCorrectionCommand|CommandTests|ZeroParamVerbRejection|NoteVibratoLimits|MainActorOccupancySiteTests`: **1260/1260 in 99 suites at load ~35, 0 warnings.** 8 of the new tests passed by name.
+    - **Release step owes:**
+      - `npm run bundle:plugin` (the bundle lacks `clip_find_unpitched_sounds` and both vibrato tools);
+      - the `composer.md` / `mix-engineer.md` allowlists, all three tools;
+      - a `plugin.json` bump from 0.17.0.
+    - **Filed and routed:** `ZeroParamVerbRejectionTests` scrapes without stripping comments while the drift gate strips them, so a call-shaped comment makes a phantom verb. Lane **ZP**.
+  - ✅ **NT-G2 LANDED (~22:22), VERIFIED BY ME (22:24-22:26): `SpectralEnvelopeMeter` no longer reads −700 c as an exact 0.0.**
+    - **Three bugs:**
+      - the peak and floor were taken over 0…Nyquist, not the analysis band;
+      - the floor offset ignored the cepstral round-trip's ×2·fftSize scale, so the in-band curve went flat and the correlation returned lag 0;
+      - two "could not measure" paths returned a confident 0.0.
+    - **The fix:** in-band peak and floor, the scaled offset, and `nil` on an unmeasurable reading (never 0.0). The search reaches ±1500 c.
+    - **Known-answer suite on the current tree:** ±500/700/1200 c at 80/110/220 Hz all read correctly signed, at 79-104 % of planted. The f0-only control reads 3-20 c against 342-368 c positive controls, and silence returns nil.
+    - **G2's cells:**
+      - 80 Hz / −700 reads −55.3 c, pinned as a KNOWN ISSUE, with LPC showing the formants kept (F1 0.9 %, F2 3.5 %);
+      - 110 / −300 now passes (4.7 c), so the old pin was removed; it self-invalidated as designed;
+      - ⛔ 220 Hz / −500 reads **63.2 c against ±50: a REAL red**. The old meter's weak 220 Hz control hid it. It is handed to **NT-E1b** to settle by LPC (meter artefact → pin; render residual → pin plus numbers plus a follow-up).
+    - **Plants:** a formant shift in the f0-only control, and the inverted `unmeasurable.isEmpty`. Both RED at all 3 f0s, `cmp`-restored.
+    - **My run:** 4-pattern filter, **87 tests in 14 suites, 0 warnings.** The only ✘ is the 220/−500 cell, plus the 80/−700 known issue. The meter's new tests passed BY NAME.
+    - **Moved but not failing:** `NaturalTuningBaselineTests` G5's formant-scale control reads −166.4 c, against −160.5 on record.
+  - ✅ **NT-C C4 LANDED (~22:25), VERIFIED BY ME (22:28-22:31): natural tuning §4, SOFT JOINS, plus digest slot 9. A moved note now GLIDES into its unmoved neighbour.**
+    - **The curve (DAWCore `make` + evaluator):**
+      - each span has its own rise and fall edge plus a bridge;
+      - width = the LEFT note's `transitionOutMs`, else `max(retuneMs, 1000·Δ/slope)`, else legacy;
+      - `h = min(W/2, dur_l/2, dur_r/2)`;
+      - Δ uses the bridged edge values;
+      - the `glideFollow` bridge also enters the formant constant (X7).
+      - p2-span's `searchBounds` now use gate centre ± half-width.
+    - **R15's ONE predicate:** `PitchEditSet.joinKind`, which says `.soft` or `.gap`. Abutting curve notes, and holes < `consonantMinimumGapSeconds` = 0.064 s (PROVISIONAL; changing it must bump `transitionRenderVersion`), are soft.
+    - **Setters (one undo step each, refusals in words; NT-W copies them):**
+      - `setClipNoteTransition` ("Change Slide", drags of one join fold);
+      - `setClipPitchTransitionSmoothness` (nil = 3000; 500-20000; 0 refused);
+      - `setClipNoteGlideFollow` (0…1).
+      - The split rule: the left half's width goes to 0, the right half keeps it, both keep follow.
+      - D4-1 option (a) (`handEditUpgradesLegacyVocal = false`): old vocals stay legacy until the user's `nt-old-vocals` answer. Option (b) is NOT a one-line flip (plant P9).
+    - **`NotePitchDraft`** carries widths, so the drawn line equals what plays.
+    - **Slot 9:** marker `0x5431_5241_4E53_4901`, `transitionRenderVersion` = 1, the slope, and each note's width and follow. Emitted only when `usesSoftJoins`. `digestCoversEveryStoredField` now has REAL coverage of both C0 fields.
+    - **Legacy is bit-identical:** G-TWO legacy 270,614 points, 0 mismatches. NO existing golden moved. The preset gate did NOT move (its fixtures have no joins), contrary to R14's prediction.
+      - G-BYTE's named golden is NEW, `legacyJoinGoldensHold`, because plant P1 (slope forced on) left EVERY old byte golden green. R27 was right.
+    - **Measured by the lane:**
+      - F12 curve dip 89.06 c → 4e-14 c;
+      - render sag 107.1 → 2.2 c;
+      - G-SUM Σgate deviation 0;
+      - X7: pitch and formant reach 50 % at the same instant, with a 101.3 ms rise each;
+      - G-TWO soft: 260,990 points across 199 soft sets, 0 mismatches;
+      - drag reach: 0 changed samples outside `pitchDragReach`, but 41,247 outside today's note ± retune/2. **NT-U2 must use `pitchDragReach`.**
+    - **Plants:** P1-P10 each turned its gates RED and were `cmp`-restored. P4 (bridge blends) spared the formant G-TWO, as expected; P8 catches the formant bridge.
+    - **My run:** 23-pattern filter, **790 tests in 60 suites, 0 warnings.** `PitchTransitionTests`, `PitchSpanSearchTests` and "Natural tuning §4 — soft joins…" passed BY NAME. The only ✘ is G2's 220/−500 cell, which is NT-E1b's to settle.
+  - ✅ **W6 I5-F1 LANDED (~22:35), LOOKED AT BY ME; my filter run passed (752/752 in 50 suites, 0 warnings), but my I5 gate re-runs are RED 2/33 on timing legs (see I5-F1-F below): the note editor's ruler numbers the SONG's bars and snaps to the song's 1/16 grid, plus the "Preview" caption.**
+    - Seen in `gate-green2/i5-8`: the transport reads 4.4, the arrange line is just before 5, and the editor's handle is between 4.4 and 5. They agree.
+    - Seen in `probe2/b2c-1`: "Playing a quick preview. The exact version replaces it in a moment." is on the status line while playing.
+    - The lane's filter: 752/752 ×3. Its I5 gate: 33/33 ×2, with the old clip-local snap planted RED (10 of 33).
+    - **The poll:** 4 Hz, compare-before-assign; one preview episode costs 2 writes. The pane body did NOT re-render at the stretch poll's rate while a render was pending, which narrows WF's suspects.
+    - **The piano roll** has the same clip-local numbering in four places. Routed: **I5-F2**.
+  - ✅ **W6 TB LANDED (~22:40), VERIFIED + LOOKED AT BY ME: no transport label breaks inside a word at any window width.**
+    - **What was broken:**
+      - At 1208 pt: `KEY`/`S`, `LOO`/`PER`, `EXP`/`ORT`, `12…`.
+      - Pro was broken at EVERY width, 2400 included: `L…` `PU…` `CL…`. PANIC and the count-in stepper had grown the left group to 369 pt inside its 340 pt anchor.
+      - At 1208, Pro fell off both window edges.
+    - **The fix:**
+      - Readouts and labels are pinned (`.fixedSize()`), and Pro's leading row uses 5 pt spacing (339 pt).
+      - The right region gives in a fixed order: gaps 20 → 8 pt (`TransportGap`), then a give that loses no word (Pro's loop length re-stacks UNDER the LOOPER door), then chips drop their word to a 26 pt icon (`TransportChipFace`; the word stays in the tooltip and the accessibility label): EXPORT, then KEYS, then Simple's LOOPER.
+      - If the bar still can't fit, it overflows to the RIGHT only.
+    - **I looked at:** `simple-1208`, `pro-1208`, `pro-1600-left` and `pro-notice-deck-1208`. Every word is whole at rest; the tempo reads `120.0`.
+    - **The lane's evidence:** the new site suite `TransportBarLabelSiteTests` (11 tests; the left-group fit is measured with real fonts: 339.09 at 5 pt, 369.09 at 10); 3 plants → 3 RED; the loop-door gate 38/38.
+    - **My run:** 185/185 in 23 suites, 0 warnings. "Transport bar labels at narrow widths (TB)" passed BY NAME.
+    - **Left open (TB-F1):** at the 1208 floor, a looper session or Pro's warnings chip still overflows, clipping the meter and the SIMPLE/PRO toggle. I saw it in `pro-notice-deck-1208`. Recommend a compact deck strip over raising `WindowFloor.transportProMinWidth` (1183, stale). See `survey/followups.md`.
+  - ✅ **W5 C5a-F9 LANDED (~22:50), VERIFIED BY ME (22:54): a narrowed wobble no longer drops ~20 c at the handoff.**
+    - **The bug (§18.8):** a draft that isn't flat but reads `.noWobble` (a ±40 c wobble narrowed to keep 0.45) seeded 0 c. The line jumped 12.69 c RMS and the audio 12.40 c.
+    - **The fix:** such a draft now seeds from `subFloorFit`, a floorless fit at the sung rate (`PitchWobbleEstimate.refit`), with the rate converted by the line's own edited-to-source slope (1 today).
+    - **Measured by the lane:** keep 0.45 → seeded 20 c, 1.41 c RMS line jump, 1.74 c audio. Keep 0.95 → 1.41 / 2.11 c.
+    - **The residual ~2 % is the render's interpolated cancel.** It predates F9, is pinned at ≤ 2.5 % of the width, and CORRECTS C5a-4a's "the line jump equals the audio jump", which holds only at frame centres.
+    - **Ruled by me:**
+      - a `.tooShort`/`.tooUneven`/`.noWobble` sung reading with no fit is REFUSED ("first drag down to smooth it flat"), not zeroed, because there is no trustworthy rate;
+      - the mirrored `playedSamples` copy moves to ONE home in DAWCore: **C5a-F10, running.**
+    - **Plants:** P29 (the old zeroing), P30, P31 and P32 each turned RED. P01-P28 were re-run on the F9 code.
+    - **My run:** 94/94 in 8 suites, 0 warnings. `aNarrowedWobbleHandsOffWithoutAJump`, `underTheFloorIsNotFlat`, `aShortNarrowedWobbleIsRefusedNotZeroed` and `playedSamplesMirrorTheEstimator` passed BY NAME.
+  - ⚠️ **W6 I5-F1's gate is RED in my verify: 2/33 in each of two runs, on DIFFERENT legs.**
+    - Run A: the follow page-turn after pinchEnd, and the suspension. The transport ran past the clip's end and the editor never paged. The failed capture also drew a phantom "3" at the ruler's left edge, with no tick.
+    - Run B: the "clip fits" precondition, a scroller race.
+    - The legs I5-F1 was built for (song numbering, snap, ⌘-click) passed in both.
+    - **I5-F1-F LANDED (~01:00): both MECHANISMS found; both were gate problems, not product bugs.**
+      - **Run A:** the display was ASLEEP (`pmset` 22:29:41-22:48:53; the run was 22:45-22:46). Main-actor stalls of 4.7 s (WF's second, meter-driven stall, by timing) let the transport run past the clip to the SONG's END, where it STOPS. A stopped transport correctly neither pages nor suspends.
+      - **Run B:** SwiftUI's scroll reader goes stale at the second zoom in 36 of 57 repetitions, a race with an unknown trigger. The precondition is now a recorded observation, and the user-facing legs still run. Root-fix guess, filed as **I0-F**: `repinTimeZoom` shouldn't call `scrollTo` when the content fits.
+      - **The gate is rewritten:**
+        - the follow legs wait on CONDITIONS (follow due ≥ 0.25 beat), re-seeking up to 3× if a stall used up the runway;
+        - `occlusionVisible` is read at each follow leg, and a window that isn't drawn gives exit 2 ("proves nothing");
+        - the gate prints its own pid's wedge lines;
+        - planted-binary runs are labelled.
+      - **Plants:** PF1/PF2/PF3/PE each turned RED on its OWN leg (1 of 33) in a drawn run under heavy load. **Ruled by me: a planted defect in a run whose window isn't drawn exits 2, not 1** (WF's rule; nothing drawn, nothing proved).
+      - **13 runs:** the follow legs 8/8 drawn; every other check 13/13; 0 re-seeks; worst round trip 51 ms.
+      - **MY RUN (01:09-01:11), on the merged tree (WF's fix included), built right before the gate: 33/33, EXIT 0.** `occlusionVisible` was true at all six follow read points; the fit leg DISCRIMINATED (the reader was stale at 900). **I5-F1 is DONE.**
+      - **THE PHANTOM "3" IS REAL:** the clipped TAIL of the "2.3" label (tick at −14.4 pt on screen, text −11.4…4.8 pt). It reproduces with the transport stopped at offset 200. The roll shares the renderer. **Routed to I5-F3:** a pinned current-bar label outside the geometry-group strip.
+  - ✅ **NT-E1b LANDED (~23:10), VERIFIED BY ME (23:01-23:05): THE FORMANT RENDER IS ON IN THE APP.** A moved note keeps the singer's voice rather than turning chipmunk or giant.
+    - **The wiring:**
+      - both product render calls pass `formant:` (`StretchRenderCache.swift:900` window, `:907` whole file). The census over `Sources/` found no third caller;
+      - `PitchEditSet.formantRenderVersion` 1 → 2;
+      - `minimumVoiceNoteSeconds = 0.08` (unread until NT-E2/R18).
+    - **The product gate:** for amount 1, a −2 st offset with the clip flag off/on, and a soft join:
+      - 90,240 of 96,000 samples (whole file) and 29,760 of 29,760 (window) differ from the legacy twin;
+      - 0 samples differ from NT-E1's direct render;
+      - every legacy twin's SHA equals its capture from BEFORE the wiring.
+    - **g5 became a note-level product check.** It reads −160.4 c against a planted −166.4; the old render is its negative control at −0.7 c.
+    - **Plants:** the window call without `formant:` (8 RED), the whole-file call without it (9 RED), and the version set back to 1 (14 RED). Each was `cmp`-restored.
+    - **G2 at 220 Hz / −500 SETTLED: a render RESIDUAL, not a meter artefact.**
+      - LPC is valid at this cell: it reads the ideal within 1.2 %. F2 is +12.5 % off the ideal.
+      - The cepstral reading is +63.6 c, an over-correction of 17 % of the legacy −372 c move. Upstream's own vocal mode reads +64.7.
+      - Pinned `withKnownIssue` (red if the cell starts passing), with no tolerance widened.
+      - **Every 220 Hz down-shift carries it** (−300: +65.2, −700: +62.5). Filed as **NT-F220**; NT-L's listening set must include a 220 Hz down-shift.
+    - **Precondition found:** `ProvisionalRender.memoKey` ignores formant-only edits. **NT-PK is fixing it; NT-W's two formant verbs are held on it.**
+    - **My run:** 23-pattern filter, **468 tests in 36 suites, 0 ✘, 2 known issues** (G2 80/−700, a meter artefact; G2 220/−500, the render residual). **0 warnings.** Every natural-tuning suite passed by name.
+    - **I corrected three stale comments:** the `PitchCorrection.swift` header item 2 (the transposer is now within 0.01 c, per p2-acc-3), `PitchPresetRenderGateTests`' wording, and the NT-G banner (g5 is a product check now).
+  - ✅ **W6 WF MERGED (~23:25), VERIFIED BY ME (23:25-23:26): THE RENDER-PENDING FREEZE IS FIXED.** My run: 109/109 in 11 suites, 0 warnings; the geometry-group site test and both breadcrumb-origin tests passed BY NAME. The runtime gate needs a drawn window; I'll re-run it at the release checkpoint.
+    - **Cause, bisected with an `RBLayer -display` spy:** `PianoRollScrubRulerBand`'s `.clipped()` group flattened into ONE window-level RenderBox layer that re-rasterised on EVERY Core Animation commit, with no SwiftUI body re-running.
+      - At rest: 60/s from the VibeMeter's tick.
+      - With a render pending: the arrange's `ClipShimmer` pushed it to 120-240/s, and the main thread slept in `RB::SurfacePool::wait_image_queue` (up to 70 % of a 5 s sample; once 24 s, WEDGED).
+    - **The fix:** one line, `.geometryGroup()` in the band's `scrolling` helper. Measured: 0 re-draws during a pending render, 0 across a 400 pt scroll, 0 waits, byte-identical pixels.
+    - **Ruled out:** blend mode, the 10 Hz poll, and the shimmer as a cause (it is only a second commit source). `.drawingGroup()`, `.mask` and `rendersAsynchronously` do NOT fix it.
+    - **The gate** `scripts/gates/wedge-render-pending.mjs` needs a DRAWN window and refuses (exit 2) when it isn't.
+      - Fixed binary: 5 of 6 drawn runs green. The red one is the SECOND stall below, told apart by its sample signature.
+      - Plant: RED in 3 of 3.
+    - **I6b re-run:** 10 of 10 green, 5 of them drawn.
+    - **Also merged:** breadcrumbs carry `pid= port= process=`; `debug.windowFrame` has `occlusionVisible`; the site test `scrolledStripIsAGeometryGroup`; a DESIGN-LANGUAGE rule.
+    - **The live app (813c415):** its PITCH editor has no band, so it can't have this freeze. Its PIANO ROLL mounts the same band, so it is plausibly exposed. That is inferred, not measured.
+    - **Left open, needs a decision: the SECOND stall, WF-F1.** The VibeMeter's always-on 60 Hz timeline drives `-[CAContext waitForCommitId:timeout:]`, mostly while the display sleeps: pings up to 2.1 s, WEDGED 3-8 s. This likely explains much of the overnight "main actor unresponsive" log. Options:
+      - (a) pause the meter on display sleep;
+      - (b) pause it on occlusion;
+      - (c) document it.
+      - **Ruled by me: neither (a) nor (b).** m23-r3b's standing law (:543) says "any new pause condition is exactly how this bug class returns". **WF-F1 is running (d):** bisect the meter's `waitForCommitId` path with the spy and fix the MECHANISM while the meter keeps ticking at 60/s (m23r3b gate 47/47, pixels byte-identical).
+  - ✅ **W6 ZP + ZP-2 LANDED (~23:35): the two wire-verb scrapes now strip comments and tolerate whitespace IDENTICALLY.**
+    - `ZeroParamVerbRejectionTests` ports `doc-count-drift.mjs`'s `stripLineComments` and mirrors its whitespace-tolerant zero-param regex. The two scrapes are pure text-in functions now.
+    - Three snippet tests: a commented call site doesn't count, for zero-param and for any call site; a spaced `[ ]` still counts. Each went RED under its plant.
+    - **Census:** 53 zero-param and 247 total, with the full SETS byte-identical between the Swift scrape and the gate (diffed, not just counted).
+    - The shared, documented limit: neither is string-literal-aware.
+    - **VERIFIED BY ME (23:28-23:30):** `doc-count-drift` exit 0 (247 in every doc claim); my filter run passed 16/16 in 2 suites, 0 warnings in `Sources/`. The 6 `Tests/` warnings are the known `ArrangeVerticalFollowTests` ones.
+  - ✅ **W5 C5a-F10 LANDED (~23:40): `PitchWobbleEstimate.playedSamples` has ONE home in DAWCore.**
+    - `played` reads through it; the gesture's copy is deleted, and `PitchWobbleGesture`'s public API is unchanged.
+    - **Old against new, bit-identical** on 6 fixtures (every array's `bitPattern`, and every reading).
+    - The frozen-rule test `playedSamplesAreOneFrozenRule` (edge-in/edge-out, two runs, played median) replaces the mirror test, retired by name.
+    - **Plant F10-P1 (drop the end-edge sample):** RED in the estimator AND in the frozen test. The gesture's behaviour tests did NOT catch it; only the frozen test does. P29, P31 and P32 were re-run and are RED.
+    - **VERIFIED BY ME (23:32-23:33):** 94/94 in 8 suites, 0 warnings.
+  - ✅ **W6 I5-F2 LANDED (~23:45), LOOKED AT + VERIFIED BY ME: the MIDI piano roll uses the SONG's bars in all four of its sites.**
+    - **The four sites:**
+      - the ruler (`songMeter` passed to the band);
+      - the grid's bar lines (`PianoRollSongGrid.forEachLine`, song beat 0, meter-aware, allocation-free; the grid is now `Equatable` + `.equatable()`);
+      - the header's `BAR n` (`PianoRollBarOps.targetBar`, song bar, with the insert/delete range on that same bar);
+      - `placementLocalBeat` (song beat snapped, then clamped to the clip; the clamp wins).
+      - The snap SIZE stays `effectiveSnap`.
+    - **Seen by me in `cap2/A-bar4.png`:** the transport 4.1, the arrange line on bar 4, the roll's handle on "4", "BAR 4", and the grid's bar lines narrowing after the 3/4 change at bar 3, with the ruler labels on them.
+    - **Tests:** 10 new, including `allFourSitesAgree` on a clip at 2.5 with a 4/4 → 3/4 change. Rewritten tests were rewritten, none deleted. Plants P1-P4 each turned RED.
+      - **P3b (the playhead as clip start + offset) stayed GREEN:** the float guard is untested because no start produces the error.
+    - **Gate `m23t-baroperand`:** 72/73. W1 pins a STALE literal of 186 wire verbs; it is being fixed in I5-F3.
+    - **My run:** 826 tests in 53 suites; every piano-roll suite passed BY NAME, with 0 `Sources/` warnings. **The 1 ✘ is C5a-4b's in-flight T3** (a draft missing the wobble anchor, 0.0 against 1.46), a lane mid-work, not I5-F2.
+    - **Ruled by me:**
+      - "1/16 grid" means the grid's POSITION;
+      - **a partial-bar delete is REFUSED in words** (it would pull later notes off the song grid);
+      - **note add/move/resize/scale/paste must follow the song grid too.** I5-F2 left them clip-local, so an off-grid clip placed notes BETWEEN the drawn lines. That is **I5-F3, running.**
+      - DAWCore quantize and the step sequencer stay clip-local: **I5-F4**, to be filed with the exact gap.
+  - ✅ **NT-PK LANDED (~23:45), VERIFIED BY ME (23:48-23:54): a voice-only edit no longer replays a stale preview.** My run: 165 tests in 19 suites, 0 ✘, 2 known issues (the G2 cells), 0 warnings; "…a voice-only edit never replays a stale provisional patch (NT-PK)" passed BY NAME. I replaced the test's session-scratchpad path with a pointer to this entry.
+    - **The bug was in the memo key ONLY.** The key ignored the voice completely: an engaged +3 st set keyed IDENTICALLY to a legacy set (`7c790d2f…`). All four RenderDiff spec items were already in (NT-E1).
+    - Measured failing-first: a warm edit reused 67,290-115,453 stale frames in 3 cases.
+    - **The fix:** the key hashes the per-chunk formant values through `RenderDiff.formant`, the function the extent reads (one home, `RenderDiff.formantCurve`).
+    - **Legacy keys are byte-identical** to a golden of 3 keys captured BEFORE the change. Reuse still holds for engaged sets.
+    - **p2-ren G2 on the real-formant voice:** LSD 1.84 dB against a 3.23 dB limit (the stale patch read 11.25 dB and 519 c).
+    - **Plants:** the key hash dropped (RED) and the extent compare dropped (30 issues).
+    - **NT-W's formant verbs are UNBLOCKED** once my verify is green.
+  - ✅ **NT-C C2 LANDED (~00:30), VERIFIED BY ME (00:54-00:57): consonants keep their own pitch, the DAWCore half. NOT YET AUDIBLE: the mix is NT-E2.** My run: 297 tests in 24 suites, 0 ✘, 2 known issues, 0 warnings; both C2 suites passed BY NAME.
+    - **Built:** `PitchConsonantMask.swift` with:
+      - `consonantMaskVersion` 1;
+      - `consonantFadeSeconds` 0.010 (PROVISIONAL: M-3 could not pick a length, with 31 of 62 edges at ρ ≥ 0.9 at every fade);
+      - `consonantRegions()` built on C4's `joinKind`, the ONE rule (C4's `consonantMinimumGapSeconds` 0.064 reused);
+      - `tunedWeight`, `hasConsonantMix` and `consonantMixInactiveReason` (in DAWCore, so the wire and the editor can reach it; forwarded from `StretchCurvePlan`).
+    - **Digest slot 8:** gated on `hasConsonantMix`, between 7 and 9.
+    - **The setter:** `setClipConsonantProtection(clipId:enabled:seedIfAbsent:)`, one undo step ("Keep Consonants").
+    - The field and seeds already existed from C0: checked, not rewritten.
+    - **The census:** `constructionSiteCensus` scans all 548 Sources files for `PitchEditSet(` construction sites, and 11 store writers are run flag-on AND flag-off. Flag-off was missing from C0.
+    - **R21:** an untouched sound plays dry; a DRAGGED sound renders moved; moving the note beside a sound never moves it.
+    - **Found:** §2b.4's "the masks touch disjoint frames" is FALSE now that sounds exist. A cleared breath is both dry and silenced, so **the mix MUST run before the level mask** (pinned).
+    - **Goldens:** 24 digests captured before the change. Every flag-off/identity/levels-only digest and every legacy golden is unchanged. The 10 bending flag-on sets moved by exactly the slot-8 block.
+    - **Plants:** 11, each RED.
+    - **The lane's runs:** 297 tests in 24 suites ×2, 0 warnings.
+    - **For the handoff page:**
+      - Q1: existing vocals stay OFF;
+      - Q2: per R21;
+      - NEW: re-running a preset switches an explicit consonants-OFF back ON (a Bool cannot tell legacy-off from chosen-off). Filed as **NT-C2-F1**.
+  - ✅ **C5b-1+2 LANDED (~00:45), VERIFIED BY ME (00:58-01:02): the drawn pitch shape, model and render proof.** My run: 362 tests in 28 suites, 0 ✘, 2 known issues (the G2 cells), 0 warnings. "C5b — the drawn pitch shape…" passed BY NAME. The C5b-1 model suite's own pass line was lost to interleaving, but it started, its tests passed individually (e.g. the clamp test) and the run has 0 ✘.
+    - **The fields:**
+      - `NoteSegment.shapeStartIndex` / `shapeTenthsOfCents: [Int16]` on a 100 Hz grid (±1200 c), before `isCleared`;
+      - healing: empty → (0, []), negative indices dropped, past 24 h dropped, clamped;
+      - omitted from the encoding when empty.
+    - **Identity and the curve:**
+      - `isPitchIdentity && !hasShape`;
+      - **`entersPitchCurve` also counts `hasShape`** (unrequested but necessary; a shaped note now leaves C2's consonant mask);
+      - the curve term `drawnShape` is in SOURCE time, lerped, with the ends held, weighted by the same gates (no double count at soft joins); the formant curve ignores it.
+    - **Digest slot 4:** marker `0x5331_4841_5045_5301`, per shaped note (index, start, count, samples), between slots 3 and 5.
+    - **`ClipRenderSignature.bitIdentical`** memcmps everything EXCEPT the array's pointer bytes, then compares the samples by contents. The size pin is rewritten to name the array as the note's only reference.
+    - **The render proof:** a +50 c plateau drawn over 0.80-1.20 s is HEARD at +50.15/+50.09/+50.03 c, with 0.0/0.0/−0.01/−0.02 c outside. RenderDiff's first differing frame is 33,120.
+    - **Byte gates:** 5 shape-free sets' encoding, digest and render hashes were captured BEFORE the change and are unchanged; no golden moved.
+    - **Plants:** 7, each RED.
+    - The lane ran 345 tests in 27 suites ×2. It broke the build for ~20 s once and fixed it.
+  - 📥 **THE USER ANSWERED ALL FIVE (handoff db `handoff/pitch-2026-09-25`, stamped 04:25Z = 2026-09-25 21:25 PDT; read by me ~01:15 PDT 09-26):**
+    - **`nt-old-vocals` = (b), NOT the recommended (a):** "The first note you drag on an old vocal updates the whole vocal (also one Undo)."
+      - Final: never re-ask.
+      - Scope, ruled by me: EVERY per-note hand edit, from the editor or the wire (pitch, split, slide width and follow, wobble, drawn line, per-note voice, level, clear/restore). The set-level toggles are NOT triggers.
+      - Routed to **lane D4-1** (`scratchpad/w6/D41/brief.md`): flip `handEditUpgradesLegacyVocal`, a setter census gate, rewrite the (a) pins (C4's plant P9 list: the C1/C4 fixtures are built BY hand edits and must be re-seeded), and measure the first-edit render.
+      - Told NT-W (tool text describes (b)), C5a-4b (the wobble draft ends in `afterHandEdit()`) and C5b-3a (the shared file).
+      - NT-U's R16 line must say (b), not "Tap to update" alone.
+    - **`nt-readout` = words** (the default; NT-U / the Drift tool).
+    - **`file-upstream` = YES:** "I post the reports and the fixes on the library's public page, as you."
+      - Upstream HEAD is `a670068` (2026-09-25); `signalsmith-stretch.h` is unchanged since our `57b93f4`, but Linear went to 0.6.4.
+      - **Lane UP** (`scratchpad/w6/UP/brief.md`) drafts the three issues with a standalone repro on HEAD. It posts nothing; **I review, secret-scan and post** with `gh` (github.com account `dimichgh`).
+    - **`sing-pick` = v1** (SoulX-Singer, stock voice 1): Route A is viable by the user's ear.
+    - **`sing-own-voice` = yes.** **Lane SING-6** (`scratchpad/w6/SING6/brief.md`):
+      - guide tunes (higher C4 / lower C3), with gates, plus novice recording steps;
+      - the §1.6 Route H pipeline, proven on a stand-in with three negative controls, BEFORE the user records.
+      - The recording is saved to the Desktop as `row-your-boat`; that is the ONLY user file ever read.
+  - ⏸ **BUDGET PAUSE REQUESTED BY THE USER (2026-09-26 ~01:50 PDT): "let's now slow down as we approach our weekly limits, currently 92% and we need to prepare to pause till we get rest in about 24 hours".**
+    - This is a PAUSE: all work stays and stays authorised. No cron jobs existed.
+    - All 9 lanes were asked to stop at a SAFE point (the tree compiling; a flip or wiring either fully gated or not in at all; the filter run once), each writing a `STATUS.md` in its folder. All 9 had stopped by ~02:15 PDT.
+    - No new lanes and no workflows until the user says "continue" or runs `/dev-cycle`.
+    - ⚠️ **Times in this block are PDT (UTC−7).** The handoff db's `at` stamps are UTC (`Z`); convert before writing one into a record. I first recorded the answers as "09-26 04:25" local; they are 09-25 21:25 PDT.
+  - ▶ **RESUMED ON THE USER'S "continue" (2026-09-27, Sunday).** The pause is over and every lane below restarts from its STATUS file. At the resume: no listeners on 17600/17695/8001/8002 (the lsof shape found 36 other listeners); no locks; HEAD `813c415` plus 189 uncommitted paths.
+    - **Wave 7 launched.** Rules are in `scratchpad/w7/common.md`, which carries the current ownership table and the plant law as a both-slots procedure with `plant-intent.lock`.
+      - **Engine, W7-NTE2 (opus):** the fade0, nokey and memo-key plants, the G-C12 mechanism, the key cost, and a 2nd run.
+      - **DAWCore, W7-D41 (opus):** P4, the `pitchDragReach` widening, the stale "inert until the user rules" comments, the doc note, a 2nd run, and a report of any (a) pins.
+      - **Pitch UI, W7-C5b4b (opus):** the brush UI, D4-1 #1 (`playedLine` path), C5b-G, the Wobble capture at 1208 mid-drag, and C5b-D.
+      - **Wire, W7-WIRE (sonnet):** X4 `clip.upgradeNaturalTuning` (254→255 / 259→260), the `predatesNaturalTuning` text checked against the census, and the HELD-ON-NT-E2 comment sweep.
+      - **Design, W7-SING (opus):** `docs/design/2026-09-27-p2-sing-integration.md`, carrying the key/octave default.
+      - **Piano roll, W7-I5F3 (sonnet):** I5-F3's steps 1-5.
+      - **UP is mine:** the account is `dimichgh`; upstream HEAD is still `a670068`; the 23 upstream issues and 9 PRs hold no duplicate.
+      - **My rulings:**
+        - the memo-key patch is APPROVED;
+        - the `ContourToRenderTests` edits are ACCEPTED (the harness mirrors the product under its own gate);
+        - G-C12 waits on the mechanism.
+      - **Deferred:**
+        - WF-F1: its asleep run needs the display asleep, and nothing sleeps the user's display. The m23r3b Finder focus theft is part of it.
+      - ✅ **W7-I5F3 DONE** (Sonnet, 03:08-03:35 PDT; its logs checked by me 03:38).
+        - **Plant PE1:** RED on its 3 named tests. It now runs under `plant-intent` plus BOTH slots: `plant.sh` was rewritten, and `both.sh` is new.
+        - `heavy.sh` and `staged.sh` now wait out a foreign `plant-intent.lock`.
+        - **Warnings:** 0 in `Sources/`, with a planted warning as the positive control.
+        - **Runs:** the F3 filter's 2nd run passed 793/793 (50 suites). The m23t gate passed 75/75, exit 0.
+        - ⚠️ **The wedge gate is INCONCLUSIVE (exit 2):** `occlusionVisible` was false in all 6 phases. The cause is not the code: the frontmost app was `loginwindow` at every check, so THE USER'S SCREEN IS LOCKED and no window can be drawn.
+        - Re-run `staged.sh wedge` when `lsappinfo front` is no longer loginwindow. That's an environment wait, not a question for the user.
+        - The unit guard `scrolledStripIsAGeometryGroup` is green.
+        - **What remains of I5-F3:** that one re-run. I5-F4 is filed.
+      - ✅ **W7-D41 ROUND 1 DONE** (opus, ~03:05-03:40 PDT; checked by me 03:45).
+        - **`pitchDragReach`** (`PitchCorrection.swift` ~:1684) now gives a first edit on an old vocal the WHOLE-vocal span.
+        - It decides legacy vs soft on the set the drag STORES (`setADragStores` asks the hook). My literal rule missed the never-tuned table; the directed test `dragReachOnANeverTunedTable` catches it, 268/1,299 samples out under P6.
+        - **Plants:** P4 RED (22 issues in 11 tests), P5 RED, P6 RED.
+        - **Runs, confirmed by me in the logs:** the filter 433/35 with 2 known (NT-E1 G2); `PitchCorrectionCommand` 177/177, where NO wire test pins (a); the reach tests 18/18.
+        - The stale D4-1 comments went from 5 sites to 0; they were wrapped lines, which a one-line grep missed. A doc paragraph was added.
+        - ⛔ **FOUND, AND CONFIRMED BY ME: `pitchDragReach` HAS ZERO PRODUCTION CALLERS.** `PitchEditorModel.draftSpan`/`draftSpans` (~:2144/:2184) restate the old ± retune/2 rule. The fix is dead until the UI asks it, and the draft outside the dragged note is stale during a first drag on an old vocal (it corrects on release).
+          - Routed to W7-C5b4b (token P) by message: one home, plus a test and a plant.
+        - **RULED BY ME: a no-op edit must NOT update an old vocal.** The user said "the first note you DRAG". Today, Reset Wobble on an as-sung note switches the whole vocal, audibly, and adds an undo step.
+          - Resumed W7-D41 to build "update only when a note changed" in ONE home, with census, store tests and a plant.
+          - It also rewrites the 4 stale D4-1 lines in the natural-tuning design doc (:1108, :1124, :1222, :1323).
+      - ✅ **W7-D41 ROUND 2 DONE** (opus, ~03:45-04:05 PDT; checked by me 04:10).
+        - **The no-op rule is in ONE home:** `PitchEditSet.afterHandEdit(from before:)` (`PitchCorrection.swift:1873`). It compares notes only; there are 15 `from:` call sites and 0 bare `.afterHandEdit()` calls left in DAWCore.
+        - The census now REQUIRES `.afterHandEdit(from: self)` in every transform and refuses the bare hook.
+        - **Plants:** P7 "always update" RED (56 ✘ lines, exactly the no-op tests), P8 a writer's bare hook RED, P9 `from: table` in a transform RED.
+        - **Runs, checked by me:** brief 437/35 with the 2 known issues, wire 177/177, and the P lane's 2 draft tests 2/2. 0 warnings.
+        - The design doc's 4 stale lines are rewritten. I then recorded the Q-U1 answer (b) and the Q-U3 answer "words only" in its questions list, which still read "Recommended: (a)".
+        - **Known and accepted:**
+          - a clamped hand-written value counts as a change;
+          - a drag committed as several coalesced steps keeps the update from its first moving step;
+          - -0.0 vs 0.0 is `performEdit`'s pre-existing equality.
+        - `pitchDragReach` still has no production callers: that's with W7-C5b4b.
+        - **Follow-up for the wire token, after W7-I5F4 frees `server.ts`:** `clip_get_pitch_edits`' predates text and `clip_upgrade_natural_tuning` must say "the first per-note edit THAT CHANGES A NOTE", then regenerate the bundle.
+      - ✅ **W7-WIRE DONE** (Sonnet, ~03:05-03:44 PDT; checked by me 03:50).
+        - **X4 `clip.upgradeNaturalTuning {clipId}` / `clip_upgrade_natural_tuning`:** a 5-line handler over `ProjectStore.upgradeToNaturalTuning`. The store owns every refusal.
+        - **Refusal behaviour found:**
+          - A clip with NO table refuses in words.
+          - An already-natural vocal is a no-op: nothing is journaled, and one undo restores the original.
+          - An explicit smoothness pick survives.
+          - A never-upgraded identity table with pre-feature defaults does real work (it gates on the table EXISTING, not on `predatesNaturalTuning`). This is documented.
+        - **Tests:** 7 wire tests by name, and a DRIVEN route. The filter passed 1634/1634 twice. npm 1091/1091 and 7 MCP tests.
+        - **Counts, checked by me:** wire **255** (doc-count-drift ✔); the 19 pins moved to 255 with 0 left at 254; MCP **260**.
+        - **`predatesNaturalTuning` text:** it now names the first-edit update and the new tool. It was checked against the census: 11/11 writers and the 3 set-level exemptions.
+        - **The HELD-ON-NT-E2 sweep:** 23 → 1. The one left is a live `assert.doesNotMatch`, correctly kept.
+        - The bundle was regenerated; `plugin.json` is still 0.17.0.
+        - ⚠️ **Once D41's no-op rule lands,** the tool text "the first per-note edit … updates the whole vocal" must say "the first per-note edit THAT CHANGES A NOTE". That's a follow-up for the wire token after D41.
+      - ✅ **W7-NTE2 ROUND 1 DONE** (opus, ~03:05-03:55 PDT; checked by me ~04:00).
+        - **Plants, all RED:** fade0 (`smoothJoinsAreClean` at 671.6×/278.5× against a 4× bound; the phrase leg stays blind, as known), nokey (`renderKeyNamesTheMix`; the `index.txt` newline bug is fixed), and memo-key.
+        - The **memo-key patch** is applied VERBATIM, which I checked: the 17-line block is found as-is. `toggleMemoIsAMiss` is ENABLED and green, and the NT-PK golden is unchanged.
+        - **Runs:** the full filter's 2nd run passed 256/30 with the 2 known NT-E1 issues, which I checked. Memokey 29/29. 0 new `Sources/` warnings.
+        - ✅ **G-C12 RULED BY ME: CLOSED as a FIXTURE property, not an NT-E2 defect** (the mechanism was measured per cell).
+          - The fixture's vowel is 72.3 dB under the 's' in 4-20 kHz. A moved note carries the neighbour consonant into its first and last 60 ms at 32-42 dB under the 's'. A floor at 30 dB contrast gives 0/8 cells over the bound.
+          - **With the flag OFF the readings are IDENTICAL** (0 of 2,880 edge frames differ), so the mix does not cause it.
+          - The take's edge contrast has a median of 4.5 dB and a max of 32.9 dB; its widest anywhere is 54.2 dB.
+          - The take at +300/+700/+1200 c has medians of −1.14/−0.09/−0.50 dB. Its edges over 3 dB are the move darkening the note's middle (`excessMid` −3.7…−8.3), not smear.
+          - The bound is not re-fit, and the cells stay recorded and unasserted.
+          - The leak itself is filed as the known pre-existing limit **NT-E2-L1**.
+        - **Cost per edit:** the memo-key hash is 1.28 ms, but the X6 union (`differingConsonantFrames`) is **~117 ms per edit**, 97% of `RenderDiff.extent` on the take (39 regions over 17.9 s).
+        - ✅ **APPROVED BY ME:** the lane's EXACT short-circuit (equal inputs → []), with every weight input compared, tests, a plant, and a before/after re-measure. That includes the D41 harness, to find out whether the extent sits inside the user-facing ~231 ms. The NTE2 lane was resumed for it.
+      - ⏳ **W7-I5F4 launched ~03:52 PDT** (opus; tokens R + Q; `common.md` updated). Quantize, the step sequencer and `clip.quantize` follow the SONG grid. It starts with a census of every clip-local grid consumer. On-grid clips must stay byte-identical. The wire and MCP counts stay 255/260. The looked-at gate waits for an unlocked screen.
+        - Auto-correct's formant override needs a DAWCore field while D is busy.
+      - ⏳ **W7-D2 launched ~04:08 PDT** (opus, swift-app-engineer; token D after D41).
+        - **NT-C2-F1:** re-running a preset must KEEP a consonant choice the user made. The fix must be EXACT, not inferred from "the set predates natural tuning", which has holes both ways.
+          - Existing sets must encode and decode byte-identically, and the render digest must not change.
+          - Tests: the {legacy, natural} × {chosen ON, chosen OFF, never chosen} matrix, plus plants.
+        - **Auto-correct's voice-size override (the DAWCore half):** `PitchAutoCorrectOptions.formantCorrection`. It beats both the seed and the carry, and non-finite values are refused before detection.
+        - The wire leg is written as a spec, `$S/w7/D2/WIRE-SPEC.md`, for the next wire round. That round also carries D41's owed "THAT CHANGES A NOTE" text.
+      - ⏳ **W7-NTL launched ~04:11 PDT** (opus, qa-test-engineer; a new token L). It owns only the new `NaturalTuningListeningTests.swift` and the durable `DUR/NT-L/`, and edits no `Sources/`.
+        - **L1, voice size** (0 / 50 / 75 / 100 %) on three excerpts: a +400 c note, a phrase (R20), and a note near 220 Hz moved DOWN (NT-F220).
+        - **L2, slide smoothness:** legacy, 6000, 3000 and 1500 c/s.
+        - **L3** only if G3 passed.
+        - It uses the P-L pipeline: PREREG first, the product path, physics that must ORDER the files, plants, −21.5 LUFS, and true peak ≤ −1 dBTP on the decoded MP3s. I build and publish the page.
+      - ⏳ **W7-TBF1 launched ~04:20 PDT** (opus, ui-design-engineer; token T). TB-F1 is a compact deck strip, plus a compact warnings chip, at the 1208 floor.
+        - The compact-vs-full rule is a pure DAWAppKit function, pinned over the full state matrix.
+        - The floor is NOT raised. `transportProMinWidth` (1183, stale) is re-measured and reported only.
+        - Captures are PENDING while the screen is locked.
+      - ⏳ **W7-F220 launched ~04:22 PDT** (opus, audio-dsp-engineer; research only, OUTSIDE the tree).
+        - It maps the down-shift formant residual over f0 × shift, proves the mechanism with a controlled variant in a COPY of the library, and prototypes a fix (our shim, or a vendored patch plus upstream report `issue-0004.md`, drafted and NOT posted).
+        - Then it writes the exact patch plus its render-version bump for the engine lane.
+      - ✅ **W7-NTE2 ROUND 2 DONE** (opus, ~04:00-04:35 PDT; checked by me 04:40): the EXACT short-circuit in `RenderDiff.differingConsonantFrames`.
+        - When the two region lists are the same BIT FOR BIT (`sameRegionBits`, stricter than `==` on ±0), it returns `[]` without computing weights. A reflection check fails if `PitchConsonantRegion` gains a 5th stored field.
+        - I read the exactness argument in the function body: both sides get the SAME rate, ratio and frames, and the weights read only the regions and a DAWCore constant.
+        - **Measured** (debug build, loaded):
+          - the union went from 119 ms to 0.07 ms per pitch-only edit;
+          - the whole second-edit provisional went from 232 to 113 ms;
+          - D41's second edit went from 247 to 129 ms;
+          - the first edit is unchanged, 1841 ms.
+        - Its premise corrected: a split DOES take the short-circuit, correctly, because its halves abut bit for bit.
+        - **Plant "always return []":** 6/7 RED, including X6 (d), where the provisional served 51,156 stale gap frames.
+        - **My own re-run of the brief's filter:** **259 tests in 30 suites, 2 known issues** (G2 at 80 Hz −700 and 220 Hz −500, both the documented ones). The lane's log shows `RenderDiff.swift` compiled with 0 warnings. The md5 `74dd8440` matches.
+        - The handoff page's "later changes after about 0.2 seconds" still holds for the user's CURRENT dist build. It gets "about a tenth of a second" with the next build.
+      - ✅ **W7-SING DONE** (opus daw-architect, ~03:05-04:33 PDT; checked by me 04:36): `docs/design/2026-09-27-p2-sing-integration.md` (97 KB, §0-§15).
+        - **The plan:**
+          - SoulX as a 3rd loopback sidecar on :8004, behind a stdlib facade that renders one phrase per request;
+          - an APP-owned `SingJobCoordinator`;
+          - octave-only vocal moves, with key changes made by a new `project.transpose`;
+          - `yieldsWhenBusy` residency;
+          - Route N labels, replacing Route H (1/10);
+          - −18 LUFS as a TARGET, not a gate, since the user's pick measured −19.2;
+          - 17 additive verbs.
+        - It also added one "Key future decisions" entry to ARCHITECTURE.md. That was outside its brief; I read it, it's accurate, and I kept it.
+        - ⭐ **Its prerequisite finding, VERIFIED BY ME:** `noteJobStarted` is called in ONE place (`Commands.swift:11656`, the wire's ACE path), and `noteJobEnded` at :7797/:7821. The control found the definition at `ModelLifecycleCoordinator.swift:828`.
+          - So Sketchpad and import-seam ACE jobs, and every RVC convert/train, are invisible to eviction.
+          - **That is a LIVE latent defect today, not just a p2-sing risk:** an RVC boot during a Sketchpad song generation evicts ACE mid-song, and the reverse also holds.
+          - It is p2-sing-0, launched below.
+        - Its key-fit arithmetic does NOT reproduce the user's −18 pick under an assumed p90. It says so plainly, and makes calibration Round K a gate.
+        - **3 questions for the user**, each with a default; work proceeds on the defaults:
+          - Q1: download consent (a), a window, click to install;
+          - Q2: delete the spike folder after the product install passes (yes);
+          - Q3: save `raw-raw-song.m4a` as "My voice" (yes).
+          - These go on the handoff page.
+      - ✅ **W7-C5b4b DONE** (opus, ~03:05-04:40 PDT; verified by me 04:55): **the freehand brush UI, ⌘-drag on a note draws its pitch line.**
+        - **My run of its filter, with my card fix in:** 659 tests in 57 suites, **658 pass and 1 ✘**, 0 warnings, Leg C 393.
+          - Both C-F3 card tests pass.
+          - The ✘ is NOT the brush's. It is the engine-side G8 set-level census (`NaturalTuningDigestTests.swift:323`), turned red by W7-D2's in-flight `consonantProtection` stored field, which replaced the stored `keepsConsonantsUntuned` Bool.
+          - That census file is in DAWEngineTests, outside D2's token. I GRANTED it to D2 (04:58), with what the census needs: the field in `hashed`, a row showing on↔off moves the digest, and a row showing offByDefault↔offByChoice does NOT.
+        - **How it works:**
+          - The release commits ONCE through `PitchEditorShapeWrite`: one `setClipNoteShapes` call, one "Draw Pitch" undo step, with an independent read-back.
+          - The draft goes through `PitchEditorDraftEdit.draftSet`, case `.shape`.
+          - The live window asks DAWCore's `pitchDragReach`, memoised per line revision. That is D4-1 #2, with tests for a first move on an old vocal (the whole vocal) and a second drag (the note's reach).
+          - The brush test's oracle now uses `afterHandEdit(from:)`, plus a no-op leg.
+        - **Its run:** 659 tests in 57 suites, 0 failed, 0 warnings, Leg C 393.
+        - **Plants p1-p6, each RED:** the draft skips the set transform; one store call per note; a refusal ignored; the window restated; the memo outlives its table; a commit per tick.
+        - Staging gets an opt-in `DAWPRO_STAGING_NO_ACTIVATE=1` (`DAWProApp.swift:30`). The default still activates; I read it.
+        - **Gates prepared:** `$S/w7/C5b4b/build-and-gate.sh brush 1`, then `… wobble 1` (the 1208 mid-drag capture). Both are PENDING an unlocked screen, and each refuses on `loginwindow` (tested).
+        - ⚖️ **Its two asks, decided by me, not the user's:**
+          - (1) On a breath or consonant, the brush shows its own NOVICE sentence, not the store's agent-facing one, which names a UUID. That is the copy rule, so I kept it.
+          - (2) ✅ **FIXED BY ME:** the "Replace your hand edits?" card did not name a drawn line, which a preset also erases.
+            - `PitchPresetReplaceCopy.handEdits` now ends "…any wobble you changed and any pitch line you drew".
+            - The honesty test's ban on "drawn" was LIFTED, with a comment, the same way "wobble" left that list when its tool shipped. "shape" stays banned as jargon. I did not word around the ban.
+            - The tripwire now also pins `PitchEditorGestureRouter.commandDraws(in: .pointer)`, since a ⌘ modifier is invisible to the palette list.
+        - **Its C5b-D proposals:** I inserted the design-language text as a sub-bullet after the note-menu entry. This record stands in for its proposed roadmap block.
+        - **Filed for a wire round:** the UI writes a multi-note stroke as ONE undo step, but the wire's `clip.setNoteShape` is per note, so an agent's multi-note stroke costs N undo steps. The fix is an additive `clip.setNoteShapes` batch verb over the existing `setClipNoteShapes`.
+        - Retired by name: `chordIsInertToday`, replaced by `onlyCommandOnANoteChangesAKind`.
+      - ⏳ **W7-NTU launched ~04:52 PDT** (opus swift-app-engineer; token P after C5b4b).
+        - **Round 1:**
+          - U1, the header group "Sound like the singer": Keep voice size (0-100 %, detents at the L1 stops), Consonants, and Slides (Snappy/Quick/Smooth/Slow). The upgrade line is worded TRUE for the user's (b).
+          - The Wobble help at 1208, again, after C5b-4b's "Hold ⌘ to draw instead." made it longer.
+          - I0-F, the `repinTimeZoom` root fix.
+        - **Later rounds:** round 2 is the Voice tool (U3); round 3 is the join drag (U2). U4 Drift waits for C3 and G3.
+        - Its gate `m23ap-ntu-header.mjs` is pending an unlocked screen. It must not edit anything until my C5b verification has compiled.
+      - ⏳ **p2-sing, the first four items, launched ~04:45-04:50 PDT** (all opus; ownership in `common.md`):
+        - **W7-S0**, p2-sing-0 (mcp-integration-engineer, token A): `LifecycleTracking{SongGenerator,VoiceConverter}` decorators, so every ACE and RVC job registers.
+          - It fixes the live latent eviction defect above.
+          - The `DAWProApp.swift` wiring is a DRAFTED patch; I apply it once P frees the file.
+        - **W7-SB**, p2-sing-b (audio-dsp-engineer, token B): `scripts/sing/`, i.e. the stdlib facade, stub, run/install scripts, lock, pins and guide tool.
+          - The converter must match the spike's T1/T2/T1T2 JSON byte for byte. `install.sh` is tested against a local fixture mirror under a spaced path.
+          - One real-model smoke run on port 18004 uses the SPIKE's runtime read-only (no downloads), and must pass the prompt-f0 null test. The sidecar is killed pid-exact.
+          - NO real install: the user's download-consent Q1 is still open.
+        - **W7-SD1**, p2-sing-d1 (swift-app-engineer, token Y): `Clip.lyrics`, additive and byte-identical when nil, plus the tokenizer, the assigner (rules 1-7 over the ONE `PhraseDetection`) and a syllable heuristic that must reach ≥ 90% on a CMUdict-derived fixture.
+        - **W7-SD3**, p2-sing-d3 (audio-dsp-engineer, token V): `VoiceRangeFit` (it must reproduce the design's [D] arithmetic), `VoiceClipCheck` (the spike's constants verbatim, plus `guide_leak`), Route N with Route H as the negative control, and the guide WAVs.
+          - The user's recording must still PASS the Swift check. That is an env-gated test that reads it in place and never copies it.
+      - ✅ **W7-I5F4 DONE (round 1)** (opus, ~03:52-04:37 PDT; not yet checked by me, pending round 2).
+        - Quantize, groove and the step grid follow the SONG grid.
+        - **Census:** `census.md`.
+        - **Bit-identity:** 2016 frozen-quantizer cases plus the step geometry at 7 on-line starts.
+        - **Plants:** Q1 8 RED, S1 6 RED, I1 both RED.
+        - **Its runs:** 599/599, ctl 1636/1636, npm 1091, wire 255, and 0 warnings with a planted-warning control.
+        - ⚖️ **RULED BY ME (04:40), not a user question:** swing and groove count from the SONG's beat 0, not the clip's first grid line.
+          - The clip-relative rule delays the song's DOWNBEATS on a clip that starts on an offbeat, and it disagrees with `clip.quantizeAudio`, which already counts from beat 0.
+          - Nothing stored changes; only FUTURE quantizes on odd-slot starts change, to the correct result.
+          - The lane was resumed to switch, re-pin the exact invariance scope, and plant the old term.
+        - **Filed for the DAWCore lane:** `ClipAutoExtend.outcome` (`ProjectStore.swift:4941`, `+Paste:331`, `+RepeatNotes:299`) still rounds a grown clip end to CLIP-local bars, and the comment near `ProjectStore.swift:4921` is stale since I5-F2.
+        - The capture is `$S/w7/I5F4/stage-capture.sh`, which refuses while the screen is locked (tested). The plugin bundle's `clip_quantize` text waits for the release regeneration.
+      - ✅ **WF-F1 MERGED INTO THE MAIN TREE by me (04:14 PDT), and verified at the unit level (04:19).**
+        - **How it merged:**
+          - main's `VibeMeterView.swift` was byte-identical to the fix's saved pre-fix copy, and all three patches passed `git apply --check`;
+          - I added the new type first, then its tests, then the patches;
+          - all 5 merged code files are byte-identical to the worktree's (`cmp`);
+          - backups are in `$S/w7/WF1/*.pre-merge`.
+        - **The filter** (6 suites: the two new ones, PollDiscipline, VibeMeterModel, LiveLayerWitness and MainActorOccupancySite) passed **34 tests in 6 suites**, the worktree's count. It took 3 tries: 2 collisions with W7-I5F4's saves.
+        - **Warnings:** both changed Source files were compiled in that very build (log :510 and :654), with 0 warnings on either. As a control, the logs do carry 58 other `warning:` lines, so the grep can find them.
+        - **Still OPEN:** the display-ASLEEP measurement. At 04:12 the display was awake while locked (`dispstate`: `displayAsleep:false`), and I never force sleep. The at-rest asleep case holds by construction; a MOVING orb while asleep is unmeasured.
+        - Pixel identity was verified on the worktree binary, and the merged Swift is byte-identical to it.
+      - ✅ **W7-D2 DONE** (opus swift-app-engineer, ~04:08-05:14 PDT; **VERIFIED BY ME 05:46**). DAWCore only; the wire leg is W7-WIRE2's.
+        - **My re-run** (`$S/w7/orch-d2/`, D2's own filter): **425 tests in 19 suites passed**, on try 8 of 8. Tries 1-7 were collisions, not results: NTU mid-save (1-2), SD3's `VoiceReferenceLabeler.swift` failing to compile 05:29-05:41 and blocking EVERY lane (3-6; fixed after my message), and a file vanishing mid-build (7). **Warnings:** all 4 of D2's Source files were compiled in try 8, with 0 warnings on them; the same grep counts 458 warning lines in try 7's log, so it can see them.
+        - **NT-C2-F1: re-running a preset keeps a consonant choice somebody made.** One stored three-state field, `PitchEditSet.consonantProtection` (`.offByDefault` / `.on` / `.offByChoice`). `keepsConsonantsUntuned` is now its computed on/off reading, so every reader compiles unchanged.
+          - Saved form: no key / `true` / explicit `false`. All 51 older copies of `PitchCorrection.swift` in the scratchpad only ever wrote `true` or nothing, so no saved file reads back as "off by choice". Five pre-record goldens re-save byte for byte.
+          - A preset keeps every state except "never chosen", which gets the new-set default (ON). The natural-tuning update (the tap AND D4-1's first changing hand edit) keeps a chosen OFF: the C4 slope precedent, READ at `upgradedToNaturalTuning()`. Design X4 amended by me.
+          - Not render material: a chosen OFF masks, mixes, bends and keys its render exactly like an OFF nobody chose (tests). The choice-only change is seen by `ClipRenderSignature` and `Params ==`, the stamp path's cost (argued at `PitchEditProvenance.swift:66`, not measured).
+        - **Auto-correct's voice-size override (DAWCore half):** `PitchAutoCorrectOptions.formantCorrection`, clamped 0...1, beats both the seed and the carry; non-finite refused in words before `replaceExisting` and before detection. Design §1(e) amended by me.
+        - **The G8 census I flagged at 04:55 is fixed** under my 04:58 grant: `consonantProtection` is hashed; on↔off moves the digest, offByDefault↔offByChoice does not.
+        - **Its lane numbers:** 425 tests in 19 suites green on the final tree (05:14; matches mine); 9 plants all RED, each restored cmp OK (the lane's, not re-run by me); 0 `Sources/` warnings with a planted positive control.
+        - **Decisions I checked and ACCEPT:**
+          - (d) Picking OFF on a never-chosen OFF is ONE undo step ("Keep Consonants"); undo restores "never chosen" exactly. It moves the content stamp, so the replace card asks before the next preset. Every set-level pick already does that (READ, `PitchEditProvenance.swift:66` and `hasHandEditsSinceAutoCorrect`). The card's words must stay true when the only change is a kept set-level pick: sent to W7-NTU for its replace-card round.
+          - An explicit JSON `null` for `formantCorrection` is REFUSED on the wire (read-back hazard: `null` means legacy for this field name elsewhere).
+          - `ConsonantChoiceDigestTests.swift` (outside D's token) now sits with the engine token, W7-C3's.
+        - **Owed:** the wire leg (W7-WIRE2) and a CHANGELOG line at the release checkpoint.
+      - ⏳ **Three lanes launched ~05:28 PDT** (ownership in `common.md`; the D token is SPLIT between C3 and AX):
+        - **W7-WIRE2** (sonnet, mcp-integration-engineer; the wire token, SHARED with I5F4's quantize cases): W7-D2's `WIRE-SPEC.md` §1-§6, D41's "the first per-note edit THAT CHANGES A NOTE" text, and ONE new batch verb `clip.setNoteShapes` / `clip_set_note_shapes` (the brush's multi-note stroke as ONE undo step over the wire). Expected wire 255→256, MCP 260→261. **Shared-file rule sent to both wire lanes:** Edit tool only; plants in `Commands.swift`/`server.ts` are SURGICAL, never restored by whole-file copy (a whole-file restore would erase the other lane's saves).
+        - **W7-C3** (opus, audio-dsp-engineer; D-part + engine): the drift/wobble separator v2 (design §3b), in the design's order G0 → PREREG → build → G1 → G2 → G3 (the L × edge sweep, `minimumSeparableSeconds`) → G4 on the take only if G3 passes. Its G3 verdict applies §3b's rule: PASS → decouple Wobble and Drift; FAIL → keep coupling, and Drift ships agent-only.
+        - **W7-AX** (opus, swift-app-engineer; D-part): a clip grown by a drag, paste or repeat ends on the next SONG bar line (I5F4's filing), with on-bar clips bit-identical and the roll's own grid proving the end is a line the user sees.
+      - ⏳ **W7-PK launched ~05:40 PDT** (opus swift-app-engineer; new files only): **p2-sing-k's DAWCore half, `ProjectStore.transposeProject`** (design `2026-09-27-p2-sing-integration.md` §3.6), one undo step, a pure nonisolated planner, the census of every pitch/key field first. The wire verb is a later round.
+        - ⚠️ **Sent to CHECK, not copy: the design's claim that a tuned vocal's correction tonic moves with the song.** If the corrector snaps the SOURCE pitch and `pitchShiftSemitones` rides on top, moving the tonic would snap every sung note to the wrong scale. The lane decides from the render order and proves it with a tracked-pitch test on a corrected vocal (INFERRED risk, not measured).
+      - ✅ **W7-SB DONE (p2-sing-b)** (opus audio-dsp-engineer, ~04:45-06:36 PDT; **verified by me 06:39**): `scripts/sing/`, 43 new files: the stdlib facade (`server.py`, `singlib/`), `stub_server.py` (faults nan/silence/click/crash/slow/balloon + an extra `nonfinite`), `run.sh`, `install.sh`, `pins.env`, `requirements.lock`, tools, tests.
+        - **My re-run** (`scripts/sing/tests/run_all.sh`, logs `$S/w7/orch-sb/`): stdlib pass **108 tests OK** (6 skipped = exactly the venv-only modules), venv pass **6 OK**, no leftover processes, no `__pycache__`. Secret scan of `scripts/sing/` clean, with the regex shown able to fire on a planted key. No audio or model file in the folder; the 8 fixtures are small JSON.
+        - **The lane's own evidence (not re-run by me):** the converter reproduces the spike's T1/T2/T1T2 JSON byte for byte (and the other 5 fixtures); `install.sh` against a local fixture mirror under spaced paths (idempotent re-run, cancel leaves nothing, concurrent install exits 75); run.sh's pidfile pid owns the port (lsof); ONE real-model smoke on 127.0.0.1:18004, 22/22 checks, the prompt-f0 null test passes, then a pid-exact stop with the process tree shown gone. I confirmed nothing listens on 18004 now.
+        - **Not done, by rule:** the real network install (7 GB). The user's `sing-consent` question is about what the APP does when an agent asks; it is not my licence to download, so this path stays untested until the user installs through the app.
+        - **Deviations other lanes must carry** (29 in its STATUS, each reasoned; none needs the user):
+          - **FFmpeg (Homebrew) is a HARD runtime requirement** the design never states: torchcodec's dylibs point at `/opt/homebrew/opt/ffmpeg/lib`. p2-sing-c's installer preflight and p2-sing-f's UI must surface it.
+          - **g2p_en garbles numbers and hyphenated words** (design §3.2's [A] refuted); the facade expands them first. Sent to W7-SD1 for the lyrics tokenizer (06:39).
+          - The built-in voice is 48 kHz (the spike's file), its sha pinned; a different ffmpeg can fail the sha with identical audio, so a diagnostic PCM sha tells the cases apart.
+          - The facade writes its own WAVs (libsndfile's PEAK chunk carries a timestamp and would break byte identity).
+        - **Disclosed by the lane:** one read-only `git status` in the spike's upstream checkout (it created and removed `.git/index.lock`; no content changed).
+        - ⏳ **p2-sing-c launched ~06:41 PDT as W7-SC** (sonnet mcp-integration-engineer, token C). I launched it before W7-S0 reports, but fenced off S0's files and `ModelLifecycleCoordinator.swift`. Admission is ADDITIVE, and a table test pins every existing model's `resolve` BEFORE SoulX lands. Stub + fixture mirror only; its stop/lifecycle code gets the design's `daw-architect` review.
+      - ✅ **W7-WIRE2 DONE** (sonnet mcp-integration-engineer, ~05:28-06:45 PDT; **verified by me 06:58**): W7-D2's WIRE-SPEC §1-§6 plus D41's "THAT CHANGES A NOTE" text. `clip.autoCorrectPitch` takes `formantCorrection` (null/out-of-range/non-number refused in words; echoed only when passed); `clip.getPitchEdits` gains `consonantsOffByChoice`; the "a switch-off is kept" text. **NEW verb `clip.setNoteShapes` / tool `clip_set_note_shapes`** (a stroke across several notes as ONE undo step; sounds beside sung notes are skipped and reported; all-or-nothing refusals; the reply read from the STORED segments). Added to the composer/mix-engineer allowlists.
+        - **Mine:** `doc-count-drift.mjs` **wire 256**, all 5 scored claims agree; npm **1108/1109** (the MCP pin "261 total" passes; the only failure is W7-SD3's `SingGuideLine.swift:22` tripping the permanent tempo lint, sent to SD3); DAWControlTests **1639 tests in 116 suites passed**. I read the new handler myself: it pre-resolves every points item through the store's own read-only check, skips sounds only when a sung points item exists, makes ONE store call, and echoes from the stored clip.
+        - **Its plants (not re-run by me):** 6 RED (the parse dropped, the echo unconditional, the wrong `consonantsOffByChoice` predicate, the store called per note, the sound filter dropped, the echo from the request), each restored byte-identical.
+        - **19 wire-count pins in 18 DAWControlTests files** were bumped 255 → 256 (none is another live lane's file). Their history comments were deliberately left alone, since one chain was already stale.
+        - **Owed at release:** `npm run bundle:plugin` (the loaded bundle cannot serve `clip_set_note_shapes` until then), and the CHANGELOG line.
+      - ✅ **W7-I5F4 ROUND 2 DONE** (opus, ~03:52-06:55 PDT; **verified by me 06:58: 606/606 in 58 suites** on its filter `Quantize|StepSequencer|PianoRoll|Groove|EditorSurface`). Swing and grooves count from the SONG's beat 0 (my ruling), through ONE term: `slotOffset(slot: firstLine + slot)`, with `SongGridPhase.firstLineIndex`. Groove extraction relabels its table by the first line's slot; no onset moves.
+        - **Invariance scope, derived separately in Python and pinned:** of 2880 matrix cases, 2034 stay bit-identical (straight at any start; swung when the first line's song slot is even; grooved when it is a whole number of cycles from beat 0) and 846 move on purpose. Both halves are asserted.
+        - Plants P1/P2/P3 RED as designed (the lane's). The MCP texts for `clip_quantize` and `groove_extract` are updated (the old "quantizes exactly as it always did" was false for swung clips on odd starts).
+        - **Incident, disclosed:** a planted unused variable (a WARNING, never an error) stayed in `StepSequencerModel.swift` 06:12:16-~06:13; the restore precondition is fixed and tested.
+        - ⛔ **Its finding, now ROUND 3 (my ruling, 06:59):** `slotOffset`'s `Int(slot)` traps on huge slots, and the wire accepts any `gridBeats > 0`, so a wire call could crash the app (read from code, not yet run). Fix in BOTH layers: DAWCore conversion made total (every in-range result bit-identical), and the wire refuses non-finite or < 1/1024 beat in words (census first). The trap is reproduced only in a throwaway process, never in the shared test run.
+      - ✅ **W7-F220 DONE (research; nothing in the tree edited)** (opus audio-dsp-engineer, ~04:22-06:55 PDT; report read by me 06:56, NOT yet re-measured by me). **Mechanism found in the vendored library, not in our base or compensation:** `updateFormants`' outward spread (decay `1 - 1/(f/2+1)`, vendored :1045, upstream :985) sags ~4.3 dB between strong harmonics, so a weak harmonic reads its neighbour's skirt, and step 3 scales each band by that wrong envelope (:1084/:1086). An "oracle" run with the true envelope lands every harmonic within ±0.1 dB, which proves the mechanism.
+        - **The fix: a GATED vendored patch 0004** (the envelope through the harmonic peaks, used ONLY when we pass a base). Measured on the exact patch text, synthetic material only: G2 map **51/72 → 69/72** (one cell regresses: 147 Hz −700 c, −44.9 → −51.1 against a tolerance of 50); per-harmonic error 3.94 → 2.63 dB; legacy, flag-on and withheld-stage renders byte-identical; hostile inputs clean; CPU −6.7 % at −O2 (under the timing lock, but with load 8-10 from other lanes, so indicative only). `formantRenderVersion` 2 → 3 (NOT `pv:`, which would re-key every tuned render in every cache for identical audio).
+        - **L1-e3's +50 c on the take:** the patch moves the synthetic 146.72 Hz −500 c readings by −39 to +2 c (median −17), so it explains part of it at most. A 0.176 s note's 5-6 windows swing ±30-58 c even with no render. The decisive test is set D re-rendered with the patched header, by a lane allowed to touch the take.
+        - **Sequenced, not applied:** the patch spans owners (`PitchCorrection.swift`, the digest tests and G2's pin are W7-C3's engine token; `VENDORED.md` is mine; the header, `patches/`, `shim.cpp`, `FormantCorrectionModelTests` and `NoteShapeRenderTests` have no owner). It moves formant-engaged render keys, which W7-C3's goldens are capturing right now. **I apply it after W7-C3 reports,** as one engine-token round with its tests (`$S/w7/F220/patch/F220-engine-lane.patch`), then the L1-e3 decisive re-render.
+        - **Upstream issue 0004 is DRAFTED, not posted** (`$S/w7/F220/issue-0004.md`, privacy scan clean with positive controls). The user's `file-upstream = yes` covered the three reports of 09-26; a fourth public post under their account gets its own ask on the handoff page, with no default.
+      - ✅ **W7-NTL DONE** (opus qa-test-engineer, ~04:11-05:29 PDT; its files checked by me 05:32): **one listening set ships, L1-e1; published on the handoff page v53 as 03a** (ask `nt-voice-size`, default keep100, the current new-set value).
+        - **L1-e1** (E2 raised 4 st, 8.3 s excerpt): A/B/C/D = keep 0/50/75/100 %. Gate meter +314.4/+198.9/+116.2/+36.9 c; steps 115.5/82.7/79.3 (> 25 c); D within 50 c; the LPC F2 meter agrees on the order. A matches legacy within 0.002 c.
+          - **MY OWN MEASUREMENT (05:32), on the decoded MP3s:** −21.5 LUFS each, true peak −1.9/−1.9/−1.8/−1.8 dBFS (ffmpeg ebur128, `-hide_banner`); all 8 MP3/PNG md5s equal the manifest's; PREREG mtime 04:29:42 precedes the first render (04:44:36, the lane's log).
+          - Audibility: A vs D 369.9 c LPC (bound 100.9 c); B-C 89.0 and C-D 80.7 c are UNDER the bound, so the page says those neighbours may be hard to tell apart and offers "they sound the same" as an answer.
+        - **Held, and it STAYS held (my ruling): L1-e3** (D3 lowered 5 st, the NT-F220 stand-in: the take has no note within 2 st of 220 Hz; its highest is 146.72 Hz). The order holds, but D misses the pre-registered "about 0" by 0.19 c (+50.19 vs 50). A threshold is never moved after seeing data. The page's 03 promise ("the listening page will include exactly such a note") is corrected in v53.
+        - **Dropped:** L1-e2 (the phrase: G2b failed on the take, 1.17 vs 1.07 dB; the four versions measure within 1.5 c) and L2 (slides: the tracker could not measure the join width for A, B or D; POST-HOC, the original has a 26 ms tracker hole at that join). L3 was not built (G3 has never run; W7-C3 runs it).
+        - **Its findings for other lanes:** the P-L anchor no longer matches bit-exactly (the pitch-shift engine's version moved 3 → 4 since P-L; the zero-curve anchor is bit-exact); P-L's harness expects 59 segments but tables now carry 38 unpitched sounds too; its suite name matches NTE2's `NaturalTuning` filter (+1 skipped test). The e2 meter disagreement and the e3 real-vs-synthetic gap went to W7-F220.
+        - **Next:** L2 round 2, at a join the tracker covers (the PREREG checks coverage of the ORIGINAL across the whole expected slide first).
+        - **L2 ROUND 2 DROPPED under its own PREREG** (06:50, lane report; its files are in `NT-L/page-l2r2/` and `out/l2r2-*`). The join was chosen by a written rule (run 27, 22.912 s, 193/193 frames confident, a 1122 c slide). Widths order A<B<C<D (6.5/31.4/83.1/163.5 ms), and the round-1 anchors still render BIT-EXACT (so W7-C3 had not moved the render path at 06:39). It failed only the gate "Snappy dips worst": all four dip −4.3 to −4.7 dB at the take's own loudness peak 52-68 ms after the join, so the dip measured the material there, not the slide.
+          - **My ruling: it STAYS dropped** (no post-hoc rule change on data already seen). **Round 3 is ordered** at the other qualifying join (run 7, not yet rendered), under a NEW PREREG written first. In it the dip is report-only, with that reason; neighbour audibility is pre-registered (a pair under the bound gets a page warning, and all three under it drops the set); and the loudness plant is +3.5 dB, because round 2 showed "gain skipped" cannot fail on an excerpt already at −21.5 LUFS.
+          - Its finding for the design: the product's slide is not a straight ramp; measured 10-90 % widths are 47-62 % of the applied widths (a raised cosine reads ~59 %).
+          - ⛔ **Three tree-wide build breaks today** (SD3 05:29-05:41; a `#expect(x.allSatisfy(\.keyPath))` test for ~30 min; `LyricTokenizerTests.swift:105`) led me to add a rule to `common.md` at 06:53 and send it to all 10 Swift lanes: install a draft only under a slot, and restore it before releasing the slot if it fails.
+      - ✅ **W7-AX DONE** (opus swift-app-engineer, ~05:28-06:58 PDT; its report read by me 07:10; **verified by me 07:13: one combined re-run of AX's, S0's and SD1's filters, 323/323 in 24 suites, `Sources/` and `Tests/` warnings 0**): a clip grown by a note drag, a paste or a repeat now ends on the next SONG bar line, the line the roll draws.
+        - The song entry is `ClipAutoExtend.outcome(…clipStartBeat:meterMap:maxLengthBeats:)`. Its bar phase comes from `SongGridPhase.phase(of:step:)`, I5F4's one home for song-grid phase, not a copy. The old clip-local entry still exists and is the song entry at beat 0, bit for bit (4,392 cases).
+        - **Headline, invariance:** 604,800 on-bar cases compared bit for bit against a frozen copy of the pre-AX rule. They cover 72 starts from bar 0 to bar 2^20, including 16 in songs whose meter changes, plus lengths, bar counts, end crumbs down to ±4e-13, onset gaps and ceilings. Result: 0 moved, and every outcome kind was reached.
+        - **The end is a line the user SEES:** for 44 off-bar clips, the roll's own `PianoRollSongGrid.forEachLine` draws the grown end at both zoom branches. The negative control: the old clip-bar end is not a drawn line for any of them.
+        - Refusals keep their meaning, measured over 164,430 fixtures with 0 reclassified. The cap and the neighbour headroom are judged against the NEW end.
+        - Plants P1/P2/P3 went RED exactly as simulated beforehand (9 tests; 7,634 of 604,800; 2 tests). P3 really damaged the neighbour clip. All three were restored cmp-identical.
+        - Tests: 190/190 in 15 suites, 14 of them new. `Sources/` warnings: 0, with a planted-warning control. Wire and MCP unchanged: the only wire value that moves is `clip.repeatNotes`' `clipLengthBeats` on an off-bar clip.
+        - ⚠️ **AX-F1, filed and DEFERRED, no user input needed: songs whose meter CHANGES keep the old clip-bar rule.** `songBarPhase` returns 0 when `meterMap.changes.count > 1`, the roll's own predicate, pinned by `meterChangeKeepsTheClipBarRule`.
+          - In such a song an off-bar clip still grows to a spot between the drawn lines.
+          - An ON-bar clip whose growth CROSSES a meter change does too. Example: a clip at 0 in 4/4, with 3/4 from beat 8 and a note to 9.5, grows to 12, while the lines are at 8, 11 and 14.
+          - The fix needs a meter-aware "first song bar line at or after beat X" in the song-grid home (`MeterMap` or `SongGridPhase`, as `PianoRollSongGrid.barLine(.upward)` does privately).
+          - **My ruling for when it is built:** on-bar clips crossing a meter change MAY move. Their old end is the same defect. The user's hands-on confirmation (m25-f-3) was the one-meter case, which AX leaves bit-identical.
+        - Filed, minor: `TempoMap.swift`'s `MeterMap` banner says multi-change maps are "unit-test-only until Phase C/D". They are user-reachable through `setTempoMap(_:meterMap:)`.
+        - ⭐ **Its cross-lane finding, a gate law:** the console test log DROPS records. One passing 190/190 run had 206 "started" but only 139 "passed" lines, and one line was overwritten mid-record. Per-test claims come from `--xunit-output`, never from grepping `✔`. The run summary line was intact.
+      - ✅ **W7-TBF1 DONE (captures pending)** (opus ui-design-engineer, ~04:20-07:05 PDT; **verified by me 07:07: 67/67 in 5 suites, including the 48-case fit matrix; `Sources/` warnings 0**). At the 1208 pt floor, the transport bar now fits in every state its rule models.
+        - `DAWAppKit.TransportBarFit` is a pure rule. It tests fit ASSUMING every `ViewThatFits` give is already taken, then takes the cheapest set of its own gives:
+          - Pro's test tone 38 → 26 pt;
+          - the notices chip drops its count to its tooltip;
+          - the looper takes its compact form: one capsule, plus four controls stacked 2 × 2, and Pro's closed door becomes `[⧉][FREE]` over the bar stepper.
+        - **Measured on staging (locked screen, no focus change):** drawn = modelled in the 6 Pro states probed, at 1208 and 1600. The floor's binding state is Pro at rest: 32 + 689 + 20 + 437 = 1178 pt, which is `transportProMinWidth` 1183 less its 5 pt safety, a coincidence and not a derivation.
+        - **A shipped m34-h-2 defect, fixed under my approval:** the looper ARM drew as a bare grey ◉, because macOS flattens a `.borderlessButton` menu's label, so its amber chip never reached the screen. The chip is now drawn outside the label. The click and the hold are the same `Menu`, pinned by a site test. To revert: `armButton` at `LoopDeckControls.swift:386`.
+        - Its rule and the new menu-label law are written into `DESIGN-LANGUAGE.md` by me. The claim is corrected there to "modelled for all 48; measured in 6 Pro states". `WindowFloor.transportProMinWidth`'s doc, which described a row that no longer exists, is rewritten by me, going in with the S0 install below.
+        - **PENDING an unlocked screen:** before/after captures (`TBF1_LABEL=before|after … node scripts/gates/w7-tbf1-capture.mjs`, binaries in `$S/w7/TBF1/bin/`). The gate's main loop has never run end to end: the Simple density, the full state × width matrix and the 3-layer shot are all untested. The ARM's press highlight is still unseen.
+        - Filed: `LoopDeckStrip` duplicates the deck's light table and `lengthPhrase` (a drift risk), and the recording full deck is 47 pt tall in the 44 pt row, which predates this lane.
+      - ✅ **W7-S0 DONE (p2-sing-0)** (opus mcp-integration-engineer, ~04:45-07:03 PDT; report read by me 07:05; **verified by me 07:13: one combined re-run of AX's, S0's and SD1's filters, 323/323 in 24 suites, `Sources/` and `Tests/` warnings 0**): `LifecycleTrackingSongGenerator` and `LifecycleTrackingVoiceConverter` make EVERY ACE and RVC job, from any origin, register with the lifecycle coordinator.
+        - 18 functions / 28 cases, run against the real `ModelLifecycleCoordinator` with a spy evictor. The negative controls show the live defects without the tracker:
+          - an RVC boot mid-song SIGTERMs ACE;
+          - **a second live defect the design missed: ACE's 600 s idle unload is armed at boot and only a registered job disarms it, so a Sketchpad-only session lost ACE about 10 minutes after boot, even mid-render.**
+        - Five plants went RED exactly as predicted (predictions were written first), each restored cmp-identical. 95/95 on its gate filter. `Sources/` warnings 0.
+        - **Design corrected by the lane (I agree):** an ACE job must NOT close on a cancelled or failed poll. ACE has no abort route, so the sidecar keeps rendering. It closes only on a terminal state, `jobFailed` or `jobNotFound`. RVC closes on every exit.
+        - ✅ **The wiring patch is INSTALLED by me, 07:09** (6 hunks in `DAWProApp.swift`, P token, NTU told before and after): taken under heavy-1, `git apply --check` passed, `swift build` green at 07:09:41, 0 warnings in the file. New sha 60aad310…; the pre-patch copy is in `$S/w7/orch-s0/`. The raw clients are built inline inside the trackers, so no handle reaches around them. The same window carried my `WindowFloor.transportProMinWidth` doc rewrite (comment only). The live check (booting RVC during a Sketchpad song) needs ACE, RVC and the app, so it is left for the p2-sing-g staging gate.
+        - Filed: the terminal rule now lives in three places (wire `:11683`, presence model `:528`, tracker `:168`). The next wire round should make the wire's `errorProvesJobIsOver` call the tracker's. The router's default raw clients (`Commands.swift:964-965`) are used only by headless constructions.
+      - ✅ **W7-SD1 DONE (p2-sing-d1)** (opus, ~04:50-07:05 PDT; report read by me 07:09; **verified by me 07:13: one combined re-run of AX's, S0's and SD1's filters, 323/323 in 24 suites, `Sources/` and `Tests/` warnings 0**): lyrics on MIDI clips (`ClipLyrics`), the tokenizer, English syllables, and the lyric-to-note assigner.
+        - Syllables: 973/1000 = 97.3 % on a held-out CMUdict fixture (bar 90 %). Numbers are counted as the singing service says them. The lane checked 4,442/4,442 number tokens against g2p_en's own expansion, and the old code was wrong on 1,213.
+        - A clip without lyrics encodes byte for byte as before, and old clips decode to nil. `Clip`'s Equatable now includes lyrics on purpose, since a lyrics-only edit must be an undo step.
+        - 57 new tests in 4 nonisolated suites. Two plants went RED, each suite-local, and were restored cmp-identical. `Sources/` warnings 0.
+        - ⛔ **Owed before p2-sing-e ships the verbs (p2-sing-d1b, to launch):**
+          - lyrics are lost on save and reopen (`ClipDocument`, `runtimeState`, `TakeGroupDocument`);
+          - edits that REBUILD a clip drop them: `splitClip` ×2, `applyTrimWindow`, duplicate and paste (`reidentified`), `clipTrimmedToWindow`, and maybe `CompFlattener.flatten`. Losing lyrics on Duplicate is the one a user would notice.
+          - The engine-side render-key test is drafted (`$S/w7/SD1/drafts/ClipLyricsRenderKeyTests.swift`); it needs an engine-test token.
+        - For the design owner (me):
+          - hyphenated compounds: send the parts with hyphens and let the service join them only when the joined word is in its dictionary;
+          - §3.2's "g2p_en normalises numbers" is REFUTED (by SB and SD1);
+          - the flow-mode W > N refusal misreads for multi-line text;
+          - four provisional sentences need a novice-copy pass.
+        - Incident, disclosed: its `Model.swift` edit landed at 06:55:21 inside W7-PK's plant window without a slot, against the 06:53 rule. PK's log shows no disturbance.
+      - ⏳ **W7-SD2 launched ~07:12 PDT** (opus swift-app-engineer; token Y plus the lyrics follow-ups; brief `$S/w7/SD2/BRIEF.md`).
+        - **Part A, p2-sing-d1b:** lyrics survive save and reopen, and every edit that rebuilds a clip. It starts with a census of every clip construction site.
+          - Split is a design gap. The lane proposes a rule; my default is to split the text where the derived assignment splits the notes.
+          - It also installs SD1's drafted engine test.
+        - **Part B, p2-sing-d2:** `SingPlanner`, `landSungVocal` (one track, one undo), `Track.sungVocalProvenance` (a fact that transpose must NOT move; I'll relay that to PK), and `WordErrorRate`, tested against the spike's own `wer.py` outputs.
+      - **Design amended by me, 07:13** (`2026-09-27-p2-sing-integration.md`): S0's ACE close rule and the idle-unload defect under R0; SD1's hyphen decision (the facade sings joined only when CMUdict has the word) under §3.2; and the REFUTED number claim, with the facade's pre-normalisation, under §3.2.
+      - ⏳ **Four lanes launched ~07:17 PDT, with tokens freed by AX, TBF1, S0 and SD1.** The build slots stay the bottleneck, so two of the four are design-only:
+        - **W7-ME2** (opus audio-dsp-engineer; brief `$S/w7/ME2/BRIEF.md`): **m39-e-2**. Master-strip modulation works live but never reaches a bounce, because `OfflineRenderer` has 0 `masterModulation` (positive control `masterAutomation`: 9, re-checked by me ~07:15). It is threaded through every offline entry point, ADDITIVELY: every existing `AudioEngineControlling` conformer must compile unchanged. Its gates: PHYSICS, where a real bounce follows a master LFO; and INVARIANCE, where every render without one is bit-identical.
+        - **W7-MF3** (sonnet mcp-integration-engineer; brief `$S/w7/MF3/BRIEF.md`): **m39-f-3 + m39-f-2**. `fx.describe` emits the `modulatable` verdict that `mod.describeKinds` already claims it does; the only `"modulatable"` key in `Commands.swift` today is the drum kit's. The verdict is pinned against a real `mod.addRoute`. `instrument.describeSynth` reports each `curve` from `ParamCurve`, and no curve changes, because m39-a-2 is the user's decision. Wire and MCP counts do not move.
+        - **W7-TPL** (opus daw-architect; design only): M39 wave 3, **multi-instrument templates**, the next wave by the user's 2026-09-19 ruling, to `docs/design/2026-09-27-multi-instrument-templates.md`.
+        - **W7-AUR** (opus daw-architect; design only): **cost reusing AU instances across offline renders** for the sax team's still-open defects ③ (cold first-clip drop in stems/bounce), ④ (freed-memory crash) and ⑤ (warm renders don't null), against M29 out-of-process hosting (which needs the user's word). Output: `docs/design/2026-09-27-au-instance-reuse.md`.
+        - `ProjectStore.swift` is now SHARED between SD2 and ME2 under the Edit-tool-only rule (`common.md`, 07:17).
+      - ⚠️ **My own process slip (07:10), recorded as a law:** I stopped a verify script with TaskStop while it was mid-test and holding heavy-2. The kill skipped its release trap and left a stale lock, which blocked NTU's plant window for about a minute. I released it by owner tag after proving the owner pid dead, with a positive-controlled `ps`. **Law: before stopping a slot-taking script, read the lock owners; if it holds a slot, release that lock pid-checked right after the stop.**
+      - ✅ **W7-PK ROUND 1 DONE (p2-sing-k, the DAWCore half)** (opus swift-app-engineer, ~05:40-07:13 PDT; report read by me 07:20; **verified by me 07:24: 49/49 in 3 suites, `Sources/` warnings 0, none of the run's 28 `Tests/` warnings in PK's files**): `ProjectStore.transposeProject(semitones:excludeTrackIds:dryRun:)`, one undo step, built as a pure nonisolated planner (`ProjectTranspose.swift`) plus a thin store wrapper.
+        - 49/49 in 3 suites: 21 planner tests, 6 render tests measuring tracked pitch, and 4 appended to `UndoRoundTripTests`.
+        - 8 plants, 19 of 49 tests RED, exactly the predicted set, and restored cmp-identical. `Sources/` warnings 0.
+        - ⛔ **THE DESIGN WAS WRONG, and the render physics proves it: nothing stores a tonic, and a tuned vocal's corrections are KEPT.** They are relative to the recording, and the clip's shift carries them. A C-major-tuned vocal moved +3 lands within 15 c of every intended E♭-major note. Moving the scale instead (the negative control) plays wrong notes. I amended design §3.6 at 07:21.
+        - Census, method written: `MIDINote.pitch`, `Clip.pitchShiftSemitones` and take-group lane clips MOVE. Pitch edits, sampler key maps, bend lanes and `VoiceProvenance` are KEPT, and drums and excluded tracks are skipped. SD2's coming `Track.sungVocalProvenance` is a historical fact and is not moved.
+        - **Accepted by me:**
+          - the new refusal `transposeLooperOpen`: an open looper would silently undo the move;
+          - `trackNotFound`, for an unknown `excludeTrackIds` entry.
+          Row 17 of the design now lists both.
+        - ⛔ **PK-F1, filed and CONFIRMED by me in source (07:20):** Auto-Correct snaps the pitch AS RECORDED. `autoCorrectClipPitchReport` passes no clip shift to `PitchAutoCorrect.build`, while the render adds the shift and the editor's drag snap uses the played pitch. So re-tuning a SHIFTED clip "to the new key" snaps to wrong notes. That is latent today, and common once transpose ships.
+          - Fix: `build` snaps `sung + clipShift`. That is in `PitchCorrection.swift`, W7-C3's, so it is queued after C3.
+          - **Owed before `project.transpose` reaches users.**
+        - ▶ **ROUND 2, from 07:22 (PK resumed):**
+          - PK-F3: an AI fix in flight on a take group lands in the OLD key, because it imports with shift 0.
+          - PK-F2: a slice kit is scrambled by a transpose. It needs a STORED marker; the `Model.swift`/`ProjectDocument.swift` part is drafted and installed by me after SD2.
+          - Musical Typing's chord key does not follow the move: reported in words only.
+        - The wire verb `project.transpose` / MCP `project_transpose` is a later wire round. It launches once `Commands.swift` has fewer concurrent editors (I5F4 round 3 and MF3 are in it now). The `TransposeReport` shape is in PK's STATUS §3.
+      - ✅ **W7-NTU ROUND 1 DONE (U1, the header group "Sound like the singer", plus the wobble help and I0-F)** (opus swift-app-engineer, ~04:52-07:24 PDT; report read by me 07:26; **verified by me 07:50: 702 tests in 59 suites, the ONLY failure `readoutNeverOverclaims` (2 issues, W7-C3's regression below); `Sources/` warnings 0**; captures PENDING, because the screen is locked).
+        - Four set-level controls, each ONE gesture, ONE store call, ONE undo step, with the clip read back from the store (a setter's return is not proof):
+          - Keep voice size (0-100 %, detents at the L1 stops);
+          - Consonants;
+          - Slides (Snappy/Quick/Smooth/Slow);
+          - the old-vocal update line, "Older tuning. Tap, or change a note, to update.", worded TRUE for the user's (b).
+        - A read-back that fails shows the refusal bubble. The layout is a stateless `Layout` in which the chips yield before the group moves below. The palette help is a fixed two-line box at the 1208 floor. The I0-F `repinTimeZoom` root fix is in.
+        - 37 new tests, 702 in 59 suites on its filter. 17 plants, each attributed by its failing LINE. One plant (p03, a switch writing the state it already shows) was caught ONLY by the test's own read of the clip and the undo journal; the funnel's read-back stayed green. `Sources/` warnings 0, with a planted-warning control.
+        - Its design-language line is in `DESIGN-LANGUAGE.md` (the note-editor section), written by me.
+        - ⛔ **It caught a regression outside its lane:** `readoutNeverOverclaims()` (`PitchWobbleGestureTests.swift:968/969`) passed at 06:58 and failed at 07:16 and 07:18 (78.38 against a required > 83.99). The only change on its path is **W7-C3's v2 install at 07:03:42**. It is routed to C3 (07:26), which decides from the physics whether the test pinned v1's leak or v2 makes the editor's readout overclaim. Edits to that one test are granted to C3.
+        - Gate `scripts/gates/m23ap-ntu-header.mjs` (13 captures) refuses on a locked screen, proven, and has never run past that check. Run it with `bash $S/w7/NTU/build-and-gate.sh 1`.
+        - Optional follow-up (DAWCore): `upgradeToNaturalTuning(clipId:formantCorrection:)`, so a DRAG on an old vocal's slider updates AND sets the amount in one undo step. Today every press there is the update at 100 %.
+        - ▶ **ROUND 2 from ~07:26 (NTU resumed): U3, the Voice tool,** plus D2's item 3, the replace card's list staying true after a set-level pick. Round 3 is U2, the join drag.
+      - ⏸ **OUTAGE 07:50-09:20 PDT: the account's API session limit stopped ALL TWELVE lanes at once, mid-step. It is a PAUSE, not a cancel; every lane was RESUMED by me at 09:24** with a common note, `$S/w7/RESUME-0923.md` (locks, in-flight plants, what changed).
+        - State I found at 09:21, each item checked:
+          - one stale lock, heavy-2, held by W7-I5F4 (pid 34196, dead), released by owner tag;
+          - no running build or test processes (positive-controlled `ps`);
+          - no plant markers in `Sources/`/`Tests/` beyond doc comments;
+          - the whole tree compiles (a 09:22 build under heavy-1, rc 0; nothing needed recompiling).
+        - Files changed after 07:40: C3's install2 (07:50:39: `PitchCorrection.swift`, 3 tests, and its physics RE-DERIVATION of `readoutNeverOverclaims`: v2's triangle has H(5.5 Hz) ≈ +0.001, so keep 2 reads ≈ 2.00 × D and the readout never overclaimed; the plant moves to 4 Hz), plus files from SD3, SC, MF3 and NTL. C3's install2 is not yet verified by anyone.
+        - ⛔ **A tree-wide build break, 07:34 to ~07:45:** W7-SC wrote a non-compiling `SingingSidecarManager.swift` WITHOUT a slot ("actor 'SingingSidecarWatchdog' is internal and cannot be referenced from a default argument value"). It failed every lane's build, including 6 of my NTU verify tries. It is the FOURTH such break today, despite the 06:53 rule. SC admitted the slip in its last message and was told again on resume.
+      - ✅ **W7-SD3 ROUND 1 DONE (p2-sing-d3), with FOUR gates honestly NOT met** (opus audio-dsp-engineer, ~04:50-09:27 PDT including the outage; report read by me 09:27; **verified by me 09:37: 64 tests in 8 suites passed with exactly the 11 known issues, `Sources/` and `Tests/` warnings 0**). Built: `VoiceRangeFit`, `VoiceClipCheck` (a port of the spike's checks), `VoiceReferenceLabeler` (Route N, plus a test-only Route H), `SingGuideLine`, and two bundled guide WAVs.
+        - Its suites run green (64 tests, 11 KNOWN issues, which flip loudly once fixed). `Sources/` warnings 0, with a planted control. The tempo lint is fixed; npm is 1109/1109 at 09:26, lane-measured.
+        - `VoiceRangeFit` reproduces design §3.5's [D] arithmetic: the best overall is vocal −21 (0.1189/0.1094); the user's −18 pick costs 1.5108/0.8783. It is pinned.
+        - **The user's recording** (read in place, never copied) PASSES the clip check, and Swift agrees with the spike's Python: 5.928 s, correlation 0.935 vs 0.936, true peak −6.93 dBTP.
+        - **NOT met:**
+          - ⛔ **Route N fails fixture 3, the user's singing shape:** median 120 ms and p90 264 ms against bars of 40 and 80, and 5 of 10 labels against a bar of 9. A sweep of its two knobs found no passing setting.
+          - Music under the voice gets the WRONG sentence (SwiftF0 tracks the backing, so alignment locks onto the music).
+          - A synthetic −20 dB guide leak does not trip (0.1149 < 0.138).
+          - The guide files' +12 c control was reworded after the first run: disclosed, and NOT a pre-registered pass.
+        - **Design corrections it measured:**
+          - the design's `guide_leak` threshold 0.25 trips none of its own fixtures; the lane set 0.138 by its pre-registered rule, which catches leaks from about −18 dB up;
+          - the ±10 c guide bar sits at SwiftF0's resolution;
+          - its harness had the known m32-h short-read bug (16-37 ms dropped per file), now fixed. **Any production caller must decode with `AudioFileFullRead.readWholeFile`.**
+        - ✅ **`.gitignore` fixed by me, 09:31:** its `*.wav` rule would have silently dropped both bundled guides from any commit, so a fresh checkout would ship no guides and the leak check would report `measured: false`. Two re-admit lines were added. `git check-ignore` confirms both are admitted, and a planted control WAV in the same folder is still ignored.
+        - ▶ **ROUND 2 from ~09:31 (SD3 resumed):**
+          - the DECIDING measurement: Route N on the user's REAL recording against the spike's own-voice prompt labels, the ones that rendered the take the user picked (down18), with a PREREG first;
+          - `VoiceRangeFit.measure` on the same take (settles the "p90 123 or 139" guess);
+          - a fix proposal for music under the voice.
+          - Fixture 3's gate status waits for my ruling on that data.
+      - ✅ **W7-NTL ROUND 3 DONE: L2r3 (slides) SHIPS, PUBLISHED on the handoff page v55 as 03c** (ask `nt-slides`, default `smooth`, the value new sets use now: `PitchEditSet.defaultTransitionSlope` = 3000 c/s) (opus qa-test-engineer; report read by me 09:39).
+        - The join was run 7 (edge 5.856 s), picked by the round-2 PREREG's rule. PREREG-L2r3 (07:18:16) was written before the first render (07:24:48).
+        - All four renders came from ONE engine state: C3's install1. They re-render BYTE-IDENTICAL on today's tree, because every option has `!needsDetectedContour`, so the separator never reads them.
+        - Measured slide widths: A Snappy 30.1, B Quick 32.6, C Smooth 96.1, D Slow 174.3 ms, strictly ordered. The level dip is report-only.
+        - **MY OWN MEASUREMENT (09:40), on the decoded MP3s:** −21.5 LUFS each, true peak −3.9 dBFS (ffmpeg ebur128, `-hide_banner`), all four md5s equal to the lane's table. The PREREG mtime precedes the first render.
+        - ⚖️ **My ruling on the one ambiguity: the set SHIPS.** "With your round-2 step margins" means round 2's gate, which PREREG-L2r2 C7 states as strict order with NO minimum step. The lane's pre-data reading matches it, and whether a step is audible is the audibility bound's job. A-B is UNDER that bound (+2.5 ms, 1.08×), so the page says A and B may be hard to tell apart and offers "they sound the same". B-C and C-D are apart.
+        - Page copy corrected by me: the lane's "Snappy (like today)" is how vocals tuned BEFORE the update sound. The shipped app has the slope feature (`transitionSlope` is in the dist binary; checked with a control), so its new tunings slide. The picture's own title is explained in the caption.
+        - Its findings for the design:
+          - measured widths are only 49/72/65 % of the applied ones (Quick/Smooth/Slow);
+          - today's slide width varies by join (6.5/30.1/44.2 ms at runs 27/7/10);
+          - a frame can pass the confidence check and still read an octave low;
+          - `SingingSidecarManager.swift` blocked its builds from 07:29.
+        - ⚠️ **Its correction to my RESUME note:** C3's 07:50:39 install was NOT "v2 again". It changed `separatedDriftWindowSeconds` from 0.25 to 0.16 s. ✅ **Checked by me 09:44: PRE-REGISTERED, not post-hoc.** Design §3b sets a sweep, L ∈ {0.16, 0.20, 0.25} s × edge {truncate, reflect}, with a pick rule. C3's `PREREG-G3.md` (05:54:12) PREDICTED that the fallback pick would be L = 0.16 with truncate, so 0.16 is the pre-registered rule's outcome.
+      - ✅ **W7-MF3: m39-f-3 DONE** (sonnet mcp-integration-engineer; report read by me ~09:46; **VERIFIED by me, finished 09:51:34**: `DescribeVerdictsCommandTests|FXCommandTests` 50 tests / 2 suites passed; npm **1121/1121** (the lane's 1113 plus 8 from other lanes since); `doc-count-drift.mjs` rc 0, wire **256** agreed in 3 places; log `$S/w7/orch-mf3/`): `fx.describe` now emits each parameter's `modulatable` verdict, read from `EffectParamSpec.modulatable`, the same table a real `mod.addRoute` validates against. `mod.describeKinds`' help text needed no change: it was false only because `fx.describe` had not kept its promise.
+        - 4 new DAWControl tests cross-check every verdict against a REAL `mod.addRoute`, not just the label, plus 4 npm tests on the MCP description. The lane measured 50/50 Swift and npm 1113/1113. Wire 256 and MCP 261 are unchanged.
+        - Plants: omitting the field reddened exactly the 6 predicted tests; inverting `.refused` reddened exactly ONE, the behaviour cross-check. So the behaviour test is the load-bearing one. Both were surgical under both slots and restored cmp-identical.
+        - Accepted outside its fence: two `FXCommandTests` pinned the ABSENCE of `modulatable`, i.e. the defect itself.
+        - ⚖️ **m39-f-2 RULED by me (~09:49), Option A plus a note.**
+          - `instrument.describeSynth`'s `curve` is the law the WIRE applies (`InstrumentParamSpec`, which `ModulationSnapshotBuilder` reads for a real route), so attack/decay/release report `logarithmic`.
+          - A per-param `note` says the on-screen knob still moves in even steps. **This does NOT pre-empt m39-a-2** (the user's knob decision): no knob and no curve moves. Reporting "linear", as the brief pinned, would have shipped a new falsehood about the wire.
+          - Also granted: fix the stale `fx.describe` shape at `claude-plugin/skills/daw-wire-reference/SKILL.md:728/821/918`, which was already missing `unit`.
+      - ✅ **W7-C3: drift/wobble separator v2 DONE. G3 FAILED its pre-registered thresholds → KEEP COUPLING** (opus audio-dsp-engineer; report 09:50; **VERIFIED by me, finished 09:57:19**: C3's own final filter, **478 tests / 29 suites passed, 6 known issues** (the 6 pre-registered G3 fails, kept visible), Sources 0 warnings; log `$S/w7/orch-c3/`).
+        - **What ships:** the v2 separator (triangular kernel, L 0.16 s, truncate; `minimumSeparableSeconds` 0.5; `separatedShapingVersion` 2) in the render, for notes whose drift and wobble scales DIFFER. That stops such notes from inverting their wobble. Equal-scale notes keep v1's lines bit-for-bit, and the Hard Tune key is unchanged (`502fa11f87acab61`).
+        - **What does not ship:** a Drift tool on screen. By design §3b's fail branch it ships to agents only. The Wobble gesture already runs the fail branch's proportional coupling (`driftScale = d0 · k / k0`, `PitchWobbleGesture.swift:152-161`; checked by me 09:59), so no code changes. G4 was not run, by rule.
+        - **Deciding cells:** production (1,0) keeps 0.211 / 0.572 / 0.443 of the sung wobble at 110 / 220 / 82 Hz, against ≤ 0.2. (0.5,0.5) reads 0.654 / 0.713 at 220 / 82 Hz, against [0.4, 0.6]. Every leg the separator itself decides passes at every pitch.
+        - ⭐ **LEAD, filed as W7-LAG: at 220 Hz the RENDERER keeps the wobble, not the separator.** The render leaves 0.572; the same curve at the tracker's times leaves 0.146. A correction landing about 17 ms late would explain it: 2·sin(π · 5.5 Hz · 0.017 s) = 0.58. That is C3's one-parameter FIT, **not a measurement**. 110 Hz goes the other way (0.211 rendered vs 0.419 from the curve), mechanism unknown.
+        - ⭐ **Filed as W7-LAG: the render removes LESS vibrato than on 09-24**, measured before any C3 edit. "vibratoScale 0 alone" at A3 was 56 %, now 44-46 %; Hard Tune was 48-58 %, now 39-51 %. The curve's arithmetic reproduces 09-24 exactly, so the RENDER changed. Cause INFERRED only (a transposer change since 09-24).
+        - **Cost of L 0.16:** under Drift 0 at 220 Hz a 4 Hz vibrato keeps 0.886 of itself (L 0.25 would keep 0.991), i.e. slow vibratos lose about 11 %. Drift is agents-only, so only agents can reach this.
+        - **T16 (`readoutNeverOverclaims`) was the TEST's error**, re-derived under my 07:25 grant. At 5.5 Hz keep 2 now reads 80.00 c against a predicted 79.95. The `k × D` check moved to 4 Hz (74.59 c prints "75"; the plant would print "80"). ⛔ **OWED: a real `k × D` plant in `PitchWobbleGesture.swift`**, for the NTU lane's next round.
+        - **Stale texts outside C3's files** (they still pass, but describe v1 as the product), for a qa lane after the F220 install: `NoteVibratoHandleRenderTests.swift:382-414` (F16 says "~2.215×", now 1.957×), `PitchEditorDisplayMatchesRenderTests.swift:360-362` (case B "~121 %"), `ContourToRenderTests.swift:692-704` (`oneNoteVibratoScaleZero`), `docs/design/2026-09-24-pitch-editor-vibrato-handle.md:119-134` and `:1457`.
+        - **Not quotable:** the scoop figure (PREREG §9). This instrument cannot measure an 80 ms onset scoop. G2's goldens are specific to this machine and account.
+        - **Plants:** G1 (equal scales pushed through v2) went RED with 17 issues; G2 (a global version bump plus a warning control) went RED with 9 and read exactly the 1 planted warning. Both were restored `cmp`-identical.
+        - Tokens freed 09:59: `PitchCorrection.swift` and the engine.
+      - ✅ **W7-ME2: m39-e-2 DONE, master-strip modulation reaches the bounce** (opus audio-dsp-engineer; report ~09:56; **VERIFIED by me, finished 09:58:08**: its 33 render and seam suites plus `MainActorOccupancySiteTests`, **313 tests / 34 suites passed**, 1 known issue = PK's own PK-F3 pin at `ClipFixTests.swift:829`, not ME2's; Sources 0 warnings; log `$S/w7/orch-me2/`).
+        - A master LFO or macro now reaches mixdown, bounce, measureLoudness and the stems' "00 Mastered Mix", bit-exact against the engine's own formula: 0 mismatching samples; depth 23.953 dB against 23.953 predicted; loudness −4.93 → −10.915 LUFS, equal to the prediction. A master macro gives the same gain live and offline (0 mismatching samples).
+        - Invariance: 36 of 42 file digests are byte-identical before and after. The 6 that changed are exactly the mastered files with a routed LFO. RUN 0 and RUN 1 ran under one held slot.
+        - ⚖️ **RULED by me (09:59): its render-class reading stands.** Each stem, the "00 Mixdown" reference and bounce-in-place NEVER carry master modulation, the same class rule as the master volume lane. Baking it in would apply it twice when that audio plays back through the live master.
+        - Plants A (routes never reach the offline graph), B (bounce-in-place given master modulation) and C (the refusing default turned into a silent forward) each went RED exactly as predicted and were restored `cmp`-identical.
+        - Filed by me: `docs/design/2026-09-19-modulation-layer.md`'s claim 3 ("live and offline agree by construction", :250) was false for the master strip until today. Recorded as §15 ERRATUM (09:59).
+        - Not verified: master modulation of a master insert-effect parameter, of pan, and from step-sequencer or envelope-follower sources. Live LFO parity on a rolling transport needs an audio device. CHANGELOG owed at release.
+      - ✅ **W7-I5F4 round 3 DONE: the gridBeats crash** (opus; report ~09:56; **VERIFIED by me, finished 10:00:19**: `Quantize|StepSequencer|PianoRoll|Groove|EditorSurface|MainActorOccupancySiteTests` **625 tests / 59 suites passed**; npm **1123/1123**; `doc-count-drift.mjs` rc 0, wire **256**; log `$S/w7/orch-i5f4r3/`).
+        - The crash: when a note's position divided by the grid reached 2^63, the quantize math crashed the app. Committed code crashed in 38 of 91 cases, and round 2's song-grid swing made it 62 of 112 (the lane's own regression). Now 110 of 112 are fine, and the 50 cases that worked before give identical output. The 2 that still crash sit in `GrooveTemplate.extract`, which the store no longer lets them reach.
+        - The wire and MCP now refuse a grid finer than 1/1024 beat, in words that name that value. MCP also rejects non-finite grids: 1e400 used to arrive as `null` and was silently replaced by 0.25.
+        - Plants: removing the wire bound failed exactly its 3 wire tests; removing the MCP bound failed 6 of 8 new npm tests. Both were restored.
+        - ⚖️ **RULED by me (10:07) on its main recommendation: YES, ONE ceiling on note and clip positions and lengths**, 2^20 beats by default, in one DAWCore home, refused in words. This is **round 4** (sent 10:07): a census of every beat-taking verb, the wire refusal, and the remaining crash sites (`TempoMap.swift:448`, `StepSequencerModel.swift:305/:458`, `Groove.swift` 53/85/89, `SliceBoundaries.swift:113`, the saved-groove grid at `QuantizeModel.swift:262`). A project-file load guard is FILED: `ProjectDocument.swift` is W7-SD2's.
+        - Release step owed: `npm run bundle:plugin`, because the plugin bundle still has the old schemas.
+      - ✅ **W7-AUR DONE: AU-instance reuse costed** (opus daw-architect; design only, `docs/design/2026-09-27-au-instance-reuse.md`, 1,158 lines; report ~10:00).
+        - Its lead **CHECKED by me in source (10:07)**: `offlineCompensationTargets` (`AudioEngine.swift:3710`) builds a throwaway `OfflineRenderer`, loads EVERY hosted AU via `prepareAudioUnits`, and uses only effect latency (`PlaybackGraph.swift` ~:1822-1836). Only stems (`ProjectStore+Render.swift:290`) and bounce-in-place (`ProjectStore+Bounce.swift:107`) call it. Mixdown, the verb that worked, never does.
+        - Verdicts: ③ is probably fixed by AUR-1 if that throwaway causes it, but a render-speed explanation is not ruled out; ④ exposure is reduced, not contained (only M29 contains it); ⑤ is not fixed by reuse.
+        - Its facts that CONTRADICT memory: DecentSampler here is 1.29.0 in `/Library/Audio/Plug-Ins/Components` (the 1.23.5 copy is gone), and no DAWApp crash reports remain. The tester's 2026-08-20 numbers never recorded a plugin build.
+        - **Three questions for the user**, put on the handoff page, each with a default: update DecentSampler to 1.33.2 (their admin action; default yes, after one baseline round); may the TEST copy load DecentSampler to count its threads (default yes); hold M29 until this evidence is in (default yes).
+        - Items, as it proposed (§10):
+          - [ ] (m29-aur-0) Zero-code probes: the 1.29.0 baseline round (E0, E2, the G-SAX `fresh` column), then the user's update, then the same round; E1/P-STATE after Q2. Route: user / tester / qa-test-engineer.
+          - [ ] (m29-aur-1) The PDC plan prepares hosted INSERTS only. Route: audio-dsp-engineer. Gate: T1, T2. **Launched 10:07 as W7-AUR1**, keeping a before-binary so the tester's same-build comparison stays possible.
+          - [ ] (m29-aur-2) Engine-owned offline AU pool (fresh/request/session, default request). Route: audio-dsp-engineer + daw-architect review. Gate: T3-T10.
+          - [ ] (m29-aur-2w) `engine.setOfflineAUReuse` + `engine_set_offline_au_reuse`. Route: mcp-integration-engineer. Gate: T14, count gate.
+          - [ ] (m29-aur-3) Quiesced AU disposal. Gate: T11.
+          - [ ] (m29-aur-4/5/6) CONDITIONAL on G-SAX / E1 (§10 of the design).
+      - ▶ **Launched after C3 (10:03-10:07):**
+        - **W7-F220I** (opus audio-dsp-engineer; brief `$S/w7/F220I/BRIEF.md`, saved 10:03): install vendored patch 0004 (the low-note "voice size" fix the handoff page promised for today) over C3's changes, with the `formantRenderVersion` 2 → 3 lever, pre-registered gates, plants, and `VENDORED.md` by grant. Then re-render the held L1-e3p set on the user's recording (read in place) to test whether 0004 removes its residual.
+        - **W7-LAG** (opus audio-dsp-engineer; brief `$S/w7/LAG/BRIEF.md`, saved 10:03; read-only plus one new test file): measure directly when a correction takes effect in the render, at 82-330 Hz with a calibrated tracker. Then find the mechanism of C3's 220 Hz residual and of the vibrato-removal drop since 09-24, bisecting by component on git-archive snapshots. Draft a fix; do not install it.
+        - **W7-STX** (sonnet qa-test-engineer; brief `$S/w7/STX/BRIEF.md`, saved 10:05): re-measure and correct the four passages that still quote v1 figures. Text only.
+      - ✅ **W7-PK round 2 DONE, half in the tree by design** (opus; report ~10:07; **VERIFIED by me, finished 10:08:42**: `ProjectTranspose|UndoRoundTripTests|ClipFix|SliceToSampler|MainActorOccupancySiteTests` **185 tests / 12 suites passed, 10 known issues** (its pins); Sources 0 warnings; log `$S/w7/orch-pk2/`).
+        - **PK-F3** (a fix in flight on a take group lands in the old key): pinned verbatim as a known issue. The refusal check and its wording are live; the pitch record it needs is the drafted `clipfix_frozen_pitch.py` (5 edits, 3 files, checked clean by me ~10:07). ⚖️ **RULED: refuse as stale, in words**, because "land in the current key" double-applies an existing lane shift. The design is amended (§3.6 limits, 10:10).
+        - **PK-F2** (slice kits): the skip rule is live (`skippedSliceKit`, the report now has 14 fields). The stored marker is the drafted `slice_kit_marker.py` (21 edits, 8 files incl. `Model.swift`, `ProjectDocument.swift` and one `Commands.swift` line; checked clean ~10:07). **It WAITS for W7-SD2 to release those files.** Until then no track reads as a kit, so a chop still moves on a key change.
+        - Found: **`vc.convert` lands key-changed work in the old key, silently**, and design §4.5 landed a transposed sung take in the old key under a generic notice. ⚖️ **RULED (10:10):** vc.convert gets the refuse-as-stale rule (PK round 3). A sung take across a PURE transposition lands moved by the same Δ, with its own notice; §4.5 is amended, owner p2-sing-e.
+        - ▶ **Round 3 sent 10:10:** install the clip-fix patch; **PK-F1** (Auto-Correct snaps in the played domain, physics-proven, with shift-0 invariance and the Hard Tune key pinned); vc.convert's stale-key rule; optionally `TransposeReport` names in-flight jobs.
+      - ✅ **W7-TPL DONE: M39 wave 3 (multi-instrument templates) designed** (daw-architect; design only, `docs/design/2026-09-27-multi-instrument-templates.md`, 1,504 lines; report ~10:12).
+        - ⚖️ **RULED by me (10:12): ACCEPT its departure from the 09-20 spike.** A new `template.*` surface (list, describe, apply, save, remove, import, export) plus `template` and `dryRun` on `macro.songSkeleton`, all built by ONE pure `TemplateBuilder`. The skeleton's rosters are re-pointed onto it behind a byte-identical golden gate. Reasons that decide it (its §1.3):
+          - the accepted definition includes effect chains and routing, which the spike had none of;
+          - "a template IS the skeleton" would re-tempo and restructure a song the user had already started;
+          - template-local KEYS remove the name-matching risk the spike deferred buses over;
+          - saved templates are user data, so they need a file format.
+        - ⭐ **A SHIPPED DEFECT it found (wave 2's drum machine): General MIDI beats play the WRONG DRUMS.** The drum machine answers notes 36-43 in its own pad order, while the step sequencer, MIDI files and AI-written beats speak GM. So GM 38 (snare) plays the closed hat, 42 (closed hat) plays the rim, and 46/49/51 play nothing. The composer agent is never told the layout. Plus **F-4 (UNVERIFIED): the note-on lookup scans `DrumVoice.allCases` on the render thread**, and whether that allocates was never measured. → **TPL-0, launched 10:12.**
+        - Also found, filed as its items: **TPL-F8** (`macro.songSkeleton` changes tempo with none of `setTempo`'s guards, even mid-recording); **TPL-F9** (`mixer.applyPreset` can remove a sidechain key mid-take); **D2** (`tracks[i]` has no unknown-key check); **D3** (rock's Drums AND Bass have no instrument).
+        - Items (its §10; order TPL-0 ∥ TPL-1 → TPL-2 → TPL-3 ∥ TPL-5 → TPL-4 ∥ TPL-6 → TPL-7 ∥ TPL-8 → TPL-9):
+          - [ ] (m39-tpl-0) The drum machine learns the GM layout (`DrumKitParams.noteLayout` pads/gm, absent = pads bit for bit; a `switch` lookup; `isDrumKit` census; presets keep the layout; wire + MCP + the agent rule). RT review by daw-architect. **Launched 10:12 as W7-TPL0.**
+          - [ ] (m39-tpl-1) Template types + codec + the five moved rules + drum-kit parity test. **Launched 10:12 as W7-TPL1.**
+          - [ ] (m39-tpl-2) Builder + `applyTemplate` + headless engine batch test.
+          - [ ] (m39-tpl-3) Golden fixtures first; the ten built-ins; `applySongSkeleton(template:)`; D3 flagged.
+          - [ ] (m39-tpl-4) Render checks, tuning of every assumed value, the Pop Band drums listening page (user Q2, 4 options on one axis).
+          - [ ] (m39-tpl-5) Save / remove / import / export + AU state.
+          - [ ] (m39-tpl-6) The seven verbs + skeleton params + D2 (+7 wire).
+          - [ ] (m39-tpl-7) The seven MCP tools (+7).
+          - [ ] (m39-tpl-8) Picker card, menus, Save as Template (dogfood + screenshots).
+          - [ ] (m39-tpl-9) Docs, CHANGELOG (flag D2, D3), allowlists, plugin regen.
+          - [ ] (m39-tpl-10) Recommended after v1: hear a template before picking it.
+          - [ ] (m39-tpl-f8) Skeleton tempo guards. [ ] (m39-tpl-f9) `mixer.applyPreset` sidechain guard mid-take.
+        - User questions: Q1 ("multi-instrument presets" also meaning one track playing two instruments? default no, not now) goes on the handoff page; Q2 is a LISTENING page after TPL-4. The default drum layout for a NEW drum machine stays `pads` until wave 4 (the m39-ac-2 shape), where `gm` is recommended.
+      - ▶ **W7-SMP launched (brief 10:19; swift-app-engineer): the sax tester's defect ②, its two open halves** (filed only in memory until now, never in this file; checked by me 10:19):
+        - The sampler's global release is INERT when every zone sets its own. `instrument.describeSampler` says so (`effectiveGlobals`, `globalIsInert`), but the SETTER does not: `track.setInstrument` with `sampler` params (what `instrument_set_sampler_param` sends, `server.ts` ~:5068) stores it and replies success. That is how 3.4465 s got there.
+        - The Sampler card's Release knob shows the inert value and does nothing (`SamplerEditorModel` has an inert concept for glide only).
+        - The lane censuses every zone-overridable global, then adds a setter warning built by the SAME function describe uses, plus an inert flag and note on the card. Headless gate now; the on-screen check waits for an unlocked screen.
+        - [ ] (m23-sax2-open) Close when W7-SMP is verified and its card is seen on screen.
+        - ✅ **Round 1 VERIFIED by me (11:40:42-11:43:09):** 364 tests in 26 suites passed, 4 known issues (all W7-PK's PK-F2 pins), 0 `Sources/` warnings; npm 1125/1125; doc-count-drift agrees (wire 256). ▶ **Round 2 sent 11:47:** unset per-zone Decay/Sustain knobs show 0/100 % while the engine plays the global (same defect class as the release knob); the setter reply and `project.snapshot` never echo global decay/sustain; a zone edit that makes a global inert, and a glide stored under Chords, get no setter warning. The on-screen check still waits for an unlocked screen.
+      - ✅ **W7-SD3 round 2 DONE** (opus; report ~10:37; my re-run is queued behind MF3's plant window):
+        - **Route N FAILS its pre-registered bars on the user's real recording** (2 of 6 met: pyin agreement 8/10 and confident frames 1.000 met; verdict "poor", steady spans 6/10, shortest span 16 ms, not ≥ Route H). There is no truth to compare against: the labels behind the picked "down18" take ARE Route H's output. A truth needs syllable starts from an independent method (a person on a spectrogram, or a forced aligner) plus notes where two trackers agree.
+        - **A defect in its own code, found here:** `VoiceReferenceLabeler.swift` ~:208 lets one breath be claimed by several note boundaries. On this take "gent-", "-ly" and "down" all claimed 3.296-3.520 s, giving a triple rest and two 16 ms notes. ⚖️ **RULED (~10:40): fix it** (a breath belongs to its nearest boundary, pinned by a planted multi-claim fixture), and allow ONE more in-place read to measure the fix, with the prediction written first. Also wrap `SingGuideOwnVoiceTests`' 4 missed bars in `withKnownIssue`. **Round 3 sent ~10:40, before this record.**
+        - **The user's range, MEASURED on the whole recording:** p10 85.9 / median 102.5 / **p90 178.7 Hz** (independent pyin 86.6 / 103.8 / 179.6). Not the assumed 123-139 Hz: the held last note "stream" sits around F3. Costs: −21 (song +3) 0.19, −20 0.30, **the pick −18 0.80**, −24 1.57, −12 2.86. The metric still does not choose the pick. Design §3.5 corrected by me (10:40).
+        - **Music under the voice FIXED:** `VoiceClipCheck.judgedOrder` shows "too much background sound" instead of "cut start" when the noise floor fails and the offset depends on it. It chooses only the sentence, never pass/fail. Plants: 5 tests RED with 10 issues, and 4 with 6, both as predicted, restores byte-identical. Design §3.8 amended by me (10:40).
+      - ▶ **W7-RK launched (brief 10:42; audio-dsp-engineer): Round K, the key-calibration listening set** (design §7.5), pulled forward from p2-sing-g's gate. The user's line in their own voice at −18 (the anchor, re-rendered and checked against the published pick), −20, −21 and −24. Everything else is held identical (the spike recipe the user heard, one seed). Checks are pre-registered, note accuracy uses two instruments, true peak and level match are measured after MP3 decode, plus plants. The recording is read in place and the spike stays read-only, proven with a positive control. The orchestrator publishes.
+      - ⚙️ **MEASURED 11:43 (a scratch package, never the main tree): `swift test` holds `.build`'s lock through the TEST RUN, not just the build.** A `swift build` started 3 s into a 25 s test waited ("Another instance of SwiftPM … waiting") and finished the moment the test ended (11:43:22 → 11:43:44). So two main-tree runs always take turns, whatever the slot count. Outside-tree work (scratch/snapshot builds, renders, spike runs) now has its own FIFO pool, `take-aux` (aux-1/aux-2, not blocked by plant-intent); a job that COPIES from the main tree still copies under a heavy slot. Self-tested (4 cases) in a throwaway lock dir; installed by atomic rename so running waiters kept the old file.
+      - ⚙️ **Lock queue (orchestrator, 11:24):** every lane polled its own `mkdir` every 15 s, and a plant-taker may take `plant-intent` while both slots are busy, which blocks every NEW slot. With 4-5 lanes planting, a plain slot-waiter (W7-NTU) starved **54 min (10:22-11:16, measured from ps)**. Every acquisition now goes through a first-come-first-served queue, `$S/locks-q.sh` (2 s poll, dead tickets swept, seniority kept with `QSINCE` read from ps; self-tested 3/3 in a throwaway lock dir). NTU got the next slot (11:32:09). ⛔ **My own slip:** a "scratch" SwiftPM probe called `scripts/test.sh`, which `cd`s to the repo root, so it built the MAIN tree twice with no slot (11:26-11:32). It wrote no file and reached no test; it added CPU load and build-lock waits for the lanes. Rule added to common.md.
+      - ✅ **W7-SD3 round 3, the install (11:19-11:24): the breath fix is IN, and it exposed a hidden gap.** My re-run (11:24:58-11:28:07, 0 `Sources/` warnings) reproduced the lane's result exactly: 73 tests in 10 suites, 11 issues (9 known), one red, `differentMelodyGradesPoor` (the different-melody control now grades **fair**). Mechanism (the lane's invariance diff, 37 [measured] lines, 5 changed): the control graded "poor" ONLY because of the squeeze artifact the fix removes; the verdict has no misalignment signal of its own. ⚖️ **RULED (11:31):** keep the fix (audio 4 max error 114 → 34 ms); the `withKnownIssue` wrap is a HOLDING state only; build an explicit, pre-registered misalignment measure next.
+        - [ ] (p2-sing-d3-mis) A different melody must grade poor with a stated margin (fixture 8 frames AND audio 8), fixture 3 / audio 3 / audio 4 keep their verdicts, the wraps come off; plant: measure disabled → red. Otherwise a singer who sang different notes gets no "I couldn't follow your recording closely" warning.
+      - ⛔ **FOUND by W7-SD2 (measured 10:11), confirmed in source by me (11:37): MODULATION IS NOT SAVED.** `TrackDocument` has no modulation fields (`ProjectDocument.swift` has zero "modulation" matches; control: "automation" 21), and the master strip's modulation lives only in `ProjectStore.masterModulationSources/Routes` (`ProjectStore.swift:95-96`). Tremolo, auto-pan, trance gate and every LFO/step/follower/macro route vanish on reopen. The m39-e tests round-tripped `Track`'s own `Codable`, never the file path: the mirror-DTO trap again. **This is in the user's installed app.**
+        - ▶ **W7-MODP launched (brief 11:40; swift-app-engineer):** census every runtime ↔ document mirror first, fix per-track + master through the real save/open path (omitted when empty, byte-identical without modulation), a Mirror spy gate that fails BY NAME on an unclassified stored property, 4 plants, and a design erratum §16.
+        - [ ] (m39-e-persist) Close when W7-MODP is verified by me.
+      - **Filed (gate infrastructure):** `m23r3b-live-layers.mjs` steals focus with `open -a Finder` every 1.5 s for the whole run. With no Finder window open, that OPENS one, which is left on the user's screen.
+        - Fix: a windowless focus-sink `.app`, built at gate start, activated the same way. It's still a focus theft by design, so the gate must only run when the user is away AND the screen is unlocked.
+        - Not urgent: the gate is not in the release checkpoint's list.
+  - ⏸ **RESUME POINT, THE SUNDAY PAUSE (skeleton written 11:56:47 PDT on 2026-09-27; filled in as each lane reports).** The user: "let's pause when it is good time". It is a PAUSE, not a cancel: every lane's work stays in the tree and stays authorised. Every running lane was told (messages just before 11:56:10) to finish the step it was IN, start nothing new, hold no lock or queue ticket, and end its STATUS.md with a "⏸ PAUSED" section. No lane was stopped. `CronList` was empty; my two queued verify runs (SD2, SC) were stopped before they took a slot (no lock or ticket left, checked 11:54:28).
+    - **Owed by me at resume** (⚠️ ORDER SUPERSEDED at 12:26: the full suite runs FIRST, see "Order at resume" below)**:** re-queue the two verifies exactly as written in `$S/w7/orch-sd2/filter.txt` (SD2's widened filter + `MainActorOccupancySiteTests`) and `'ModelAdmission|ModelRegistry|Singing|AppDirectories|ModelLifecycle'` (SC), with `$S/orch-verify5.sh`; then read `$S/w7/SC/ARCH-REVIEW.md` (the architect's review, if it finished).
+    - **Lanes and where their state lives** (`$S` = the session scratchpad; each STATUS.md ends with its own ⏸ PAUSED section):
+      - Verified by me before the pause: C3, ME2, MF3 (m39-f-3), I5F4 round 3, PK round 2, SMP round 1 (11:43), SD3's round-3 install (11:28).
+      - DONE, awaiting my verify: SC (`$S/w7/SC/`), SD2 (`$S/w7/SD2/`), STX (`$S/w7/STX/`).
+      - Paused mid-item (ALL reported by 12:24; every report below): NTU r2, F220I (patch 0004), LAG, I5F4 round 4, AUR1 (aur-1), PK round 3 (its two round-2 patches APPROVED by me 11:37, maybe not applied), TPL0, TPL1, SD3 round 3 (then p2-sing-d3-mis), RK (Round K), SMP round 2, MODP (m39-e-persist, the modulation data loss), MF3.
+    - **Lane reports at the pause** (each lane's STATUS.md ⏸ section has the exact next action):
+      - **MODP (paused 11:57:42, NOTHING installed, no lock):** census READ, not yet measured: per-track modulation is dropped by `TrackDocument`; master modulation has no field in the file and neither save site passes it (`ProjectStore.swift:89-91`'s comment "rides EditState, persists additively" is false on both counts). **Three more, read not measured:** ⛔ **F1 LEAK**: new, open and crash recovery never reset or reload master modulation nor tell the engine, so project A's master LFO stays live in project B and lands in B's mixdown; **F2**: undo snapshots carry no master modulation (master edits cannot be undone; per-track undo works); **F4**: autosave and recovery bundles lose it too. The other document pairs look complete. Resume: census program in `$S/w7/MODP/cap/` + the byte goldens from UNMODIFIED code in ONE heavy-slot run, then the fix; `newProject`'s reset (F1) and the undo field (F2) are outside its sites: it reports exact patches.
+      - **SMP round 2 (paused 11:58:43, only READ so far: nothing drafted or installed, no lock; round 1's six files byte-identical to what I verified at 11:43):** item 1 is two literals in `SamplerEditorModel.zoneValue` (`?? 0`, `?? 1`); the card test sets globals through `store.setInstrument` (DAWAppKitTests cannot import DAWControl; no `Package.swift` edit), the wire half is item 2's test. No test pins the old sampler reply shape. New gaps it will REPORT: `instrument.describeSampler` shows stored global decay/sustain only inside `effectiveGlobals` and only with zones; "constantRate with glide 0" stays describe-only. It declined MY example One Shot wording as inaccurate (One Shot goes inert because every zone sets its own One Shot, not loop mode) — correct. Resume: append round-2 predictions first (STATUS.md "Round 2 ⏸ PAUSED", ~:197; anchors are exact text because `Commands.swift` moved ~40 lines).
+      - **NTU round 2, the Voice tool + the preset card (paused 11:59:42; INSTALLED, no lock, no plant):** install 11:32 (one red of its own, `wobbleHelpFitsAtTheFloor`: 325 pt beside the longest readout, needs 340), fixed 11:58 (slot padding 9 → 6 in `PitchEditorPaletteLayout.swift`, measured first: tightest now 349 pt); the brief's filter 742 tests, 0 failures, all 49 of its tests passing BY NAME in `logs/r2-fix1.xml` (the 11:32 console log printed no result for 28 tests, 3 of them its own: the lossy-log law again). **NOT yet backed:** the 16 plants (5 windows ready, each planted state compiles, none run), the warnings measurement (0 in `Sources/` but incremental builds, no positive control), the on-screen gate (screen locked). Departures to rule on at resume: the card also asks when only a kept setting changed (the "edited" stamp covers the whole set; a notes-only stamp needs DAWCore); a note under 80 ms shows "too short" instead of refusing; the "mouth" icon is unproven on macOS 14; the real double-click line is never exercised; the far-move hint and the transpose chip are not done. Reported, not its files: `scripts/gates/m23ap-c5a4b-wobble.mjs:220` pins the palette to ["Move","Split","Wobble"] (fails now "Voice" is there); `PitchWobbleCopy.handoffRefused` already ran the Wobble help to 3 lines at 1208 pt. No new wire/MCP (uses `clip.setNoteFormant`).
+      - **I5F4 round 4, the timeline ceiling (paused 12:00:04; INSTALLED, no lock):** DAWCore built 11:17:40; wire + DAWAppKit + tests one filtered run 11:44-11:45: **2311 tests in 183 suites, 0 failures** (the 4 known issues are W7-PK's PK-F2), all 18 new tests passing BY NAME, 0 `Sources/` warnings (control so far: 132 warnings found in other lanes' test files; the `Sources/` control comes with P5/P6); wire 256 (both routes agree); MCP: 49 Edit-tool edits in `server.ts`, in-tree `npm test` **1134/1134** incl. the 261-tool count, two bounds removed in a scratch copy each failed as predicted. Also fixed (its own verb): `clip.quantizeAudio` `divisions` crashed on `1e20`. **NOT done:** window C (`SliceBoundaries.gridDivisions`, drafted + typechecked, not installed), plants P5/P6 (predictions written). **Filed for my ruling (STATUS §11):** a guard on project-file load; positions that arrive from files (imports); compound edits that can still push past 2^20; ⛔ **~40 other wire parameters crash on a whole number ≥ 2^63 (e.g. `1e20`), listed by line — it proposes ONE pre-pass that refuses any wire number ≥ 2^53.** It moved its own two MCP-test session logs out of `~/Library/Logs/DAWPro/mcp/` into its scratch folder.
+      - ⭐⭐ **LAG, correction timing (paused ~11:58; NOTHING in the main tree; all measured on scratch copies of C3's tree, header `80d11216…`, pitch-only renders so patch 0004 cannot act):** **corrections land ~16 ms EARLY, not late**, at every pitch (5.5 Hz ±40 c: −15.9 to −16.6 ms on the shipping compensated path; uncompensated +47.9 to +48.7 ms; gain ~1.13; vowels within 1.3 ms; 44.1 kHz the same; the product's sharpest 30 ms ramp −15.0 ms). Tracker calibrated on unrendered controls (−0.02…+0.28 ms continuous; ±1.5 ms step); positive controls read a 45.45 ms shift as +45.2…+45.9 and a 90 ms step as ~+90.0. **A perfect curve through today's render leaves 56-60 % of a 5.5 Hz wobble at every pitch.** Mechanism READ + MEASURED: `OfflineStretcher.swift:318` `return outputFrame + latency + intervalSamples / 2`: the half-hop term was derived for a HARD 2-semitone step (the only stimulus E1(a) and `PitchCurveRenderTests` check); smoother or smaller corrections land early. **Drafted fix (NOT installed, `$S/w7/LAG/draft/fix/`): drop the half-hop term, `transposeEngineVersion` 4 → 5.** Measured on a scratch tree: 5.5 Hz lag −0.6…−1.6 ms; **vibrato-removal sweep 51/44/46/39/48 % → 83/85/82/86/84 %**; C3's 220 Hz cell 0.572 → 0.082; cost: a hard +200 c step lands +12.6…+15.3 ms late; ⚠️ **110 Hz gets WORSE (0.211 → 0.357): the render no longer hides the DETECTOR's own lateness at low pitch (+11.5 ms), a separate defect.** It re-keys Hard Tune (`502fa11f87acab61` → `b4df1498aa8ab4d4`) and turns red: `PitchCurveRenderTests` (1) and (8, six byte digests), the `ShapingKeyVersionTests` goldens, C3's G3 suite (3 designed + 2 NEW 110 Hz failures). **NEEDS MY RULING AT RESUME (with C3's owner-view on the 110 Hz cells and a detector-lateness item).** The 09-22 real-voice 54.5/50.6 ms were UNCOMPENSATED renders (compensation arrived in `ed0d3ad`), so they agree. **Q2:** the 09-24 → today drop in vibrato removal is **vendored patch 0001 alone** (an intended correctness fix, the fractional `prevInput` read); how it costs ~10 points is NOT established. Wrong claims in the tree: the `curveLookupFrame` derivation doc; `PitchCurveRenderTests`' "not this arithmetic". Resume: install `draft/CorrectionTimingTests.swift` (821 lines) under a heavy slot, build at once (equivalence passes, the PIN records its known issue).
+      - ✅ **RK, Round K (DONE; published by me on the handoff page v58 as 04c, question `sing-key`, default A = the earlier pick):** anchor PASS byte-identical (today's −18 export md5 = the picked `sing-own-down18.wav`; 19/19 notes, loudness and length identical). A −18 / B −20 / C −21 pass every pre-registered check (A 19/19, B and C 18/19 on two meters each); **D −24 FAILS the note gate** (14-15/19; all three meters agree on four misses: two C2 notes and "how" high, "what" low; the model can't hold notes that low in this voice). ⚖️ **RULED at publish: option (a)**, all four, D's misses stated plainly, because −24 is the only take that keeps the song in its own key, so the user's reaction still informs the rule. Loudness matched after MP3 decode (−21.5 LUFS, spread ≤ 0.05 LU, TP −3.2…−4.9 dBTP); plants caught (a mislabelled render, +3 dB, a hard clip); spike folder untouched (proved with a control); processes and ports clean. Checksums re-verified by me after copying into the page's audio folder. Not measured: word clarity; SwiftF0 not used; nobody has listened. Caveats: the axis is upstream `--pitch_shift` (design §7.5 describes another route); the spike's pyin reports sub-65 Hz notes AT 65 Hz, so a flat C2 could pass as in tune.
+      - **TPL0, the GM drum layout (paused 12:00:17; INSTALLED, no lock, no plant; the 3 plants NOT run):** pads kits bit-identical (default `af5d4a9be873642b`, lofi `aeab1f176b98b04` before and after); all 22 gm notes land on their voice (r = 1.0000, decay ratio 1.000) with the 56 wrong-pair controls failing (hats separated by decay, not correlation); F-4: the old scan allocated in DEBUG only (release had folded it to a table); the new `switch` allocates 0 in both. Filter 175/175 in 16 suites; npm 1134/1134 (261 tools); wire 256; 0 `Sources/` warnings with a planted-warning control. Findings in other lanes' files: no step-grid rows for rim (37) and clap (39) on a gm kit; the in-app copilot's `track.setInstrument` text still says "notes 36-43"; the liveness probe's default pitch 57 is silent on pads and a cymbal on gm. The plugin bundle is NOT regenerated (release step). Resume: re-cut P2/P3 from the live `Commands.swift`, one 540 s plant window (P3, P2, P1), then the architect's RT review of the lookup.
+      - **TPL1, template types + codec + the four rule moves (paused 12:00:27; INSTALLED, no lock, no plant; ⚠️ ONE RED IN THE TREE):** `TrackSetTemplateCodecTests/summaryAndTemplateNameBounds` fails because the TEST decodes an inline template as a file (the codec rightly refuses "not a template"); the one-line fix (`.inline`) is in its draft, NOT installed: ⚖️ I left it for the resume (a full-suite run during the pause shows exactly this one new failure). **Byte identity PASSED:** five golden tables written by the store before and after the move, `cmp` SAME (7,288 lines); the 356-line `applyEffectParam` is DELETED from `ProjectStore.swift` (0 mentions) and the sidechain block became one `SidechainRules.check`; agreement tests store-vs-rule 0 disagreements (effects 3,404, master 664, modulation targets 2,650, budget 170, sidechain 144); the live verbs' suites keep their counts. Codec 32/33 (drum-kit wire parity 98 rows). **NOT proven:** that the tables catch a divergence (plants P1-P4, P9 not run); its own `Sources/` warning control (P7). RoutingRules NOT done (re-pointing `setTrackOutput`/`addSend` is outside its grant: STOP-and-report). Design errors: §5.2 (`automation.addLane` uses neither the modulation target rules nor the 64-slot budget); an existing defect moved verbatim and pinned (the budget counts an already-automated setting twice); four settings stored unsnapped (`clipper.mode 0.7` reads back but plays as mode 1), pinned.
+      - **PK round 3 (paused 12:01:50; (a) INSTALLED, (b)(c)(d) + the approved slice-kit marker patch NOT installed, all verified in a scratch copy; no lock):** it released the install slot granted 11:57:51 at 11:58:05 without writing. Scratch: 407 tests in 31 suites, 0 failures, 5 known issues (the marker pins); plant runs A and B each RED on exactly the 5 predicted tests. ⛔ **NOT run anywhere: the four PK-F1 engine physics tests** (DAWEngineTests is not in the scratch copy) and the Hard Tune key. (b) PK-F1: Auto-Correct snaps `sung + clip shift` (E♭ major at +3: now C4/D4/F4 on the scale; before B3 off the scale and E♭4). ⚖️ **NEEDS MY ACK: on a FRACTIONAL shift (e.g. 0.5) Auto-Correct now puts the played note on the grid; a deliberate detune is corrected away.** (c) vc.convert refuses in words at landing if a clip's shift moved. (d) the transpose report names pending AI fixes a key change would move (in-flight conversions can't be named: the store doesn't track them). Found, not fixed: vc.convert also bakes `formantPreserve`/`stretchRatio`/`startOffsetSeconds`; a source clip deleted after its turn still lands (pre-existing). The marker patch re-checked clean against the tree at 11:58:24.
+      - **SD3 round 3 + p2-sing-d3-mis (paused 12:06:02; INSTALLED, no lock, no plant; its r4i slot was taken 11:59:06, before my pause message reached it):** the gap fix `VoiceReferenceLabeler.placeGaps` (nearest boundary; tie → earlier, its own choice) is in; the wrap + the ONE authorised in-place read ran together at 11:46: the breath is listed once now; Route N still fails its bars (verdict poor, steady 7/10, shortest 16 ms on "gent-"), the comparison with Route H now passes (steady 7 vs 7, pyin 8 vs 1); 5 of 5 outright predictions held. **p2-sing-d3-mis: it did NOT build the measure I approved by name** (the shared-gap count is ruled out: audio 4, graded good, has the same one-frame signature; path compression can't be pre-registered). Instead: the existing DTW shape distance with its "poor" threshold moved 2.0 → 1.30 (good ceiling too). Different melodies 1.582 (frames) / 1.630 (audio); the user's shape 1.059 / 0.977; the real take 0.985 (verdict unchanged without another read); tests pin a 0.20 margin both sides. Install run r4i-1: 75 tests, 73 passed, 2 skipped (the recording tests), 9 known issues; both fixture-8 wraps OFF and green; exactly one measured line moved (fixture 8 fair → poor), 0 warnings. ⚖️ **NEEDS MY RULING AT RESUME: the 1.30 threshold rests on ONE different melody rendered two ways** (a second different-melody fixture before it ships?). Plants written, not run (`bash $S/w7/SD3/r4-plant.sh`: measure off → 3 tests/5 issues; old gap rule → 4 tests/8 issues). Design errata owed (§3.7 step 7 and thresholds, the ~:610 p90, §3.8 check order, and the "poor" notice text still asks "did you sing the same words?" though it now fires for a different tune).
+      - ✅ **AUR1, m29-aur-1 (DONE by the lane, paused 12:05:43; awaiting MY verify; no lock):** the stems / bounce-in-place latency plan now prepares hosted INSERTS only. T1 (spy + the registry's own ledger agree): new plan 0 instrument loads, 2 AUDelay; the old-plan control 1 instrument. T2: all 9 strips' targets identical old vs new (AUPeakLimiter 96 / AUDynamicsProcessor 256 samples of real latency; controls: nothing prepared → 0; inserts on instrument tracks skipped → GM+limiter 256 → 352). Invariance: 11/11 stems/bounce files byte-identical old vs new plan in one process (3 sessions, the old arm really loaded 0/2/1 instruments) and across builds (all other 619 `Sources/` files hashed identical). Plants P1 (plan loads instruments → T1 red 4, T2 red 2) and P2 (skips instrument-track inserts → T2 red on parity) RED as predicted, `cmp` restores; the two render checks cover each other's blind spot (an extra load changes no bytes: only T1 sees P1). Before-binary `$S/w7/AUR1/bin/before/DAWApp` sha256 `7f495130…c2d4`. 0 `Sources/` warnings on the build that compiled its files (control: 2 older `/Tests/` warnings). Runs 81/81, 84/84, @MainActor census 8/8 (still 393), final 20/20. ⚖️ **NEEDS MY RULING: the test hook `offlinePlanRendererForTesting`** in `AudioEngine.swift` (nil in production; without it no gate catches P1). Owed: `EngineProtocol.swift:952` doc sentence (text in its STATUS); the ROADMAP tick for m29-aur-1 + CHANGELOG; include `AUHostingTests` in the full suite (≈10 GM/AUSampler loads; one took 28.7 s under full-suite load vs a 60 s timeout). **It does NOT prove ③'s cause:** it removes the one code-path difference between the failing verbs and mixdown; M2 (a one-track render pulls faster) and M3 (run-loop starvation) are not ruled out; only the user's cold fresh-process `track_bounce_in_place` with DecentSampler 1.29.0 can separate M1 from M2 (lands at 9.869 s → M1). It removed 24 of its own temp folders from `$TMPDIR` by an exact list (66.5 MB).
+      - ✅ **MF3, m39-f-2 (DONE by the lane, paused 12:09:29; awaiting MY verify):** `instrument.describeSynth` now emits `curve` (the 7 declared `InstrumentParamSpec` params) and `note` (attack/decay/release: the on-screen-knob disagreement), via `Commands.swift`'s `injectSynthParamCurves`, mirrored in `server.ts`, plus the granted 3-line `daw-wire-reference/SKILL.md` fix (728/821/918). 4 Swift + 2 npm tests; Swift 71/71 (widened filter), npm 1123/1123, wire 256. Plants 1 (omit) and 2 (fabricate) each reddened the predicted test; **plant 3's first attempt silently re-tested plant 1** (a stray comment marker also commented out the replacement): caught by READING the failure messages, not the count; rerun red with "the wire and real behaviour disagree". All restored, `cmp`-identical, 0 new warnings (positive-controlled). **Why the 10:26 `mf2plant` locks were left:** the acquiring helper exited after taking them and release was a separate tool call ~70 min later, so no process owned the locks for their lifetime; fix adopted: acquire → work → release in ONE process with its own EXIT trap. A post-drift re-run of its widened filter was still running at the pause (its own trap releases the tag); npm/doc-count-drift re-runs deferred to resume.
+      - **SC's architect review DONE (`$S/w7/SC/ARCH-REVIEW.md`, read-only):** every defect is LATENT today (nothing outside SC's files references SoulX, the manager or the installer; the grep's unfiltered form finds 7 files). Verdicts: Q1 `residentFacts` drops `yieldsWhenBusy` → FIX NOW (W7-S0's one line, SC's real-coordinator test); Q2 eviction reason → later, before p2-sing-e's resume logic (W7-S0); Q3 → FIX NOW with two ordinary stubs (`stop()` reports success while the port still answers "loading", never checks `targetSurvived`); Q4 → FIX NOW (a structured kill trigger; the manager tests use the REAL pressure observer, contradicting its own docs); Q5 → FIX NOW (a structured failure kind; the three `sing.installEngine` refusals must be synchronous, p2-sing-e); Q6 no change; Q7 later. **New, ranked:** ⛔ **HIGH: a yield is misread as a crash** (`SingingSidecarManager.swift:552` records the stop reason only after `terminateTree` returns, the actor is free meanwhile, so a failing job reads `nil`, restarts SoulX into ACE's in-flight boot: exactly what rule R3 forbids). MEDIUM: `status()` polls re-arm and starve the watchdog; the watchdog is not armed during the 7-20 s load; it can SIGKILL a RECYCLED pid on Critical pressure (no identity check); cancel before launch is ignored (the full ~7 GB install proceeds); a hung load holds the flight ticket and blocks every ACE boot; `ps` sampling ~96 ms CPU per snapshot (~27 % of a core); `sing.sidecarStart` can boot beside a busy ACE. Lower: a stale pidfile is never removed; SoulX stays "resident" after a watchdog kill; a reentrant stop can miss a just-spawned process; final `@@` lines can be lost; quitting mid-install orphans the step's processes. Eight design amendments + three rules for `docs/ARCHITECTURE.md` proposed, not applied. **p2-sing-c does NOT close until the fix-now set lands** (SC round 2 + W7-S0's line).
+      - **F220I, vendored patch 0004 (paused 12:18:13; INSTALLED + BUILT + GATED in the tree, no lock, no plant, no temp file):** `formantRenderVersion` 2 → 3 (`PitchCorrection.swift:1303`). Tree hashes re-read by me at 12:24: header `1a11a07f…c136` (0001-0004), `shim.cpp` `632aa339…1a81` (comment only), matching its STATUS table. Gates vs PREREG (stamped 10:30:42 + 4 addenda): target cell 220 Hz −5 st **63.2 → 16.5 c** (bound 50; predicted 16.5); per-harmonic error 3.94 → 2.63 dB (63/72 better, none >1 dB worse); cepstral map 51 → 69/72, the one new failure the pre-listed 147 Hz −7 st (−44.9 → −51.1 c); byte identity at 0 st / clip flag / withheld stage 6/6, the −1 c control differs 6/6; exactly the 16 engaged digest sets moved, 43 did not; **Hard Tune key `502fa11f87acab61` UNCHANGED**; F220-1 red without 0004 (5.42 dB), green with (2.38); F220-2 green. S3 in-tree: 323 tests, 297 passed, 2 failed, both predicted (the stale `FormantCorrectionModelTests.pitchGolden`, which C3's new separator moved BEFORE 0004 (measured under the old separator), and NTL's synthetic P+ cell, now 16.55 c vs its stale pin 63.6); 0 new `Sources/` warnings. **Part B: L1-e3p is DROPPED, not shipped** under NTL's unchanged checks: D's median fell +50.2 → +25.0 c (inside the predicted 5-40 c drop, so the mechanism holds), but option C reads +465.9 c because 3 of its 6 windows jump ~+1150 c; INFERRED a meter error (10 ms apart, the same jump in the untouched legacy twin, LPC F2 orders A < B < C < D). No page built. Wrong predictions it disclosed: option A is not "float rounding only" on the real take (moves up to 4.2e-4, −66 dB); "L1-e3p ships". Its errors: a non-compiling capture file sat in the tree 42 s at 10:35 (broke PK's `apply3a` build); S2 held heavy-1 15 min before the aux pool existed; SD3 built the tree for ~60 s with 0004 at version 2 (clean, SD3's own suites only). ⚖️ **NEEDS MY RULING AT RESUME:** (1) half-spacing 0.5 vs 0.6 (at 0.6 L1-e3p ships, but LPC puts D's F2 at −170.1 c vs −17.7); (2) whether NTL's median-of-6 rule handles meter outliers; (3) L1-e1's shipped page predates 0004 (D now 28.3 c, was 36.9); (4) NTL's stale P+ pin `pinnedResidual220 = 63.6`; (5) who re-pins the stale `pitchGolden`, with what check; (6) `ClipSpanRenderTests.contourDetectionIsSingleFlight` red under load in S1+S2, green alone twice and in S3 (not its file); (7) `file-upstream-0004` untouched, nothing posted. ⚠️ **LAG's measurements were on header `80d11216…`; the tree is now `1a11a07f…`**, so LAG's install must re-check its pitch-only renders on the new header. Resume: re-hash the tree, plants P(a), P(c), P(b) via `locks-q.sh plant-take`, the four `VENDORED.md` edits, the final report (`$S/w7/F220I/STATUS.md` last section).
+    - **PAUSE COMPLETE 12:26 PDT (every lane reported; nothing running).** Measured by me 12:24-12:26: `locks-q.sh status` empty (both queues), `$S/locks/` holds only the two queue dirs; no swift-build/test, xctest, DAWApp, uvicorn/ACE/SoulX or `node dist` process (ps, positive control `launchd` = 1); no listener on 17600/17695/8001/8002 (0 each; control: 36 listeners machine-wide); wire **256** by `doc-count-drift.mjs` (both routes agree). **Tree:** branch `m23-wip-2026-08-10`, HEAD `813c415`, **372 uncommitted paths (183 modified, 189 untracked)** by `rtk proxy git status --porcelain`; nothing committed (commits need the user's word). **Not run at the pause:** a full suite. Known reds in the tree, each predicted by its lane: TPL1's `summaryAndTemplateNameBounds` (its one-line test fix not installed), F220I's stale `FormantCorrectionModelTests.pitchGolden` and NTL's P+ pin (63.6 vs 16.55 c); flaky under load: `ClipSpanRenderTests.contourDetectionIsSingleFlight`. **Notes backup (reboot-proof; the scratchpad is wiped by a reboot):** `~/.claude/projects/-Users-dsemenov-Views-daw-pro/pause-2026-09-27/scratch-docs.tgz` (16,631 files, 69 MB: every `.md/.sh/.py/.txt/.mjs/.swift/.diff/.json` under 2 MB in `w7/` and `briefs/` minus `.build`/`tree-*`/`node_modules`/`.swiftpm`, plus `locks-q.sh`, `orch-verify5.sh`, the handoff page html/py; list in `filelist.txt`; **0 audio files**, checked with a planted `.wav` control, and no copy of the user's recording).
+    - **Order at resume:** (1) the full suite ALONE for a pause baseline; (2) my owed verifies: SD2, SC, STX, AUR1, MF3 (+ MF3's deferred npm/drift re-runs); (3) the rulings below, then each lane from its STATUS.md ⏸ section.
+    - **Rulings owed by me (consolidated):** LAG's timing fix (drop the half-hop term, `transposeEngineVersion` 4 → 5), with C3's view on the two 110 Hz cells and a detector-lateness item, re-checked on the new header · F220I's seven (above) · SD3's 1.30 threshold (one different melody) · AUR1's test hook `offlinePlanRendererForTesting` · PK's fractional-shift Auto-Correct · NTU's departures (card asks on kept-setting edits, <80 ms note, the macOS 14 icon, the palette pin at `scripts/gates/m23ap-c5a4b-wobble.mjs:220`) · I5F4 §11 (the 2^53 wire-number pre-pass, file-load guard, imports, compound edits) · SD2's (planned, NOT yet sent: flatten words per window = accept; `arrange.deleteBars` removes the deleted notes' words in the same undo; accept the `planned:` param and the provisional copy) · MODP's F1 (master LFO leaks across new/open/recovery) + F2 (master undo) patches · TPL1's `.inline` test fix · TPL0's cross-lane findings (no step rows for rim 37 / clap 39 on gm; the copilot's "notes 36-43"; the liveness probe's pitch 57) · SC round 2 = the architect's fix-now set incl. the HIGH yield-misread-as-crash (`SingingSidecarManager.swift:552`) + W7-S0's `residentFacts` line.
+    - **Schedules:** none existed (`CronList` empty at 11:54 and again at 12:28, after every agent had finished; no in-process agent listed, no python in the top-RSS processes); nothing to restore on resume.
+    - **The lock queue** `$S/locks-q.sh` (with `take-aux` for outside-tree work) is the only way to take a slot on resume; `$S/w7/common.md` carries the rules and the pause banner.
+  - ⏸ **RESUME POINT (written 2026-09-26 ~02:25 PDT).**
+    - **State of the tree:** HEAD `813c415` plus 188 uncommitted paths; nothing committed (commits need the user's word).
+    - **Nothing running:** no staging (17695), no ACE (8001) and no RVC (8002) listener. The lsof shape was controlled against the port listing: it found other listeners, and the user's own app was not running. No locks are held and no model process is left.
+    - **The backup:** the scratchpad lives in /private/tmp, which a reboot wipes, so its notes are backed up to `~/.claude/projects/-Users-dsemenov-Views-daw-pro/pause-2026-09-26/scratch-docs.tgz` (950 files, including all 9 STATUS files, the briefs, `survey/followups.md` and the upstream drafts).
+    - **Worktrees:** 16 exist under `.claude/worktrees/`. Only `w6-wedge` carries unmerged live work (WF-F1). List the others before removing any, and never delete one unseen.
+    - **What is verified:** nothing below is verified by me unless it says so. My full suite, run ALONE at the pause, is recorded at the end of this block.
+    - **C5a-4b, the Wobble tool in the editor: BUILT.**
+      - Its one wrap-up run: 394 tests in 23 suites, green. Its 11 plants each went RED.
+      - ⚠️ Its looked-at gate (C5a-G, 15/15) ran on a binary built BEFORE its last `PitchEditorDraftEdit` change. Re-run `build-and-gate.sh e`.
+      - **Then C5a-F11, copy** (in `PitchWobbleGesture.swift`):
+        - a low note's readout says "(replaces your own)" beside an untrusted "40" cents, though a little of the singer's own wobble survives;
+        - at the 1208 pt floor the help text loses "100 cents is one piano key. Let go to hear it."
+      - Left out: double-click to 1↔0, and wobble on a group of notes.
+      - `scratchpad/w6/C5a4b/STATUS.md`.
+    - **C5b-3a + C5b-4a, the drawn line's store, split and brush math: DONE.**
+      - Part 1: 285 tests, twice. Part 2: 328 tests, twice. Green; its one red was D4-1's, which D4-1 then fixed.
+      - 8 plants RED; 0 warnings.
+      - Drawing on a sound is REFUSED.
+      - Next:
+        - C5b-3b, the wire `clip.setNoteShape` + `clip_set_note_shape` (`Commands.swift` is free now);
+        - C5b-4b, the UI (`case shape` in `PitchEditorDraftEdit`, plus a ⌘ route row);
+        - C5b-G and C5b-D.
+      - Two comments in its hunks still say "inert until the user rules".
+      - `scratchpad/w6/C5b3a4a/STATUS.md`.
+    - **D4-1, the user's (b): IN.** Every per-note edit on an old vocal upgrades it, in one undo step.
+      - The census gate `NaturalTuningHandEditCensusTests` covers 11 writers plus 10 exemptions. Hooks were added to cleared, gain, formant, reset-wobble and `applyingNoteVibratos`.
+      - 5 legacy fixtures were re-seeded; no assertion was weakened.
+      - One run: 414 tests, green. Plants P1-P3 each went RED.
+      - Next:
+        - plant P4 (a draft without the hook);
+        - a second run;
+        - the DAWControl filter. A known (a) pin: `PitchCorrectionCommandTests.swift:3506`, `setNoteFormantHappyPath`;
+        - ✅ the first-edit cost, MEASURED BY ME (03:28 PDT, both heavy slots held, right after a build: the 1-min load was ~9-11 from that build). On the 33 s take (97 notes, 52 tuned; p50 of 5): the first edit's provisional DECLINES in 1 ms ('one render shapes the voice note by note and the other does not'), so the old sound plays until the whole render lands at **1811 ms**. A second edit splices in **231 ms**. Old rule (a)'s first edit spliced in 105 ms. Output is `scratchpad/w6/D41/cost/d41-first-edit-cost.json`. The handoff page v47 tells the user "about 2 seconds".
+      - Open:
+        - `pitchDragReach` is too narrow for a first drag on an old vocal;
+        - NT-W claims slide and follow edits do NOT upgrade; D4-1's census says they do. Check it.
+      - `scratchpad/w6/D41/STATUS.md`.
+    - **NT-W, natural tuning reaches agents: 6 verbs + 6 tools SHIPPED.**
+      - By doc-count-drift: wire 247→253, MCP 252→258. The bundle was regenerated; `plugin.json` is untouched.
+      - It fixed a tautological `clamped` in 4 of its own first-draft handlers. D4-1's report of that bug was NT-W's in-flight PLANT, seen through the other heavy slot (see the law below).
+      - npm 1077/1077. Swift: 274 tests with 5 known issues:
+        - `ZeroParamVerbRejectionTests.swift:404`, a stale literal 247: derive it from doc-count-drift, as I5-F3 did for W1;
+        - `ControlTests.swift:2589` ×3: `clip.findUnpitchedSounds` and `clip.setNoteVibrato(s)` were never added to `paramsByCommand`;
+        - `:3506`, which pins (a).
+      - Next:
+        - lift the consonant verb's HOLD now that NT-E2 has landed, using NT-E2's honest text;
+        - the owed `clip.upgradeNaturalTuning` verb and tool (X4), and auto-correct's formant override.
+      - `scratchpad/w6/NTW/STATUS.md`.
+    - **NT-E2, consonants and breaths play the singer's own sound: WIRED, byte gates green.**
+      - M-2b: no audible smear on the real take (median −1.14 dB), so no edge offset.
+      - ρ is 1.000 at clean joins and 0–0.58 after moved notes.
+      - The mix costs 23 ms. The cache key gains `consonantMix:1`.
+      - One run: 246 tests, green.
+      - Next:
+        - plants fade0 (against the new `smoothJoinsAreClean`) and nokey;
+        - a second run;
+        - my review of its edits to `ContourToRenderTests.swift` (two tests now apply the mix on the harness side);
+        - its drafted `ProvisionalRender` memo-key patch (`provisional-memokey.patch.md`: a toggle can replay stale unmixed gaps), then enable `toggleMemoIsAMiss`.
+      - G-C12's 3 dB bound fails 7 of 8 FIXTURE cells (recorded, not asserted). That needs my ruling.
+      - `scratchpad/w6/NTE2/STATUS.md`.
+    - **I5-F3, roll notes on the song grid plus the ruler fragment: DONE for notes.** 793 tests in 50 suites, once.
+      - Accepted by me:
+        - only a partly-covered FIRST bar is refused ("…Move the playhead to a later bar to delete one."); a partial LAST bar still trims;
+        - the ruler fix is an edge cover, not a pinned chip.
+      - Next: the cover-disabled plant run headless, warnings with the new ruler file, the wedge gate with the window drawn, a second run, and the m23t gate.
+      - ⌥-no-snap on note edits never existed: that's a design question, not the user's.
+      - I5-F4 is filed with the exact gap: quantize and the step sequencer still count from the part's start.
+      - `scratchpad/w6/I5F3/STATUS.md`.
+    - **WF-F1, the meter's `waitForCommitId` stall: FIXED IN THE WORKTREE, NOT MERGED.**
+      - Where: `.claude/worktrees/w6-wedge`, with patches in `scratchpad/w6/wedgefix/patches-f1/`.
+      - The orb redraws only when a frame is visibly new (`VibeOrbFrameGate`): 0 redraws at rest, 60/s while moving, pixels byte-identical. The wedge gate is 9/9 with the display awake.
+      - Unmeasured: the display-asleep run (`asleep-queue.sh …`), because the display never slept. A moving orb while asleep likely still stalls; try `Canvas(rendersAsynchronously: true)`.
+      - ⚠️ The m23r3b gate's Finder focus theft leaves a Finder window open on the user's screen. Fix the gate.
+      - `scratchpad/WForch/F1-STATUS.md`.
+    - **UP, the 3 upstream reports: DRAFTED, NOTHING POSTED.**
+      - All three reproduce on HEAD `a670068` in both backends. With the fixes, every case lands within 0.011 c.
+      - Before posting:
+        - my review and a secret scan;
+        - CORRECT `VENDORED.md` where the independent repro disagreed: 0003 reads +1.20 c for an H+1 input; 0002's "12 c / 76 c on 0001 alone" did not reproduce; the vibrato residual is 0.82/3.53 c, not 1.2/4.4.
+      - Then post with `gh issue create -R Signalsmith-Audio/signalsmith-stretch` (github.com account `dimichgh`), fill in the `#TBD-*` cross-references, and put the links on the page.
+      - `scratchpad/upstream/STATUS.md`.
+    - **SING-6: DONE.**
+      - The guides are published on page v45 (−18 LUFS; true peak −9.5 and −9.1 dB, measured by me) with the ask `own-recording`.
+      - The pipeline `~/DAWPro-spikes/sing-soulx/own-voice.sh RECORDING` is proven on a stand-in plus 3 negative controls. Peak memory 6.05 GiB. No model is left running (checked by me with a same-shape control).
+      - Next: when the db says `own-recording = done`, run it on `~/Desktop/row-your-boat.<ext>`, the ONLY user file ever read. Then publish `sing-own.wav` with "Does it sound like you? yes / a bit / no".
+      - Facts:
+        - the page's Version 1 is upstream's Chinese-recorded prompt voice;
+        - a low voice will be sung an octave up (auto-shift is off);
+        - WER is unmeasured (there is no whisper in the spike);
+        - the clip check cannot catch a guide played from the speakers, so only the headphone rule in the steps guards against it.
+      - `scratchpad/w6/SING6/STATUS.md`.
+    - ✅ **SING-6 OWN-VOICE RUN (me, 2026-09-26 13:04-13:25 PDT).**
+      - **The recording:** the user named `/Users/dsemenov/Downloads/raw-raw-song.m4a` in chat, not the Desktop path the page asked for. The user's word names the file, so that ONE file was read; the page's `own-recording` ask was never clicked.
+      - **Clip check: PASS.**
+        - 5.93 s, TP −6.9 dBTP, floor margin 44.6 dB.
+        - Key −18 st, and REAL: pyin at 40-800 Hz gives a median of 104 Hz (G♯2). A harmonic comb at pyin's f0 has an odd/even ratio of 1.80, so this is not a halving.
+        - ⚠️ Alignment: 1/10 notes after the key shift. The residuals run −221…+449 c, because the user sang the intervals wide; Route H's note_pitch is therefore rough.
+      - **Renders:** the page's line with the same seed/target as v1, at 3 heights on ONE axis. I added `--pitch-shift` to `code/own_voice.py`, whose note gate shifts with it; the backup is `.bak-pre-shift`.
+        - **0 (as written):** PASS, 19/19.
+        - **−12:** 18/19. Note 15 at 10.84 s is −1200.8 c. The miss is REAL, from a 2nd instrument: comb ratio 0.45 at half the note, where a scored hit reads 0.03. It fails measurement 3.
+        - **−18:** 19/19, but capped at −19.2 LUFS by the −1 dBTP ceiling, so it fails G1.
+      - **Fairness:** all four comparison files were gain-matched down to −19.2 LUFS (spread 0.00 LU on ffmpeg, py within 0.1; max TP −1.1). Record: `w6/SING6/level-match.json`.
+      - **Timbre (crude MFCC-cosine to the recording; lower = closer):**
+        - Pitch dominates: the stock renders at F4 score 0.17-0.40, own-as-written 0.34, own −12 0.042, own −18 0.015.
+        - **CONTROL, stock v1 singer at −18 (same pitch): 0.037.** Own −18 is about 2.4× closer at equal pitch. That is CONSISTENT WITH voice carrying through beyond register, NOT a finding: the metric has no noise floor yet.
+        - The missing control is own −18 with a second seed, measured against the first. Only that makes it a claim.
+        - Ears decide.
+      - **Published: page v49.** Three options (typed/−12/−18) plus the stock-at-−18 reference, and the ask `sing-own-pick` (typed / down12 / down18 / none). The published file list was checked: no user audio was uploaded.
+      - WER not measured. No model left running (3 no-model checks, positive-controlled). Scripts: `w6/SING6/{own_checks,octave_note,level_match,timbre_all,stock_down18,export_control}.py`.
+      - 📥 **THE USER PICKED `sing-own-pick = down18`** ("Where I sang": own voice at own pitch). db stamp 2026-09-26T21:31:36Z = 14:31 PDT; read by me 14:32 PDT.
+        - **What it settles:** the model carries the user's voice WHEN it sings in the user's range. As written (1.75 octaves above) and −12 did not win.
+        - **⚠️ Implication for p2-sing's design, a measurable DEFAULT I decide, not a question:**
+          - −18 st is a KEY change, not an octave. It works a cappella but clashes with a fixed-key backing track.
+          - In a song, the voice may move only by whole octaves, unless the WHOLE SONG moves key. Real singers choose the song's key for their voice.
+          - So p2-sing's own-voice path should (1) measure the reference's range (as `own_voice.py` does: median plus p10/p90), and (2) propose the song key and octave that put the melody in that range, rather than shift the vocal alone.
+          - −24 is untested: its bottom note, C2 at 65 Hz, sits below the recording's p10 of ~85 Hz.
+        - **Next (on "continue"):** p2-sing §2, the integration design (`docs/design/2026-09-24-p2-sing-spike.md` §2.1 onward), routed to daw-architect, carrying this default.
+    - **Then the queue:**
+      - NT-U: the header slider, the Voice tool, the slide UI, the consonant toggle, and R16's line worded for (b);
+      - NT-C C3 and the Drift tool;
+      - NT-L (with a 220 Hz down-shift);
+      - NT-F220, NT-C2-F1, I5-F4, I0-F, TB-F1;
+      - the release checkpoint: full suite ALONE, 0 warnings, doc-count-drift, npm, the wedge gate with the window drawn, the `plugin.json` bump, and a dist build only on the user's word.
+    - ⛔ **LAW, PAID FOR TWICE THIS SESSION: a plant applied under ONE heavy slot is compiled by the OTHER slot's build.**
+      - C5b-3a found another lane's build had compiled its planted file.
+      - D4-1 reported NT-W's in-flight plant as a real product bug.
+      - Runs by other lanes inside a plant window are evidence of nothing, green or red.
+      - The rule from now: apply plants only in an isolated copy (a worktree), or while holding BOTH heavy slots.
+    - **MY FULL SUITE AT THE PAUSE (02:23-02:32 PDT, run ALONE): 10,243 tests in 865 suites, 520 s, 24 issues (2 known) in 13 tests.**
+      - 3 are TEST-SIDE:
+        - `ZeroParamVerbRejectionTests.swift:404` (the literal 247);
+        - `ControlTests.swift:2589` ×3;
+        - `PitchCorrectionCommandTests.swift:3506`, which pins (a).
+        A Sonnet qa lane is fixing them and checking NT-W's slide/follow claim.
+      - 10 are TIMEOUTS during a machine-wide stall:
+        - Apple AU preparation hit its 60 s limit ×4;
+        - a 30 s bound read 76 s;
+        - a stress ring received 0 of 20,000.
+        All 10 suites passed ALONE (89/89, 02:37). The cause of the stall is unknown.
+      - 0 `Sources/` warnings in the build log.
+    - ✅ **DIST REBUILT AND SWAPPED ON THE USER'S WORD** ("make sure we get latest dist rebuilt", 2026-09-26 ~02:30 PDT).
+      - **Built:** `scripts/bundle.sh --output dist/DAWPro-next.app` (177 s release build).
+      - **Checked:**
+        - `codesign --verify --deep --strict` valid, and the Designated Requirement satisfied (CodeDirectory 91239 → 93671);
+        - the 9 new verbs present by name in the new binary and absent from the old, by a right-boundary regex. Controls: `clip.setNotePitch` in both; `clip.setNoteShape` and `clip.setNoteBogus` in neither.
+      - **Swapped:** `scratchpad/pause/dist/swap.sh`:
+        - the user's app was not running (by path and by port 17600);
+        - backup `dist/DAWPro-backup-2026-09-26-0241.zip`, extracted, codesign-verified and its binary `cmp`-identical;
+        - the swap, `lsregister -f`, and a re-verify.
+      - **The dmg:** rebuilt from the swapped app WITHOUT `dmg.sh`; the old one is kept as `DAWPro-0.1.0-2026-09-25.dmg`. `hdiutil verify` VALID; sha256 `89034aaa…f33c`.
+      - The dist is `813c415` + 188 UNCOMMITTED paths: nothing is on GitHub until the user says commit. Handoff page v46 tells the user what's in it and what isn't.
+    - ✅ **UP DONE (me, 2026-09-27): THE 3 REPORTS ARE FILED UPSTREAM** under the user's GitHub account (`dimichgh`), on the user's "file-upstream = yes".
+      - **Filed:** #31 (0001, fractional `prevInput` read), #32 (0002, peaks and lobe map) and #33 (0003, exact previous hop), at https://github.com/Signalsmith-Audio/signalsmith-stretch/issues/31 to /33.
+      - **Checked before posting:**
+        - I read every line of all three bodies. The 16 KB repro block is byte-identical in all three and equals `repro/repro.cpp`, so it was read once.
+        - Upstream HEAD is still `a670068`. None of the tracker's 23 issues or 9 PRs is a duplicate.
+        - The claim that PR #25 adds a line right after `reanalysePrev` was verified against the PR's diff.
+        - Upstream already uses `M_PI` in the same `rot` pass, so the fix has no new MSVC exposure. Apple clang 21.0.0 was confirmed. Linear tag `0.6.4` = `de55e6a`.
+      - **One wording change, in #33:** "a rate within 2/H of 1 gives H±1 blocks" is now marked as reasoning from the code, since only its rows were measured.
+      - **Privacy scan** over keys, /Users, names, the product, internal ids and emails: 0 hits in all 3. The positive control hit 5 on VENDORED.md.
+      - **Cross-links** were written in as #31/#32/#33 BEFORE posting, since the newest item was #30. The script stopped if a number deviated; none did.
+      - **Live check:** each posted body equals the reviewed text (`cmp`), with author dimichgh and state OPEN.
+      - **`VENDORED.md` corrected** (backup `scratchpad/upstream/VENDORED.before-2026-09-27.md`):
+        - 0003's "∓1.20 c" contradicted its own ω(H±1)/H: an H+1 input reads SHARP;
+        - the r in its measured lines is a stretch ratio, output/input;
+        - 0002's 12/76 c came from the wider harness and did not reproduce in the plain repro, whose figures are now annotated;
+        - the vibrato figures are 0.82/3.53/−2.30 c in the repro;
+        - the 17/104 count was not re-run;
+        - "Filing upstream is the user's call" is now FILED, with the numbers.
+      - The handoff page (v51) links all three.
+    - ✅ **THE 3 STALE TEST PINS ARE FIXED** (Sonnet qa lane, ~02:45-03:10 PDT). Its filter: 1620 tests in 118 suites, 0 ✘ (`scratchpad/w4/qa/qa_main_run.log`, checked by me).
+      - ZP now compares the scrape's count with `CommandRouter.allCommands.count`. The plant (drop one name) went RED at 252 vs 253, then was restored and checked with `cmp`.
+      - `clip.setNoteVibrato(s)` are driven in the route test. `clip.findUnpitchedSounds` is excluded with a reason: it needs real audio, and `findUnpitchedSoundsHappyPath` covers it.
+      - `setNoteFormantHappyPath` now asserts (b).
+      - **NT-W's slide/follow claim:**
+        - FALSE for a genuinely tuned legacy vocal: the new pin `setNoteTransitionUpgradesATunedLegacyVocal` is green.
+        - On a NEVER-edited table the upgrade does not fire. But such a table is not legacy: `predatesNaturalTuning` needs `!isPitchIdentity`, and widths are excluded from identity. So its first AUDIBLE edit upgrades it.
+        - I accept that as intended in effect; D4-1's doc should say so.
+    - ✅ **NT-W-F1 DONE** (Sonnet, ~03:15-03:35 PDT). `clip.setConsonantProtection` and `clip_get_pitch_edits` now state the LIVE promise (NT-E2's measured text, with its limits).
+      - **`active` equals the render's gate by construction:** the wire calls `consonantMixIsActive(stretchRatio:clipSemitones:)` with the clip's own values, and `StretchCurvePlan.consonantMixActive` forwards to it.
+      - **Its runs:** npm 1077/1077, Swift 163/163 ×2, doc-count-drift exit 0.
+      - **Checked by me:** the bundle has 0 "WILL engage once NT-E2 lands", 0 "HELD ON NT-E2", and 2 of the new sentence, with a control.
+      - Dated doc entries were annotated, not rewritten.
+      - **Filed, not done:**
+        - ✅ DONE by me at ~04:55 PDT: the stale `TODO(NT-W)` at `ProjectStore+PitchNoteEdits.swift:617-623`, plus a second at :671 for the three slide verbs. All four verbs are live (`Commands.swift` routes), so both became ✅ SHIPPED pointers. Comment-only; the first one had also named the wrong param (`keepConsonantsUntuned`; the shipped verb takes `enabled`);
+        - ~23 plain "HELD ON NT-E2" comments across `Tests/DAWControlTests/*` and two mcp tests (comments only, nothing pins them).
+    - ✅ **C5a-G RE-RUN ON THE CURRENT CODE (me, 03:26-03:27 PDT): 15/15, and LOOKED AT BY ME** (`scratchpad/w6/C5a4b/gate/c5a4b-2-new-wobble-mid-drag.png`).
+      - The draft wobble line, the dot at the note's top centre, the engaged Wobble slot and the one-line readout are all right.
+      - Staging exited, and the locks were released.
+      - ⚠️ **C5a-F11 is WIDER than filed.** The help text is cut off at "…a little of the recording's own…" at a 2000 pt window mid-drag, not only at the 1208 pt floor, so "100 cents is one piano key. Let go to hear it." never shows while dragging.
+      - My copy ruling for C5a-F11:
+        - help → "Drag up for a wider wobble, down for a flatter one, sideways for faster or slower. 100 cents is one piano key. Let go to hear it.";
+        - the flat caveat moves to the flat tip → "Smoothed flat (a little of your own movement remains)";
+        - the handoff readout says "(replaces most of your own)".
+      - ✅ **C5a-F11 DONE** (Sonnet, ~03:35-03:55 PDT).
+        - The three strings changed in `PitchWobbleGesture.swift`; the unused `helpFlatIsMostly` was deleted; 5 pins in `PitchWobbleGestureTests.swift` updated to the exact new strings.
+        - Filter: 242 tests in 7 suites, green. Gate `f`: 15/15. The gate reads back the new help and the "(replaces most of your own)" readout from the running app.
+        - **LOOKED AT BY ME:** the full help now fits at 2000 pt mid-drag, and at the 1208 pt floor at rest (captures `c5a4b-2`, `c5a4b-6`).
+        - NOT seen: 1208 pt mid-drag, where the readout is longer.
+        - The flat tip has unit-test cover only; no gate leg reads it.
+        - Old copy remains in the vibrato-handle design doc and a doc comment at `PitchEditorModel.swift:1212`.
+        - In the TREE, not in the user's app: the dist was built at 02:40.
+    - ✅ **C5b-3b DONE** (Sonnet mcp-integration-engineer, ~03:58-04:36 PDT; verified by me ~04:50).
+      - **What shipped:**
+        - The wire verb `clip.setNoteShape` takes `{clipId, noteId, points:[{seconds,cents}]}` or `{…, clear:true}`, and echoes `shape {startSeconds, stepSeconds 0.01, cents}`.
+        - `clip.getPitchEdits` now adds `shape` per note, only on a drawn note. This is deliberate, per my brief; design §5.7 said "every segment".
+        - The MCP tool is `clip_set_note_shape`, added to the composer and mix-engineer allowlists.
+        - The bundle was regenerated. `plugin.json` stays at 0.17.0: the release checkpoint bumps it.
+      - **My fix on review:** the handler kept hand-copied versions of two private store sentences (`noteTable` and `segmentIndex`); they were byte-identical today but could drift.
+        - Replaced by the new public `ProjectStore.editableStoredNote(clipId:noteId:)`, which is the store's own read-only check, with its own sentences in its own order.
+        - Side effect: a comp-lane member is now refused before the table check, as every per-note writer does.
+      - **Measured by me:**
+        - Filter `PitchCorrectionCommand|NoteShape|CommandRouter|ZeroParamVerbRejection`: 310 tests / 5 suites, 0 ✘. All 7 new wire tests passed, matched by display name. `Sources/` warnings: 0 in the build log (positive control: 338 log lines matched).
+        - npm 1084/1084. `doc-count-drift` exit 0 at **wire 254**.
+        - Test pins: `.count == 254` on 19 lines, `== 253` on 0. The MCP pin is **259**; `258` survives only in history comments.
+      - The agent's census correction: the wire-count literal sits on 19 lines in 18 files, not the "20 across 19" SKILL.md claimed.
+      - **NOT exercised through `clip.setNoteShape`:** the no-table and comp-member refusals. Only unknown-note runs, and it is checked verbatim. The store's own writer tests cover those helpers.
+      - Also checked by me:
+        - the tool text states the whole-vocal upgrade (ruling b);
+        - `swift build` is clean after the comment edits;
+        - design §5.7 carries an ERRATUM line for the only-when-drawn `shape`.
+      - This is in the TREE, not in the user's app or plugin, until a rebuild and a release.
+  - ⏹ **The lane list as it stood at ~00:55 PDT (historical; every lane has since stopped, see the RESUME POINT above):**
+    - WF-F1: the VibeMeter's `waitForCommitId` stall, fixed without a pause condition (worktree);
+    - ZP: one comment-stripping rule for the two wire-verb scrapes (token W, test-only);
+    - **C5a-4b: the Wobble tool and the dot, wired into the note editor** (ui-design-engineer; `PitchEditorDraftEdit`, the router kind, the dot, T3, T-dot-4, and the looked-at gate C5a-G);
+    - **NT-W: natural tuning reaches agents.** 5 verbs and 5 tools (`clip.setNoteFormant`, `clip.setFormantCorrection`, `clip.setNoteTransition`, `clip.setPitchTransitionSmoothness`, `clip.setNoteGlideFollow`), plus the `clip.getPitchEdits` fields and the plugin allowlists. NT-PK has landed, so the formant verbs are free; a 6th verb, `clip.setConsonantProtection`, is added and HELD on NT-E2;
+    - **NT-E2: consonants and breaths AUDIBLY keep the singer's own sound.** M-2b first, then `applyConsonantMix` (R1's power-matched law, ρ per fade) before the level mask, the RenderDiff union (X6), and gates G-C1…G-C12. NT-W's consonant verb is HELD on it (until then it would be a silent success);
+    - I5-F3: the roll's note editing on the song grid, partial-bar deletes refused, and gate W1 derived rather than pinned;
+    - **C5b-3a then C5b-4a:** `NoteShapeSamples` + `setClipNoteShapes` + `splicing`, the split slicing at `ceil(cut·100)`, a recommended refusal on sounds, then the brush's pure math (`PitchShapeBrush.swift`, `PitchPlayedLine.playedMidi`);
+    - Queued:
+      - TB-F1 (a compact deck strip at the window floor);
+      - NT-W (the formant/transition verbs; after C4 + NT-E1b);
+      - C5b.
 - **History of that step (2026-09-25 ~10:30):** the last test-only step before the commit. My full suite (08:47–08:54, run alone) finished 9637 tests with **3 issues**, all in tests added today, all short deadlines under the full suite's normal main-thread queue (the product held in each). **Fixed and VERIFIED BY ME** (each with an injected stall that turns the old test red and leaves the new one green, run in an isolated copy):
   - "the wait is polled BY ITSELF" now waits for the poll's own read (a 120 s hang guard, `mainActorHangGuard` in `PitchEditorModelTests.swift`);
   - the NH-A seam asserts the waiter's OWN give-up stamp (8.8 ms under a 1.5 s observer stall that the old form read as 1511 ms);
@@ -2034,7 +3459,7 @@ Order: a (shipped regression, first) → b → **c1 → c2** (m23-c SPLIT 2026-0
 
 ⚠️ **TWO OF THESE SIX ARE NOT DEFECTS — they ask us to REVERSE a documented decision. Do not "fix" them silently; m25-a and m25-f each need the user's word, and each names the exact file that records the decision being reversed.**
 
-- [x] (m25-a) **BUILT + VERIFIED 2026-08-13 — 5567/564/0, build 0/0, +34 tests. AWAITING A HUMAN DOUBLE-CLICK; no gate here sees a gesture.** Shared primitive `Sources/DAWCore/ClipAutoExtend.swift` (pure, DAWCore); store verb `setClipNotes(clipID:notes:extendToCover:)` (`ProjectStore.swift:3510`) writes notes AND length inside ONE `performEdit` (`:3557`). ⭐ **m25-f-3 reuses it in ONE LINE** — `PianoRollView.swift:2238` `commit()` → `commit(extendToCover: model.selection)`; `coverage` already spans multiple notes. **The shared-primitive instruction held.** ⭐⭐ **A LIVE HAZARD IT CAUGHT, NOT A PRECAUTION — CONFIRMED BY ME: a grow routes through `Self.resolvingOverlaps` (`ProjectStore.swift:3566`), which TRIMS OR DELETES the stationary neighbour. Auto-extend would have EATEN THE NEXT CLIP — the same class as m25-k, caught before shipping. Growth is now capped at the distance to the next same-track clip (`trailingHeadroom`), plus a 16-bar ceiling.** ⭐ Grows to the next clip-local BAR line, not the exact note end (matches the grid lines already drawn at `PianoRollView.swift:2438/2446`); `fitClipToContent` keeps its exact-end rule because its contract is "match the content" while this one's is "make room". ⭐ Deliberately did NOT use `applyTrimWindow` — `:4024`'s `guard shiftedStart < newLength` DROPS notes past the new length, which on a capped grow are exactly the m18-f latent notes this item must preserve. ⭐⭐⭐ **SECOND OPINION GIVEN 2026-08-13 on the decision the agent flagged ("refuse rather than partially grow"): REFUSING IS CORRECT. A partial grow visibly changes the clip while still failing the user's goal — worse than no change, because it looks like it worked. ⭐ BUT THE REFUSAL IS SILENT, AND THAT IS PRECISELY WHERE ROUTE ⓒ EARNS ITS PLACE: the user's original ask was *"warn with signal or something and direct user or give a clue"*, and auto-extend removes the need for a warning in the COMMON case while creating the ONE case that genuinely needs one. Filed as m25-a-2.** ⭐⭐ **AND A TEST-CRAFT FINDING WORTH MORE THAN THE FEATURE: `EditorSurfaceOwnershipSiteTests`' R6 lane assertion `roll.contains("onCommit: commit")` WAS VACUOUS — `onCommit: commitControllerLane` PREFIX-MATCHED it, so the velocity-lane half passed whether or not the lane was wired at all. A `contains` assertion on a source string is a PREFIX test unless you anchor it.** Now pinned exactly. **Original ruling:** ✅⭐⭐ **FULLY UNBLOCKED 2026-08-13 — THE USER RULED: *"extend in both as you suggested"*. So route ⓑ (AUTO-EXTEND) applies to BOTH paths: the note DRAG that reaches the clip edge (m25-f-3) AND DOUBLE-CLICK-TO-CREATE past the end. Route ⓐ (prevent/clamp) is DEAD — do not revive it; it would contradict the auto-extend behaviour on the other path.** ⚠️ **ONE AUTO-EXTEND PRIMITIVE, SHARED — m25-f-3 needs the identical operation and two implementations of "grow the clip to fit" WILL drift.** ⚠️ The m18-f/m19-g "legal-but-latent" rule (`PianoRollModel.swift:202-214`) SURVIVES: notes past the end stay legal data; the clip now grows so they also become AUDIBLE, rather than being refused. Route ⓒ (an active warning) is optional on top — with auto-extend the surprise largely disappears, so build it only if the growth itself proves confusing. ⭐⭐ **HALF-ANSWERED 2026-08-12 — THE USER CHOSE ROUTE ⓑ (AUTO-EXTEND) IN PASSING, while describing the note-drag behaviour they want: *"as user moves close to the edge of the note, it should expand/scroll the note area as well as auto extend clip if it reaches the edge."* That is ⓑ for the DRAG path. ⚠️ It does NOT by itself settle the DOUBLE-CLICK-TO-CREATE path this item was filed about — but it makes ⓐ (prevent) incoherent, since the app would then auto-extend on drag while refusing on create.** ⭐⭐ **BUILD ONE AUTO-EXTEND PRIMITIVE, NOT TWO — m25-f-3 needs the identical operation, and two implementations of "grow the clip to fit" will drift.** Remaining question for the user is narrow: does double-click-to-create past the end auto-extend too, or only warn? Original filing: **notes ARE placeable past the clip end, and that is DELIBERATE, recorded in three places.** User asks (2026-08-13) for it to be prevented, *"warn with signal or something and direct user or give a clue to extend the clips or place note to the active clip zone."* ⚠️ **But `PianoRollModel.swift:202-214` defines that space as "shaded latent space… a note created there is the same legal-but-latent data… store-legal, engine-windowed by strict `<`"** (m18-f/m19-g), `:197-200` keeps such notes visible on purpose, and `:230-235` (`playableEndBeat`) makes them silent-but-kept. So the vertical line the user sees (`Sources/DAWApp/PianoRoll/PianoRollView.swift:2388-2406` `drawOutOfClipShade` — 0.28 shade + a 1 pt hairline at `clipX - 0.5`, same grammar in `ControllerLaneStrip.swift:436-439` and `VelocityLane.swift:49-50`) is already the "signal" — it is just **passive**. Three routes, and they are different products: **ⓐ PREVENT** — clamp in `PianoRollView.swift:1546-1554` (the `SpatialTapGesture` has no bounds gate) or `PianoRollModel.addNote:337-346` (clamps PITCH only, never beat); reverses the latent-data rule outright. **ⓑ AUTO-EXTEND the clip** on write past the end — wire primitives already exist (`clip_fit_to_content`, `clip_stretch_to_length`); keeps the data rule and removes the surprise. **ⓒ ACTIVE WARNING** — keep the behaviour, add a transient toast/glow naming the fix ("extend the clip to hear this"). ⭐ **ⓑ or ⓒ preserves the m18-f rule; ⓐ discards it. RECOMMEND ⓑ+ⓒ.** ✅ **HUMAN-VERIFIED BY THE USER 2026-08-23** — they confirmed the gesture works. This is the instrument no gate in this tree has: it can see neither a keystroke nor a pixel.
+- [x] (m25-a) **BUILT + VERIFIED 2026-08-13 — 5567/564/0, build 0/0, +34 tests. AWAITING A HUMAN DOUBLE-CLICK; no gate here sees a gesture.** Shared primitive `Sources/DAWCore/ClipAutoExtend.swift` (pure, DAWCore); store verb `setClipNotes(clipID:notes:extendToCover:)` (`ProjectStore.swift:3510`) writes notes AND length inside ONE `performEdit` (`:3557`). ⭐ **m25-f-3 reuses it in ONE LINE** — `PianoRollView.swift:2238` `commit()` → `commit(extendToCover: model.selection)`; `coverage` already spans multiple notes. **The shared-primitive instruction held.** ⭐⭐ **A LIVE HAZARD IT CAUGHT, NOT A PRECAUTION — CONFIRMED BY ME: a grow routes through `Self.resolvingOverlaps` (`ProjectStore.swift:3566`), which TRIMS OR DELETES the stationary neighbour. Auto-extend would have EATEN THE NEXT CLIP — the same class as m25-k, caught before shipping. Growth is now capped at the distance to the next same-track clip (`trailingHeadroom`), plus a 16-bar ceiling.** ⭐ Grows to the next clip-local BAR line, not the exact note end (matches the grid lines already drawn at `PianoRollView.swift:2438/2446`) — ⚠️ **SUPERSEDED 2026-09-27 by W7-AX: since I5-F2 the roll draws the SONG's bar lines, so a grown clip now ends on the next SONG bar line (one-meter songs; on-bar clips bit-identical over 604,800 cases). Songs whose meter changes keep the clip-bar rule: AX-F1.**; `fitClipToContent` keeps its exact-end rule because its contract is "match the content" while this one's is "make room". ⭐ Deliberately did NOT use `applyTrimWindow` — `:4024`'s `guard shiftedStart < newLength` DROPS notes past the new length, which on a capped grow are exactly the m18-f latent notes this item must preserve. ⭐⭐⭐ **SECOND OPINION GIVEN 2026-08-13 on the decision the agent flagged ("refuse rather than partially grow"): REFUSING IS CORRECT. A partial grow visibly changes the clip while still failing the user's goal — worse than no change, because it looks like it worked. ⭐ BUT THE REFUSAL IS SILENT, AND THAT IS PRECISELY WHERE ROUTE ⓒ EARNS ITS PLACE: the user's original ask was *"warn with signal or something and direct user or give a clue"*, and auto-extend removes the need for a warning in the COMMON case while creating the ONE case that genuinely needs one. Filed as m25-a-2.** ⭐⭐ **AND A TEST-CRAFT FINDING WORTH MORE THAN THE FEATURE: `EditorSurfaceOwnershipSiteTests`' R6 lane assertion `roll.contains("onCommit: commit")` WAS VACUOUS — `onCommit: commitControllerLane` PREFIX-MATCHED it, so the velocity-lane half passed whether or not the lane was wired at all. A `contains` assertion on a source string is a PREFIX test unless you anchor it.** Now pinned exactly. **Original ruling:** ✅⭐⭐ **FULLY UNBLOCKED 2026-08-13 — THE USER RULED: *"extend in both as you suggested"*. So route ⓑ (AUTO-EXTEND) applies to BOTH paths: the note DRAG that reaches the clip edge (m25-f-3) AND DOUBLE-CLICK-TO-CREATE past the end. Route ⓐ (prevent/clamp) is DEAD — do not revive it; it would contradict the auto-extend behaviour on the other path.** ⚠️ **ONE AUTO-EXTEND PRIMITIVE, SHARED — m25-f-3 needs the identical operation and two implementations of "grow the clip to fit" WILL drift.** ⚠️ The m18-f/m19-g "legal-but-latent" rule (`PianoRollModel.swift:202-214`) SURVIVES: notes past the end stay legal data; the clip now grows so they also become AUDIBLE, rather than being refused. Route ⓒ (an active warning) is optional on top — with auto-extend the surprise largely disappears, so build it only if the growth itself proves confusing. ⭐⭐ **HALF-ANSWERED 2026-08-12 — THE USER CHOSE ROUTE ⓑ (AUTO-EXTEND) IN PASSING, while describing the note-drag behaviour they want: *"as user moves close to the edge of the note, it should expand/scroll the note area as well as auto extend clip if it reaches the edge."* That is ⓑ for the DRAG path. ⚠️ It does NOT by itself settle the DOUBLE-CLICK-TO-CREATE path this item was filed about — but it makes ⓐ (prevent) incoherent, since the app would then auto-extend on drag while refusing on create.** ⭐⭐ **BUILD ONE AUTO-EXTEND PRIMITIVE, NOT TWO — m25-f-3 needs the identical operation, and two implementations of "grow the clip to fit" will drift.** Remaining question for the user is narrow: does double-click-to-create past the end auto-extend too, or only warn? Original filing: **notes ARE placeable past the clip end, and that is DELIBERATE, recorded in three places.** User asks (2026-08-13) for it to be prevented, *"warn with signal or something and direct user or give a clue to extend the clips or place note to the active clip zone."* ⚠️ **But `PianoRollModel.swift:202-214` defines that space as "shaded latent space… a note created there is the same legal-but-latent data… store-legal, engine-windowed by strict `<`"** (m18-f/m19-g), `:197-200` keeps such notes visible on purpose, and `:230-235` (`playableEndBeat`) makes them silent-but-kept. So the vertical line the user sees (`Sources/DAWApp/PianoRoll/PianoRollView.swift:2388-2406` `drawOutOfClipShade` — 0.28 shade + a 1 pt hairline at `clipX - 0.5`, same grammar in `ControllerLaneStrip.swift:436-439` and `VelocityLane.swift:49-50`) is already the "signal" — it is just **passive**. Three routes, and they are different products: **ⓐ PREVENT** — clamp in `PianoRollView.swift:1546-1554` (the `SpatialTapGesture` has no bounds gate) or `PianoRollModel.addNote:337-346` (clamps PITCH only, never beat); reverses the latent-data rule outright. **ⓑ AUTO-EXTEND the clip** on write past the end — wire primitives already exist (`clip_fit_to_content`, `clip_stretch_to_length`); keeps the data rule and removes the surprise. **ⓒ ACTIVE WARNING** — keep the behaviour, add a transient toast/glow naming the fix ("extend the clip to hear this"). ⭐ **ⓑ or ⓒ preserves the m18-f rule; ⓐ discards it. RECOMMEND ⓑ+ⓒ.** ✅ **HUMAN-VERIFIED BY THE USER 2026-08-23** — they confirmed the gesture works. This is the instrument no gate in this tree has: it can see neither a keystroke nor a pixel.
 - [x] (m25-b) ✅✅ **CONFIRMED WORKING BY THE USER, HANDS-ON, 2026-08-24 — TICKED ON THE ONLY INSTRUMENT THAT COULD SETTLE IT.** **Maximize the note editor + a viewport minimap.** Both ABSENT — verified. **Maximize:** the editor is a splitter pane hard-clamped to `editorFractionRange = 0.30...0.55` (`Sources/DAWAppKit/PanelLayoutModel.swift:120`, clamp at `:193`, splitter `ContentView.swift:1002-1011`, height applied `:714`); the 0.55 ceiling is deliberate (`PanelLayoutModel.swift:116` — keep header/arrange/transport visible), so maximize is a MODE that suspends it, not a wider range. ⚠️ No maximize exists anywhere; the one `fullScreen` hit in `Sources/DAWApp` is `PluginUI/PluginPanelController.swift:84` (AU panel collection behaviour) and is unrelated. **Minimap:** ⚠️⚠️ **THE NAME WILL MISLEAD YOU — `MIDIMapGeometry.swift:93` says "arrange mini-map", but that is `ClipMIDIMap` (`Sources/DAWApp/Timeline/ClipMIDIMap.swift:15`), a per-clip note THUMBNAIL drawn inside the clip rect with `.allowsHitTesting(false)` (:59). It is not a viewport navigator and never was.** ⭐ The math already exists — `MIDIMapGeometry` gives pitch/position mapping, `PianoRollModel.contentWidth:197` the extent; only the viewport rect + drag-to-scroll layer is new. ⭐ **Related gap worth folding in: zoom is HORIZONTAL ONLY** — `rowHeight` is a fixed `14` (`PianoRollModel.swift:88`) with no vertical zoom, and pinch does not anchor the beat under the cursor (`PianoRollView.swift:1874-1881` — ⚠️ **CITE CORRECTED 2026-08-16: this item said `:1279-1283`, which is CLIPBOARD/cut code; the `MagnifyGesture` is at `:1874`. Verified by reading both.** SPLIT OUT as m25-b-3 / m25-b-4). Route: `ui-design-engineer`.
   - [x] (m25-b-1) ✅ **CONFIRMED BY THE USER, HANDS-ON, 2026-08-24 — BUT QUALIFIED, AND THE QUALIFICATION IS THE POINT: their exact words were _"it does maximize ok **for now**"_, not an unreserved yes. TICKED, because the item as scoped (a mode that suspends the 0.30...0.55 clamp) demonstrably works. ⚠️ DO NOT READ THIS AS 'the note editor is big enough' — the measured gain is window-dependent (+3.7 % at 640 pt, +26 % at 900, +47 % at 1440) because the mode reserves a CONSTANT 275 pt of chrome, and "for now" is the likely seed of a follow-up asking for more height on a small window. If that arrives, it is a NEW item about the chrome reservation, not a reopening of this one.** 🖐 **BUILT + VERIFIED 2026-08-13 (5533/561/0, build 0/0, 4/4 planted mutants caught) — AWAITING THE USER'S EYE. Do not tick on machine evidence; no gate here sees pixels.** ⚠️⚠️ **AND CARRY THIS CAVEAT FORWARD WHEN TICKING — the implementing agent MEASURED IT AND FLAGGED IT ITSELF, which is why it must not be lost in a tick: the mode reserves a CONSTANT 275 pt (189 fixed chrome + an 86 pt pinned arrange strip), so the gain is window-dependent — 640 pt window (the floor): 352 → 365, **+3.7 %, essentially nothing**; 900 (default): 495 → 625, +26 %; 1440: 792 → 1165, +47 %.** ⭐ **The 80 pt arrange floor has a real engineering reason — unmounting the arrange resets scroll offset, viewport-width reporting, follow-playhead runtime and key-focus scope, and collapsing below it makes the `.frame(height: rulerHeight)`-pinned block draw OVER the editor — so this is a considered trade, not sloppiness. But a human reading "maximize: shipped" will expect the editor to FILL the window, and at a small window it does not.** ⭐ **UNUSED LEVER IF THIS IS JUDGED INSUFFICIENT: the arrange TOOLBAR row (~30 pt with spacing) is meaningless with no lanes visible. Reclaiming it needs clipping, which the agent declined to add unconditionally because it would also clip the normal case — a targeted clip is possible.** ⚠️ Also unverified visually: the ~32 pt the toggle adds to a header already carrying eight controls (computed, not measured; the clip name truncates first if it over-commits), and that maximizing with the Sketchpad / Clip Fix / Voice panel open squashes that panel to its header — structurally safe by m17-f F4 design, but nobody has looked. ⭐ Found while measuring: `WindowFloor.timelineSliverMinHeight`'s comment says "the 42 pt ruler" but `TimelineLanesView.rulerHeight` is **80** — prose predating the loop/marker/tempo lanes joining the block. Staleness recorded in source; the constant was deliberately NOT moved, since that would move the shipped window floor. **Original filing:** **Maximize the note editor.** SPLIT OUT 2026-08-13 by the dev cycle: maximize and the minimap are independently valuable and independently shippable, and bundling them delays the cheap half behind the expensive one. ⭐ **This is a MODE THAT SUSPENDS THE CLAMP, not a wider range** — `PanelLayoutModel.swift:120` fixes `editorFractionRange = 0.30...0.55`, applied at `:193`, and the 0.55 ceiling is deliberate (`:116` — keep header/arrange/transport visible). Widening the range would degrade the normal case to serve the maximized one. Ships: a persisted `editorMaximized` flag, a header toggle in the roll (`PianoRollView.swift:883+`), and a restore that returns to the user's PREVIOUS fraction rather than a default. ⚠️ Escape and the toggle must both exit; a mode with one way out strands people. ⚠️ Check the small-window interaction the layout notes flag (`PanelLayoutModel.swift:116`, `ContentView.swift:588-591`, "m10-j"). Route: `ui-design-engineer`.
   - [x] (m25-b-2) ✅✅ **CONFIRMED WORKING BY THE USER, HANDS-ON, 2026-08-13 — TICKED ON THE ONLY INSTRUMENT THAT COULD SETTLE IT.** Their words: *"The note editor minimap - works, verified"*. HISTORICAL: **BUILT + INDEPENDENTLY VERIFIED 2026-08-13 — AWAITING THE USER'S EYE. DELIBERATELY NOT TICKED: a minimap is a VISUAL feature and NO PIXELS WERE SEEN, by me or by the building agent (it says so itself). Unit tests cannot answer the question this feature actually poses.** ⭐ **MY OWN VERIFICATION, not the agent's report:** `swift build` **0 errors / 0 warnings**; `./scripts/test.sh` **5608 tests / 566 suites / 0 ✘**, the ✘ pattern POSITIVE-CONTROLLED against **6164 ✔** on a 13,759-line log — **exactly +41 tests / +2 suites against the 5567/564 baseline**, matching the agent's claim to the unit. Gate corpus still **94**. ⭐⭐ **PURE-VIEW RULE HELD, AND I CHECKED IT THE STRONG WAY: no wire-surface file is touched AT ALL** (`DAWControl`, `mcp-server`, `CopilotCatalog` all clean in `git status`), **so `allCommands` 175 / MCP 178 cannot have changed** — a count that cannot move beats a recount that can lie. Visibility rides `debug.panelLayout {pianoRollMinimap}`, which is where view chrome belongs. **No gate files added.** ⚠️⚠️ **THREE THINGS THE AGENT COULD NOT VERIFY, CARRIED FORWARD VERBATIM RATHER THAN QUIETLY DROPPED — read these before ticking:** ① **the vertical jump's landing is a CODE-REASONING CALL, NOT A MEASUREMENT** — the site test pins that the anchor is mounted on the gutter, which is the argument's PREMISE, not its conclusion that a both-axes `ScrollViewReader` leaves the horizontal scroller alone; no test in this tree can see a scroller's position, and the gateable follow-up (a `gridScrollY` echo) was deliberately not built. **The HORIZONTAL jump does NOT carry this caveat** — it rides the seam m23-c2 already gates. ② **no pixels** — whether a 176×56 box reads well on a dense clip is a human call, and **the pill floors mean a busy clip could render as a near-solid block**, which is exactly the failure a unit test cannot see. ③ **the viewport rectangle OVERSTATES visible pitch by ~18 pt** because it uses the scroller's height while the scrub strip covers its top — **deliberate**, since clamping to a shorter viewport would make the map request offsets the scroller refuses at the bottom edge; documented at the call site as the cheaper error in the safe direction. ⭐ **Design decisions worth not re-litigating:** default **ON** (opt-in ships it invisible, and the user asked for it), collapsing to a 22×22 chip; corner overlay rather than a band, because a ~60 pt band costs four semitone rows permanently from a pane already clamped at 0.55 — which is the very complaint m25-b-1 exists to fix. Visibility is PERSISTED because the roll is `.id(clip.id)`-mounted, so plain view state would resurrect on every clip switch. `MIDIMapGeometry` was judged and REJECTED with reason (its `pitchFraction` is span-relative, so a viewport rect there is unbounded and the axis rescales mid-drag); the minimap uses an absolute 0…127 axis and reuses `PianoRollModel.noteRect` so the map cannot disagree with the grid it navigates. SPLIT OUT 2026-08-13. ⚠️⚠️ **THE NAME TRAP, RESTATED SO IT IS NOT REDISCOVERED: `MIDIMapGeometry.swift:93` says "arrange mini-map" but that is `ClipMIDIMap` (`Sources/DAWApp/Timeline/ClipMIDIMap.swift:15`), a per-clip note THUMBNAIL drawn inside the clip rect with `.allowsHitTesting(false)` (:59). It is NOT a viewport navigator and never was — do not try to extend it.** ⭐ The math exists: `MIDIMapGeometry` maps pitch/position, `PianoRollModel.contentWidth:197` gives the extent. **Genuinely new: the viewport rectangle, click-to-jump, and drag-to-scroll.** ⚠️ Must not fight `FollowPlayhead` (`PianoRollView.swift:689-753`) — decide precedence while a drag is live. Route: `ui-design-engineer`.
@@ -4360,7 +5785,7 @@ better, so the app can ROUTE to the right one instead of picking a winner.
   CURRENT TOTALS" ledger still reads 204/209 (last entry m34-l, 2026-08-31) against a measured
   218/223 — four closes behind, spanning untouched milestones.
 
-- [ ] (m39-e-2) ⛔⛔ **MASTER-STRIP MODULATION NEVER REACHES A BOUNCE — works live, silently
+- [x] (m39-e-2) ✅ **DONE 2026-09-27 (W7-ME2, verified by me 09:58).** ⛔⛔ **MASTER-STRIP MODULATION NEVER REACHES A BOUNCE — works live, silently
   absent offline. MEASURED 2026-09-19, and the source claims the opposite in writing.**
   `graph.masterModulationSources/Routes` are assigned in exactly two places
   (`Sources/DAWEngine/AudioEngine.swift:712-713` on rebuild-republish, `:2410-2411` in
@@ -4386,7 +5811,7 @@ better, so the app can ROUTE to the right one instead of picking a winner.
   ⚠️ Deliberately NOT fixed in the same breath as it was found: an `audio-dsp-engineer` agent was
   mid-flight in `Commands.swift`/`Effects.swift` on m39-i, and a concurrent multi-file signature
   change through `AudioEngine`/`ProjectStore` risked colliding with it.
-- [ ] (m39-f-3) ⚠️ **`fx.describe` does not emit `modulatable` — and `mod.describeKinds` TELLS
+- [x] (m39-f-3) ✅ **DONE 2026-09-27 (W7-MF3, verified by me 09:51).** ⚠️ **`fx.describe` does not emit `modulatable` — and `mod.describeKinds` TELLS
   AGENTS IT DOES.** `EffectParamSpec.modulatable` is declared (`Sources/DAWCore/Effects.swift:964`)
   and `ModulationSnapshotBuilder.resolveTarget` REFUSES a route against a `.refused` param, but
   `fx.describe`'s `paramObj` (`Sources/DAWControl/Commands.swift:2765-2776`) never puts the verdict

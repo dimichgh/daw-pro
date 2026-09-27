@@ -568,8 +568,9 @@ struct EngineNoticeEngineTests {
     /// What the LIVE graph would play for `clip`, as audio: an offline render
     /// whose stretch provider is the live engine's OWN resolver (the closure
     /// the graph's reconcile calls — `.ready(url)` opens `url`, `.bridge(url)`
-    /// opens the clip's PREVIOUS file `url` (p2-ren Stage A), `.pending`
-    /// schedules nothing), rendered from the clip's start, written to a temp
+    /// opens the clip's PREVIOUS file `url` (p2-ren Stage A), `.provisional(url)`
+    /// its quick PREVIEW `url` (Stage B), `.pending` schedules nothing),
+    /// rendered from the clip's start, written to a temp
     /// WAV and read back. The bounce path (`renderOffline`) is deliberately
     /// NOT used: it calls `renderIfNeeded` directly and would render the new
     /// key itself, hiding what the live graph does.
@@ -578,7 +579,7 @@ struct EngineNoticeEngineTests {
         let renderer = OfflineRenderer()
         renderer.stretchedFileProvider = { clip in
             switch resolver(clip) {
-            case .ready(let url), .bridge(let url): return url
+            case .ready(let url), .bridge(let url), .provisional(let url): return url
             case .pending: return nil
             }
         }
@@ -1092,6 +1093,9 @@ struct EngineNoticeEngineTests {
     /// edit after the file the clip plays was deleted.
     private func vetoScenarioTranscript(configure: (AudioEngine) -> Void) async throws -> [String] {
         let engine = engineWithTempCache()
+        // p2-ren Stage B's provisional is OFF for Stage A's two pinned
+        // transcripts; `provisionalSessionReadsAsDesigned` turns it on.
+        engine.provisionalsEnabled = false
         configure(engine)
         let box = EventBox()
         engine.engineNoticeHandler = { box.events.append($0) }

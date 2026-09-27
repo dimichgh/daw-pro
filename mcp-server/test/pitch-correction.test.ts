@@ -9,8 +9,8 @@
  * `DawBridge.prototype.send` before importing the real `McpServer`, drive
  * each tool over an in-memory transport, and assert:
  *   - clip_auto_correct_pitch forwards {clipId, preset, tonicPitchClass,
- *     mode, strength, retuneMs, preserveVibrato} verbatim, omitted params as
- *     undefined never fabricated defaults
+ *     mode, strength, retuneMs, preserveVibrato, formantCorrection} verbatim,
+ *     omitted params as undefined never fabricated defaults
  *   - the app's response round-trips verbatim
  *   - preset/mode enums reject an unrecognized value at the SCHEMA layer,
  *     zero bridge calls (the app's own field-named-error path is a
@@ -93,6 +93,29 @@
  *     precedent this tool otherwise has the least in common with -- see
  *     server.ts for why: both are "sounds now, not an edit" doors)
  *   - an app-side error (e.g. ALL-OR-NOTHING unknown id, a MIDI clip)
+ *     surfaces as an MCP tool error, message verbatim
+ *
+ * C5a-3 / NT-L3 (vibrato-handle design §12.1, natural-tuning §3e) add
+ * clip_set_note_vibrato and its batch twin clip_set_note_vibratos, the
+ * per-note Wobble tool, plus additive fields on clip_get_pitch_edits and
+ * clip_get_played_pitch:
+ *   - clip_set_note_vibrato forwards {clipId, segmentId, vibratoRateHz,
+ *     vibratoDepthCents, vibratoOnsetSeconds, vibratoPhaseAnchorSeconds,
+ *     vibratoScale, driftScale, reset} verbatim -- every field but clipId/
+ *     segmentId forwards as undefined when omitted, never a fabricated
+ *     default; the six wobble numbers are UNCHECKED at the schema layer
+ *     (the clip_set_note_pitch cents precedent) while `reset` IS
+ *     boolean-typed
+ *   - clip_set_note_vibratos forwards {clipId, notes} verbatim, each note's
+ *     six fields also unchecked; the inner note object is `.strict()`
+ *     (m30-c) and has NO `reset` key at all (reset stays single-note)
+ *   - both round-trip the app's response verbatim, including the ALWAYS-
+ *     present `skippedSoundIds` (and `skippedSoundsSentence` when present)
+ *   - both registered via the STRICT-SCHEMA wrapper; an empty `notes` array
+ *     on the batch is NOT rejected at the schema layer (no `.min(1)`, the
+ *     clip_set_note_pitches precedent) -- it reaches the bridge so the
+ *     store's own empty-list refusal surfaces verbatim
+ *   - an app-side error (a refusal sentence, or ALL-OR-NOTHING unknown id)
  *     surfaces as an MCP tool error, message verbatim
  */
 
@@ -235,6 +258,10 @@ test("clip_auto_correct_pitch forwards every optional param explicitly, includin
     retuneMs: 60,
     preserveVibrato: false,
     replaceExisting: false,
+    // W7-WIRE2: formantCorrection was not passed above, so it forwards as
+    // undefined here too — the same "omitted param forwards as undefined"
+    // rule every other optional on this tool already follows.
+    formantCorrection: undefined,
   });
 });
 
@@ -271,6 +298,55 @@ test("clip_auto_correct_pitch surfaces the replaceExisting:false refusal as an M
   const r = result as any;
   assert.ok(r.isError, "the replaceExisting refusal must be a tool error, never a silent success");
   assert.match(r.content[0].text as string, /replaceExisting:true/);
+});
+
+// --- W7-WIRE2 (natural tuning §1(e) wire leg): formantCorrection -----------
+
+test("clip_auto_correct_pitch forwards formantCorrection verbatim (a number) and omits it when absent", async () => {
+  const clipId = randomUUID();
+  queuedResult = makeStubbedResponse();
+
+  await client.callTool({
+    name: "clip_auto_correct_pitch",
+    arguments: { clipId, formantCorrection: 0.4 },
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.params["formantCorrection"], 0.4);
+
+  queuedResult = makeStubbedResponse();
+  await client.callTool({ name: "clip_auto_correct_pitch", arguments: { clipId } });
+  assert.equal(calls.length, 2);
+  assert.equal(
+    calls[1]!.params["formantCorrection"],
+    undefined,
+    "an omitted formantCorrection forwards as undefined, never a fabricated default"
+  );
+  assert.ok(
+    !JSON.stringify(calls[1]!.params).includes("formantCorrection"),
+    "an undefined-valued key is dropped by JSON.stringify — absent on the wire, not null"
+  );
+});
+
+test("clip_auto_correct_pitch refuses formantCorrection below 0, above 1 and null at the schema layer, zero bridge calls", async () => {
+  const clipId = randomUUID();
+
+  const tooLow = await client.callTool({
+    name: "clip_auto_correct_pitch",
+    arguments: { clipId, formantCorrection: -0.1 },
+  });
+  const tooHigh = await client.callTool({
+    name: "clip_auto_correct_pitch",
+    arguments: { clipId, formantCorrection: 1.1 },
+  });
+  const nullValue = await client.callTool({
+    name: "clip_auto_correct_pitch",
+    arguments: { clipId, formantCorrection: null },
+  });
+  for (const response of [tooLow, tooHigh, nullValue]) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    assert.ok((response as any).isError);
+  }
+  assert.equal(calls.length, 0, "every schema rejection above must never reach the bridge");
 });
 
 test("clip_auto_correct_pitch requires a UUID clipId (rejected at the schema layer, zero bridge calls)", async () => {
@@ -1472,6 +1548,488 @@ test("clip_audition_note surfaces an app-side error (e.g. ALL-OR-NOTHING unknown
 
   assert.equal(calls.length, 1);
   assert.equal(calls[0]!.command, "clip.auditionNote");
+  const r = result as any;
+  assert.ok(r.isError, "an app-side error must be a tool error, never a silent success");
+  assert.match(r.content[0].text as string, /No note with id .* 1 note\(s\)/);
+});
+
+// --- clip_find_unpitched_sounds (UB-2) --------------------------------------
+
+function makeFoundSoundsResponse(extra: Record<string, unknown> = {}) {
+  return {
+    ...makeStubbedResponse(),
+    added: 1,
+    marginDb: 9,
+    floorDbfs: -60,
+    floorIsDigitalSilence: false,
+    thresholdDbfs: -51,
+    singingDbfs: -20,
+    sounds: [
+      {
+        segmentId: randomUUID(),
+        startSeconds: 1.2,
+        endSeconds: 1.39,
+        anchorHz: 220,
+        borrowedFromSegmentId: randomUUID(),
+        borrowedFrom: "following",
+      },
+    ],
+    ...extra,
+  };
+}
+
+test("clip_find_unpitched_sounds forwards {clipId} with marginDb undefined when omitted, and the response round-trips verbatim", async () => {
+  const clipId = randomUUID();
+  const stubbed = makeFoundSoundsResponse({ clipId });
+  queuedResult = stubbed;
+
+  const result = await client.callTool({
+    name: "clip_find_unpitched_sounds",
+    arguments: { clipId },
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.command, "clip.findUnpitchedSounds");
+  assert.deepEqual(calls[0]!.params, { clipId, marginDb: undefined });
+
+  const parsed = parseJSON(result as any);
+  assert.deepEqual(parsed, stubbed, "the app's response round-trips verbatim");
+});
+
+test("clip_find_unpitched_sounds forwards marginDb explicitly when given", async () => {
+  const clipId = randomUUID();
+  queuedResult = makeFoundSoundsResponse({ clipId, marginDb: 12 });
+
+  await client.callTool({
+    name: "clip_find_unpitched_sounds",
+    arguments: { clipId, marginDb: 12 },
+  });
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0]!.params, { clipId, marginDb: 12 });
+});
+
+test("clip_find_unpitched_sounds: marginDb is range-checked 0..60 at the schema layer (unlike clip_set_note_gain's gainDb, which is not)", async () => {
+  const clipId = randomUUID();
+
+  let r = (await client.callTool({
+    name: "clip_find_unpitched_sounds",
+    arguments: { clipId, marginDb: -1 },
+  })) as any;
+  assert.ok(r.isError, "marginDb below 0 must be rejected at the schema layer");
+
+  r = (await client.callTool({
+    name: "clip_find_unpitched_sounds",
+    arguments: { clipId, marginDb: 61 },
+  })) as any;
+  assert.ok(r.isError, "marginDb above 60 must be rejected at the schema layer");
+
+  assert.equal(calls.length, 0, "every schema rejection above must never reach the bridge");
+});
+
+test("clip_find_unpitched_sounds requires a UUID clipId (schema layer, zero bridge calls)", async () => {
+  const missing = (await client.callTool({ name: "clip_find_unpitched_sounds", arguments: {} })) as any;
+  assert.ok(missing.isError, "missing clipId must be rejected");
+
+  const badId = (await client.callTool({
+    name: "clip_find_unpitched_sounds",
+    arguments: { clipId: "not-a-uuid" },
+  })) as any;
+  assert.ok(badId.isError, "a non-UUID clipId must be rejected");
+
+  const badMargin = (await client.callTool({
+    name: "clip_find_unpitched_sounds",
+    arguments: { clipId: randomUUID(), marginDb: "loud" },
+  })) as any;
+  assert.ok(badMargin.isError, "a non-numeric marginDb must be rejected");
+
+  assert.equal(calls.length, 0, "every schema rejection above must never reach the bridge");
+});
+
+test("clip_find_unpitched_sounds is registered via the STRICT-SCHEMA wrapper: an unrecognized argument IS rejected", async () => {
+  const clipId = randomUUID();
+  const result = (await client.callTool({
+    name: "clip_find_unpitched_sounds",
+    arguments: { clipId, bogus: true },
+  })) as any;
+  assert.ok(result.isError);
+  assert.equal(calls.length, 0);
+});
+
+test("clip_find_unpitched_sounds: a real 'nothing found' answer (added:0, skippedReason) round-trips as a SUCCESS, never a tool error", async () => {
+  const clipId = randomUUID();
+  queuedResult = makeFoundSoundsResponse({
+    clipId,
+    added: 0,
+    sounds: [],
+    floorDbfs: undefined,
+    thresholdDbfs: undefined,
+    skippedReason: "notEnoughQuiet",
+    skippedMessage:
+      "Under 1 second(s) of quiet time were found between notes, so this clip's own noise " +
+      "floor could not be measured — there is nothing to compare a sound's loudness against.",
+  });
+
+  const result = (await client.callTool({
+    name: "clip_find_unpitched_sounds",
+    arguments: { clipId },
+  })) as any;
+
+  assert.equal(calls.length, 1);
+  assert.ok(!result.isError, "the finder declining on purpose is a SUCCESS, never a tool error");
+  const parsed = parseJSON(result);
+  assert.equal(parsed.added, 0);
+  assert.equal(parsed.skippedReason, "notEnoughQuiet");
+  assert.match(parsed.skippedMessage, /noise/);
+});
+
+test("clip_find_unpitched_sounds surfaces an app-side error (e.g. no stored note table) as an MCP tool error, message verbatim", async () => {
+  const clipId = randomUUID();
+  queuedError = new Error(
+    "This clip has no note table to add sounds to. Open it in the note editor or run " +
+      "`clip.autoCorrectPitch`: a new table already includes the sounds with no detected pitch."
+  );
+
+  const result = await client.callTool({
+    name: "clip_find_unpitched_sounds",
+    arguments: { clipId },
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.command, "clip.findUnpitchedSounds");
+  const r = result as any;
+  assert.ok(r.isError, "an app-side error must be a tool error, never a silent success");
+  assert.match(r.content[0].text as string, /no note table to add sounds to/);
+});
+
+// --- clip_set_note_vibrato / clip_set_note_vibratos (C5a-3 / NT-L3) ---------
+
+function makeVibratoResponse(extra: Record<string, unknown> = {}) {
+  return {
+    ...makeStubbedResponse(),
+    skippedSoundIds: [],
+    ...extra,
+  };
+}
+
+test("clip_set_note_vibrato forwards {clipId, segmentId} with every optional field undefined when omitted, and the response round-trips verbatim", async () => {
+  const clipId = randomUUID();
+  const segmentId = randomUUID();
+  const stubbed = makeVibratoResponse({
+    segmentId,
+    vibrato: {
+      requested: { vibratoRateHz: 5.5 },
+      applied: {
+        vibratoRateHz: 5.5, vibratoDepthCents: 0, vibratoOnsetSeconds: 0,
+        vibratoPhaseAnchorSeconds: 0, vibratoScale: 1, driftScale: 1,
+      },
+      heardRateHz: 5.5,
+      clamped: [],
+      silentWobble: false,
+      parkedRate: false,
+    },
+  });
+  queuedResult = stubbed;
+
+  const result = await client.callTool({
+    name: "clip_set_note_vibrato",
+    arguments: { clipId, segmentId, vibratoRateHz: 5.5 },
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.command, "clip.setNoteVibrato");
+  assert.deepEqual(calls[0]!.params, {
+    clipId, segmentId, vibratoRateHz: 5.5, vibratoDepthCents: undefined,
+    vibratoOnsetSeconds: undefined, vibratoPhaseAnchorSeconds: undefined,
+    vibratoScale: undefined, driftScale: undefined, reset: undefined,
+  });
+
+  const parsed = parseJSON(result as any);
+  assert.deepEqual(parsed, stubbed, "the app's response round-trips verbatim");
+});
+
+test("clip_set_note_vibrato forwards every field explicitly, including reset:true alone", async () => {
+  const clipId = randomUUID();
+  const segmentId = randomUUID();
+  queuedResult = makeVibratoResponse({ segmentId });
+
+  await client.callTool({
+    name: "clip_set_note_vibrato",
+    arguments: { clipId, segmentId, reset: true },
+  });
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0]!.params, {
+    clipId, segmentId, vibratoRateHz: undefined, vibratoDepthCents: undefined,
+    vibratoOnsetSeconds: undefined, vibratoPhaseAnchorSeconds: undefined,
+    vibratoScale: undefined, driftScale: undefined, reset: true,
+  });
+});
+
+test("clip_set_note_vibrato's numeric fields are UNCHECKED at the schema layer — an out-of-range rate still reaches the bridge (the clamp is the store's job)", async () => {
+  const clipId = randomUUID();
+  const segmentId = randomUUID();
+  queuedResult = makeVibratoResponse({
+    segmentId,
+    vibrato: {
+      requested: { vibratoRateHz: 999 }, applied: { vibratoRateHz: 8 },
+      heardRateHz: 8, clamped: ["heardRateCeiling"], silentWobble: false, parkedRate: false,
+    },
+  });
+
+  const result = await client.callTool({
+    name: "clip_set_note_vibrato",
+    arguments: { clipId, segmentId, vibratoRateHz: 999 },
+  });
+
+  assert.equal(calls.length, 1, "an out-of-range rate must still reach the bridge, unclamped");
+  assert.equal(calls[0]!.params["vibratoRateHz"], 999, "the schema forwards the raw value, not a clamped one");
+  const r = result as any;
+  assert.ok(!r.isError);
+  assert.deepEqual(parseJSON(r).vibrato.clamped, ["heardRateCeiling"], "the RESPONSE carries the app's clamp");
+});
+
+test("clip_set_note_vibrato requires clipId and segmentId (UUIDs) at the schema layer, zero bridge calls", async () => {
+  const segmentId = randomUUID();
+  const clipId = randomUUID();
+
+  let r = (await client.callTool({
+    name: "clip_set_note_vibrato",
+    arguments: { segmentId, vibratoRateHz: 5 },
+  })) as any;
+  assert.ok(r.isError, "missing clipId must be rejected");
+
+  r = (await client.callTool({
+    name: "clip_set_note_vibrato",
+    arguments: { clipId, vibratoRateHz: 5 },
+  })) as any;
+  assert.ok(r.isError, "missing segmentId must be rejected");
+
+  r = (await client.callTool({
+    name: "clip_set_note_vibrato",
+    arguments: { clipId, segmentId: "not-a-uuid", vibratoRateHz: 5 },
+  })) as any;
+  assert.ok(r.isError, "a non-UUID segmentId must be rejected");
+
+  r = (await client.callTool({
+    name: "clip_set_note_vibrato",
+    arguments: { clipId, segmentId, vibratoRateHz: "fast" },
+  })) as any;
+  assert.ok(r.isError, "a non-numeric vibratoRateHz must be rejected");
+
+  r = (await client.callTool({
+    name: "clip_set_note_vibrato",
+    arguments: { clipId, segmentId, reset: "true" },
+  })) as any;
+  assert.ok(r.isError, "a non-boolean reset must be rejected");
+
+  assert.equal(calls.length, 0, "every schema rejection above must never reach the bridge");
+});
+
+test("clip_set_note_vibrato is registered via the STRICT-SCHEMA wrapper: an unrecognized argument IS rejected", async () => {
+  const clipId = randomUUID();
+  const segmentId = randomUUID();
+  const result = (await client.callTool({
+    name: "clip_set_note_vibrato",
+    arguments: { clipId, segmentId, vibratoRateHz: 5, bogus: true },
+  })) as any;
+  assert.ok(result.isError);
+  assert.equal(calls.length, 0);
+});
+
+test("clip_set_note_vibrato surfaces an app-side error (e.g. reset combined with a field) as an MCP tool error, message verbatim", async () => {
+  const clipId = randomUUID();
+  const segmentId = randomUUID();
+  queuedError = new Error(
+    "reset puts every wobble setting back to how it was sung; send it on its own."
+  );
+
+  const result = await client.callTool({
+    name: "clip_set_note_vibrato",
+    arguments: { clipId, segmentId, reset: true, vibratoRateHz: 5 },
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.command, "clip.setNoteVibrato");
+  const r = result as any;
+  assert.ok(r.isError, "an app-side error must be a tool error, never a silent success");
+  assert.match(r.content[0].text as string, /send it on its own/);
+});
+
+test("clip_set_note_vibratos forwards {clipId, notes} verbatim, and the response merges notes plus skippedSoundIds (echoed from the app)", async () => {
+  const clipId = randomUUID();
+  const segmentIdA = randomUUID();
+  const segmentIdB = randomUUID();
+  const soundId = randomUUID();
+  const stubbed = makeVibratoResponse({
+    notes: [
+      {
+        segmentId: segmentIdA,
+        requested: { driftScale: 0 },
+        applied: { driftScale: 0, vibratoScale: 1 },
+        heardRateHz: 0,
+        clamped: [],
+        silentWobble: false,
+        parkedRate: false,
+      },
+      {
+        segmentId: segmentIdB,
+        requested: { vibratoScale: 0 },
+        applied: { vibratoScale: 0, driftScale: 1 },
+        heardRateHz: 0,
+        clamped: [],
+        silentWobble: false,
+        parkedRate: false,
+      },
+    ],
+    skippedSoundIds: [soundId],
+    skippedSoundsSentence:
+      "1 of the 3 named ids has no detected pitch, so it was left alone: it cannot carry a wobble setting.",
+  });
+  queuedResult = stubbed;
+
+  const notes = [
+    { segmentId: segmentIdA, driftScale: 0 },
+    { segmentId: segmentIdB, vibratoScale: 0 },
+    { segmentId: soundId, vibratoScale: 0 },
+  ];
+  const result = await client.callTool({
+    name: "clip_set_note_vibratos",
+    arguments: { clipId, notes },
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.command, "clip.setNoteVibratos");
+  assert.deepEqual(calls[0]!.params, { clipId, notes });
+
+  const parsed = parseJSON(result as any);
+  assert.deepEqual(parsed, stubbed, "the app's response round-trips verbatim, including the skip echo");
+});
+
+test("clip_set_note_vibratos's per-note fields are UNCHECKED at the schema layer, per item — an out-of-range value still reaches the bridge (the clamp is the store's job)", async () => {
+  const clipId = randomUUID();
+  const segmentId = randomUUID();
+  queuedResult = makeVibratoResponse({
+    notes: [{
+      segmentId, requested: { vibratoRateHz: 999 }, applied: { vibratoRateHz: 8 },
+      heardRateHz: 8, clamped: ["heardRateCeiling"], silentWobble: false, parkedRate: false,
+    }],
+  });
+  const result = await client.callTool({
+    name: "clip_set_note_vibratos",
+    arguments: { clipId, notes: [{ segmentId, vibratoRateHz: 999 }] },
+  });
+  assert.equal(calls.length, 1, "an out-of-range rate must still reach the bridge, unclamped");
+  assert.deepEqual(
+    calls[0]!.params["notes"],
+    [{ segmentId, vibratoRateHz: 999 }],
+    "the schema forwards the raw value, not a clamped one"
+  );
+  const r = result as any;
+  assert.ok(!r.isError);
+  assert.deepEqual(parseJSON(r).notes[0].clamped, ["heardRateCeiling"], "the RESPONSE carries the app's clamp");
+});
+
+test("clip_set_note_vibratos requires clipId and notes (array of {segmentId, <wobble fields>}) at the schema layer, zero bridge calls", async () => {
+  const clipId = randomUUID();
+  const segmentId = randomUUID();
+
+  let r = (await client.callTool({
+    name: "clip_set_note_vibratos",
+    arguments: { notes: [{ segmentId, vibratoRateHz: 5 }] },
+  })) as any;
+  assert.ok(r.isError, "missing clipId must be rejected");
+
+  r = (await client.callTool({ name: "clip_set_note_vibratos", arguments: { clipId } })) as any;
+  assert.ok(r.isError, "missing notes must be rejected");
+
+  r = (await client.callTool({
+    name: "clip_set_note_vibratos",
+    arguments: { clipId, notes: segmentId },
+  })) as any;
+  assert.ok(r.isError, "a bare string notes (not an array) must be rejected");
+
+  r = (await client.callTool({
+    name: "clip_set_note_vibratos",
+    arguments: { clipId, notes: ["not-an-object"] },
+  })) as any;
+  assert.ok(r.isError, "a notes element that is not an object must be rejected");
+
+  r = (await client.callTool({
+    name: "clip_set_note_vibratos",
+    arguments: { clipId, notes: [{ segmentId: "not-a-uuid", vibratoRateHz: 5 }] },
+  })) as any;
+  assert.ok(r.isError, "a non-UUID segmentId inside a notes element must be rejected");
+
+  r = (await client.callTool({
+    name: "clip_set_note_vibratos",
+    arguments: { clipId, notes: [{ segmentId, vibratoRateHz: "fast" }] },
+  })) as any;
+  assert.ok(r.isError, "a non-numeric field inside a notes element must be rejected");
+
+  assert.equal(calls.length, 0, "every schema rejection above must never reach the bridge");
+});
+
+test("clip_set_note_vibratos: an unrecognized key INSIDE one notes[] element is rejected (the m30-c nested-strict precedent) — no `reset` inside a batch item either", async () => {
+  const clipId = randomUUID();
+  const segmentId = randomUUID();
+
+  let result = (await client.callTool({
+    name: "clip_set_note_vibratos",
+    arguments: { clipId, notes: [{ segmentId, vibratoRateHz: 5, bogus: true }] },
+  })) as any;
+  assert.ok(result.isError, "a typo'd field inside a notes element must be REJECTED, not silently stripped");
+  assert.equal(calls.length, 0);
+
+  result = (await client.callTool({
+    name: "clip_set_note_vibratos",
+    arguments: { clipId, notes: [{ segmentId, reset: true }] },
+  })) as any;
+  assert.ok(result.isError, "`reset` is not one of this item schema's keys — batch has no reset");
+  assert.equal(calls.length, 0);
+});
+
+test("clip_set_note_vibratos: an empty notes array is NOT rejected at the schema layer — it reaches the bridge (no .min(1))", async () => {
+  const clipId = randomUUID();
+  queuedError = new Error(
+    "Name at least one note to change. Read the clip's note ids with `clip.getPitchEdits` first."
+  );
+  const result = await client.callTool({
+    name: "clip_set_note_vibratos",
+    arguments: { clipId, notes: [] },
+  });
+  assert.equal(calls.length, 1, "an empty notes array must reach the bridge, not be pre-empted by the schema");
+  assert.deepEqual(calls[0]!.params, { clipId, notes: [] });
+  const r = result as any;
+  assert.ok(r.isError, "the store's own empty-list refusal must surface as a tool error");
+  assert.match(r.content[0].text as string, /Name at least one note to change/);
+});
+
+test("clip_set_note_vibratos is registered via the STRICT-SCHEMA wrapper: an unrecognized top-level argument IS rejected", async () => {
+  const clipId = randomUUID();
+  const segmentId = randomUUID();
+  const result = (await client.callTool({
+    name: "clip_set_note_vibratos",
+    arguments: { clipId, notes: [{ segmentId, vibratoRateHz: 5 }], bogus: true },
+  })) as any;
+  assert.ok(result.isError);
+  assert.equal(calls.length, 0);
+});
+
+test("clip_set_note_vibratos surfaces an app-side error (e.g. ALL-OR-NOTHING unknown id, or an all-sounds batch) as an MCP tool error, message verbatim", async () => {
+  const clipId = randomUUID();
+  const segmentId = randomUUID();
+  queuedError = new Error(
+    "No note with id 11111111-1111-1111-1111-111111111111 on this clip's 1 note(s)."
+  );
+
+  const result = await client.callTool({
+    name: "clip_set_note_vibratos",
+    arguments: { clipId, notes: [{ segmentId, vibratoRateHz: 5 }] },
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.command, "clip.setNoteVibratos");
   const r = result as any;
   assert.ok(r.isError, "an app-side error must be a tool error, never a silent success");
   assert.match(r.content[0].text as string, /No note with id .* 1 note\(s\)/);

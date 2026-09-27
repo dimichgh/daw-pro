@@ -802,6 +802,9 @@ struct ContentView: View {
                 // grid uses the meter GOVERNING THE CLIP'S START beat, so a clip in
                 // a 7/8 section rules bars every 7 beats and a 4/4 clip every 4.
                 beatsPerBar: store.transport.meterMap.beatsPerBar(atBeat: clip.startBeat),
+                // m23-ap I5-F2: the song's ONE meter map — the roll's ruler, grid,
+                // "BAR n" and playhead snap all read the SONG's bars through it.
+                meterMap: store.transport.meterMap,
                 // The SAME transport source the arrange timeline consumes (no second
                 // ticker) — the piano roll playhead is a rendering of this state.
                 positionBeats: store.transport.positionBeats,
@@ -1043,6 +1046,8 @@ struct ContentView: View {
                     case .reset:
                         model.zoomPitchEditorReset()
                         model.pitchEditorRowZoomReset()
+                    // m23-ap I2 — the pinch: a scale, not a ladder step.
+                    case .timeScale(let ppb): model.setPitchEditorTimeScale(ppb)
                     }
                 },
                 // The spy seam: the header reports the very strings it drew, so
@@ -1077,8 +1082,36 @@ struct ContentView: View {
                     model.routePitchEditorAudition(request, clipID: clip.id)
                 },
                 // The router's honest-waiting line, drawn on the state row.
-                auditionLine: model.pitchEditorAudition.line
+                auditionLine: model.pitchEditorAudition.line,
+                // m23-ap I5 — PLACE THE PLAYHEAD. `effectiveClipSnap` (the snap
+                // in force, the roll's own input above) decides ON/OFF; the pane
+                // places on its own 1/16. The seek goes through the SAME store
+                // door the roll's scrub uses, handed to the pane's model at mount
+                // — the model is its only caller.
+                appSnap: model.effectiveClipSnap,
+                onSeek: { beats in _ = try? store.seek(toBeats: beats) },
+                // m23-ap I5 — FOLLOW: the app-held runtime (it survives the
+                // `.id(clip.id)` rebuild below) and the transport's state, the
+                // roll's two inputs above.
+                follow: model.pitchEditorFollow,
+                isPlaying: store.transport.isPlaying,
+                // UE-1 — "Find sounds with no pitch": the header's button, for a
+                // stored table made before sounds existed, through the SAME
+                // store method `clip.findUnpitchedSounds` calls (one "Find
+                // Sounds" undo step). The pane's model decides when to run it
+                // and shows the answer on its own line.
+                onFindSounds: { await model.findUnpitchedSoundsFromEditor(clipID: clip.id) },
+                // m23-ap I5-F1 — the SONG's meter, so the time ruler names the
+                // bars the transport and the arrange ruler name. The one map,
+                // never a `MeterMap(constant:)` rebuilt here.
+                meterMap: store.transport.meterMap,
+                // p2-ren Stage B″(c) — the "Preview" caption's input: the
+                // app's poll, for THIS clip only.
+                renderAudible: model.pitchEditorRenderAudible(clipID: clip.id)
             )
+            // B″(c) — THE POLL LIVES EXACTLY AS LONG AS THIS PANE: SwiftUI
+            // cancels it when the pane closes or switches clip.
+            .task(id: clip.id) { await model.pollPitchEditorRenderAudible(clipID: clip.id) }
             .id(clip.id)
             .frame(height: geo.size.height * editorPaneFraction(geoHeight: geo.size.height))
         }

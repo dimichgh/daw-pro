@@ -263,7 +263,11 @@ public struct ProjectDocument: Codable, Sendable, Equatable {
                     // segments re-heal (sorted, non-overlapping, values
                     // re-clamped) through `PitchEditSet.init`, and an empty set
                     // normalises back to nil in `Clip.init`.
-                    pitchEdits: cd.pitchEdits
+                    pitchEdits: cd.pitchEdits,
+                    // Lyrics (p2-sing-d1b): absent reads as none; blank text
+                    // and an audio clip's stray key normalise to nil in
+                    // `Clip.init`.
+                    lyrics: cd.lyrics
                 )
             }
             let instrument = td.instrument.map { instDoc in
@@ -335,7 +339,9 @@ public struct ProjectDocument: Codable, Sendable, Equatable {
                 // gone is a normal state, and blanking the record here would
                 // destroy the only thing that can still say what the audio was
                 // made from.
-                voiceProvenance: td.voiceProvenance
+                voiceProvenance: td.voiceProvenance,
+                // p2-sing-d2: the same fact-not-binding rule, verbatim.
+                sungVocalProvenance: td.sungVocalProvenance
             )
         }
         // Attach the non-trivial tempo/meter maps (m12-d) onto the runtime
@@ -607,11 +613,16 @@ public struct TrackDocument: Codable, Sendable, Equatable {
     /// found by id under the bundle's `voices/` folder, deliberately DERIVED
     /// rather than recorded, so no manifest can disagree with the directory.
     public var voiceProvenance: VoiceProvenance?
+    /// Sung-vocal provenance (p2-sing-d2). Additive and optional, the
+    /// `voiceProvenance` rule exactly: nil (key omitted) on every track no
+    /// sing job made, and `SungVocalProvenance`'s Codable IS the disk shape.
+    public var sungVocalProvenance: SungVocalProvenance?
 
     private enum CodingKeys: String, CodingKey {
         case id, name, kind, volume, pan, isMuted, isSoloed, isArmed, isAIGenerated, clips, instrument
         case outputBusId, sends, effects, automation, takeGroups
         case voiceProvenance
+        case sungVocalProvenance
     }
 
     init(from track: Track, mediaRefs: [UUID: String?]) {
@@ -646,6 +657,7 @@ public struct TrackDocument: Codable, Sendable, Equatable {
         // m24-n: rides verbatim; nil on a track no conversion produced, so the
         // synthesized encodeIfPresent omits the key entirely.
         voiceProvenance = track.voiceProvenance
+        sungVocalProvenance = track.sungVocalProvenance
     }
 
     public init(from decoder: any Decoder) throws {
@@ -673,6 +685,8 @@ public struct TrackDocument: Codable, Sendable, Equatable {
         takeGroups = try c.decodeIfPresent([TakeGroupDocument].self, forKey: .takeGroups)
         // Additive optional (m24-n): a pre-provenance track has no key.
         voiceProvenance = try c.decodeIfPresent(VoiceProvenance.self, forKey: .voiceProvenance)
+        // Additive optional (p2-sing-d2): a pre-sing track has no key.
+        sungVocalProvenance = try c.decodeIfPresent(SungVocalProvenance.self, forKey: .sungVocalProvenance)
     }
 }
 
@@ -1474,6 +1488,12 @@ public struct ClipDocument: Codable, Sendable, Equatable {
     /// which is precisely how `gainEnvelope` silently vanished from take lanes
     /// for three milestones until m16-b3 found it.
     public var pitchEdits: PitchEditSet?
+    /// Typed lyrics (p2-sing-d1b) — additive optional, the omit-when-nil rule:
+    /// stored ONLY when the clip has lyrics, so a project without any stays
+    /// byte-identical across a round trip; absent reads as none. Same m12-f
+    /// mirror-DTO lesson as `pitchEdits`: threaded through `init(from clip:)`,
+    /// encode, decode AND both `ClipDocument`→`Clip` reconstructions.
+    public var lyrics: ClipLyrics?
     /// Take-group marker (M5 iii-a) — additive optional, same omit-when-nil rule.
     /// Set only on comp member clips; a pre-take clip has no key and stays
     /// byte-identical across a round trip.
@@ -1484,6 +1504,7 @@ public struct ClipDocument: Codable, Sendable, Equatable {
         case startOffsetSeconds, gainDb, fadeInBeats, fadeOutBeats, fadeInCurve, fadeOutCurve
         case stretchRatio, pitchShiftSemitones, formantPreserve, gainEnvelope, controllerLanes, takeGroupId
         case pitchEdits
+        case lyrics
     }
 
     init(from clip: Clip, media: String?) {
@@ -1510,6 +1531,9 @@ public struct ClipDocument: Codable, Sendable, Equatable {
         // Pitch edits (m23-ap): `Clip.init` already normalised an empty set to
         // nil, so an unedited clip carries no key here either.
         pitchEdits = clip.pitchEdits
+        // Lyrics (p2-sing-d1b): `Clip.init` already normalised blank text to
+        // nil, so a clip without lyrics carries no key here either.
+        lyrics = clip.lyrics
         takeGroupId = clip.takeGroupID
     }
 
@@ -1534,6 +1558,7 @@ public struct ClipDocument: Codable, Sendable, Equatable {
         gainEnvelope = try c.decodeIfPresent([ClipGainPoint].self, forKey: .gainEnvelope)
         controllerLanes = try c.decodeIfPresent([MIDIControllerLane].self, forKey: .controllerLanes)
         pitchEdits = try c.decodeIfPresent(PitchEditSet.self, forKey: .pitchEdits)
+        lyrics = try c.decodeIfPresent(ClipLyrics.self, forKey: .lyrics)
         takeGroupId = try c.decodeIfPresent(UUID.self, forKey: .takeGroupId)
     }
 
@@ -1571,6 +1596,9 @@ public struct ClipDocument: Codable, Sendable, Equatable {
         // Pitch edits (m23-ap): omitted when nil/absent (the clip had none), so a
         // pre-m23-ap clip never grows a key.
         try c.encodeIfPresent(pitchEdits, forKey: .pitchEdits)
+        // Lyrics (p2-sing-d1b): omitted when nil, so a clip without lyrics
+        // never grows a key.
+        try c.encodeIfPresent(lyrics, forKey: .lyrics)
         try c.encodeIfPresent(takeGroupId, forKey: .takeGroupId)
     }
 }
@@ -1640,7 +1668,10 @@ public struct TakeGroupDocument: Codable, Sendable, Equatable {
                 // second hand-maintained field list. That is exactly how
                 // `gainEnvelope` went missing from take lanes from m13-e until
                 // m16-b3 found it.
-                pitchEdits: cd.pitchEdits)
+                pitchEdits: cd.pitchEdits,
+                // p2-sing-d1b: the same second field list, so lyrics are
+                // threaded here too.
+                lyrics: cd.lyrics)
             // TakeLane.init strips any stray takeGroupID (payloads never nest).
             return TakeLane(id: ld.id, name: ld.name, clip: clip)
         }

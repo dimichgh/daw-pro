@@ -11,6 +11,16 @@ import Testing
 /// pitch-only clip's render state, a FAILED render included, never left the
 /// app. Both sides now ask `Clip.rendersThroughStretchCache`.
 ///
+/// p2-ren **Stage B′** (`docs/design/2026-09-25-incremental-note-render.md`
+/// §11 step 14) adds `renderAudible` (exact | preview | previous | silent) to
+/// the same clips, from `store.renderAudible` (which forwards to
+/// `AudioEngineControlling.renderAudible`, derived on the real engine from
+/// `graph.clipPlays`). It says what the clip's node is ACTUALLY PLAYING right
+/// now — a Stage B provisional, a Stage A bridge, honest silence, or the
+/// clip's own exact render — distinct from `stretchRendering`, which is only
+/// about the FINAL render job's own status and can be true at the same time
+/// as any of the four.
+///
 /// The stub answers the SAME status for every clip it is asked about, so the
 /// snapshot's gate — not the stub — decides which clips carry a field. The
 /// invariance controls (an untouched clip, a clip whose note table is
@@ -38,6 +48,18 @@ struct ClipRenderStatusSnapshotTests {
         func clipStretchStatus(trackID: UUID, clipID: UUID) -> ClipStretchStatus? {
             queried.append(clipID)
             return status
+        }
+
+        /// p2-ren Stage B′: what every `renderAudible` query answers, nil
+        /// meaning "this engine has no opinion" (the snapshot then omits the
+        /// field, exactly like `.idle`/nil above).
+        var audible: ClipRenderAudible? = .preview
+        /// Every clip id `renderAudible` was asked about, in order.
+        private(set) var audibleQueried: [UUID] = []
+
+        func renderAudible(trackID: UUID, clipID: UUID) -> ClipRenderAudible? {
+            audibleQueried.append(clipID)
+            return audible
         }
 
         func prepare() throws {}
@@ -184,5 +206,43 @@ struct ClipRenderStatusSnapshotTests {
         #expect(clips[f.untouched]?["stretchError"] == nil)
         #expect(clips[f.detectedOnly]?["stretchError"] == nil)
         #expect(Set(f.engine.queried) == [f.tuned, f.stretched])
+    }
+
+    @Test("project.snapshot reports renderAudible: preview/previous/silent for a TUNED clip (p2-ren Stage B′)")
+    func tunedClipRenderAudibleReachesTheWire() async throws {
+        let f = try await makeFixture()
+
+        for (audible, wire) in [(ClipRenderAudible.preview, "preview"),
+                                 (.previous, "previous"),
+                                 (.silent, "silent")] {
+            f.engine.audible = audible
+            let clips = try await snapshotClips(f)
+            #expect(clips[f.tuned]?["renderAudible"]?.stringValue == wire,
+                    "a tuned clip renders through the stretch cache — what it is actually playing must be visible (\(audible))")
+            // Control: the case the old gate already covered still works.
+            #expect(clips[f.stretched]?["renderAudible"]?.stringValue == wire)
+            // Invariance: clips that never render are never queried and never
+            // carry the field, even though the stub would answer for them too.
+            #expect(clips[f.untouched]?["renderAudible"] == nil)
+            #expect(clips[f.detectedOnly]?["renderAudible"] == nil)
+        }
+        #expect(Set(f.engine.audibleQueried) == [f.tuned, f.stretched],
+                "queried \(f.engine.audibleQueried.map(\.uuidString))")
+    }
+
+    @Test("project.snapshot OMITS renderAudible when the clip plays exactly, or the engine has no opinion (p2-ren Stage B′)")
+    func exactOrUnsupportedRenderAudibleOmitsTheField() async throws {
+        let f = try await makeFixture()
+
+        f.engine.audible = .exact
+        var clips = try await snapshotClips(f)
+        #expect(clips[f.tuned]?["renderAudible"] == nil,
+                "`.exact` is the common case — it must not cost every poll a field agents would mostly ignore")
+        #expect(clips[f.stretched]?["renderAudible"] == nil)
+
+        f.engine.audible = nil
+        clips = try await snapshotClips(f)
+        #expect(clips[f.tuned]?["renderAudible"] == nil,
+                "an engine with no opinion (headless, or one that predates this capability) must omit the field, never fabricate `.exact`")
     }
 }

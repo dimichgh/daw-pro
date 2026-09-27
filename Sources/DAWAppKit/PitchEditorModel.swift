@@ -86,10 +86,10 @@ public enum PitchEditorReadout {
     public nonisolated static let detectorBinCents: Double = 25.79
 
     /// Half a bin — the finest distinction this detector can support, so no
-    /// readout may imply anything finer. Note the chain is wrong twice over:
-    /// the transposer we ship is itself sharp (+5.45 cents at +2 st, +3.95 at
-    /// −2 st), so a readout implying closed-loop exactness would be a second
-    /// lie on top of this one.
+    /// readout may imply anything finer. (The transposer used to add a second
+    /// error, +5.45 c at +2 st and +3.95 at −2 st, until p2-acc's vendored
+    /// patch on 2026-09-25; it now lands within 0.5 c for |shift| ≤ 3 st. This
+    /// floor never depended on it.)
     public nonisolated static let centsResolutionFloor: Double = PitchCorrectionMath.detectorResolutionFloorCents
 
     /// A cents figure as a readout, or `nil` when the figure is inside the
@@ -103,6 +103,30 @@ public enum PitchEditorReadout {
         guard cents.isFinite, abs(cents) >= centsResolutionFloor else { return nil }
         return String(format: "%+.0f cents", cents)
     }
+
+    /// UE-1 — what a SOUND with no detected pitch (`NoteOrigin.unpitched`) says
+    /// INSTEAD of a cents readout. Verbatim from the unpitched-notes design
+    /// §1.7 (U5), which natural-tuning R21 keeps ("U5's on-screen text stays
+    /// true") and R26's renames do not touch.
+    ///
+    /// ⛔ **A SOUND GETS NO NUMBER.** Its drawn pitch is BORROWED from the note
+    /// beside it (§1.5), so "+100 cents" or a note name would be a measurement
+    /// nobody made. What moving it DOES is the useful fact: the breath or
+    /// consonant is transposed, and only gets brighter or darker.
+    public nonisolated static let unpitchedSound =
+        "No pitch found. Moving it shifts this sound: a breath or an 's' just gets brighter or darker."
+
+    /// UE-2 — the TAG a dragged sound carries ABOVE itself (the drag overlay),
+    /// while `unpitchedSound` sits in the palette's readout slot.
+    ///
+    /// ⚠️ **THE SENTENCE CANNOT LIVE AT THE POINTER.** ~94 characters of 9 pt
+    /// mono is ~500 pt, centred over a breath 20–60 pt wide, on a Canvas as
+    /// wide as the clip — so it runs off the visible pane at either end and
+    /// clamping it to the Canvas is not clamping it to what a person sees. Two
+    /// words, the sentence's own first two, are what fits there; the palette
+    /// (the readout's ONE home) says the rest. No direction word ("brighter"):
+    /// §1.7 marks what a move DOES to a sound as inferred, not measured.
+    public nonisolated static let unpitchedSoundTag = "No pitch"
 }
 
 // MARK: - The visible pitch window
@@ -283,6 +307,33 @@ public enum PitchEditorRange {
                        min(fullMidiRange.upperBound, highest.rounded(.up) + heldNoteHeadroomRows))
         return low...high
     }
+
+    // MARK: I6b — the window grows under a drag at its edge (interaction batch §9)
+
+    /// `window` widened by `rows` whole rows at ONE end (m23-ap I6b S2): the TOP
+    /// (higher pitches) for `.leading`, the bottom for `.trailing` — the sides
+    /// `EdgeAutoScroll.Side` names on y, where `.leading` is the top because
+    /// the pane draws its highest pitch there.
+    ///
+    /// Widen-only and clamped to `fullMidiRange`: a non-positive `rows` is no
+    /// change, a bound already at 0 or 127 stays, and a bound somehow already
+    /// PAST the clamp is never pulled back in (that would narrow). The other end
+    /// never moves.
+    public nonisolated static func grown(_ window: ClosedRange<Double>,
+                                         towards side: EdgeAutoScroll.Side,
+                                         by rows: Int) -> ClosedRange<Double> {
+        guard rows > 0 else { return window }
+        switch side {
+        case .leading:
+            let high = max(window.upperBound,
+                           min(fullMidiRange.upperBound, window.upperBound + Double(rows)))
+            return window.lowerBound...high
+        case .trailing:
+            let low = min(window.lowerBound,
+                          max(fullMidiRange.lowerBound, window.lowerBound - Double(rows)))
+            return low...window.upperBound
+        }
+    }
 }
 
 // MARK: - One key of the pitch ruler
@@ -392,11 +443,18 @@ public struct NoteBlob: Sendable, Equatable, Identifiable {
     /// (`isMoved` is the ghost's question, and it is false there).
     public let isPitchEdited: Bool
 
+    /// UE-1 — where the segment this blob was drawn from came from
+    /// (`NoteSegment.origin`, U-A): a note the splitter found, a sung slide, or
+    /// a SOUND with no detected pitch. A detection fact, copied, never derived.
+    /// A blob built without a segment (`init(run:)`) is `.detected`.
+    public let origin: NoteOrigin
+
     public init(id: UUID = UUID(), startSeconds: Double, endSeconds: Double,
                 detectedHz: Double, medianConfidence: Double, frameCount: Int,
                 offsetCents: Double = 0, hasEdits: Bool? = nil,
                 isCleared: Bool = false, amplitudeDb: Double = 0,
-                isPitchEdited: Bool? = nil) {
+                isPitchEdited: Bool? = nil, origin: NoteOrigin = .detected) {
+        self.origin = origin
         self.id = id
         self.startSeconds = startSeconds
         self.endSeconds = endSeconds
@@ -427,8 +485,23 @@ public struct NoteBlob: Sendable, Equatable, Identifiable {
                   hasEdits: segment.isEdited,
                   isCleared: segment.isCleared,
                   amplitudeDb: segment.amplitudeDb,
-                  isPitchEdited: !segment.isPitchIdentity)
+                  isPitchEdited: !segment.isPitchIdentity,
+                  origin: segment.origin)
     }
+
+    /// UE-1 — this blob is a SOUND with no detected pitch: a breath, a
+    /// consonant, or a piece of a sung note the detector did not commit to
+    /// (`NoteOrigin.unpitched`, unpitched-notes design §1.4). Its `centreMidi`
+    /// is the BORROWED anchor of the note beside it (§1.5), never a
+    /// measurement, so it prints no cents (`soundReadout` instead), snaps
+    /// relative to where it sits (`PitchEditorModel.updatePitchDrag`), and is
+    /// a "Sound" in the selection menu (`menuTarget`).
+    public var isUnpitched: Bool { origin == .unpitched }
+
+    /// UE-1 — §1.7's sentence for a sound (`PitchEditorReadout.unpitchedSound`),
+    /// or `nil` for a note. The line a surface shows where a note would show
+    /// its cents.
+    public var soundReadout: String? { isUnpitched ? PitchEditorReadout.unpitchedSound : nil }
 
     /// m23-ap I7b — the note's LEVEL as a readout, "Level -6.0 dB", or `nil`
     /// when there is nothing to say: a note at its sung level (0 dB), or a
@@ -446,10 +519,11 @@ public struct NoteBlob: Sendable, Equatable, Identifiable {
     }
 
     /// What the selection menu needs to know about this note
-    /// (`PitchEditorNoteMenu`). Every drawn note is a NOTE until U-A gives the
-    /// editor unpitched sounds.
+    /// (`PitchEditorNoteMenu`). UE-1: a SOUND is a `.sound`, so its items read
+    /// "Clear Sound" / "Restore 2 Sounds" and a mix reads "Clear 3 Selected"
+    /// (the nouns the menu already mapped; this is their producer).
     public var menuTarget: PitchEditorNoteMenu.Target {
-        PitchEditorNoteMenu.Target(kind: .note, isCleared: isCleared)
+        PitchEditorNoteMenu.Target(kind: isUnpitched ? .sound : .note, isCleared: isCleared)
     }
 
     /// The detected centre plus the edit, WITHOUT the clip's transpose — the
@@ -479,8 +553,11 @@ public struct NoteBlob: Sendable, Equatable, Identifiable {
 
     /// The edit as a READOUT, or `nil` when it is inside the detector's own
     /// resolution (`PitchEditorReadout`'s ±12.90 cent floor). ⚠️ `nil` is
-    /// "too small for us to claim", never "no edit".
-    public var offsetReadout: String? { PitchEditorReadout.centsReadout(offsetCents) }
+    /// "too small for us to claim", never "no edit". UE-1: `nil` for a SOUND,
+    /// always — it has no pitch to move by cents from (`soundReadout`).
+    public var offsetReadout: String? {
+        isUnpitched ? nil : PitchEditorReadout.centsReadout(offsetCents)
+    }
 
     /// The editor's vocabulary for one `VoicedRun`. Verbatim — no rounding, no
     /// re-anchoring, no filtering.
@@ -502,9 +579,10 @@ public struct NoteBlob: Sendable, Equatable, Identifiable {
     }
     /// The distance as a READOUT, or `nil` when it is inside the detector's own
     /// resolution. ⚠️ `nil` is "we cannot tell", never "in tune" —
-    /// `PitchEditorReadout.centsReadout`.
+    /// `PitchEditorReadout.centsReadout`. UE-1: `nil` for a SOUND, always — its
+    /// centre is borrowed, so its distance from a note measures nothing.
     public var centsReadout: String? {
-        PitchEditorReadout.centsReadout(centsFromNearestNote)
+        isUnpitched ? nil : PitchEditorReadout.centsReadout(centsFromNearestNote)
     }
 }
 
@@ -1027,8 +1105,11 @@ public enum PitchEditorState: Sendable, Equatable {
     case idle
     /// Detection is running.
     case analysing
-    /// Detection found notes and they are on screen.
-    case ready(noteCount: Int)
+    /// Detection found notes and they are on screen. `noteCount` is every
+    /// drawn blob; UE-2 — `soundCount` is how many of them are SOUNDS with no
+    /// pitch (`NoteOrigin.unpitched`), so the sentence never calls a breath a
+    /// note. Defaulted: a table with no sound reads exactly as before.
+    case ready(noteCount: Int, soundCount: Int = 0)
     /// Detection ran to completion and found nothing.
     case noNotesFound
     /// The engine could not be asked.
@@ -1039,13 +1120,15 @@ public enum PitchEditorState: Sendable, Equatable {
     /// **The total function §12.1 requires.** Two inputs, no impossible
     /// combination: `PitchEditorPhase` cannot be "in flight" and "failed" at
     /// once, and the note count only decides anything once detection completed.
-    public nonisolated static func resolve(phase: PitchEditorPhase, noteCount: Int) -> PitchEditorState {
+    public nonisolated static func resolve(phase: PitchEditorPhase, noteCount: Int,
+                                           soundCount: Int = 0) -> PitchEditorState {
         switch phase {
         case .notStarted: return .idle
         case .detecting: return .analysing
         case .failed(.engineUnavailable): return .engineUnavailable
         case .failed(.refused(let text)): return .refused(text)
-        case .detected: return noteCount > 0 ? .ready(noteCount: noteCount) : .noNotesFound
+        case .detected:
+            return noteCount > 0 ? .ready(noteCount: noteCount, soundCount: soundCount) : .noNotesFound
         }
     }
 
@@ -1078,7 +1161,17 @@ public enum PitchEditorState: Sendable, Equatable {
             return "We have not listened to this clip yet."
         case .analysing:
             return "Listening to your vocal…"
-        case .ready(let count):
+        case .ready(let count, let sounds) where sounds > 0:
+            // ⛔ UE-2 — A SOUND IS NOT COUNTED AS A NOTE. "Found 72 notes."
+            // beside "1 sound selected" was measured on a real take (32 of the
+            // 72 were breaths and consonants): the words the novice believes
+            // called every one of them a sung note.
+            let notes = max(0, count - sounds)
+            let soundWords = sounds == 1 ? "1 sound with no pitch" : "\(sounds) sounds with no pitch"
+            guard notes > 0 else { return "Found \(soundWords)." }
+            let noteWords = notes == 1 ? "1 note" : "\(notes) notes"
+            return "Found \(noteWords) and \(soundWords)."
+        case .ready(let count, _):
             return count == 1 ? "Found 1 note." : "Found \(count) notes."
         case .noNotesFound:
             return "We could not hear any sung notes here. This works best on one voice "
@@ -1115,14 +1208,34 @@ public enum PitchEditorTool: String, Sendable, Equatable, CaseIterable, Identifi
     case pointer
     /// Cut a note in two where you click (C3).
     case scissors
+    /// m23-ap C5a-4b — change a note's WOBBLE (vibrato): drag a note up to widen
+    /// it, down to smooth it flat, sideways for a faster or slower one; click
+    /// the dot at its top centre for one step (design 2026-09-24 vibrato-handle
+    /// §4.1, the unpitched design's §4). The slot sits after Split (§4.1); the
+    /// Drift (C5a-5) and Shape (C5b) slots are NOT drawn until they work.
+    case wobble
+    /// W7-NTU U3 — make one note's VOICE deeper or brighter without moving its
+    /// pitch (natural tuning §1(f) item 2; R25 names the Formant tool
+    /// "Voice"): drag the note down for deeper, up for brighter; ⌥ for finer
+    /// steps; double-click to put it back as sung. The slot sits after Wobble,
+    /// the order the tools landed in.
+    case voice
 
     public var id: String { rawValue }
 
-    /// SF Symbol. `scissors` is the frames' own glyph for this slot.
+    /// SF Symbol. `scissors` is the frames' own glyph for this slot;
+    /// `waveform.path` is the reference frames' glyph for the wobble tool (§4.1).
+    /// W7-NTU U3 — `mouth` is §1(f) item 2's pick for the Voice slot. The design
+    /// asks for it to be checked on macOS 14 (else `person.wave.2`): it is an
+    /// SF Symbols 3 glyph (macOS 12), from memory, NOT measured, because this
+    /// machine runs a later macOS. `PitchEditorPaletteFitTests.measuringIsReal`
+    /// proves only that it loads HERE.
     public var symbolName: String {
         switch self {
         case .pointer: return "cursorarrow"
         case .scissors: return "scissors"
+        case .wobble: return "waveform.path"
+        case .voice: return "mouth"
         }
     }
 
@@ -1131,6 +1244,8 @@ public enum PitchEditorTool: String, Sendable, Equatable, CaseIterable, Identifi
         switch self {
         case .pointer: return "Move"
         case .scissors: return "Split"
+        case .wobble: return "Wobble"
+        case .voice: return PitchEditorFormantCopy.voiceToolLabel
         }
     }
 
@@ -1138,10 +1253,32 @@ public enum PitchEditorTool: String, Sendable, Equatable, CaseIterable, Identifi
     /// ⚠️ Drawn, not only hovered: a tooltip is invisible to `view.capture`, so
     /// a captured gate cannot tell a correct caption from a missing one (the
     /// `EQCurveEditor.help` lesson).
+    ///
+    /// The Wobble tool's help is DERIVED from the one layout constant
+    /// (`PitchWobbleGesture.help`, design §4.3 D3), so swapping the axis answer
+    /// cannot leave the help lying.
+    ///
+    /// m23-ap C5b-4b — ⌘-drag DRAWS in the Move and Wobble tools now
+    /// (`PitchEditorGestureRouter.commandDraws`), so both helps say so: the
+    /// Move help is design §5.6's minus its timing clause (C2's edge drag is
+    /// not built, and a help may not name a gesture that does nothing), and
+    /// the Wobble help carries its "Hold ⌘ to draw instead." (`drawToolAvailable:
+    /// true`: the sentence names a gesture that works, which is what the flag
+    /// guards). While ⌘ is held the palette shows the brush's own help instead
+    /// (`PitchEditorModel.paletteHelp`).
     public var help: String {
         switch self {
-        case .pointer: return "Drag a note up or down to change its pitch. Hold ⌥ to move it freely."
+        case .pointer:
+            return "Drag a note up or down to change its pitch. Hold ⌘ to draw its line; "
+                + "hold ⌥ to move it freely."
         case .scissors: return "Click a note to cut it in two, so you can tune each half on its own."
+        case .wobble: return PitchWobbleGesture.help(drawToolAvailable: true)
+        // W7-NTU U3 — every word from `PitchEditorFormantCopy`; the ⌘ sentence
+        // asks the router's one home, so it can never name a gesture that
+        // does nothing here.
+        case .voice:
+            return PitchEditorFormantCopy.voiceToolHelp(
+                drawToolAvailable: PitchEditorGestureRouter.commandDraws(in: .voice))
         }
     }
 }
@@ -1177,6 +1314,31 @@ public struct PitchEditorDragDraft: Sendable, Equatable {
     /// Non-empty, every member takes the pressed note's LANDED delta, so the
     /// intervals between the notes are kept (`PitchEditorModel.updatePitchDrag`).
     public internal(set) var members: [PitchEditorDragMember] = []
+    /// m23-ap I6b — the laid-out window's TOP (`midiRange.upperBound`) when
+    /// this drag began. The press point is a CONTENT y fixed for the gesture's
+    /// life, and every row's y counts down from the window's top, so a top that
+    /// moves under the drag (a row grown by `growPitchWindowForDrag`, or a
+    /// relayout) moves every row by that many rows. `updatePitchDrag` takes the
+    /// difference back out: exactly 0, and so bit-identical, while it has not
+    /// moved.
+    public let windowTopAtPress: Double
+    /// m23-ap I6b — whole rows THIS drag grew the window by at its top and at
+    /// its bottom (`PitchEditorModel.growPitchWindowForDrag`). Counters for the
+    /// echo and for the release's headroom pass; the pointer arithmetic reads
+    /// `windowTopAtPress`, never these.
+    public internal(set) var topGrowthRows: Int = 0
+    public internal(set) var bottomGrowthRows: Int = 0
+    /// UE-1 — the PRESSED blob is a sound with no detected pitch
+    /// (`NoteBlob.isUnpitched`). Set once by `beginPitchDrag` and fixed for the
+    /// gesture's life (a `var` only so the memberwise init can default it). It
+    /// decides two things: the drag's snap is RELATIVE — whole semitones from
+    /// where the sound sits, ⌥ free — for the whole group
+    /// (`PitchEditorModel.updateSoundPitchDrag`), and the readout is §1.7's
+    /// sentence, never a number.
+    public internal(set) var isUnpitched: Bool = false
+
+    /// Rows this drag grew the window by, both ends.
+    public var grownRows: Int { topGrowthRows + bottomGrowthRows }
 
     /// Every note this drag moves — the pressed one first, then `members`.
     public var movingSegmentIDs: [UUID] { [segmentID] + members.map(\.segmentID) }
@@ -1210,7 +1372,27 @@ public struct PitchEditorDragDraft: Sendable, Equatable {
     /// the detector can resolve. ⚠️ **`nil` IS NOT "0 cents"** — a free drag of
     /// three cents is a move nobody can measure, and printing a number for it
     /// would claim a precision this chain does not have (§5.5.3).
-    public var readout: String? { PitchEditorReadout.centsReadout(offsetCents) }
+    ///
+    /// UE-1: a SOUND's readout is §1.7's sentence
+    /// (`PitchEditorReadout.unpitchedSound`) for the whole drag, from the press
+    /// on — it prints no cents, because it has no pitch to be moved by cents
+    /// from, and what a person needs to know before letting go is what moving
+    /// it does to the sound.
+    public var readout: String? {
+        isUnpitched ? PitchEditorReadout.unpitchedSound : PitchEditorReadout.centsReadout(offsetCents)
+    }
+
+    /// The label drawn ABOVE the moving blob (`PitchEditorDragOverlay`): the
+    /// target note's name and the readout ("A3  +100 cents"), or `nil` when the
+    /// readout is `nil`. UE-1: a SOUND's label carries no note name — a note
+    /// name over a breath would be a pitch claim, the same one its missing cents
+    /// refuse to make. UE-2: and not the whole sentence either, which cannot fit
+    /// over a breath (`PitchEditorReadout.unpitchedSoundTag` says why) — the
+    /// two-word tag, with the sentence in the palette's readout (`readout`).
+    public var overlayLabel: String? {
+        if isUnpitched { return PitchEditorReadout.unpitchedSoundTag }
+        return readout.map { "\(targetNoteName)  \($0)" }
+    }
 }
 
 /// One OTHER selected note riding a GROUP pitch drag (m23-ap I4). The pressed
@@ -1227,15 +1409,22 @@ public struct PitchEditorDragMember: Sendable, Equatable {
     /// The live offset, in cents — the baseline plus the group's landed delta.
     /// STORED space: the number the commit writes.
     public internal(set) var offsetCents: Double
+    /// UE-1 — this member is a sound with no detected pitch
+    /// (`NoteBlob.isUnpitched`). It rides the group's one delta like any note
+    /// (the PRESSED blob decides the snap, `PitchEditorModel.updatePitchDrag`);
+    /// carried so a surface can draw a moving sound as a sound.
+    public let isUnpitched: Bool
 
     public init(segmentID: UUID, startSeconds: Double, endSeconds: Double,
-                detectedMidi: Double, baselineCents: Double, offsetCents: Double) {
+                detectedMidi: Double, baselineCents: Double, offsetCents: Double,
+                isUnpitched: Bool = false) {
         self.segmentID = segmentID
         self.startSeconds = startSeconds
         self.endSeconds = endSeconds
         self.detectedMidi = detectedMidi
         self.baselineCents = baselineCents
         self.offsetCents = offsetCents
+        self.isUnpitched = isUnpitched
     }
 
     /// Where the note is DRAWN right now, on the clip's transposed axis.
@@ -1247,6 +1436,175 @@ public struct PitchEditorDragMember: Sendable, Equatable {
     /// Where its ghost is drawn: the SUNG centre on the transposed axis.
     public func ghostMidi(clipPitchShiftSemitones: Double) -> Double {
         detectedMidi + clipPitchShiftSemitones
+    }
+}
+
+/// m23-ap C5a-4b — ONE Wobble-tool press in flight, from its first tick to its
+/// release: the headless gesture (`PitchWobbleSession`, C5a-4a), where the press
+/// came in (the dot or the note), and what the palette's readout slot says.
+///
+/// ⭐ **LIVES IN THE MODEL, LIKE `PitchEditorDragDraft`**, for that type's
+/// reason: the store is not written until the release, so this is the only
+/// place the live value exists, and the overlay, the palette and the echo all
+/// read it without a store write per tick.
+public struct PitchEditorWobbleDraft: Sendable, Equatable {
+    /// The pressed note — a `NoteSegment.id`.
+    public let segmentID: UUID
+    public let startSeconds: Double
+    public let endSeconds: Double
+    /// The door the press came in by: the dot (a click is one step) or the
+    /// note (a click is the house click). Decided at press, never re-decided.
+    public let door: PitchWobbleDoor
+    /// The knob the press grabbed (`PitchWobbleGesture.knob`): `.both` in the
+    /// shipped one-knob layout.
+    public let knob: PitchWobbleKnob
+    /// The gesture. Fed pointer travel from the moment the press is promoted
+    /// past the router's slop, never before, so a click steps or selects from
+    /// the STORED note.
+    public internal(set) var session: PitchWobbleSession
+    /// The press has travelled past `PitchEditorGestureRouter.slop`: it is a
+    /// drag, its draft line is live, and its release commits.
+    public internal(set) var isDragging: Bool = false
+    /// The last pointer travel fed to the session, already mapped by the layout
+    /// (`PitchWobbleGesture.travel`), for the echo.
+    public internal(set) var travel: PitchWobbleTravel = .zero
+    /// ⌥ was held on the last tick (fine control, ÷4 gains).
+    public internal(set) var fine: Bool = false
+    /// The estimator's reading of the DRAFT's played line (`nil` off the own
+    /// branch, or before the first rebuild): what the readout prints for your
+    /// wobble (design §9.3: never `keep × depth`).
+    public internal(set) var played: PitchWobbleReading?
+    /// The line the palette's SF Mono slot draws, verbatim (`session.readout`).
+    public internal(set) var readout: PitchWobbleReadout
+
+    /// The edit a release would write: all six fields as the draft holds them
+    /// (design §10, "the UI's commit").
+    public var edit: NoteVibratoEdit { NoteVibratoEdit(storedIn: session.draft) }
+}
+
+/// m23-ap C5b-4b — THE FREEHAND BRUSH'S STROKE IN FLIGHT (design 2026-09-24
+/// timing-and-freehand §5.5): the headless stroke (C5b-4a's
+/// `PitchShapeStroke`), what its release would write, and what the palette's
+/// readout slot says.
+///
+/// ⭐ **LIVES IN THE MODEL, LIKE `PitchEditorDragDraft`**, for that type's
+/// reason: the store is not written until the release, so this is the only
+/// place the live value exists, and the overlay, the palette and the echo all
+/// read it without a store write per tick.
+public struct PitchEditorBrushDraft: Sendable, Equatable {
+    /// The note the press began on — a `NoteSegment.id`. A stroke STARTS on a
+    /// note (C5b-4a's banner) and may then cross into others.
+    public let pressedNoteID: UUID
+    /// The stroke: the largest weight and its target per grid sample, the
+    /// notes it may write into, and the line as it played BEFORE it.
+    public internal(set) var stroke: PitchShapeStroke
+    /// ⭐ **WHAT THE RELEASE WRITES, AS OF THE LAST TICK** — `stroke.commit()`,
+    /// read ONCE per tick and kept: the draft line is drawn from it
+    /// (`PitchEditorModel.draftNotes`) and the release hands it to the store
+    /// unchanged (`endBrush`), so what the stroke shows IS what its release
+    /// stores. Empty: the stroke changes nothing (yet).
+    public internal(set) var shapes: [UUID: NoteShapeSamples]
+    /// The palette's SF Mono line, verbatim (`PitchShapeStroke.readout`).
+    public internal(set) var readout: String
+    /// Where the pointer is, content space: the band's centre.
+    public internal(set) var point: CGPoint
+
+    /// The notes the release would write, in a fixed order (ascending
+    /// `uuidString`), for the echo and for the view's `onChange`.
+    public var touchedNoteIDs: [UUID] { shapes.keys.sorted { $0.uuidString < $1.uuidString } }
+}
+
+/// m23-ap C5b-4b — THE BRUSH BAND, as the surface draws it (design §5.5: "A
+/// faint band 2R wide follows the pointer while ⌘ is held, showing where a
+/// stroke would act"). Resolved by ONE function
+/// (`PitchEditorModel.brushBand(at:commandHeld:)`), which the band, the
+/// cursor and the palette's help all read, so none of them can promise a
+/// stroke the press would not start.
+public struct PitchEditorBrushBand: Sendable, Equatable {
+    /// The band, content space: `2 × PitchShapeBrush.radiusPoints` wide (the
+    /// kernel's whole reach: its weight is 0 at the edges), centred on the
+    /// pointer, the surface's full height.
+    public let rect: CGRect
+    /// The pointer, content space: the band's centre line.
+    public let point: CGPoint
+    /// A stroke is in flight (the band follows it), rather than ⌘ held over a
+    /// note with the button up.
+    public let isStroking: Bool
+    /// Why a press here would NOT draw, in `PitchShapeStroke.begin`'s own
+    /// words (the line is an estimate; the note is a sound), or `nil` when it
+    /// would. The band is drawn dim, and the palette's help says this instead.
+    public let refusal: String?
+}
+
+/// m23-ap C5a-4b — THE DOT, as the surface draws it on a note the Wobble tool can
+/// grab (unpitched design §4): where, what its tip says, and what the palette's
+/// readout says about that note. Resolved by `PitchEditorModel.wobbleDot(at:)`
+/// from the STORED note — the view draws it and the echo reports it, never a
+/// re-derivation.
+public struct PitchEditorWobbleDot: Sendable, Equatable {
+    /// The note it sits on.
+    public let segmentID: UUID
+    /// The dot's centre, content space: the blob's top centre
+    /// (`PitchWobbleGesture.dot(in:)`).
+    public let centre: CGPoint
+    /// The blob's drawn rect, for the tip's placement.
+    public let blobRect: CGRect
+    /// The dot's TIP, drawn beside it (the user's own words, unpitched design
+    /// §4's table: `PitchWobbleSession.dotTip`).
+    public let tip: PitchWobbleReadout
+    /// The palette's readout for this note at rest (design §9.2's hover row).
+    public let readout: PitchWobbleReadout
+    /// Why it is showing: the pointer is over the note or its dot (`hover`), or
+    /// a dot click just stepped it (`afterClick`).
+    public let reason: Reason
+
+    public enum Reason: String, Sendable, Equatable {
+        case hover, afterClick
+    }
+}
+
+/// m23-ap C5a-4b — one drawn note's two wobble readings, for the
+/// `debug.pitchEditor` wobble block (design §12.5's `perNote`): what was SUNG
+/// (`PitchWobbleEstimate.sung`, over the render's contour; `nil` without one)
+/// and what the committed line PLAYS (`PitchWobbleEstimate.played`).
+public struct PitchEditorWobbleNoteReadings: Sendable, Equatable {
+    public let segmentID: UUID
+    public let sung: PitchWobbleReading?
+    public let played: PitchWobbleReading
+}
+
+/// m23-ap C5a-4b — the estimator's two readings of each note, kept until the
+/// line or the contour they were read from changes. Internal: the model's
+/// plumbing, never drawn.
+struct PitchEditorWobbleReadingCache: Sendable {
+    /// What the readings were read from; any change empties the cache.
+    var lineRevision: Int = -1
+    var contourAnswered: Bool = false
+    /// `PitchWobbleEstimate.sung` per note (`nil` = no `.detected` contour).
+    var sung: [Key: PitchWobbleReading?] = [:]
+    /// `PitchWobbleEstimate.played` over the committed line, per note.
+    var played: [Key: PitchWobbleReading] = [:]
+
+    /// What a reading of one note depends on besides the line and the contour:
+    /// which frames it owns (its edges) and what it is read against (its
+    /// detected centre).
+    struct Key: Hashable, Sendable {
+        let id: UUID
+        let startSeconds: Double
+        let endSeconds: Double
+        let detectedHz: Double
+
+        init(_ segment: NoteSegment) {
+            id = segment.id
+            startSeconds = segment.startSeconds
+            endSeconds = segment.endSeconds
+            detectedHz = segment.detectedHz
+        }
+    }
+
+    mutating func sync(lineRevision: Int, contourAnswered: Bool) {
+        guard lineRevision != self.lineRevision || contourAnswered != self.contourAnswered else { return }
+        self = PitchEditorWobbleReadingCache(lineRevision: lineRevision, contourAnswered: contourAnswered)
     }
 }
 
@@ -1268,6 +1626,42 @@ public struct PitchEditorBand: Sendable, Equatable {
     public internal(set) var hits: Set<UUID>
 }
 
+/// Which edge of the pane an I6b edge step last acted at — the words the
+/// `debug.pitchEditor` echo reports (`autoscroll.lastSide`).
+public enum PitchEditorEdge: String, Sendable, Equatable {
+    case top, bottom, left, right
+}
+
+/// What ONE pointer event (or held-pointer tick) near the pane's edge asks the
+/// VIEW to do (m23-ap I6b S3), as decided by `PitchEditorModel.edgeStep` —
+/// which has ALREADY grown the window when that was the answer. The view only
+/// writes the scroll targets; it decides nothing.
+public struct PitchEditorEdgeStep: Sendable, Equatable {
+    /// A new horizontal offset (a band only), or nil to leave x alone.
+    public var scrollX: CGFloat?
+    /// A new vertical offset, or nil to leave y alone. After a BOTTOM growth it
+    /// is the new content's own `maxOffset`: the row just grown sits under the
+    /// viewport's edge until it is revealed, and a writer clamped against the
+    /// OLD content could never reach it.
+    public var scrollY: CGFloat?
+    /// Whole rows the window grew by at this step (a pitch drag at a wall).
+    public var grownRows: Int
+    /// The edge this step acted at, or nil when it did nothing.
+    public var edge: PitchEditorEdge?
+
+    public init(scrollX: CGFloat? = nil, scrollY: CGFloat? = nil, grownRows: Int = 0,
+                edge: PitchEditorEdge? = nil) {
+        self.scrollX = scrollX
+        self.scrollY = scrollY
+        self.grownRows = grownRows
+        self.edge = edge
+    }
+
+    /// Nothing to do: the pointer is in no band, the viewport sits at the wall
+    /// with nothing to grow, or the press is not one that pushes.
+    public static let none = PitchEditorEdgeStep()
+}
+
 // MARK: - Increment C — what a gesture submits
 
 /// ONE store write, emitted on gesture END and never per tick (§8.2 / §11 P7b).
@@ -1276,14 +1670,21 @@ public struct PitchEditorBand: Sendable, Equatable {
 /// `Clip.pitchEdits` rides `ClipKey.pitchEditSetHash`. A commit per pointer
 /// tick would re-key the clip's offline render at pointer rate, and the render
 /// would never be ready. What the transport plays meanwhile — ⚠️ CHANGED BY
-/// p2-ren Stage A (2026-09-25): a clip whose render is pending after an edit
-/// that keeps its time base (a note's pitch, level, clear or timing) plays its
-/// PREVIOUS version (`StretchResolution.bridge`), so the vocal would sound
-/// STALE for the whole drag — the edit never heard in context — while a render
-/// is started and thrown away per tick. Silence (`StretchResolution.pending`,
-/// the clip skipped) is now only for a change that moves the time base (a
-/// stretch) or a render that failed; before Stage A it was silence either way,
-/// which is what design §11 P7b records. `AutomationLaneEditor` commits per
+/// p2-ren Stages A and B (2026-09-25): a clip whose render is pending after an
+/// edit that keeps its time base (a note's pitch, level, clear or timing)
+/// plays a PREVIEW when one can be built (Stage B, `StretchResolution
+/// .provisional`: its last committed render with the changed notes spliced in
+/// from a span render; the snapshot's `renderAudible` reads `preview`), else
+/// its PREVIOUS version (Stage A, `StretchResolution.bridge`; `previous`). A
+/// commit per tick would re-ask for both at pointer rate: the provisional slot
+/// is latest-wins, so each tick's build cancels the last before it lands, and
+/// the vocal would sound STALE for the whole drag — the edit never heard in
+/// context — while a render is started and thrown away per tick. Silence
+/// (`StretchResolution.pending`, the clip skipped) is now only for a change
+/// that moves the time base (a stretch) or a render that failed; before
+/// Stage A it was silence either way, which is what design §11 P7b records
+/// (p2-ren design `docs/design/2026-09-25-incremental-note-render.md` §17
+/// is the as-built record). `AutomationLaneEditor` commits per
 /// tick and is right to: there is no offline render behind an automation
 /// lane. That precedent does not transfer, and the design doc records getting
 /// this backwards on its first pass.
@@ -1310,6 +1711,53 @@ public struct PitchEditorCommit: Sendable, Equatable {
         /// Emitted only by `PitchEditorModel.performNoteAction`, the one action
         /// behind ⌫, Edit ▸ Delete and the right-click menu.
         case notesCleared(segmentIDs: [UUID], cleared: Bool)
+        /// m23-ap C5a-4b — ONE note's WOBBLE: a Wobble-tool drag or a dot
+        /// click, all six fields ABSOLUTE (design §10, "the UI's commit": what
+        /// the draft drew is what it submits), through
+        /// `ProjectStore.setClipNoteVibrato` under
+        /// `PitchCorrectionUndoKey.vibrato` — so dot clicks on one note inside
+        /// the journal's 800 ms window fold into one undo step (T-dot-4).
+        case noteVibrato(segmentID: UUID, edit: NoteVibratoEdit)
+        /// m23-ap C5a-4b — "Back to how you sang it" (the note menu): these
+        /// notes' six wobble fields back to their defaults, ONE undo step under
+        /// `structuralKey` (design §10 item 8: a deliberate reset never merges
+        /// into the drag before it). Sounds are never named.
+        case noteVibratoReset(segmentIDs: [UUID])
+        /// m23-ap C5b-4b — the FREEHAND BRUSH: every note ONE stroke drew on,
+        /// each with its WHOLE new drawing (`PitchShapeStroke.commit()`), or
+        /// `NoteShapeSamples.clear` per note for the note menu's "Reset drawn
+        /// shape". ONE `ProjectStore.setClipNoteShapes` call, ONE undo step
+        /// ("Draw Pitch" / "Reset Drawn Shape") under `structuralKey`
+        /// (`PitchEditorShapeWrite`). Emitted on RELEASE only, never per tick,
+        /// and never empty (design §5.3).
+        case noteShapes(shapes: [UUID: NoteShapeSamples])
+        /// W7-NTU U1 — the header's "Keep voice size" (natural tuning §1(f)):
+        /// the clip's `formantCorrection`, 0...1, ONE store call on the
+        /// slider's RELEASE (`ProjectStore.setClipFormantCorrection`, "Keep
+        /// Voice Size"). Never emitted on a vocal that `predatesNaturalTuning`:
+        /// a press there is `.naturalTuningUpdate` (see the model's section).
+        case voiceSize(amount: Double)
+        /// W7-NTU U1 — "Older tuning. Tap, or change a note, to update." (and a
+        /// press on the dim slider): X4's ONE upgrade path,
+        /// `ProjectStore.upgradeToNaturalTuning`, ONE undo step ("Update
+        /// Tuning").
+        case naturalTuningUpdate
+        /// W7-NTU U1 — "Consonants" switched on or off
+        /// (`ProjectStore.setClipConsonantProtection`, "Keep Consonants").
+        case consonants(enabled: Bool)
+        /// W7-NTU U1 — one of the four "Slides" steps
+        /// (`ProjectStore.setClipPitchTransitionSmoothness`, "Slide
+        /// Smoothness"). Always a step's value, never 0 (§4.e).
+        case slideSmoothness(centsPerSecond: Double)
+        /// W7-NTU U3 — these NOTES' Voice, one FINAL value in semitones for
+        /// all of them (0 = as sung; negative deeper, positive brighter), in
+        /// ONE store call (`ProjectStore.setClipNoteFormant`, one "Set Note
+        /// Voice" undo step; `PitchEditorVoiceWrite`). A Voice drag's release
+        /// names its one note; a double-click names it with 0; the note menu's
+        /// Voice row names every selected NOTE that changes, in table order.
+        /// Never a sound: the store refuses one, and the tool and the menu
+        /// never name one.
+        case noteFormant(segmentIDs: [UUID], semitones: Double)
     }
 
     public var kind: Kind
@@ -1489,6 +1937,12 @@ public final class PitchEditorModel {
     /// until release.
     public private(set) var draftPlayedLine: PitchPlayedLine?
 
+    /// The note table `draftPlayedLine` was last built from, or `nil` when no
+    /// drag is in flight — the draft line's INPUT, kept so a test can read what
+    /// the line was drawn through (NT-U0). `@ObservationIgnored`: nothing draws
+    /// it; the line itself is what the surface watches.
+    @ObservationIgnored public private(set) var draftEditSet: PitchEditSet?
+
     /// Bumped on every rebuild of `playedLine` — what a view watches instead of
     /// comparing ~16 000 points with `==` on every body evaluation.
     public private(set) var playedLineRevision: Int = 0
@@ -1529,9 +1983,94 @@ public final class PitchEditorModel {
     /// looks the same and is not.
     public private(set) var drag: PitchEditorDragDraft?
 
+    /// m23-ap C5a-4b — the Wobble-tool press in flight, or `nil`: the dot or the
+    /// note it came in by, its headless session, and the readout the palette
+    /// draws. Observable for `drag`'s reason (the overlay, the palette and the
+    /// echo watch it, and the store is written only at the release).
+    public private(set) var wobble: PitchEditorWobbleDraft?
+
+    /// m23-ap C5a-4b — the note whose dot TIP shows after a dot click
+    /// (unpitched design §4: "shows on hover and after each click"), until the
+    /// next press, a tool switch or the pane's rebuild. Its words are re-read
+    /// from the STORED note every time they are drawn, so they say what the
+    /// store kept, not what the click asked for.
+    public private(set) var wobbleTipNoteID: UUID?
+
+    /// D4-1 #2 — `draftReach`'s memo: the line revision it was read at, and
+    /// each draft note's reach. Plumbing, never drawn.
+    @ObservationIgnored private var draftReachCache: (revision: Int, reaches: [UUID: ClosedRange<Double>])
+        = (-1, [:])
+
+    /// m23-ap C5b-4b — the brush stroke in flight, or `nil`: begun when a
+    /// `.brush` press crosses the slop, gone at its release, its Escape, or a
+    /// new press. Observable for `drag`'s reason (the overlay, the palette and
+    /// the echo watch it, and the store is written only at the release).
+    public private(set) var brush: PitchEditorBrushDraft?
+
+    /// W7-NTU U3 — the Voice-tool press in flight, or `nil`: begun on the
+    /// FIRST tick of a `.formantDrag` press (a sound is refused there), fed
+    /// travel once the press is past the slop, and gone at its release, its
+    /// Escape, or a new press. Observable for `drag`'s reason: the surface's
+    /// bar and chip, the palette and the echo watch it, and the store is
+    /// written only at the release.
+    public private(set) var voiceDrag: PitchEditorVoiceDraft?
+
+    /// m23-ap C5a-4b — the estimator's readings per note, cached against the
+    /// line they were read from (`playedLineRevision`) and the render contour
+    /// (`contourPhase`), so hovering from note to note costs one pass per note
+    /// per line rebuild, never one per pointer move. Plumbing, not state.
+    @ObservationIgnored private var wobbleReadings = PitchEditorWobbleReadingCache()
+
+    /// m23-ap I6b — the fraction of a row the window has earned towards its
+    /// next grown row (`growPitchWindowForDrag`). GROWTH STATE, reset per press
+    /// in `beginPitchDrag` and zeroed at 0/127 so a pause at the limit banks
+    /// nothing — never pointer integration: the pointer's own position is
+    /// recomputed from what is observed, every tick (`EdgeAutoScroll.tick`).
+    /// `@ObservationIgnored`: nothing draws it.
+    @ObservationIgnored private var growthRemainder: Double = 0
+
     /// The last refusal this surface produced, in words for a person, or `nil`.
     /// A tool that refused and a tool that did nothing must not look the same.
     public private(set) var refusal: String?
+
+    /// UE-1 — the line about the last "Find sounds with no pitch" press
+    /// (`PitchEditorFindSounds`): working while the pitch is read, then the
+    /// answer in words — sounds added, none to add, or why nothing was added.
+    /// `nil` before any press. It outlives the answer on purpose (the sounds it
+    /// names are on screen), until the next press or the pane's rebuild.
+    ///
+    /// UE-2 — with two exceptions, both in `syncStoredNoteTable`:
+    ///  • **"Added N sounds" is WITHDRAWN when the table no longer holds a
+    ///    sound** (the merge was undone): the line would name sounds that are
+    ///    gone, beside the button that is back — **and when the table is
+    ///    REBUILT under it** (a preset pass: every segment gets a new id, so the
+    ///    sounds it named are gone even though new ones are drawn, and "Undo
+    ///    takes them away" would undo the preset). Keyed on the added sounds'
+    ///    ids (`findSoundsAddedIDs`), so a pitch drag, a level change or a
+    ///    note's split keeps it.
+    ///  • **A finder's DECLINE outlives the pane** through `findSoundsMemory`
+    ///    (app-held), so a pane rebuilt on the same table shows the same
+    ///    button WITH the reason it declined, instead of a bare button that
+    ///    looks as if it was never pressed.
+    public private(set) var findSoundsLine: PitchEditorFindSoundsLine?
+
+    /// UE-2 — how many sounds the last finished press ADDED (0 for none, a
+    /// decline or a refusal): what makes an "Added" line withdrawable on undo
+    /// without parsing its words. Nothing draws it.
+    @ObservationIgnored private var findSoundsAdded = 0
+
+    /// UE-2 edge — the ids of the sounds an "Added" line names, taken from the
+    /// merge's OWN write (`nil` until that write has reached this pane: the
+    /// answer and the table can arrive in either order). The merge never moves
+    /// or re-identifies a segment (`ProjectStore.findUnpitchedSounds`), so these
+    /// ids stay in the table until something REBUILDS it — a preset pass mints
+    /// new ones — and then "Undo takes them away" would point at that rebuild.
+    @ObservationIgnored private var findSoundsAddedIDs: Set<UUID>?
+
+    /// UE-2 — the app-held memory of each clip's last Find-sounds DECLINE
+    /// (`PitchEditorInteractionBridge.findSoundsMemory`), installed once by the
+    /// view. `nil` (a preview, a test that does not ask) remembers nothing.
+    @ObservationIgnored public var findSoundsMemory: PitchEditorFindSoundsMemory?
 
     // MARK: I4 — the selection (interaction batch §7)
 
@@ -1603,6 +2142,23 @@ public final class PitchEditorModel {
     /// `@ObservationIgnored` for `onCommit`'s reason: plumbing, not state.
     @ObservationIgnored public var onAudition: ((PitchEditorAuditionRequest) -> Void)?
 
+    /// ⭐ **THE SEEK SEAM — `onCommit`'s other twin** (m23-ap I5). Set once by the
+    /// view; the model is the ONLY caller, and it calls it from exactly two
+    /// places: the time ruler's ticks (`placePlayhead`, one seek per tick) and a
+    /// ⌘-click on empty surface (`releasePress`, one seek per click). It carries
+    /// a PROJECT beat, snapped and clamped by `placementBeat` — the view never
+    /// computes one. The app installs `store.seek(toBeats:)` here.
+    ///
+    /// `@ObservationIgnored` for `onCommit`'s reason: plumbing, not state.
+    @ObservationIgnored public var onSeek: ((Double) -> Void)?
+
+    /// m23-ap I5 — the app's snap IN FORCE (`AppModel.effectiveClipSnap`, the
+    /// roll's own input), which decides only ON or OFF here: the division the
+    /// playhead lands on is this pane's own `placementGrid`. Any value but
+    /// `.off` snaps. Plain state, not observed by anything that draws; the view
+    /// keeps it current as the app's snap changes.
+    @ObservationIgnored public var appSnap: ClipSnap = .beat
+
     /// What the drag in flight last ASKED TO HEAR, note by note, or nil before
     /// its first step — then what is sounding is the press: every moving note
     /// at its baseline. Reset by `beginPitchDrag`. See `requestDragAudition`.
@@ -1643,7 +2199,8 @@ public final class PitchEditorModel {
     /// What the surface says — §5.7, resolved at ONE home so the echo, the
     /// header and any gate all read the SAME string the view drew.
     public var state: PitchEditorState {
-        PitchEditorState.resolve(phase: phase, noteCount: blobs.count)
+        PitchEditorState.resolve(phase: phase, noteCount: blobs.count,
+                                 soundCount: blobs.count { $0.isUnpitched })
     }
 
     /// The DETECTED contour as screen polylines — one per detected run, **never
@@ -1704,28 +2261,114 @@ public final class PitchEditorModel {
         return out
     }
 
-    /// The source-second span a live pitch drag can change: the dragged note
-    /// widened by half the set's retune ramp on each side — the reach of its
-    /// boundary crossfade (`PitchCorrectionCurve`'s centred ramps). Outside it
-    /// the dragged note's gate is exactly 0, so the draft and the committed
-    /// line are the same numbers there, bit for bit. `nil` with no drag.
+    /// The source-second span a live edit of the FIRST draft note can change:
+    /// DAWCore's ONE rule, `PitchEditSet.pitchDragReach(ofSegmentAt:)`, asked
+    /// of the committed table (`draftReach`). Outside it the draft and the
+    /// committed line are the same numbers, so the surface keeps drawing the
+    /// committed line there and the overlay draws the draft inside it. `nil`
+    /// with nothing in flight.
+    ///
+    /// ⭐ D4-1 #2 (natural tuning, the user's ruling (b); orchestrator's scope
+    /// addition to C5b-4b, 2026-09-27) — **ASKED, NOT RESTATED.** This used to
+    /// restate the reach itself — the note widened by half the retune ramp —
+    /// which is right for a later edit of a legacy set and WRONG for the FIRST
+    /// hand edit of a vocal that predates natural tuning: that release updates
+    /// the WHOLE vocal (`afterHandEdit(from:)`), so the draft line differs from the
+    /// committed one everywhere, and a window narrower than the vocal left the
+    /// rest of the line stale until the release. `pitchDragReach` returns the
+    /// whole vocal's span then, and on a set with soft joins the note's own
+    /// soft reach (its neighbours across a soft join included).
+    ///
+    /// m23-ap C5a-4b — a WOBBLE drag's note, and C5b-4b — each note a brush
+    /// STROKE draws on: the same reach, one home ("Do not invent a second
+    /// span", design §9.3). CONSERVATIVE by DAWCore's own doc: a wider window
+    /// only redraws more of a line that is correct everywhere.
     public var draftSpan: ClosedRange<Double>? {
-        guard let draft = drag else { return nil }
-        let half = max(0, noteTable.retuneMs / 1000 / 2)
-        return (draft.startSeconds - half)...(draft.endSeconds + half)
+        guard let first = draftNotes.first else { return nil }
+        return draftReach(of: first.segmentID, startSeconds: first.startSeconds,
+                          endSeconds: first.endSeconds)
     }
 
-    /// m23-ap I4 — EVERY moving note's span, widened like `draftSpan`, merged
+    /// `PitchEditSet.pitchDragReach(ofSegmentAt:)` for note `id` on the
+    /// committed table, MEMOISED per line revision: every change of the table
+    /// rebuilds the line and bumps `playedLineRevision` (`apply`,
+    /// `syncStoredNoteTable`, `clearDetection`), so a cached reach can never
+    /// outlive the table it was read from, and a pointer tick costs a
+    /// dictionary read instead of `afterHandEdit()`'s whole-set transform per
+    /// moving note. A note the table does not hold (a stranded draft) keeps
+    /// the rule from before NT-U2 — its span widened by half the retune — so
+    /// the window never vanishes mid-gesture.
+    private func draftReach(of id: UUID, startSeconds: Double, endSeconds: Double) -> ClosedRange<Double> {
+        if draftReachCache.revision != playedLineRevision {
+            draftReachCache = (playedLineRevision, [:])
+        }
+        if let cached = draftReachCache.reaches[id] { return cached }
+        let table = noteTable
+        let reach: ClosedRange<Double>
+        if let index = table.segments.firstIndex(where: { $0.id == id }),
+           let asked = table.pitchDragReach(ofSegmentAt: index) {
+            reach = asked
+        } else {
+            let half = max(0, table.retuneMs / 1000 / 2)
+            reach = (startSeconds - half)...(endSeconds + half)
+        }
+        draftReachCache.reaches[id] = reach
+        return reach
+    }
+
+    /// ⭐ m23-ap C5a-4b — **EVERY NOTE THE LIVE GESTURE CHANGES, AND HOW**: the
+    /// pitch drag's pressed note then its members, or the wobble drag's note —
+    /// each with its span and its `PitchEditorDraftEdit`. THE one list the
+    /// draft line (`rebuildDraftLine`) and its spans (`draftSpan`,
+    /// `draftSpans`) are built from, so a new tool adds a producer here and
+    /// never a second draft path. Empty with nothing in flight. A wobble press
+    /// joins only once it is a DRAG: a dot click never draws a draft.
+    ///
+    /// m23-ap C5b-4b — or the brush STROKE's notes: every note its release
+    /// would write (`PitchEditorBrushDraft.shapes`, the value the release
+    /// commits), in table order, each `.shape` with its own span.
+    private var draftNotes: [(segmentID: UUID, startSeconds: Double, endSeconds: Double,
+                              edit: PitchEditorDraftEdit)] {
+        if let brush {
+            guard !brush.shapes.isEmpty else { return [] }
+            return noteTable.segments.compactMap { note in
+                brush.shapes[note.id].map { (note.id, note.startSeconds, note.endSeconds, .shape($0)) }
+            }
+        }
+        if let draft = drag {
+            return [(draft.segmentID, draft.startSeconds, draft.endSeconds,
+                     .pitch(offsetCents: draft.offsetCents))]
+                + draft.members.map {
+                    ($0.segmentID, $0.startSeconds, $0.endSeconds, .pitch(offsetCents: $0.offsetCents))
+                }
+        }
+        if let wobble, wobble.isDragging {
+            return [(wobble.segmentID, wobble.startSeconds, wobble.endSeconds,
+                     wobbleDraftEdit(wobble))]
+        }
+        return []
+    }
+
+    /// The draft edit a wobble gesture draws: all six fields as its session's
+    /// draft holds them, at the clip's ratio — what its release commits
+    /// (`endWobbleDrag`: the same `edit`) and so what the store writes.
+    private func wobbleDraftEdit(_ wobble: PitchEditorWobbleDraft) -> PitchEditorDraftEdit {
+        .wobble(wobble.edit, stretchRatio: geometry.stretchRatio)
+    }
+
+    /// m23-ap I4 — EVERY moving note's reach, asked like `draftSpan`, merged
     /// where they overlap and sorted: what a GROUP drag's line owns while the
     /// pointer is down. For a one-note drag this is `[draftSpan]` exactly, so
     /// nothing a one-note drag draws changed. Empty with no drag.
     public var draftSpans: [ClosedRange<Double>] {
-        guard let draft = drag, let first = draftSpan else { return [] }
-        guard !draft.members.isEmpty else { return [first] }
-        let half = max(0, noteTable.retuneMs / 1000 / 2)
-        let spans = ([first] + draft.members.map {
-            ($0.startSeconds - half)...($0.endSeconds + half)
-        }).sorted { $0.lowerBound < $1.lowerBound }
+        let notes = draftNotes
+        guard let first = draftSpan else { return [] }
+        guard notes.count > 1 else { return [first] }
+        // D4-1 #2 — each moving note's reach from the SAME memoised DAWCore
+        // rule as `draftSpan` (never a second restatement of it).
+        let spans = notes.map {
+            draftReach(of: $0.segmentID, startSeconds: $0.startSeconds, endSeconds: $0.endSeconds)
+        }.sorted { $0.lowerBound < $1.lowerBound }
         var merged: [ClosedRange<Double>] = []
         for span in spans {
             if let last = merged.last, span.lowerBound <= last.upperBound {
@@ -1878,35 +2521,41 @@ public final class PitchEditorModel {
             sourceWindow: geometry.sourceWindow)
         playedLineRevision &+= 1
         rebuildGaps()
-        if drag != nil { rebuildDraftLine() }
+        if !draftNotes.isEmpty { rebuildDraftLine() }
     }
 
     /// The draft line: `noteTable` copied, the dragged note's offset set to
     /// the draft, through the same `make`. Nothing is committed.
+    ///
+    /// ⭐ NT-U0 (natural tuning, X2 rule 2) — **A REBUILD CARRIES.** (Since
+    /// C5a-4b the copy is the commit's own set transform, which starts from
+    /// `noteTable` itself, so every set-level field rides along.) The table used
+    /// to be minted with
+    /// `PitchEditSet(analysisVersion:segments:retuneMs:)`, which silently put
+    /// every OTHER set-level field back to legacy — the formant amount, the
+    /// consonant flag and the transition slope — so the line drawn during a drag
+    /// could differ from what plays once any of them shapes the curve (NT-C C4's
+    /// transitions do). `PitchEditorModelTests` pins the carry, plant shown red.
+    ///
+    /// ⭐ m23-ap C5a-4b — **ONE DRAFT PATH (design V4).** Every changing note
+    /// goes through `PitchEditorDraftEdit.draftSet` — a pitch drag's pressed
+    /// note and its members (I4: the line rides with all of them), or a wobble
+    /// drag's note — which runs the SAME DAWCore set transform the release's
+    /// commit runs (`applyingNotePitchOffsets` / `applyingNoteVibratos` /
+    /// `applyingNoteShapes`), so the draft ends in `afterHandEdit(from:)` —
+    /// the whole-vocal upgrade when the edit changed a note, nothing when it
+    /// did not — exactly when the stored set will (natural tuning D4-1, Q-U1 =
+    /// (b)). Nothing here writes a field itself.
     private func rebuildDraftLine() {
-        guard let draft = drag else {
+        let notes = draftNotes
+        guard !notes.isEmpty else {
             draftPlayedLine = nil
+            draftEditSet = nil
             return
         }
-        var segments = noteTable.segments
-        if let index = segments.firstIndex(where: { $0.id == draft.segmentID }) {
-            segments[index].pitchOffsetCents = draft.offsetCents
-        }
-        // I4 — every OTHER note of a group drag moves in the draft too, so the
-        // line rides with all of them (a no-op loop for a one-note drag).
-        for member in draft.members {
-            if let index = segments.firstIndex(where: { $0.id == member.segmentID }) {
-                segments[index].pitchOffsetCents = member.offsetCents
-            }
-        }
-        let table = PitchEditSet(analysisVersion: noteTable.analysisVersion,
-                                 segments: segments, retuneMs: noteTable.retuneMs)
-        draftPlayedLine = PitchPlayedLine.make(
-            contour: contourPhase.contour,
-            fallback: fallbackDetection,
-            editSet: table,
-            clipPitchShiftSemitones: geometry.clipPitchShiftSemitones,
-            sourceWindow: geometry.sourceWindow)
+        let built = playedLine(applying: notes.map { ($0.segmentID, $0.edit) })
+        draftEditSet = built.table
+        draftPlayedLine = built.line
         draftLineRevision &+= 1
     }
 
@@ -2029,6 +2678,9 @@ public final class PitchEditorModel {
         // pane shrank, a wire edit) widens it. Never a shrink, so a commit
         // read back never moves the grid.
         holdStrandedNotes()
+        // UE-2: an undone merge withdraws its "Added" line; a remembered
+        // decline comes back on a rebuilt pane.
+        reconcileFindSoundsLine()
     }
 
     /// The table blobs are drawn from: the store's when there is one, the
@@ -2099,7 +2751,12 @@ public final class PitchEditorModel {
         seedTable = .empty
         fallbackDetection = nil
         drag = nil
+        wobble = nil
+        brush = nil
+        voiceDrag = nil   // W7-NTU U3
+        wobbleTipNoteID = nil
         draftPlayedLine = nil
+        draftEditSet = nil
         refusal = nil
         // I4: nothing is drawn, so nothing can be selected or banded.
         band = nil
@@ -2173,12 +2830,18 @@ public final class PitchEditorModel {
     ///
     /// Compare-first: the splitter reports a new height every frame, and the
     /// window only moves when a whole row appears or goes.
+    ///
+    /// m23-ap I6b: a LIVE DRAG's drawn pitches are held too. A draft is not in
+    /// `blobs` until it commits, so without this a resize or a zoom mid-drag
+    /// could lay the window out from under the note in the user's hand — the
+    /// same data-loss shape, one gesture earlier. Nothing changes with no drag.
     private func layOutPitchWindow() {
         let geometry = geometry
         let fitted = fittedMidiRange
-        let held = blobs.filter { !fitOutlierIDs.contains($0.id) }
+        var drawn = blobs.filter { !fitOutlierIDs.contains($0.id) }
             .map { geometry.drawnMidi(for: $0) }
-            .filter { !fitted.contains($0) }
+        if let drag { drawn += Self.drawnMidis(of: drag) }
+        let held = drawn.filter { !fitted.contains($0) }
         let window = PitchEditorRange.holding(
             PitchEditorRange.filled(fittedMidiRange, rowHeight: geometry.rowHeight,
                                     availableHeight: availableHeight),
@@ -2257,7 +2920,11 @@ public final class PitchEditorModel {
                                     baselineCents: blob.offsetCents,
                                     offsetCents: blob.offsetCents,
                                     isFree: false,
-                                    clipPitchShiftSemitones: geometry.clipPitchShiftSemitones)
+                                    clipPitchShiftSemitones: geometry.clipPitchShiftSemitones,
+                                    windowTopAtPress: geometry.midiRange.upperBound,
+                                    isUnpitched: blob.isUnpitched)
+        // I6b — growth state is per PRESS: a new drag banks nothing from the last.
+        growthRemainder = 0
         dragAuditionHeard = nil
         // C-0: the draft line exists from the first moment of the gesture, so
         // the note's own stretch of line leaves the surface and rides with the
@@ -2273,9 +2940,21 @@ public final class PitchEditorModel {
     /// points, y-down as SwiftUI reports it. `free` is ⌥.
     public func updatePitchDrag(translationHeight: CGFloat, free: Bool) {
         guard var draft = drag else { return }
+        // ⭐ m23-ap I6b — THE TOP MOVED, SO EVERY ROW DID. Rows are laid out down
+        // from the window's top (`y(forMidi:)`), so a row grown there
+        // (`growPitchWindowForDrag`) or a relayout that moved it shifts every
+        // row, while the press point — a CONTENT y fixed for the gesture — does
+        // not. Without this the note falls one row behind the pointer per row
+        // grown. `translationHeight` itself when the top has not moved, so a
+        // drag that never grows is bit-identical (`PitchEditorModelTests`
+        // proves it on `.bitPattern`).
+        let topShift = geometry.midiRange.upperBound - draft.windowTopAtPress
+        let travel = topShift == 0
+            ? translationHeight
+            : translationHeight - CGFloat(topShift) * geometry.rowHeight
         // y grows DOWNWARD and pitch grows UPWARD: the minus sign is the whole
         // of that relationship and it is the one thing a reviewer should check.
-        let semitones = -Double(translationHeight) / Double(max(1, geometry.rowHeight))
+        let semitones = -Double(travel) / Double(max(1, geometry.rowHeight))
         // ⚠️ DRAWN PITCH from here to `landed` (m23-ap C-0): the window, the
         // clamp and the snap are all on the axis the user SEES, which on a
         // transposed clip is not the stored one. The way back to a stored
@@ -2284,6 +2963,16 @@ public final class PitchEditorModel {
             centreMidi: draft.detectedMidi, offsetCents: draft.baselineCents,
             clipPitchShiftSemitones: draft.clipPitchShiftSemitones)
         let raw = origin + semitones
+        // ⭐ UE-1 — A SOUND PRESSED WITHOUT ⌥ takes its own branch, alone or
+        // leading a group: whole semitones from where it sits
+        // (`updateSoundPitchDrag`, §1.7). ⌥ falls through to the free paths
+        // below, which are the same for a sound as for a note. A drag whose
+        // pressed blob is a NOTE never enters it, so both branches below are
+        // left exactly as they were.
+        if draft.isUnpitched, !free {
+            updateSoundPitchDrag(&draft, origin: origin, raw: raw)
+            return
+        }
         // ⭐ m23-ap I4 — A GROUP DRAG takes its own branch, and the one-note
         // path below is left EXACTLY as it was: a drag with no other selected
         // note never enters it, so it snaps, clamps and commits byte-identically.
@@ -2342,6 +3031,18 @@ public final class PitchEditorModel {
         // STORE says, and a commit that silently wrote nothing shows up as the
         // line springing back with its blob.
         draftPlayedLine = nil
+        draftEditSet = nil
+        // m23-ap I6b — THE RELEASE'S HEADROOM, only for a drag that GREW the
+        // window: a note let go on a grown edge row (a free drag reaches it; a
+        // group member can too) keeps a row above it for its NAME, drawn in the
+        // gutter over the note (I6c's measured "no B4"). Widen-only, through the
+        // strand rule's own arithmetic. A drag that never grew skips it, so its
+        // release leaves the window exactly as before.
+        if draft.grownRows > 0 {
+            let window = PitchEditorRange.holding(geometry.midiRange,
+                                                  drawnMidis: Self.drawnMidis(of: draft))
+            if window != geometry.midiRange { geometry.midiRange = window }
+        }
         guard !draft.isNoOp else { return nil }
         guard !draft.members.isEmpty else {
             return emit(.notePitch(segmentID: draft.segmentID, offsetCents: draft.offsetCents))
@@ -2366,7 +3067,16 @@ public final class PitchEditorModel {
     /// baseline.
     public func cancelDrag() {
         drag = nil
+        // C5a-4b — and a Wobble-tool press, dropped with nothing committed.
+        wobble = nil
+        // C5b-4b — and a brush stroke, dropped with nothing committed.
+        brush = nil
+        // W7-NTU U3 — and a Voice-tool press, dropped the same way.
+        voiceDrag = nil
+        // W7-NTU U1 — and a "Keep voice size" press, dropped the same way.
+        cancelVoiceSize()
         draftPlayedLine = nil
+        draftEditSet = nil
         // I4 — a band that cannot finish gives the selection BACK: it is put
         // away with the frozen base it armed with, never left half-applied.
         cancelBand()
@@ -2374,6 +3084,646 @@ public final class PitchEditorModel {
         // make the next gesture's first tick look like a later tick of this one
         // whenever it happened to start at the same point.
         press.cancel()
+    }
+
+    // MARK: C5a-4b — the Wobble tool and its dot (vibrato-handle design §4–§6, §9, §18)
+    //
+    // ⭐ THE GESTURE IS C5a-4a's, HEADLESS (`PitchWobbleSession`); THIS IS ITS
+    // WIRING. A press on a note in the Wobble tool routes `.wobble(id, door:)`
+    // (`PitchEditorGestureRouter`), begins a session on its FIRST tick
+    // (`beginWobble`, from `trackPress`), feeds it pointer travel only once the
+    // press is past the router's 4 pt slop (`updateWobbleDrag`: the one slop,
+    // §18.8), and at the release either commits the drag (`endWobbleDrag`) or
+    // steps the dot (`stepWobble`) — ONE commit each, none for a gesture that
+    // plays like the stored note (T10), through `emit` like every other write.
+
+    /// The note table's segment behind a drawn note, as STORED.
+    private func storedSegment(_ id: UUID) -> NoteSegment? {
+        noteTable.segments.first { $0.id == id }
+    }
+
+    /// Empty the reading cache when the line it was read from has changed.
+    private func syncWobbleReadings() {
+        var answered = false
+        if case .answered = contourPhase { answered = true }
+        wobbleReadings.sync(lineRevision: playedLineRevision, contourAnswered: answered)
+    }
+
+    /// The SUNG reading of a note (`PitchWobbleEstimate.sung` over the
+    /// render's own contour, design §8.1), cached. `nil` without a `.detected`
+    /// contour: the editor's window detection is another analysis (F18).
+    private func sungWobbleReading(of segment: NoteSegment) -> PitchWobbleReading? {
+        syncWobbleReadings()
+        let key = PitchEditorWobbleReadingCache.Key(segment)
+        if let cached = wobbleReadings.sung[key] { return cached }
+        let reading = contourPhase.contour.flatMap { PitchWobbleEstimate.sung(segment, contour: $0) }
+        wobbleReadings.sung[key] = .some(reading)
+        return reading
+    }
+
+    /// The PLAYED reading of a note as STORED — the estimator over the line
+    /// the surface draws (design §9.2's hover row), cached.
+    private func playedWobbleReading(of segment: NoteSegment) -> PitchWobbleReading {
+        syncWobbleReadings()
+        let key = PitchEditorWobbleReadingCache.Key(segment)
+        if let cached = wobbleReadings.played[key] { return cached }
+        let reading = PitchWobbleEstimate.played(segment, line: playedLine)
+        wobbleReadings.played[key] = reading
+        return reading
+    }
+
+    /// What a Wobble-tool press on `segment` would start (design §5.1 as
+    /// amended by §18.3): `PitchWobbleGesture.classify` — a SOUND refused in
+    /// §1.7's words, the basis gate (§5.5) refused in its two captions, else
+    /// your wobble or a new one.
+    public func wobbleStart(for segment: NoteSegment) -> PitchWobbleStart {
+        PitchWobbleGesture.classify(segment: segment, sung: sungWobbleReading(of: segment),
+                                    basis: playedLine.basis)
+    }
+
+    /// Whether the Wobble tool can grab `segment` NOW — the question the dot
+    /// asks before it is drawn (unpitched design §4: none on a sound, none
+    /// while the tool is gated). The refusal never depends on the sung reading
+    /// (only own-vs-new does), so this reads none.
+    public func wobbleCanGrab(_ segment: NoteSegment) -> Bool {
+        PitchWobbleGesture.classify(segment: segment, sung: nil, basis: playedLine.basis).refusal == nil
+    }
+
+    /// The drawn note whose DOT is under `point` — within
+    /// `PitchWobbleGesture.knobHitRadius` of a grabbable note's top centre, the
+    /// nearest if two reach — in the Wobble tool only; else `nil`. The dot's
+    /// radius reaches above the blob, past `hitSlop`, so this is asked BEFORE
+    /// `blob(at:)` (`pressHit`), and the hover asks the same function, so the
+    /// dot a person sees is the dot a press grabs.
+    public func wobbleDotHit(at point: CGPoint) -> NoteBlob? {
+        guard tool == .wobble, state.drawsNotes else { return nil }
+        var best: (blob: NoteBlob, distance: CGFloat)?
+        for blob in blobs {
+            let rect = geometry.rect(for: blob)
+            guard PitchWobbleGesture.door(at: point, blobRect: rect) == .dot,
+                  let segment = storedSegment(blob.id), wobbleCanGrab(segment) else { continue }
+            let centre = PitchWobbleGesture.dot(in: rect)
+            let distance = hypot(point.x - centre.x, point.y - centre.y)
+            if best == nil || distance < best!.distance { best = (blob, distance) }
+        }
+        return best?.blob
+    }
+
+    /// ⭐ **THE DOT, AS DRAWN** (unpitched design §4): on the grabbable note
+    /// under `point` (its dot, or the note itself) while the Wobble tool is
+    /// engaged — or, with the pointer on neither, on the note a dot click just
+    /// stepped (`wobbleTipNoteID`). Its tip and the palette's readout are read
+    /// from the STORED note through a throwaway session, so they say what the
+    /// store holds. `nil` during a wobble DRAG (the knob is the drag overlay's
+    /// then), on a sound, while the tool is gated, and in every other tool.
+    public func wobbleDot(at point: CGPoint?) -> PitchEditorWobbleDot? {
+        // C5b-4b — nor during a brush stroke: the press is the brush's.
+        guard tool == .wobble, state.drawsNotes, wobble?.isDragging != true, brush == nil
+        else { return nil }
+        var target: (blob: NoteBlob, reason: PitchEditorWobbleDot.Reason)?
+        if let point {
+            if let hit = wobbleDotHit(at: point) {
+                target = (hit, .hover)
+            } else if let hit = blob(at: point), let segment = storedSegment(hit.id),
+                      wobbleCanGrab(segment) {
+                target = (hit, .hover)
+            }
+        }
+        if target == nil, let id = wobbleTipNoteID, let tipped = blobs.first(where: { $0.id == id }) {
+            target = (tipped, .afterClick)
+        }
+        guard let target, let segment = storedSegment(target.blob.id), wobbleCanGrab(segment),
+              let session = wobbleSession(on: segment, start: wobbleStart(for: segment), door: .dot)
+        else { return nil }
+        let rect = geometry.rect(for: target.blob)
+        return PitchEditorWobbleDot(segmentID: segment.id, centre: PitchWobbleGesture.dot(in: rect),
+                                    blobRect: rect, tip: session.dotTip(),
+                                    readout: session.readout(played: playedWobbleReading(of: segment),
+                                                            hasDrawnShape: segment.hasShape),
+                                    reason: target.reason)
+    }
+
+    /// The palette's SF Mono readout in the Wobble tool (design §9.1, the UE-2
+    /// one-line slot): the press in flight's own line, else the dot's note's.
+    /// `nil` in every other tool and with nothing to say.
+    public func wobbleReadout(dot: PitchEditorWobbleDot?) -> PitchWobbleReadout? {
+        guard tool == .wobble else { return nil }
+        return wobble?.readout ?? dot?.readout
+    }
+
+    /// Where the KNOB of a wobble DRAG in flight is drawn, content space: the
+    /// pressed note's dot (`PitchWobbleGesture.dot(in:)`), which does not move
+    /// — a wobble drag never moves the note. `nil` with no drag.
+    public var wobbleKnob: CGPoint? {
+        guard let wobble, wobble.isDragging,
+              let blob = blobs.first(where: { $0.id == wobble.segmentID }) else { return nil }
+        return PitchWobbleGesture.dot(in: geometry.rect(for: blob))
+    }
+
+    /// A session on `segment` at this pane's ratio, row height and time warp.
+    private func wobbleSession(on segment: NoteSegment, start: PitchWobbleStart,
+                               door: PitchWobbleDoor) -> PitchWobbleSession? {
+        PitchWobbleSession.begin(segment: segment, start: start,
+                                 stretchRatio: geometry.stretchRatio,
+                                 rowHeight: Double(geometry.rowHeight),
+                                 timeWarp: playedLine.curve.timeWarp,
+                                 door: door)
+    }
+
+    /// The FIRST tick of a `.wobble` press (`trackPress`): a session on the
+    /// STORED note, or a refusal said in words — a sound (§1.7), the basis gate
+    /// (§5.5: "Changing a wobble needs the app's analysis…"), a knob too narrow
+    /// to grab — and the press ABANDONED, so its ticks and its release do
+    /// nothing (`PitchEditorPressTracker.abandon`): no draft, no selection, no
+    /// commit. The refusal is drawn on the palette's `PanelRefusalLine`, the
+    /// slot every refusal on this surface uses: a tool that refused must not
+    /// look like one that did nothing.
+    private func beginWobble(segmentID id: UUID, door: PitchWobbleDoor, origin: CGPoint) {
+        refusal = nil
+        guard let blob = blobs.first(where: { $0.id == id }), let segment = storedSegment(id) else {
+            press.abandon()
+            return
+        }
+        guard let knob = PitchWobbleGesture.knob(at: origin, in: geometry.rect(for: blob)) else {
+            refusal = PitchWobbleCopy.zoomInForTwoHandles
+            press.abandon()
+            return
+        }
+        let start = wobbleStart(for: segment)
+        if let sentence = start.refusal {
+            refusal = sentence
+            press.abandon()
+            return
+        }
+        guard let session = wobbleSession(on: segment, start: start, door: door) else {
+            press.abandon()
+            return
+        }
+        let played: PitchWobbleReading? = session.phase == .own ? playedWobbleReading(of: segment) : nil
+        wobble = PitchEditorWobbleDraft(segmentID: id, startSeconds: segment.startSeconds,
+                                        endSeconds: segment.endSeconds, door: door, knob: knob,
+                                        session: session, played: played,
+                                        readout: session.readout(played: played,
+                                                                hasDrawnShape: segment.hasShape))
+    }
+
+    /// One pointer tick of the Wobble-tool press in flight. ⛔ **NEVER
+    /// COMMITS** — `PitchWobbleSession.update` has no commit output at all (T10).
+    ///
+    /// `translation` is the gesture's total travel from the PRESS (SwiftUI's:
+    /// y grows down), handed to the one function that reads a translation
+    /// (`PitchWobbleGesture.travel`, D3); `fine` is ⌥ as held THIS tick. Does
+    /// nothing until the press is past the router's slop (`isPromoted`, the one
+    /// 4 pt home, §18.8): a click steps or selects from the STORED note. The
+    /// draft line and the readout are rebuilt only when the QUANTISED draft
+    /// changed (§9.3), and the readout's reading of YOUR wobble is the
+    /// estimator over that draft line, never `keep × depth`.
+    public func updateWobbleDrag(translation: CGSize, fine: Bool) {
+        guard var current = wobble, press.current?.isPromoted == true else { return }
+        let startedDragging = !current.isDragging
+        current.isDragging = true
+        current.travel = PitchWobbleGesture.travel(translation: translation, knob: current.knob)
+        current.fine = fine
+        let changed = current.session.update(travel: current.travel, fine: fine,
+                                             playedLine: { draft in self.wobbleHandoffLine(with: draft) })
+        wobble = current
+        if changed || startedDragging {
+            // `draftNotes` reads `wobble`, so it is stored FIRST.
+            rebuildDraftLine()
+            current.played = current.session.phase == .own || current.session.phase == .group
+                ? draftPlayedLine.map { PitchWobbleEstimate.played(current.session.draft, line: $0) }
+                : nil
+        }
+        // §13: on a note with a drawn shape (C5b) the line says the drawing stays.
+        current.readout = current.session.readout(played: current.played,
+                                                  hasDrawnShape: current.session.stored.hasShape)
+        wobble = current
+    }
+
+    /// The line the handoff reads at its crossing tick (§6.2 step 1): the
+    /// committed table with `draft` in place of its note, through the ONE draft
+    /// path (`PitchEditorDraftEdit.draftSet`) and the render's own `make` — with
+    /// the note's DRAWN SHAPE (C5b-1, `shapeTenthsOfCents`) CLEARED IN THE
+    /// COPY (§13): otherwise the drawing would be read as part of the wobble,
+    /// copied into the new sine, and then play twice. The stored note keeps
+    /// its shape; only this measurement's copy loses it.
+    private func wobbleHandoffLine(with draft: NoteSegment) -> PitchPlayedLine {
+        playedLine(applying: [(draft.id, .wobble(NoteVibratoEdit(storedIn: draft),
+                                                 stretchRatio: geometry.stretchRatio))],
+                   clearingShapeOf: draft.id).line
+    }
+
+    /// The committed table with `edits` applied through
+    /// `PitchEditorDraftEdit.draftSet` — the SAME DAWCore set transforms the
+    /// commits run, `afterHandEdit(from:)` included (natural tuning D4-1) — and its
+    /// played line through the render's own `make`: THE one builder the draft
+    /// line (`rebuildDraftLine`) and the handoff line share.
+    private func playedLine(applying edits: [(segmentID: UUID, edit: PitchEditorDraftEdit)],
+                            clearingShapeOf shapeCleared: UUID? = nil)
+    -> (table: PitchEditSet, line: PitchPlayedLine) {
+        var table = PitchEditorDraftEdit.draftSet(noteTable, applying: edits, clipID: clipID)
+        // The handoff's measurement copy only (`wobbleHandoffLine`): "no
+        // shape" is an empty array at index 0, the model's own spelling.
+        if let shapeCleared, let index = table.segments.firstIndex(where: { $0.id == shapeCleared }) {
+            table.segments[index].shapeTenthsOfCents = []
+            table.segments[index].shapeStartIndex = 0
+        }
+        let line = PitchPlayedLine.make(
+            contour: contourPhase.contour,
+            fallback: fallbackDetection,
+            editSet: table,
+            clipPitchShiftSemitones: geometry.clipPitchShiftSemitones,
+            sourceWindow: geometry.sourceWindow)
+        return (table, line)
+    }
+
+    /// The wobble DRAG ended (`PitchEditorReleaseAction.endWobble`). Emits AT
+    /// MOST ONE commit, `.noteVibrato` with all six fields — and NONE for a
+    /// gesture whose result plays exactly like the stored note
+    /// (`PitchWobbleSession.commit`, §5.4 / T10). The draft line goes with the
+    /// draft: from here the line is what the STORE says.
+    @discardableResult
+    public func endWobbleDrag() -> PitchEditorCommit? {
+        guard let current = wobble else { return nil }
+        wobble = nil
+        draftPlayedLine = nil
+        draftEditSet = nil
+        guard current.isDragging, let commit = current.session.commit(),
+              let item = commit.items.first else { return nil }
+        return emit(.noteVibrato(segmentID: item.segmentId, edit: item.edit))
+    }
+
+    /// A click on the DOT (`PitchEditorReleaseAction.wobbleStep`): ONE step —
+    /// keep ± 0.10 on your wobble, width ± 5 c on a new one (C5a-4a's
+    /// `PitchWobbleSession.step`) — from the STORED note, and one commit, or
+    /// none when the step changes nothing (at a cap, or at flat). The dot's
+    /// tip then shows for this note (`wobbleTipNoteID`) until the next press.
+    /// Clicks on one note inside 800 ms fold into one undo step in the store
+    /// (`PitchCorrectionUndoKey.vibrato`, T-dot-4).
+    @discardableResult
+    public func stepWobble(segmentID: UUID, bigger: Bool) -> PitchEditorCommit? {
+        guard var current = wobble, current.segmentID == segmentID else { return nil }
+        wobble = nil
+        // A step is a click, so it never drew a draft; cleared anyway, so a
+        // step can never leave a drag's line behind (`endWobbleDrag`'s rule).
+        draftPlayedLine = nil
+        draftEditSet = nil
+        wobbleTipNoteID = segmentID
+        current.session.step(bigger: bigger)
+        guard let commit = current.session.commit(), let item = commit.items.first else { return nil }
+        return emit(.noteVibrato(segmentID: item.segmentId, edit: item.edit))
+    }
+
+    /// Put the dot's after-click tip away (a tool switch).
+    public func clearWobbleTip() { wobbleTipNoteID = nil }
+
+    /// Every drawn note's two readings, in blob order (the echo's `perNote`,
+    /// design §12.5). Cached per line, so asking twice costs one pass per note.
+    public func wobbleReadingsReport() -> [PitchEditorWobbleNoteReadings] {
+        blobs.compactMap { blob in
+            guard let segment = storedSegment(blob.id) else { return nil }
+            return PitchEditorWobbleNoteReadings(segmentID: segment.id,
+                                                 sung: sungWobbleReading(of: segment),
+                                                 played: playedWobbleReading(of: segment))
+        }
+    }
+
+    // MARK: C5b-4b — the freehand brush (timing-and-freehand design §5.5–§5.6)
+    //
+    // ⭐ THE MATH IS C5b-4a's, HEADLESS (`PitchShapeStroke`); THIS IS ITS
+    // WIRING. ⌘ held at a press on a note, in the Move or the Wobble tool,
+    // routes `.brush(id)` (`PitchEditorGestureRouter`). Nothing happens until
+    // the press crosses the router's 4 pt slop: released inside it, the press
+    // is the house click (⌘ toggles the note), as it was before the brush.
+    // At the promotion the stroke BEGINS at the press point (`beginBrush`) or
+    // is REFUSED in words and the press abandoned; every tick sweeps it
+    // (`advanceBrush`) and redraws the draft only when what the release would
+    // write CHANGED; the release emits ONE `.noteShapes` commit (`endBrush`),
+    // none for a stroke that changed nothing — so a stroke across three notes
+    // is ONE store call and ONE undo step, never three. `trackPress` drives
+    // it WHOLE (the band's shape), so a staged press and a real one run the
+    // same code.
+
+    /// Points per SOURCE second at `seconds`: the geometry's own mapping over
+    /// one 10 ms grid step (a tempo change bends it, so no constant is right
+    /// everywhere). The kernel's radius is converted with it ONCE, at the
+    /// stroke's start (§5.5: "the brush feels the same at every zoom").
+    private func pointsPerSourceSecond(at seconds: Double) -> Double {
+        let step = 1 / NoteSegment.shapeGridHz
+        let width = geometry.x(forSourceSecond: seconds + step) - geometry.x(forSourceSecond: seconds)
+        return Double(width) / step
+    }
+
+    /// The note a press at `point` with this chord would DRAW on — the
+    /// router's own answer (`.brush`), asked exactly as the press will ask it
+    /// — or `nil`.
+    public func brushNote(at point: CGPoint, modifiers: ArrangeClickModifiers) -> UUID? {
+        guard case .brush(let id) = PitchEditorGestureRouter.route(
+            tool: tool, modifiersAtPress: modifiers, hit: pressHit(at: point)) else { return nil }
+        return id
+    }
+
+    /// What a stroke on note `id` starting at `point` would be: C5b-4a's ONE
+    /// `begin` — its refusals (an estimate line, a sound) in its own words —
+    /// on the COMMITTED table and the line as drawn now (never a draft). The
+    /// press and the hover both ask this, so the band can never promise a
+    /// stroke the press then refuses, or the other way round.
+    private func brushStart(on id: UUID, at point: CGPoint) -> PitchShapeBrushStart {
+        let seconds = geometry.sourceSecond(forX: point.x)
+        return PitchShapeStroke.begin(pressedNoteID: id, atSourceSecond: seconds,
+                                      midi: geometry.midi(forY: point.y), table: noteTable,
+                                      prestrokePlayedLine: playedLine,
+                                      pointsPerSourceSecond: pointsPerSourceSecond(at: seconds))
+    }
+
+    /// ⭐ **THE BAND, AS DRAWN** (design §5.5): following the stroke in flight,
+    /// or — with ⌘ held, the button up, over a note a ⌘-press would draw on —
+    /// following the pointer, dimmed and carrying the sentence when that press
+    /// would be refused. `nil` otherwise: over empty surface ⌘ places the
+    /// playhead (I5, its own ghost line), and the knife never draws.
+    public func brushBand(at hover: CGPoint?, commandHeld: Bool) -> PitchEditorBrushBand? {
+        if let brush { return brushBand(centre: brush.point, isStroking: true, refusal: nil) }
+        guard commandHeld, press.current == nil, state.drawsNotes, let hover,
+              let id = brushNote(at: hover, modifiers: [.command]) else { return nil }
+        return brushBand(centre: hover, isStroking: false,
+                         refusal: brushStart(on: id, at: hover).refusal)
+    }
+
+    private func brushBand(centre: CGPoint, isStroking: Bool, refusal: String?) -> PitchEditorBrushBand {
+        let radius = CGFloat(PitchShapeBrush.radiusPoints)
+        return PitchEditorBrushBand(
+            rect: CGRect(x: centre.x - radius, y: 0, width: 2 * radius, height: geometry.contentHeight),
+            point: centre, isStroking: isStroking, refusal: refusal)
+    }
+
+    /// ⭐ **THE PALETTE'S DRAWN HELP** (design §5.6: "While ⌘ is held: the help
+    /// slot shows the Shape help"): the brush's own words while a stroke is in
+    /// flight, or while ⌘ is held over the surface in a tool where ⌘ draws —
+    /// or, over a note the brush would refuse, that refusal's sentence (the
+    /// estimate caption §5.5 says the disabled brush shows). Else the engaged
+    /// tool's help. `band` is `brushBand(at:commandHeld:)`'s answer for the
+    /// same hover, so the words and the band cannot disagree.
+    public func paletteHelp(commandHeld: Bool, band: PitchEditorBrushBand?) -> String {
+        if let refusal = band?.refusal { return refusal }
+        if brush != nil || (commandHeld && PitchEditorGestureRouter.commandDraws(in: tool)) {
+            return PitchShapeBrush.help
+        }
+        return tool.help
+    }
+
+    /// The `.brush` press crossed the slop (`trackPress`): the stroke BEGINS at
+    /// the PRESS point — its first point, so a press that then pulls straight
+    /// up or down is one place with a moving target, "pull a peak" (§5.5) —
+    /// or is REFUSED in words and the press ABANDONED
+    /// (`PitchEditorPressTracker.abandon`), so its later ticks and its release
+    /// do nothing: no draft, no selection, no commit. The refusal is drawn on
+    /// the palette's `PanelRefusalLine`, the slot every refusal on this surface
+    /// uses: a tool that refused must not look like one that did nothing.
+    private func beginBrush(on id: UUID, origin: CGPoint) {
+        refusal = nil
+        switch brushStart(on: id, at: origin) {
+        case .refused(let sentence):
+            refusal = sentence
+            press.abandon()
+        case .drawing(let stroke):
+            brush = PitchEditorBrushDraft(pressedNoteID: id, stroke: stroke, shapes: [:],
+                                          readout: PitchShapeBrush.readout(maxExcursionCents: 0),
+                                          point: origin)
+        }
+    }
+
+    /// One pointer tick of the stroke in flight: sweep it to `point` (source
+    /// seconds and fractional midi, through the geometry's ONE mapping each
+    /// way — the played line's own axis, the clip's transpose included), then,
+    /// ONLY when what the release would write CHANGED, store the new write,
+    /// its readout and the draft line. ⛔ **NEVER COMMITS.**
+    ///
+    /// ⚠️ C2 (per-note timing) will move a frame's EDITED second away from its
+    /// source second; the pointer's x is then an edited second and needs the
+    /// warp's inverse here. Until C2 lands the two are equal
+    /// (`PitchPlayedLine.Point.editedSeconds`).
+    private func advanceBrush(to point: CGPoint) {
+        guard var current = brush else { return }
+        current.stroke.move(toSourceSecond: geometry.sourceSecond(forX: point.x),
+                            midi: geometry.midi(forY: point.y))
+        current.point = point
+        let shapes = current.stroke.commit()
+        let changed = shapes != current.shapes
+        if changed {
+            current.shapes = shapes
+            current.readout = current.stroke.readout
+        }
+        // `draftNotes` reads `brush`, so it is stored BEFORE the rebuild.
+        brush = current
+        if changed { rebuildDraftLine() }
+    }
+
+    /// The stroke ended (`PitchEditorReleaseAction.endBrush`). Emits AT MOST
+    /// ONE commit — `.noteShapes` with every note the stroke drew on, the very
+    /// value the last tick drew (`PitchEditorBrushDraft.shapes`) — and NONE for
+    /// a stroke that changed nothing (a no-op write is an undo entry for a
+    /// decision nobody made). The draft line goes with the draft: from here
+    /// the line is what the STORE says.
+    @discardableResult
+    public func endBrush() -> PitchEditorCommit? {
+        guard let current = brush else { return nil }
+        brush = nil
+        draftPlayedLine = nil
+        draftEditSet = nil
+        guard !current.shapes.isEmpty else { return nil }
+        return emit(.noteShapes(shapes: current.shapes))
+    }
+
+    /// C5b-4b — a drawn note (or a sound, from a hand-written file) whose
+    /// stored drawing is not empty: what "Reset drawn shape" offers to clear.
+    private func hasDrawnShape(_ id: UUID) -> Bool {
+        storedSegment(id)?.hasShape == true
+    }
+
+    // MARK: I6b — the window grows under a pitch drag (interaction batch §9)
+
+    /// Every note a draft moves, at the pitch it is DRAWN at right now — the
+    /// pressed note, then each member, on the clip's transposed axis.
+    nonisolated static func drawnMidis(of draft: PitchEditorDragDraft) -> [Double] {
+        [draft.targetMidi] + draft.members.map {
+            $0.targetMidi(clipPitchShiftSemitones: draft.clipPitchShiftSemitones)
+        }
+    }
+
+    /// A pitch drag held in the pane's top or bottom edge band with the
+    /// viewport already against that wall (`EdgeAutoScroll.Push.isAtWall`): the
+    /// WINDOW grows there instead, so the note can keep going (m23-ap I6b S2).
+    /// Returns the whole rows grown now (0 for most calls: a row is earned over
+    /// several ticks).
+    ///
+    /// The rate is `EdgeAutoScroll.growthSemitonesPerSecond` × `depthFraction`
+    /// (how deep in the band, `0...1`, the scroll's own ramp) × `dt`, and the
+    /// fraction of a row left over is carried in `growthRemainder`. `dt` is the
+    /// caller's measured time since its last growth step; it owns the clamp
+    /// that keeps a pause from arriving as a burst.
+    ///
+    /// Growing the TOP moves every row down, which `updatePitchDrag` takes back
+    /// out through `windowTopAtPress`; growing the bottom moves nothing, but the
+    /// new row sits under the viewport's edge until the view reveals it (a
+    /// writer clamped against the NEW content height). A drag only: a band, a
+    /// cut and an idle surface never grow the window. Commits nothing.
+    @discardableResult
+    public func growPitchWindowForDrag(side: EdgeAutoScroll.Side, depthFraction: CGFloat,
+                                       dt: Double) -> Int {
+        guard var draft = drag else { return 0 }
+        let window = geometry.midiRange
+        let atLimit = side == .leading
+            ? window.upperBound >= PitchEditorRange.fullMidiRange.upperBound
+            : window.lowerBound <= PitchEditorRange.fullMidiRange.lowerBound
+        guard !atLimit else {
+            growthRemainder = 0   // a pause at 0/127 banks nothing
+            return 0
+        }
+        let depth = depthFraction.isFinite ? min(max(Double(depthFraction), 0), 1) : 0
+        let step = dt.isFinite ? max(0, dt) : 0
+        growthRemainder += EdgeAutoScroll.growthSemitonesPerSecond * depth * step
+        let earned = Int(growthRemainder.rounded(.down))
+        guard earned >= 1 else { return 0 }
+        growthRemainder -= Double(earned)
+        let grown = PitchEditorRange.grown(window, towards: side, by: earned)
+        let rows = Int((grown.upperBound - grown.lowerBound) - (window.upperBound - window.lowerBound))
+        guard rows > 0 else {
+            growthRemainder = 0
+            return 0
+        }
+        // Reached the limit mid-step: what was left over has nowhere to go.
+        if rows < earned { growthRemainder = 0 }
+        switch side {
+        case .leading: draft.topGrowthRows += rows
+        case .trailing: draft.bottomGrowthRows += rows
+        }
+        drag = draft
+        geometry.midiRange = grown
+        return rows
+    }
+
+    /// Rows the window grew by during the press in flight, or during the last
+    /// one once it is over — what `debug.pitchEditor`'s `autoscroll.grownRows`
+    /// reads. Reset at every press's first tick (`trackPress`).
+    @ObservationIgnored public private(set) var edgeGrownRows = 0
+    /// The edge the last edge step of this press (or the last one) acted at.
+    @ObservationIgnored public private(set) var lastEdge: PitchEditorEdge?
+
+    /// The longest step `edgeStep` grows the window for, in seconds: three
+    /// frames at 60 Hz. A PICK (a delegated default): the pointer's events and
+    /// the held repeat both arrive far faster, so this only bites after a gap —
+    /// the held repeat's 200 ms wait, a staged step — where it keeps the gap
+    /// from arriving as a burst of rows.
+    public nonisolated static let maxEdgeStepSeconds: Double = 0.05
+
+    /// The `dt` one edge step grows for: the time since the press's previous
+    /// edge step, capped at `maxEdgeStepSeconds`; the repeat's own interval when
+    /// there is no previous step to measure from. ⚠️ In the pane that `nil` is
+    /// reached only by a press's own first tick, which never grows (a press
+    /// pushes nothing until it has travelled): `applyEdgeStep` stamps every
+    /// call, so a press's first GROWING step measures from the tick before it.
+    public nonisolated static func edgeStepSeconds(sinceLastStep elapsed: Duration?) -> Double {
+        guard let elapsed else {
+            let interval = PianoRollEdgeRepeat.interval.components
+            return Double(interval.seconds) + Double(interval.attoseconds) * 1e-18
+        }
+        let parts = elapsed.components
+        let seconds = Double(parts.seconds) + Double(parts.attoseconds) * 1e-18
+        return min(max(0, seconds), maxEdgeStepSeconds)
+    }
+
+    /// The axes the press in flight pushes along at the pane's edge, EMPTY when
+    /// it pushes nothing — what the view's held-pointer clock arms on and ticks
+    /// with. The same answer `edgeStep` acts on (`edgeBehaviour`), so the clock
+    /// is never live where a real event would be inert.
+    public var edgePushAxes: EdgeAutoScroll.Axes { edgeBehaviour?.axes ?? [] }
+
+    /// Whether the press in flight GROWS the pitch window at a wall — the other
+    /// half of `edgeStep`'s answer, read from the same switch. Exposed so the
+    /// `.band` arm's "never grows" is pinned on its own (S4 follow-up): through
+    /// `edgeStep` alone it cannot be seen, because `growPitchWindowForDrag`'s
+    /// `drag == nil` guard also stops a band, and each guard hid the other's
+    /// removal.
+    public var edgeGrowsAtWall: Bool { edgeBehaviour?.grows ?? false }
+
+    /// The one exhaustive switch behind `edgeStep` and `edgePushAxes`: the axes a
+    /// press pushes along and whether it grows the window at a wall, or nil.
+    private var edgeBehaviour: (axes: EdgeAutoScroll.Axes, grows: Bool)? {
+        guard let current = press.current, current.isPromoted else { return nil }
+        switch current.kind {
+        case .noteDrag: return drag != nil ? (.vertical, true) : nil
+        case .band: return band != nil ? (.both, false) : nil
+        // C5a-4b — a wobble drag pushes nothing: its travel is a GAIN on the
+        // note's wobble, not a position, and the note it edits never moves, so
+        // a scroll under it would only change what the pointer is over.
+        // C5b-4b — nor does a brush stroke: it DRAWS where the hand is, and a
+        // scroll under a still pointer would draw a line the hand never made.
+        // W7-NTU U3 — nor a Voice drag, for the wobble's reason: its travel is
+        // a VALUE, and the note it edits never moves.
+        case .cut, .none, .wobble, .brush, .formantDrag: return nil
+        }
+    }
+
+    /// ⭐ **THE ONE EDGE DECISION** (m23-ap I6b S3): what a pointer at `pointer`
+    /// (content space) near the pane's edge does for the press in flight. The
+    /// view's live pointer, its held repeat and the staged seam all ask HERE,
+    /// then write the returned targets — so none of them can decide differently.
+    ///
+    /// ⛔ **AN EXHAUSTIVE SWITCH ON THE PRESS KIND, NO `default`.** A new press
+    /// kind (C5a's wobble, C5b's brush, C2's edge) must opt in or out here, or
+    /// this does not compile:
+    /// - `.noteDrag` pushes on y only: it scrolls while there is room, and at
+    ///   the wall it GROWS the window (`growPitchWindowForDrag`) — the pitch
+    ///   pane's divergence from the roll, whose rows are all 128 already;
+    /// - `.band` scrolls on x AND y and never grows (every note is already
+    ///   inside the window; its origin is content space, so a scroll does not
+    ///   move it) — a DELEGATED divergence from the roll's marquee, which does
+    ///   not scroll at all;
+    /// - `.cut` and `.none` push nothing.
+    ///
+    /// Only a PROMOTED press with its draft or band live pushes: an Escape (the
+    /// model's `cancelGestureForEscape`) or a cancel ends it here, with no
+    /// teardown the view has to remember.
+    ///
+    /// `viewport`'s offset is read CLAMPED (`PitchEditorViewport.clamped`): the
+    /// measured x can hold a position the scroller is not at
+    /// (`shownOffsetX`'s warning), and a push measured from it would scroll from
+    /// the wrong place.
+    @discardableResult
+    public func edgeStep(pointer: CGPoint, viewport: PitchEditorViewport, dt: Double) -> PitchEditorEdgeStep {
+        guard let behaviour = edgeBehaviour else { return .none }
+        let axes = behaviour.axes
+        let grows = behaviour.grows
+        let pushes = EdgeAutoScroll.push(pointer: pointer, offset: viewport.clamped(viewport.offset),
+                                         viewport: viewport.viewportSize,
+                                         content: viewport.contentSize, axes: axes)
+        var step = PitchEditorEdgeStep()
+        if let x = pushes.horizontal, let next = x.next {
+            step.scrollX = next
+            step.edge = x.side == .leading ? .left : .right
+        }
+        if let y = pushes.vertical {
+            if let next = y.next {
+                step.scrollY = next
+                step.edge = y.side == .leading ? .top : .bottom
+            } else if grows {
+                let rows = growPitchWindowForDrag(side: y.side, depthFraction: y.depthFraction, dt: dt)
+                if rows > 0 {
+                    step.grownRows = rows
+                    step.edge = y.side == .leading ? .top : .bottom
+                    edgeGrownRows += rows
+                    // The bottom's new row is under the viewport's edge: reveal
+                    // it against the NEW content. The top needs no write: its
+                    // rows push the content down under an offset of 0.
+                    if y.side == .trailing {
+                        step.scrollY = FollowPlayhead.maxOffset(contentWidth: geometry.contentHeight,
+                                                                viewportWidth: viewport.viewportSize.height)
+                    }
+                }
+            }
+        }
+        if let edge = step.edge { lastEdge = edge }
+        return step
     }
 
     // MARK: I0 — the press router (interaction batch §3 item 5)
@@ -2394,8 +3744,13 @@ public final class PitchEditorModel {
     /// What is under a press, for the router — the ONE hit producer the press
     /// path uses: `blob(at:)` (its slop and its nearest-by-vertical rule) on a
     /// surface that is drawing notes, `.inert` on one that is not.
+    ///
+    /// m23-ap C5a-4b — in the Wobble tool the DOT is asked first: its 12 pt
+    /// radius reaches above the blob, past `hitSlop`, where `blob(at:)` finds
+    /// nothing (`wobbleDotHit`). Every other tool reads exactly as before.
     public func pressHit(at point: CGPoint) -> PitchEditorPressHit {
         guard state.drawsNotes else { return .inert }
+        if tool == .wobble, let dot = wobbleDotHit(at: point) { return .dot(dot.id) }
         return blob(at: point).map { .note($0.id) } ?? .empty
     }
 
@@ -2424,14 +3779,48 @@ public final class PitchEditorModel {
                            modifiers: ArrangeClickModifiers) -> PitchEditorPressTick {
         let tick = press.tick(start: start, location: location, tool: tool, modifiers: modifiers,
                               hit: { pressHit(at: $0) })
-        if tick.isFirst, drag != nil {
+        if tick.isFirst, drag != nil || wobble != nil || brush != nil || voiceDrag != nil {
             drag = nil
+            wobble = nil
+            brush = nil
+            voiceDrag = nil   // W7-NTU U3
             draftPlayedLine = nil
+            draftEditSet = nil
+        }
+        // C5a-4b — a new press puts the dot's after-click tip away, and a
+        // `.wobble` press begins its session NOW, on its first tick: the door
+        // is decided at the press, and a refused press is abandoned before any
+        // later tick can act on it (`beginWobble`).
+        if tick.isFirst {
+            wobbleTipNoteID = nil
+            if case .wobble(let id, let door) = tick.kind {
+                beginWobble(segmentID: id, door: door, origin: start)
+            }
+            // W7-NTU U3 — a Voice-tool press begins its draft NOW, on its
+            // first tick, from the STORED note, so a sound is refused (and the
+            // press abandoned) before any later tick or its release can act.
+            if case .formantDrag(let id) = tick.kind {
+                beginVoiceDrag(segmentID: id)
+            }
+        }
+        // I6b — the edge echo describes THIS press from its first tick.
+        if tick.isFirst {
+            edgeGrownRows = 0
+            lastEdge = nil
         }
         if tick.isFirst, band != nil { cancelBand() }
         if case .band = tick.kind, tick.isPromoted, let current = press.current {
             advanceBand(origin: current.origin, to: location,
                         modifiersAtPress: current.modifiersAtPress, didPromote: tick.didPromote)
+        }
+        // ⭐ C5b-4b — THE BRUSH, DRIVEN HERE WHOLE, like the band: nothing
+        // inside the slop (the release is then the house click), the stroke
+        // begun at the PRESS point on the tick that crosses it (or refused,
+        // and the press abandoned), and swept to the pointer on that tick and
+        // every one after. Commits nothing: `endBrush` is the release's.
+        if case .brush(let id) = tick.kind, tick.isPromoted, let current = press.current {
+            if tick.didPromote { beginBrush(on: id, origin: current.origin) }
+            advanceBrush(to: location)
         }
         // ⭐ m23-ap I1 UI hooks — A PRESS ON A NOTE IS HEARD, ONCE, AT ITS FIRST
         // TICK: the note as it sounds NOW (design §4, the roll's first-tick
@@ -2453,8 +3842,15 @@ public final class PitchEditorModel {
     /// I0 computed is ACTED ON and never decided twice: a click resolves
     /// through `PianoRollGridPress`'s table (plain on a note selects only it,
     /// ⇧/⌘ toggles it, plain on empty deselects, ⇧ on empty does nothing), and
-    /// a travelled band lands its final selection at the release point. ⌘ on
-    /// empty (`.positionPlayhead`) is I5's seam and does nothing yet. The two
+    /// a travelled band lands its final selection at the release point.
+    ///
+    /// ⭐ m23-ap I5 — ⌘ ON EMPTY SURFACE (`.positionPlayhead`) PLACES THE
+    /// PLAYHEAD, at the press's START x (the knife's rule: a hand that slipped
+    /// during a click did not mean to move it), through `placePlayhead` — one
+    /// seek, snapped unless `snapBypassed` (⌥ held at release). It still does
+    /// NOT deselect: the click table sent it here, not to `.deselect`. Only a
+    /// LIVE surface routes it: a surface drawing no notes is `.inert` and its
+    /// press is `.none`, so there the time ruler is the way to place it. The two
     /// commit-producing answers (`.endNoteDrag`, `.cut`) stay the view's to
     /// dispatch — it owns the one path that can write.
     ///
@@ -2463,21 +3859,128 @@ public final class PitchEditorModel {
     /// left exactly where it was (`PitchEditorModelTests` pins it on an
     /// off-grid note, with the zero-length drag that used to retune it as the
     /// positive control).
+    ///
+    /// W7-NTU U3 — `clickCount` is the mouse-up's own click count: the Voice
+    /// tool's double-click reset reads it (`PitchEditorGestureRouter.release`),
+    /// and it defaults to 1, so every caller before U3 reads as it did.
     @discardableResult
     public func releasePress(start: CGPoint, location: CGPoint,
-                             modifiers: ArrangeClickModifiers) -> PitchEditorReleaseAction {
-        let action = press.release(start: start, at: location, modifiers: modifiers)
+                             modifiers: ArrangeClickModifiers,
+                             snapBypassed: Bool = false,
+                             clickCount: Int = 1) -> PitchEditorReleaseAction {
+        // C5a-4b — ⌥ at the release is the dot's smaller step
+        // (`PitchEditorGestureRouter.release`); every other kind ignores it.
+        let action = press.release(start: start, at: location, modifiers: modifiers,
+                                   optionAtRelease: snapBypassed, clickCount: clickCount)
         lastRelease = action
         switch action {
         case .click(let answer):
-            applyClick(answer)
+            applyClick(answer, pressStart: start, snapBypassed: snapBypassed)
         case .endBand:
             finishBand(at: location)
-        case .endNoteDrag, .cut, .nothing:
+        case .endNoteDrag, .cut, .nothing, .endWobble, .wobbleStep, .endBrush,
+             .endFormantDrag, .formantReset:
             break
+        }
+        // C5a-4b — a Wobble-tool press that ended as anything but its drag or
+        // its step (the house click on the note's body) ends its session here:
+        // nothing else would, and a stale session would keep speaking in the
+        // palette's readout slot for a press that is over.
+        switch action {
+        case .endWobble, .wobbleStep: break
+        default: wobble = nil
+        }
+        // W7-NTU U3 — the same for a Voice-tool press that ended as a click:
+        // its draft goes here. Its drag's end and its double-click keep it for
+        // the view's `endVoiceDrag` / `resetVoice`, which clear it themselves.
+        switch action {
+        case .endFormantDrag, .formantReset: break
+        default: voiceDrag = nil
         }
         return action
     }
+
+    // MARK: I5 — the playhead (interaction batch §8)
+
+    /// The division a snapped placement lands on: 1/16 of a beat (design §8),
+    /// `SnapResolution`'s own value and never `ClipSnap`'s (the timing doc's
+    /// F21). C2-5's chip will own this later; its default already agrees.
+    public nonisolated static let placementGrid: SnapResolution = .sixteenth
+
+    /// The grid a placement snaps to RIGHT NOW: `.off` when the app's snap is
+    /// off, else `placementGrid` — through `SnapResolution.effective`, the one
+    /// home of that rule (the user's 2026-08-13 ruling: the note editors follow
+    /// the arrange's snap ON/OFF).
+    ///
+    /// ⚠️ **`density: .pro` IS NOT A PREFERENCE, IT IS THE ONLY CORRECT
+    /// ARGUMENT.** `effective` locks every non-Pro density to `.beat` — the
+    /// roll's Simple scaffolding — and this pane has ONE mode (no Simple/Pro
+    /// chip, `PitchEditorView`'s banner). Passing anything else would silently
+    /// coarsen the snap to whole beats with nothing on screen to say why.
+    public var placementSnap: SnapResolution {
+        SnapResolution.effective(appSnap: appSnap, density: .pro, picked: Self.placementGrid)
+    }
+
+    /// **THE ONE PLACEMENT PRODUCER** (design §8): the PROJECT beat a playhead
+    /// placed at content x lands on — the ruler's ticks and the ⌘-click both
+    /// come here, and so does the ⌘ ghost line.
+    ///
+    /// Content x → the PROJECT beat (x 0 is the clip's start, through the
+    /// geometry's one mapping) → snapped to `placementSnap` ON THE SONG'S GRID
+    /// unless ⌥ bypasses it → clamped to the clip by
+    /// `PianoRollPlayhead.projectBeat`.
+    ///
+    /// ⭐ **I5-F1 (2026-09-25): THE SNAP IS IN SONG SPACE, NOT CLIP-LOCAL.** I5
+    /// snapped the clip-local beat, to match a ruler numbered from the clip's
+    /// first beat; that ruler named a different bar from the transport for any
+    /// vocal that does not start on a bar line. The ruler now numbers the song's
+    /// bars (`PitchEditorSongRuler`), so the playhead lands on the song's 1/16 —
+    /// the lines the transport, the arrange and this ruler all count. Song bars
+    /// start on whole beats (`MeterMap` puts every change on a barline, from
+    /// beat 0), so a 1/16 grid from beat 0 is the song's grid under any meter.
+    /// `PianoRollPlayhead.projectBeat`'s "snap in clip-local space" warning is
+    /// the ROLL's, whose grid lines are clip-local; this pane draws none.
+    ///
+    /// ⚠️ **THE CLAMP WINS AT THE CLIP'S EDGES, SO AN EDGE CAN BE OFF THE GRID.**
+    /// A clip starting at beat 3.1: x 0 snaps to 3.0, outside the clip, and
+    /// clamps back to 3.1. The clip's own start and end are honest places to put
+    /// the playhead, and walking the transport out of the editor's span is what
+    /// the clamp exists to prevent.
+    ///
+    /// ⚠️ `x` IS CONTENT SPACE. A caller holding a VIEWPORT x (the ruler, which
+    /// does not scroll) adds the scroll offset first, in exactly one place
+    /// (`PitchEditorView.rulerTick`); a caller on the surface (the ⌘-click) is
+    /// already in content space and must add nothing.
+    public func placementBeat(atContentX x: CGFloat, snapBypassed: Bool) -> Double {
+        let project = geometry.projectBeat(forX: x)
+        let placed = snapBypassed ? project : placementSnap.snapped(project)
+        return PianoRollPlayhead.projectBeat(localBeat: placed - geometry.startBeat,
+                                             clipStartBeat: geometry.startBeat,
+                                             lengthBeats: geometry.lengthBeats)
+    }
+
+    /// Place the playhead at content x: one seek through `onSeek`, carrying
+    /// `placementBeat`. The time ruler's every tick calls this (click jumps, drag
+    /// scrubs), and nothing else seeks but the ⌘-click below. Returns the beat
+    /// it asked for, so a caller can report it.
+    @discardableResult
+    public func placePlayhead(atContentX x: CGFloat, snapBypassed: Bool) -> Double {
+        let beat = placementBeat(atContentX: x, snapBypassed: snapBypassed)
+        placementCount += 1
+        lastPlacementBeat = beat
+        onSeek?(beat)
+        return beat
+    }
+
+    /// How many placements this model has asked for, ever — the `commitCount`
+    /// discipline: counted, never reasoned about. With `lastPlacementBeat` it is
+    /// what `debug.pitchEditor`'s `playhead` echo shows of what was ASKED, beside
+    /// the transport's own position (what the store DID): a seek that failed
+    /// quietly shows up as the two disagreeing. `@ObservationIgnored`: nothing
+    /// draws it.
+    @ObservationIgnored public private(set) var placementCount = 0
+    /// The project beat the last placement asked for, or `nil` before any.
+    @ObservationIgnored public private(set) var lastPlacementBeat: Double?
 
     // MARK: I4 — the selection's writers (interaction batch §7)
 
@@ -2496,12 +3999,46 @@ public final class PitchEditorModel {
     /// nothing is selected (the line says nothing rather than "0 notes
     /// selected"), "1 note selected", "3 notes selected". Resolved HERE so the
     /// wording is tested headless; the view draws it verbatim.
+    ///
+    /// UE-1: SOUNDS are counted as sounds — "1 sound selected", "2 notes and 1
+    /// sound selected" — the menu's own nouns (`PitchEditorNoteMenu`), so the
+    /// status line and "Clear Sound" never disagree about what is selected. A
+    /// selection with no sound reads exactly as before.
     public var selectionSummary: String? {
+        let sounds = selection.isEmpty ? 0 : blobs.reduce(into: 0) { count, blob in
+            if blob.isUnpitched, selection.contains(blob.id) { count += 1 }
+        }
+        if sounds > 0 {
+            // The selection only ever holds DRAWN ids, so the rest are notes.
+            let notes = selection.count - sounds
+            let soundWords = sounds == 1 ? "1 sound" : "\(sounds) sounds"
+            guard notes > 0 else { return "\(soundWords) selected" }
+            let noteWords = notes == 1 ? "1 note" : "\(notes) notes"
+            return "\(noteWords) and \(soundWords) selected"
+        }
         switch selection.count {
         case 0: return nil
         case 1: return "1 note selected"
         case let count: return "\(count) notes selected"
         }
+    }
+
+    /// UE-2 — WHAT KINDS the selection holds (`NoteBlob.menuTarget`'s kind):
+    /// `[.note]`, `[.sound]`, both, or empty. The Edit menu's Clear title reads
+    /// it through the pane's bridge (`PitchEditorInteractionBridge
+    /// .selectionKinds` → `DeleteMenuPolicy`), so "Clear Selected Sounds" and
+    /// the note menu's "Clear Sound" come from one noun table
+    /// (`PitchEditorNoteMenu.selectionClearTitle`). A selected id's kind cannot
+    /// change under it (`NoteSegment.origin` is a `let`, and the merge never
+    /// re-identifies a segment), so the pane reports it on `selectionToken`.
+    public var selectionKinds: Set<PitchEditorNoteMenu.Kind> {
+        guard !selection.isEmpty else { return [] }
+        var kinds: Set<PitchEditorNoteMenu.Kind> = []
+        for blob in blobs where selection.contains(blob.id) {
+            kinds.insert(blob.menuTarget.kind)
+            if kinds.count == 2 { break }
+        }
+        return kinds
     }
 
     /// Select exactly this note — a plain click on it. A note this surface
@@ -2532,16 +4069,18 @@ public final class PitchEditorModel {
     private func isDrawn(_ id: UUID) -> Bool { blobs.contains { $0.id == id } }
 
     /// The click table's answer, acted on (see `releasePress`).
-    private func applyClick(_ answer: PianoRollGridRelease) {
+    private func applyClick(_ answer: PianoRollGridRelease, pressStart: CGPoint,
+                            snapBypassed: Bool) {
         switch answer {
         case .selectOnly(let id): selectOnly(id)
         case .toggle(let id): toggle(id)
         case .deselect: clearSelection()
         case .positionPlayhead:
-            // ═══ I5 SEAM ═══ ⌘ on empty surface places the playhead there. Not
-            // built yet, so it does nothing — and in particular it does NOT
-            // deselect: the click table sent it here and not to `.deselect`.
-            break
+            // I5 — ⌘ on empty surface places the playhead where the press
+            // BEGAN (content space: the surface's own point, no scroll term).
+            // It does NOT deselect: the click table sent it here, not to
+            // `.deselect`.
+            placePlayhead(atContentX: pressStart.x, snapBypassed: snapBypassed)
         case .doNothing:
             break
         }
@@ -2631,7 +4170,8 @@ public final class PitchEditorModel {
     /// The Move tool's press on a note travelled past the slop (I0's
     /// promotion): drag the SELECTION's pitch (m23-ap I4). An UNSELECTED note
     /// is selected first — alone, or added to the selection when the press
-    /// carried ⇧ or ⌘ (the house additive chord, `ArrangeClickIntent`). The
+    /// carried ⇧ (the house additive chord, `ArrangeClickIntent`; since C5b-4b
+    /// a ⌘-press on a note is the BRUSH and never reaches here). The
     /// pressed note is the drag's anchor — `beginPitchDrag(on:)`, UNCHANGED —
     /// and every OTHER selected, drawn note rides along as a member.
     ///
@@ -2654,7 +4194,8 @@ public final class PitchEditorModel {
         draft.members = others.map {
             PitchEditorDragMember(segmentID: $0.id, startSeconds: $0.startSeconds,
                                   endSeconds: $0.endSeconds, detectedMidi: $0.centreMidi,
-                                  baselineCents: $0.offsetCents, offsetCents: $0.offsetCents)
+                                  baselineCents: $0.offsetCents, offsetCents: $0.offsetCents,
+                                  isUnpitched: $0.isUnpitched)
         }
         drag = draft
         rebuildDraftLine()
@@ -2770,6 +4311,84 @@ public final class PitchEditorModel {
         return nil
     }
 
+    // MARK: UE-1 — a sound with no pitch is dragged RELATIVELY (unpitched design §1.7)
+
+    /// `updatePitchDrag`'s branch for a drag whose PRESSED blob is a SOUND and
+    /// ⌥ is NOT held — one sound, or a group led by one (UE-1).
+    ///
+    /// ⭐ **WHOLE SEMITONES FROM WHERE IT SITS** (§1.7, U5 as kept by
+    /// natural-tuning R21: a sound the user drags on purpose still moves). A
+    /// sound's drawn pitch is borrowed from its neighbour (§1.5), so snapping
+    /// it to the SCALE would snap a guess: the sound moves by a whole number of
+    /// semitones, `k`, from its offset at the press, and its stored offset is
+    /// EXACTLY `baseline + 100·k` — never routed through
+    /// `PitchEditorGeometry.storedOffsetCents`, whose float round trip would
+    /// put a sound a hair off "whole" and make a release at the start read as a
+    /// move (`isNoOp`). A sound sung 37 c off its anchor stays 37 c off it.
+    ///
+    /// ⭐ **THE GROUP RULE: THE PRESSED BLOB DECIDES THE SNAP; EVERY MEMBER RIDES
+    /// THE ONE DELTA.** Pressing a sound, every other selected blob — note or
+    /// sound — moves by the same `k` semitones, so the intervals are kept and a
+    /// note riding along lands `100·k` c from where it was, not on the scale.
+    /// Pressing a NOTE is the I4 group branch, unchanged: the note snaps to the
+    /// scale and every sound riding along takes that (possibly fractional)
+    /// delta, so it stays drawn at the note it borrowed its pitch from — "a
+    /// sound drawn away from its word cannot be read as part of it" (§1.5).
+    /// A notes-only drag never reaches this function
+    /// (`ue1NotesOnlyDragIsBitIdenticalToTheFrozenArithmetic`).
+    ///
+    /// ⛔ **THE CLAMP IS `groupDeltaBounds`', the tightest member's** (the I4
+    /// data-loss rule, one home for one sound or many), narrowed to its whole
+    /// semitones. Those bounds always contain 0, so a sound can always stay
+    /// where it is.
+    private func updateSoundPitchDrag(_ draft: inout PitchEditorDragDraft,
+                                      origin: Double, raw: Double) {
+        let shift = draft.clipPitchShiftSemitones
+        let origins = [origin] + draft.members.map {
+            PitchEditorGeometry.drawnMidi(centreMidi: $0.detectedMidi, offsetCents: $0.baselineCents,
+                                          clipPitchShiftSemitones: shift)
+        }
+        let baselines = [draft.baselineCents] + draft.members.map(\.baselineCents)
+        let bounds = Self.groupDeltaBounds(origins: origins, baselines: baselines,
+                                           window: geometry.midiRange)
+        let semitones = Self.wholeSemitones(raw - origin, within: bounds)
+        draft.isFree = false
+        // Zero writes the baseline back EXACTLY: released where it began is a
+        // no-op, never a write of a rounding error (the group branch's rule).
+        draft.offsetCents = semitones == 0
+            ? draft.baselineCents
+            : (draft.baselineCents + semitones * 100).clamped(to: NoteSegment.pitchOffsetCentsRange)
+        for index in draft.members.indices {
+            let member = draft.members[index]
+            draft.members[index].offsetCents = (member.baselineCents + semitones * 100)
+                .clamped(to: NoteSegment.pitchOffsetCentsRange)
+        }
+        let moved = draft.offsetCents != drag?.offsetCents || draft.members != drag?.members
+        drag = draft
+        // I1 UI hooks, unchanged: one drag step per change of the offsets. Every
+        // step here is a whole semitone (100 c), above the detector floor the
+        // audition thins at, so each one is HEARD — a transposed breath, which
+        // U5 accepts; the release plays it too (`commitLanded`). Never a silent
+        // no-op.
+        if moved {
+            rebuildDraftLine()
+            requestDragAudition(draft)
+        }
+    }
+
+    /// `delta` (drawn semitones) rounded to the nearest WHOLE semitone —
+    /// half a row moves one, the snap's own nearest rule — and held inside the
+    /// whole semitones of `bounds`. `bounds` comes from `groupDeltaBounds`,
+    /// which always contains 0, so the result range is never empty. A
+    /// non-finite delta moves nothing.
+    nonisolated static func wholeSemitones(_ delta: Double,
+                                           within bounds: ClosedRange<Double>) -> Double {
+        guard delta.isFinite else { return 0 }
+        let lower = min(0, bounds.lowerBound.rounded(.up))
+        let upper = max(0, bounds.upperBound.rounded(.down))
+        return min(max(delta.rounded(), lower), upper)
+    }
+
     // MARK: I3 — the cut line (interaction batch §6)
 
     /// Whether the Split tool is LIVE: engaged, AND the surface is drawing notes
@@ -2785,6 +4404,37 @@ public final class PitchEditorModel {
     /// `CursorAffordance` case for it: that catalog lists surfaces that advertise
     /// a cursor AT REST, and this one is tool-gated, like the roll's ⌘ bar.
     public var surfaceCursor: CursorKind? { isCutToolLive ? .crosshair : nil }
+
+    /// m23-ap I5 — whether a click at `point` with this chord would PLACE THE
+    /// PLAYHEAD: the press router's own answer (`.band` — the Move tool, on a live
+    /// surface, with no note under the point) and the house click table's
+    /// (`PianoRollGridPress.placesPlayhead`), asked exactly as the press and the
+    /// release will ask them — so the ⌘ affordance can never promise a playhead
+    /// and deliver a deselect (the roll's `playheadPlaceGhost` rule).
+    public func placesPlayhead(at point: CGPoint, modifiers: ArrangeClickModifiers) -> Bool {
+        guard PitchEditorGestureRouter.route(tool: tool, modifiersAtPress: modifiers,
+                                             hit: pressHit(at: point)) == .band else { return false }
+        return PianoRollGridPress.placesPlayhead(noteID: nil, modifiers: modifiers)
+    }
+
+    /// The pointer over the surface at `point` with this chord held: the
+    /// transport's `.verticalBar` where a click would place the playhead (⌘ on
+    /// empty surface), else `surfaceCursor`. The ruler wears the same bar.
+    ///
+    /// m23-ap C5b-4b — and ⌘ over a note the brush WOULD draw on (the band's
+    /// own two questions: the router says `.brush`, and `begin` does not
+    /// refuse) wears the `.crosshair`, the "precise place / paint" family
+    /// (`CursorKind`). The design's pencil would be a NEW family, which
+    /// `docs/DESIGN-LANGUAGE.md` asks for by name, not by hand-coding; where
+    /// the brush would refuse, the pointer stays plain and the band is dim.
+    public func surfaceCursor(at point: CGPoint, modifiers: ArrangeClickModifiers) -> CursorKind? {
+        if placesPlayhead(at: point, modifiers: modifiers) { return .verticalBar }
+        if let id = brushNote(at: point, modifiers: modifiers),
+           brushStart(on: id, at: point).refusal == nil {
+            return .crosshair
+        }
+        return surfaceCursor
+    }
 
     /// ⭐⭐ **THE ONE VERDICT** (I3, design §6 D3): what the Split tool would do
     /// at `point`. The hover line (`cutLine(at:)`) carries it and the knife
@@ -2915,7 +4565,16 @@ public final class PitchEditorModel {
     /// Whether this pane holds a gesture Escape would cancel: a pitch drag or a
     /// band in flight. A press still inside the slop is not one — nothing on
     /// screen has changed yet.
-    public var escapeGestureLive: Bool { drag != nil || band != nil }
+    ///
+    /// C5a-4b — a wobble DRAG is one too (its draft line is on screen); a dot
+    /// press still inside the slop is not.
+    ///
+    /// W7-NTU U3 — a Voice DRAG too (its bar and chip are moving on screen); a
+    /// Voice press still inside the slop is not.
+    public var escapeGestureLive: Bool {
+        drag != nil || band != nil || wobble?.isDragging == true || brush != nil
+            || voiceDrag?.isDragging == true
+    }
 
     /// Escape's `.cancelGesture` rung on this pane: the drag is dropped with
     /// NOTHING committed, a band gives the selection back, and the press is
@@ -2924,7 +4583,11 @@ public final class PitchEditorModel {
     /// (`PitchEditorPressTracker.abandon`), not start a fresh gesture.
     public func cancelGestureForEscape() {
         drag = nil
+        wobble = nil   // C5a-4b — a wobble drag too, nothing committed
+        brush = nil    // C5b-4b — and a brush stroke, nothing committed
+        voiceDrag = nil   // W7-NTU U3 — and a Voice drag, nothing committed
         draftPlayedLine = nil
+        draftEditSet = nil
         cancelBand()
         press.abandon()
     }
@@ -3004,6 +4667,336 @@ public final class PitchEditorModel {
     /// `@State private` inside the pane.
     public func refuseDeleteKey() { refusal = DeleteMenuPolicy.pitchEditorOpenHint }
 
+    // MARK: UE-1 — Find sounds with no pitch (unpitched design §1.6, §1.10)
+
+    /// Whether the editor OFFERS "Find sounds with no pitch": the clip's STORED
+    /// table exists and holds no sound (`PitchEditorFindSounds.isOffered`). The
+    /// editor's own seed already has its sounds, so a pane drawing a seed is
+    /// never offered it. Read from the table the pane was HANDED
+    /// (`syncStoredNoteTable`), so the merge's own write hides it.
+    public var offersFindSounds: Bool { PitchEditorFindSounds.isOffered(storedTable: storedTable) }
+
+    /// A Find Sounds press is waiting for its answer.
+    public var isFindingSounds: Bool { findSoundsLine?.kind == .working }
+
+    /// The press: returns `true` when the caller should now run the store's
+    /// verb, and `false` when it must not — one is already running (a second
+    /// click is ignored, never a second pass), or the table is one the store
+    /// would refuse, which is then said in a person's words on the line
+    /// (`PitchEditorFindSounds.refusal`) without asking the store.
+    ///
+    /// ⚠️ **NOT A COMMIT.** The store's verb is its own undo step ("Find
+    /// Sounds", one `performEdit`, U-B); it never passes through `emit`, so
+    /// `commitCount` does not move. The app funnel is
+    /// `AppModel.findUnpitchedSoundsFromEditor`, reached through the view's
+    /// `onFindSounds`.
+    @discardableResult
+    public func beginFindSounds() -> Bool {
+        guard !isFindingSounds else { return false }
+        if let words = PitchEditorFindSounds.refusal(storedTable: storedTable) {
+            findSoundsLine = PitchEditorFindSoundsLine(kind: .shortfall, text: words)
+            return false
+        }
+        findSoundsLine = PitchEditorFindSounds.workingLine
+        return true
+    }
+
+    /// The store answered (or refused): say what happened, in words.
+    ///
+    /// UE-2 — a finder DECLINE is also REMEMBERED for this clip's current
+    /// table (`PitchEditorFindSoundsMemory`), because the offer's predicate
+    /// cannot see it: the table still holds no sound, so the button stays, and
+    /// a rebuilt pane would otherwise show it with no word about the answer.
+    public func finishFindSounds(_ outcome: PitchEditorFindSoundsOutcome) {
+        let line = PitchEditorFindSounds.line(for: outcome)
+        findSoundsLine = line
+        switch outcome {
+        case .finished(let added, let skipped):
+            findSoundsAdded = added
+            // The merge's write may already be here (it is, when the table
+            // reached the pane before the answer); else the next sync takes it.
+            findSoundsAddedIDs = added > 0 ? Self.soundIDs(in: storedTable) : nil
+            if skipped != nil, let storedTable {
+                findSoundsMemory?.remember(clipID: clipID, table: storedTable, line: line)
+            }
+        case .refused:
+            findSoundsAdded = 0
+            findSoundsAddedIDs = nil
+        }
+    }
+
+    /// The ids of a table's sounds, or `nil` when it holds none.
+    private nonisolated static func soundIDs(in table: PitchEditSet?) -> Set<UUID>? {
+        let ids = Set((table?.segments ?? []).lazy.filter { $0.origin == .unpitched }.map(\.id))
+        return ids.isEmpty ? nil : ids
+    }
+
+    /// UE-2 — the rules that keep the Find-sounds line true across a table
+    /// change (see `findSoundsLine`). Called by `syncStoredNoteTable` only.
+    private func reconcileFindSoundsLine() {
+        if findSoundsAdded > 0, findSoundsLine?.kind == .done {
+            if offersFindSounds {
+                // An "Added" line whose sounds are gone: the offer is back,
+                // which is exactly "a stored table with no sound" (the merge's
+                // own undo).
+                withdrawAddedLine()
+            } else if let named = findSoundsAddedIDs {
+                // UE-2 edge — a table REBUILT under the line (a preset pass
+                // mints new ids for every segment): the sounds it names are
+                // gone even though sounds are drawn, and "Undo takes them
+                // away" would now undo the rebuild.
+                let present = Set(storedTable?.segments.map(\.id) ?? [])
+                if !named.isSubset(of: present) { withdrawAddedLine() }
+            } else {
+                // The merge's own write, arriving after the answer.
+                findSoundsAddedIDs = Self.soundIDs(in: storedTable)
+            }
+        }
+        // A decline this clip met on THIS table before the pane was rebuilt.
+        if findSoundsLine == nil,
+           let remembered = findSoundsMemory?.line(clipID: clipID, table: storedTable) {
+            findSoundsLine = remembered
+        }
+    }
+
+    /// Take down an "Added" line and what it named.
+    private func withdrawAddedLine() {
+        findSoundsLine = nil
+        findSoundsAdded = 0
+        findSoundsAddedIDs = nil
+    }
+
+    // MARK: W7-NTU U1 — the header group "Sound like the singer" (natural tuning X9)
+    //
+    // THE GROUP'S THREE ROWS, AS GESTURES. Every gesture is ONE commit through
+    // `emit` (counted: the spy gate's home), and every commit is ONE store call
+    // in `PitchEditorSingerWrite`, so every gesture is ONE undo step. What the
+    // rows DRAW is `PitchEditorSingerGroup.resolve` over `noteTable`; nothing
+    // here draws.
+    //
+    // ⭐ THE SLIDER COMMITS ON RELEASE, NEVER PER TICK (the "what does a commit
+    // re-key?" law): the amount is render material (digest slot 7), so a write
+    // per pointer tick would re-key the clip's render at pointer rate.
+    //
+    // ⛔⛔ ON A VOCAL THAT `predatesNaturalTuning`, EVERY PRESS ON THE VOICE ROW
+    // IS THE UPDATE, NEVER A VOICE-SIZE WRITE. `setClipFormantCorrection` writes
+    // its own field only (an explicit request, by the store's rule). On an old
+    // vocal it would make the amount non-nil, so `predatesNaturalTuning` goes
+    // false while the consonants stay off and the slides stay on the old rule:
+    // the update line would vanish, and D4-1's whole-vocal update (the user's
+    // ruling (b)) would never come, because the first note change would find a
+    // set that no longer "predates". So the dim slider starts no draft (its
+    // thumb must not follow the pointer to an amount it will not write) and its
+    // release is `.naturalTuningUpdate`, which lands at the seed amount.
+    // Dragging to a chosen amount in that SAME step would need a store door
+    // that updates AND sets the amount; none exists (reported, W7-NTU).
+
+    /// A press on the "Keep voice size" slider, from its first tick to its
+    /// release.
+    public enum VoiceSizePress: Sendable, Equatable {
+        /// A press on the DIM slider of an old vocal: its release is the update.
+        case update
+        /// A drag on the live slider, at this amount (already snapped).
+        case drag(amount: Double)
+    }
+
+    /// Whether the header offers the group: a note table is on screen. With no
+    /// table (still listening, or nothing found) every row would be a control
+    /// that does nothing, and the store refuses an empty seed.
+    public var offersSingerGroup: Bool { !noteTable.segments.isEmpty }
+
+    /// The voice-size press in flight, or nil.
+    public private(set) var voiceSizePress: VoiceSizePress?
+
+    /// The amount a live voice-size DRAG is at, or nil (none, or an update
+    /// press, which has no amount).
+    public var voiceSizeDraft: Double? {
+        if case .drag(let amount) = voiceSizePress { return amount }
+        return nil
+    }
+
+    /// The group's faces for this clip. `stretchRatio` and `clipSemitones` are
+    /// the clip's STORED fields (see `PitchEditorSingerGroup.resolve`).
+    public func singerGroup(stretchRatio: Double, clipSemitones: Double) -> PitchEditorSingerGroup {
+        PitchEditorSingerGroup.resolve(table: noteTable, stretchRatio: stretchRatio,
+                                       clipSemitones: clipSemitones, voiceDraft: voiceSizeDraft)
+    }
+
+    /// A press, and each drag tick after it, on the "Keep voice size" track at
+    /// `fraction` of its width (0 = the left end). The FIRST tick decides the
+    /// press: on an old vocal it is the update and later ticks change nothing;
+    /// otherwise the draft follows the pointer (`PitchEditorVoiceSize.amount`:
+    /// detents, ⌥ = `fine`). Never commits.
+    public func trackVoiceSize(atFraction fraction: Double, fine: Bool) {
+        guard offersSingerGroup else { return }
+        switch voiceSizePress {
+        case .update:
+            return
+        case nil where noteTable.predatesNaturalTuning:
+            voiceSizePress = .update
+        default:
+            voiceSizePress = .drag(amount: PitchEditorVoiceSize.amount(atFraction: fraction, fine: fine))
+        }
+    }
+
+    /// The slider's release: ONE commit, or none. An update press commits the
+    /// update; a drag commits its amount, unless it ends on the amount already
+    /// stored (a press released where it started changes nothing, so it writes
+    /// nothing and adds no undo step).
+    @discardableResult
+    public func releaseVoiceSize() -> PitchEditorCommit? {
+        guard let press = voiceSizePress else { return nil }
+        voiceSizePress = nil
+        switch press {
+        case .update:
+            return updateToNaturalTuning()
+        case .drag(let amount):
+            guard amount != noteTable.formantCorrection else { return nil }
+            return emit(.voiceSize(amount: amount))
+        }
+    }
+
+    /// The slider's press dropped with nothing committed (the pane went away).
+    public func cancelVoiceSize() {
+        voiceSizePress = nil
+    }
+
+    /// The update line tapped (or the dim slider released): X4's ONE upgrade
+    /// path, `ProjectStore.upgradeToNaturalTuning`. Only on a vocal that
+    /// `predatesNaturalTuning` (R16), which is always a STORED table: the
+    /// editor's seed is seeded new.
+    @discardableResult
+    public func updateToNaturalTuning() -> PitchEditorCommit? {
+        guard offersSingerGroup, noteTable.predatesNaturalTuning else { return nil }
+        return emit(.naturalTuningUpdate)
+    }
+
+    /// The "Consonants" switch clicked: it switches to the other state. A
+    /// switch never writes the state it shows, so a click is never a no-op.
+    @discardableResult
+    public func toggleConsonants() -> PitchEditorCommit? {
+        guard offersSingerGroup else { return nil }
+        return emit(.consonants(enabled: !noteTable.keepsConsonantsUntuned))
+    }
+
+    /// A "Slides" step clicked. The lit step writes nothing (the smoothness it
+    /// would store is already stored).
+    @discardableResult
+    public func pickSlides(_ step: PitchEditorSlideStep) -> PitchEditorCommit? {
+        guard offersSingerGroup,
+              noteTable.transitionSlopeCentsPerSecond != step.centsPerSecond else { return nil }
+        return emit(.slideSmoothness(centsPerSecond: step.centsPerSecond))
+    }
+
+    // MARK: W7-NTU U3 — the Voice tool (natural tuning §1(f) items 2-3)
+    //
+    // ⭐ THE ARITHMETIC IS HEADLESS (`PitchEditorVoiceTool`,
+    // `PitchEditorVoiceDraft`); THIS IS ITS WIRING, in the Wobble tool's shape.
+    // A press on a note in the Voice tool routes `.formantDrag(id)` and begins
+    // its draft on its FIRST tick (`beginVoiceDrag`, from `trackPress`; a sound
+    // is refused there in words and the press abandoned). It is fed vertical
+    // travel only once past the router's 4 pt slop (`updateVoiceDrag`). At the
+    // release it commits the drag (`endVoiceDrag`) or, on a double-click, puts
+    // the note back as sung (`resetVoice`): ONE commit each, none for a gesture
+    // that changes nothing, through `emit` like every other write. The note's
+    // pitch, its blob and the played line never move: a Voice changes how the
+    // note SOUNDS, not where it sits.
+
+    /// The FIRST tick of a `.formantDrag` press: a draft on the STORED note.
+    /// On a SOUND the press is refused in words and ABANDONED
+    /// (`PitchEditorPressTracker.abandon`), so its later ticks and its release
+    /// do nothing: no draft, no selection, no commit. The refusal is drawn on
+    /// the palette's `PanelRefusalLine`, the slot every refusal here uses.
+    private func beginVoiceDrag(segmentID id: UUID) {
+        refusal = nil
+        guard let segment = storedSegment(id) else {
+            press.abandon()
+            return
+        }
+        guard segment.origin != .unpitched else {
+            refusal = PitchEditorFormantCopy.voiceSoundRefusal
+            press.abandon()
+            return
+        }
+        voiceDrag = PitchEditorVoiceDraft(segmentID: id, baseline: segment.formantOffsetSemitones,
+                                          isTooShort: PitchEditorVoiceTool.isTooShort(segment))
+    }
+
+    /// One pointer tick of the Voice press in flight. ⛔ **NEVER COMMITS.**
+    /// `translationHeight` is the gesture's whole vertical travel from the
+    /// PRESS (SwiftUI's: y grows down), and `fine` is ⌥ as held THIS tick. It
+    /// does nothing until the press is past the router's slop, so a click, and
+    /// each click of a double-click, leaves the value alone.
+    public func updateVoiceDrag(translationHeight: Double, fine: Bool) {
+        guard var current = voiceDrag, press.current?.isPromoted == true else { return }
+        current.update(translationHeight: translationHeight, fine: fine)
+        voiceDrag = current
+    }
+
+    /// The Voice DRAG ended (`PitchEditorReleaseAction.endFormantDrag`). Emits
+    /// AT MOST ONE commit, `.noteFormant` for the one note, and NONE for a drag
+    /// that ends on the stored value (`PitchEditorVoiceDraft.commitValue`).
+    @discardableResult
+    public func endVoiceDrag() -> PitchEditorCommit? {
+        guard let current = voiceDrag else { return nil }
+        voiceDrag = nil
+        guard let value = current.commitValue else { return nil }
+        return emit(.noteFormant(segmentIDs: [current.segmentID], semitones: value))
+    }
+
+    /// A DOUBLE-click on a note in the Voice tool
+    /// (`PitchEditorReleaseAction.formantReset`): its Voice back to as sung,
+    /// ONE commit, or none when it already is (a reset that changes nothing
+    /// adds no undo step). Never a sound: a press on one was refused at its
+    /// first tick.
+    @discardableResult
+    public func resetVoice(segmentID id: UUID) -> PitchEditorCommit? {
+        voiceDrag = nil
+        guard let segment = storedSegment(id), segment.origin != .unpitched,
+              segment.formantOffsetSemitones != 0 else { return nil }
+        return emit(.noteFormant(segmentIDs: [id], semitones: 0))
+    }
+
+    /// ⭐ **THE VOICE MARKS, AS DRAWN** (§1(f) item 2, R22): while the Voice
+    /// tool is engaged, every drawn NOTE whose Voice is not as sung, in blob
+    /// order. The note being dragged shows the live draft's value; every other
+    /// note shows its STORED value. Empty in every other tool, so nothing
+    /// about a Voice is drawn where it cannot be changed. The surface draws
+    /// these and the echo reports them.
+    public var voiceMarks: [PitchEditorVoiceMark] {
+        guard tool == .voice else { return [] }
+        var stored: [UUID: Double] = [:]
+        for segment in noteTable.segments where segment.origin != .unpitched {
+            stored[segment.id] = segment.formantOffsetSemitones
+        }
+        return blobs.compactMap { blob in
+            guard let storedValue = stored[blob.id] else { return nil }
+            let live = voiceDrag?.segmentID == blob.id ? voiceDrag : nil
+            let value = live?.semitones ?? storedValue
+            guard value != 0 else { return nil }
+            return PitchEditorVoiceMark(segmentID: blob.id, semitones: value,
+                                        blobRect: geometry.rect(for: blob), isLive: live != nil)
+        }
+    }
+
+    /// The Voice tool's line in the palette's SF Mono readout slot: for the
+    /// press in flight's note, else for the NOTE under `hover`. `nil` in any
+    /// other tool, over empty surface, over a sound, or while another kind of
+    /// press is in flight. A note shorter than
+    /// `PitchEditSet.minimumVoiceNoteSeconds` says R11's sentence instead of
+    /// its number; the chip under it still prints the number.
+    public func voiceReadout(hover: CGPoint?) -> String? {
+        guard tool == .voice else { return nil }
+        if let draft = voiceDrag {
+            return draft.isTooShort ? PitchEditorFormantCopy.voiceTooShort
+                : PitchEditorFormantCopy.voiceToolReadout(draft.semitones)
+        }
+        guard press.current == nil, let hover, let blob = blob(at: hover),
+              let segment = storedSegment(blob.id), segment.origin != .unpitched else { return nil }
+        return PitchEditorVoiceTool.isTooShort(segment) ? PitchEditorFormantCopy.voiceTooShort
+            : PitchEditorFormantCopy.voiceToolReadout(segment.formantOffsetSemitones)
+    }
+
     // MARK: I7b — clear and restore the selected notes (interaction batch §10)
 
     /// The SELECTED notes this surface draws, in table order — what ⌫, Edit ▸
@@ -3056,7 +5049,58 @@ public final class PitchEditorModel {
             let changing = targets.filter(\.isCleared).map(\.id)
             guard !changing.isEmpty else { return nil }
             return emit(.notesCleared(segmentIDs: changing, cleared: false))
+        case .resetWobble:
+            // C5a-4b — "Back to how you sang it": the selected NOTES whose
+            // wobble changed, in table order, ONE commit (one undo step under
+            // `structuralKey`, applied by the app funnel). Sounds are never
+            // named: they have no wobble (§1.7), and the store would refuse.
+            let changing = targets.filter { hasWobbleEdit($0.id) }.map(\.id)
+            guard !changing.isEmpty else { return nil }
+            return emit(.noteVibratoReset(segmentIDs: changing))
+        case .resetShape:
+            // C5b-4b — "Reset drawn shape" (design §5.5): every selected note
+            // that carries a drawing, ONE commit of clears (one "Reset Drawn
+            // Shape" undo step through `setClipNoteShapes`). A sound is named
+            // too when it carries one: the store allows that clear (only a
+            // hand-written file can put a drawing on a sound, and this is its
+            // cleanup path).
+            let changing = targets.filter { hasDrawnShape($0.id) }.map(\.id)
+            guard !changing.isEmpty else { return nil }
+            return emit(.noteShapes(shapes: Dictionary(uniqueKeysWithValues:
+                changing.map { ($0, NoteShapeSamples.clear) })))
+        case .voiceDeeper, .voiceBrighter, .voiceAsSung:
+            // W7-NTU U3 — the Voice row (natural tuning §1(f) item 3): every
+            // selected NOTE whose Voice is not already the row's value, in
+            // table order, ONE commit (one "Set Note Voice" undo step). Sounds
+            // are never named: the store refuses a sound's Voice, and would
+            // refuse the whole batch with it.
+            let value = PitchEditorNoteMenu.voiceValue(of: action) ?? 0
+            let changing = targets.filter { blob in
+                guard let segment = storedSegment(blob.id), segment.origin != .unpitched else {
+                    return false
+                }
+                return segment.formantOffsetSemitones != value
+            }.map(\.id)
+            guard !changing.isEmpty else { return nil }
+            return emit(.noteFormant(segmentIDs: changing, semitones: value))
         }
+    }
+
+    /// C5a-4b — a drawn NOTE (never a sound) whose stored wobble is not as sung.
+    private func hasWobbleEdit(_ id: UUID) -> Bool {
+        guard let segment = storedSegment(id), segment.origin != .unpitched else { return false }
+        return NoteVibratoEdit(storedIn: segment) != .asSung
+    }
+
+    /// A blob as the note menu counts it: its kind and clear, and — C5a-4b —
+    /// whether its wobble was changed (the "Back to how you sang it" row).
+    private func menuTarget(for blob: NoteBlob) -> PitchEditorNoteMenu.Target {
+        var target = blob.menuTarget
+        target.hasWobbleEdit = hasWobbleEdit(blob.id)
+        target.hasDrawnShape = hasDrawnShape(blob.id)   // C5b-4b
+        // W7-NTU U3 — the note's STORED Voice, for the Voice row.
+        target.voiceSemitones = storedSegment(blob.id)?.formantOffsetSemitones ?? 0
+        return target
     }
 
     /// The right-click's SELECTION half, applied before the menu opens (the
@@ -3087,8 +5131,13 @@ public final class PitchEditorModel {
     /// the selection alone would name the OLD selection's notes over a note the
     /// click is about to select. Resolved from the hover point instead, the
     /// title names the notes the action will act on.
+    ///
+    /// W7-NTU U3 — the Voice row's "Deeper" and "Brighter" are offered in the
+    /// Voice tool (`voiceTool:`); its "As sung", a reset like "Back to how you
+    /// sang it", in every tool once a note has a Voice.
     public func noteMenu(at point: CGPoint?) -> [PitchEditorNoteMenu.Item] {
-        PitchEditorNoteMenu.items(for: contextMenuTargets(at: point).map(\.menuTarget))
+        PitchEditorNoteMenu.items(for: contextMenuTargets(at: point).map { menuTarget(for: $0) },
+                                  voiceTool: tool == .voice)
     }
 
     private func contextMenuTargets(at point: CGPoint?) -> [NoteBlob] {

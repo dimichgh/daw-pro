@@ -880,4 +880,83 @@ struct SliceToSamplerCommandTests {
         #expect(!response.ok)
         #expect(response.error?.contains("'muteSourceTrack'") == true)
     }
+
+    // MARK: - Key change (round 2, PK-F2)
+
+    @Test("PK-F2: a key change leaves a chopped loop's slices alone and still moves the pitched parts")
+    func keyChangeSkipsTheChop() async throws {
+        let engine = engineWithThreeOnsets()
+        let (router, store) = makeRouter(engine: engine)
+        let (_, clipID) = try await addAudioClip(router)
+        let chopped = await chop(router, clipID: clipID)
+        #expect(chopped.ok)
+        let kitID = try #require(UUID(uuidString: chopped.result?["trackId"]?.stringValue ?? ""))
+        let keys = store.addTrack(name: "Keys", kind: .instrument)
+        _ = try store.addMIDIClip(toTrack: keys.id, name: "Chords", atBeat: 0, lengthBeats: 4,
+                                  notes: [MIDINote(pitch: 60, velocity: 100, startBeat: 0, lengthBeats: 1)])
+
+        let report = try store.transposeProject(semitones: 3)
+        // REAL: the pitched part moved, so the key change ran.
+        #expect(store.tracks.first { $0.id == keys.id }?.clips.first?.notes?.map(\.pitch) == [63])
+        #expect(report.tracks.first { $0.trackId == keys.id }?.outcome == .moved)
+        withKnownIssue("PK-F2: SamplerParams.sliceKit is not stored until the marker patch lands, so the chop reads as a pitched sampler and moves") {
+            #expect(store.tracks.first { $0.id == kitID }?.clips.first?.notes?.map(\.pitch) == [36, 37, 38])
+            #expect(report.tracks.first { $0.trackId == kitID }?.outcome == .skippedSliceKit)
+        }
+    }
+
+    @Test("PK-F2: the slice-kit marker survives a wire sampler edit and save → open; a plain sampler is never marked")
+    func sliceKitMarkerPersists() async throws {
+        let engine = engineWithThreeOnsets()
+        let (router, store) = makeRouter(engine: engine)
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("daw-pro-pk-f2-marker-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        // Real files: sampler zones are validated on disk and copied into the bundle.
+        let source = dir.appendingPathComponent("Loop.wav")
+        FileManager.default.createFile(atPath: source.path, contents: Data([0, 1, 2, 3]))
+
+        let (_, clipID) = try await addAudioClip(router, path: source.path)
+        let chopped = await chop(router, clipID: clipID)
+        let kitID = try #require(chopped.result?["trackId"]?.stringValue)
+        // NEGATIVE CONTROL: a sampler loaded over the wire is never a kit.
+        let addInst = await router.handle(ControlRequest(
+            id: "i", command: "track.add", params: ["kind": .string("instrument")]))
+        let plainID = try #require(addInst.result?["id"]?.stringValue)
+        let loaded = await router.handle(ControlRequest(
+            id: "l", command: "track.setInstrument",
+            params: ["trackId": .string(plainID), "kind": .string("sampler"),
+                     "sampler": .object(["zones": .array([.object(["path": .string(source.path)])])])]))
+        #expect(loaded.ok)
+        let plainName = try #require(store.tracks.first { $0.id.uuidString == plainID }?.name)
+
+        // One scalar edit over the wire: `parseSampler` rebuilds the whole struct.
+        let edited = await router.handle(ControlRequest(
+            id: "g", command: "track.setInstrument",
+            params: ["trackId": .string(kitID), "sampler": .object(["gain": .number(0.5)])]))
+        #expect(edited.ok)
+        let afterEdit = try #require(store.tracks.first { $0.id.uuidString == kitID }?.instrument?.sampler)
+        #expect(afterEdit.gain == 0.5)
+        #expect(afterEdit.zones.count == 3)
+
+        let path = dir.appendingPathComponent("marker.dawproj").path
+        let saved = await router.handle(ControlRequest(
+            id: "s", command: "project.save", params: ["path": .string(path)]))
+        #expect(saved.ok)
+        let opened = await router.handle(ControlRequest(
+            id: "o", command: "project.open", params: ["path": .string(path)]))
+        #expect(opened.ok)
+        let reopenedKit = try #require(store.tracks.first { $0.name == "Loop chops" }?.instrument?.sampler)
+        #expect(reopenedKit.zones.count == 3)
+        #expect(reopenedKit.gain == 0.5)
+        let reopenedPlain = try #require(store.tracks.first { $0.name == plainName }?.instrument?.sampler)
+        #expect(reopenedPlain.zones.count == 1)
+        #expect(!reopenedPlain.isSliceKit)
+
+        withKnownIssue("PK-F2: SamplerParams.sliceKit is not stored until the marker patch lands") {
+            #expect(afterEdit.isSliceKit)
+            #expect(reopenedKit.isSliceKit)
+        }
+    }
 }

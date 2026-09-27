@@ -158,21 +158,43 @@ public struct MainActorLiveness: Sendable, Equatable {
 
     // MARK: - Breadcrumb lines (pure formatters, tested headless)
 
+    /// WHO wrote a breadcrumb (WF, 2026-09-25): `pid=<pid> port=<control port>
+    /// process=<name>`. ⚠️ **The log is SHARED.** The user's live app and every
+    /// staging launch append to the same `main-actor-wedge.log`, so a line
+    /// without this tag cannot say whether the USER'S app froze or a test's did.
+    /// The process name is the cheap tell for the defaults domain: a staging
+    /// launch runs as `DAWProStaging`, the live app as its own executable.
+    public static func originTag(pid: Int32, port: Int?, processName: String) -> String {
+        "pid=\(pid) port=\(port.map { String($0) } ?? "?") process=\(processName)"
+    }
+
     /// The wedge-declared breadcrumb. Written OFF-main the moment the wedge is
     /// latched (the main thread is, by definition, unavailable to log it).
+    /// APPEND-ONLY FORMAT: `origin` (`originTag`) goes AFTER the original words,
+    /// so a reader that matched the old line still matches.
     public static func wedgeLine(unresponsiveForSeconds: Double,
                                  thresholdSeconds: Double,
-                                 timestamp: Date = Date()) -> String {
+                                 timestamp: Date = Date(),
+                                 origin: String? = nil) -> String {
         "\(iso8601(timestamp)) WEDGED main actor unresponsive for "
             + String(format: "%.1f", unresponsiveForSeconds)
             + " s (threshold " + String(format: "%.1f", thresholdSeconds) + " s)"
+            + originSuffix(origin)
     }
 
-    /// The recovery breadcrumb, with the TOTAL wedge duration.
+    /// The recovery breadcrumb, with the TOTAL wedge duration. Same append-only
+    /// `origin` rule as `wedgeLine`.
     public static func recoveryLine(totalWedgeSeconds: Double,
-                                    timestamp: Date = Date()) -> String {
+                                    timestamp: Date = Date(),
+                                    origin: String? = nil) -> String {
         "\(iso8601(timestamp)) RECOVERED main actor responsive again after "
             + String(format: "%.1f", totalWedgeSeconds) + " s wedged"
+            + originSuffix(origin)
+    }
+
+    private static func originSuffix(_ origin: String?) -> String {
+        guard let origin, !origin.isEmpty else { return "" }
+        return " " + origin
     }
 
     private static func iso8601(_ date: Date) -> String {
@@ -204,6 +226,12 @@ public final class MainActorLivenessMonitor: @unchecked Sendable {
     private let pingIntervalSeconds: Double
     private let timerQueue = DispatchQueue(label: "dawpro.main-actor-liveness")
     private var timer: DispatchSourceTimer?
+    /// `MainActorLiveness.originTag` for this process, appended to every
+    /// breadcrumb (nil = the pre-WF line, byte for byte).
+    let origin: String?
+    /// The threshold, held OUTSIDE `liveness` so the line builder never reads
+    /// the lock-protected state without the lock.
+    private let wedgeThresholdSeconds: Double
 
     /// - Parameters:
     ///   - wedgeThresholdSeconds / pingIntervalSeconds: detection constants
@@ -214,18 +242,39 @@ public final class MainActorLivenessMonitor: @unchecked Sendable {
     ///     no-wall-time law).
     ///   - breadcrumb: where transition lines go; defaults to appending to
     ///     ~/Library/Logs/DAWPro/main-actor-wedge.log.
+    ///   - origin: who is writing (`MainActorLiveness.originTag`) — the log is
+    ///     shared by the live app and staging, so the app passes its pid, port
+    ///     and process name.
     public init(
         wedgeThresholdSeconds: Double = MainActorLiveness.defaultWedgeThresholdSeconds,
         pingIntervalSeconds: Double = MainActorLivenessMonitor.defaultPingIntervalSeconds,
         clock: @escaping @Sendable () -> Double = {
             Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000_000
         },
-        breadcrumb: (@Sendable (String) -> Void)? = nil
+        breadcrumb: (@Sendable (String) -> Void)? = nil,
+        origin: String? = nil
     ) {
         self.liveness = MainActorLiveness(wedgeThresholdSeconds: wedgeThresholdSeconds)
         self.pingIntervalSeconds = pingIntervalSeconds
         self.clock = clock
         self.breadcrumb = breadcrumb ?? Self.defaultBreadcrumbSink()
+        self.origin = origin
+        self.wedgeThresholdSeconds = wedgeThresholdSeconds
+    }
+
+    /// The ONE line builder both edges use (tick → WEDGED, pong → RECOVERED),
+    /// so the origin tag cannot reach one line and miss the other.
+    func breadcrumbLine(for transition: MainActorLiveness.Transition,
+                        timestamp: Date = Date()) -> String {
+        switch transition {
+        case .becameWedged(let seconds):
+            return MainActorLiveness.wedgeLine(
+                unresponsiveForSeconds: seconds, thresholdSeconds: wedgeThresholdSeconds,
+                timestamp: timestamp, origin: origin)
+        case .recovered(let total):
+            return MainActorLiveness.recoveryLine(
+                totalWedgeSeconds: total, timestamp: timestamp, origin: origin)
+        }
     }
 
     /// Starts the ping timer. Idempotent; call from the owner (main actor).
@@ -263,11 +312,9 @@ public final class MainActorLivenessMonitor: @unchecked Sendable {
         lock.lock()
         liveness.recordPing(now: now)
         let transition = liveness.check(now: now)
-        let threshold = liveness.wedgeThresholdSeconds
         lock.unlock()
-        if case .becameWedged(let seconds) = transition {
-            breadcrumb(MainActorLiveness.wedgeLine(
-                unresponsiveForSeconds: seconds, thresholdSeconds: threshold))
+        if let transition, case .becameWedged = transition {
+            breadcrumb(breadcrumbLine(for: transition))
         }
         Task { @MainActor [weak self] in self?.recordPong() }
     }
@@ -280,11 +327,11 @@ public final class MainActorLivenessMonitor: @unchecked Sendable {
         lock.lock()
         let transition = liveness.recordPong(now: now)
         lock.unlock()
-        if case .recovered(let total) = transition {
+        if let transition, case .recovered = transition {
             // Recovery line off-main too (house rule: the monitor never does
             // work on the main thread beyond the no-op ping itself).
             let sink = breadcrumb
-            timerQueue.async { sink(MainActorLiveness.recoveryLine(totalWedgeSeconds: total)) }
+            timerQueue.async { [self] in sink(self.breadcrumbLine(for: transition)) }
         }
     }
 

@@ -1013,10 +1013,24 @@ public enum SMFProjectExporter {
     /// where the question was first answered. A caller reading
     /// `SMFProjectExporter.isDrumKit(track)` from a UI module is reading the one
     /// home, which is the property worth having.
+    ///
+    /// m39-tpl-0 — OUR DRUM MACHINE COUNTS ONLY IN ITS `gm` NOTE LAYOUT. There
+    /// it answers General MIDI drum notes, so it belongs on the GM drum
+    /// channel, opens in the step sequencer's drum lanes and is not transposed,
+    /// exactly like a percussion bank. In `pads` a General MIDI beat plays the
+    /// wrong drums, so calling it a GM drum kit would be the confident-wrong
+    /// answer. The switch lists every kind, so the next kind has to decide.
     public static func isDrumKit(_ track: Track) -> Bool {
-        guard let instrument = track.instrument, instrument.kind == .soundBank,
-              let bank = instrument.soundBank else { return false }
-        return bank.bankMSB == GMProgramCatalog.percussionBankMSB
+        guard let instrument = track.instrument else { return false }
+        switch instrument.kind {
+        case .soundBank:
+            guard let bank = instrument.soundBank else { return false }
+            return bank.bankMSB == GMProgramCatalog.percussionBankMSB
+        case .drumSynth:
+            return instrument.resolvedDrumKit.noteLayout == .gm
+        case .testTone, .polySynth, .sampler, .audioUnit:
+            return false
+        }
     }
 
     /// The GM program this track asks for, or nil.

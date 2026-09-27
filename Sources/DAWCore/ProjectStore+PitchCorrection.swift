@@ -28,6 +28,14 @@ extension ProjectStore {
     /// hand them straight back buys nothing and risks a stale contour being
     /// applied against a clip that has since changed.
     ///
+    /// **Natural tuning §1(e): `options.formantCorrection`** names the voice
+    /// size the new set stores, over both the seed and the carry below (nil,
+    /// every preset's, keeps today's rule). A NON-FINITE one is refused in
+    /// words after the clip gates and BEFORE the `replaceExisting` refusal and
+    /// the detection: an argument error, so nothing runs and nothing is
+    /// journaled. **NT-C2-F1:** the consonant setting the current table holds
+    /// is kept unless nobody chose it (see the one home below).
+    ///
     /// This inherits `detectClipPitch`'s own rejections for free: a MIDI clip
     /// or a clip with no backing file → `pitchDetectionRequiresAudioClip` /
     /// a teaching `invalidClipEdit`; a missing file on disk → a teaching
@@ -98,6 +106,20 @@ extension ProjectStore {
     public func autoCorrectClipPitch(
         clipId: UUID, options: PitchAutoCorrectOptions, replaceExisting: Bool = true
     ) async throws -> Clip {
+        try await autoCorrectClipPitchReport(clipId: clipId, options: options,
+                                             replaceExisting: replaceExisting).clip
+    }
+
+    /// `autoCorrectClipPitch`, plus what the unpitched finder decided while
+    /// building the set (U-A/U-B, unpitched-notes design §1.10): the ONE
+    /// implementation, which `autoCorrectClipPitch` forwards to. It exists so
+    /// the wire's `unpitchedCount` / `unpitchedSkippedReason` echo (UB-2) has
+    /// a path: the plain verb returns only the clip, and the finder's reason
+    /// never reaches a `Clip`.
+    @discardableResult
+    public func autoCorrectClipPitchReport(
+        clipId: UUID, options: PitchAutoCorrectOptions, replaceExisting: Bool = true
+    ) async throws -> PitchAutoCorrectReport {
         guard let (t, c) = locateClipIndexForPitchCorrection(clipId) else {
             throw ProjectError.clipNotFound(clipId)
         }
@@ -105,13 +127,24 @@ extension ProjectStore {
         guard !tracks[t].clips[c].isMIDI else {
             throw ProjectError.pitchDetectionRequiresAudioClip(clipId)
         }
+        // Natural tuning §1(e): a voice size that is not a number is an
+        // ARGUMENT error, refused in words before the table-state refusal
+        // below and before the (slow) detection, so nothing runs, nothing is
+        // stored and nothing is journaled. The pure policy would quietly
+        // keep the seed instead: a request dropped without a word.
+        if let amount = options.formantCorrection, !amount.isFinite {
+            throw ProjectError.invalidClipEdit(
+                "The voice-size amount has to be a number from 0 to 1 (or left out to keep "
+                    + "this clip's own amount); \(amount) is not one. Nothing was changed.")
+        }
         if !replaceExisting, let existing = tracks[t].clips[c].pitchEdits,
            existing.hasHandEditsSinceAutoCorrect {
             throw Self.replaceExistingRefusal(existing)
         }
 
         let detection = try await detectClipPitch(clipId: clipId)
-        let editSet = PitchAutoCorrect.editSet(from: detection.pitch, options: options)
+        let build = PitchAutoCorrect.build(from: detection.pitch, options: options)
+        let editSet = build.editSet
 
         guard let (t2, c2) = locateClipIndexForPitchCorrection(clipId) else {
             throw ProjectError.clipNotFound(clipId)
@@ -139,14 +172,179 @@ extension ProjectStore {
         // `PitchEditSet.hasHandEditsSinceAutoCorrect` is the one question, and
         // `PitchEditProvenance.swift` argues the mechanism. The stamp is not
         // render material: `PitchEditSetDigest.hex` never reads it.
-        let stored = editSet.stampedAsAutoCorrectOutput()
+        //
+        // Natural tuning §1(c) D-F2 (NT-C C1): the new set is SEEDED
+        // (`newSetFormantCorrection`), which is what a legacy set, or a clip
+        // with no table, gets. But a voice-size amount the CURRENT table
+        // already carries is the user's (or an agent's) own pick, so a preset
+        // never resets it: it is carried over. Read from the table as it is
+        // NOW (t2, c2), after the await, for the C-F3 re-check's reason, and
+        // written BEFORE the stamp, so the stamp describes what is stored.
+        //
+        // §1(e): a voice size the OPTIONS name wins over both. The policy
+        // has already written it over the seed, so the carry steps aside.
+        var carried = editSet
+        if !carried.isEmpty, options.formantCorrectionOverride == nil,
+           let amount = tracks[t2].clips[c2].pitchEdits?.formantCorrection {
+            carried.formantCorrection = amount
+        }
+        // NT-C2-F1 (W7-D2): ⭐ THE ONE HOME of the consonant rule. The
+        // setting the CURRENT table holds is kept unless it is
+        // `.offByDefault` (nobody chose it), which takes the new set's seed.
+        // So an OFF somebody chose stays off, on a legacy table and a natural
+        // one alike, and ON stays ON. Stated as "keep unless nobody chose"
+        // rather than "keep only a chosen OFF": if the seed ever stops being
+        // ON, a set that is ON keeps its sound instead of losing it. Read
+        // after the await, for the formant carry's reason, and written before
+        // the stamp.
+        if !carried.isEmpty,
+           let consonants = tracks[t2].clips[c2].pitchEdits?.consonantProtection,
+           consonants != .offByDefault {
+            carried.consonantProtection = consonants
+        }
+        let stored = carried.stampedAsAutoCorrectOutput()
         performEdit("Auto-Correct Pitch", key: PitchCorrectionUndoKey.structuralKey) {
             tracks[t2].clips[c2].pitchEdits = editSet.isEmpty ? nil : stored
             // pitchEdits rides the render cache key (StretchRenderCache) —
             // the setClipStretch precedent for a ClipKey-affecting edit.
             engine?.tracksDidChange(tracks)
         }
-        return tracks[t2].clips[c2]
+        return PitchAutoCorrectReport(clip: tracks[t2].clips[c2], unpitched: build.unpitched)
+    }
+
+    /// Add the SOUNDS with no detected pitch to a clip's STORED note table
+    /// (U-B, unpitched-notes design §1.6/§1.10): the merge verb, for a table
+    /// made before sounds existed (F-stale). A fresh table already has them:
+    /// both builders run the finder.
+    ///
+    /// The shape of `autoCorrectClipPitch`: pre-check, `await
+    /// detectClipPitch`, re-locate and re-check, then ONE
+    /// `performEdit("Find Sounds", structuralKey)` — a deliberate pass never
+    /// coalesces.
+    ///
+    /// ⭐ **IT FILLS ONLY UNCOVERED TIME, AND NEVER MOVES OR RE-IDENTIFIES A
+    /// SEGMENT.** Every STORED segment covers its time, so the user's own
+    /// splits and moves count, and a sound is only ever added in a gap.
+    /// A sound borrows its drawing anchor from the nearer stored note
+    /// (`detectedHz`, never the moved pitch: the anchor is where the sound is
+    /// drawn, relative to what was sung). ⛔ A stored `.unpitched` segment is
+    /// covered time but NEVER a lender (`Note.lendsPitch: false`): a sound
+    /// drawn at another sound's borrowed anchor would be a guess about a
+    /// guess. Any sound that would overlap a stored segment is dropped
+    /// before the write, because `PitchEditSet.canonical` heals an overlap
+    /// FIRST-WINS by trimming the LATER segment, which could be the user's
+    /// note (the finder clamps to note edges, so this is a guard, not a path).
+    ///
+    /// ⭐ **THE RE-STAMP RULE (delegated default: "Find Sounds" is not a hand
+    /// edit).** Adding sounds changes the set's content, so its
+    /// `contentStamp` moves. A set that was EXACTLY a preset's output before
+    /// the merge (`autoCorrectStamp` present and matching) is re-stamped
+    /// after it, so switching presets still asks nothing. A set that was
+    /// already hand-edited, or that no preset wrote, keeps its stamp and so
+    /// keeps reading as hand-edited: the merge never launders a hand edit.
+    ///
+    /// **Refuses, in words:** an unknown clip, a MIDI clip or a comp member
+    /// (before and after the detection, the `autoCorrectClipPitch` race
+    /// rule); a clip with no stored table (nothing to merge into: opening
+    /// the note editor or a preset makes a table that already has sounds);
+    /// a table from another detector generation (`analysisVersion`), whose
+    /// notes this detector's frames cannot be laid against.
+    ///
+    /// **Finding nothing is not a failure.** A guard that fired
+    /// (`notEnoughQuiet`, `tooNoisy`, `noNotes`) or a table with no audible
+    /// gap returns the finder's result with no sounds added, and journals
+    /// nothing (no undo entry, no dirty mark).
+    ///
+    /// - Parameter marginDb: the finder's threshold above the clip's floor,
+    ///   `PitchUnpitchedFinder.defaultMarginDb` (9) by default. A non-finite
+    ///   value heals to the default inside the finder; its RANGE is the wire
+    ///   verb's to validate (UB-2), not this function's.
+    @discardableResult
+    public func findUnpitchedSounds(
+        clipId: UUID, marginDb: Double = PitchUnpitchedFinder.defaultMarginDb
+    ) async throws -> FoundUnpitchedSounds {
+        guard let (t, c) = locateClipIndexForPitchCorrection(clipId) else {
+            throw ProjectError.clipNotFound(clipId)
+        }
+        try requireNotCompMember(trackIndex: t, clipIndex: c)
+        guard !tracks[t].clips[c].isMIDI else {
+            throw ProjectError.pitchDetectionRequiresAudioClip(clipId)
+        }
+        try Self.requireMergeableTable(tracks[t].clips[c].pitchEdits)
+
+        let detection = try await detectClipPitch(clipId: clipId)
+
+        // Re-locate and RE-CHECK on the table as it is NOW: an edit, a
+        // preset or a Remove Tuning may have landed during the detection.
+        guard let (t2, c2) = locateClipIndexForPitchCorrection(clipId) else {
+            throw ProjectError.clipNotFound(clipId)
+        }
+        try requireNotCompMember(trackIndex: t2, clipIndex: c2)
+        let table = try Self.requireMergeableTable(tracks[t2].clips[c2].pitchEdits)
+
+        let notes = table.segments.map { segment in
+            PitchUnpitchedFinder.Note(startSeconds: segment.startSeconds,
+                                      endSeconds: segment.endSeconds,
+                                      hz: segment.detectedHz,
+                                      lendsPitch: segment.origin != .unpitched)
+        }
+        let result = PitchUnpitchedFinder.sounds(in: detection.pitch, notes: notes,
+                                                 marginDb: marginDb)
+        var added: [NoteSegment] = []
+        var found: [FoundUnpitchedSounds.Sound] = []
+        for sound in result.sounds {
+            // The guard `canonical` needs (see the doc): never trim a stored note.
+            guard !table.segments.contains(where: {
+                $0.startSeconds < sound.endSeconds && sound.startSeconds < $0.endSeconds
+            }) else { continue }
+            let segment = PitchAutoCorrect.segment(forSound: sound)
+            added.append(segment)
+            found.append(FoundUnpitchedSounds.Sound(
+                segmentId: segment.id,
+                startSeconds: segment.startSeconds,
+                endSeconds: segment.endSeconds,
+                anchorHz: sound.anchorHz,
+                borrowedFromSegmentId: table.segments[sound.lenderIndex].id,
+                borrowedFrom: sound.borrowedFrom))
+        }
+        guard !added.isEmpty else {
+            return FoundUnpitchedSounds(clip: tracks[t2].clips[c2], finder: result, sounds: [])
+        }
+
+        // The re-stamp rule, decided on the table BEFORE the merge.
+        let wasPresetOutput = table.autoCorrectStamp != nil && !table.hasHandEditsSinceAutoCorrect
+        let merged = table.withSegments(table.segments + added)
+        let stored = wasPresetOutput ? merged.stampedAsAutoCorrectOutput() : merged
+
+        performEdit("Find Sounds", key: PitchCorrectionUndoKey.structuralKey) {
+            tracks[t2].clips[c2].pitchEdits = stored
+            // pitchEdits rides the render key. Untouched sounds bend nothing,
+            // so an identity table stays keyless; an edited one re-keys once
+            // (the digest's origin block) and re-renders the same audio.
+            engine?.tracksDidChange(tracks)
+        }
+        return FoundUnpitchedSounds(clip: tracks[t2].clips[c2], finder: result, sounds: found)
+    }
+
+    /// The merge verb's table refusals (`findUnpitchedSounds`), one home for
+    /// the pre-check and the post-detection re-check so their words agree.
+    @discardableResult
+    private static func requireMergeableTable(_ table: PitchEditSet?) throws -> PitchEditSet {
+        guard let table else {
+            throw ProjectError.invalidClipEdit(
+                "This clip has no note table to add sounds to. Open it in the note editor "
+                    + "or run `clip.autoCorrectPitch`: a new table already includes the sounds "
+                    + "with no detected pitch.")
+        }
+        guard table.analysisVersion == PitchEditSet.currentAnalysisVersion else {
+            throw ProjectError.invalidClipEdit(
+                "This clip's notes were found by a different version of the pitch detector "
+                    + "(analysis version \(table.analysisVersion); this build uses "
+                    + "\(PitchEditSet.currentAnalysisVersion)), so new sounds could not be "
+                    + "lined up with them. Nothing was changed. `clip.autoCorrectPitch` "
+                    + "rebuilds the table with its sounds, but replaces the notes' edits.")
+        }
+        return table
     }
 
     /// Removes a clip's pitch edits entirely — `nil`, not `PitchEditSet.empty`
@@ -228,4 +426,57 @@ extension ProjectStore {
         }
         return nil
     }
+}
+
+// MARK: - What the two passes report (U-A/U-B)
+
+/// What `ProjectStore.autoCorrectClipPitchReport` did: the clip as stored,
+/// and what the unpitched finder decided while the set was built. The wire's
+/// `unpitchedCount` / `unpitchedSkippedReason` echo (UB-2) reads it.
+public struct PitchAutoCorrectReport: Sendable, Equatable {
+    /// The clip after the pass, read back from the store.
+    public let clip: Clip
+    /// `nil` exactly when the pass never ran the finder (strength 0).
+    public let unpitched: PitchUnpitchedFinder.Result?
+
+    public init(clip: Clip, unpitched: PitchUnpitchedFinder.Result?) {
+        self.clip = clip
+        self.unpitched = unpitched
+    }
+
+    /// Sounds in the STORED set, counted off the set itself rather than the
+    /// finder's list, so it is what a reader of `clip.getPitchEdits` sees.
+    public var unpitchedCount: Int {
+        clip.pitchEdits?.segments.filter { $0.origin == .unpitched }.count ?? 0
+    }
+}
+
+/// What `ProjectStore.findUnpitchedSounds` did (U-B, unpitched-notes design
+/// §1.10): the shape the wire's `clip.findUnpitchedSounds` answer is built
+/// from — `{added, skippedReason?, floorDbfs, thresholdDbfs, sounds}`.
+public struct FoundUnpitchedSounds: Sendable, Equatable {
+    /// One sound the merge ADDED to the stored table.
+    public struct Sound: Sendable, Equatable {
+        /// The new segment's id, as stored.
+        public let segmentId: UUID
+        /// Source-file seconds, the stored segment's own span.
+        public let startSeconds: Double
+        public let endSeconds: Double
+        /// Where it is drawn: the lending note's `detectedHz` (§1.5).
+        public let anchorHz: Double
+        /// The STORED note it borrowed from, by id.
+        public let borrowedFromSegmentId: UUID
+        /// Which side that note sits on.
+        public let borrowedFrom: PitchUnpitchedFinder.Side
+    }
+
+    /// The clip after the merge (unchanged when nothing was added).
+    public let clip: Clip
+    /// The finder's own result: floor, threshold, margin and skip reason.
+    public let finder: PitchUnpitchedFinder.Result
+    /// The sounds ADDED, in time order. Empty when the finder skipped, found
+    /// nothing audible, or every sound it found was already covered.
+    public let sounds: [Sound]
+
+    public var added: Int { sounds.count }
 }

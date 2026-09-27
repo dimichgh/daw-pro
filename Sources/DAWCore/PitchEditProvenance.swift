@@ -63,6 +63,17 @@ import Foundation
 // `Params.init` (Params changing while the model does not) cannot follow from
 // it. A Hard Tune set playing its fallback may repeat its contour notice once.
 //
+// NT-C2-F1 (W7-D2) added a SECOND field that `==` sees and the digest does
+// not: the consonant CHOICE (`PitchEditSet.consonantProtection`, an OFF
+// somebody chose versus one nobody chose; both read `keepsConsonantsUntuned`
+// false). Its one same-notes path is `setClipConsonantProtection(enabled:
+// false)` on an OFF nobody chose, plus that step's undo and redo: the same
+// shape, and by the same mechanism the same cost, as the stamp path above
+// (argued from this paragraph, not re-measured). The choice is ALSO part of
+// what the set saves, so `contentStamp` sees it, with no exception here: a
+// choice made after a preset reads as a change since that preset, exactly as
+// a flip of the flag always has.
+//
 // ⚠️ **WHY FNV-1a AND NOT SHA256.** DAWCore imports Foundation only, and
 // Swift's `Hashable` is seeded per process, so it would never match a stamp
 // saved by an earlier launch. This is change detection, not security: 64 bits
